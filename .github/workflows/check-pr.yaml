@@ -24,15 +24,25 @@ jobs:
           ./ccex format --no-apply-patches
 
   build-and-test:
-    runs-on: ubuntu-22.04
+    runs-on: tico-linux
+    container:
+      image: ubuntu:22.04
     strategy:
       matrix:
         torch-version: ["2.5", "2.6"]
     steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl git lsb-release unzip
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      
+      - name: Install python dependencies
+        run: |
+          apt-get install -y python3-venv python3-pip
 
       - name: Get Ubuntu codename
         id: os
@@ -51,8 +61,8 @@ jobs:
       #     filename: one-compiler-${{ steps.os.outputs.codename }}_1.30.0_amd64.deb
       # - name: "Install one-compiler"
       #   run: |
-      #     sudo dpkg -i ${{ steps.download.outputs.filename }}
-      #     sudo apt-get install -f -y
+      #     dpkg -i ${{ steps.download.outputs.filename }}
+      #     apt-get install -f -y
       #     onecc --version
 
       - name: Download issue attatchment (one-compiler latest)
@@ -65,8 +75,8 @@ jobs:
           unzip one-compiler-latest.zip -d one-compiler-package
           ls -l one-compiler-package
 
-          sudo dpkg -i one-compiler-package/*.deb
-          sudo apt-get install -f -y # fix dependencies if needed
+          dpkg -i one-compiler-package/*.deb
+          apt-get install -f -y # fix dependencies if needed
 
       - name: Check installation
         run: |
