@@ -1,0 +1,34 @@
+name: Download release asset
+description: Download a specific file from a GitHub release
+
+inputs:
+  owner:
+    description: GitHub owner of the repository
+    required: true
+  repo:
+    description: GitHub repository name
+    required: true
+  tag:
+    description: GitHub release tag (e.g., v1.2.3)
+    required: true
+  filename:
+    description: File name to download from the release
+    required: true
+
+outputs:
+  filename:
+    description: The downloaded file name
+    value: ${{ steps.download-step.outputs.filename }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      id: download-step
+      run: |
+        chmod +x ${{ github.action_path }}/entrypoint.sh
+        ${{ github.action_path }}/entrypoint.sh     \
+                            "${{ inputs.owner }}"   \
+                            "${{ inputs.repo }}"    \
+                            "${{ inputs.tag }}"     \
+                            "${{ inputs.filename }}"

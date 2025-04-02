@@ -18,8 +18,9 @@ jobs:
 
       - name: "Build package"
         run: |
-          export NIGHTLY_VERSION=$(date '+%y%m%d')
-          echo "NIGHTLY_VERSION=$NIGHTLY_VERSION" >> $GITHUB_ENV
+          NIGHTLY_VERSION=$(date '+%y%m%d')
+          export NIGHTLY_VERSION
+          echo "NIGHTLY_VERSION=$NIGHTLY_VERSION" >> "$GITHUB_ENV"
           ./ccex build
 
       - name: "Upload artifact"

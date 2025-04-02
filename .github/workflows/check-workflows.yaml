@@ -1,5 +1,4 @@
 name: Check Workflows
-description: Formats and validates workflow .yaml files.
 
 on:
   pull_request:
@@ -13,7 +12,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - run: mkdir /CODE/lint -p
       - name: Run actionlint
         run: |
           bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
