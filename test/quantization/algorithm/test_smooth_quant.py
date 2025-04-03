@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-TODO Enable in the CI.
-"""
-
+import os
 import unittest
 
 import numpy as np
@@ -24,10 +21,12 @@ import torch
 from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import SmoothQuantConfig
 
+IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+
 
 class SmoothQuantTest(unittest.TestCase):
-    @unittest.skip(
-        "Skip this test until deciding the policy about required dependency and enabling quantization."
+    @unittest.skipIf(
+        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
     )
     @torch.inference_mode()
     def test_value(self):

@@ -27,6 +27,12 @@ def main():
     parser.add_argument(
         "-m", "--model", type=str, help="Specify model to run tests on."
     )
+    parser.add_argument(
+        "-i",
+        "--include-internal",
+        action="store_true",
+        help="Include internal-only tests",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode")
     args = parser.parse_args()
 
@@ -53,6 +59,9 @@ def main():
                 "Error: Cannot specify both --model and --keyword/--all at the same time."
             )
             sys.exit(1)
+
+    if args.include_internal:
+        os.environ["RUN_INTERNAL_TESTS"] = "1"
 
     ##############
     # Run commands

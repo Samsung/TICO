@@ -25,6 +25,8 @@ from tico.experimental.quantization.evaluation.evaluate import evaluate
 
 from test.utils.base_builders import TestDictBuilderBase, TestRunnerBase
 
+IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+
 
 class QuantizationTest(TestRunnerBase):
     def __init__(
@@ -46,8 +48,8 @@ class QuantizationTest(TestRunnerBase):
             self.tolerance["peir"] = mod.quantized_peir_tolerance  # type: ignore[assignment]
 
     def make(self):
-        @unittest.skip(
-            "Skip this test until deciding the policy about required dependency and enabling quantization."
+        @unittest.skipIf(
+            not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
         )
         def wrapper(s):
             self._run()

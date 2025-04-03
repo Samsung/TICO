@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-TODO Enable in the CI.
-"""
-
+import os
 import unittest
 
 import tico
@@ -24,6 +21,8 @@ import torch
 from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import GPTQConfig, PT2EConfig
 from tico.experimental.quantization.evaluation.evaluate import BACKEND, evaluate
+
+IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class BigLinear(torch.nn.Module):
@@ -46,8 +45,8 @@ class BigLinear(torch.nn.Module):
 
 
 class GPTQTest(unittest.TestCase):
-    @unittest.skip(
-        "Skip this test until deciding the policy about required dependency and enabling quantization."
+    @unittest.skipIf(
+        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
     )
     @torch.inference_mode()
     def test_model(self):
@@ -76,8 +75,8 @@ class GPTQTest(unittest.TestCase):
         # TODO Check PEIR.
         # https://github.com/pytorch/pytorch/issues/148171
 
-    @unittest.skip(
-        "Skip this test until deciding the policy about required dependency and enabling quantization."
+    @unittest.skipIf(
+        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
     )
     def test_net(self):
         q_m = BigLinear()

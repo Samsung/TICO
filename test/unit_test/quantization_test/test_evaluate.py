@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import unittest
 from typing import Any
 
@@ -21,6 +22,8 @@ from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import PT2EConfig
 from tico.experimental.quantization.evaluation.backend import BACKEND
 from tico.experimental.quantization.evaluation.evaluate import evaluate
+
+IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class TwoLinear(torch.nn.Module):
@@ -40,8 +43,8 @@ class TwoLinear(torch.nn.Module):
 
 class EvaluateTest(unittest.TestCase):
     # This test needs triv24-toolchain package.
-    @unittest.skip(
-        "Skip this test until deciding the policy about required dependency and enabling quantization."
+    @unittest.skipIf(
+        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
     )
     def test_evaluate_simple_linear(self):
         m: Any = TwoLinear().eval()
