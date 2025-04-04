@@ -22,6 +22,9 @@ from torch.export import export, ExportedProgram
 from tico.config import CompileConfigBase, get_default_config
 from tico.experimental.quantization.passes.fill_meta_quant_val import FillMetaQuantVal
 from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
+from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch import (
+    InsertQuantizeOnDtypeMismatch,
+)
 from tico.experimental.quantization.passes.propagate_qparam_backward import (
     PropagateQParamBackward,
 )
@@ -246,6 +249,7 @@ def convert_exported_module_to_circle(
             FillMetaQuantVal(),
             PropagateQuantParam(),
             PropagateQParamBackward(),
+            InsertQuantizeOnDtypeMismatch(),
         ]
     )
     if enable_quantization:
