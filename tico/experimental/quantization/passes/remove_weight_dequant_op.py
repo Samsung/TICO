@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import torch.fx
@@ -40,6 +40,32 @@ def get_constant(exported_program: ExportedProgram, node: torch.fx.Node):
         return named_buffer[buffer_name]
     else:
         raise RuntimeError("NYI constant")
+
+
+class ValRange:
+    def __init__(self, val: Union[torch.Tensor, List[int]]):
+        if isinstance(val, torch.Tensor):
+            self.max = torch.max(val).item()
+            self.min = torch.min(val).item()
+        elif type(val) == list:
+            self.max = max(val)
+            self.min = min(val)
+        else:
+            raise RuntimeError("Wrong dtype (val)")
+
+    def within(self, min_val, max_val):
+        return self.min >= min_val and self.max <= max_val
+
+
+# Infer dtype using weight, zero point, and dtype
+def infer_dtype(weight: torch.Tensor, zerop: List[int], dtype: torch.dtype) -> str:
+    weight_val = ValRange(weight)
+    zp_val = ValRange(zerop)
+
+    if weight_val.within(0, 15) and zp_val.within(0, 15) and dtype == torch.uint8:
+        return "uint4"
+    else:
+        return to_qparam_dtype(dtype)
 
 
 @trace_graph_diff_on_pass
@@ -101,10 +127,13 @@ class RemoveWeightDequantOp(PassBase):
             if QPARAM_KEY in q_weight.meta:
                 continue
 
-            q_weight_val = q_weight.meta["val"]
-            assert isinstance(q_weight_val, FakeTensor)
+            q_weight_meta = q_weight.meta["val"]
+            assert isinstance(q_weight_meta, FakeTensor)
             # Weight should have quantized values.
-            assert q_weight_val[0].dtype != torch.float
+            assert q_weight_meta.dtype != torch.float
+
+            q_weight_val = get_constant(exported_program, q_weight)
+            assert isinstance(q_weight_val, torch.Tensor)
 
             quant_param = QuantParam()
             if isinstance(dq_args, DequantizePerChannelArgs):
@@ -112,12 +141,18 @@ class RemoveWeightDequantOp(PassBase):
                 zero_ps = get_constant(exported_program, dq_args.zero_points)
                 quant_param.scale = scales.tolist()
                 quant_param.zero_point = zero_ps.tolist()
+                assert quant_param.zero_point is not None  # To avoid mypy error
                 quant_param.quantized_dimension = dq_args.axis
-                quant_param.dtype = to_qparam_dtype(q_weight_val.dtype)
+                quant_param.dtype = infer_dtype(
+                    q_weight_val, quant_param.zero_point, q_weight_meta.dtype
+                )
             elif isinstance(dq_args, DequantizePerTensorArgs):
                 quant_param.scale = [dq_args.scale]
                 quant_param.zero_point = [dq_args.zero_point]
-                quant_param.dtype = to_qparam_dtype(q_weight_val.dtype)
+                assert quant_param.zero_point is not None  # To avoid mypy error
+                quant_param.dtype = infer_dtype(
+                    q_weight_val, quant_param.zero_point, q_weight_meta.dtype
+                )
             else:
                 raise RuntimeError(f"Invalid DQ target: {dq.target}")
 

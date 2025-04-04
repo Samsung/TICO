@@ -28,6 +28,7 @@ from tico.serialize.circle_mapping import (
     str_to_circle_dtype,
     to_circle_dtype,
 )
+from tico.serialize.pack import pack_buffer
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils.utils import to_circle_qparam
 
@@ -150,8 +151,14 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
 
         buffer = circle.Buffer.BufferT()
         if data is not None and isinstance(data, np.ndarray):
+            data = data.flatten()
+
+            if QPARAM_KEY in node.meta:
+                if node.meta[QPARAM_KEY].dtype == "uint4":
+                    data = pack_buffer(data, "uint4")
+
             # Packing np.ndarray is faster than packing bytes
-            buffer.data = data.flatten().view(np.uint8)  # type: ignore[assignment]
+            buffer.data = data.view(np.uint8)  # type: ignore[assignment]
         else:
             assert data is None
         bid = self.model.add_buffer(buffer)
