@@ -35,7 +35,7 @@ from tico.utils.validate_args_kwargs import (
 )
 
 
-def _dtype(node: torch.fx.Node) -> str:
+def qparam_dtype(node: torch.fx.Node) -> str:
     assert QPARAM_KEY in node.meta
     return node.meta[QPARAM_KEY].dtype
 
@@ -169,10 +169,10 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                 if QPARAM_KEY not in node.meta:
                     continue
 
-                if _dtype(inp) == _dtype(node):
+                if qparam_dtype(inp) == qparam_dtype(node):
                     continue
 
-                if _dtype(inp) == "uint8" and _dtype(node) == "int16":
+                if qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
                     quantize = _insert_quantize_op_after(node)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
@@ -204,10 +204,10 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                 if QPARAM_KEY not in node.meta:
                     continue
 
-                if _dtype(x) == _dtype(node):
+                if qparam_dtype(x) == qparam_dtype(node):
                     continue
 
-                if _dtype(x) == "int16" and _dtype(node) == "uint8":
+                if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
                     quantize = _insert_quantize_op_after(node)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
@@ -230,10 +230,10 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                 if QPARAM_KEY not in node.meta:
                     continue
 
-                if _dtype(x) == _dtype(node):
+                if qparam_dtype(x) == qparam_dtype(node):
                     continue
 
-                if _dtype(x) == "int16" and _dtype(node) == "uint8":
+                if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
                     quantize = _insert_quantize_op_after(node)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
@@ -254,10 +254,10 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                 if QPARAM_KEY not in node.meta:
                     continue
 
-                if _dtype(inp) == _dtype(node):
+                if qparam_dtype(inp) == qparam_dtype(node):
                     continue
 
-                if _dtype(inp) == "int16" and _dtype(node) == "uint8":
+                if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "uint8":
                     # A new Quantize Op (s16 to u8) is inserted before (not after)
                     # permute Op to reduce tensor size ealier
                     quantize = _insert_quantize_op_before(node, inp)
@@ -267,7 +267,7 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                     logger.debug(
                         f"quantize_per_tensor.default is inserted before {node.name}."
                     )
-                elif _dtype(inp) == "uint8" and _dtype(node) == "int16":
+                elif qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
                     quantize = _insert_quantize_op_after(node)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
