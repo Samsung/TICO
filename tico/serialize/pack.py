@@ -25,10 +25,11 @@ def pack_buffer(flat_data: np.ndarray, dtype: str) -> np.ndarray:
         numel = flat_data.shape[0]
         packed = np.zeros((numel + 1) // 2, dtype=np.uint8)
         for i in range(numel):
+            assert flat_data[i] >= 0 and flat_data[i] <= 15
             if i % 2 == 0:
-                packed[i // 2] = flat_data[i] & 0x0F
+                packed[i // 2] = flat_data[i]
             else:
                 packed[i // 2] |= flat_data[i] << 4
         return packed
     else:
-        raise RuntimeError(f"NYI dtype: {dtype}")
+        raise NotImplementedError(f"NYI dtype: {dtype}")
