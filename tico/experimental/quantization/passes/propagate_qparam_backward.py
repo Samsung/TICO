@@ -25,7 +25,7 @@ from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import CatArgs, ReshapeArgs
+from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs
 
 
 @trace_graph_diff_on_pass
@@ -78,6 +78,9 @@ class PropagateQParamBackward(PassBase):
             elif node.target == torch.ops.aten.reshape.default:
                 args = ReshapeArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(node, args.input)
+            elif node.target == torch.ops.aten.permute.default:
+                permute_args = PermuteArgs(*node.args, **node.kwargs)
+                _propagate_qparam_if_possible(node, permute_args.input)
             # TODO Support more ops.
 
         graph.eliminate_dead_code()

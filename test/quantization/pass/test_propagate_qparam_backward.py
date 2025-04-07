@@ -21,7 +21,7 @@ from tico.experimental.quantization.passes.propagate_qparam_backward import (
 )
 from tico.passes.convert_view_to_reshape import ConvertViewToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
-from tico.utils.validate_args_kwargs import CatArgs, ReshapeArgs
+from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs
 
 
 class SingleOpPropagateQParamBackwardTest(unittest.TestCase):
@@ -141,4 +141,29 @@ class CatTest(SingleOpPropagateQParamBackwardTest):
         self.setup(CatModule(), torch.ops.aten.cat.default, dtype="int16")
         args = CatArgs(*self.target.args)
         inputs = args.tensors
+        self.run_test(inputs)
+
+
+class PermuteModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.ops.aten.permute.default(x, (0, 1))
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 3),)
+
+
+class PermuteTest(SingleOpPropagateQParamBackwardTest):
+    def test_u8(self):
+        self.setup(PermuteModule(), torch.ops.aten.permute.default, dtype="uint8")
+        args = PermuteArgs(*self.target.args)
+        inputs = [args.input]
+        self.run_test(inputs)
+
+    def test_s16(self):
+        self.setup(PermuteModule(), torch.ops.aten.permute.default, dtype="int16")
+        args = PermuteArgs(*self.target.args)
+        inputs = [args.input]
         self.run_test(inputs)
