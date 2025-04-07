@@ -20,7 +20,6 @@ import torch
 from torch.export import export, ExportedProgram
 
 from tico.config import CompileConfigBase, get_default_config
-from tico.experimental.quantization.passes.fill_meta_quant_val import FillMetaQuantVal
 from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
@@ -186,16 +185,6 @@ def convert_exported_module_to_circle(
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
         exported_program = traced_run_decompositions(exported_program)
 
-    # TODO Consider above decompositions.
-    enable_quantization = has_quantization_ops(exported_program.graph)
-    quantize_graph = PassManager(
-        passes=[
-            FoldQuantOps(),
-        ]
-    )
-    if enable_quantization:
-        quantize_graph.run(exported_program)
-
     # TODO Distinguish legalize and optimize
     circle_legalize = PassManager(
         passes=[
@@ -243,17 +232,19 @@ def convert_exported_module_to_circle(
     )
     circle_legalize.run(exported_program)
 
-    finalize_quantization = PassManager(
-        passes=[
-            RemoveWeightDequantOp(),
-            FillMetaQuantVal(),
-            PropagateQuantParam(),
-            PropagateQParamBackward(),
-            InsertQuantizeOnDtypeMismatch(),
-        ]
-    )
+    # TODO Give an option to enable quantiztion to user
+    enable_quantization = has_quantization_ops(exported_program.graph)
     if enable_quantization:
-        finalize_quantization.run(exported_program)
+        quantize_graph = PassManager(
+            passes=[
+                FoldQuantOps(),
+                RemoveWeightDequantOp(),
+                PropagateQuantParam(),
+                PropagateQParamBackward(),
+                InsertQuantizeOnDtypeMismatch(),
+            ]
+        )
+        quantize_graph.run(exported_program)
 
     check_unsupported_target(exported_program)
     circle_program = build_circle(exported_program)
