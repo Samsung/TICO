@@ -27,8 +27,8 @@ from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch imp
 from tico.experimental.quantization.passes.propagate_qparam_backward import (
     PropagateQParamBackward,
 )
-from tico.experimental.quantization.passes.propagate_quant_param import (
-    PropagateQuantParam,
+from tico.experimental.quantization.passes.propagate_qparam_forward import (
+    PropagateQParamForward,
 )
 from tico.experimental.quantization.passes.remove_weight_dequant_op import (
     RemoveWeightDequantOp,
@@ -239,7 +239,7 @@ def convert_exported_module_to_circle(
             passes=[
                 FoldQuantOps(),
                 RemoveWeightDequantOp(),
-                PropagateQuantParam(),
+                PropagateQParamForward(),
                 PropagateQParamBackward(),
                 InsertQuantizeOnDtypeMismatch(),
             ]

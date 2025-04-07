@@ -18,8 +18,8 @@ import torch
 from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import PT2EConfig
 from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
-from tico.experimental.quantization.passes.propagate_quant_param import (
-    PropagateQuantParam,
+from tico.experimental.quantization.passes.propagate_qparam_forward import (
+    PropagateQParamForward,
 )
 from tico.passes.convert_view_to_reshape import ConvertViewToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
@@ -38,7 +38,7 @@ class LinearPermuteModule(torch.nn.Module):
         return (torch.randn(2, 3),)
 
 
-class PropagateQuantParamTest(unittest.TestCase):
+class PropagateQParamForwardTest(unittest.TestCase):
     def test_pass(self):
         m: LinearPermuteModule | torch.nn.Module = LinearPermuteModule().eval()
         assert isinstance(m, LinearPermuteModule)
@@ -62,7 +62,7 @@ class PropagateQuantParamTest(unittest.TestCase):
                 continue
             if node.target == torch.ops.aten.permute.default:
                 self.assertFalse(QPARAM_KEY in node.meta)
-        target_pass = PropagateQuantParam()
+        target_pass = PropagateQParamForward()
         target_pass.call(ep)
         # After pass
         for node in ep.graph.nodes:
@@ -135,7 +135,7 @@ class SingleOpPropagateQParamForwardTest(unittest.TestCase):
         # Before pass
         self.assertFalse(QPARAM_KEY in self.target.meta)
 
-        target_pass = PropagateQuantParam()
+        target_pass = PropagateQParamForward()
         target_pass.call(self.ep)
 
         # After pass

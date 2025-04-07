@@ -35,7 +35,7 @@ from tico.utils.validate_args_kwargs import (
 
 
 @trace_graph_diff_on_pass
-class PropagateQuantParam(PassBase):
+class PropagateQParamForward(PassBase):
     """
     A pass propagates quantization parameters through operations that do not alter them.
 
