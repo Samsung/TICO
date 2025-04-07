@@ -25,6 +25,7 @@ from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import set_new_meta_val
+from tico.utils.validate_args_kwargs import ReshapeArgs
 
 
 def passes():
@@ -36,6 +37,7 @@ def passes():
         RemoveRedundantReshapePattern2(),
         RemoveRedundantReshapePattern3(),
         RemoveRedundantReshapePattern4(),
+        RemoveRedundantReshapePattern5(),
     ]
 
 
@@ -376,6 +378,51 @@ class RemoveRedundantReshapePattern4(PassBase):
             logger.debug(
                 f"{reshape1.name} and {reshape2.name} are fused to {fused_reshape.name}"
             )
+
+        graph.eliminate_dead_code()
+        graph.lint()
+        graph_module.recompile()
+
+        return PassResult(modified)
+
+
+@trace_graph_diff_on_pass
+class RemoveRedundantReshapePattern5(PassBase):
+    def __init__(self):
+        super().__init__()
+
+    def call(self, exported_program: ExportedProgram) -> PassResult:
+        """
+        [BEFORE]
+            (AxBxC) - aten.reshape - (AxBxC)
+        [AFTER]
+            (AxBxC)
+        """
+        logger = logging.getLogger(__name__)
+
+        graph_module = exported_program.graph_module
+        graph = graph_module.graph
+        modified = False
+
+        for node in graph.nodes:
+            if not node.op == "call_function":
+                continue
+
+            if not node.target in ops.aten.reshape:
+                continue
+
+            args = ReshapeArgs(*node.args)
+            output_shape = args.size
+            input_shape = list(extract_shape(args.input))
+
+            if output_shape != input_shape:
+                continue
+
+            with graph.inserting_after(node):
+                node.replace_all_uses_with(args.input, propagate_meta=False)
+
+            modified = True
+            logger.debug(f"{node.name} is replaced with {args.input}")
 
         graph.eliminate_dead_code()
         graph.lint()

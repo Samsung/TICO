@@ -22,6 +22,7 @@ from tico.passes.remove_redundant_reshape import (
     RemoveRedundantReshapePattern2,
     RemoveRedundantReshapePattern3,
     RemoveRedundantReshapePattern4,
+    RemoveRedundantReshapePattern5,
 )
 
 from test.utils.helper import num_of_ops
@@ -178,3 +179,30 @@ class RemoveRedundantReshapePattern4Test(SinglePassValueTest):
 
         self.run_value_test(RemoveRedundantReshapePattern4())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 1)
+
+
+class RedundantReshapePattern5(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        reshape_shape = [4, 6, 8]
+        # AxBxC -> AxBxC
+        reshape = torch.reshape(x, reshape_shape)
+        return reshape
+
+    def get_example_inputs(self):
+        return (torch.randn(4, 6, 8),)
+
+
+class RemoveRedundantReshapePattern5Test(SinglePassValueTest):
+    def test_pass(self):
+        self.setup(RedundantReshapePattern5())
+
+        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
+            self.run_value_test(ConvertViewToReshape())
+
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 1)
+
+        self.run_value_test(RemoveRedundantReshapePattern5())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
