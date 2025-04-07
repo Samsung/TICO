@@ -19,7 +19,7 @@ import torch
 from tico.experimental.quantization.passes.propagate_qparam_backward import (
     PropagateQParamBackward,
 )
-from tico.passes.convert_view_to_reshape import ConvertViewToReshape
+from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.validate_args_kwargs import CatArgs, ReshapeArgs
 
@@ -52,7 +52,7 @@ class SingleOpPropagateQParamBackwardTest(unittest.TestCase):
             self.ep = torch.export.export(mod.eval(), self.inputs)
 
         # This is necessary for testing Reshape on torch 2.5
-        ConvertViewToReshape().call(self.ep)
+        ConvertLayoutOpToReshape().call(self.ep)
 
         # Find target node
         target_node = None

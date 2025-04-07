@@ -40,9 +40,9 @@ from tico.passes.convert_conv1d_to_conv2d import ConvertConv1dToConv2d
 from tico.passes.convert_index_to_resize_nearest_neighbor import (
     ConvertIndexToResizeNearestNeighbor,
 )
+from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.convert_repeat_to_expand_copy import ConvertRepeatToExpandCopy
 from tico.passes.convert_to_relu6 import ConvertToReLU6
-from tico.passes.convert_view_to_reshape import ConvertViewToReshape
 from tico.passes.decompose_addmm import DecomposeAddmm
 from tico.passes.decompose_batch_norm import DecomposeBatchNorm
 from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
@@ -191,7 +191,7 @@ def convert_exported_module_to_circle(
             FillMetaVal(),
             ExtractDtypeKwargsPass(),
             RemoveNop(),
-            ConvertViewToReshape(),
+            ConvertLayoutOpToReshape(),
             RestoreLinear(),
             ConvertToReLU6(),
             DecomposeAddmm(),

@@ -55,10 +55,15 @@ class AtenOps:
         self.select = [torch.ops.aten.select_copy.int, torch.ops.aten.select.int]
         self.slice = [torch.ops.aten.slice.Tensor, torch.ops.aten.slice_copy.Tensor]
         self.softmax = [torch.ops.aten._softmax.default]
+        self.squeeze = [torch.ops.aten.squeeze.dims, torch.ops.aten.squeeze_copy.dims]
         self.to_copy = [
             torch.ops.aten._to_copy.default,
             torch.ops.aten.to.dtype,
             torch.ops.aten.to.dtype_layout,
+        ]
+        self.unsqueeze = [
+            torch.ops.aten.unsqueeze.default,
+            torch.ops.aten.unsqueeze_copy.default,
         ]
         self.view = [
             torch.ops.aten.view,

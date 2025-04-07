@@ -20,18 +20,18 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.passes import ops
+from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import ViewArgs
+from tico.utils.validate_args_kwargs import SqueezeArgs, UnSqueezeArgs, ViewArgs
 
 
 @trace_graph_diff_on_pass
-class ConvertViewToReshape(PassBase):
+class ConvertLayoutOpToReshape(PassBase):
     """
-    The latest Torch version converts `torch.view` to `torch.ops.aten.reshape`.
-    It is necessary to align with Torch Dynamo and provide reshape-centric optimization passes.
-    Converting views to reshapes is considered more secure compared to the reverse process.
+    This pass converts layout transformation Op to reshape if possible.
+    This is helpful for further optimization.
     """
 
     def __init__(self):
@@ -43,26 +43,39 @@ class ConvertViewToReshape(PassBase):
         graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
-        for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
 
-            if node.target not in ops.aten.view:
-                continue
-
-            _ = ViewArgs(*node.args, **node.kwargs)
+        def convert(node, input):
+            out_shape = list(extract_shape(node))
 
             with graph.inserting_after(node):
                 reshape_node = graph.call_function(
                     torch.ops.aten.reshape.default,
-                    args=node.args,
-                    kwargs=node.kwargs,
+                    args=(input, out_shape),
                 )
 
             node.replace_all_uses_with(reshape_node, propagate_meta=True)
 
-            modified = True
             logger.debug(f"{node.name} is replaced with {reshape_node.name}")
+
+        for node in graph.nodes:
+            if not node.op == "call_function":
+                continue
+
+            if node.target in ops.aten.view:
+                view_args = ViewArgs(*node.args, **node.kwargs)
+                convert(node, view_args.input)
+                modified = True
+                continue
+            elif node.target in ops.aten.unsqueeze:
+                unsqueeze_args = UnSqueezeArgs(*node.args, **node.kwargs)
+                convert(node, unsqueeze_args.input)
+                modified = True
+                continue
+            elif node.target in ops.aten.squeeze:
+                squeeze_args = SqueezeArgs(*node.args, **node.kwargs)
+                convert(node, squeeze_args.input)
+                modified = True
+                continue
 
         graph.eliminate_dead_code()
         graph.lint()

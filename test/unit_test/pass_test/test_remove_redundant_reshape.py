@@ -16,7 +16,7 @@ import torch
 from packaging.version import Version
 
 from tico.passes import ops
-from tico.passes.convert_view_to_reshape import ConvertViewToReshape
+from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.remove_redundant_reshape import (
     RemoveRedundantReshapePattern1,
     RemoveRedundantReshapePattern2,
@@ -52,7 +52,7 @@ class RemoveRedundantReshapePattern1Test(SinglePassValueTest):
         self.setup(RedundantReshapePattern1())
 
         if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertViewToReshape())
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
@@ -90,7 +90,7 @@ class RemoveRedundantReshapePattern2Test(SinglePassValueTest):
         self.setup(RedundantReshapePattern2())
 
         if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertViewToReshape())
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
@@ -126,7 +126,7 @@ class RemoveRedundantReshapePattern3Test(SinglePassValueTest):
         self.setup(RedundantReshapePattern3())
 
         if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertViewToReshape())
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
 
@@ -172,7 +172,7 @@ class RemoveRedundantReshapePattern4Test(SinglePassValueTest):
         self.setup(RedundantReshapePattern4())
 
         if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertViewToReshape())
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
