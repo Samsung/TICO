@@ -200,7 +200,7 @@ class RemoveRedundantReshapePattern5Test(SinglePassValueTest):
         self.setup(RedundantReshapePattern5())
 
         if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertViewToReshape())
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 1)
 
