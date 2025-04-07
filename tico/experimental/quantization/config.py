@@ -15,17 +15,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Optional
 
-"""
-This key is for 'node.meta' dict that saves quantization parameters for circle.
-"""
-CIRCLE_QUANT_PARAM_KEY = "circle.QuantizationParameters.QuantizationParametersT"
-"""
-This key is for 'node.meta' dict that saves Quantize ops' meta["val"].
-
-The values are retrieved in the "finalize_quantization" pass.
-"""
-QUANT_VAL_KEY = "torch.ops.quantized_decomposed.quantize.meta[val]"
-
 
 class BaseConfig(ABC):
     """

@@ -25,8 +25,6 @@ from tico.experimental.quantization.algorithm.pt2e.annotation.config import (
     QuantizationConfig,
 )
 
-from tico.experimental.quantization.config import CIRCLE_QUANT_PARAM_KEY, QUANT_VAL_KEY
-
 
 def get_module_type_filter(tp: Callable):
     """
@@ -138,32 +136,3 @@ def is_annotated(nodes: List[torch.fx.Node] | torch.fx.Node):
             and node.meta["quantization_annotation"]._annotated
         )
     return annotated
-
-
-def transfer_circle_quant_param(src: torch.fx.Node, dst: torch.fx.Node):
-    """
-    Transfers specified circle quantization parameters in metadata from one node to another.
-    """
-    if CIRCLE_QUANT_PARAM_KEY in src.meta:
-        dst.meta[CIRCLE_QUANT_PARAM_KEY] = src.meta[CIRCLE_QUANT_PARAM_KEY]
-        del src.meta[CIRCLE_QUANT_PARAM_KEY]
-
-
-def set_new_meta_quant_val(node: torch.fx.node.Node):
-    """
-    Set node.meta[QUANT_VAL_KEY].
-    There are some cases when node.meta[QUANT_VAL_KEY] should be updated.
-    - After creating new node
-    - After updating node's args or kwargs
-    """
-    assert isinstance(node, torch.fx.node.Node)
-
-    # `node.target()` needs only `Tensor` for its arguments.
-    # Therefore, let's retrieve `FakeTensor` if it is `torch.fx.Node`.
-    args, kwargs = pytree.tree_map_only(
-        torch.fx.Node,
-        lambda n: n.meta[QUANT_VAL_KEY],
-        (node.args, node.kwargs),
-    )
-    new_val = node.target(*args, **kwargs)  # type: ignore[operator]
-    node.meta[QUANT_VAL_KEY] = new_val
