@@ -58,7 +58,8 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
         if output_tensor.type == circle.TensorType.TensorType.UINT8:
             assert quant_min == 0 and quant_max == 255
         elif output_tensor.type == circle.TensorType.TensorType.INT16:
-            assert quant_min == -32767 and quant_max == 32767
+            # Some frameworks use -32767 as quant_min of int16
+            assert quant_min in (-32768, -32767) and quant_max == 32767
 
         inputs = [tensor]
         outputs = [node]
