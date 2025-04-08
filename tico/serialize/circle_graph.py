@@ -144,7 +144,9 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         tensor.name = self._gen_unique_name_with_prefix(node.name)
         assert node.meta.get("val") is not None
         tensor.type = extract_circle_dtype(node)
-        tensor.shape = list(extract_shape(node))
+        tensor_shape = list(extract_shape(node))
+        tensor_shape = [-1 if isinstance(s, torch.SymInt) else s for s in tensor_shape]
+        tensor.shape = tensor_shape
         if QPARAM_KEY in node.meta:
             tensor.quantization = to_circle_qparam(node.meta[QPARAM_KEY])
             tensor.type = str_to_circle_dtype(node.meta[QPARAM_KEY].dtype)
