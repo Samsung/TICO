@@ -302,3 +302,12 @@ def to_circle_qparam(qparam: QuantParam):
         circle_qparam.max = qparam.max
 
     return circle_qparam
+
+
+def quant_min_max(dtype: str):
+    if dtype == "uint8":
+        return (0, 255)
+    elif dtype == "int16":
+        return (-32767, 32767)
+    else:
+        raise NotImplementedError(f"NYI dtype: {dtype}")

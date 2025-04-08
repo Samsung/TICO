@@ -26,7 +26,7 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import set_new_meta_val
+from tico.utils.utils import quant_min_max, set_new_meta_val
 from tico.utils.validate_args_kwargs import (
     BmmArgs,
     LinearArgs,
@@ -119,8 +119,7 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
             assert qparam.zero_point is not None
             scale = qparam.scale[0]
             zerop = qparam.zero_point[0]
-            min_ = qparam.min[0] if qparam.min is not None else 0
-            max_ = qparam.max[0] if qparam.max is not None else 0
+            min_, max_ = quant_min_max(qparam.dtype)
             dtype = getattr(torch, qparam.dtype)
 
             with graph.inserting_before(node):
@@ -129,6 +128,7 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                     torch.ops.quantized_decomposed.quantize_per_tensor.default,
                     args=q_args,
                 )
+                quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
                 set_new_meta_val(quantize)
 
             node.replace_input_with(inp, quantize)
@@ -141,8 +141,7 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
             assert qparam.zero_point is not None
             scale = qparam.scale[0]
             zerop = qparam.zero_point[0]
-            min_ = qparam.min[0] if qparam.min is not None else 0
-            max_ = qparam.max[0] if qparam.max is not None else 0
+            min_, max_ = quant_min_max(qparam.dtype)
             dtype = getattr(torch, qparam.dtype)
             with graph.inserting_after(node):
                 q_args = (node, scale, zerop, min_, max_, dtype)
@@ -153,6 +152,8 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
 
             node.replace_all_uses_with(quantize, propagate_meta=True)
             quantize.replace_input_with(quantize, node)
+
+            quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
 
             return quantize
 

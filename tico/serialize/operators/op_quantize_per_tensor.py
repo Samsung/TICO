@@ -48,13 +48,17 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
         quant_max = args.quant_max
 
         output_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)
-        assert not output_tensor.quantization
-        quant_param = circle.QuantizationParameters.QuantizationParametersT()
-        quant_param.min = [quant_min]
-        quant_param.max = [quant_max]
-        quant_param.scale = [scale]
-        quant_param.zeroPoint = [zero_p]
-        output_tensor.quantization = quant_param
+        assert output_tensor.quantization is not None
+
+        # Tensor should have qparam when it's exported
+        # The qparam must match with the arguments of this Op
+        assert output_tensor.quantization.scale[0] == scale
+        assert output_tensor.quantization.zeroPoint[0] == zero_p
+
+        if output_tensor.type == circle.TensorType.TensorType.UINT8:
+            assert quant_min == 0 and quant_max == 255
+        elif output_tensor.type == circle.TensorType.TensorType.INT16:
+            assert quant_min == -32767 and quant_max == 32767
 
         inputs = [tensor]
         outputs = [node]
