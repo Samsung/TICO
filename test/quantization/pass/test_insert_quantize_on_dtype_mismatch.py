@@ -25,6 +25,7 @@ from test.modules.op.bmm import SimpleBatchMatMul
 from test.modules.op.linear import SimpleLinear
 from test.modules.op.mul import SimpleMulWithTensor
 from test.modules.op.permute import SimplePermute
+from test.modules.op.reshape import ReshapeTorchAPI
 
 
 class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
@@ -141,4 +142,14 @@ class MulTest(InsertQuantizeOnDtypeMismatchTest):
 class BMMTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i16o8(self):
         self.setup(SimpleBatchMatMul(), torch.ops.aten.bmm.default, dtype="int16")
+        self.run_test()
+
+
+class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_i8o16(self):
+        self.setup(ReshapeTorchAPI(), torch.ops.aten.reshape.default, dtype="uint8")
+        self.run_test()
+
+    def test_i16o8(self):
+        self.setup(ReshapeTorchAPI(), torch.ops.aten.reshape.default, dtype="int16")
         self.run_test()
