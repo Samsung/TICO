@@ -16,7 +16,7 @@ import os
 import subprocess
 from functools import wraps
 from pathlib import Path
-from typing import List, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -26,7 +26,7 @@ import tico.utils
 import tico.utils.model
 import torch
 from tico.utils.convert import convert_exported_module_to_circle
-from tico.utils.utils import SuppressWarning
+from tico.utils.utils import run_bash_cmd, SuppressWarning
 from torch.export import export
 from torch.utils import _pytree as pytree
 
@@ -34,6 +34,8 @@ from torch.utils import _pytree as pytree
 
 __test_dir = Path(os.path.dirname(os.path.abspath(__file__))) / "artifacts"
 __circle2circle_path = "/usr/share/one/bin/circle2circle"
+__circle_resizer_path = "/usr/share/one/bin/circle-resizer"
+
 
 # Create empty test directories
 if not os.path.exists(__test_dir):
@@ -66,9 +68,22 @@ def get_args_kwargs(example_inputs: tuple):
         return example_inputs, {}
 
 
+def extract_shapes_from_input_tensors(tensors: tuple[torch.Tensor]) -> str:
+    shapes = []
+    for tensor in tensors:
+        shape = []
+        for dim in tensor.size():
+            shape.append(str(dim))
+        shapes.append("[" + ",".join(shape) + "]")
+    return ",".join(shapes)
+
+
 @print_name_on_exception
 def convert_nnmodule_to_pt2(
-    model: torch.nn.Module, example_inputs: tuple, pt2_model_path: str
+    model: torch.nn.Module,
+    example_inputs: tuple,
+    pt2_model_path: str,
+    dynamic_shapes: Optional[Union[Dict[str, Any], Tuple[Any], List[Any]]] = None,
 ):
     # Create .pt2 model
     with torch.no_grad(), SuppressWarning(UserWarning, ".*quantize_per_tensor"):
@@ -77,7 +92,9 @@ def convert_nnmodule_to_pt2(
         #   UserWarning: At pre-dispatch tracing, we assume that any custom op marked with
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
         _args, _kwargs = get_args_kwargs(example_inputs)
-        exported = export(model.eval(), args=_args, kwargs=_kwargs)
+        exported = export(
+            model.eval(), args=_args, kwargs=_kwargs, dynamic_shapes=dynamic_shapes
+        )
     torch.export.save(exported, pt2_model_path)
 
 
@@ -146,6 +163,24 @@ def infer_nnmodule(model: torch.nn.Module, example_inputs: tuple):
         torch_result, _ = pytree.tree_flatten(torch_result)
 
         return torch_result
+
+
+@print_name_on_exception
+def resize_circle(
+    circle_model_path: str,
+    resized_circle_model_str: str,
+    example_inputs: tuple[torch.Tensor],
+):
+    cmd = [
+        __circle_resizer_path,
+        "--input_path",
+        circle_model_path,
+        "--output_path",
+        resized_circle_model_str,
+        "--input_shapes",
+        extract_shapes_from_input_tensors(example_inputs),
+    ]
+    run_bash_cmd(cmd)
 
 
 @print_name_on_exception

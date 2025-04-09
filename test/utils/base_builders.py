@@ -28,6 +28,10 @@ class TestRunnerBase:
         assert hasattr(nnmodule, "get_example_inputs")
         assert isinstance(nnmodule.get_example_inputs(), tuple)  # type: ignore[operator]
 
+        self.dynamic_shapes = None
+        if hasattr(nnmodule, "get_input_dynamic_shapes"):
+            self.dynamic_shapes = nnmodule.get_input_dynamic_shapes()  # type: ignore[operator]
+
         self.nnmodule = nnmodule
         self.example_inputs = nnmodule.get_example_inputs()  # type: ignore[operator]
 
