@@ -33,7 +33,7 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
     This class runs a test for InsertQuantizeOpOnDtypeMismatch pass
     - Set up a network with target_op and dtype of input. Target node's
       dtype is set differently from input dtype
-    - After the pass runs, node's dtype must be the same with its input
+    - After the pass runs, node's dtype must be the same with desired_dtype
 
     How to use?
 
@@ -41,18 +41,27 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
 
     class DummyTest(InsertQuantizeOpOnDtypeMismatchTest):
         def test_pass(self):
-            self.setup(DummyNet(), target_op=torch.ops.aten.reshape.default, dtype="uint8")
+            self.setup(DummyNet(), target_op=torch.ops.aten.reshape.default, input_dtype="uint8", desired_dtype="uint8")
             self.run_test()
     """
 
     initialized: bool = False
 
-    def setup(self, mod: torch.nn.Module, target_op, scale=1.0, zp=0, dtype="uint8"):
+    def setup(
+        self,
+        mod: torch.nn.Module,
+        target_op,
+        scale=1.0,
+        zp=0,
+        input_dtype="uint8",
+        desired_dtype="uint8",
+    ):
         assert hasattr(mod, "get_example_inputs")
         self.inputs = mod.get_example_inputs()  # type: ignore[operator]
         self.scale = scale
         self.zp = zp
-        self.dtype = dtype
+        self.input_dtype = input_dtype
+        self.desired_dtype = desired_dtype
 
         with torch.no_grad():
             self.ep = torch.export.export(mod.eval(), self.inputs)
@@ -86,16 +95,16 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
             qparam = QuantParam()
             qparam.scale = [self.scale]
             qparam.zero_point = [self.zp]
-            qparam.dtype = self.dtype
+            qparam.dtype = self.input_dtype
 
             user_input.meta[QPARAM_KEY] = qparam
 
         node_qparam = QuantParam()
-        if self.dtype == "int16":
+        if self.input_dtype == "int16":
             node_qparam.scale = [1.0]
             node_qparam.zero_point = [0]
             node_qparam.dtype = "uint8"
-        elif self.dtype == "uint8":
+        elif self.input_dtype == "uint8":
             node_qparam.scale = [1.0]
             node_qparam.zero_point = [0]
             node_qparam.dtype = "int16"
@@ -108,48 +117,92 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
 
     def run_test(self):
         # Before pass
-        self.assertNotEqual(self.target.meta[QPARAM_KEY].dtype, self.dtype)
+        # InsertQuantizeOnDtypeMismatch works for the case when input dtype does not match with output dtype
+        self.assertNotEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
 
         target_pass = InsertQuantizeOnDtypeMismatch()
         target_pass.call(self.ep)
 
         # After pass
-        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.dtype)
+        # Check whether dtype of target is the same with desired_dtype
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.desired_dtype)
+
+        # Check whether input/output of target has the same dtype
+        # TODO Update args[0] if an Op does not have its input as args[0]
+        self.assertEqual(
+            self.target.meta[QPARAM_KEY].dtype,
+            self.target.args[0].meta[QPARAM_KEY].dtype,
+        )
 
 
 class PermuteTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i8o16(self):
-        self.setup(SimplePermute(), torch.ops.aten.permute.default, dtype="uint8")
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
         self.run_test()
 
     def test_i16o8(self):
-        self.setup(SimplePermute(), torch.ops.aten.permute.default, dtype="int16")
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="int16",
+            desired_dtype="uint8",
+        )
         self.run_test()
 
 
 class LinearTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i8o16(self):
-        self.setup(SimpleLinear(), torch.ops.aten.linear.default, dtype="uint8")
+        self.setup(
+            SimpleLinear(),
+            torch.ops.aten.linear.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
         self.run_test()
 
 
 class MulTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i16o8(self):
-        self.setup(SimpleMulWithTensor(), torch.ops.aten.mul.Tensor, dtype="int16")
+        self.setup(
+            SimpleMulWithTensor(),
+            torch.ops.aten.mul.Tensor,
+            input_dtype="int16",
+            desired_dtype="int16",
+        )
         self.run_test()
 
 
 class BMMTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i16o8(self):
-        self.setup(SimpleBatchMatMul(), torch.ops.aten.bmm.default, dtype="int16")
+        self.setup(
+            SimpleBatchMatMul(),
+            torch.ops.aten.bmm.default,
+            input_dtype="int16",
+            desired_dtype="int16",
+        )
         self.run_test()
 
 
 class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i8o16(self):
-        self.setup(ReshapeTorchAPI(), torch.ops.aten.reshape.default, dtype="uint8")
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
         self.run_test()
 
     def test_i16o8(self):
-        self.setup(ReshapeTorchAPI(), torch.ops.aten.reshape.default, dtype="int16")
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="int16",
+            desired_dtype="uint8",
+        )
         self.run_test()

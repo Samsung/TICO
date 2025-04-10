@@ -265,7 +265,6 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                     quantize = _insert_quantize_op_before(node, inp)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-                    node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
                     logger.debug(
                         f"quantize_per_tensor.default is inserted before {node.name}."
                     )
@@ -298,7 +297,6 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                     quantize = _insert_quantize_op_before(node, inp)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-                    node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
                     logger.debug(
                         f"quantize_per_tensor.default is inserted before {node.name}."
                     )
