@@ -32,7 +32,7 @@ jobs:
           if [[ ! "$count" -ge "1" ]]; then
             echo "Your commit message does not contain the expected signoff information."
             echo "Please add a line like 'TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>' to your commit message."
-            echo "Refer to https://github.com/Samsung/TICO/wiki/TICO-Developer's-Certificate-of-Origin"
+            echo "Refer to https://github.com/Samsung/TICO/wiki/TICO-Developer-Certificate-of-Origin"
             exit 1
           fi
 
