@@ -103,6 +103,26 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
     output dtype (int16) is updated to the input dtype (uint8), which breaks the semantics.
     This problem can occur in the tools (ex: circle2circle) that automatically apply type inference.
     - To resolve the issue, we insert quantize operators not to violate circle's type inference logic.
+    - NOTE For some cases, Quantize Op is inserted before the operators.
+
+    Let's assume Reshape Op's input is int16 and output is uint8. There are two possible places to insert
+    Quantize Op.
+
+    1. Insert Quantize before Reshape.
+
+    ```
+    Predecessor (int16)-> Quantize (uint8) -> Reshape (uint8) -> ...
+    ```
+
+    2. Insert Quantize after Reshape.
+
+    ```
+    Predecessor (int16)-> Reshape (int16) -> Quantize (uint8) -> ...
+    ```
+
+    Comparing 1) and 2), the difference is that Reshape operation is conducted in uint8 or int16.
+    We go with 1), which does Reshape in uint8, for faster execution. Note that Reshape Op does not
+    change the value, so its dytpe does not affect accuracy.
     """
 
     def __init__(self):

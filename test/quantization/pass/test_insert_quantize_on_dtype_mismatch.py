@@ -117,7 +117,7 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
 
     def run_test(self):
         # Before pass
-        # InsertQuantizeOnDtypeMismatch works for the case when input dtype does not match with output dtype
+        # InsertQuantizeOnDtypeMismatch inserts Quantize Op when input dtype does not match with output dtype
         self.assertNotEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
 
         target_pass = InsertQuantizeOnDtypeMismatch()
@@ -145,6 +145,9 @@ class PermuteTest(InsertQuantizeOnDtypeMismatchTest):
         )
         self.run_test()
 
+    # Quantize Op is inserted before Permute, so desired_dtype of Reshape is uint8
+    # After conversion)
+    # Input (s16) -> Quantize (u8) -> Permute (u8)
     def test_i16o8(self):
         self.setup(
             SimplePermute(),
@@ -198,6 +201,9 @@ class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
         )
         self.run_test()
 
+    # Quantize Op is inserted before Reshape, so desired_dtype of Reshape is uint8
+    # After conversion)
+    # Input (s16) -> Quantize (u8) -> Reshape (u8)
     def test_i16o8(self):
         self.setup(
             ReshapeTorchAPI(),
