@@ -29,7 +29,7 @@ jobs:
           name: "${{ matrix.ubuntu_version }}_wheel"
           path: "./dist/"
 
-  publish-to-testpypi:
+  publish-to-pypi:
     needs:
       - build-and-upload
     runs-on: ubuntu-22.04
@@ -38,8 +38,8 @@ jobs:
         ubuntu_version: [22.04]
 
     environment:
-      name: testpypi
-      url: https://test.pypi.org/p/TICO
+      name: pypi
+      url: https://pypi.org/p/TICO
 
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
@@ -51,7 +51,5 @@ jobs:
           name: "${{ matrix.ubuntu_version }}_wheel"
           path: "./dist/"
 
-      - name: "Publish distribution 📦 to TestPyPI"
+      - name: "Publish distribution to PyPI"
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
