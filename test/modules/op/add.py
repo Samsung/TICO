@@ -37,10 +37,10 @@ class SimpleAdd(torch.nn.Module):
         calibration_data = [
             (
                 torch.randn(
-                    (1,),
+                    (1, 2),
                 ),
                 torch.randn(
-                    (1,),
+                    (1, 2),
                 ),
             )
             for i in range(100)
