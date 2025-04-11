@@ -27,8 +27,10 @@ if [[ "${CHECK_DIFF_ONLY}" = "1" ]]; then
   DIFF_COMMITS=`git log --graph --oneline main..HEAD | wc -l`
   if [[ -z "${MAIN_EXIST}" ]]; then
     echo "Cannot find main branch"
+    exit 1
   elif [[ "${CURRENT_BRANCH}" = "main" ]]; then
     echo "Current branch is main"
+    exit 1
   else
     # Gather diff from HEAD
     FILES_TO_CHECK=$(git diff --name-only --diff-filter=d HEAD~${DIFF_COMMITS})
