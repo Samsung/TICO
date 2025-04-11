@@ -31,8 +31,7 @@ jobs:
 
   publish-to-testpypi:
     name: Publish Python 🐍 distribution 📦 to TestPyPI
-    needs:
-      - build-and-upload
+    needs: build-and-upload
     runs-on: ubuntu-22.04
 
     environment:
@@ -47,7 +46,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-package-distributions
-          path: dist/
+          path: "./dist/""
       - name: Publish distribution 📦 to TestPyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
