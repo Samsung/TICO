@@ -29,7 +29,10 @@ setup(
     python_requires=">=3.10.0",
     version=VERSION,
     description="Convert exported Torch module to circle",
+    long_description=open("README.md").read(),
+    long_description_content_type="text/markdown",
+    license_files = ("LICENSE",),
     packages=find_packages(include=["tico*"]),
     entry_points={"console_scripts": ["pt2-to-circle = tico.pt2_to_circle:main"]},
-    install_requires=["circle-schema", "packaging", "cffi", "torch", "pyyaml"],
+    install_requires=["circle-schema", "packaging>=24.2", "cffi", "torch", "pyyaml"],
 )
