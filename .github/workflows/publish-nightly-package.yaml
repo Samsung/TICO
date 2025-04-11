@@ -30,7 +30,6 @@ jobs:
           path: "./dist/"
 
   publish-to-testpypi:
-    name: Publish Python 🐍 distribution 📦 to TestPyPI
     needs:
       - build-and-upload
     runs-on: ubuntu-22.04
