@@ -23,7 +23,7 @@ def load_tests(loader, standard_tests, pattern):
 
     # Add test files to be found by `unittest`
     # WHY? Not to include other files by mistake and to make it clear which files are being tested
-    for testfile in ["test_net.py", "test_op.py"]:
+    for testfile in ["test_net.py", "test_op.py", "test_dyn_op.py"]:
         package_tests = loader.discover(start_dir=this_dir, pattern=testfile)
         standard_tests.addTests(package_tests)
 
