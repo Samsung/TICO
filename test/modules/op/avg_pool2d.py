@@ -41,9 +41,9 @@ class AdaptiveAvgPool(torch.nn.Module):
         return (torch.randn(1, 128, 7, 7),)
 
     # This test should be done after applying NCHW_to_NHWC with onecc.
-    def get_calibration_data(self):
-        calibration_data = [self.get_example_inputs() for _ in range(100)]
-        return calibration_data
+    # def get_calibration_data(self):
+    #     calibration_data = [self.get_example_inputs() for _ in range(100)]
+    #     return calibration_data
 
 
 class AvgPoolWithPadding(torch.nn.Module):
