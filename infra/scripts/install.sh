@@ -75,13 +75,13 @@ SCRIPTS_DIR="${CCEX_PROJECT_PATH}/infra/scripts"
 
 if [ "$_TORCH_VER" == "nightly" ]; then
   echo "Install package dependencies from torch nightly version"
-  python3 -m pip install --force-reinstall -r "${SCRIPTS_DIR}/install_requirements_dev.txt"
+  uv pip install --force-reinstall -r "${SCRIPTS_DIR}/install_requirements_dev.txt"
 elif [ "$_TORCH_VER" == "2.6" ]; then
   echo "Install package dependencies from torch stable version"
-  python3 -m pip install --force-reinstall -r "${SCRIPTS_DIR}/install_requirements_2_6.txt"
+  uv pip install --force-reinstall -r "${SCRIPTS_DIR}/install_requirements_2_6.txt"
 elif [ "$_TORCH_VER" == "2.5" ]; then
   echo "Install package dependencies from torch stable version"
-  python3 -m pip install --force-reinstall -r "${SCRIPTS_DIR}/install_requirements_2_5.txt"
+  uv pip install --force-reinstall -r "${SCRIPTS_DIR}/install_requirements_2_5.txt"
 else
   echo "Assertion: Cannot reach here"
   exit 1
@@ -89,8 +89,8 @@ fi
 
 if [ $_DIST -eq 1 ]; then
   echo "Install from whl file"
-  python3 -m pip install --force-reinstall dist/tico*.whl
+  uv pip install --force-reinstall dist/tico*.whl
 else
   echo "Install as editable mode"
-  pip install -e .
+  uv pip install -e .
 fi

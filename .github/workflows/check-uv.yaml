@@ -1,0 +1,80 @@
+name: Check UV effect
+
+on:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: tico-linux
+    container:
+      image: ubuntu:22.04
+    strategy:
+      matrix:
+        torch-version: ["2.5", "2.6", "nightly"] # TODO: Add 2.7 when it is released
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y curl git lsb-release unzip
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.6.14"
+          python-version: "3.10"
+
+      - name: Install python dependencies
+        run: |
+          apt-get install -y python3-venv python3-pip
+
+      - name: Get Ubuntu codename
+        id: os
+        run: |
+          CODENAME=$(lsb_release -cs)
+          echo "codename=$CODENAME" >> "$GITHUB_OUTPUT"
+
+      - name: Download issue attatchment (one-compiler latest)
+        run: |
+          curl -L -o one-compiler-latest.zip \
+            "https://github.com/user-attachments/files/19561702/one-compiler_1.30.0.25040116_amd64.zip"
+
+      - name: Unzip and install the one-compiler package
+        run: |
+          unzip one-compiler-latest.zip -d one-compiler-package
+          ls -l one-compiler-package
+
+          dpkg -i one-compiler-package/*.deb
+          apt-get install -f -y # fix dependencies if needed
+
+      - name: Check installation
+        run: |
+          onecc --version || echo "Installation failed."
+
+      - name: "Build package"
+        run: |
+          uv pip install setuptools
+          ./ccex build
+
+      - name: "Run install"
+        shell: bash
+        run: |
+          TORCH_VERSION=${{ matrix.torch-version }}
+          ./ccex install --dist --torch_ver $TORCH_VERSION
+          pt2-to-circle -h
+
+      - name: "Configure test"
+        shell: bash
+        run: |
+          TORCH_VERSION=${{ matrix.torch-version }}
+          ./ccex configure test --torch_ver $TORCH_VERSION
+
+      - name: "Show torch package versions"
+        shell: bash
+        run: |
+          uv pip list | grep torch
+
+      - name: "Run test"
+        shell: bash
+        run: |
+          ./ccex test
