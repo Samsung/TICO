@@ -14,7 +14,7 @@
 
 import operator
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.export import export, ExportedProgram
@@ -265,9 +265,12 @@ def convert(
     kwargs: Optional[Dict[str, Any]] = None,
     strict: bool = True,
     config: CompileConfigBase = get_default_config(),
+    dynamic_shapes: Optional[Union[Dict[str, Any], Tuple[Any], List[Any]]] = None,
 ) -> CircleModel:
     with torch.no_grad():
-        exported_program = export(mod, args, kwargs, strict=strict)
+        exported_program = export(
+            mod, args, kwargs, strict=strict, dynamic_shapes=dynamic_shapes
+        )
 
     circle_binary = convert_exported_module_to_circle(exported_program, config=config)
 
