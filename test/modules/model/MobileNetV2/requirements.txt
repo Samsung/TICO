@@ -1,4 +1,1 @@
-# Following options have an effect on the entire pip install run
---extra-index-url "https://download.pytorch.org/whl/nightly/cpu"
-
-torchvision==0.22.0.dev20250209
+torchvision
