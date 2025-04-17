@@ -68,10 +68,6 @@ jobs:
           apt-get update
           apt-get install -y curl git lsb-release unzip
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-      
       - name: Install python dependencies
         run: |
           apt-get install -y python3-venv python3-pip
