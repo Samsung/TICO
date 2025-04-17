@@ -71,10 +71,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-      
-      - name: Install python dependencies
-        run: |
-          apt-get install -y python3-venv python3-pip
 
       - name: Get Ubuntu codename
         id: os
