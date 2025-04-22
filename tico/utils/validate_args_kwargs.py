@@ -15,6 +15,8 @@
 from dataclasses import dataclass, field
 from typing import List, Optional, TYPE_CHECKING, Union
 
+import torch.fx.immutable_collections
+
 if TYPE_CHECKING:
     import torch._ops
     import torch.fx
@@ -89,8 +91,12 @@ class ArangeStartStepArgs:
     """
 
     start: Union[int, float]
-    end: Union[int, float]
+    end: Union[int, float, torch.fx.node.Node]
     step: Union[int, float] = 1
+    dtype: Optional[torch.dtype] = None
+    layout: Optional[torch.layout] = None
+    device: Optional[torch.device] = None
+    pin_memory: Optional[bool] = None
 
 
 @enforce_type
@@ -358,7 +364,7 @@ class ExpandArgs:
     """
 
     input: torch.fx.Node
-    size: List[int]
+    size: List[int] | torch.fx.immutable_collections.immutable_list
 
 
 @enforce_type
@@ -845,7 +851,7 @@ class ReshapeArgs:
     """
 
     input: torch.fx.Node
-    size: List[int]
+    size: List[int] | torch.fx.immutable_collections.immutable_list
 
 
 @enforce_type
@@ -899,6 +905,17 @@ class SigmoidArgs:
     """
 
     input: torch.fx.Node
+
+
+@enforce_type
+@dataclass
+class SymSizeIntArgs:
+    """
+    sym_size.int(Tensor self, int dim) -> SymInt
+    """
+
+    input: torch.fx.Node
+    dim: int
 
 
 @enforce_type
@@ -1099,7 +1116,7 @@ class ViewArgs:
     """
 
     input: torch.fx.Node
-    size: List[int]
+    size: List[int] | torch.fx.immutable_collections.immutable_list
 
 
 @enforce_type

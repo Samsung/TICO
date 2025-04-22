@@ -104,6 +104,8 @@ def extract_torch_dtype(node: torch.fx.Node) -> torch.dtype:
     if isinstance(val, torch.Tensor):
         assert isinstance(val.dtype, torch.dtype)
         val_dtype = val.dtype
+    elif isinstance(val, torch.SymInt):
+        val_dtype = torch.int64
     else:
         val_dtype = torch.tensor(val).dtype
     return val_dtype
@@ -122,6 +124,8 @@ def extract_shape(node: torch.fx.Node) -> torch.Size:
     val_shape = None
     if isinstance(val, torch.Tensor):
         val_shape = val.size()
+    elif isinstance(val, torch.SymInt):
+        val_shape = []
     else:
         val_shape = torch.tensor(val).shape
 

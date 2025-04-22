@@ -29,6 +29,17 @@ from tico.utils.errors import NotYetSupportedError
 from tico.utils.validate_args_kwargs import ReshapeArgs
 
 
+def is_dynamic(size: List[int] | torch.fx.immutable_collections.immutable_list):
+    for s in size:
+        if isinstance(s, int):
+            continue
+        if isinstance(s, torch.SymInt):
+            return True
+        
+        raise RuntimeError(f"Invalid type for size: {type(s)}")
+
+    return False
+
 @register_node_visitor
 class ReshapeVisitor(NodeVisitor):
     target: List[torch._ops.OpOverload] = [
@@ -53,8 +64,11 @@ class ReshapeVisitor(NodeVisitor):
         if isinstance(size, int):
             raise NotYetSupportedError("scalar size conversion is not supported yet.")
 
-        assert is_const(size), type(size)
+        # assert is_const(size), type(size)
 
+        dynamic = is_dynamic(size)
+        if dynamic:
+            size = [-1 if isinstance(s, torch.SymInt) else s for s in size]
         size_i32 = circle_legalize_dtype_to(size, dtype=torch.int32)
         inputs = [input, size_i32]
         outputs = [node]

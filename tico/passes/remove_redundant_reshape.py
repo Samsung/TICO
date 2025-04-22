@@ -348,7 +348,7 @@ class RemoveRedundantReshapePattern4(PassBase):
             assert isinstance(reshape1_input, torch.fx.Node), type(reshape1_input)
             assert isinstance(size, list), type(size)
             for s in size:
-                assert isinstance(s, int), type(s)
+                assert isinstance(s, (int, torch.SymInt)), type(s)
 
             if not len(reshape1.users) == 1:
                 continue
@@ -365,7 +365,7 @@ class RemoveRedundantReshapePattern4(PassBase):
             assert isinstance(reshape2_input, torch.fx.Node), type(reshape2_input)
             assert isinstance(reshape2_size, list), type(reshape2_size)
             for s in reshape2_size:
-                assert isinstance(s, int), type(s)
+                assert isinstance(s, (int, torch.SymInt)), type(s)
 
             with graph.inserting_before(reshape1):
                 fused_reshape = graph.call_function(

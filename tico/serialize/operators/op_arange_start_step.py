@@ -14,6 +14,8 @@
 
 from typing import Dict, List, TYPE_CHECKING
 
+from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+
 if TYPE_CHECKING:
     import torch._ops
     import torch.fx
@@ -45,17 +47,19 @@ class ArangeStartStepVisitor(NodeVisitor):
         start = args.start
         end = args.end
         step = args.step
-        delta = 1
+        
+        inputs = [start, end, step]
+        outputs = [node]
 
-        if step is not None:
-            delta = step[0]  # type: ignore[index]
-        # assert False, "This pass must not be in use."
+        op_index = get_op_index(
+            circle.BuiltinOperator.BuiltinOperator.RANGE, self._op_codes
+        )
 
-        arange_dtype: torch.dtype = torch.float32
-        if isinstance(start, int) and isinstance(end, int):
-            arange_dtype = torch.int64
+        operator = create_builtin_operator(self.graph, op_index, inputs, outputs)
 
-        output_data = torch.arange(start=start, end=end, step=delta, dtype=arange_dtype)
-        self.graph.update_tensor_buffer(output_data, node.name)
+        # Op-specific option
+        operator.builtinOptionsType = circle.BuiltinOptions.BuiltinOptions.RangeOptions
+        option = circle.RangeOptions.RangeOptionsT()
+        operator.builtinOptions = option
 
-        return None  # type: ignore[return-value]
+        return operator
