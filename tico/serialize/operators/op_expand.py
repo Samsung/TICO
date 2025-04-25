@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
 from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,17 +27,19 @@ from tico.serialize.operators.node_visitor import NodeVisitor, register_node_vis
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.validate_args_kwargs import ExpandArgs
 
+
 def is_dynamic(size: List[int] | torch.fx.immutable_collections.immutable_list):
     for s in size:
         if isinstance(s, int):
             continue
         if isinstance(s, torch.fx.Node):
-            if s.target == torch.ops.aten.sym_size.int:
+            if s.target == torch.ops.aten.sym_size.int or s.target == operator.add:
                 return True
-        
+
         raise RuntimeError(f"Invalid type for size: {type(s)}")
 
     return False
+
 
 @register_node_visitor
 class ExpandVisitor(NodeVisitor):
@@ -60,7 +63,7 @@ class ExpandVisitor(NodeVisitor):
         option = circle.BroadcastToOptions.BroadcastToOptionsT()
         operator.builtinOptions = option
         return operator
-    
+
     def define_pack_node(
         self, inputs: List[torch.fx.Node], outputs: List[circle.Tensor.TensorT]
     ) -> circle.Operator.OperatorT:

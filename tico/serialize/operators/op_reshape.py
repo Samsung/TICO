@@ -35,10 +35,11 @@ def is_dynamic(size: List[int] | torch.fx.immutable_collections.immutable_list):
             continue
         if isinstance(s, torch.SymInt):
             return True
-        
+
         raise RuntimeError(f"Invalid type for size: {type(s)}")
 
     return False
+
 
 @register_node_visitor
 class ReshapeVisitor(NodeVisitor):

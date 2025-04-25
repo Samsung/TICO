@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
 from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -92,6 +93,24 @@ class MulScalarVisitor(BaseMulVisitor):
         input = args.input
         other = args.other
 
+        operator = super().define_node(
+            node,
+        )
+
+        return operator
+
+
+@register_node_visitor
+class MulDynamicVisitor(BaseMulVisitor):
+    target: List[torch._ops.OpOverload] = [operator.mul]
+
+    def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
+        super().__init__(op_codes, graph)
+
+    def define_node(
+        self,
+        node: torch.fx.Node,
+    ) -> circle.Operator.OperatorT:
         operator = super().define_node(
             node,
         )

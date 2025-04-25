@@ -52,22 +52,34 @@ class NormalizeDynamicExpandShape(PassBase):
                 if isinstance(s, torch.fx.Node):
                     if s.target == torch.ops.aten.sym_size.int:
                         with graph.inserting_before(node):
-                            unsqueezed = graph.call_function(torch.ops.aten.unsqueeze.default, args=(s, 0))
+                            unsqueezed = graph.call_function(
+                                torch.ops.aten.unsqueeze.default, args=(s, 0)
+                            )
                         new_shape_nodes.append(unsqueezed)
                     else:
-                        raise ValueError(f"Unsupported dynamic shape expression: {s.target}")
+                        raise ValueError(
+                            f"Unsupported dynamic shape expression: {s.target}"
+                        )
                 elif isinstance(s, int):
                     # wrap into scalar tensor
                     with graph.inserting_before(node):
-                        const_tensor = graph.call_function(torch.ops.aten.full.default, args=([], s), kwargs={"dtype": torch.int64})
-                        unsqueezed = graph.call_function(torch.ops.aten.unsqueeze.default, args=(const_tensor, 0))
+                        const_tensor = graph.call_function(
+                            torch.ops.aten.full.default,
+                            args=([], s),
+                            kwargs={"dtype": torch.int64},
+                        )
+                        unsqueezed = graph.call_function(
+                            torch.ops.aten.unsqueeze.default, args=(const_tensor, 0)
+                        )
                     new_shape_nodes.append(unsqueezed)
                 else:
                     raise ValueError(f"Unsupported shape element type: {type(s)}")
-            
+
             # Concatenate all dims into shape tensor
             with graph.inserting_before(node):
-                shape_tensor = graph.call_function(torch.ops.aten.cat.default, args=(new_shape_nodes, 0))
+                shape_tensor = graph.call_function(
+                    torch.ops.aten.cat.default, args=(new_shape_nodes, 0)
+                )
             node.update_arg(1, shape_tensor)
 
             modified = True

@@ -90,7 +90,7 @@ class ArangeStartStepArgs:
     arange.start_step(Scalar start, Scalar end, Scalar step=1, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None) -> Tensor
     """
 
-    start: Union[int, float]
+    start: Union[int, float, torch.fx.node.Node]
     end: Union[int, float, torch.fx.node.Node]
     step: Union[int, float] = 1
     dtype: Optional[torch.dtype] = None
@@ -419,6 +419,10 @@ class FullArgs:
 
     size: Union[list, tuple, torch.Size]
     fill_value: Union[int, float, bool]
+    dtype: Optional[torch.dtype] = None
+    layout: Optional[torch.layout] = None
+    device: Optional[torch.device] = None
+    pin_memory: Optional[bool] = None
 
 
 @enforce_type
@@ -507,6 +511,18 @@ class InstanceNormArgs:
     momentum: float
     eps: float
     cudnn_enabled: bool
+
+
+@enforce_type
+@dataclass
+class LeArgs:
+    """
+    le.Scalar(Tensor self, Scalar other) -> Tensor
+    le.Tensor(Tensor self, Tensor other) -> Tensor
+    """
+
+    input: Union[torch.fx.Node, torch.Tensor, float, int]
+    other: Union[torch.fx.Node, torch.Tensor, float, int]
 
 
 @enforce_type
