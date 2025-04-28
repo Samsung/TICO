@@ -18,6 +18,7 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
+from tico.utils.mx.mx_ops import _quantize_mx
 
 # Note that an operator assumes input tensor has NHWC format.
 def CircleResizeNearestNeighbor():
@@ -550,6 +551,47 @@ def CircleInstanceNorm():
         return input.new_empty(input.size())
 
 
+def CircleQuantizeMX():
+    # This operator conducts fake-quantization of microscaling
+    # NOTE Why using "quantize"_mx not "fake_quantize"_mx?
+    # To align with function name of microxcaling repo.
+    # https://github.com/microsoft/microxcaling/blob/v1.1.0/mx/mx_ops.py#L173
+    @custom_op("circle_custom::quantize_mx", mutates_args=())
+    def quantize_mx(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        if elem_format == "int8":
+            scale_bits = 8
+            block_size = 32
+        else:
+            raise RuntimeError(f"Unsupported elem_format in quantize_mx: {elem_format}")
+
+        result = _quantize_mx(
+            input_,
+            scale_bits=scale_bits,
+            elem_format=elem_format,
+            axes=[axis],
+            block_size=block_size,
+            shared_exp_method=shared_exp_method,
+            round=round,
+        )
+        return result
+
+    @register_fake("circle_custom::quantize_mx")
+    def _(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",  # Fixed
+        round: str = "nearest",  # Fixed
+    ) -> torch.Tensor:
+        return input_
+
+
 # Add custom ops to the torch namespace
 def RegisterOps():
     CircleResizeNearestNeighbor()
@@ -560,3 +602,4 @@ def RegisterOps():
     CircleMaxPool2D()
     CircleAvgPool2D()
     CircleInstanceNorm()
+    CircleQuantizeMX()
