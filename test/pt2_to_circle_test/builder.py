@@ -26,6 +26,7 @@ from test.pt2_to_circle_test.test_pt2_to_circle import (
     convert_pt2_to_circle,
     infer_circle,
     infer_nnmodule,
+    resize_circle,
     validate_result,
     verify_circle,
 )
@@ -85,6 +86,7 @@ class NNModuleTest(TestRunnerBase):
         os.makedirs(os.path.dirname(test_prefix), exist_ok=True)
 
         circle_model_path = str(test_prefix) + ".circle"
+        resized_circle_model_path = str(test_prefix) + ".resized.circle"
         opt_circle_model_path = str(test_prefix) + ".opt.circle"
         pt2_model_path = str(test_prefix) + ".pt2"
 
@@ -96,13 +98,23 @@ class NNModuleTest(TestRunnerBase):
             )
         else:
             # torch.nn.Module --> ExportedProgram ----------------------------------------> circle
-            convert_nnmodule_to_pt2(self.nnmodule, self.example_inputs, pt2_model_path)
+            convert_nnmodule_to_pt2(
+                self.nnmodule, self.example_inputs, pt2_model_path, self.dynamic_shapes
+            )
             convert_pt2_to_circle(pt2_model_path, circle_model_path)
 
-        verify_circle(circle_model_path, opt_circle_model_path)
+        if self.dynamic_shapes:
+            resize_circle(
+                circle_model_path, resized_circle_model_path, self.example_inputs
+            )
+
+        verify_circle(
+            resized_circle_model_path if self.dynamic_shapes else circle_model_path,
+            opt_circle_model_path,
+        )
 
         torch_result = infer_nnmodule(self.nnmodule, self.example_inputs)
-        circle_result = infer_circle(circle_model_path, self.example_inputs)
+        circle_result = infer_circle(opt_circle_model_path, self.example_inputs)
         validate_result(torch_result, circle_result, **self.tolerance)
 
 
