@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-import subprocess
 from typing import Any, Tuple
 
 import test.utils.helper as helper
@@ -69,23 +68,7 @@ def infer_with_onert(circle_path: str, example_inputs: Tuple) -> Any:
     except ImportError:
         raise RuntimeError("The 'onert' package is required to run this funciton.")
 
-    cmd = [
-        "/usr/share/one/bin/onecc",
-        "pack",
-        "-i",
-        circle_path,
-        "-o",
-        os.path.dirname(circle_path),
-    ]
-    subprocess.run(cmd, check=True)
+    session_float = infer.session(circle_path)
+    output = session_float.infer(example_inputs)
 
-    # Load nnpackage to onert
-    nnpackage = os.path.splitext(circle_path)[0]
-    is_dir = os.path.isdir(nnpackage)
-    if is_dir:
-        session_float = infer.session(nnpackage)
-        output = session_float.infer(example_inputs)
-
-        return output
-    else:
-        raise RuntimeError(f"nnpackage doesn't exist: {nnpackage}")
+    return output
