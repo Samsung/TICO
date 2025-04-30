@@ -1,1 +1,2 @@
 -r ../infra/dependency/torchvision_dev.txt
+pyyaml==6.0.2
