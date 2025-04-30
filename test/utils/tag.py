@@ -68,6 +68,18 @@ def target(orig_class):
     return orig_class
 
 
+def use_onert(orig_class):
+    """
+    Decorator to mark a test class so that Circle models are executed
+     with the 'onert' runtime.
+
+    Useful when the default 'circle-interpreter' cannot run the model
+     under test.
+    """
+    setattr(orig_class, "__tag_use_onert", True)
+    return orig_class
+
+
 def init_args(*args, **kwargs):
     def __inner_init_args(orig_class):
         orig_init = orig_class.__init__

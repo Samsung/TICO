@@ -102,7 +102,17 @@ class NNModuleTest(TestRunnerBase):
         verify_circle(circle_model_path, opt_circle_model_path)
 
         torch_result = infer_nnmodule(self.nnmodule, self.example_inputs)
-        circle_result = infer_circle(circle_model_path, self.example_inputs)
+        USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert"
+        if self.use_onert or USE_ONERT:
+            circle_result = infer_circle(
+                circle_model_path, self.example_inputs, "onert"
+            )
+            torch_shape = torch_result[0].shape
+            circle_result[0] = circle_result[0].reshape(torch_shape)
+        else:
+            circle_result = infer_circle(
+                circle_model_path, self.example_inputs, "circle-interpreter"
+            )
         validate_result(torch_result, circle_result, **self.tolerance)
 
 

@@ -33,6 +33,13 @@ def main():
         action="store_true",
         help="Include internal-only tests",
     )
+    parser.add_argument(
+        "-r",
+        "--runtime",
+        choices=["circle-interpreter", "onert"],
+        default=os.environ.get("CCEX_RUNTIME", "circle-interpreter"),
+        help="Which inference runtime to use (or set CCEX_RUNTIME)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode")
     args = parser.parse_args()
 
@@ -62,6 +69,8 @@ def main():
 
     if args.include_internal:
         os.environ["RUN_INTERNAL_TESTS"] = "1"
+
+    os.environ["CCEX_RUNTIME"] = args.runtime
 
     ##############
     # Run commands

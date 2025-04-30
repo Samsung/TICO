@@ -263,6 +263,44 @@ For example, to run a single model
 ./ccex test -m InceptionV3
 ```
 
+#### Runtime Options
+
+By default, `./ccex test` runs all modules with the `circle-interpreter` engine.
+ You can override this and run tests using the `onert` runtime instead.
+
+##### 1. Command-Line Flag
+
+Use the `--runtime` (or `-r`) flag to select a runtime:
+
+```bash
+# Run with the default circle-interpreter
+./ccex test
+
+# Run all tests with onert
+./ccex test --runtime onert
+# or
+./ccex test -r onert
+```
+
+##### 2. Environment Variable
+
+You can also set the `CCEX_RUNTIME` environment variable:
+
+```bash
+# Temporarily override for one command
+CCEX_RUNTIME=onert ./ccex test
+
+# Persist in your shell session
+export CCEX_RUNTIME=onert
+./ccex test
+```
+
+##### Supported Runtimes
+
+- circle-interpreter (default): uses the Circle interpreter for inference.
+- onert: uses the ONERT package for inference, useful when the Circle interpreter
+ cannot run a given module.
+
 ### Code Formatting
 
 #### Format configure

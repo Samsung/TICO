@@ -35,6 +35,16 @@ def num_of_ops(ep: ExportedProgram, ops: List[torch._ops.OpOverload]):
     return count
 
 
+def get_args_kwargs(example_inputs: tuple):
+    if len(example_inputs) == 0:
+        return (), {}
+
+    if isinstance(example_inputs[-1], dict):
+        return example_inputs[:-1], example_inputs[-1]
+    else:
+        return example_inputs, {}
+
+
 def declare_unittests(global_obj: dict, namespace: str, builder: Callable):
     """
     Build unittests from the namespace and declare them in global_obj

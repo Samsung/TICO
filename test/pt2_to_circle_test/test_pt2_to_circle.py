@@ -16,7 +16,7 @@ import os
 import subprocess
 from functools import wraps
 from pathlib import Path
-from typing import List, TYPE_CHECKING
+from typing import Any, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import numpy as np
@@ -29,6 +29,10 @@ from tico.utils.convert import convert_exported_module_to_circle
 from tico.utils.utils import SuppressWarning
 from torch.export import export
 from torch.utils import _pytree as pytree
+
+import test.utils.helper as helper
+from test.utils.infer import infer_with_circle_interpreter, infer_with_onert
+from test.utils.runtime import Runtime
 
 # TODO Move this to utils or helper
 
@@ -56,16 +60,6 @@ def print_name_on_exception(function):
     return wrapper
 
 
-def get_args_kwargs(example_inputs: tuple):
-    if len(example_inputs) == 0:
-        return (), {}
-
-    if isinstance(example_inputs[-1], dict):
-        return example_inputs[:-1], example_inputs[-1]
-    else:
-        return example_inputs, {}
-
-
 @print_name_on_exception
 def convert_nnmodule_to_pt2(
     model: torch.nn.Module, example_inputs: tuple, pt2_model_path: str
@@ -81,7 +75,7 @@ def convert_nnmodule_to_pt2(
         #   ...site-packages/torch/_subclasses/functional_tensor.py:364
         #   UserWarning: At pre-dispatch tracing, we assume that any custom op marked with
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
-        _args, _kwargs = get_args_kwargs(example_inputs)
+        _args, _kwargs = helper.get_args_kwargs(example_inputs)
         exported = export(model.eval(), args=_args, kwargs=_kwargs)
     torch.export.save(exported, pt2_model_path)
 
@@ -98,7 +92,7 @@ def convert_nnmodule_to_circle(
     circle_model_path: str,
 ):
     with torch.no_grad():
-        _args, _kwargs = get_args_kwargs(example_inputs)
+        _args, _kwargs = helper.get_args_kwargs(example_inputs)
         exported_program = export(nnmodule.eval(), args=_args, kwargs=_kwargs)
     circle_program = convert_exported_module_to_circle(exported_program)
     circle_binary = circle_program
@@ -138,7 +132,7 @@ def verify_circle(circle_model_path: str, opt_circle_model_str: str):
 @print_name_on_exception
 def infer_nnmodule(model: torch.nn.Module, example_inputs: tuple):
     with torch.no_grad():
-        _args, _kwargs = get_args_kwargs(example_inputs)
+        _args, _kwargs = helper.get_args_kwargs(example_inputs)
         torch_result = model.forward(*_args, **_kwargs)
 
         # Let's flatten torch output result.
@@ -154,15 +148,34 @@ def infer_nnmodule(model: torch.nn.Module, example_inputs: tuple):
 
 
 @print_name_on_exception
-def infer_circle(circle_path: str, example_inputs: tuple):
-    circle_model = tico.utils.model.CircleModel.load(circle_path)
-    _args, _kwargs = get_args_kwargs(example_inputs)
-    circle_result = circle_model(*_args, **_kwargs)
+def infer_circle(
+    circle_path: str, example_inputs: tuple, runtime: Runtime = "circle-interpreter"
+) -> Any:
+    """
+    Run inference on a Circle model using the specified runtime.
 
-    if not isinstance(circle_result, list):
-        circle_result = [circle_result]
+    Parameters
+    -----------
+    circle_path
+        Path to the .circle file.
+    example_inputs
+        Tuple of example inputs for the model.
+    runtime
+        Which runtime to use for execution.
+        - 'circle-interpreter' (default)
+        - 'onert'
 
-    return circle_result
+    Returns
+    --------
+    Any
+        The output produced by the chosen runtime.
+    """
+    if runtime == "circle-interpreter":
+        return infer_with_circle_interpreter(circle_path, example_inputs)
+    elif runtime == "onert":
+        return infer_with_onert(circle_path, example_inputs)
+    else:
+        raise ValueError(f"Unknown runtime: {runtime!r}")
 
 
 @print_name_on_exception
