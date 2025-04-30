@@ -49,7 +49,7 @@ jobs:
 
       - name: "Run configure"
         run: |
-          ./ccex configure
+          ./ccex configure format
 
       - name: "Run linters"
         run: |
