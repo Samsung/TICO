@@ -59,6 +59,9 @@ jobs:
     runs-on: tico-linux
     container:
       image: ubuntu:22.04
+      credentials:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
     strategy:
       matrix:
         torch-version: ["2.5", "2.6", "nightly"] # TODO: Add 2.7 when it is released
