@@ -21,7 +21,7 @@
 
 show_help() {
 # `cat << EOF` This means that cat should stop reading when EOF is detected
-cat << EOF  
+cat << EOF
 Usage: ./ccex install [--dist|--torch_ver|--help|-h]
 --dist          Install from whl file
                 (default: Install from source, editable mode)
@@ -34,7 +34,7 @@ EOF
 
 options=$(getopt -o h --long dist,torch_ver:,help -- "$@")
 
-[ $? -eq 0 ] || { 
+[ $? -eq 0 ] || {
     echo "Incorrect options provided"
     exit 1
 }
@@ -46,7 +46,7 @@ eval set -- "$options"
 
 while true; do
     case "$1" in
-        --dist) 
+        --dist)
             _DIST=1
             ;;
         --torch_ver)
@@ -89,7 +89,7 @@ fi
 
 if [ $_DIST -eq 1 ]; then
   echo "Install from whl file"
-  python3 -m pip install --force-reinstall dist/tico*.whl
+  python3 -m pip install --force-reinstall --no-deps dist/tico*.whl
 else
   echo "Install as editable mode"
   pip install -e .
