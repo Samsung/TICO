@@ -268,6 +268,20 @@ For example, to run a single model
 By default, `./ccex test` runs all modules with the `circle-interpreter` engine.
  You can override this and run tests using the `onert` runtime instead.
 
+
+##### 0. Installing ONERT Nightly
+
+Some ONERT features are only available in the nightly build until the next official release.
+ To install the ONERT wheel from the issue comment:
+
+1. Download the `.whl` file linked 
+in [the relevant Github issue comment](https://github.com/Samsung/TICO/issues/2#issuecomment-2841487306).
+2. Install it with pip, for example:
+
+```bash
+pip install /path/to/onert_nightly.whl
+```
+
 ##### 1. Command-Line Flag
 
 Use the `--runtime` (or `-r`) flag to select a runtime:
