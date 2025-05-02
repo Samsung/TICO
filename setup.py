@@ -16,7 +16,7 @@ if nightly_release_version := os.environ.get("NIGHTLY_VERSION"):
 ############################################################
 with open("tico/__init__.py", "r") as init_file:
     init_file_update = re.sub(
-        "__version__ =.*", f"__version__ = '{VERSION}'", init_file.read()
+        "__version__ =.*", f'__version__ = "{VERSION}"', init_file.read()
     )
 with open("tico/__init__.py", "w") as init_file:
     init_file.write(init_file_update)
