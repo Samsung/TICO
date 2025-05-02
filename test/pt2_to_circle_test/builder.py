@@ -49,7 +49,7 @@ class NNModuleTest(TestRunnerBase):
         if hasattr(self.nnmodule, "atol"):
             self.tolerance["atol"] = self.nnmodule.atol
 
-    def make(self):
+    def make(self, dynamic: bool = False):
         if self.skip:
 
             @unittest.skip(self.skip_reason)
@@ -73,11 +73,16 @@ class NNModuleTest(TestRunnerBase):
         else:
 
             def wrapper(s):
-                self._run(without_pt2=self.test_without_pt2)
+                self._run(without_pt2=self.test_without_pt2, dynamic=dynamic)
 
             return wrapper
 
-    def _run(self, without_pt2=False):
+    def _run(self, without_pt2=False, dynamic: bool = False):
+        dynamic_shapes = None
+        if dynamic:
+            assert hasattr(self.nnmodule, "get_dynamic_shapes")
+            dynamic_shapes = self.nnmodule.get_dynamic_shapes()  # type: ignore[operator]
+
         test_prefix = self.test_dir / self.test_name.replace(
             "test.modules.", ""
         ).replace(".", "/")
@@ -92,17 +97,25 @@ class NNModuleTest(TestRunnerBase):
             # torch.nn.Module --> ExportedProgram --> pt2 ----- (ExportedProgram) ------- > circle
             #                                       (--> load_from_pt2_file -->)
             convert_nnmodule_to_circle(
-                self.nnmodule, self.example_inputs, circle_model_path
+                self.nnmodule,
+                self.example_inputs,
+                circle_model_path,
+                dynamic_shapes=dynamic_shapes,
             )
         else:
             # torch.nn.Module --> ExportedProgram ----------------------------------------> circle
-            convert_nnmodule_to_pt2(self.nnmodule, self.example_inputs, pt2_model_path)
+            convert_nnmodule_to_pt2(
+                self.nnmodule,
+                self.example_inputs,
+                pt2_model_path,
+                dynamic_shapes=dynamic_shapes,
+            )
             convert_pt2_to_circle(pt2_model_path, circle_model_path)
 
         verify_circle(circle_model_path, opt_circle_model_path)
 
         torch_result = infer_nnmodule(self.nnmodule, self.example_inputs)
-        USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert"
+        USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert" or dynamic
         if self.use_onert or USE_ONERT:
             circle_result = infer_circle(
                 circle_model_path, self.example_inputs, "onert"
@@ -128,7 +141,18 @@ class NormalTestDictBuilder(TestDictBuilderBase):
         """
         testdict = {}
         for nnmodule_cls in self._get_nnmodules(submodule):
-            nnmodule_name = f"{submodule}.{nnmodule_cls.__name__}"
+            base_name = f"{submodule}.{nnmodule_cls.__name__}"
+            module_instance = nnmodule_cls()
 
-            testdict[nnmodule_name] = NNModuleTest(nnmodule_name, nnmodule_cls()).make()
+            # static test
+            testdict[base_name] = NNModuleTest(base_name, module_instance).make(
+                dynamic=False
+            )
+
+            if hasattr(module_instance, "get_dynamic_shapes"):
+                dyn_name = base_name + "_dynamic"
+                testdict[dyn_name] = NNModuleTest(dyn_name, module_instance).make(
+                    dynamic=True
+                )
+
         return testdict

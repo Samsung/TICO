@@ -62,7 +62,10 @@ def print_name_on_exception(function):
 
 @print_name_on_exception
 def convert_nnmodule_to_pt2(
-    model: torch.nn.Module, example_inputs: tuple, pt2_model_path: str
+    model: torch.nn.Module,
+    example_inputs: tuple,
+    pt2_model_path: str,
+    dynamic_shapes: dict | None = None,
 ):
     # Create .pt2 model
     with torch.no_grad(), SuppressWarning(
@@ -76,7 +79,12 @@ def convert_nnmodule_to_pt2(
         #   UserWarning: At pre-dispatch tracing, we assume that any custom op marked with
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
         _args, _kwargs = helper.get_args_kwargs(example_inputs)
-        exported = export(model.eval(), args=_args, kwargs=_kwargs)
+        if dynamic_shapes is not None:
+            exported = export(
+                model.eval(), args=_args, kwargs=_kwargs, dynamic_shapes=dynamic_shapes
+            )
+        else:
+            exported = export(model.eval(), args=_args, kwargs=_kwargs)
     torch.export.save(exported, pt2_model_path)
 
 
@@ -90,10 +98,19 @@ def convert_nnmodule_to_circle(
     nnmodule: torch.nn.Module,
     example_inputs: tuple,
     circle_model_path: str,
+    dynamic_shapes: dict | None = None,
 ):
     with torch.no_grad():
         _args, _kwargs = helper.get_args_kwargs(example_inputs)
-        exported_program = export(nnmodule.eval(), args=_args, kwargs=_kwargs)
+        if dynamic_shapes is not None:
+            exported_program = export(
+                nnmodule.eval(),
+                args=_args,
+                kwargs=_kwargs,
+                dynamic_shapes=dynamic_shapes,
+            )
+        else:
+            exported_program = export(nnmodule.eval(), args=_args, kwargs=_kwargs)
     circle_program = convert_exported_module_to_circle(exported_program)
     circle_binary = circle_program
     with open(circle_model_path, "wb") as f:
