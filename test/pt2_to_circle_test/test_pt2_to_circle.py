@@ -79,12 +79,9 @@ def convert_nnmodule_to_pt2(
         #   UserWarning: At pre-dispatch tracing, we assume that any custom op marked with
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
         _args, _kwargs = helper.get_args_kwargs(example_inputs)
-        if dynamic_shapes is not None:
-            exported = export(
-                model.eval(), args=_args, kwargs=_kwargs, dynamic_shapes=dynamic_shapes
-            )
-        else:
-            exported = export(model.eval(), args=_args, kwargs=_kwargs)
+        exported = export(
+            model.eval(), args=_args, kwargs=_kwargs, dynamic_shapes=dynamic_shapes
+        )
     torch.export.save(exported, pt2_model_path)
 
 
