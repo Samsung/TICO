@@ -99,15 +99,9 @@ def convert_nnmodule_to_circle(
 ):
     with torch.no_grad():
         _args, _kwargs = helper.get_args_kwargs(example_inputs)
-        if dynamic_shapes is not None:
-            exported_program = export(
-                nnmodule.eval(),
-                args=_args,
-                kwargs=_kwargs,
-                dynamic_shapes=dynamic_shapes,
-            )
-        else:
-            exported_program = export(nnmodule.eval(), args=_args, kwargs=_kwargs)
+        exported_program = export(
+            nnmodule.eval(), args=_args, kwargs=_kwargs, dynamic_shapes=dynamic_shapes
+        )
     circle_program = convert_exported_module_to_circle(exported_program)
     circle_binary = circle_program
     with open(circle_model_path, "wb") as f:
