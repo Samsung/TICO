@@ -27,7 +27,7 @@ class SimpleLinear(torch.nn.Module):
     def get_example_inputs(self):
         return (torch.randn(3, 3),)
 
-    # TODO enalbe this after introducing onert in CI.
+    # TODO enable this after introducing onert in CI.
     # def get_dynamic_shapes(self):
     #     return {"arg": {0: Dim("batch")}}
 
