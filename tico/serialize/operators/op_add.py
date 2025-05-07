@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
 from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ class AddVisitor(NodeVisitor):
     target: List[torch._ops.OpOverload] = [
         torch.ops.aten.add.Tensor,
         torch.ops.aten.add.Scalar,
+        operator.add,
     ]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):

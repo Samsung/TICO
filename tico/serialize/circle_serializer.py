@@ -61,7 +61,7 @@ def build_circle(edge_program: ExportedProgram) -> bytes:
             if node.target in multiple_output_ops:
                 continue
             node_val = node.meta["val"]
-            if node_val.layout != torch.strided:
+            if hasattr(node_val, "layout") and node_val.layout != torch.strided:
                 raise RuntimeError(
                     f"Only support dense tensors (node layout: {node_val.layout})"
                 )

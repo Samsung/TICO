@@ -14,7 +14,7 @@
 
 import operator
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.export import export, ExportedProgram
@@ -60,6 +60,7 @@ from tico.passes.lower_pow2_to_mul import LowerPow2ToMul
 from tico.passes.lower_to_resize_nearest_neighbor import LowerToResizeNearestNeighbor
 from tico.passes.lower_to_slice import passes as LowerToSlicePasses
 from tico.passes.merge_consecutive_cat import MergeConsecutiveCat
+from tico.passes.normalize_dynamic_expand_shape import NormalizeDynamicExpandShape
 from tico.passes.remove_nop import RemoveNop
 from tico.passes.remove_redundant_assert_nodes import RemoveRedundantAssertionNodes
 from tico.passes.remove_redundant_expand import RemoveRedundantExpand
@@ -225,6 +226,7 @@ def convert_exported_module_to_circle(
             LowerPow2ToMul(),
             ConvertConv1dToConv2d(),
             *LowerToSlicePasses(),
+            # NormalizeDynamicExpandShape(),
         ]
     )
     circle_legalize.run(exported_program)
@@ -265,9 +267,12 @@ def convert(
     kwargs: Optional[Dict[str, Any]] = None,
     strict: bool = True,
     config: CompileConfigBase = get_default_config(),
+    dynamic_shapes: Optional[Union[Dict[str, Any], Tuple[Any], List[Any]]] = None,
 ) -> CircleModel:
     with torch.no_grad():
-        exported_program = export(mod, args, kwargs, strict=strict)
+        exported_program = export(
+            mod, args, kwargs, strict=strict, dynamic_shapes=dynamic_shapes
+        )
 
     circle_binary = convert_exported_module_to_circle(exported_program, config=config)
 

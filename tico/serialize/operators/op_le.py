@@ -14,8 +14,6 @@
 
 from typing import Dict, List, TYPE_CHECKING
 
-from tico.serialize.operators.utils import create_builtin_operator, get_op_index
-
 if TYPE_CHECKING:
     import torch._ops
     import torch.fx
@@ -25,41 +23,32 @@ from circle_schema import circle
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
-from tico.utils.validate_args_kwargs import ArangeStartStepArgs
+from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.utils.validate_args_kwargs import LeArgs
 
 
 @register_node_visitor
-class ArangeStartStepVisitor(NodeVisitor):
-    """
-    Fuse arange_start_step to const_tensor
-    """
-
-    target: List[torch._ops.OpOverload] = [torch.ops.aten.arange.start_step]
+class LeVisitor(NodeVisitor):
+    target: List[torch._ops.OpOverload] = [
+        torch.ops.aten.le.Scalar,
+        torch.ops.aten.le.Tensor,
+    ]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
         super().__init__(op_codes, graph)
 
-    def define_node(
-        self,
-        node: torch.fx.Node,
-    ) -> circle.Operator.OperatorT:
-        args = ArangeStartStepArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
-        start = args.start
-        end = args.end
-        step = args.step
-
-        inputs = [start, end, step]
-        outputs = [node]
+    def define_node(self, node: torch.fx.Node) -> circle.Operator.OperatorT:
+        args = LeArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        input = args.input
+        other = args.other
 
         op_index = get_op_index(
-            circle.BuiltinOperator.BuiltinOperator.RANGE, self._op_codes
+            circle.BuiltinOperator.BuiltinOperator.LESS_EQUAL, self._op_codes
         )
 
-        operator = create_builtin_operator(self.graph, op_index, inputs, outputs)
+        inputs = [input, other]
+        outputs = [node]
 
-        # Op-specific option
-        operator.builtinOptionsType = circle.BuiltinOptions.BuiltinOptions.RangeOptions
-        option = circle.RangeOptions.RangeOptionsT()
-        operator.builtinOptions = option
+        operator = create_builtin_operator(self.graph, op_index, inputs, outputs)
 
         return operator
