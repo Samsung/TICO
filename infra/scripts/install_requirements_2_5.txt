@@ -3,6 +3,7 @@ wheel==0.43.0
 
 circle_schema
 
+--extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.5.0
 cffi==1.17.1
 packaging==25.0
