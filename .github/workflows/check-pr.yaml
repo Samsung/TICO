@@ -58,7 +58,7 @@ jobs:
   build-and-test:
     runs-on: tico-linux
     container:
-      image: mirror.gcr.io/ubuntu:22.04
+      image: samsungonedev.azurecr.io/ubuntu:22.04
     strategy:
       matrix:
         torch-version: ["2.5", "2.6", "nightly"] # TODO: Add 2.7 when it is released
