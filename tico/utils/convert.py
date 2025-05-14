@@ -102,6 +102,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             torch.ops.aten._safe_softmax.default,
             torch.ops.aten.relu6.default,  # Do not decompose to hardtanh
             torch.ops.aten.linear.default,
+            torch.ops.aten.scaled_dot_product_attention.default,
         )
         ep = ep.run_decompositions(_preserve_ops=_preserve_ops)
 
@@ -119,6 +120,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             torch.ops.aten.relu6.default,  # Do not decompose to hardtanh
             torch.ops.aten.prelu.default,
             torch.ops.aten.linear.default,
+            torch.ops.aten.scaled_dot_product_attention.default,
         )
         for op in _preserve_ops:
             if op in _decomp_table:

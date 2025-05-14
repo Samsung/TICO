@@ -881,6 +881,23 @@ class ScalarTensorArgs:
 
 @enforce_type
 @dataclass
+class SDPAArgs:
+    """
+    scaled_dot_product_attention(Tensor query, Tensor key, Tensor value, Tensor? attn_mask=None, float dropout_p=0.0, bool is_causal=False, *, float? scale=None, bool enable_gqa=False) -> Tensor
+    """
+
+    query: Union[torch.fx.Node, float, int, torch.Tensor]
+    key: Union[torch.fx.Node, float, int, torch.Tensor]
+    value: Union[torch.fx.Node, float, int, torch.Tensor]
+    attn_mask: Optional[Union[torch.fx.Node, float, int, torch.Tensor]] = None
+    dropout_p: float = 0.0
+    is_causal: bool = False
+    scale: Optional[float] = None
+    enable_gqa: bool = False
+
+
+@enforce_type
+@dataclass
 class SelectCopyIntArgs:
     """
     select_copy.int(Tensor self, int dim, SymInt index) -> Tensor
