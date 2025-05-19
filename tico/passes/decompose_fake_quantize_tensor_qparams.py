@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     import torch._ops
     import torch.fx
 import torch
+from torch._export.utils import (
+    get_buffer,
+    get_lifted_tensor_constant,
+    is_buffer,
+    is_lifted_tensor_constant,
+)
 
 # To import torch.ops.quantized_decomposed related operator
 from torch.ao.quantization.fx._decomposed import quantized_decomposed_lib
@@ -55,6 +61,14 @@ def get_constant_from_tensor(
     """
     if isinstance(node, float):
         return node
+    if is_buffer(ep, node):
+        buf = get_buffer(ep, node)
+        assert isinstance(buf, torch.Tensor)
+        return buf.item()
+    elif is_lifted_tensor_constant(ep, node):
+        lifted = get_lifted_tensor_constant(ep, node)
+        assert isinstance(lifted, torch.Tensor)
+        return lifted.item()
     assert isinstance(node.target, torch._ops.OpOverload)
     if node.target.__name__ == "mul.Tensor":
         assert len(node.args) == 2

@@ -17,6 +17,12 @@ from typing import List, Optional, TYPE_CHECKING, Union
 if TYPE_CHECKING:
     import torch.fx
 import torch
+from torch._export.utils import (
+    get_buffer,
+    get_lifted_tensor_constant,
+    is_buffer,
+    is_lifted_tensor_constant,
+)
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.export import ExportedProgram
 
@@ -34,10 +40,10 @@ def get_constant(exported_program: ExportedProgram, node: torch.fx.Node):
     assert isinstance(node, torch.fx.Node)
     if node.name in exported_program.constants:
         return exported_program.constants[node.name]
-    elif node.name in exported_program.graph_signature.inputs_to_buffers:
-        buffer_name = exported_program.graph_signature.inputs_to_buffers[node.name]
-        named_buffer = dict(exported_program.named_buffers())
-        return named_buffer[buffer_name]
+    elif is_buffer(exported_program, node):
+        return get_buffer(exported_program, node)
+    elif is_lifted_tensor_constant(exported_program, node):
+        return get_lifted_tensor_constant(exported_program, node)
     else:
         raise RuntimeError("NYI constant")
 
