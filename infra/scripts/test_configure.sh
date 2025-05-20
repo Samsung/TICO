@@ -26,7 +26,7 @@ Usage: ./ccex configure test [--torch_ver|--help|-h]
 --torch_ver     [2.5|2.6|nightly]
                 Specify torch version to install family test packages.
                 (default: 2.6)
---cuda_ver      [11.8|12.1]
+--cuda_ver      [11.8|12.6|12.8]
                 Specify the target CUDA version. This overrides automatic 
                  detection.
 --cpu_only      Forces installation of the CPU-only version of PyTorch.
@@ -103,7 +103,8 @@ get_index_url_for_cuda_version() {
 
   case "$version" in
     11.8) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu118" ;;
-    12.1) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu121" ;;
+    12.6) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu126" ;;
+    12.8) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu128" ;;
     *) echo "" ;;
   esac
 }
