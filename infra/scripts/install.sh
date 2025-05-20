@@ -104,12 +104,11 @@ get_index_url_for_cuda_version() {
   local version="$1"
   local is_nightly="$2"
 
-  case "$version" in
-    11.8) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu118" ;;
-    12.6) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu126" ;;
-    12.8) echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/cu128" ;;
-    *) echo "" ;;
-  esac
+  local major=${version%.*}
+  local minor=${version#*.}
+  local cuda_suffix="cu${major}${minor}"
+
+  echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/${cuda_suffix}"
 }
 INDEX_URL="https://download.pytorch.org/whl${_NIGHTLY:+/nightly}/cpu"
 if [[ "$_CPU_ONLY" = true ]]; then
