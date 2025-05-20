@@ -599,7 +599,7 @@ class MeanDimArgs:
 
     input: torch.fx.Node
     dim: List[int]
-    keep_dims: bool = False
+    keepdim: bool = False
     dtype: Optional[torch.dtype] = None
 
 

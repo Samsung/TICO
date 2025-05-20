@@ -69,6 +69,30 @@ class SimpleNativeGroupNormWithoutWeightBias(torch.nn.Module):
         )
 
 
+class SimpleNativeGroupNormRedundantReshape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.N = 20
+        self.C = 1
+        self.H = 512
+
+    def forward(self, tensor, group, eps):
+        z = torch.native_group_norm(
+            tensor, None, None, self.N, self.C, self.H, group, eps
+        )[0]
+        return (z,)
+
+    def get_example_inputs(self):
+        tensor = torch.randn(self.N, self.C, self.H)
+        group = 1
+        eps = 1e-5
+        return (
+            tensor,
+            group,
+            eps,
+        )
+
+
 class SimpleNativeGroupNormWithLayerNormClass(torch.nn.Module):
     def __init__(self):
         super().__init__()

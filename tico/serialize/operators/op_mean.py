@@ -45,7 +45,7 @@ class MeanVisitor(NodeVisitor):
         args = MeanDimArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         input = args.input
         dim = args.dim
-        keep_dims = args.keep_dims
+        keep_dims = args.keepdim
 
         dim_i32 = circle_legalize_dtype_to(dim, dtype=torch.int32)
         inputs = [input, dim_i32]

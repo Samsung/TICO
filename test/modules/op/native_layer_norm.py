@@ -67,6 +67,30 @@ class SimpleNativeLayerNormWithoutWeightBias(torch.nn.Module):
         )
 
 
+class SimpleNativeLayerNormRedundantReshape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, tensor, normalized_shape, eps):
+        z = torch.native_layer_norm(tensor, normalized_shape, None, None, eps)[0]
+        return (z,)
+
+    def get_example_inputs(self):
+        N = 4
+        H = 3
+        W = 2
+        C = 1
+
+        tensor = torch.randn(N, H, W, C)
+        normalized_shape = [C]
+        eps = 1e-5
+        return (
+            tensor,
+            normalized_shape,
+            eps,
+        )
+
+
 class NativeLayerNormChannelLastInput(torch.nn.Module):
     def __init__(self):
         super().__init__()
