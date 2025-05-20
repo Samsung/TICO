@@ -88,6 +88,25 @@ class DecomposeGroupNorm(PassBase):
     def __init__(self):
         super().__init__()
 
+    def _insert_norm(self, graph, tensor, eps):
+        """
+        Insert (tensor - mean) / sqrt(var + eps)) into the graph
+          and return the normalized tensor node.
+        """
+        mean = graph.call_function(
+            torch.ops.aten.mean.dim, (tensor, [-1]), {"keepdim": True}
+        )
+        dev = graph.call_function(torch.ops.aten.sub.Tensor, (tensor, mean))
+        sqr = graph.call_function(torch.ops.aten.pow.Tensor_Scalar, (dev, 2))
+        var = graph.call_function(
+            torch.ops.aten.mean.dim, (sqr, [-1]), {"keepdim": True}
+        )
+        inv_std = graph.call_function(
+            torch.ops.aten.rsqrt.default,
+            (graph.call_function(torch.ops.aten.add.Tensor, (var, eps)),),
+        )
+        return graph.call_function(torch.ops.aten.mul.Tensor, (dev, inv_std))
+
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
 
@@ -155,85 +174,20 @@ class DecomposeGroupNorm(PassBase):
             pack_shape = [layer_size, norm_size]
 
             with gm.graph.inserting_before(node):
-                # Skip reshape if norm size matches the last dim of the input.
-                if norm_size == x_shape[-1]:
-                    layer_mean = graph.call_function(
-                        torch.ops.aten.mean.dim,
-                        (x, [-1]),
-                        {"keepdim": True},
+                # Branch only on whether a reshape is needed; the normalization is shared.
+                if norm_size != x_shape[-1]:
+                    # Pack groups so that the last dimension equals norm_size.
+                    packed = graph.call_function(
+                        torch.ops.aten.reshape.default, (x, pack_shape)
                     )
-                    layer_deviation = graph.call_function(
-                        torch.ops.aten.sub.Tensor,
-                        (x, layer_mean),
-                    )
-                    layer_sqr_diff = graph.call_function(
-                        torch.ops.aten.pow.Tensor_Scalar,
-                        (layer_deviation, 2),
-                    )
-                    var = graph.call_function(
-                        torch.ops.aten.mean.dim,
-                        (layer_sqr_diff, [-1]),
-                        {"keepdim": True},
-                    )
-                    var_eps = graph.call_function(
-                        torch.ops.aten.add.Tensor,
-                        (var, eps),
-                    )
-                    rsqrt = graph.call_function(
-                        torch.ops.aten.rsqrt.default,
-                        (var_eps,),
-                    )
+                    normed = self._insert_norm(graph, packed, eps)
+                    # Restore the original shape after normalization.
                     layer_norm = graph.call_function(
-                        torch.ops.aten.mul.Tensor,
-                        (layer_deviation, rsqrt),
+                        torch.ops.aten.reshape.default, (normed, x_shape)
                     )
                 else:
-                    layer = graph.call_function(
-                        # Sometimes, `x` has a stride for NHWC, which can't be reshaped with `aten.view.default`.
-                        # TODO Find out how to process such case properly.
-                        torch.ops.aten.reshape.default,
-                        (x, pack_shape),
-                    )
-                    layer_mean = graph.call_function(
-                        torch.ops.aten.mean.dim,
-                        (layer, [-1]),
-                    )
-                    layer_mean_reshape = graph.call_function(
-                        torch.ops.aten.view.default,
-                        (layer_mean, [layer_size, 1]),
-                    )
-                    layer_deviation = graph.call_function(
-                        torch.ops.aten.sub.Tensor,
-                        (layer, layer_mean_reshape),
-                    )
-                    layer_sqr_diff = graph.call_function(
-                        torch.ops.aten.pow.Tensor_Scalar,
-                        (layer_deviation, 2),
-                    )
-                    var = graph.call_function(
-                        torch.ops.aten.mean.dim,
-                        (layer_sqr_diff, [-1]),
-                    )
-                    var_eps = graph.call_function(
-                        torch.ops.aten.add.Tensor,
-                        (var, eps),
-                    )
-                    rstd = graph.call_function(
-                        torch.ops.aten.rsqrt.default,
-                        (var_eps,),
-                    )
-                    rstd_reshape = graph.call_function(
-                        torch.ops.aten.view.default,
-                        (rstd, [layer_size, 1]),
-                    )
-                    layer_norm = graph.call_function(
-                        torch.ops.aten.mul.Tensor,
-                        (layer_deviation, rstd_reshape),
-                    )
-                    layer_norm = graph.call_function(
-                        torch.ops.aten.view.default,
-                        (layer_norm, x_shape),
-                    )
+                    # The input already has norm_size in the last dimension.
+                    layer_norm = self._insert_norm(graph, x, eps)
 
                 # weight
                 if weight:
