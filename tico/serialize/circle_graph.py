@@ -29,7 +29,7 @@ from tico.serialize.circle_mapping import (
     to_circle_dtype,
 )
 from tico.serialize.pack import pack_buffer
-from tico.serialize.quant_param import QPARAM_KEY
+from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.utils import to_circle_qparam
 
 """
@@ -184,13 +184,21 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         return tensor
 
     def add_tensor_from_scratch(
-        self, prefix: str, shape: List[int], dtype: int
+        self,
+        prefix: str,
+        shape: List[int],
+        dtype: int,
+        qparam: Optional[QuantParam] = None,
     ) -> circle.Tensor.TensorT:
         assert isinstance(dtype, int), f"{dtype} must be integer. Use to_circle_dtype."
         tensor = circle.Tensor.TensorT()
         tensor.name = self._gen_unique_name_with_prefix(prefix)
-        tensor.type = dtype
         tensor.shape = shape
+        if qparam is not None:
+            tensor.quantization = to_circle_qparam(qparam)
+            tensor.type = str_to_circle_dtype(qparam.dtype)
+        else:
+            tensor.type = dtype
 
         buffer = circle.Buffer.BufferT()
         bid = self.model.add_buffer(buffer)
