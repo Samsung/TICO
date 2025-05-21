@@ -73,25 +73,25 @@ done
 ###############################################################################
 # Detect (and maybe keep) any existing torch installation
 ###############################################################################
-python - <<'PY' >/tmp/.tico_torch_ver 2>/dev/null
-import sys, importlib.util, re, json, os
+read -r INSTALLED_TORCH_FULL INSTALLED_TORCH_FAMILY < <(
+  python3 - <<'PY'
+import importlib.util, re, sys
 spec = importlib.util.find_spec("torch")
-if spec is None:
+if spec is None:                       # Torch not found → just print blanks
+    print()
+    print()
     sys.exit(0)
-import torch  # noqa: E402
+import torch
 v = torch.__version__
-# Extract simple major.minor (2.6 etc.)
-m = re.match(r"^(\d+\.\d+)", v)
-print(json.dumps({"full": v, "family": m.group(1) if m else ""}))
+fam = re.match(r"^(\d+\.\d+)", v)
+print(v)                               # line 1 → INSTALLED_TORCH_FULL
+print(fam.group(1) if fam else "")     # line 2 → INSTALLED_TORCH_FAMILY
 PY
+)
 
-INSTALLED_TORCH_FULL=""
-INSTALLED_TORCH_FAMILY=""
-if [[ -s /tmp/.tico_torch_ver ]]; then
-  INSTALLED_TORCH_FULL=$(jq -r '.full' /tmp/.tico_torch_ver)
-  INSTALLED_TORCH_FAMILY=$(jq -r '.family' /tmp/.tico_torch_ver)
-fi
-rm -f /tmp/.tico_torch_ver
+# ensure variables exist even if torch absent
+INSTALLED_TORCH_FULL=${INSTALLED_TORCH_FULL:-}
+INSTALLED_TORCH_FAMILY=${INSTALLED_TORCH_FAMILY:-}
 
 # Normalise requested spec to family / exact
 REQUEST_IS_NIGHTLY=""
@@ -125,7 +125,7 @@ fi
 ###############################################################################
 # CUDA index-URL logic
 ###############################################################################
-get_index_url() {
+get_index_url_for_cuda_version() {
   local cuda_ver="$1" nightly="$2"
   local maj=${cuda_ver%.*} min=${cuda_ver#*.}
   echo "https://download.pytorch.org/whl${nightly:+/nightly}/cu${maj}${min}"
@@ -147,7 +147,7 @@ else
     echo "[INFO] Detected CUDA ${CUDA_TO_USE}"
   fi
   if [[ -n "$CUDA_TO_USE" ]]; then
-    INDEX_URL=$(get_index_url "$CUDA_TO_USE" "$REQUEST_IS_NIGHTLY")
+    INDEX_URL=$(get_index_url_for_cuda_version "$CUDA_TO_USE" "$REQUEST_IS_NIGHTLY")
   fi
 fi
 
