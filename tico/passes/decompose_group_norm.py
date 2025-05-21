@@ -96,16 +96,16 @@ class DecomposeGroupNorm(PassBase):
         mean = graph.call_function(
             torch.ops.aten.mean.dim, (tensor, [-1]), {"keepdim": True}
         )
-        dev = graph.call_function(torch.ops.aten.sub.Tensor, (tensor, mean))
-        sqr = graph.call_function(torch.ops.aten.pow.Tensor_Scalar, (dev, 2))
+        deviation = graph.call_function(torch.ops.aten.sub.Tensor, (tensor, mean))
+        squared = graph.call_function(torch.ops.aten.pow.Tensor_Scalar, (deviation, 2))
         var = graph.call_function(
-            torch.ops.aten.mean.dim, (sqr, [-1]), {"keepdim": True}
+            torch.ops.aten.mean.dim, (squared, [-1]), {"keepdim": True}
         )
-        inv_std = graph.call_function(
+        inverse_std = graph.call_function(
             torch.ops.aten.rsqrt.default,
             (graph.call_function(torch.ops.aten.add.Tensor, (var, eps)),),
         )
-        return graph.call_function(torch.ops.aten.mul.Tensor, (dev, inv_std))
+        return graph.call_function(torch.ops.aten.mul.Tensor, (deviation, inverse_std))
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
