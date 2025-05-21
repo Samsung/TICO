@@ -19,129 +19,143 @@
 # [EXPORTED VARIABLES]
 # - CCEX_PROJECT_PATH
 
-show_help() {
-# `cat << EOF` This means that cat should stop reading when EOF is detected
-cat << EOF  
-Usage: ./ccex configure test [--torch_ver|--help|-h]
---torch_ver     [2.5|2.6|nightly]
-                Specify torch version to install family test packages.
-                (default: 2.6)
---cuda_ver      [11.8|12.6|12.8]
-                Specify the target CUDA version. This overrides automatic 
-                 detection.
---cpu_only      Forces installation of the CPU-only version of PyTorch.
-                Disables both CUDA version detection and use of --cuda-version.
--h | --help     Show help message and exit
-EOF
-}
-
+###############################################################################
+# Helpers & constants
+###############################################################################
 SCRIPTS_DIR="${CCEX_PROJECT_PATH}/infra/scripts"
 TEST_DIR="${CCEX_PROJECT_PATH}/test"
 
-pushd ${CCEX_PROJECT_PATH} > /dev/null
+SUPPORTED_FAMILIES=("2.5" "2.6" "2.7")
+DEFAULT_FAMILY="2.6"
 
-options=$(getopt -o h --long torch_ver:,cuda_ver:,cpu_only,help -- "$@")
+show_help() {
+cat <<EOF
+Usage: ./ccex configure test [OPTIONS]
 
-[ $? -eq 0 ] || { 
-    echo "Incorrect options provided"
-    exit 1
+--torch_ver VER       Torch version or family to install.
+                      Accepts:
+                        • 2.5  | 2.6  | 2.7      (family, installs latest)
+                        • 2.6.3, 2.7.0+cu118 ... (exact)
+                        • nightly
+                      Default: ${DEFAULT_FAMILY}
+--cuda_ver MAJ.MIN    Override detected CUDA version (e.g. 12.1)
+--cpu_only            Force CPU-only Torch installation 
+                      (disables CUDA detection / --cuda_ver)
+-h, --help            Show this help
+EOF
 }
 
-_TORCH_VER="2.6"
-_USER_SPECIFIED_CUDA=""
+###############################################################################
+# Option parsing
+###############################################################################
+_TORCH_VER="${DEFAULT_FAMILY}"
+_USER_CUDA=""
 _CPU_ONLY=false
-_NIGHTLY=""
 
+options=$(getopt -o h --long torch_ver:,cuda_ver:,cpu_only,help -- "$@") || {
+  echo "[ERROR] Invalid command-line options" >&2; exit 1; }
 eval set -- "$options"
 
 while true; do
-    case "$1" in
-        --torch_ver)
-            _TORCH_VER="$2"
-            shift
-            ;;
-        --cuda_ver)
-            _USER_SPECIFIED_CUDA="$2"
-            shift
-            ;;
-        --cpu_only)
-            _CPU_ONLY=true
-            shift
-            ;;
-        -h|--help)
-            show_help
-            exit 0;
-            ;;
-        --)
-            shift
-            break;;
-        *)  break;;
-    esac
-    shift
+  case "$1" in
+      --torch_ver) _TORCH_VER="$2"; shift 2;;
+      --cuda_ver)  _USER_CUDA="$2"; shift 2;;
+      --cpu_only)  _CPU_ONLY=true; shift;;
+      -h|--help)   show_help; exit 0;;
+      --) shift; break;;
+      *)  echo "[ERROR] Unknown option $1"; exit 1;;
+  esac
 done
 
-# Check torch version
-if [ "$_TORCH_VER" != "2.5" -a "$_TORCH_VER" != "2.6" -a "$_TORCH_VER" != "nightly" ]; then
-    echo "Invalid '$_TORCH_VER'"
-    echo "(Use --help to see available options)"
-    exit 1
+###############################################################################
+# Torch version analysis
+###############################################################################
+REQUEST_IS_NIGHTLY=""
+REQUEST_IS_EXACT=false
+if [[ "${_TORCH_VER}" == "nightly" ]]; then
+  REQUEST_IS_NIGHTLY=true
 fi
-# Check if torch version is nightly
-if [[ "$_TORCH_VER" == "nightly" ]]; then
-  _NIGHTLY=true
-fi
-# Check for conflicting options
-if [[ -n "$_USER_SPECIFIED_CUDA" && "$_CPU_ONLY" = true ]]; then
-  echo "[ERROR] Cannot use --cpu_only and --cuda_ver together"
-  exit 1
+FAMILY="$(echo "${_TORCH_VER}" | grep -oE '^[0-9]+\.[0-9]+' || echo "${DEFAULT_FAMILY}")"
+if [[ "${REQUEST_IS_NIGHTLY}" = false && " ${SUPPORTED_FAMILIES[*]} " != *" ${FAMILY} "* ]]; then
+  echo "[ERROR] Unsupported --torch_ver ${_TORCH_VER}"; exit 1
 fi
 
-# set index-url
-get_index_url_for_cuda_version() {
-  local version="$1"
-  local is_nightly="$2"
-
-  local major=${version%.*}
-  local minor=${version#*.}
-  local cuda_suffix="cu${major}${minor}"
-
-  echo "https://download.pytorch.org/whl${is_nightly:+/nightly}/${cuda_suffix}"
+###############################################################################
+# Index-url  (same rules as install.sh)
+###############################################################################
+get_index_url() {
+  local cuda="$1" nightly="$2"
+  local maj=${cuda%.*} min=${cuda#*.}
+  echo "https://download.pytorch.org/whl${nightly:+/nightly}/cu${maj}${min}"
 }
-INDEX_URL="https://download.pytorch.org/whl${_NIGHTLY:+/nightly}/cpu"
-if [[ "$_CPU_ONLY" = true ]]; then
-  echo "[INFO] Installing CPU-only version of PyTorch"
-else
-  if [[ -n "$_USER_SPECIFIED_CUDA" ]]; then
-    echo "[INFO] Using user-specified CUDA version: $_USER_SPECIFIED_CUDA"
-    INDEX_URL=$(get_index_url_for_cuda_version "$_USER_SPECIFIED_CUDA" "$_NIGHTLY")
+
+INDEX_URL="https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
+if [[ "${_CPU_ONLY}" = false ]]; then
+  if [[ -n "${_USER_CUDA}" ]]; then
+    CUDA="${_USER_CUDA}"
+    echo "[INFO] Using user-specified CUDA ${CUDA}"
   else
-    if command -v nvcc &> /dev/null; then
-      DETECTED_CUDA=$(nvcc --version | grep -oP "release \K[0-9]+\.[0-9]+")
-    elif command -v nvidia-smi &> /dev/null; then
-      DETECTED_CUDA=$(nvcc --version | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+")
-    else
-      DETECTED_CUDA=""
+    if command -v nvcc &>/dev/null;   then CUDA="$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')" ; fi
+    if [[ -z "${CUDA:-}" ]] && command -v nvidia-smi &>/dev/null; then
+      CUDA="$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+')"
     fi
   fi
-  if [[ -n "$DETECTED_CUDA" ]]; then
-    echo "[INFO] Detected CUDA version: $DETECTED_CUDA"
-    INDEX_URL=$(get_index_url_for_cuda_version "$DETECTED_CUDA" "$_NIGHTLY")
+  if [[ -n "${CUDA:-}" ]]; then
+    echo "[INFO] Detected CUDA ${CUDA}"
+    INDEX_URL="$(get_index_url "${CUDA}" "${REQUEST_IS_NIGHTLY}")"
   fi
+else
+  echo "[INFO] Forcing CPU-only test deps"
 fi
 
-if [ "$_TORCH_VER" == "nightly" ]; then
-  echo "Install test package dependencies from nightly version"
-  REQ_FILE="${SCRIPTS_DIR}/../dependency/torchvision_dev.txt"
-  python3 -m pip install -r ${REQ_FILE} --index-url ${INDEX_URL}
-  python3 -m pip install -r "${TEST_DIR}/requirements_dev.txt"
-elif [ "$_TORCH_VER" == "2.6" ]; then
-  echo "Install test package dependencies from stable version"
-  python3 -m pip install torchvision==0.21.0 --index-url ${INDEX_URL}
-  # python3 -m pip install -r "${TEST_DIR}/requirements_2_6.txt"
-elif [ "$_TORCH_VER" == "2.5" ]; then
-  echo "Install test package dependencies from stable version"
-  python3 -m pip install torchvision==0.20.0 --index-url ${INDEX_URL}
-  # python3 -m pip install -r "${TEST_DIR}/requirements_2_5.txt"
+###############################################################################
+# pip helper  (handles spec + arbitrary flags)
+###############################################################################
+pip_install() {
+  local spec="$1"
+  python3 -m pip install ${spec} --index-url "${INDEX_URL}"
+}
+
+###############################################################################
+# torchvision version mapping per torch family
+###############################################################################
+declare -A TORCHVISION_FAMILY=(
+  ["2.5"]="0.20.*"
+  ["2.6"]="0.21.*"
+  ["2.7"]="0.22.*"
+)
+
+###############################################################################
+# 1) Install torchvision
+###############################################################################
+if [[ "${REQUEST_IS_NIGHTLY}" = true ]]; then
+  echo "[INFO] Installing torchvision (nightly) from ${INDEX_URL}"
+  pip_install "-r ${SCRIPTS_DIR}/../dependency/torchvision_dev.txt"
+else
+  VISION_VER="${TORCHVISION_FAMILY[${FAMILY}]}"
+  echo "[INFO] Installing torchvision==${VISION_VER} from ${INDEX_URL}"
+  pip_install "torchvision==${VISION_VER}"
 fi
 
-popd > /dev/null
+
+###############################################################################
+# 2) Install additional test-only requirements
+###############################################################################
+if [[ "${REQUEST_IS_NIGHTLY}" = true ]]; then
+  EXTRA_REQ_FILES=(
+    "${TEST_DIR}/requirements_dev.txt"
+  )
+else
+  DEP_FILE="${SCRIPTS_DIR}/../dependency/torchvision_${FAMILY/./_}.txt"
+  TEST_FILE="${TEST_DIR}/requirements_${FAMILY/./_}.txt"
+  EXTRA_REQ_FILES=("${DEP_FILE}" "${TEST_FILE}")
+fi
+
+for req in "${EXTRA_REQ_FILES[@]}"; do
+  if [[ -f "${req}" ]]; then
+    echo "[INFO] Installing auxiliary test deps from ${req##*/}"
+    pip_install "-r ${req}"
+  fi
+done
+
+echo "[SUCCESS] ./ccex configure test completed"
