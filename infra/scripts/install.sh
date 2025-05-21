@@ -51,7 +51,7 @@ EOF
 _DIST=0
 _TORCH_VER="${DEFAULT_FAMILY}"
 _USER_CUDA=""
-_CPU_ONLY=false
+_CPU_ONLY=""
 
 options=$(getopt -o h --long dist,torch_ver:,cuda_ver:,cpu_only,help -- "$@") || {
   echo "[ERROR] Invalid command-line options" >&2; exit 1; }
@@ -62,7 +62,7 @@ while true; do
       --dist)        _DIST=1 ;;
       --torch_ver)   _TORCH_VER="$2"; shift ;;
       --cuda_ver)    _USER_CUDA="$2"; shift ;;
-      --cpu_only)    _CPU_ONLY=true ;;
+      --cpu_only)    _CPU_ONLY=1 ;;
       -h|--help)     show_help; exit 0 ;;
       --)            shift; break ;;
       *)             echo "[ERROR] Unknown option $1"; exit 1 ;;
@@ -73,46 +73,44 @@ done
 ###############################################################################
 # Detect (and maybe keep) any existing torch installation
 ###############################################################################
-read -r INSTALLED_TORCH_FULL INSTALLED_TORCH_FAMILY < <(
+INSTALLED_TORCH_FULL=""
+INSTALLED_TORCH_FAMILY=""
+read -r INSTALLED_TORCH_FULL < <(
   python3 - <<'PY'
 import importlib.util, re, sys
 spec = importlib.util.find_spec("torch")
 if spec is None:                       # Torch not found → just print blanks
     print()
-    print()
     sys.exit(0)
 import torch
-v = torch.__version__
-fam = re.match(r"^(\d+\.\d+)", v)
-print(v)                               # line 1 → INSTALLED_TORCH_FULL
-print(fam.group(1) if fam else "")     # line 2 → INSTALLED_TORCH_FAMILY
+print(torch.__version__)
 PY
 )
 
-# ensure variables exist even if torch absent
-INSTALLED_TORCH_FULL=${INSTALLED_TORCH_FULL:-}
-INSTALLED_TORCH_FAMILY=${INSTALLED_TORCH_FAMILY:-}
+if [[ -n "$INSTALLED_TORCH_FULL" ]]; then
+  INSTALLED_TORCH_FAMILY=$(echo "$INSTALLED_TORCH_FULL" | cut -d. -f1,2)
+fi
 
 # Normalise requested spec to family / exact
 REQUEST_IS_NIGHTLY=""
-REQUEST_IS_EXACT=false
+REQUEST_IS_EXACT=""
 if [[ "$_TORCH_VER" == "nightly" ]]; then
-  REQUEST_IS_NIGHTLY=true
+  REQUEST_IS_NIGHTLY=1
 elif [[ "$_TORCH_VER" =~ ^[0-9]+\.[0-9]+$ ]]; then
   : # family only
 elif [[ "$_TORCH_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-  REQUEST_IS_EXACT=true
+  REQUEST_IS_EXACT=1
 else
   echo "[ERROR] Unsupported --torch_ver value '${_TORCH_VER}'"; exit 1
 fi
 
 # Respect pre-installed Torch if allowed
-SKIP_TORCH_INSTALL=false
+SKIP_TORCH_INSTALL=""
 if [[ -n "$INSTALLED_TORCH_FULL" ]]; then
   if [[ " ${SUPPORTED_FAMILIES[*]} " =~ " ${INSTALLED_TORCH_FAMILY} " ]]; then
-    if [[ "$REQUEST_IS_NIGHTLY" = false && "$REQUEST_IS_EXACT" = false ]]; then
+    if [[ -z "$REQUEST_IS_NIGHTLY" && -z "$REQUEST_IS_EXACT" ]]; then
       echo "[INFO] Supported torch ${INSTALLED_TORCH_FULL} already present — keeping it"
-      SKIP_TORCH_INSTALL=true
+      SKIP_TORCH_INSTALL=1
       _TORCH_VER="$INSTALLED_TORCH_FAMILY"   # for later requirements file pick
     else
       echo "[INFO] '--torch_ver' explicitly requests ${_TORCH_VER}; will override existing ${INSTALLED_TORCH_FULL}"
@@ -132,7 +130,7 @@ get_index_url_for_cuda_version() {
 }
 
 INDEX_URL="https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
-if [[ "$_CPU_ONLY" = true ]]; then
+if [[ -n "$_CPU_ONLY" ]]; then
   echo "[INFO] Forcing CPU-only Torch installation"
 else
   CUDA_TO_USE=""
@@ -160,11 +158,11 @@ install_torch() {
   python3 -m pip install ${spec} --index-url "${INDEX_URL}"
 }
 
-if [[ "$SKIP_TORCH_INSTALL" = false ]]; then
-  if [[ "$REQUEST_IS_NIGHTLY" = true ]]; then
+if [[ -z "$SKIP_TORCH_INSTALL" ]]; then
+  if [[ -n "$REQUEST_IS_NIGHTLY" ]]; then
     install_torch "-r ${SCRIPTS_DIR}/../dependency/torch_dev.txt"
   else
-    if [[ "$REQUEST_IS_EXACT" = true ]]; then
+    if [[ -n "$REQUEST_IS_EXACT" ]]; then
       install_torch "torch==${_TORCH_VER}"
     else
       # family only → pip’s ~= spec picks the newest patch in the family
@@ -177,7 +175,7 @@ fi
 # Install the auxiliary Python requirements
 ###############################################################################
 choose_req_file() {
-  if [[ "$REQUEST_IS_NIGHTLY" = true ]]; then
+  if [[ -n "$REQUEST_IS_NIGHTLY" ]]; then
     echo "${SCRIPTS_DIR}/install_requirements_dev.txt"
     return
   fi

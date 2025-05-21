@@ -50,7 +50,7 @@ EOF
 ###############################################################################
 _TORCH_VER="${DEFAULT_FAMILY}"
 _USER_CUDA=""
-_CPU_ONLY=false
+_CPU_ONLY=""
 
 options=$(getopt -o h --long torch_ver:,cuda_ver:,cpu_only,help -- "$@") || {
   echo "[ERROR] Invalid command-line options" >&2; exit 1; }
@@ -60,7 +60,7 @@ while true; do
   case "$1" in
       --torch_ver) _TORCH_VER="$2"; shift 2;;
       --cuda_ver)  _USER_CUDA="$2"; shift 2;;
-      --cpu_only)  _CPU_ONLY=true; shift;;
+      --cpu_only)  _CPU_ONLY=1; shift;;
       -h|--help)   show_help; exit 0;;
       --) shift; break;;
       *)  echo "[ERROR] Unknown option $1"; exit 1;;
@@ -71,12 +71,12 @@ done
 # Torch version analysis
 ###############################################################################
 REQUEST_IS_NIGHTLY=""
-REQUEST_IS_EXACT=false
+REQUEST_IS_EXACT=""
 if [[ "${_TORCH_VER}" == "nightly" ]]; then
-  REQUEST_IS_NIGHTLY=true
+  REQUEST_IS_NIGHTLY=1
 fi
 FAMILY="$(echo "${_TORCH_VER}" | grep -oE '^[0-9]+\.[0-9]+' || echo "${DEFAULT_FAMILY}")"
-if [[ "${REQUEST_IS_NIGHTLY}" = false && " ${SUPPORTED_FAMILIES[*]} " != *" ${FAMILY} "* ]]; then
+if [[ -z "${REQUEST_IS_NIGHTLY}" && " ${SUPPORTED_FAMILIES[*]} " != *" ${FAMILY} "* ]]; then
   echo "[ERROR] Unsupported --torch_ver ${_TORCH_VER}"; exit 1
 fi
 
@@ -90,7 +90,7 @@ get_index_url() {
 }
 
 INDEX_URL="https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
-if [[ "${_CPU_ONLY}" = false ]]; then
+if [[ -z "${_CPU_ONLY}" ]]; then
   if [[ -n "${_USER_CUDA}" ]]; then
     CUDA="${_USER_CUDA}"
     echo "[INFO] Using user-specified CUDA ${CUDA}"
@@ -128,7 +128,7 @@ declare -A TORCHVISION_FAMILY=(
 ###############################################################################
 # 1) Install torchvision
 ###############################################################################
-if [[ "${REQUEST_IS_NIGHTLY}" = true ]]; then
+if [[ -n "${REQUEST_IS_NIGHTLY}" ]]; then
   echo "[INFO] Installing torchvision (nightly) from ${INDEX_URL}"
   pip_install "-r ${SCRIPTS_DIR}/../dependency/torchvision_dev.txt"
 else
@@ -141,7 +141,7 @@ fi
 ###############################################################################
 # 2) Install additional test-only requirements
 ###############################################################################
-if [[ "${REQUEST_IS_NIGHTLY}" = true ]]; then
+if [[ -n "${REQUEST_IS_NIGHTLY}" ]]; then
   EXTRA_REQ_FILES=(
     "${TEST_DIR}/requirements_dev.txt"
   )
