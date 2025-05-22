@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import IntEnum
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch._ops
@@ -25,7 +25,12 @@ from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.circle_mapping import extract_circle_dtype, extract_shape
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
-from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.operators.utils import (
+    create_builtin_operator,
+    get_integer_dtype_min,
+    get_op_index,
+)
+from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.validate_args_kwargs import MaxPool2dWithIndicesArgs
 
 
@@ -82,7 +87,6 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
                 ],
                 dtype=torch.int32,
             )
-            padding_value = float("-inf")
             input_shape = list(extract_shape(input))
             input_dtype: int = extract_circle_dtype(input)
             padded_input_shape = [
@@ -93,12 +97,20 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
             ]
             padded_input_shape[1] += padding[0] * 2
             padded_input_shape[2] += padding[1] * 2
+            input_qparam: Optional[QuantParam] = (
+                input.meta[QPARAM_KEY] if QPARAM_KEY in input.meta else None
+            )
             # create padded input tensor
             padded_input_tensor = self.graph.add_tensor_from_scratch(
                 prefix=f"{input.name}_pad_output",
                 shape=padded_input_shape,
                 dtype=input_dtype,
+                qparam=input_qparam,
             )
+            if input_qparam is not None:
+                padding_value = get_integer_dtype_min(input_qparam.dtype)
+            else:
+                padding_value = float("-inf")
             pad_operator = self.define_padV2_node(
                 [input, padding_vec, padding_value], [padded_input_tensor]
             )

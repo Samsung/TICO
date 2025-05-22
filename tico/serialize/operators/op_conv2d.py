@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch._ops
@@ -24,6 +24,7 @@ from tico.serialize.circle_mapping import extract_circle_dtype, extract_shape
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.define import define_pad_node
 from tico.utils.padding import is_same_padding, is_valid_padding, SAME, VALID
 from tico.utils.validate_args_kwargs import Conv2DArgs
@@ -150,11 +151,14 @@ class Conv2dVisitor(NodeVisitor):
             # Add (pad_left+pad_Right) to pad_output_shape_w
             pad_output_shape[2] += padding[1] * 2
             # create padded output tensor
-
+            input_qparam: Optional[QuantParam] = (
+                input_.meta[QPARAM_KEY] if QPARAM_KEY in input_.meta else None
+            )
             pad_output = self.graph.add_tensor_from_scratch(
                 prefix=f"{node.name}_input_pad_output",
                 shape=pad_output_shape,
                 dtype=input_dtype,
+                qparam=input_qparam,
             )
             # CirclePad
             pad_operator = define_pad_node(
