@@ -96,3 +96,18 @@ class AvgPoolNonSquareWindow(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(2, 4, 8, 16),)
+
+
+class AvgPoolWithNoCountIncludePad(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.avgpool = torch.nn.AvgPool2d(
+            kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), count_include_pad=False
+        )
+
+    def forward(self, tensor):
+        result = self.avgpool(tensor)
+        return result
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3, 56, 56),)

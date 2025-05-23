@@ -114,7 +114,7 @@ class AvgPool2dArgs:
     input: torch.fx.Node
     kernel_size: List[int]
     stride: List[int] = field(default_factory=list)
-    padding: List[int] = field(default_factory=lambda: [0, 0])
+    padding: Union[List[int], int] = field(default_factory=lambda: [0, 0])
     ceil_mode: bool = field(default=False)
     count_include_pad: bool = field(default=True)
     divisor_override: Optional[Union[int, None]] = None
@@ -123,7 +123,10 @@ class AvgPool2dArgs:
         assert len(self.kernel_size) == 2, len(self.kernel_size)
         assert len(self.stride) == 2, len(self.stride)
         if self.padding is not None:
-            assert len(self.padding) == 2, len(self.padding)
+            if isinstance(self.padding, List):
+                assert len(self.padding) == 2, len(self.padding)
+            else:
+                assert isinstance(self.padding, int), type(self.padding)
         if self.divisor_override is not None:
             assert isinstance(self.divisor_override, int), type(self.divisor_override)
             assert self.divisor_override != 0, f"Divisor must be not zero."
@@ -735,6 +738,19 @@ class NegArgs:
     """
 
     input: torch.fx.Node
+
+
+@enforce_type
+@dataclass
+class PadArgs:
+    """
+    pad(Tensor self, SymInt[] pad, str mode="constant", float? value=None) -> Tensor
+    """
+
+    input: torch.fx.Node
+    pad: List[int]
+    mode: str = "constant"
+    value: Optional[float] = None
 
 
 @enforce_type

@@ -93,6 +93,10 @@ class NNModuleTest(TestRunnerBase):
         opt_circle_model_path = str(test_prefix) + ".opt.circle"
         pt2_model_path = str(test_prefix) + ".pt2"
 
+        # infer torch module first before export
+        # For some cases (e.g. EfficientFormer), torch module is affected by `export` operation and generates `FakeTensor` instead of `Tensor`.
+        torch_result = infer_nnmodule(self.nnmodule, self.example_inputs)
+
         if without_pt2:
             # torch.nn.Module --> ExportedProgram --> pt2 ----- (ExportedProgram) ------- > circle
             #                                       (--> load_from_pt2_file -->)
@@ -114,7 +118,6 @@ class NNModuleTest(TestRunnerBase):
 
         verify_circle(circle_model_path, opt_circle_model_path)
 
-        torch_result = infer_nnmodule(self.nnmodule, self.example_inputs)
         USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert" or dynamic
         if self.use_onert or USE_ONERT:
             circle_result = infer_circle(
@@ -126,6 +129,7 @@ class NNModuleTest(TestRunnerBase):
             circle_result = infer_circle(
                 circle_model_path, self.example_inputs, "circle-interpreter"
             )
+        circle_result = infer_circle(circle_model_path, self.example_inputs)
         validate_result(torch_result, circle_result, **self.tolerance)
 
 
