@@ -569,6 +569,18 @@ class LtArgs:
 
 @enforce_type
 @dataclass
+class MaxDimArgs:
+    """
+    max.dim(Tensor self, int dim, bool keepdim=False) -> (Tensor values, Tensor indices)
+    """
+
+    input: torch.fx.Node
+    dim: int
+    keepdim: bool = False
+
+
+@enforce_type
+@dataclass
 class MaxPool2dWithIndicesArgs:
     """
     max_pool2d_with_indices(Tensor self, int[2] kernel_size, int[2] stride=[], int[2] padding=0, int[2] dilation=1, bool ceil_mode=False) -> (Tensor, Tensor)

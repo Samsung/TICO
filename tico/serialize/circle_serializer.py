@@ -35,6 +35,7 @@ from tico.utils import logging
 
 multiple_output_ops = [
     torch.ops.aten.split_with_sizes.default,
+    torch.ops.aten.max.dim,
 ]
 
 # Build circle model from ExportedProgram
