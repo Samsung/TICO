@@ -36,7 +36,7 @@ This file includes OpArgs classes that provide arguments with type annotations.
 @dataclass
 class AbsArgs:
     """
-    cos(Tensor self) -> Tensor
+    abs(Tensor self) -> Tensor
     """
 
     input: torch.fx.Node
