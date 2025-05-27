@@ -108,7 +108,7 @@ class FakeQuantizeTensorQParamUint4Dtype(torch.nn.Module):
         return (torch.randn(1, 5),)
 
 
-class DecomposeUintFakeQuantizeTensorQParam4Dtype(PassTest):
+class DecomposeFakeQuantizeTensorQParamUint4Dtype(PassTest):
     def test_pass(self):
         self.setup(FakeQuantizeTensorQParamUint4Dtype())
         self.run_pass(DecomposeFakeQuantize())
