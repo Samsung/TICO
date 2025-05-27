@@ -13,12 +13,20 @@
 # limitations under the License.
 
 import torch
+from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
+from tico.experimental.quantization.passes.remove_weight_dequant_op import (
+    RemoveWeightDequantOp,
+)
+from tico.passes.const_prop_pass import ConstPropPass
+from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
 from tico.passes.decompose_fake_quantize_tensor_qparams import (
     DecomposeFakeQuantizeTensorQParams,
 )
+from tico.passes.fill_meta_val import FillMetaVal
+from tico.serialize.quant_param import QPARAM_KEY
 
 from test.utils.helper import num_of_ops
-from test.utils.pass_value_test import SinglePassValueTest
+from test.utils.pass_value_test import PassTest, SinglePassValueTest
 
 
 class FakeQuantizeTensorQParamPerTensor(torch.nn.Module):
@@ -70,3 +78,53 @@ class DecomposeFakeQuantizeTensorQParamPerTensor(SinglePassValueTest):
             ),
             1,
         )
+
+
+class FakeQuantizeTensorQParamUint4Dtype(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(5, 10)
+        self.w_scale = torch.tensor([1.0] * self.linear.out_features)
+        self.w_zp = torch.zeros(self.linear.out_features)
+        self.w_qmin = 0
+        self.w_qmax = 15
+        self.a_qmin = 0
+        self.a_qmax = 255
+
+    def forward(self, input):
+        q_weight = torch.fake_quantize_per_channel_affine(
+            self.linear.weight, self.w_scale, self.w_zp, 0, self.w_qmin, self.w_qmax
+        )
+        quantized_input = torch.fake_quantize_per_tensor_affine(
+            input, torch.tensor(0.1), torch.tensor(0), self.a_qmin, self.a_qmax
+        )
+        linear = torch.nn.functional.linear(quantized_input, q_weight)
+        q_linear = torch.fake_quantize_per_tensor_affine(
+            linear, torch.tensor(0.1), torch.tensor(0), self.a_qmin, self.a_qmax
+        )
+        return q_linear
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 5),)
+
+
+class DecomposeUintFakeQuantizeTensorQParam4Dtype(PassTest):
+    def test_pass(self):
+        self.setup(FakeQuantizeTensorQParamUint4Dtype())
+        self.run_pass(DecomposeFakeQuantize())
+        self.run_pass(DecomposeFakeQuantizeTensorQParams())
+        self.run_pass(ConstPropPass())
+        self.run_pass(FillMetaVal())
+        self.run_pass(FoldQuantOps())
+        self.run_pass(RemoveWeightDequantOp())
+        for n in self.ep.graph.nodes:
+            if QPARAM_KEY not in n.meta:
+                continue
+            if n.op == "placeholder":
+                if n.target == "input":
+                    self.assertEqual(n.meta[QPARAM_KEY].dtype, "uint8")
+                else:  # linear weight
+                    self.assertEqual(n.meta[QPARAM_KEY].dtype, "uint4")
+            else:
+                self.assertEqual(n.target, torch.ops.aten.linear.default)
+                self.assertEqual(n.meta[QPARAM_KEY].dtype, "uint8")

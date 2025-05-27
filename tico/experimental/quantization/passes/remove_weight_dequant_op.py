@@ -116,12 +116,12 @@ class RemoveWeightDequantOp(PassBase):
                 dq.target
                 == torch.ops.quantized_decomposed.dequantize_per_channel.default
             ):
-                dq_args = DequantizePerChannelArgs(*dq.args, *dq.kwargs)
+                dq_args = DequantizePerChannelArgs(*dq.args, **dq.kwargs)
             elif (
                 dq.target
                 == torch.ops.quantized_decomposed.dequantize_per_tensor.default
             ):
-                dq_args = DequantizePerTensorArgs(*dq.args, *dq.kwargs)
+                dq_args = DequantizePerTensorArgs(*dq.args, **dq.kwargs)
             else:
                 raise RuntimeError(f"Invalid DQ target: {dq.target}")
 

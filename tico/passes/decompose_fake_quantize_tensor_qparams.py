@@ -39,6 +39,10 @@ from tico.utils.validate_args_kwargs import FakeQuantizePerTensorTQParamArgs
 
 
 def get_quant_type(min: int, max: int) -> torch.dtype:
+    if min == 0 and max == 15:
+        # torch can't represent "uint4".
+        # Let's set torch.uint8 and infer dtype with quant_min/quant_max instead.
+        return torch.uint8
     if min == 0 and max == 255:
         return torch.uint8
     if min == -32768 and max == 32767:
@@ -98,7 +102,7 @@ def get_constant_from_tensor(
         lifted_tensor_constants = ep.graph_signature.inputs_to_lifted_tensor_constants
         assert lifted_tensor.name in lifted_tensor_constants
         tensor_name = lifted_tensor_constants[lifted_tensor.name]
-        value = ep.constants[tensor_name].cpu().detach().numpy()
+        value = ep.constants[tensor_name].item()
         return value
     if node.target.__name__ in ["detach.default", "detach_.default"]:
         assert len(node.args) == 1

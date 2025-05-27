@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import torch
+from tico.experimental.quantization.passes.remove_weight_dequant_op import (
+    RemoveWeightDequantOp,
+)
+from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
 
 from test.utils.helper import num_of_ops
-from test.utils.pass_value_test import SinglePassValueTest
+from test.utils.pass_value_test import PassTest, SinglePassValueTest
 
 
 class FakeQuantizePerChannel(torch.nn.Module):
