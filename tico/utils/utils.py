@@ -312,3 +312,32 @@ def quant_min_max(dtype: str):
         return (-32768, 32767)
     else:
         raise NotImplementedError(f"NYI dtype: {dtype}")
+
+
+def get_quant_dtype(qmin: int, qmax: int):
+    """
+    Returns the string representation of the quantized data type based on qmin and qmax.
+
+    Args:
+        qmin (int): Minimum quantized value.
+        qmax (int): Maximum quantized value.
+
+    Returns:
+        str: A string representing the quantized data type, such as "int8", "uint4", etc.
+
+    Raises:
+        ValueError: If the (qmin, qmax) pair is not supported.
+    """
+    known_ranges = {
+        (-32768, 32767): "int16",
+        (0, 65535): "uint16",
+        (-128, 127): "int8",
+        (0, 255): "uint8",
+        (-8, 7): "int4",
+        (0, 15): "uint4",
+    }
+
+    if (qmin, qmax) in known_ranges:
+        return known_ranges[(qmin, qmax)]
+    else:
+        raise ValueError(f"Unsupported qunatization range: ({qmin}, {qmax})")

@@ -23,6 +23,7 @@ from tico.serialize.quant_param import QPARAM_KEY, QuantParam, to_qparam_dtype
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import get_quant_dtype
 from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
@@ -81,8 +82,7 @@ class FoldQuantOps(PassBase):
                 qparam = QuantParam()
                 qparam.scale = [q_args.scale]
                 qparam.zero_point = [q_args.zero_p]
-                assert "val" in q.meta and hasattr(q.meta["val"], "dtype")
-                qparam.dtype = to_qparam_dtype(q.meta["val"].dtype)
+                qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
                 op.meta[QPARAM_KEY] = qparam
 
             dq.replace_all_uses_with(op, propagate_meta=False)
