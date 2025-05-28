@@ -61,7 +61,7 @@ jobs:
       image: samsungonedev.azurecr.io/ubuntu:22.04
     strategy:
       matrix:
-        torch-version: ["2.6.0", "latest"] # TODO: Add 2.7 when it is released
+        torch-version: ["2.6.0", "nightly"] # TODO: Add 2.7 when it is released
     steps:
       - name: Install dependencies
         run: |
