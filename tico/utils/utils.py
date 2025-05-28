@@ -340,4 +340,4 @@ def get_quant_dtype(qmin: int, qmax: int):
     if (qmin, qmax) in known_ranges:
         return known_ranges[(qmin, qmax)]
     else:
-        raise ValueError(f"Unsupported qunatization range: ({qmin}, {qmax})")
+        raise ValueError(f"Unsupported quantization range: ({qmin}, {qmax})")
