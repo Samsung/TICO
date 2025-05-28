@@ -34,5 +34,5 @@ setup(
     license_files=("LICENSE",),
     packages=find_packages(include=["tico*"]),
     entry_points={"console_scripts": ["pt2-to-circle = tico.pt2_to_circle:main"]},
-    install_requires=["circle-schema", "packaging", "cffi", "torch>=2.6.0", "pyyaml"],
+    install_requires=["circle-schema", "packaging", "cffi", "torch>=2.0.0", "pyyaml"],
 )
