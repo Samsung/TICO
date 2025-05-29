@@ -17,6 +17,8 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
+import math
+
 import torch
 from torch.export import ExportedProgram
 
@@ -317,11 +319,26 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         if ceil_mode:
             raise NotYetSupportedError("Only support non-ceil model.")
         count_include_pad = args.count_include_pad
+
         if not count_include_pad:
-            # NOTE count_include_pad = False can be partially supported with SAME padding in circle.
-            raise NotYetSupportedError(
-                "For the case that the count_include_pad is False is not yet supported."
+            # count_include_pad is False means that padding type is SAME
+            input_shape = extract_shape(input_)
+
+            output_height = (
+                math.ceil((input_shape[2] - kernel_size[0] + 1) / stride[0])
+                + padding[0] * 2
             )
+            output_width = (
+                math.ceil((input_shape[3] - kernel_size[1] + 1) / stride[1])
+                + padding[1] * 2
+            )
+
+            # Check if its padding type is SAME
+            if not (input_shape[2] == output_height and input_shape[3] == output_width):
+                raise NotYetSupportedError(
+                    "Only support count_include_pad=False with SAME padding case"
+                )
+
         divisor_override = args.divisor_override
         if divisor_override is not None:
             raise NotYetSupportedError(

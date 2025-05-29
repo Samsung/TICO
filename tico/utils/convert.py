@@ -52,6 +52,7 @@ from tico.passes.decompose_slice_scatter import DecomposeSliceScatter
 from tico.passes.extract_dtype_kwargs import ExtractDtypeKwargsPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.fuse_redundant_reshape_to_mean import FuseRedundantReshapeToMean
+from tico.passes.legalize_avgpool2d import LegalizeAvgpool2D
 from tico.passes.legalize_causal_mask_value import LegalizeCausalMaskValue
 from tico.passes.legalize_predefined_layout_operators import (
     LegalizePreDefinedLayoutOperators,
@@ -208,6 +209,7 @@ def convert_exported_module_to_circle(
             DecomposeGroupedConv2d(),
             CastATenWhereArgType(),
             ConvertRepeatToExpandCopy(),
+            LegalizeAvgpool2D(),
             *RemoveRedundantPermutePasses(),
             RemoveRedundantAssertionNodes(),
             RemoveRedundantExpand(),
