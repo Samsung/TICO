@@ -111,6 +111,7 @@ class CopyVisitor(NodeVisitor):
             prefix=f"{dst_name}_shape_output",
             shape=dst_shape_shape,
             dtype=circle.TensorType.TensorType.INT32,
+            source_node=node,
         )
 
         shape_operator = self.define_shape_node([dst], [shape_output])
@@ -131,6 +132,7 @@ class CopyVisitor(NodeVisitor):
                     prefix=f"{src_name}_broadcast_to_output",
                     shape=dst_shape,
                     dtype=src_type,
+                    source_node=node,
                 )
             )
 

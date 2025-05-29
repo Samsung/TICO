@@ -111,7 +111,9 @@ class MatmulDefaultVisitor(NodeVisitor):
     fullyconnected( lhs[H, K], trs_output[W', K] ) -> output(H, W')
     """
 
-    def define_fc_with_transpose(self, inputs, outputs) -> circle.Operator.OperatorT:
+    def define_fc_with_transpose(
+        self, node, inputs, outputs
+    ) -> circle.Operator.OperatorT:
         lhs, rhs = inputs
 
         # get transpose shape
@@ -128,8 +130,9 @@ class MatmulDefaultVisitor(NodeVisitor):
             prefix=f"{rhs_name}_transposed_output",
             shape=rhs_shape_transpose,
             dtype=rhs_type,
+            source_node=node,
         )
-        trs_perm = self.graph.add_const_tensor(data=[1, 0])
+        trs_perm = self.graph.add_const_tensor(data=[1, 0], source_node=node)
         trs_operator = self.define_transpose_node([rhs, trs_perm], [trs_output])
         self.graph.add_operator(trs_operator)
 
@@ -138,7 +141,7 @@ class MatmulDefaultVisitor(NodeVisitor):
         fc_weight = trs_output
         fc_shape = [fc_weight.shape[0]]
         fc_bias = self.graph.add_const_tensor(
-            data=[0.0] * fc_shape[0],
+            data=[0.0] * fc_shape[0], source_node=node
         )
 
         operator = self.define_fc_node([fc_input, fc_weight, fc_bias], outputs)
@@ -169,6 +172,6 @@ class MatmulDefaultVisitor(NodeVisitor):
         if not is_const(other) and prior_latency:
             operator = self.define_bmm_node(inputs, outputs)
         else:
-            operator = self.define_fc_with_transpose(inputs, outputs)
+            operator = self.define_fc_with_transpose(node, inputs, outputs)
 
         return operator

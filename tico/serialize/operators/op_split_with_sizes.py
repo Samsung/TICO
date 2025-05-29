@@ -82,7 +82,10 @@ class SplitWithSizesVisitor(NodeVisitor):
                 shape = list(fake_tensor.size())
                 dtype = to_circle_dtype(fake_tensor.dtype)
                 tensor = self.graph.add_tensor_from_scratch(
-                    f"{node.name}_unused_{idx}", shape, dtype
+                    f"{node.name}_unused_{idx}",
+                    shape,
+                    dtype,
+                    source_node=node,
                 )
                 outputs.append(tensor)
 

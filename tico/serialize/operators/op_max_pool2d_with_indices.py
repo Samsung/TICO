@@ -106,6 +106,7 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
                 shape=padded_input_shape,
                 dtype=input_dtype,
                 qparam=input_qparam,
+                source_node=node,
             )
             if input_qparam is not None:
                 padding_value = get_integer_dtype_min(input_qparam.dtype)

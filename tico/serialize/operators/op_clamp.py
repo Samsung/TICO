@@ -107,7 +107,10 @@ class ClampVisitor(NodeVisitor):
             input_shape = extract_shape(input)
             input_dtype = extract_circle_dtype(input)
             minimum_tensor = self.graph.add_tensor_from_scratch(
-                prefix=f"{input.name}_min", dtype=input_dtype, shape=list(input_shape)
+                prefix=f"{input.name}_min",
+                dtype=input_dtype,
+                shape=list(input_shape),
+                source_node=node,
             )
             minimum_opertor = self.define_minimum_node(
                 [input, max_val], [minimum_tensor]

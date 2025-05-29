@@ -159,6 +159,7 @@ class Conv2dVisitor(NodeVisitor):
                 shape=pad_output_shape,
                 dtype=input_dtype,
                 qparam=input_qparam,
+                source_node=node,
             )
             # CirclePad
             pad_operator = define_pad_node(

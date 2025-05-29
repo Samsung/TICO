@@ -198,3 +198,38 @@ def is_single_value_tensor(t: torch.Tensor):
         return True
 
     return False
+
+
+def get_module_name_chain(node: Optional[torch.fx.Node]) -> str:
+    """
+    Returns a slash-separated string of module names representing the
+    hierarchical path of the FX node within the original model.
+
+    If the node has no `nn_module_stack` metadata, "unknown" is returned.
+
+    Example:
+        "encoder/layer1/linear"
+
+    Parameters
+    ----------
+    node: torch.fx.Node
+        A node from an ExportedProgram graph.
+
+    Returns
+    -------
+    str
+        A human-readable string that describes the full module path.
+    """
+    if node is None:
+        return "unknown"
+    # Let's prefix "tico" for graph inputs
+    if node.op == "placeholder" and "nn_module_stack" not in node.meta:
+        return "tico"
+
+    assert isinstance(node, torch.fx.Node)
+    stack = node.meta.get("nn_module_stack")
+    if stack:
+        assert isinstance(stack, dict)
+        return "/".join(f"{name}" for name, _ in stack.values())
+    else:
+        return "unknown"

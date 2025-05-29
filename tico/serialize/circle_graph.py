@@ -91,6 +91,10 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         self.tensors: List[circle.Tensor.TensorT] = []
         self.operators: List[circle.Operator.OperatorT] = []
         self.name_to_tid: Dict[str, int] = {}
+        # Mapping from Circle tensor names to their originating FX nodes.
+        # Used to trace back tensor definitions to their source and finalize
+        # human-readable tensor names after serialization.
+        self.name_to_node: Dict[str, torch.fx.Node] = {}
         self.counter: defaultdict = defaultdict(int)
 
     # Generate a unique name with prefix.
@@ -111,6 +115,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
 
     def _add_tensor(self, tensor: circle.Tensor.TensorT) -> None:
         self.tensors.append(tensor)
+        assert tensor.name not in self.name_to_tid
         self.name_to_tid[tensor.name] = len(self.tensors) - 1
 
     def add_operator(self, op: circle.Operator.OperatorT) -> None:
@@ -138,10 +143,12 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         return name in self.name_to_tid
 
     def add_tensor_from_node(
-        self, node: torch.fx.node.Node, data: Optional[np.ndarray] = None
+        self, node: torch.fx.Node, data: Optional[np.ndarray] = None
     ) -> None:
         tensor = circle.Tensor.TensorT()
         tensor.name = self._gen_unique_name_with_prefix(node.name)
+        assert tensor.name not in self.name_to_node
+        self.name_to_node[tensor.name] = node
         assert node.meta.get("val") is not None
         tensor.type = extract_circle_dtype(node)
         tensor.shape = list(extract_shape(node))
@@ -165,10 +172,15 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         tensor.buffer = bid
         self._add_tensor(tensor)
 
-    def add_const_tensor(self, data: ConstData) -> circle.Tensor.TensorT:
+    def add_const_tensor(
+        self, data: ConstData, source_node: Optional[torch.fx.Node] = None
+    ) -> circle.Tensor.TensorT:
         assert is_const(data)
         tensor = circle.Tensor.TensorT()
         tensor.name = self._gen_unique_name_with_prefix("const_tensor")
+        assert tensor.name not in self.name_to_node
+        if source_node is not None:
+            self.name_to_node[tensor.name] = source_node
         assert not self.has_tensor(tensor.name)
         torch_t = torch.as_tensor(data=data)
         torch_t_shape = list(torch_t.size())
@@ -189,10 +201,45 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         shape: List[int],
         dtype: int,
         qparam: Optional[QuantParam] = None,
+        source_node: Optional[torch.fx.Node] = None,
     ) -> circle.Tensor.TensorT:
+        """
+        Create a new tensor and register it into the Circle subgraph from scratch.
+
+        This function is used to allocate tensors that are not directly derived from
+        values in the FX graph, such as those created by padding or shape-generating
+         operators.
+
+        If a `source_node` is provided, it is used to enrich the tensor's metadata
+        (e.g., by associating the tensor with the module hierarchy path stored in
+        the node's `nn_module_stack`). This enables better traceability and more
+        informative tensor names in the final Circle model.
+
+        Parameters
+        ----------
+        prefix : str
+            A name prefix used to generate a unique tensor name.
+        shape : List[int]
+            The shape of the tensor.
+        dtype : int
+            The Circle-compatible dtype of the tensor. Use `to_circle_dtype()` to convert.
+        qparam : Optional[QuantParam]
+            Optional quantization parameters to apply to the tensor.
+        source_node : Optional[torch.fx.Node]
+            If provided, the FX node from which this tensor originates. Used to generate
+            a richer name and track module origin.
+
+        Returns
+        -------
+        circle.Tensor.TensorT
+            The newly created and registered tensor.
+        """
         assert isinstance(dtype, int), f"{dtype} must be integer. Use to_circle_dtype."
         tensor = circle.Tensor.TensorT()
         tensor.name = self._gen_unique_name_with_prefix(prefix)
+        assert tensor.name not in self.name_to_node
+        if source_node is not None:
+            self.name_to_node[tensor.name] = source_node
         tensor.shape = shape
         if qparam is not None:
             tensor.quantization = to_circle_qparam(qparam)
@@ -255,7 +302,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
 
     # TODO Rename, it doesn't only get_tid but also possibly add a new const tensor
     def get_tid(
-        self, node: Union[torch.fx.node.Node, circle.Tensor.TensorT, ConstData]
+        self, node: Union[torch.fx.Node, circle.Tensor.TensorT, ConstData]
     ) -> int:
         # return -1 if node is None. This is for generating CircleOutputExclude
         if node == None:
