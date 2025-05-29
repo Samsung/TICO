@@ -46,6 +46,10 @@ class AvgPool2DVisitor(NodeVisitor):
         stride = args.stride
         padding = args.padding
 
+        if args.count_include_pad == False:
+            # count_include_pad must be legalized by LegalizeAvgPool2D pass
+            raise ValueError("count_include_pad must be True")
+
         avgpool_input: torch.fx.Node | circle.Tensor.TensorT = input
 
         def define_padding_node():
