@@ -122,7 +122,10 @@ class AnyVisitor(NodeVisitor):
             dst_dtype_circle = circle.TensorType.TensorType.BOOL
             dst_dtype_torch = torch.bool
             ne_tensor: circle.Tensor.TensorT = self.graph.add_tensor_from_scratch(
-                prefix=f"{input.name}_ne", shape=input_shape, dtype=dst_dtype_circle
+                prefix=f"{input.name}_ne",
+                shape=input_shape,
+                dtype=dst_dtype_circle,
+                source_node=input,
             )
             ne_node = self.define_ne_node(
                 [input_tensor, torch.Tensor([0]).to(dtype_torch)], [ne_tensor]

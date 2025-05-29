@@ -47,7 +47,7 @@ class ReciprocalVisitor(NodeVisitor):
         input = args.input
 
         input_tensor = torch.tensor(1, dtype=extract_torch_dtype(input))
-        x = self.graph.add_const_tensor(input_tensor)
+        x = self.graph.add_const_tensor(input_tensor, source_node=node)
         inputs = [x, input]
         outputs = [node]
 

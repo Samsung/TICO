@@ -65,7 +65,10 @@ class Log1pVisitor(NodeVisitor):
         input_shape = list(extract_shape(input))
         dst_dtype_circle = extract_circle_dtype(input)
         add_tensor: circle.Tensor.TensorT = self.graph.add_tensor_from_scratch(
-            prefix=f"{input.name}_add", shape=input_shape, dtype=dst_dtype_circle
+            prefix=f"{input.name}_add",
+            shape=input_shape,
+            dtype=dst_dtype_circle,
+            source_node=node,
         )
         const_one = torch.tensor([1]).to(extract_torch_dtype(input))
 

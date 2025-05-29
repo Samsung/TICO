@@ -63,7 +63,10 @@ class CumsumVisitor(NodeVisitor):
             cast_name = f"{input.name}_cast"
             cast_dtype = circle.TensorType.TensorType.INT64
             cast_tensor = self.graph.add_tensor_from_scratch(
-                prefix=cast_name, dtype=cast_dtype, shape=input_shape
+                prefix=cast_name,
+                dtype=cast_dtype,
+                shape=input_shape,
+                source_node=node,
             )
             cast_operator = create_builtin_operator(
                 self.graph, cast_op_index, [input], [cast_tensor]

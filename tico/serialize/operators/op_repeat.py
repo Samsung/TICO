@@ -76,6 +76,7 @@ class RepeatVisitor(NodeVisitor):
                         prefix=f"{node.name}_concat_{idx}",
                         shape=repeated_shape,
                         dtype=tensor_dtype,
+                        source_node=node,
                     )
                 inputs = [concat_input] * r
                 if repeat_dim_cnt == 1:

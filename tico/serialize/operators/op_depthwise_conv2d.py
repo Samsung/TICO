@@ -171,6 +171,7 @@ class DepthwiseConv2dVisitor(NodeVisitor):
                 prefix=f"{node.name}_input_pad_output",
                 shape=pad_output_shape,
                 dtype=input_dtype,
+                source_node=node,
             )
             # CirclePad
             pad_operator = define_pad_node(

@@ -42,7 +42,10 @@ class BasePowVisitor(NodeVisitor):
         cast_name = f"{node.name}_cast"
         cast_dtype = circle.TensorType.TensorType.FLOAT32
         cast_tensor = self.graph.add_tensor_from_scratch(
-            prefix=cast_name, dtype=cast_dtype, shape=node_shape
+            prefix=cast_name,
+            dtype=cast_dtype,
+            shape=node_shape,
+            source_node=node,
         )
         cast_operator = create_builtin_operator(
             self.graph, op_index, [node], [cast_tensor]
