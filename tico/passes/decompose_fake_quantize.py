@@ -35,6 +35,8 @@ def get_quant_type(min: int, max: int) -> torch.dtype:
         return torch.uint8
     if min == 0 and max == 255:
         return torch.uint8
+    if min == 0 and max == 15:
+        return torch.uint8
     if min == -32768 and max == 32767:
         return torch.int16
     if min == -32767 and max == 32767:
