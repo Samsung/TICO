@@ -14,7 +14,7 @@
 
 import unittest
 
-from tico.utils.utils import get_quant_dtype
+from tico.utils.utils import broadcastable, get_quant_dtype
 
 
 class TestGetQuantDtype(unittest.TestCase):
@@ -35,3 +35,38 @@ class TestGetQuantDtype(unittest.TestCase):
             get_quant_dtype(256, 512)
         with self.assertRaises(ValueError):
             get_quant_dtype(-32768, 32768)
+
+
+class BroadcastableTest(unittest.TestCase):
+    def test_true_cases(self):
+        true_pairs = [
+            # identical
+            ([4, 8, 16], [4, 8, 16]),
+            # trailing singleton
+            ([4, 8, 16], [4, 8, 1]),
+            # head & tail singleton
+            ([4, 8, 1], [1, 8, 1]),
+            # rank-mismatch, typical bias broadcast
+            ([32, 64, 64], [32, 1, 64]),
+            # rank-mismatch, leading dims implicit
+            ([8, 16, 32], [16, 32]),  # (1, 16, 32)
+            ([8, 16, 32], [1, 32]),  # (1, 1, 32)
+            ([8, 16, 32], [32]),  # (1, 1, 32)
+        ]
+        for a, b in true_pairs:
+            with self.subTest(shape_a=a, shape_b=b):
+                self.assertTrue(broadcastable(a, b))
+
+    def test_false_cases(self):
+        false_pairs = [
+            # mismatch in non-singleton dim
+            ([4, 8, 16], [4, 7, 16]),
+            # trailing dim mismatch
+            ([4, 8, 16], [4, 8, 32]),
+            # rank-mismatch but incompatible
+            ([4, 8, 16], [4, 4]),  # align (8 vs 4)
+            ([4, 8, 16, 2], [4, 8, 16]),  # align first diff 2 vs 1
+        ]
+        for a, b in false_pairs:
+            with self.subTest(shape_a=a, shape_b=b):
+                self.assertFalse(broadcastable(a, b))

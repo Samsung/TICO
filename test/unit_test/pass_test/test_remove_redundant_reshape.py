@@ -149,6 +149,53 @@ class RemoveRedundantReshapePattern3Test(SinglePassValueTest):
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
 
 
+class RedundantReshapePattern3Broadcasted(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, y):
+        # AxBxC -> 1xAxBxC
+        x_reshape = torch.reshape(x, [1, *x.size()])
+        y_reshape = torch.reshape(y, [1, *y.size()])
+        # add
+        add = torch.add(x_reshape, y_reshape)
+        # softmax
+        softmax = torch.softmax(add, dim=3)
+        # 1xAxBxC -> AxBxC
+        reshape = torch.reshape(softmax, y.size())
+        return reshape
+
+    def get_example_inputs(self):
+        return (torch.randn(16, 1, 64), torch.randn(16, 64, 64))
+
+
+class RemoveRedundantReshapePattern3BroadcastedTest(SinglePassValueTest):
+    def test_pass(self):
+        self.setup(RedundantReshapePattern3Broadcasted())
+
+        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
+            self.run_value_test(ConvertLayoutOpToReshape())
+
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
+
+        for node in self.exported_program().graph.nodes:
+            if not node.op == "call_function":
+                continue
+
+        from tico.utils.utils import SuppressWarning
+
+        # torch.ops.aten.softmax.int -> torch.ops.aten._softmax.default
+        with SuppressWarning(UserWarning, ".*quantize_per_tensor"):
+            # Warning details:
+            #   ...site-packages/torch/_subclasses/functional_tensor.py:364
+            #   UserWarning: At pre-dispatch tracing, we assume that any custom op marked with
+            #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
+            self.ep = self.exported_program().run_decompositions()
+
+        self.run_value_test(RemoveRedundantReshapePattern3())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
+
+
 class RedundantReshapePattern4(torch.nn.Module):
     def __init__(self):
         super().__init__()

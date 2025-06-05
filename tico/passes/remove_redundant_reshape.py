@@ -24,11 +24,12 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import set_new_meta_val
+from tico.utils.utils import broadcastable, set_new_meta_val
 from tico.utils.validate_args_kwargs import (
     AddTensorArgs,
     PermuteArgs,
     ReshapeArgs,
+    SafeSoftmaxArgs,
     SoftmaxArgs,
 )
 
@@ -253,15 +254,14 @@ class RemoveRedundantReshapePattern3(PassBase):
                 continue
             if not softmax.target in ops.aten.softmax:
                 continue
-            softmax_args = SoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type]
-            add, softmax_dim, softmax_half_to_float = (
+            if softmax.target == torch.ops.aten._softmax.default:
+                softmax_args = SoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type, assignment]
+            elif softmax.target == torch.ops.aten._safe_softmax.default:
+                softmax_args = SafeSoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type, assignment]
+            add, softmax_dim = (
                 softmax_args.input,
                 softmax_args.dim,
-                softmax_args.half_to_float,
             )
-            assert isinstance(add, torch.fx.Node), type(add)
-            assert isinstance(softmax_dim, int), type(softmax_dim)
-            assert isinstance(softmax_half_to_float, bool), type(softmax_half_to_float)
             softmax_shape = extract_shape(softmax)
             # TODO support other dimension
             if softmax_dim != -1 and softmax_dim != len(softmax_shape) - 1:
@@ -295,10 +295,13 @@ class RemoveRedundantReshapePattern3(PassBase):
             # Check condition
             reshape_2_input_shape = extract_shape(reshape_2_input)
             reshape_3_input_shape = extract_shape(reshape_3_input)
-            if reshape_2_input_shape != reshape_3_input_shape:
+            if not broadcastable(reshape_2_input_shape, reshape_3_input_shape):
                 continue
             reshape_1_shape = extract_shape(reshape_1)
-            if reshape_2_input_shape != reshape_1_shape:
+            if (
+                reshape_2_input_shape != reshape_1_shape
+                and reshape_3_input_shape != reshape_1_shape
+            ):
                 continue
             # Assume `aten.add` and `aten.softmax` have only one user.
             if len(add.users) != 1:
@@ -311,8 +314,7 @@ class RemoveRedundantReshapePattern3(PassBase):
             set_new_meta_val(add)
             # Update softmax
             if softmax_dim == len(softmax_shape) - 1:
-                updated_dim = len(extract_shape(reshape_2_input)) - 1
-                softmax.args = (add, updated_dim, softmax_half_to_float)
+                softmax.update_arg(1, -1)  # (index, last_dim)
             set_new_meta_val(softmax)
 
             reshape_1.replace_all_uses_with(softmax, propagate_meta=False)
