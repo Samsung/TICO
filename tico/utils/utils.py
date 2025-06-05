@@ -17,6 +17,7 @@ import subprocess
 import typing
 import warnings
 from functools import wraps
+from typing import List
 
 import torch
 from circle_schema import circle
@@ -341,3 +342,39 @@ def get_quant_dtype(qmin: int, qmax: int):
         return known_ranges[(qmin, qmax)]
     else:
         raise ValueError(f"Unsupported quantization range: ({qmin}, {qmax})")
+
+
+def broadcastable(
+    shape_a: List[int] | torch.Size, shape_b: List[int] | torch.Size
+) -> bool:
+    """
+    Return **True** if two shapes are broadcast-compatible under the standard
+    NumPy/PyTorch rules.
+
+    Broadcasting rule
+    --------------------------------
+    - Align the shapes **right-to-left**.
+    - For each aligned dimension `(a, b)` one of the following must hold
+      - `a == b`  (sizes match)
+      - `a == 1`  (shape-A can repeat along that dim)
+      - `b == 1`  (shape-B can repeat along that dim)
+    - When one shape is shorter, treat its missing leading dims as `1`.
+
+    Examples
+    --------
+    >>> _broadcastable([8, 16, 32], [16, 32])
+    True
+    >>> _broadcastable([8, 16, 32], [1, 32])
+    True
+    >>> _broadcastable([8, 16, 32], [8, 32, 16])
+    False
+    """
+    # Walk from the last dim to the front
+    len_a, len_b = len(shape_a), len(shape_b)
+    max_len = max(len_a, len_b)
+    for i in range(1, max_len + 1):
+        dim_a = shape_a[-i] if i <= len_a else 1
+        dim_b = shape_b[-i] if i <= len_b else 1
+        if dim_a != 1 and dim_b != 1 and dim_a != dim_b:
+            return False
+    return True
