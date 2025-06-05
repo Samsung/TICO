@@ -25,7 +25,12 @@ from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import set_new_meta_val
-from tico.utils.validate_args_kwargs import ReshapeArgs
+from tico.utils.validate_args_kwargs import (
+    AddTensorArgs,
+    PermuteArgs,
+    ReshapeArgs,
+    SoftmaxArgs,
+)
 
 
 def passes():
@@ -70,8 +75,8 @@ class RemoveRedundantReshapePattern1(PassBase):
             # Assumes that other node do not use ops in the pattern for simplisity.
             if len(reshape1.users) != 1:
                 continue
-            assert len(reshape1.args) == 2, len(reshape1.args)
-            reshape1_input, reshape1_size = reshape1.args
+            reshape1_args = ReshapeArgs(*reshape1.args, **reshape1.kwargs)  # type: ignore[arg-type]
+            reshape1_input, reshape1_size = reshape1_args.input, reshape1_args.size
             # `(AxBxC) - aten.reshape` - (1xAxBxC)
             if [1] + list(extract_shape(reshape1_input)) != list(
                 extract_shape(reshape1)
@@ -84,8 +89,8 @@ class RemoveRedundantReshapePattern1(PassBase):
                 continue
             if len(permute.users) != 1:
                 continue
-            assert len(permute.args) == 2, len(permute.args)
-            permute_input, permute_dims = permute.args
+            permute_args = PermuteArgs(*permute.args, **permute.kwargs)  # type: ignore[arg-type]
+            permute_input, permute_dims = permute_args.input, permute_args.dims
             # (1xAxBxC) - `aten.permute` - (1xAxCxB)
             if permute_dims != [0, 1, 3, 2]:
                 continue
@@ -103,7 +108,8 @@ class RemoveRedundantReshapePattern1(PassBase):
                 continue
             if len(reshape2.users) != 1:
                 continue
-            reshape2_input, reshape2_size = reshape2.args
+            reshape2_args = ReshapeArgs(*reshape2.args, **reshape2.kwargs)  # type: ignore[arg-type]
+            reshape2_input, reshape2_size = reshape2_args.input, reshape2_args.size
             # (1xAxCxB) - `aten.reshape - (AxCxB)
             if list(extract_shape(reshape2_input)) != [1] + list(
                 extract_shape(reshape2)
@@ -154,8 +160,8 @@ class RemoveRedundantReshapePattern2(PassBase):
                 continue
             if len(reshape1.users) != 1:
                 continue
-            assert len(reshape1.args) == 2, len(reshape1.args)
-            reshape1_input, reshape1_size = reshape1.args
+            reshape1_args = ReshapeArgs(*reshape1.args, **reshape1.kwargs)  # type: ignore[arg-type]
+            reshape1_input, reshape1_size = reshape1_args.input, reshape1_args.size
             # `(AxBxC) - aten.reshape` - (1xAxBxC)
             if [1] + list(extract_shape(reshape1_input)) != list(
                 extract_shape(reshape1)
@@ -168,8 +174,8 @@ class RemoveRedundantReshapePattern2(PassBase):
                 continue
             if len(permute.users) != 1:
                 continue
-            assert len(permute.args) == 2, len(permute.args)
-            permute_input, permute_dims = permute.args
+            permute_args = PermuteArgs(*permute.args, **permute.kwargs)  # type: ignore[arg-type]
+            permute_input, permute_dims = permute_args.input, permute_args.dims
             # (1xAxBxC) - `aten.permute` - (Bx1xAxC)
             if permute_dims != [2, 0, 1, 3]:
                 continue
@@ -180,7 +186,8 @@ class RemoveRedundantReshapePattern2(PassBase):
                 continue
             if len(reshape2.users) != 1:
                 continue
-            reshape2_input, reshape2_size = reshape2.args
+            reshape2_args = ReshapeArgs(*reshape2.args, **reshape2.kwargs)  # type: ignore[arg-type]
+            reshape2_input, reshape2_size = reshape2_args.input, reshape2_args.size
             # (Bx1xAxC) - `aten.reshape - (Bx(A*C))
             reshape2_input_shape = list(extract_shape(reshape2_input))
             assert len(reshape2_input_shape) == 4
@@ -237,8 +244,8 @@ class RemoveRedundantReshapePattern3(PassBase):
                 continue
             if not reshape_1.target in ops.aten.reshape:
                 continue
-            assert len(reshape_1.args) == 2, len(reshape_1.args)
-            softmax, reshape_1_size = reshape_1.args
+            reshape_1_args = ReshapeArgs(*reshape_1.args, **reshape_1.kwargs)  # type: ignore[arg-type]
+            softmax, reshape_1_size = reshape_1_args.input, reshape_1_args.size
 
             # softmax
             assert isinstance(softmax, torch.fx.Node), type(softmax)
@@ -246,8 +253,12 @@ class RemoveRedundantReshapePattern3(PassBase):
                 continue
             if not softmax.target in ops.aten.softmax:
                 continue
-            assert len(softmax.args) == 3, len(softmax.args)
-            add, softmax_dim, softmax_half_to_float = softmax.args
+            softmax_args = SoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type]
+            add, softmax_dim, softmax_half_to_float = (
+                softmax_args.input,
+                softmax_args.dim,
+                softmax_args.half_to_float,
+            )
             assert isinstance(add, torch.fx.Node), type(add)
             assert isinstance(softmax_dim, int), type(softmax_dim)
             assert isinstance(softmax_half_to_float, bool), type(softmax_half_to_float)
@@ -259,8 +270,8 @@ class RemoveRedundantReshapePattern3(PassBase):
             # add
             if not add.target in ops.aten.add:
                 continue
-            assert len(add.args) == 2, len(add.args)
-            reshape_2, reshape_3 = add.args
+            add_args = AddTensorArgs(*add.args, **add.kwargs)  # type: ignore[arg-type]
+            reshape_2, reshape_3 = add_args.input, add_args.other
             assert isinstance(reshape_2, torch.fx.Node), type(reshape_2)
             assert isinstance(reshape_3, torch.fx.Node), type(reshape_3)
 
@@ -269,16 +280,16 @@ class RemoveRedundantReshapePattern3(PassBase):
                 continue
             if not reshape_2.target in ops.aten.reshape:
                 continue
-            assert len(reshape_2.args) == 2, len(reshape_2.args)
-            reshape_2_input, reshape_2_size = reshape_2.args
+            reshape_2_args = ReshapeArgs(*reshape_2.args, **reshape_2.kwargs)  # type: ignore[arg-type]
+            reshape_2_input, reshape_2_size = reshape_2_args.input, reshape_2_args.size
             assert isinstance(reshape_2_input, torch.fx.Node), type(reshape_2_input)
             # reshape_3
             if not reshape_3.op == "call_function":
                 continue
             if not reshape_3.target in ops.aten.reshape:
                 continue
-            assert len(reshape_3.args) == 2, len(reshape_3.args)
-            reshape_3_input, reshape_3_size = reshape_3.args
+            reshape_3_args = ReshapeArgs(*reshape_3.args, **reshape_3.kwargs)  # type: ignore[arg-type]
+            reshape_3_input, reshape_3_size = reshape_3_args.input, reshape_3_args.size
             assert isinstance(reshape_3_input, torch.fx.Node), type(reshape_3_input)
 
             # Check condition
@@ -342,9 +353,8 @@ class RemoveRedundantReshapePattern4(PassBase):
                 continue
             if not reshape1.target in ops.aten.reshape:
                 continue
-            assert len(reshape1.args) == 2, len(reshape1.args)
-
-            reshape1_input, size = list(reshape1.args)
+            reshape1_args = ReshapeArgs(*reshape1.args, **reshape1.kwargs)  # type: ignore[arg-type]
+            reshape1_input, size = reshape1_args.input, reshape1_args.size
             assert isinstance(reshape1_input, torch.fx.Node), type(reshape1_input)
             assert isinstance(size, list), type(size)
             for s in size:
@@ -359,9 +369,9 @@ class RemoveRedundantReshapePattern4(PassBase):
                 continue
             if not reshape2.target in ops.aten.reshape:
                 continue
-            assert len(reshape2.args) == 2, len(reshape2.args)
+            reshape2_args = ReshapeArgs(*reshape2.args, **reshape2.kwargs)  # type: ignore[arg-type]
 
-            reshape2_input, reshape2_size = list(reshape2.args)
+            reshape2_input, reshape2_size = reshape2_args.input, reshape2_args.size
             assert isinstance(reshape2_input, torch.fx.Node), type(reshape2_input)
             assert isinstance(reshape2_size, list), type(reshape2_size)
             for s in reshape2_size:
@@ -411,7 +421,7 @@ class RemoveRedundantReshapePattern5(PassBase):
             if not node.target in ops.aten.reshape:
                 continue
 
-            args = ReshapeArgs(*node.args)
+            args = ReshapeArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
             output_shape = args.size
             input_shape = list(extract_shape(args.input))
 
