@@ -54,7 +54,10 @@ class AtenOps:
         self.reshape = [torch.ops.aten.reshape.default]
         self.select = [torch.ops.aten.select_copy.int, torch.ops.aten.select.int]
         self.slice = [torch.ops.aten.slice.Tensor, torch.ops.aten.slice_copy.Tensor]
-        self.softmax = [torch.ops.aten._softmax.default]
+        self.softmax = [
+            torch.ops.aten._softmax.default,
+            torch.ops.aten._safe_softmax.default,
+        ]
         self.squeeze = [torch.ops.aten.squeeze.dims, torch.ops.aten.squeeze_copy.dims]
         self.to_copy = [
             torch.ops.aten._to_copy.default,
