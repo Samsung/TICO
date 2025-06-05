@@ -230,6 +230,7 @@ def get_module_name_chain(node: Optional[torch.fx.Node]) -> str:
     stack = node.meta.get("nn_module_stack")
     if stack:
         assert isinstance(stack, dict)
-        return "/".join(f"{name}" for name, _ in stack.values())
+        # Retrieving the last element is enough.
+        return next(reversed(stack.values()))[1]
     else:
         return "unknown"
