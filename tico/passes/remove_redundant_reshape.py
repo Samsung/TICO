@@ -303,6 +303,9 @@ class RemoveRedundantReshapePattern3(PassBase):
                 and reshape_3_input_shape != reshape_1_shape
             ):
                 continue
+            # Make sure the softmax axis length is unchanged.
+            if softmax_shape[-1] != reshape_1_shape[-1]:
+                continue
             # Assume `aten.add` and `aten.softmax` have only one user.
             if len(add.users) != 1:
                 continue
