@@ -126,8 +126,6 @@ class RemoveRedundantReshapePattern3Test(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantReshapePattern3())
 
-        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
-
         from tico.utils.utils import SuppressWarning
 
         # torch.ops.aten.softmax.int -> torch.ops.aten._softmax.default
@@ -138,6 +136,7 @@ class RemoveRedundantReshapePattern3Test(SinglePassValueTest):
             #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
             self.ep = self.exported_program().run_decompositions()
         self.run_value_test(ConvertLayoutOpToReshape())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
 
         self.run_value_test(RemoveRedundantReshapePattern3())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
@@ -167,8 +166,6 @@ class RemoveRedundantReshapePattern3BroadcastedTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantReshapePattern3Broadcasted())
 
-        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
-
         from tico.utils.utils import SuppressWarning
 
         # torch.ops.aten.softmax.int -> torch.ops.aten._softmax.default
@@ -179,6 +176,7 @@ class RemoveRedundantReshapePattern3BroadcastedTest(SinglePassValueTest):
             #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
             self.ep = self.exported_program().run_decompositions()
         self.run_value_test(ConvertLayoutOpToReshape())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
 
         self.run_value_test(RemoveRedundantReshapePattern3())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
@@ -206,8 +204,6 @@ class RemoveRedundantReshapePattern3DifferentSoftmaxLengthTest(SinglePassValueTe
     def test_pass(self):
         self.setup(RedundantReshapePattern3DifferentSoftmaxLength())
 
-        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
-
         from tico.utils.utils import SuppressWarning
 
         # torch.ops.aten.softmax.int -> torch.ops.aten._softmax.default
@@ -218,6 +214,7 @@ class RemoveRedundantReshapePattern3DifferentSoftmaxLengthTest(SinglePassValueTe
             #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
             self.ep = self.exported_program().run_decompositions()
         self.run_value_test(ConvertLayoutOpToReshape())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
 
         self.run_value_test(RemoveRedundantReshapePattern3())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
