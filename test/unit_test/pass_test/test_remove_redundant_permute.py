@@ -45,7 +45,7 @@ class RemoveRedundantPermuteTest(SinglePassValueTest):
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.permute), 0)
 
 
-class NonRedundantPermuteNet(torch.nn.Module):
+class RedundantPermuteFusedNet(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
@@ -60,10 +60,14 @@ class NonRedundantPermuteNet(torch.nn.Module):
         return (torch.randn(2, 2, 2),)
 
 
-class NonRemoveRedundantPermuteTest(MultiPassValueTest):
+class RemoveRedundantPermuteFusedTest(MultiPassValueTest):
     def test_pass(self):
-        self.setup(NonRedundantPermuteNet())
+        self.setup(RedundantPermuteFusedNet())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.permute), 2)
 
         self.run_value_test(RemoveRedundantPermutePasses())
-        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.permute), 2)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.permute), 1)
+        for n in self.exported_program().graph.nodes:
+            if n.target == torch.ops.aten.permute.default:
+                self.assertEqual(n.args[1], [2, 0, 1])
+                break

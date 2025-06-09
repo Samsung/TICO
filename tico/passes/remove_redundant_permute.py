@@ -24,6 +24,22 @@ from tico.serialize.circle_mapping import extract_shape, extract_stride
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.validate_args_kwargs import PermuteArgs
+
+
+def _compose_permutation(dims1: list[int], dims2: list[int]):
+    """
+    Compose two permutation vectors.
+
+    Given y = x.permute(dims1) and z = y.permute(dims2),
+    the overall permutation p = dims2 ∘ dims1 is
+
+        p[i] = dims1[dims2[i]]
+    """
+    assert len(dims1) == len(
+        dims2
+    ), f"len(dims1): {len(dims1)}, len(dims2): {len(dims2)}"
+    return [dims1[i] for i in dims2]
 
 
 def passes():
@@ -45,9 +61,13 @@ class RemoveRedundantPermutePattern1(PassBase):
     def call(self, exported_program: ExportedProgram) -> PassResult:
         """
         [BEFORE]
-            (AxBxC) - aten.permute - aten.permute - (AxBxC)
+            (AxBxC) - aten.permute_1 - aten.permute_2 - (OUT_SHAPE)
         [AFTER]
-            (AxBxC)
+            if OUT_SHAPE == (AxBxC):
+                (AxBxC)
+            else:
+                (AxBxC) - aten.permute (fused dims) - (OUT_SHAPE)
+
         """
         logger = logging.getLogger(__name__)
 
@@ -61,39 +81,37 @@ class RemoveRedundantPermutePattern1(PassBase):
                 continue
             if len(permute2.users) != 1:
                 continue
-            assert len(permute2.args) == 2
-            permute1, permute2_dims = permute2.args
-            assert isinstance(permute1, torch.fx.Node), type(permute1)
-            assert isinstance(permute2_dims, list), type(permute2_dims)
-            for dim in permute2_dims:
-                assert isinstance(dim, int), type(dim)
+            permute_args = PermuteArgs(*permute2.args, **permute2.kwargs)  # type: ignore[arg-type]
+            permute1, permute2_dims = permute_args.input, permute_args.dims
 
             if not permute1.target in ops.aten.permute:
                 continue
             if len(permute1.users) != 1:
                 continue
-            assert len(permute1.args) == 2
-            permute1_input, permute1_dims = permute1.args
-            assert isinstance(permute1_input, torch.fx.Node), type(permute1_input)
-            assert isinstance(permute1_dims, list), type(permute1_dims)
-            for dim in permute1_dims:
-                assert isinstance(dim, int), type(dim)
+            permute1_args = PermuteArgs(*permute1.args, **permute1.kwargs)  # type: ignore[arg-type]
+            permute1_input, permute1_dims = permute1_args.input, permute1_args.dims
 
-            # shape
-            permute1_input_shape = extract_shape(permute1_input)
-            permute2_shape = extract_shape(permute2)
-            if permute1_input_shape != permute2_shape:
-                continue
-            # stride
-            permute1_input_stride = extract_stride(permute1_input)
-            permute2_stride = extract_stride(permute2)
-            if permute1_input_stride != permute2_stride:
-                continue
+            fused_dims = _compose_permutation(permute1_dims, permute2_dims)
+            identity = list(range(len(fused_dims)))
 
-            permute2.replace_all_uses_with(permute1_input, propagate_meta=False)
+            if fused_dims == identity:
+                # shape
+                permute1_input_shape = extract_shape(permute1_input)
+                permute2_shape = extract_shape(permute2)
+                if permute1_input_shape != permute2_shape:
+                    continue
 
+                permute2.replace_all_uses_with(permute1_input, propagate_meta=False)
+                logger.debug(f"{permute1.name} and {permute2.name} are removed.")
+            else:
+                with graph.inserting_after(permute2):
+                    new_args = (permute1_input, fused_dims)
+                    fused_permute = graph.call_function(
+                        torch.ops.aten.permute.default, args=new_args
+                    )
+                    permute2.replace_all_uses_with(fused_permute, propagate_meta=True)
+                    logger.debug(f"{permute1.name} and {permute2.name} are fused.")
             modified = True
-            logger.debug(f"{permute1.name} and {permute2.name} are removed.")
 
         graph.eliminate_dead_code()
         graph.lint()
