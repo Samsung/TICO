@@ -81,8 +81,8 @@ class RemoveRedundantPermutePattern1(PassBase):
                 continue
             if len(permute2.users) != 1:
                 continue
-            permute_args = PermuteArgs(*permute2.args, **permute2.kwargs)  # type: ignore[arg-type]
-            permute1, permute2_dims = permute_args.input, permute_args.dims
+            permute2_args = PermuteArgs(*permute2.args, **permute2.kwargs)  # type: ignore[arg-type]
+            permute1, permute2_dims = permute2_args.input, permute2_args.dims
 
             if not permute1.target in ops.aten.permute:
                 continue
@@ -98,8 +98,7 @@ class RemoveRedundantPermutePattern1(PassBase):
                 # shape
                 permute1_input_shape = extract_shape(permute1_input)
                 permute2_shape = extract_shape(permute2)
-                if permute1_input_shape != permute2_shape:
-                    continue
+                assert permute1_input_shape == permute2_shape
 
                 permute2.replace_all_uses_with(permute1_input, propagate_meta=False)
                 logger.debug(f"{permute1.name} and {permute2.name} are removed.")
