@@ -378,3 +378,31 @@ def broadcastable(
         if dim_a != 1 and dim_b != 1 and dim_a != dim_b:
             return False
     return True
+
+
+def is_single_use_target_node(
+    node: torch.fx.Node, target_ops: list[torch._ops.OpOverload] | torch._ops.OpOverload
+):
+    """
+    Check whether a given node is a `call_function` node that matches one of the specified targets
+    and is used by only one other node.
+
+    Args:
+        node (torch.fx.Node): The node to check.
+        target_ops (Iterable[Callable]): A list or set of target operations to match (e.g., ops.aten.reshape).
+
+    Returns:
+        bool: True if the node is a call_function, its target is in `target_ops`, and it has exactly one user.
+    """
+    if not isinstance(target_ops, list):
+        target_ops = [target_ops]
+    assert all(isinstance(t, torch._ops.OpOverload) for t in target_ops), target_ops
+
+    if node.op != "call_function":
+        return False
+    if node.target not in target_ops:
+        return False
+    if len(node.users) != 1:
+        return False
+
+    return True
