@@ -45,7 +45,7 @@ class FuseLeadingUnsqueezeReshape(PassBase):
     [BEFORE]
         x - aten.reshape(s1) - aten.permute(p) - aten.reshape([1]*k + p(s1))
     [AFTER]
-        x - aten.reshape([1]*k + s1) - aten.permute([d+k for d in p])
+        x - aten.reshape([1]*k + s1) - aten.permute(list(range(k)) + [d+k for d in p])
     """
 
     def call(self, ep: ExportedProgram) -> PassResult:
@@ -55,7 +55,10 @@ class FuseLeadingUnsqueezeReshape(PassBase):
         graph = gm.graph
         modified = False
         for reshape_back in graph.nodes:
-            if not is_single_use_target_node(reshape_back, ops.aten.reshape):
+            if (
+                reshape_back.op != "call_function"
+                or reshape_back.target not in ops.aten.reshape
+            ):
                 continue
             reshape_back_args = ReshapeArgs(*reshape_back.args, **reshape_back.kwargs)  # type: ignore[arg-type]
             permute, reshape_back_size = reshape_back_args.input, reshape_back_args.size

@@ -45,3 +45,29 @@ class LeadingUnsqueezeReshapeNetTest(SinglePassValueTest):
         self.run_value_test(FuseLeadingUnsqueezeReshape())
         self.assertEqual(num_of_ops(self.exported_program(), aten.reshape), 1)
         self.assertEqual(num_of_ops(self.exported_program(), aten.permute), 1)
+
+
+class LeadingUnsqueezeReshapeNet2k(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        y = torch.reshape(x, shape=(20, 8, 64))
+        z = torch.permute(y, dims=(1, 0, 2))
+        k = torch.reshape(z, shape=(1, 1, 8, 20, 64))
+        return k
+
+    def get_example_inputs(self):
+        return (torch.randn(20, 1, 512),)
+
+
+class LeadingUnsqueezeReshapeNet2kTest(SinglePassValueTest):
+    def test_pass(self):
+        self.setup(LeadingUnsqueezeReshapeNet2k())
+        self.run_value_test(ConvertLayoutOpToReshape())
+        self.assertEqual(num_of_ops(self.exported_program(), aten.reshape), 2)
+        self.assertEqual(num_of_ops(self.exported_program(), aten.permute), 1)
+
+        self.run_value_test(FuseLeadingUnsqueezeReshape())
+        self.assertEqual(num_of_ops(self.exported_program(), aten.reshape), 1)
+        self.assertEqual(num_of_ops(self.exported_program(), aten.permute), 1)
