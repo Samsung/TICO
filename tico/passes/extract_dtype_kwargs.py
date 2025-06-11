@@ -23,6 +23,7 @@ from torch.utils import _pytree as pytree
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 
 
 def _extract_to_output(node: torch.fx.Node, graph: torch.fx.Graph) -> bool:
@@ -107,7 +108,7 @@ class ExtractDtypeKwargsPass(PassBase):
         graph: torch.fx.Graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function" or node.target not in self.target_ops:
+            if not is_target_node(node, list(self.target_ops.keys())):
                 continue
             if "dtype" not in node.kwargs:
                 continue

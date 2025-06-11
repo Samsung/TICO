@@ -25,6 +25,7 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import (
     AvgPool2dArgs,
     Conv2DArgs,
@@ -363,11 +364,9 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, list(target_to_legalize_func.keys())):
                 continue
 
-            if node.target not in target_to_legalize_func:
-                continue
             modified |= target_to_legalize_func[node.target](exported_program, node)
 
         graph.eliminate_dead_code()

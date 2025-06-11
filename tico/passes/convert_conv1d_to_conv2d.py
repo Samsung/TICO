@@ -24,6 +24,7 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import Conv1DArgs
 
 
@@ -131,17 +132,15 @@ class ConvertConv1dToConv2d(PassBase):
         return modified
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
-        target_conv_op = (torch.ops.aten.conv1d.default, torch.ops.aten.conv1d.padding)
+        target_conv_op = [torch.ops.aten.conv1d.default, torch.ops.aten.conv1d.padding]
 
         graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, target_conv_op):
                 continue
 
-            if node.target not in target_conv_op:
-                continue
             modified |= self.convert(exported_program, node)
 
         graph.eliminate_dead_code()

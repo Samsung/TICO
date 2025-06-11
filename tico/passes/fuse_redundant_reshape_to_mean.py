@@ -25,6 +25,7 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 
 
 @trace_graph_diff_on_pass
@@ -45,10 +46,7 @@ class FuseRedundantReshapeToMean(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if node.target != torch.ops.aten.mean.dim:
+            if not is_target_node(node, torch.ops.aten.mean.dim):
                 continue
 
             # If mean is being used in other nodes, do not fuse it.
@@ -56,7 +54,7 @@ class FuseRedundantReshapeToMean(PassBase):
                 continue
 
             user_node = next(iter(node.users))
-            if user_node.target not in ops.aten.reshape:
+            if not is_target_node(user_node, ops.aten.reshape):
                 continue
 
             mean_args, mean_kwargs = pytree.tree_map_only(

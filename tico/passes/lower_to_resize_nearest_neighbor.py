@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
-from typing import Optional
-
 import torch
 from torch.export import ExportedProgram
 
@@ -26,6 +24,7 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import IndexArgs, UpsampleNearest2DVecArgs
 
 
@@ -194,13 +193,10 @@ class LowerToResizeNearestNeighbor(PassBase):
         graph_module = exported_program.graph_module
         graph = graph_module.graph
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if node.target not in [
-                torch.ops.aten.index.Tensor,
-                torch.ops.aten.upsample_nearest2d.vec,
-            ]:
+            if not is_target_node(
+                node,
+                [torch.ops.aten.index.Tensor, torch.ops.aten.upsample_nearest2d.vec],
+            ):
                 continue
 
             resize_nearest_neighbor = None

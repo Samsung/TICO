@@ -17,6 +17,7 @@ from torch.export import ExportedProgram
 
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 
 
 assert_node_targets = [
@@ -39,7 +40,7 @@ class RemoveRedundantAssertionNodes(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if node.op == "call_function" and node.target in assert_node_targets:
+            if is_target_node(node, assert_node_targets):
                 graph.erase_node(node)
                 modified = True
 

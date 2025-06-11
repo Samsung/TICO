@@ -25,7 +25,7 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import enforce_type
+from tico.utils.utils import enforce_type, is_target_node
 
 
 @trace_graph_diff_on_pass
@@ -82,9 +82,7 @@ class DecomposeSliceScatter(PassBase):
         modified = False
 
         for node in graph.nodes:
-            if node.op != "call_function":
-                continue
-            if node.target != torch.ops.aten.slice_scatter.default:
+            if not is_target_node(node, torch.ops.aten.slice_scatter.default):
                 continue
 
             @enforce_type

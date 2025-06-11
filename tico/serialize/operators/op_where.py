@@ -52,12 +52,12 @@ class WhereVisitor(NodeVisitor):
 
         result_true_dtype = (
             extract_torch_dtype(input)
-            if isinstance(input, torch.fx.node.Node)
+            if isinstance(input, torch.fx.Node)
             else input.dtype  # type: ignore[union-attr]
         )
         result_false_dtype = (
             extract_torch_dtype(other)
-            if isinstance(other, torch.fx.node.Node)
+            if isinstance(other, torch.fx.Node)
             else other.dtype  # type: ignore[union-attr]
         )
 

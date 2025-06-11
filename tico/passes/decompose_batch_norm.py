@@ -32,7 +32,7 @@ from tico.utils.graph import (
 )
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import fill_meta_val
+from tico.utils.utils import fill_meta_val, is_target_node
 from tico.utils.validate_args_kwargs import NativeBatchNormLegitNoTrainingArgs
 
 
@@ -87,109 +87,107 @@ class DecomposeBatchNorm(PassBase):
         modified = False
 
         for node in graph.nodes:
-            if node.op != "call_function":
+            if not is_target_node(
+                node, torch.ops.aten._native_batch_norm_legit_no_training.default
+            ):
                 continue
 
-            if node.target in [
-                torch.ops.aten._native_batch_norm_legit_no_training.default,
-            ]:
-                args = NativeBatchNormLegitNoTrainingArgs(*node.args)
-                input_ = args.input
-                weight = args.weight
-                bias = args.bias
-                running_mean = args.running_mean
-                running_var = args.running_var
-                eps = args.eps
+            args = NativeBatchNormLegitNoTrainingArgs(*node.args)
+            input_ = args.input
+            weight = args.weight
+            bias = args.bias
+            running_mean = args.running_mean
+            running_var = args.running_var
+            eps = args.eps
 
-                if not running_mean:
-                    raise NotYetSupportedError(
-                        f"running_mean=None is not supported yet"
-                    )
-                if not running_var:
-                    raise NotYetSupportedError(f"running_var=None is not supported yet")
+            if not running_mean:
+                raise NotYetSupportedError(f"running_mean=None is not supported yet")
+            if not running_var:
+                raise NotYetSupportedError(f"running_var=None is not supported yet")
 
-                """
-                Only support the cases generated from torch.nn.BatchNorm2d module,
-                 for which, let's checks if weight and bias are parameters and 
-                 running_mean and running_var are buffers.
-                """
-                if weight and not is_torch_param(weight, exported_program):
-                    continue
-                if bias and not is_torch_param(bias, exported_program):
-                    continue
-                if not is_torch_buffer(running_mean, exported_program):
-                    continue
-                if not is_torch_buffer(running_var, exported_program):
-                    continue
+            """
+            Only support the cases generated from torch.nn.BatchNorm2d module,
+             for which, let's checks if weight and bias are parameters and 
+             running_mean and running_var are buffers.
+            """
+            if weight and not is_torch_param(weight, exported_program):
+                continue
+            if bias and not is_torch_param(bias, exported_program):
+                continue
+            if not is_torch_buffer(running_mean, exported_program):
+                continue
+            if not is_torch_buffer(running_var, exported_program):
+                continue
 
-                input_shape = extract_shape(input_)
-                assert len(input_shape) == 4
-                C = input_shape[1]
+            input_shape = extract_shape(input_)
+            assert len(input_shape) == 4
+            C = input_shape[1]
 
-                weight_value = (
-                    get_torch_param_value(weight, exported_program)
-                    if weight
-                    else torch.tensor([1] * C)
+            weight_value = (
+                get_torch_param_value(weight, exported_program)
+                if weight
+                else torch.tensor([1] * C)
+            )
+            bias_value = (
+                get_torch_param_value(bias, exported_program)
+                if bias
+                else torch.tensor([0] * C)
+            )
+            mean_value = get_torch_buffer_value(running_mean, exported_program)
+            var_value = get_torch_buffer_value(running_var, exported_program)
+
+            assert isinstance(weight_value, torch.Tensor)
+            assert isinstance(bias_value, torch.Tensor)
+            assert isinstance(mean_value, torch.Tensor)
+            assert isinstance(var_value, torch.Tensor)
+
+            assert (
+                weight_value.shape
+                == bias_value.shape
+                == mean_value.shape
+                == var_value.shape
+            )
+            # Calculate constants for mul and add
+            mul_const = weight_value / torch.sqrt(var_value + eps)
+            add_const = bias_value - (mul_const * mean_value)
+            # N, C, H, W
+            assert len(mul_const) == len(add_const) == C
+            # reshape along with channel dimension
+            mul_const = mul_const.view(1, mul_const.shape[0], 1, 1)
+            add_const = add_const.view(1, add_const.shape[0], 1, 1)
+
+            # Placeholder nodes must be the first N nodes in the nodes list of a graph.
+            # Therefore, insert the newly created placeholders at the start of the node list.
+            with exported_program.graph.inserting_before(
+                get_first_user_input(exported_program)
+            ):
+                mul_const_node = add_placeholder(
+                    exported_program,
+                    mul_const,
+                    prefix=f"{node.name}_mul_const",
                 )
-                bias_value = (
-                    get_torch_param_value(bias, exported_program)
-                    if bias
-                    else torch.tensor([0] * C)
+                add_const_node = add_placeholder(
+                    exported_program,
+                    add_const,
+                    prefix=f"{node.name}_add_const",
                 )
-                mean_value = get_torch_buffer_value(running_mean, exported_program)
-                var_value = get_torch_buffer_value(running_var, exported_program)
 
-                assert isinstance(weight_value, torch.Tensor)
-                assert isinstance(bias_value, torch.Tensor)
-                assert isinstance(mean_value, torch.Tensor)
-                assert isinstance(var_value, torch.Tensor)
-
-                assert (
-                    weight_value.shape
-                    == bias_value.shape
-                    == mean_value.shape
-                    == var_value.shape
+            with gm.graph.inserting_before(node):
+                mul = graph.call_function(
+                    torch.ops.aten.mul.Tensor,
+                    args=(input_, mul_const_node),
                 )
-                # Calculate constants for mul and add
-                mul_const = weight_value / torch.sqrt(var_value + eps)
-                add_const = bias_value - (mul_const * mean_value)
-                # N, C, H, W
-                assert len(mul_const) == len(add_const) == C
-                # reshape along with channel dimension
-                mul_const = mul_const.view(1, mul_const.shape[0], 1, 1)
-                add_const = add_const.view(1, add_const.shape[0], 1, 1)
+                add = graph.call_function(
+                    torch.ops.aten.add.Tensor,
+                    args=(mul, add_const_node),
+                )
+                # Not set meta for propagating replacing get_item's meta.
+            get_item, *_ = node.users.keys()
+            get_item.replace_all_uses_with(add, propagate_meta=True)
 
-                # Placeholder nodes must be the first N nodes in the nodes list of a graph.
-                # Therefore, insert the newly created placeholders at the start of the node list.
-                with exported_program.graph.inserting_before(
-                    get_first_user_input(exported_program)
-                ):
-                    mul_const_node = add_placeholder(
-                        exported_program,
-                        mul_const,
-                        prefix=f"{node.name}_mul_const",
-                    )
-                    add_const_node = add_placeholder(
-                        exported_program,
-                        add_const,
-                        prefix=f"{node.name}_add_const",
-                    )
-
-                with gm.graph.inserting_before(node):
-                    mul = graph.call_function(
-                        torch.ops.aten.mul.Tensor,
-                        args=(input_, mul_const_node),
-                    )
-                    add = graph.call_function(
-                        torch.ops.aten.add.Tensor,
-                        args=(mul, add_const_node),
-                    )
-                    # Not set meta for propagating replacing get_item's meta.
-                get_item, *_ = node.users.keys()
-                get_item.replace_all_uses_with(add, propagate_meta=True)
-
-                fill_meta_val(exported_program)
-                modified = True
+            fill_meta_val(exported_program)
+            logger.debug(f"{node.name} is decomposed to {mul.name} and {add.name}")
+            modified = True
 
         gm.graph.eliminate_dead_code()
         gm.graph.lint()

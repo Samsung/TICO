@@ -19,6 +19,7 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import SliceArgs
 
 
@@ -38,10 +39,7 @@ class RemoveRedundantSlice(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if not node.target in ops.aten.slice:
+            if not is_target_node(node, ops.aten.slice):
                 continue
 
             args = SliceArgs(*node.args, **node.kwargs)

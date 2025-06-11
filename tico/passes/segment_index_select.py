@@ -34,6 +34,7 @@ from tico.utils import logging
 from tico.utils.graph import add_placeholder, is_single_value_tensor
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_const_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import IndexSelectArgs
 
 
@@ -78,10 +79,7 @@ class SegmentIndexSelectConst(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if not node.target in ops.aten.index_select:
+            if not is_target_node(node, ops.aten.index_select):
                 continue
 
             args = IndexSelectArgs(*node.args, **node.kwargs)

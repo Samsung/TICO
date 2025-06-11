@@ -22,6 +22,8 @@ from torch.export import ExportedProgram
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
+from tico.utils.validate_args_kwargs import PowTensorScalarArgs
 
 
 @trace_graph_diff_on_pass
@@ -42,15 +44,11 @@ class LowerPow2ToMul(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, torch.ops.aten.pow.Tensor_Scalar):
                 continue
 
-            if node.target != torch.ops.aten.pow.Tensor_Scalar:
-                continue
-
-            assert len(node.args) == 2, len(node.args)
-            in_, exp = node.args
-            assert isinstance(in_, torch.fx.Node), type(in_)
+            args = PowTensorScalarArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+            in_, exp = args.input, args.exponent
 
             if exp != 2:
                 continue

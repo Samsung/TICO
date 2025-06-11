@@ -28,13 +28,12 @@ from torch._export.utils import (
 from torch.export import ExportedProgram
 
 from tico.passes import ops
-
 from tico.serialize.circle_graph import extract_shape
 from tico.utils import logging
-
 from tico.utils.graph import is_single_value_tensor
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_const_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import IndexSelectArgs, SelectCopyIntArgs
 
 
@@ -85,10 +84,7 @@ class LowerSelectCopyToSlice(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if not node.target in ops.aten.select:
+            if not is_target_node(node, ops.aten.select):
                 continue
 
             args = SelectCopyIntArgs(*node.args, **node.kwargs)
@@ -163,11 +159,9 @@ class LowerIndexSelectToSlice(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, ops.aten.index_select):
                 continue
 
-            if not node.target in ops.aten.index_select:
-                continue
             args = IndexSelectArgs(*node.args, **node.kwargs)
             input = args.input
             dim = args.dim

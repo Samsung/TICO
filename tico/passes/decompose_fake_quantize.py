@@ -71,9 +71,9 @@ class DecomposeFakeQuantize(PassBase):
         gm = exported_program.graph_module
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
         for node in gm.graph.nodes:
-            if node.op == "call_function" and node.target in [
-                torch.ops.aten.fake_quantize_per_tensor_affine.default
-            ]:
+            if node.op != "call_function":
+                continue
+            if node.target in [torch.ops.aten.fake_quantize_per_tensor_affine.default]:
                 # tensor, scale, zero_p, quant_min, quant_max
                 assert len(node.args) == 5
                 _, _, _, quant_min, quant_max = node.args
@@ -97,9 +97,7 @@ class DecomposeFakeQuantize(PassBase):
                     node.replace_all_uses_with(dequnt, propagate_meta=True)
                 modified = True
 
-            if node.op == "call_function" and node.target in [
-                torch.ops.aten.fake_quantize_per_channel_affine.default
-            ]:
+            if node.target in [torch.ops.aten.fake_quantize_per_channel_affine.default]:
                 fq_args = FakeQuantizePerChannelArgs(*node.args, **node.kwargs)
                 quant_min = fq_args.quant_min
                 quant_max = fq_args.quant_max

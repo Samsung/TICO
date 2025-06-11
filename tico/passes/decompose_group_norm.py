@@ -25,6 +25,7 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import NativeGroupNormArgs, NativeLayerNormArgs
 
 
@@ -115,13 +116,13 @@ class DecomposeGroupNorm(PassBase):
         modified = False
 
         for node in graph.nodes:
-            if node.op != "call_function":
-                continue
-
-            if node.target not in [
-                torch.ops.aten.native_layer_norm.default,
-                torch.ops.aten.native_group_norm.default,
-            ]:
+            if not is_target_node(
+                node,
+                [
+                    torch.ops.aten.native_layer_norm.default,
+                    torch.ops.aten.native_group_norm.default,
+                ],
+            ):
                 continue
 
             if node.target == torch.ops.aten.native_layer_norm.default:

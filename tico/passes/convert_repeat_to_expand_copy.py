@@ -22,6 +22,8 @@ from torch.export import ExportedProgram
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
+from tico.utils.validate_args_kwargs import RepeatArgs
 
 
 @trace_graph_diff_on_pass
@@ -42,17 +44,11 @@ class ConvertRepeatToExpandCopy(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, torch.ops.aten.repeat.default):
                 continue
 
-            if node.target != torch.ops.aten.repeat.default:
-                continue
-
-            assert len(node.args) == 2
-
-            tensor, repeats = node.args
-            assert isinstance(tensor, torch.fx.Node)
-            assert isinstance(repeats, list)
+            reshape_args = RepeatArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+            tensor, repeats = reshape_args.input, reshape_args.repeats
 
             tensor_shape: List[int] = [int(dim) for dim in tensor.meta["val"].shape]
 

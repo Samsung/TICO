@@ -24,6 +24,8 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
+from tico.utils.validate_args_kwargs import ExpandArgs
 
 
 @trace_graph_diff_on_pass
@@ -42,17 +44,11 @@ class RemoveRedundantExpand(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, ops.aten.expand):
                 continue
 
-            if not node.target in ops.aten.expand:
-                continue
-
-            assert len(node.args) == 2
-
-            input, size = list(node.args)
-            assert isinstance(input, torch.fx.Node), type(input)
-            assert isinstance(size, list), type(size)
+            args = ExpandArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+            input, size = args.input, args.size
 
             input_shape = extract_shape(input)
             if list(input_shape) != size:

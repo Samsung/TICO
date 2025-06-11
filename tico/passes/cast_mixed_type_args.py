@@ -28,7 +28,7 @@ from tico.serialize.circle_mapping import extract_torch_dtype
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import set_new_meta_val
+from tico.utils.utils import is_target_node, set_new_meta_val
 
 
 ops_to_promote = {
@@ -96,10 +96,7 @@ class CastMixedTypeArgs(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if node.target not in ops_to_promote:
+            if not is_target_node(node, list(ops_to_promote.keys())):
                 continue
 
             assert len(node.args) == 2

@@ -18,6 +18,7 @@ from tico.passes import ops
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import CatArgs
 
 
@@ -37,10 +38,7 @@ class MergeConsecutiveCat(PassBase):
         graph = graph_module.graph
         modified = False
         for cat in graph.nodes:
-            if not cat.op == "call_function":
-                continue
-
-            if not cat.target in ops.aten.cat:
+            if not is_target_node(cat, ops.aten.cat):
                 continue
 
             args = CatArgs(*cat.args, **cat.kwargs)  # type: ignore[arg-type]

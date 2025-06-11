@@ -23,6 +23,7 @@ from tico.passes import ops
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 
 
 @trace_graph_diff_on_pass
@@ -51,11 +52,9 @@ class RemoveNop(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, RemoveNop.target_ops):
                 continue
 
-            if not node.target in RemoveNop.target_ops:
-                continue
             # TODO Consider memory format
             if node.target in ops.aten.clone and "memory_format" in node.kwargs:
                 if node.kwargs["memory_format"] not in [

@@ -26,7 +26,8 @@ from tico.utils.trace_decorators import (
     trace_const_diff_on_pass,
     trace_graph_diff_on_pass,
 )
-from tico.utils.utils import set_new_meta_val
+from tico.utils.utils import is_target_node, set_new_meta_val
+from tico.utils.validate_args_kwargs import WhereSelfArgs
 
 
 dtype_ranking = {
@@ -114,69 +115,71 @@ class CastATenWhereArgType(PassBase):
         modified = False
 
         for node in graph.nodes:
-            if node.op == "call_function" and node.target == torch.ops.aten.where.self:
+            if not is_target_node(node, torch.ops.aten.where.self):
+                continue
 
-                assert len(node.args) == 3
-                (
-                    _,
-                    result_true,
-                    result_false,
-                ) = node.args  # first argument is not used
+            where_args = WhereSelfArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+            result_true, result_false = where_args.input, where_args.other
+            if not isinstance(result_true, torch.fx.Node) or not isinstance(
+                result_false, torch.fx.Node
+            ):
+                continue
 
-                ep = exported_program
+            ep = exported_program
+            assert isinstance(result_true, torch.fx.Node)
+            assert isinstance(result_false, torch.fx.Node)
+            if not (
+                result_true.name in ep.graph_signature.inputs_to_buffers
+                and result_false.name in ep.graph_signature.inputs_to_buffers
+            ):
+                continue
 
-                if not (
-                    result_true.name in ep.graph_signature.inputs_to_buffers
-                    and result_false.name in ep.graph_signature.inputs_to_buffers
-                ):
-                    continue
+            # Check if they have different data types
+            true_dtype = extract_torch_dtype(result_true)
+            false_dtype = extract_torch_dtype(result_false)
+            if true_dtype == false_dtype:
+                continue
 
-                # Check if they have different data types
-                true_dtype = extract_torch_dtype(result_true)
-                false_dtype = extract_torch_dtype(result_false)
-                if true_dtype == false_dtype:
-                    continue
+            node_to_dtype = {result_true: true_dtype, result_false: false_dtype}
 
-                node_to_dtype = {result_true: true_dtype, result_false: false_dtype}
+            not_to_cast, to_cast = sort_by_dtype(result_true, result_false)
 
-                not_to_cast, to_cast = sort_by_dtype(result_true, result_false)
+            buf_name_to_data = {name: buf for name, buf in ep.named_buffers()}
+            buf_name = ep.graph_signature.inputs_to_buffers[to_cast.name]
+            buf_data = buf_name_to_data[buf_name]
 
-                buf_name_to_data = {name: buf for name, buf in ep.named_buffers()}
-                buf_name = ep.graph_signature.inputs_to_buffers[to_cast.name]
-                buf_data = buf_name_to_data[buf_name]
+            assert isinstance(buf_data, torch.Tensor)
 
-                assert isinstance(buf_data, torch.Tensor)
+            dtype_to_cast = node_to_dtype[not_to_cast]
 
-                dtype_to_cast = node_to_dtype[not_to_cast]
-
-                if dtype_to_cast == torch.float32:
-                    if not check_if_covered_by_float(buf_data):
-                        raise RuntimeError(
-                            f"{to_cast.name}({buf_data.dtype}) data range is out of {dtype_to_cast} range"
-                        )
-                with graph_module.graph.inserting_after(to_cast):
-                    cast = graph_module.graph.call_function(
-                        torch.ops.aten._to_copy.default,
-                        args=(to_cast,),
-                        kwargs={"dtype": dtype_to_cast},
+            if dtype_to_cast == torch.float32:
+                if not check_if_covered_by_float(buf_data):
+                    raise RuntimeError(
+                        f"{to_cast.name}({buf_data.dtype}) data range is out of {dtype_to_cast} range"
                     )
-                # set new meta["val"] in advance because we will use it below for checking if type promotion is valid.
-                set_new_meta_val(cast)
-                node.update_arg(node.args.index(to_cast), cast)
-
-                # check if type promotion is valid.
-                node_dtype_ori = extract_torch_dtype(node)
-                set_new_meta_val(node)
-                node_dtype = extract_torch_dtype(node)
-                assert (
-                    node_dtype == node_dtype_ori
-                ), f"Type casting doesn't change node's dtype."
-
-                logger.debug(
-                    f"{to_cast.name}'s dtype was casted from {buf_data.dtype} to {dtype_to_cast}"
+            with graph_module.graph.inserting_after(to_cast):
+                cast = graph_module.graph.call_function(
+                    torch.ops.aten._to_copy.default,
+                    args=(to_cast,),
+                    kwargs={"dtype": dtype_to_cast},
                 )
+            # set new meta["val"] in advance because we will use it below for checking if type promotion is valid.
+            set_new_meta_val(cast)
+            node.update_arg(node.args.index(to_cast), cast)
 
-                modified = True
+            # check if type promotion is valid.
+            node_dtype_ori = extract_torch_dtype(node)
+            set_new_meta_val(node)
+            node_dtype = extract_torch_dtype(node)
+            assert (
+                node_dtype == node_dtype_ori
+            ), f"Type casting doesn't change node's dtype."
+
+            logger.debug(
+                f"{to_cast.name}'s dtype was casted from {buf_data.dtype} to {dtype_to_cast}"
+            )
+
+            modified = True
 
         graph.eliminate_dead_code()
         graph.lint()

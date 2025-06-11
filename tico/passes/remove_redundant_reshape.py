@@ -24,7 +24,7 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import broadcastable, set_new_meta_val
+from tico.utils.utils import broadcastable, is_target_node, set_new_meta_val
 from tico.utils.validate_args_kwargs import (
     AddTensorArgs,
     PermuteArgs,
@@ -67,12 +67,10 @@ class RemoveRedundantReshapePattern1(PassBase):
         graph = graph_module.graph
         modified = False
         for reshape1 in graph.nodes:
-            if not reshape1.op == "call_function":
+            ### first reshape
+            if not is_target_node(reshape1, ops.aten.reshape):
                 continue
 
-            ### first reshape
-            if not reshape1.target in ops.aten.reshape:
-                continue
             # Assumes that other node do not use ops in the pattern for simplisity.
             if len(reshape1.users) != 1:
                 continue
@@ -86,7 +84,7 @@ class RemoveRedundantReshapePattern1(PassBase):
 
             ### permute
             permute = next(iter(reshape1.users))
-            if not permute.target in ops.aten.permute:
+            if not is_target_node(permute, ops.aten.permute):
                 continue
             if len(permute.users) != 1:
                 continue
@@ -98,14 +96,14 @@ class RemoveRedundantReshapePattern1(PassBase):
 
             ### mul
             mul = next(iter(permute.users))
-            if not mul.target in RemoveRedundantReshapePattern1.mul_ops:
+            if not is_target_node(mul, RemoveRedundantReshapePattern1.mul_ops):
                 continue
             if len(mul.users) != 1:
                 continue
 
             ### second reshape
             reshape2 = next(iter(mul.users))
-            if not reshape2.target in ops.aten.reshape:
+            if not is_target_node(reshape2, ops.aten.reshape):
                 continue
             if len(reshape2.users) != 1:
                 continue
@@ -153,11 +151,8 @@ class RemoveRedundantReshapePattern2(PassBase):
         graph = graph_module.graph
         modified = False
         for reshape1 in graph.nodes:
-            if not reshape1.op == "call_function":
-                continue
-
             ### first reshape
-            if not reshape1.target in ops.aten.reshape:
+            if not is_target_node(reshape1, ops.aten.reshape):
                 continue
             if len(reshape1.users) != 1:
                 continue
@@ -171,7 +166,7 @@ class RemoveRedundantReshapePattern2(PassBase):
 
             ### permute
             permute = next(iter(reshape1.users))
-            if not permute.target in ops.aten.permute:
+            if not is_target_node(permute, ops.aten.permute):
                 continue
             if len(permute.users) != 1:
                 continue
@@ -183,7 +178,7 @@ class RemoveRedundantReshapePattern2(PassBase):
 
             ### second reshape
             reshape2 = next(iter(permute.users))
-            if not reshape2.target in ops.aten.reshape:
+            if not is_target_node(reshape2, ops.aten.reshape):
                 continue
             if len(reshape2.users) != 1:
                 continue
@@ -239,20 +234,14 @@ class RemoveRedundantReshapePattern3(PassBase):
         graph = graph_module.graph
         modified = False
         for reshape_1 in graph.nodes:
-            assert isinstance(reshape_1, torch.fx.Node), type(reshape_1)
             # reshape_1
-            if not reshape_1.op == "call_function":
-                continue
-            if not reshape_1.target in ops.aten.reshape:
+            if not is_target_node(reshape_1, ops.aten.reshape):
                 continue
             reshape_1_args = ReshapeArgs(*reshape_1.args, **reshape_1.kwargs)  # type: ignore[arg-type]
-            softmax, reshape_1_size = reshape_1_args.input, reshape_1_args.size
+            softmax = reshape_1_args.input
 
             # softmax
-            assert isinstance(softmax, torch.fx.Node), type(softmax)
-            if not softmax.op == "call_function":
-                continue
-            if not softmax.target in ops.aten.softmax:
+            if not is_target_node(softmax, ops.aten.softmax):
                 continue
             if softmax.target == torch.ops.aten._softmax.default:
                 softmax_args = SoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type, assignment]
@@ -354,10 +343,9 @@ class RemoveRedundantReshapePattern4(PassBase):
         modified = False
         for reshape1 in graph.nodes:
             # reshape_1
-            if not reshape1.op == "call_function":
+            if not is_target_node(reshape1, ops.aten.reshape):
                 continue
-            if not reshape1.target in ops.aten.reshape:
-                continue
+
             reshape1_args = ReshapeArgs(*reshape1.args, **reshape1.kwargs)  # type: ignore[arg-type]
             reshape1_input, size = reshape1_args.input, reshape1_args.size
             assert isinstance(reshape1_input, torch.fx.Node), type(reshape1_input)
@@ -370,12 +358,10 @@ class RemoveRedundantReshapePattern4(PassBase):
 
             # reshape_2
             reshape2 = next(iter(reshape1.users))
-            if not reshape2.op == "call_function":
+            if not is_target_node(reshape2, ops.aten.reshape):
                 continue
-            if not reshape2.target in ops.aten.reshape:
-                continue
-            reshape2_args = ReshapeArgs(*reshape2.args, **reshape2.kwargs)  # type: ignore[arg-type]
 
+            reshape2_args = ReshapeArgs(*reshape2.args, **reshape2.kwargs)  # type: ignore[arg-type]
             reshape2_input, reshape2_size = reshape2_args.input, reshape2_args.size
             assert isinstance(reshape2_input, torch.fx.Node), type(reshape2_input)
             assert isinstance(reshape2_size, list), type(reshape2_size)
@@ -420,10 +406,7 @@ class RemoveRedundantReshapePattern5(PassBase):
         modified = False
 
         for node in graph.nodes:
-            if not node.op == "call_function":
-                continue
-
-            if not node.target in ops.aten.reshape:
+            if not is_target_node(node, ops.aten.reshape):
                 continue
 
             args = ReshapeArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]

@@ -22,7 +22,7 @@ from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import is_single_use_target_node
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import PermuteArgs, ReshapeArgs
 
 
@@ -55,20 +55,17 @@ class FuseLeadingUnsqueezeReshape(PassBase):
         graph = gm.graph
         modified = False
         for reshape_back in graph.nodes:
-            if (
-                reshape_back.op != "call_function"
-                or reshape_back.target not in ops.aten.reshape
-            ):
+            if not is_target_node(reshape_back, ops.aten.reshape):
                 continue
             reshape_back_args = ReshapeArgs(*reshape_back.args, **reshape_back.kwargs)  # type: ignore[arg-type]
             permute, reshape_back_size = reshape_back_args.input, reshape_back_args.size
 
-            if not is_single_use_target_node(permute, ops.aten.permute):
+            if not is_target_node(permute, ops.aten.permute):
                 continue
             permute_args = PermuteArgs(*permute.args, **permute.kwargs)  # type: ignore[arg-type]
             reshape_front, permute_dims = permute_args.input, permute_args.dims
 
-            if not is_single_use_target_node(reshape_front, ops.aten.reshape):
+            if not is_target_node(reshape_front, ops.aten.reshape):
                 continue
             reshape_front_args = ReshapeArgs(*reshape_front.args, **reshape_front.kwargs)  # type: ignore[arg-type]
             reshape_front_input, reshape_front_size = (

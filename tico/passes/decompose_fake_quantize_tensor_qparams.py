@@ -202,9 +202,10 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
         gm = exported_program.graph_module
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
         for node in gm.graph.nodes:
+            if node.op != "call_function":
+                continue
             if (
-                node.op == "call_function"
-                and node.target
+                node.target
                 == torch.ops.aten._fake_quantize_per_tensor_affine_cachemask_tensor_qparams.default
             ):
                 # tensor, scale, zero_p, fake_quant_enabled, quant_min, quant_max
@@ -247,8 +248,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                         mask_user.args = ((mask_user.args[0][0],),)
                 modified = True
             if (
-                node.op == "call_function"
-                and node.target
+                node.target
                 == torch.ops.aten.fake_quantize_per_tensor_affine.tensor_qparams
             ):
                 fq_args = FakeQuantizePerTensorTQParamArgs(*node.args, **node.kwargs)

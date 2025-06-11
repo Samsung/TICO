@@ -14,16 +14,18 @@
 
 from typing import TYPE_CHECKING
 
+
 if TYPE_CHECKING:
     import torch.fx
 import torch
 from torch.export import ExportedProgram
 
 from tico.passes import ops
-from tico.serialize.circle_mapping import extract_shape, extract_stride
+from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import PermuteArgs
 
 
@@ -75,16 +77,15 @@ class RemoveRedundantPermutePattern1(PassBase):
         graph = graph_module.graph
         modified = False
         for permute2 in graph.nodes:
-            if not permute2.op == "call_function":
+            if not is_target_node(permute2, ops.aten.permute):
                 continue
-            if not permute2.target in ops.aten.permute:
-                continue
+
             if len(permute2.users) != 1:
                 continue
             permute2_args = PermuteArgs(*permute2.args, **permute2.kwargs)  # type: ignore[arg-type]
             permute1, permute2_dims = permute2_args.input, permute2_args.dims
 
-            if not permute1.target in ops.aten.permute:
+            if not is_target_node(permute1, ops.aten.permute):
                 continue
             if len(permute1.users) != 1:
                 continue

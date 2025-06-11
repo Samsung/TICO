@@ -20,10 +20,10 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.passes import ops
-
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import AddTensorArgs
 
 
@@ -53,13 +53,8 @@ class LegalizeCausalMaskValue(PassBase):
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
-            if not node.op == "call_function":
+            if not is_target_node(node, ops.aten.add):
                 continue
-
-            if not node.target in ops.aten.add:
-                continue
-
-            assert len(node.args) == 2
 
             args = AddTensorArgs(*node.args, **node.kwargs)
             input = args.input

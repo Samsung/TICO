@@ -26,6 +26,7 @@ from tico.utils.errors import InvalidArgumentError, NotYetSupportedError
 from tico.utils.graph import add_placeholder
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import Conv2DArgs
 
 
@@ -88,9 +89,7 @@ class DecomposeGroupedConv2d(PassBase):
         modified = False
 
         for node in graph.nodes:
-            if node.op != "call_function":
-                continue
-            if not node.target in ops.aten.conv2d:
+            if not is_target_node(node, ops.aten.conv2d):
                 continue
 
             args = Conv2DArgs(*node.args)
