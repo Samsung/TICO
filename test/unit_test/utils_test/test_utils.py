@@ -20,6 +20,7 @@ from tico.utils.utils import broadcastable, get_quant_dtype
 class TestGetQuantDtype(unittest.TestCase):
     def test_supported_ranges(self):
         self.assertEqual(get_quant_dtype(-32768, 32767), "int16")
+        self.assertEqual(get_quant_dtype(-32767, 32767), "int16")
         self.assertEqual(get_quant_dtype(0, 65535), "uint16")
         self.assertEqual(get_quant_dtype(0, 255), "uint8")
         self.assertEqual(get_quant_dtype(-128, 127), "int8")

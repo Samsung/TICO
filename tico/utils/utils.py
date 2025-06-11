@@ -331,6 +331,7 @@ def get_quant_dtype(qmin: int, qmax: int):
     """
     known_ranges = {
         (-32768, 32767): "int16",
+        (-32767, 32767): "int16",
         (0, 65535): "uint16",
         (-128, 127): "int8",
         (0, 255): "uint8",
