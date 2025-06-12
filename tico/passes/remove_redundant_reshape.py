@@ -44,6 +44,7 @@ def passes():
         RemoveRedundantReshapePattern3(),
         RemoveRedundantReshapePattern4(),
         RemoveRedundantReshapePattern5(),
+        RemoveRedundantReshapePattern6(),
     ]
 
 
@@ -425,5 +426,115 @@ class RemoveRedundantReshapePattern5(PassBase):
         graph.eliminate_dead_code()
         graph.lint()
         graph_module.recompile()
+
+        return PassResult(modified)
+
+
+@trace_graph_diff_on_pass
+class RemoveRedundantReshapePattern6(PassBase):
+    def __init__(self):
+        super().__init__()
+        self.SHAPE_PRESERVING_OPS = [
+            *ops.aten.mul_scalar,
+            *ops.aten.mul_tensor,
+            *ops.aten.add,
+            # TODO add more ops.
+        ]
+
+    def call(self, ep: ExportedProgram) -> PassResult:
+        """
+        Elide a redundant leading-dimension unsqueeze that is immediately
+        cancelled later.
+
+        [BEFORE]
+          x: (20x1x512)
+          R1 = aten.reshape(x, shape=(1, 20, 8, 64))  # adds a leading 1
+          P = aten.permute (R1, dims=(0, 2, 1, 3))    # keeps that 1 in front
+            ... arbitrary shape-preserving ops ...
+          R2 = aten.reshape(*, shape=(8, 20, 64))     # drops the leading 1
+
+        [AFTER]
+          R1 = aten.reshape(x, shape=(20, 8, 64))
+          P = aten.permute (R1, dims=(1, 0, 2))
+            ... arbitrary shape-preserving ops ...
+          R2 = aten.reshape(*, shape=(8, 20, 64))     # same as before
+
+        Effect:
+            * The first reshape loses one unit-dim.
+            * The permute dims are shifted down by 1 and the leading 0 is removed.
+        """
+        logger = logging.getLogger(__name__)
+
+        gm = ep.graph_module
+        graph = gm.graph
+        modified = False
+        for reshape_front in graph.nodes:
+            if not is_target_node(reshape_front, ops.aten.reshape):
+                continue
+            if len(reshape_front.users) != 1:
+                continue
+            # The reshape must actually add a leading 1.
+            reshape_front_shape = extract_shape(reshape_front)
+            if len(reshape_front_shape) != 0 and reshape_front_shape[0] != 1:
+                continue
+
+            permute = next(iter(reshape_front.users))
+            if not is_target_node(permute, ops.aten.permute):
+                continue
+
+            # The permute must keep that leading dim in front.
+            permute_shape = extract_shape(permute)
+            if permute_shape[0] != 1:
+                continue
+
+            # Walk through shape-preserving chain
+            tail = permute
+            while True:
+                if len(tail.users) != 1:
+                    break
+                nxt = next(iter(tail.users))
+                if is_target_node(nxt, ops.aten.reshape):
+                    break
+                if is_target_node(nxt, self.SHAPE_PRESERVING_OPS) and extract_shape(
+                    nxt
+                ) == extract_shape(tail):
+                    tail = nxt
+                    continue
+                break
+            if not is_target_node(nxt, ops.aten.reshape):
+                continue
+            reshape_back = nxt
+            # resahpe_back must drop exactly the leading 1.
+            reshape_back_shape = extract_shape(reshape_back)
+            if reshape_back_shape != permute_shape[1:]:
+                continue
+
+            permute_args = PermuteArgs(*permute.args, **permute.kwargs)  # type: ignore[arg-type]
+            with graph.inserting_before(permute):
+                new_front_shape = list(reshape_front_shape[1:])
+                reshape_new = graph.call_function(
+                    torch.ops.aten.reshape.default,
+                    args=(reshape_front.args[0], new_front_shape),
+                )
+                # Remove the first element and subtract 1 from every remaining index
+                new_dims = [d - 1 for d in permute_args.dims[1:]]
+                permute_new = graph.call_function(
+                    torch.ops.aten.permute.default, args=(reshape_new, new_dims)
+                )
+            permute.replace_all_uses_with(permute_new, propagate_meta=True)
+            tail_after_opt = tail if tail is not permute else permute_new
+            reshape_back.replace_all_uses_with(tail_after_opt, propagate_meta=False)
+            # Propagate meta. But, meta["val"] should be updated.
+            reshape_new.meta = reshape_front.meta
+            set_new_meta_val(reshape_new)
+            set_new_meta_val(permute_new)
+
+            modified = True
+            logger.debug(f"{reshape_back.name} is removed.")
+
+        if modified:
+            graph.eliminate_dead_code()
+            graph.lint()
+            gm.recompile()
 
         return PassResult(modified)
