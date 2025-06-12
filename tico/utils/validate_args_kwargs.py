@@ -867,7 +867,7 @@ class ReshapeArgs:
     """
 
     input: torch.fx.Node
-    size: List[int]
+    shape: List[int]
 
 
 @enforce_type

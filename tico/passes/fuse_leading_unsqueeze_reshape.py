@@ -58,7 +58,7 @@ class FuseLeadingUnsqueezeReshape(PassBase):
             if not is_target_node(reshape_back, ops.aten.reshape):
                 continue
             reshape_back_args = ReshapeArgs(*reshape_back.args, **reshape_back.kwargs)  # type: ignore[arg-type]
-            permute, reshape_back_size = reshape_back_args.input, reshape_back_args.size
+            permute = reshape_back_args.input
 
             if not is_target_node(permute, ops.aten.permute):
                 continue
@@ -70,7 +70,7 @@ class FuseLeadingUnsqueezeReshape(PassBase):
             reshape_front_args = ReshapeArgs(*reshape_front.args, **reshape_front.kwargs)  # type: ignore[arg-type]
             reshape_front_input, reshape_front_size = (
                 reshape_front_args.input,
-                reshape_front_args.size,
+                reshape_front_args.shape,
             )
 
             # ---- condition: only leading unsqueeze ------------------------

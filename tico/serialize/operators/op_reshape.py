@@ -48,7 +48,7 @@ class ReshapeVisitor(NodeVisitor):
         )
         args = ReshapeArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         input = args.input
-        size = args.size
+        size = args.shape
 
         if isinstance(size, int):
             raise NotYetSupportedError("scalar size conversion is not supported yet.")
