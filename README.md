@@ -89,9 +89,14 @@ You can convert a torch module to a circle model with these steps.
 torch_module = AddModule()
 example_inputs = (torch.ones(4), torch.ones(4))
 
-circle_model = tico.convert(torch_module, example_inputs)
+circle_model = tico.convert(torch_module.eval(), example_inputs)
 circle_model.save('add.circle')
 ```
+
+**NOTE**
+Please make sure to call `eval()` on the PyTorch module before passing it to our API.
+This ensures the model runs in inference mode, disabling layers like dropout and
+batch normalization updates.
 
 **Compile with configuration**
 
