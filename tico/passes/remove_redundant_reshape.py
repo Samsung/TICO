@@ -443,7 +443,7 @@ class RemoveRedundantReshapePattern6(PassBase):
 
     def call(self, ep: ExportedProgram) -> PassResult:
         """
-        Elide a redundant leading-dimension unsqueeze that is immediately
+        Remove a redundant leading-dimension unsqueeze that is immediately
         cancelled later.
 
         [BEFORE]
