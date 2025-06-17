@@ -22,6 +22,7 @@ from torch.export import ExportedProgram
 from tico.serialize.circle_graph import extract_shape
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -89,15 +90,19 @@ class ConvertConv1dToConv2d(PassBase):
             )
 
         with graph.inserting_after(input):
-            input_unsqueeze = graph_module.graph.call_function(
+            input_unsqueeze = create_node(
+                graph,
                 torch.ops.aten.unsqueeze.default,
                 args=(input, 3),
+                origin=input,
             )
 
         with graph.inserting_after(weight):
-            weight_unsqueeze = graph_module.graph.call_function(
+            weight_unsqueeze = create_node(
+                graph,
                 torch.ops.aten.unsqueeze.default,
                 args=(weight, 3),
+                origin=weight,
             )
 
         with graph.inserting_before(node):
@@ -106,7 +111,8 @@ class ConvertConv1dToConv2d(PassBase):
             elif isinstance(padding, str):
                 conv2d_op = torch.ops.aten.conv2d.padding
 
-            conv2d = graph_module.graph.call_function(
+            conv2d = create_node(
+                graph,
                 conv2d_op,
                 args=(
                     input_unsqueeze,
@@ -118,9 +124,11 @@ class ConvertConv1dToConv2d(PassBase):
                     groups,
                 ),
                 kwargs=node.kwargs,
+                origin=node,
             )
 
-            conv_out_squeeze = graph_module.graph.call_function(
+            conv_out_squeeze = create_node(
+                graph,
                 torch.ops.aten.squeeze.dims,
                 args=(conv2d, [3]),
             )

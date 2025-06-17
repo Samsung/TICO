@@ -16,6 +16,7 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 
@@ -74,11 +75,12 @@ class RestoreLinear(PassBase):
 
                 addmm_args = (input, weight, bias)
                 with graph.inserting_after(node):
-                    linear_node = graph.call_function(
-                        torch.ops.aten.linear.default, args=addmm_args
+                    linear_node = create_node(
+                        graph,
+                        torch.ops.aten.linear.default,
+                        args=addmm_args,
                     )
                     node.replace_all_uses_with(linear_node, propagate_meta=True)
-                    graph.erase_node(node)
 
             elif node.target == torch.ops.aten.mm.default:
                 assert len(node.args) == 2
@@ -97,8 +99,8 @@ class RestoreLinear(PassBase):
 
                 mm_args = (input, weight)
                 with graph.inserting_after(node):
-                    linear_node = graph.call_function(
-                        torch.ops.aten.linear.default, args=mm_args
+                    linear_node = create_node(
+                        graph, torch.ops.aten.linear.default, args=mm_args
                     )
                     node.replace_all_uses_with(linear_node, propagate_meta=True)
 

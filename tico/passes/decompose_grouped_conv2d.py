@@ -23,7 +23,7 @@ from tico.passes import ops
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.errors import InvalidArgumentError, NotYetSupportedError
-from tico.utils.graph import add_placeholder
+from tico.utils.graph import add_placeholder, create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -159,19 +159,26 @@ class DecomposeGroupedConv2d(PassBase):
 
                 conv2d_tensors = []
                 for i in range(groups):
-                    sliced_input = graph.call_function(
+                    sliced_input = create_node(
+                        graph,
                         torch.ops.aten.slice.Tensor,
                         (input_, 1, group_size * i, group_size * (i + 1), 1),
+                        origin=node,
                     )
-                    sliced_weight = graph.call_function(
+                    sliced_weight = create_node(
+                        graph,
                         torch.ops.aten.slice.Tensor,
                         (weight, 0, out_group_size * i, out_group_size * (i + 1), 1),
+                        origin=node,
                     )
-                    sliced_bias = graph.call_function(
+                    sliced_bias = create_node(
+                        graph,
                         torch.ops.aten.slice.Tensor,
                         (bias, 0, out_group_size * i, out_group_size * (i + 1), 1),
+                        origin=node,
                     )
-                    conv2d_tensor = graph.call_function(
+                    conv2d_tensor = create_node(
+                        graph,
                         conv2d_op,
                         (
                             sliced_input,
@@ -182,11 +189,12 @@ class DecomposeGroupedConv2d(PassBase):
                             dilation,
                             1,
                         ),
+                        origin=node,
                     )
                     conv2d_tensors.append(conv2d_tensor)
 
-                concat_output = graph.call_function(
-                    torch.ops.aten.cat.default, (conv2d_tensors, 1)
+                concat_output = create_node(
+                    graph, torch.ops.aten.cat.default, (conv2d_tensors, 1)
                 )
 
                 node.replace_all_uses_with(concat_output, propagate_meta=True)

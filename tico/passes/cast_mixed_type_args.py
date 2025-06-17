@@ -26,6 +26,7 @@ from torch.export import ExportedProgram
 
 from tico.serialize.circle_mapping import extract_torch_dtype
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node, set_new_meta_val
@@ -126,10 +127,12 @@ class CastMixedTypeArgs(PassBase):
 
             if isinstance(arg_to_promote, torch.fx.Node):
                 with graph.inserting_after(arg_to_promote):
-                    to_copy = graph.call_function(
+                    to_copy = create_node(
+                        graph,
                         torch.ops.aten._to_copy.default,
                         (arg_to_promote,),
                         {"dtype": type_to_promote},
+                        origin=arg_to_promote,
                     )
                     # set new meta["val"] in advance because we will use it below for checking if type promotion is valid.
                     set_new_meta_val(to_copy)

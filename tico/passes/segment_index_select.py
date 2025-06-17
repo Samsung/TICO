@@ -31,7 +31,7 @@ from torch.export import ExportedProgram
 from tico.passes import ops
 from tico.serialize.circle_graph import extract_shape
 from tico.utils import logging
-from tico.utils.graph import add_placeholder, is_single_value_tensor
+from tico.utils.graph import add_placeholder, create_node, is_single_value_tensor
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_const_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -116,18 +116,22 @@ class SegmentIndexSelectConst(PassBase):
                     exported_program, torch.tensor([i]), prefix="segm_index"
                 )
                 with graph.inserting_before(node):
-                    index_select_node = graph.call_function(
+                    index_select_node = create_node(
+                        graph,
                         torch.ops.aten.index_select.default,
                         args=(input, dim, index_node),
+                        origin=node,
                     )
                     index_select_node_list.append(index_select_node)
 
             with graph.inserting_before(node):
-                concat_node = graph.call_function(
-                    torch.ops.aten.cat.default, args=(index_select_node_list, dim)
+                concat_node = create_node(
+                    graph,
+                    torch.ops.aten.cat.default,
+                    args=(index_select_node_list, dim),
                 )
 
-                node.replace_all_uses_with(concat_node, propagate_meta=False)
+                node.replace_all_uses_with(concat_node, propagate_meta=True)
 
             modified = True
             logger.debug(

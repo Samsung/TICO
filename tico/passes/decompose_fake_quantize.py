@@ -23,6 +23,7 @@ from torch.ao.quantization.fx._decomposed import quantized_decomposed_lib
 from torch.export import ExportedProgram
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.validate_args_kwargs import FakeQuantizePerChannelArgs
@@ -69,6 +70,7 @@ class DecomposeFakeQuantize(PassBase):
         modified = False
 
         gm = exported_program.graph_module
+        g = gm.graph
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
         for node in gm.graph.nodes:
             if node.op != "call_function":
@@ -83,17 +85,19 @@ class DecomposeFakeQuantize(PassBase):
                     **{"dtype": get_quant_type(quant_min, quant_max)},
                 }
                 with gm.graph.inserting_before(node):
-                    quant = gm.graph.call_function(
+                    quant = create_node(
+                        g,
                         qd.quantize_per_tensor.default,
                         args=node.args,
                         kwargs=quant_kwargs,
+                        origin=node,
                     )
-                    dequnt = gm.graph.call_function(
+                    dequnt = create_node(
+                        g,
                         qd.dequantize_per_tensor.default,
                         args=(quant, *quant.args[1:]),
                         kwargs=quant.kwargs,
                     )
-                    # Not set meta for propagating replacing node's meta.
                     node.replace_all_uses_with(dequnt, propagate_meta=True)
                 modified = True
 
@@ -107,17 +111,19 @@ class DecomposeFakeQuantize(PassBase):
                     **{"dtype": get_quant_type(quant_min, quant_max)},
                 }
                 with gm.graph.inserting_before(node):
-                    quant = gm.graph.call_function(
+                    quant = create_node(
+                        g,
                         qd.quantize_per_channel.default,
                         args=node.args,
                         kwargs=quant_kwargs,
+                        origin=node,
                     )
-                    dequnt = gm.graph.call_function(
+                    dequnt = create_node(
+                        g,
                         qd.dequantize_per_channel.default,
                         args=(quant, *quant.args[1:]),
                         kwargs=quant.kwargs,
                     )
-                    # Not set meta for propagating replacing node's meta.
                     node.replace_all_uses_with(dequnt, propagate_meta=True)
                 modified = True
 

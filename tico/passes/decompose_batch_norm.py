@@ -24,6 +24,7 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import (
     add_placeholder,
+    create_node,
     get_first_user_input,
     get_torch_buffer_value,
     get_torch_param_value,
@@ -32,14 +33,8 @@ from tico.utils.graph import (
 )
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import fill_meta_val, is_target_node
+from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import NativeBatchNormLegitNoTrainingArgs
-
-
-def insert_node(graph: torch.fx.Graph, operation, args):
-    new_node = graph.call_function(operation, args)
-
-    return new_node
 
 
 @trace_graph_diff_on_pass
@@ -173,19 +168,20 @@ class DecomposeBatchNorm(PassBase):
                 )
 
             with gm.graph.inserting_before(node):
-                mul = graph.call_function(
+                mul = create_node(
+                    graph,
                     torch.ops.aten.mul.Tensor,
                     args=(input_, mul_const_node),
+                    origin=node,
                 )
-                add = graph.call_function(
+                add = create_node(
+                    graph,
                     torch.ops.aten.add.Tensor,
                     args=(mul, add_const_node),
                 )
-                # Not set meta for propagating replacing get_item's meta.
             get_item, *_ = node.users.keys()
             get_item.replace_all_uses_with(add, propagate_meta=True)
 
-            fill_meta_val(exported_program)
             logger.debug(f"{node.name} is decomposed to {mul.name} and {add.name}")
             modified = True
 

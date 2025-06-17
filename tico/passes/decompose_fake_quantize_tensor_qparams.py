@@ -30,6 +30,7 @@ from torch.ao.quantization.fx._decomposed import quantized_decomposed_lib
 from torch.export import ExportedProgram
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import (
     trace_const_diff_on_pass,
@@ -200,6 +201,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
         modified = False
 
         gm = exported_program.graph_module
+        g = gm.graph
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
         for node in gm.graph.nodes:
             if node.op != "call_function":
@@ -226,17 +228,19 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     **{"dtype": get_quant_type(quant_min, quant_max)},
                 }
                 with gm.graph.inserting_before(node):
-                    quant = gm.graph.call_function(
+                    quant = create_node(
+                        g,
                         qd.quantize_per_tensor.default,
                         args=(tensor, s_value, zp_value, quant_min, quant_max),
                         kwargs=quant_kwargs,
+                        origin=node,
                     )
-                    dequant = gm.graph.call_function(
+                    dequant = create_node(
+                        g,
                         qd.dequantize_per_tensor.default,
                         args=(quant, *quant.args[1:]),
                         kwargs=quant.kwargs,
                     )
-                    # Not set meta for propagating replacing get_item's meta.
                     get_item.replace_all_uses_with(dequant, propagate_meta=True)
                     # If `mask` can be graph output, which prevents `eliminate_dead_code()` from eliminating `mask`.
                     # So, let's remove `mask` from the output.args first.
@@ -267,17 +271,19 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     **{"dtype": get_quant_type(quant_min, quant_max)},
                 }
                 with gm.graph.inserting_before(node):
-                    quant = gm.graph.call_function(
+                    quant = create_node(
+                        g,
                         qd.quantize_per_tensor.default,
                         args=(tensor, s_value, zp_value, quant_min, quant_max),
                         kwargs=quant_kwargs,
+                        origin=node,
                     )
-                    dequant = gm.graph.call_function(
+                    dequant = create_node(
+                        g,
                         qd.dequantize_per_tensor.default,
                         args=(quant, *quant.args[1:]),
                         kwargs=quant.kwargs,
                     )
-                    # Not set meta for propagating replacing get_item's meta.
                     node.replace_all_uses_with(dequant, propagate_meta=True)
                 modified = True
 

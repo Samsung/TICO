@@ -20,6 +20,7 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -71,8 +72,10 @@ class ConvertRepeatToExpandCopy(PassBase):
             expand_copy_args = (tensor, size)
 
             with graph.inserting_after(node):
-                expand_copy_node = graph.call_function(
-                    torch.ops.aten.expand_copy.default, args=expand_copy_args
+                expand_copy_node = create_node(
+                    graph,
+                    torch.ops.aten.expand_copy.default,
+                    args=expand_copy_args,
                 )
                 node.replace_all_uses_with(expand_copy_node, propagate_meta=True)
 

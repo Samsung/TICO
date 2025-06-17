@@ -23,6 +23,7 @@ from torch.export import ExportedProgram
 from tico.serialize.circle_graph import extract_shape
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -124,9 +125,11 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         # TODO Introduce a method that inserts permute op.
         # input permute
         with graph.inserting_after(input):
-            input_permute = graph_module.graph.call_function(
+            input_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(input, NCHW_to_NHWC),
+                origin=input,
             )
             node.update_arg(node.args.index(input), input_permute)
 
@@ -142,9 +145,11 @@ class LegalizePreDefinedLayoutOperators(PassBase):
             else:
                 assert groups == 1 or groups == input_shape[1]  # Cannot reach here
 
-            weight_permute = graph_module.graph.call_function(
+            weight_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(weight, perm),
+                origin=weight,
             )
             if args.weight.target in [
                 torch.ops.quantized_decomposed.dequantize_per_channel.default,
@@ -171,18 +176,16 @@ class LegalizePreDefinedLayoutOperators(PassBase):
             else:
                 assert groups == 1 or groups == input_shape[1]  # Cannot reach here
 
-            circle_op = graph_module.graph.call_function(
-                legalized_op,
-                args=node.args,
-                kwargs=node.kwargs,
+            circle_op = create_node(
+                graph, legalized_op, args=node.args, kwargs=node.kwargs, origin=node
             )
             # output permute
             NHWC_to_NCHW = [0, 3, 1, 2]
-            conv_out_permute = graph_module.graph.call_function(
+            conv_out_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(circle_op, NHWC_to_NCHW),
             )
-            # Not set meta for propagating replacing node's meta.
         node.replace_all_uses_with(conv_out_permute, propagate_meta=True)
 
         logger.debug(f"{node.name} is replaced with {circle_op.name}")
@@ -224,25 +227,29 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         with graph.inserting_after(input):
             # input permute
             NCHW_to_NHWC = [0, 2, 3, 1]
-            input_permute = graph_module.graph.call_function(
+            input_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(input, NCHW_to_NHWC),
+                origin=input,
             )
             node.update_arg(node.args.index(input), input_permute)
         with graph.inserting_before(node):
             # circle instnorm
-            circle_instnorm = graph_module.graph.call_function(
+            circle_instnorm = create_node(
+                graph,
                 torch.ops.circle_custom.instance_norm,
                 args=node.args,
                 kwargs=node.kwargs,
+                origin=node,
             )
             # output permute
             NHWC_to_NCHW = [0, 3, 1, 2]
-            instnorm_out_permute = graph_module.graph.call_function(
+            instnorm_out_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(circle_instnorm, NHWC_to_NCHW),
             )
-            # Not set meta for propagating replacing node's meta.
         node.replace_all_uses_with(instnorm_out_permute, propagate_meta=True)
 
         logger.debug(f"{node.name} is replaced with {circle_instnorm.name}")
@@ -275,25 +282,25 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         # TODO Introduce a method that inserts permute op.
         # input permute
         with graph.inserting_after(input_):
-            input_permute = graph_module.graph.call_function(
+            input_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(input_, NCHW_to_NHWC),
+                origin=input_,
             )
             node.update_arg(node.args.index(input_), input_permute)
         with graph.inserting_before(node):
             legalized_op = torch.ops.circle_custom.maxpool2d
-            circle_maxpool2d = graph_module.graph.call_function(
-                legalized_op,
-                args=node.args,
-                kwargs=node.kwargs,
+            circle_maxpool2d = create_node(
+                graph, legalized_op, args=node.args, kwargs=node.kwargs, origin=node
             )
             # output permute
             NHWC_to_NCHW = [0, 3, 1, 2]
-            maxpool_out_permute = graph_module.graph.call_function(
+            maxpool_out_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(circle_maxpool2d, NHWC_to_NCHW),
             )
-            # Not set meta for propagating replacing get_item's meta.
         get_item, *_ = node.users.keys()
         get_item.replace_all_uses_with(maxpool_out_permute, propagate_meta=True)
 
@@ -327,21 +334,22 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         # TODO Introduce a method that inserts permute op.
         # input permute
         with graph.inserting_after(input_):
-            input_permute = graph_module.graph.call_function(
+            input_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(input_, NCHW_to_NHWC),
+                origin=input_,
             )
             node.update_arg(node.args.index(input_), input_permute)
         with graph.inserting_before(node):
             legalized_op = torch.ops.circle_custom.avgpool2d
-            circle_avgpool2d = graph_module.graph.call_function(
-                legalized_op,
-                args=node.args,
-                kwargs=node.kwargs,
+            circle_avgpool2d = create_node(
+                graph, legalized_op, args=node.args, kwargs=node.kwargs, origin=node
             )
             # output permute
             NHWC_to_NCHW = [0, 3, 1, 2]
-            avgpool_out_permute = graph_module.graph.call_function(
+            avgpool_out_permute = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(circle_avgpool2d, NHWC_to_NCHW),
             )

@@ -30,7 +30,7 @@ from torch.export import ExportedProgram
 from tico.passes import ops
 from tico.serialize.circle_graph import extract_shape
 from tico.utils import logging
-from tico.utils.graph import is_single_value_tensor
+from tico.utils.graph import create_node, is_single_value_tensor
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_const_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -103,15 +103,21 @@ class LowerSelectCopyToSlice(PassBase):
 
             with graph.inserting_after(node):
                 # slice
-                slice_node = graph.call_function(
-                    torch.ops.aten.slice.Tensor, args=slice_copy_args
+                slice_node = create_node(
+                    graph,
+                    torch.ops.aten.slice.Tensor,
+                    args=slice_copy_args,
+                    origin=node,
                 )
                 node_shape = extract_shape(node)
             with graph.inserting_after(slice_node):
                 # reshape
                 reshape_args = (slice_node, list(node_shape))
-                reshape_node = graph.call_function(
-                    torch.ops.aten.reshape.default, args=reshape_args
+                reshape_node = create_node(
+                    graph,
+                    torch.ops.aten.reshape.default,
+                    args=reshape_args,
+                    origin=node,
                 )
                 node.replace_all_uses_with(reshape_node, propagate_meta=False)
 
@@ -196,17 +202,22 @@ class LowerIndexSelectToSlice(PassBase):
 
             with graph.inserting_after(node):
                 # slice
-                slice_node = graph.call_function(
-                    torch.ops.aten.slice.Tensor, args=slice_copy_args
+                slice_node = create_node(
+                    graph,
+                    torch.ops.aten.slice.Tensor,
+                    args=slice_copy_args,
+                    origin=node,
                 )
                 node_shape = extract_shape(node)
             with graph.inserting_after(slice_node):
                 # reshape
                 reshape_args = (slice_node, list(node_shape))
-                reshape_node = graph.call_function(
-                    torch.ops.aten.reshape.default, args=reshape_args
+                reshape_node = create_node(
+                    graph,
+                    torch.ops.aten.reshape.default,
+                    args=reshape_args,
                 )
-                node.replace_all_uses_with(reshape_node, propagate_meta=False)
+                node.replace_all_uses_with(reshape_node, propagate_meta=True)
 
             modified = True
             logger.debug(

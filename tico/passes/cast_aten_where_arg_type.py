@@ -21,6 +21,7 @@ from torch.export import ExportedProgram
 
 from tico.serialize.circle_mapping import extract_torch_dtype
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import (
     trace_const_diff_on_pass,
@@ -158,10 +159,12 @@ class CastATenWhereArgType(PassBase):
                         f"{to_cast.name}({buf_data.dtype}) data range is out of {dtype_to_cast} range"
                     )
             with graph_module.graph.inserting_after(to_cast):
-                cast = graph_module.graph.call_function(
+                cast = create_node(
+                    graph,
                     torch.ops.aten._to_copy.default,
                     args=(to_cast,),
                     kwargs={"dtype": dtype_to_cast},
+                    origin=to_cast,
                 )
             # set new meta["val"] in advance because we will use it below for checking if type promotion is valid.
             set_new_meta_val(cast)

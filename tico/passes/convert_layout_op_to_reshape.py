@@ -22,6 +22,7 @@ from torch.export import ExportedProgram
 from tico.passes import ops
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.validate_args_kwargs import SqueezeArgs, UnSqueezeArgs, ViewArgs
@@ -48,11 +49,11 @@ class ConvertLayoutOpToReshape(PassBase):
             out_shape = list(extract_shape(node))
 
             with graph.inserting_after(node):
-                reshape_node = graph.call_function(
+                reshape_node = create_node(
+                    graph,
                     torch.ops.aten.reshape.default,
                     args=(input, out_shape),
                 )
-
             node.replace_all_uses_with(reshape_node, propagate_meta=True)
 
             logger.debug(f"{node.name} is replaced with {reshape_node.name}")

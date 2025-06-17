@@ -20,6 +20,7 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.validate_args_kwargs import ClampArgs, HardTanhArgs
@@ -58,7 +59,7 @@ class ConvertHardTanhToReLU6(Converter):
         input = args.input
 
         with graph.inserting_after(node):
-            relu_node = graph.call_function(torch.ops.aten.relu6.default, args=(input,))
+            relu_node = create_node(graph, torch.ops.aten.relu6.default, args=(input,))
             node.replace_all_uses_with(relu_node, propagate_meta=True)
 
 
@@ -84,7 +85,7 @@ class ConvertClampToReLU6(Converter):
         input = args.input
 
         with graph.inserting_after(node):
-            relu_node = graph.call_function(torch.ops.aten.relu6.default, args=(input,))
+            relu_node = create_node(graph, torch.ops.aten.relu6.default, args=(input,))
             node.replace_all_uses_with(relu_node, propagate_meta=True)
 
 
@@ -140,7 +141,7 @@ class ConvertDoubleClampsToReLU6(Converter):
         input = prev_args.input
 
         with graph.inserting_after(node):
-            relu_node = graph.call_function(torch.ops.aten.relu6.default, args=(input,))
+            relu_node = create_node(graph, torch.ops.aten.relu6.default, args=(input,))
             node.replace_all_uses_with(relu_node, propagate_meta=True)
 
 

@@ -23,6 +23,7 @@ from torch.export import ExportedProgram
 
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -89,24 +90,40 @@ class DecomposeGroupNorm(PassBase):
     def __init__(self):
         super().__init__()
 
-    def _insert_norm(self, graph, tensor, eps):
+    def _insert_norm(self, graph, tensor, eps, origin):
         """
         Insert (tensor - mean) / sqrt(var + eps)) into the graph
           and return the normalized tensor node.
         """
-        mean = graph.call_function(
-            torch.ops.aten.mean.dim, (tensor, [-1]), {"keepdim": True}
+        mean = create_node(
+            graph,
+            torch.ops.aten.mean.dim,
+            (tensor, [-1]),
+            {"keepdim": True},
+            origin=origin,
         )
-        deviation = graph.call_function(torch.ops.aten.sub.Tensor, (tensor, mean))
-        squared = graph.call_function(torch.ops.aten.pow.Tensor_Scalar, (deviation, 2))
-        var = graph.call_function(
-            torch.ops.aten.mean.dim, (squared, [-1]), {"keepdim": True}
+        deviation = create_node(
+            graph, torch.ops.aten.sub.Tensor, (tensor, mean), origin=origin
         )
-        inverse_std = graph.call_function(
+        squared = create_node(
+            graph, torch.ops.aten.pow.Tensor_Scalar, (deviation, 2), origin=origin
+        )
+        var = create_node(
+            graph,
+            torch.ops.aten.mean.dim,
+            (squared, [-1]),
+            {"keepdim": True},
+            origin=origin,
+        )
+        inverse_std = create_node(
+            graph,
             torch.ops.aten.rsqrt.default,
-            (graph.call_function(torch.ops.aten.add.Tensor, (var, eps)),),
+            (create_node(graph, torch.ops.aten.add.Tensor, (var, eps), origin=origin),),
+            origin=origin,
         )
-        return graph.call_function(torch.ops.aten.mul.Tensor, (deviation, inverse_std))
+        return create_node(
+            graph, torch.ops.aten.mul.Tensor, (deviation, inverse_std), origin=origin
+        )
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
@@ -178,17 +195,23 @@ class DecomposeGroupNorm(PassBase):
                 # Branch only on whether a reshape is needed; the normalization is shared.
                 if norm_size != x_shape[-1]:
                     # Pack groups so that the last dimension equals norm_size.
-                    packed = graph.call_function(
-                        torch.ops.aten.reshape.default, (x, pack_shape)
+                    packed = create_node(
+                        graph,
+                        torch.ops.aten.reshape.default,
+                        (x, pack_shape),
+                        origin=node,
                     )
-                    normed = self._insert_norm(graph, packed, eps)
+                    normed = self._insert_norm(graph, packed, eps, origin=node)
                     # Restore the original shape after normalization.
-                    layer_norm = graph.call_function(
-                        torch.ops.aten.reshape.default, (normed, x_shape)
+                    layer_norm = create_node(
+                        graph,
+                        torch.ops.aten.reshape.default,
+                        (normed, x_shape),
+                        origin=node,
                     )
                 else:
                     # The input already has norm_size in the last dimension.
-                    layer_norm = self._insert_norm(graph, x, eps)
+                    layer_norm = self._insert_norm(graph, x, eps, origin=node)
 
                 # weight
                 if weight:
@@ -197,13 +220,17 @@ class DecomposeGroupNorm(PassBase):
                         assert weight_shape[0] == C
                         reshape_size = [1] * len(x_shape)
                         reshape_size[1] = C
-                        weight = graph.call_function(
+                        weight = create_node(
+                            graph,
                             torch.ops.aten.view.default,
                             (weight, reshape_size),
+                            origin=node,
                         )
-                    layer_norm = graph.call_function(
+                    layer_norm = create_node(
+                        graph,
                         torch.ops.aten.mul.Tensor,
                         (layer_norm, weight),
+                        origin=node,
                     )
 
                 # bias
@@ -213,15 +240,17 @@ class DecomposeGroupNorm(PassBase):
                         assert bias_shape[0] == C
                         reshape_size = [1] * len(x_shape)
                         reshape_size[1] = C
-                        bias = graph.call_function(
+                        bias = create_node(
+                            graph,
                             torch.ops.aten.view.default,
                             (bias, reshape_size),
+                            origin=node,
                         )
-                    layer_norm = graph.call_function(
+                    layer_norm = create_node(
+                        graph,
                         torch.ops.aten.add.Tensor,
                         (layer_norm, bias),
                     )
-
                 # Reset last node's meta for propagating replacing node's meta.
                 layer_norm.meta = {}
 

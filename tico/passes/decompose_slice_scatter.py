@@ -23,6 +23,7 @@ from torch.export import ExportedProgram
 from tico.serialize.circle_mapping import extract_shape
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import enforce_type, is_target_node
@@ -130,16 +131,19 @@ class DecomposeSliceScatter(PassBase):
                 slices = []
 
                 if 0 < start:
-                    slice_0 = graph.call_function(
+                    slice_0 = create_node(
+                        graph,
                         torch.ops.aten.slice_copy.Tensor,
                         args=(input, dim, 0, start, 1),
+                        origin=node,
                     )
                     slices.append(slice_0)
 
                 slices.append(src)
 
                 if start + end < extract_shape(input)[dim]:
-                    slice_1 = graph.call_function(
+                    slice_1 = create_node(
+                        graph,
                         torch.ops.aten.slice_copy.Tensor,
                         args=(
                             input,
@@ -148,13 +152,13 @@ class DecomposeSliceScatter(PassBase):
                             extract_shape(input)[dim],
                             1,
                         ),
+                        origin=node,
                     )
                     slices.append(slice_1)
 
-                concat = graph.call_function(
-                    torch.ops.aten.cat.default, args=(slices, dim)
+                concat = create_node(
+                    graph, torch.ops.aten.cat.default, args=(slices, dim)
                 )
-                # Not set meta for propagating replacing node's meta.
                 node.replace_all_uses_with(concat, propagate_meta=True)
 
             modified = True

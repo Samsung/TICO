@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -24,7 +24,7 @@ import torch
 from torch.export import ExportedProgram
 from torch.export.exported_program import InputKind, InputSpec, TensorArgument
 
-from tico.utils.utils import get_fake_mode
+from tico.utils.utils import get_fake_mode, set_new_meta_val
 
 
 def is_torch_param(node: torch.fx.Node, ep: ExportedProgram):
@@ -234,3 +234,49 @@ def get_module_name_chain(node: Optional[torch.fx.Node]) -> str:
         return next(reversed(stack.values()))[1]
     else:
         return "unknown"
+
+
+def create_node(
+    graph: torch.fx.Graph,
+    target: torch._ops.OpOverload,
+    args: Optional[Tuple[Any, ...]] = None,
+    kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    origin: Optional[torch.fx.Node] = None,
+) -> torch.fx.Node:
+    """
+    Insert a new node into graph and propagate metadata from *origin*.
+
+    Parameters
+    ----------
+    graph : torch.fx.Graph
+        The graph that will own the newly-created node.
+
+    target : torch._ops.OpOverload
+        The op to call (e.g. `torch.add` or "call_function" target).
+
+    args : Tuple[Any, ...], optional
+        Positional arguments for the new node.
+
+    kwargs : Dict[str, Any], optional
+        Keyword arguments for the new node.
+
+    origin : torch.fx.Node, optional
+        If given, every key in `origin.meta` **except** "val" is copied
+        onto the new node.  "val" is recomputed from *args* /*kwargs* using
+        the internal meta-inference helper.
+
+    Returns
+    -------
+    torch.fx.Node
+        The freshly inserted node with fully-populated `.meta`.
+    """
+    new_node = graph.call_function(target, args=args, kwargs=kwargs)
+    if origin:
+        assert isinstance(origin, torch.fx.Node), type(origin)
+        # Propagate "nn_module_stack" to retain the originating module context
+        #  for meaningful node names.
+        if "nn_module_stack" in origin.meta:
+            new_node.meta["nn_module_stack"] = origin.meta["nn_module_stack"]
+
+    return new_node

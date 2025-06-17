@@ -22,6 +22,7 @@ from torch.export import ExportedProgram
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -108,18 +109,23 @@ class LowerToResizeNearestNeighbor(PassBase):
         assert expected_shape == list(extract_shape(node))
 
         with graph.inserting_before(node):
-            nchw_to_nhwc = graph.call_function(
-                torch.ops.aten.permute.default, args=(input_tensor, [0, 2, 3, 1])
+            nchw_to_nhwc = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(input_tensor, [0, 2, 3, 1]),
+                origin=input_tensor,
             )
-            resize_nearest_neighbor = graph.call_function(
+            resize_nearest_neighbor = create_node(
+                graph,
                 torch.ops.circle_custom.resize_nearest_neighbor,
                 args=(nchw_to_nhwc, [len(expected_H_index), len(expected_W_index)]),
+                origin=node,
             )
-            nhwc_to_nchw = graph.call_function(
+            nhwc_to_nchw = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(resize_nearest_neighbor, [0, 3, 1, 2]),
             )
-            # Not set meta for propagating replacing node's meta.
             node.replace_all_uses_with(nhwc_to_nchw, propagate_meta=True)
 
         return resize_nearest_neighbor
@@ -171,18 +177,23 @@ class LowerToResizeNearestNeighbor(PassBase):
             )
 
         with graph.inserting_before(node):
-            nchw_to_nhwc = graph.call_function(
-                torch.ops.aten.permute.default, args=(input_tensor, [0, 2, 3, 1])
+            nchw_to_nhwc = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(input_tensor, [0, 2, 3, 1]),
+                origin=input_tensor,
             )
-            resize_nearest_neighbor = graph.call_function(
+            resize_nearest_neighbor = create_node(
+                graph,
                 torch.ops.circle_custom.resize_nearest_neighbor,
                 args=(nchw_to_nhwc, [expected_H, expected_W]),
+                origin=node,
             )
-            nhwc_to_nchw = graph.call_function(
+            nhwc_to_nchw = create_node(
+                graph,
                 torch.ops.aten.permute.default,
                 args=(resize_nearest_neighbor, [0, 3, 1, 2]),
             )
-            # Not set meta for propagating replacing node's meta.
             node.replace_all_uses_with(nhwc_to_nchw, propagate_meta=True)
             return resize_nearest_neighbor
 

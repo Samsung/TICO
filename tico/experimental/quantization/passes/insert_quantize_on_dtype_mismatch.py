@@ -24,6 +24,7 @@ from torch.export import ExportedProgram
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import quant_min_max, set_new_meta_val
@@ -145,9 +146,11 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
 
             with graph.inserting_before(node):
                 q_args = (inp, scale, zerop, min_, max_, dtype)
-                quantize = graph.call_function(
+                quantize = create_node(
+                    graph,
                     torch.ops.quantized_decomposed.quantize_per_tensor.default,
                     args=q_args,
+                    origin=node,
                 )
                 quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
                 set_new_meta_val(quantize)
@@ -166,7 +169,8 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
             dtype = getattr(torch, qparam.dtype)
             with graph.inserting_after(node):
                 q_args = (node, scale, zerop, min_, max_, dtype)
-                quantize = graph.call_function(
+                quantize = create_node(
+                    graph,
                     torch.ops.quantized_decomposed.quantize_per_tensor.default,
                     args=q_args,
                 )

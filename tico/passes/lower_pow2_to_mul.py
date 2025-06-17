@@ -20,6 +20,7 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -55,7 +56,8 @@ class LowerPow2ToMul(PassBase):
 
             lhs = rhs = in_
             with graph.inserting_after(node):
-                new_mul = graph.call_function(
+                new_mul = create_node(
+                    graph,
                     torch.ops.aten.mul.Tensor,
                     args=(lhs, rhs),
                     kwargs={},

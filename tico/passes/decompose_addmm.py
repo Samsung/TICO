@@ -21,7 +21,7 @@ from torch.export import ExportedProgram
 
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
-from tico.utils.graph import add_placeholder
+from tico.utils.graph import add_placeholder, create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node, set_new_meta_val
@@ -78,7 +78,9 @@ class DecomposeAddmm(PassBase):
 
             with graph.inserting_before(node):
                 # out = beta * input + alpha * (mat1 @ mat2)
-                matmul = graph.call_function(torch.ops.aten.mm.default, (mat1, mat2))
+                matmul = create_node(
+                    graph, torch.ops.aten.mm.default, (mat1, mat2), origin=node
+                )
                 set_new_meta_val(matmul)
 
                 if beta == 1:
@@ -90,7 +92,9 @@ class DecomposeAddmm(PassBase):
                         f"{node.name}_beta_zeros",
                     )
                 else:
-                    bias = graph.call_function(torch.ops.aten.mul.Tensor, (input, beta))
+                    bias = create_node(
+                        graph, torch.ops.aten.mul.Tensor, (input, beta), origin=node
+                    )
 
                 if alpha == 1:
                     scaled_matmul: torch.fx.Node | torch.Tensor = matmul
@@ -101,12 +105,12 @@ class DecomposeAddmm(PassBase):
                         f"{node.name}_alpha_zeros",
                     )
                 else:
-                    scaled_matmul = graph.call_function(
-                        torch.ops.aten.mul.Tensor, (matmul, alpha)
+                    scaled_matmul = create_node(
+                        graph, torch.ops.aten.mul.Tensor, (matmul, alpha), origin=node
                     )
 
-                result = graph.call_function(
-                    torch.ops.aten.add.Tensor, (bias, scaled_matmul)
+                result = create_node(
+                    graph, torch.ops.aten.add.Tensor, (bias, scaled_matmul)
                 )
 
             node.replace_all_uses_with(result, propagate_meta=True)

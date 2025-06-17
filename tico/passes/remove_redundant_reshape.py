@@ -22,6 +22,7 @@ from torch.export import ExportedProgram
 from tico.passes import ops
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import broadcastable, is_target_node, set_new_meta_val
@@ -369,8 +370,10 @@ class RemoveRedundantReshapePattern4(PassBase):
                 assert isinstance(s, int), type(s)
 
             with graph.inserting_before(reshape1):
-                fused_reshape = graph.call_function(
-                    reshape1.target, (reshape1_input, reshape2_size)
+                fused_reshape = create_node(
+                    graph,
+                    reshape1.target,
+                    (reshape1_input, reshape2_size),
                 )
 
             reshape2.replace_all_uses_with(fused_reshape, propagate_meta=True)

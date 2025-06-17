@@ -14,7 +14,6 @@
 
 from typing import TYPE_CHECKING
 
-
 if TYPE_CHECKING:
     import torch.fx
 import torch
@@ -23,6 +22,7 @@ from torch.export import ExportedProgram
 from tico.passes import ops
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -106,8 +106,10 @@ class RemoveRedundantPermutePattern1(PassBase):
             else:
                 with graph.inserting_after(permute2):
                     new_args = (permute1_input, fused_dims)
-                    fused_permute = graph.call_function(
-                        torch.ops.aten.permute.default, args=new_args
+                    fused_permute = create_node(
+                        graph,
+                        torch.ops.aten.permute.default,
+                        args=new_args,
                     )
                     permute2.replace_all_uses_with(fused_permute, propagate_meta=True)
                     logger.debug(f"{permute1.name} and {permute2.name} are fused.")

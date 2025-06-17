@@ -20,6 +20,7 @@ from torch.export import ExportedProgram
 from tico.passes import ops
 from tico.serialize.circle_mapping import extract_shape
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
@@ -84,15 +85,19 @@ class FuseLeadingUnsqueezeReshape(PassBase):
             k = len(back_shape) - len(permute_shape)
             with graph.inserting_before(permute):
                 new_shape = [1] * k + list(reshape_front_size)
-                r_new = graph.call_function(
+                r_new = create_node(
+                    graph,
                     torch.ops.aten.reshape.default,
                     args=(reshape_front_input, new_shape),
+                    origin=reshape_back,
                 )
                 new_p_dims = list(range(k)) + [
                     d + k for d in permute_dims
                 ]  # shift by k
-                p_new = graph.call_function(
-                    torch.ops.aten.permute.default, args=(r_new, new_p_dims)
+                p_new = create_node(
+                    graph,
+                    torch.ops.aten.permute.default,
+                    args=(r_new, new_p_dims),
                 )
 
             reshape_back.replace_all_uses_with(p_new, propagate_meta=True)
