@@ -14,6 +14,9 @@
 
 import torch
 from torch.export import Dim
+from torch.nn import functional as F
+
+from test.utils.tag import test_without_inference
 
 
 class SimpleLinear(torch.nn.Module):
@@ -68,3 +71,29 @@ class LinearWithUnusedInput(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(3, 3), None)
+
+
+@test_without_inference
+class FQLinearWithFp32Bias(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(3, 3))
+        self.bias = torch.nn.Parameter(torch.ones(3))
+
+    def forward(self, inp):
+        scale = torch.ones(3)
+        zero_point = torch.zeros(3)
+        axis = 0
+        qmin = -32768
+        qmax = 32767
+        quant_inp = torch.fake_quantize_per_tensor_affine(inp, 1.0, 0, qmin, qmax)
+        quant_weight = torch.fake_quantize_per_channel_affine(
+            self.weight, scale, zero_point, axis, qmin, qmax
+        )
+        output = F.linear(quant_inp, quant_weight, bias=self.bias)
+        output = torch.fake_quantize_per_tensor_affine(output, 1.0, 0, qmin, qmax)
+
+        return output
+
+    def get_example_inputs(self):
+        return (torch.randn(3, 3),)

@@ -48,6 +48,11 @@ def skip_if(predicate, reason):
         return lambda x: x
 
 
+def test_without_inference(orig_class):
+    setattr(orig_class, "__tag_test_without_inference", True)
+    return orig_class
+
+
 def test_without_pt2(orig_class):
     setattr(orig_class, "__tag_test_without_pt2", True)
     return orig_class

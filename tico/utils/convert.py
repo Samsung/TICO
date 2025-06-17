@@ -30,6 +30,7 @@ from tico.experimental.quantization.passes.propagate_qparam_backward import (
 from tico.experimental.quantization.passes.propagate_qparam_forward import (
     PropagateQParamForward,
 )
+from tico.experimental.quantization.passes.quantize_bias import QuantizeBias
 from tico.experimental.quantization.passes.remove_weight_dequant_op import (
     RemoveWeightDequantOp,
 )
@@ -250,6 +251,7 @@ def convert_exported_module_to_circle(
                 RemoveWeightDequantOp(),
                 PropagateQParamForward(),
                 PropagateQParamBackward(),
+                QuantizeBias(),
                 InsertQuantizeOnDtypeMismatch(),
             ]
         )

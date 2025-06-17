@@ -41,6 +41,9 @@ class NNModuleTest(TestRunnerBase):
 
         # Get tags
         self.test_without_pt2: bool = is_tagged(self.nnmodule, "test_without_pt2")
+        self.test_without_inference: bool = is_tagged(
+            self.nnmodule, "test_without_inference"
+        )
 
         # Set tolerance
         self.tolerance = {}
@@ -73,11 +76,15 @@ class NNModuleTest(TestRunnerBase):
         else:
 
             def wrapper(s):
-                self._run(without_pt2=self.test_without_pt2, dynamic=dynamic)
+                self._run(
+                    without_pt2=self.test_without_pt2,
+                    dynamic=dynamic,
+                    without_inference=self.test_without_inference,
+                )
 
             return wrapper
 
-    def _run(self, without_pt2=False, dynamic: bool = False):
+    def _run(self, without_pt2=False, dynamic: bool = False, without_inference=False):
         dynamic_shapes = None
         if dynamic:
             assert hasattr(self.nnmodule, "get_dynamic_shapes")
@@ -119,6 +126,9 @@ class NNModuleTest(TestRunnerBase):
             convert_pt2_to_circle(pt2_model_path, circle_model_path)
 
         verify_circle(circle_model_path, opt_circle_model_path)
+
+        if without_inference:
+            return
 
         USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert" or dynamic
         if self.use_onert or USE_ONERT:

@@ -145,6 +145,9 @@ class RemoveWeightDequantOp(PassBase):
             if isinstance(dq_args, DequantizePerChannelArgs):
                 scales = get_constant(exported_program, dq_args.scales)
                 zero_ps = get_constant(exported_program, dq_args.zero_points)
+
+                # Sometimes users can give fp32 zero point. Let's update dtype here.
+                zero_ps = zero_ps.to(torch.int64)
                 quant_param.scale = scales.tolist()
                 quant_param.zero_point = zero_ps.tolist()
                 assert quant_param.zero_point is not None  # To avoid mypy error
