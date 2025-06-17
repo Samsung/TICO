@@ -117,9 +117,8 @@ class LowerSelectCopyToSlice(PassBase):
                     graph,
                     torch.ops.aten.reshape.default,
                     args=reshape_args,
-                    origin=node,
                 )
-                node.replace_all_uses_with(reshape_node, propagate_meta=False)
+                node.replace_all_uses_with(reshape_node, propagate_meta=True)
 
             modified = True
             logger.debug(
