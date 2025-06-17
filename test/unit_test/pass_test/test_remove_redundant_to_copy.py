@@ -54,9 +54,9 @@ class NonRedundantToCopyNet(torch.nn.Module):
 
 
 class NonRedundantToCopyTest(SinglePassValueTest):
-    def test_pass(self):
+    def test_pass_neg(self):
         self.setup(NonRedundantToCopyNet())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.to_copy), 1)
 
         self.run_value_test(RemoveRedundantToCopy())
-        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.to_copy), 0)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.to_copy), 1)

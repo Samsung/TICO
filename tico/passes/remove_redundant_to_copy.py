@@ -70,6 +70,10 @@ class RemoveRedundantToCopy(PassBase):
                 if input_dtype != target_dtype:
                     continue
 
+            if hasattr(args, "memory_format") and args.memory_format is not None:
+                if args.memory_format != torch.contiguous_format:
+                    continue
+
             node.replace_all_uses_with(input_, propagate_meta=False)
 
             modified = True
