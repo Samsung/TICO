@@ -61,7 +61,7 @@ class NotMergedConsecutiveCatNet1(torch.nn.Module):
 
 
 class NotMergedConsecutiveCatTest1(SinglePassValueTest):
-    def test_pass(self):
+    def test_pass_neg(self):
         self.setup(NotMergedConsecutiveCatNet1())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.cat), 3)
 
@@ -84,7 +84,7 @@ class NotMergedConsecutiveCatNet2(torch.nn.Module):
 
 
 class NotMergedConsecutiveCatTest2(SinglePassValueTest):
-    def test_pass(self):
+    def test_pass_neg(self):
         self.setup(NotMergedConsecutiveCatNet2())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.cat), 3)
 

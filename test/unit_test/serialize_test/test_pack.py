@@ -40,7 +40,7 @@ class PackTest(unittest.TestCase):
         self.assertEqual(3 + (4 << 4), output_[1])
         self.assertEqual(5, output_[2])
 
-    def test_pack_dtype_mismatch_NEG(self):
+    def test_pack_dtype_mismatch_neg(self):
         input_ = np.array([1, 2, 3, 4, 5, 6], dtype=np.int16)
 
         # uint4 data has to be saved in uint8

@@ -31,7 +31,7 @@ class TestGetIntegerDtypeMin(unittest.TestCase):
         self.assertEqual(get_integer_dtype_min("uint8"), 0)
         self.assertEqual(get_integer_dtype_min("uint16"), 0)
 
-    def test_invalid_format(self):
+    def test_invalid_format_neg(self):
         with self.assertRaises(ValueError):
             get_integer_dtype_min("float32")
         with self.assertRaises(ValueError):
@@ -41,7 +41,7 @@ class TestGetIntegerDtypeMin(unittest.TestCase):
         with self.assertRaises(ValueError):
             get_integer_dtype_min("")
 
-    def test_too_small_bitwidth(self):
+    def test_too_small_bitwidth_neg(self):
         with self.assertRaises(ValueError):
             get_integer_dtype_min("int0")
         with self.assertRaises(ValueError):

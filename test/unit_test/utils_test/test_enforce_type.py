@@ -49,6 +49,8 @@ class EnforceTypeTest_Trivial(unittest.TestCase):
     def test_args1(self):
         _ArgsOptional(None)
         _ArgsOptional(1)
+
+    def test_args1_neg(self):
         with self.assertRaises(ArgTypeError):
             _ArgsOptional("str")
         with self.assertRaises(ArgTypeError):
@@ -71,6 +73,7 @@ class EnforceTypeTest_OptionalList(unittest.TestCase):
         _ArgsOptionalList([1])
         _ArgsOptionalList([0, 1, 2])
 
+    def test_optional_list_neg(self):
         with self.assertRaises(ArgTypeError):
             _ArgsOptionalList("str")
         with self.assertRaises(ArgTypeError):
@@ -94,6 +97,7 @@ class EnforceTypeTest_ListUnion(unittest.TestCase):
         _ArgsListUnion(["str"])
         _ArgsListUnion([0, 1, 2, "str"])
 
+    def test_optional_list_neg(self):
         with self.assertRaises(ArgTypeError):
             _ArgsListUnion("str")
         with self.assertRaises(ArgTypeError):
@@ -113,6 +117,7 @@ class EnforceTypeTest_UnionOptionalList(unittest.TestCase):
         _ArgsUnionOptionalList([0, 1, 2])
         _ArgsUnionOptionalList("str")
 
+    def test_union_neg(self):
         with self.assertRaises(ArgTypeError):
             _ArgsUnionOptionalList(["str"])
         with self.assertRaises(ArgTypeError):
@@ -131,6 +136,8 @@ class _ArgsSimpleDatatype:
 class EnforceTypeTest_SimpleDatatype(unittest.TestCase):
     def test_simple(self):
         _ArgsSimpleDatatype(1, "2")
+
+    def test_simple_neg(self):
         with self.assertRaises(ArgTypeError):
             _ArgsSimpleDatatype("2", 1)
 
@@ -144,6 +151,8 @@ class _ArgsDict:
 class EnforceTypeTest_SimpleDict(unittest.TestCase):
     def test_simple(self):
         _ArgsDict({"str": 1})
+
+    def test_simple_neg(self):
         with self.assertRaises(ArgTypeError):
             _ArgsDict({"str": "str"})
         with self.assertRaises(ArgTypeError):
@@ -166,7 +175,7 @@ class _ArgsCombined:
 
 
 class EnforceTypeTest_Combined(unittest.TestCase):
-    def test_all(self):
+    def test_all_neg(self):
         with self.assertRaises(ArgTypeError):
             # stride is wrong
             node_args = (_Node(), "stride", [1], [1])
@@ -202,6 +211,7 @@ class EnforceTypeTest_Combined(unittest.TestCase):
 
             _ArgsCombined(*node_args, **node_kwargs)
 
+    def test_all(self):
         node_args = (_Node(), [1, 1, 1], [1], [1])
         node_kwargs = {"groups": 1}
 

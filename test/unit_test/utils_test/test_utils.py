@@ -27,7 +27,7 @@ class TestGetQuantDtype(unittest.TestCase):
         self.assertEqual(get_quant_dtype(-8, 7), "int4")
         self.assertEqual(get_quant_dtype(0, 15), "uint4")
 
-    def test_unsupported_ranges(self):
+    def test_unsupported_ranges_neg(self):
         with self.assertRaises(ValueError):
             get_quant_dtype(0, 10)
         with self.assertRaises(ValueError):
@@ -58,7 +58,7 @@ class BroadcastableTest(unittest.TestCase):
             with self.subTest(shape_a=a, shape_b=b):
                 self.assertTrue(broadcastable(a, b))
 
-    def test_false_cases(self):
+    def test_false_cases_neg(self):
         false_pairs = [
             # mismatch in non-singleton dim
             ([4, 8, 16], [4, 7, 16]),

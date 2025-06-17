@@ -23,6 +23,6 @@ class RunBashCmdTest(unittest.TestCase):
         completed_process = run_bash_cmd(["echo", "Hello World"])
         self.assertEqual(completed_process.stdout, "Hello World\n")
 
-    def test_invalid_cmd(self):
+    def test_invalid_cmd_neg(self):
         with self.assertRaises(RuntimeError):
             run_bash_cmd(["ls", "for_invalid_test"])
