@@ -18,6 +18,7 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
+from tico.utils.feature_registry import FEATURES
 from tico.utils.mx.mx_ops import _quantize_mx
 
 # Note that an operator assumes input tensor has NHWC format.
@@ -602,4 +603,5 @@ def RegisterOps():
     CircleMaxPool2D()
     CircleAvgPool2D()
     CircleInstanceNorm()
-    CircleQuantizeMX()
+    if FEATURES["TORCH_2_5_EXPORT_ENABLED"]:
+        CircleQuantizeMX()

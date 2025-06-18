@@ -25,7 +25,7 @@
 SCRIPTS_DIR="${CCEX_PROJECT_PATH}/infra/scripts"
 TEST_DIR="${CCEX_PROJECT_PATH}/test"
 
-SUPPORTED_FAMILIES=("2.5" "2.6" "2.7")
+SUPPORTED_FAMILIES=("2.4" "2.5" "2.6" "2.7")
 DEFAULT_FAMILY="2.6"
 
 show_help() {
@@ -120,6 +120,7 @@ pip_install() {
 # torchvision version mapping per torch family
 ###############################################################################
 declare -A TORCHVISION_FAMILY=(
+  ["2.4"]="0.19.*"
   ["2.5"]="0.20.*"
   ["2.6"]="0.21.*"
   ["2.7"]="0.22.*"

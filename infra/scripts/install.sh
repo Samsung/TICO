@@ -24,7 +24,7 @@
 ###############################################################################
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SUPPORTED_FAMILIES=("2.5" "2.6" "2.7")
+SUPPORTED_FAMILIES=("2.4" "2.5" "2.6" "2.7")
 DEFAULT_FAMILY="2.6"
 
 show_help() {
