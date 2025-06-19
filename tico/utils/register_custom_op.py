@@ -385,7 +385,7 @@ def CircleMaxPool2D():
     def maxpool2d(
         input_: torch.Tensor,
         kernel_size: List[int],
-        stride: List[int],
+        stride: Optional[List[int]] = None,
         padding: Optional[List[int]] = None,
         dilation: Optional[List[int]] = None,
         ceil_mode: Optional[bool] = None,
@@ -397,6 +397,7 @@ def CircleMaxPool2D():
         So, let's set them by None in input specs, and then, set it by default values.
         https://github.com/pytorch/pytorch/blob/6b05aafc/torch/_library/infer_schema.py#L131-L144
         """
+        stride = kernel_size if not stride else stride
         padding = [0, 0] if padding is None else padding
         dilation = [1, 1] if dilation is None else dilation
         ceil_mode = False if ceil_mode is None else ceil_mode
@@ -416,7 +417,7 @@ def CircleMaxPool2D():
     def _(
         input_: torch.Tensor,
         kernel_size: List[int],
-        stride: List[int],
+        stride: Optional[List[int]] = None,
         padding: Optional[List[int]] = None,
         dilation: Optional[List[int]] = None,
         ceil_mode: Optional[bool] = None,
@@ -428,6 +429,7 @@ def CircleMaxPool2D():
         So, let's set them by None in input specs, and then, set it by default values.
         https://github.com/pytorch/pytorch/blob/6b05aafc/torch/_library/infer_schema.py#L131-L144
         """
+        stride = kernel_size if not stride else stride
         padding = [0, 0] if padding is None else padding
         dilation = [1, 1] if dilation is None else dilation
         ceil_mode = False if ceil_mode is None else ceil_mode
@@ -449,12 +451,13 @@ def CircleAvgPool2D():
     def avgpool2d(
         input_: torch.Tensor,
         kernel_size: List[int],
-        stride: List[int],
+        stride: Optional[List[int]] = None,
         padding: Optional[List[int]] = None,
         ceil_mode: Optional[bool] = None,
         count_include_pad: Optional[bool] = None,
         divisor_override: Optional[int] = None,
     ) -> torch.Tensor:
+        stride = kernel_size if not stride else stride
         padding = [0, 0] if padding is None else padding
         ceil_mode = False if ceil_mode is None else ceil_mode
         count_include_pad = True if count_include_pad is None else count_include_pad
@@ -482,12 +485,13 @@ def CircleAvgPool2D():
     def _(
         input_: torch.Tensor,
         kernel_size: List[int],
-        stride: List[int],
+        stride: Optional[List[int]] = None,
         padding: Optional[List[int]] = None,
         ceil_mode: Optional[bool] = None,
         count_include_pad: Optional[bool] = None,
         divisor_override: Optional[int] = None,
     ):
+        stride = kernel_size if not stride else stride
         padding = [0, 0] if padding is None else padding
         ceil_mode = False if ceil_mode is None else ceil_mode
         count_include_pad = True if count_include_pad is None else count_include_pad

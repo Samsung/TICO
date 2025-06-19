@@ -87,6 +87,18 @@ class AvgPoolWithoutStride(torch.nn.Module):
         return (torch.randn(2, 4, 8, 17),)
 
 
+class AvgPoolFunctionalWithoutStride(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, tensor):
+        result = torch.nn.functional.avg_pool2d(tensor, kernel_size=3)
+        return result
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 4, 8, 17),)
+
+
 class AvgPoolNonSquareWindow(torch.nn.Module):
     def __init__(self):
         super().__init__()

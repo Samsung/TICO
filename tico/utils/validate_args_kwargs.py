@@ -123,7 +123,7 @@ class AvgPool2dArgs:
 
     input: torch.fx.Node
     kernel_size: List[int]
-    stride: List[int] = field(default_factory=list)
+    stride: Optional[List[int]] = None
     padding: List[int] = field(default_factory=lambda: [0, 0])
     ceil_mode: bool = field(default=False)
     count_include_pad: bool = field(default=True)
@@ -131,7 +131,6 @@ class AvgPool2dArgs:
 
     def __post_init__(self):
         assert len(self.kernel_size) == 2, len(self.kernel_size)
-        assert len(self.stride) == 2, len(self.stride)
         if self.padding is not None:
             assert len(self.padding) == 2, len(self.padding)
         if self.divisor_override is not None:
@@ -598,14 +597,13 @@ class MaxPool2dWithIndicesArgs:
 
     input: torch.fx.Node
     kernel_size: List[int]
-    stride: List[int] = field(default_factory=list)
+    stride: Optional[List[int]] = None
     padding: List[int] = field(default_factory=lambda: [0, 0])
     dilation: List[int] = field(default_factory=lambda: [1, 1])
     ceil_mode: bool = field(default=False)
 
     def __post_init__(self):
         assert len(self.kernel_size) == 2, len(self.kernel_size)
-        assert len(self.stride) == 2, len(self.stride)
         if self.padding is not None:
             assert len(self.padding) == 2, len(self.padding)
         if self.dilation is not None:

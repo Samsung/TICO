@@ -69,6 +69,18 @@ class MaxPoolNoStride(torch.nn.Module):
         return (torch.randn(2, 4, 8, 16),)
 
 
+class MaxPoolFunctionalNoStride(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, tensor):
+        result = torch.nn.functional.max_pool2d(tensor, kernel_size=3)
+        return result
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 4, 8, 16),)
+
+
 class MaxPoolNonSquareWindow(torch.nn.Module):
     def __init__(self):
         super().__init__()

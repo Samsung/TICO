@@ -72,6 +72,8 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
         input = args.input
         kernel_size = args.kernel_size
         stride = args.stride
+        if not stride:
+            stride = kernel_size
         padding = args.padding
 
         maxpool_input: torch.fx.Node | circle.Tensor.TensorT = input
