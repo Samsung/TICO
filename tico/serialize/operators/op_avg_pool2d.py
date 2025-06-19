@@ -60,8 +60,7 @@ class AvgPool2DVisitor(NodeVisitor):
         input_shape = list(extract_shape(args.input))
         kernel_size = args.kernel_size
         stride = args.stride
-        if not stride:
-            stride = kernel_size
+        assert stride
         padding = args.padding
         # TODO Update this function when supporting ceil_mode = True
         assert args.ceil_mode is False
@@ -122,8 +121,6 @@ class AvgPool2DVisitor(NodeVisitor):
         input = args.input
         kernel_size = args.kernel_size
         stride = args.stride
-        if not stride:
-            stride = kernel_size
         padding = args.padding
         count_include_pad = args.count_include_pad
 

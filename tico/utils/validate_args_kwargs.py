@@ -131,6 +131,7 @@ class AvgPool2dArgs:
 
     def __post_init__(self):
         assert len(self.kernel_size) == 2, len(self.kernel_size)
+        self.stride = self.kernel_size if not self.stride else self.stride
         if self.padding is not None:
             assert len(self.padding) == 2, len(self.padding)
         if self.divisor_override is not None:
@@ -604,6 +605,7 @@ class MaxPool2dWithIndicesArgs:
 
     def __post_init__(self):
         assert len(self.kernel_size) == 2, len(self.kernel_size)
+        self.stride = self.kernel_size if not self.stride else self.stride
         if self.padding is not None:
             assert len(self.padding) == 2, len(self.padding)
         if self.dilation is not None:
