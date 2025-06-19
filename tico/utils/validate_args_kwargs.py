@@ -515,6 +515,17 @@ class InstanceNormArgs:
 
 @enforce_type
 @dataclass
+class LeakyReluArgs:
+    """
+    leaky_relu(Tensor self, Scalar negative_slope=0.01) -> Tensor
+    """
+
+    input: torch.fx.Node
+    negative_slope: float
+
+
+@enforce_type
+@dataclass
 class LinearArgs:
     """
     linear(Tensor input, Tensor weight, Tensor? bias=None) -> Tensor
