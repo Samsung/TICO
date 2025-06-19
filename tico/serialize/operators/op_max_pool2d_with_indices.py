@@ -124,7 +124,8 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
                 padding_type = PaddingType.SAME
             else:
                 padding_type = PaddingType.VALID
-                maxpool_input = define_padding_node()
+                if padding[0] != 0 or padding[1] != 0:
+                    maxpool_input = define_padding_node()
 
         inputs = [maxpool_input]
         outputs = [node]
