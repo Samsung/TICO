@@ -521,7 +521,7 @@ class LeakyReluArgs:
     """
 
     input: torch.fx.Node
-    negative_slope: float
+    negative_slope: float = 0.01
 
 
 @enforce_type

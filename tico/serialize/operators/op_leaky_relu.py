@@ -28,7 +28,7 @@ from tico.utils.validate_args_kwargs import LeakyReluArgs
 
 
 @register_node_visitor
-class ReluVisitor(NodeVisitor):
+class LeakyReluVisitor(NodeVisitor):
     target: List[torch._ops.OpOverload] = [torch.ops.aten.leaky_relu.default]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
