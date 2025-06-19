@@ -16,11 +16,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
+import copy
+
 import torch
 from torch.export import ExportedProgram
 
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam, to_qparam_dtype
 from tico.utils import logging
+from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import get_quant_dtype
@@ -78,6 +81,15 @@ class FoldQuantOps(PassBase):
             if q_args.dtype != dq_args.dtype:
                 continue
 
+            # Case 1. op is not quantized
+            # - Quantize op
+            # Case 2. op is quantized
+            # 2.1. op_dtype == qdq_dtype
+            # - Just skip (NOTE Need requantization?)
+            # 2.2. op_dtype != qdq_dtype
+            # - Insert Quantize operator
+
+            # Case 1
             if QPARAM_KEY not in op.meta:
                 qparam = QuantParam()
                 qparam.scale = [q_args.scale]
@@ -85,7 +97,24 @@ class FoldQuantOps(PassBase):
                 qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
                 op.meta[QPARAM_KEY] = qparam
 
-            dq.replace_all_uses_with(op, propagate_meta=False)
+                dq.replace_all_uses_with(op, propagate_meta=False)
+
+                logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
+            else:
+                op_qparam: QuantParam = op.meta[QPARAM_KEY]
+                qdq_dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
+                # Case 2.2
+                if op_qparam.dtype != qdq_dtype:
+                    # If op is already quantized with a dtype different from qdq, leave quantize
+                    qparam = QuantParam()
+                    qparam.scale = [q_args.scale]
+                    qparam.zero_point = [q_args.zero_p]
+                    qparam.dtype = qdq_dtype
+                    q.meta[QPARAM_KEY] = qparam
+                    assert len(q.users) == 1, "Fix me unless"
+
+                    dq.replace_all_uses_with(q, propagate_meta=False)
+                    logger.debug(f"{dq.name} is folded ({q.name} is left).")
 
             logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
 
