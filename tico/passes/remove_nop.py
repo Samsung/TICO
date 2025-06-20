@@ -33,9 +33,7 @@ class RemoveNop(PassBase):
     """
 
     target_ops = (
-        [
-            torch.ops.prims.view_of.default,
-        ]
+        [torch.ops.prims.view_of.default, torch.ops.aten.native_dropout.default]
         + ops.aten.alias
         + ops.aten.clone
         + ops.aten.detach
@@ -66,13 +64,14 @@ class RemoveNop(PassBase):
                 ]:
                     continue
 
-            assert len(node.args) == 1
+            # assert len(node.args) == 1
 
             src = node.args[0]
             assert isinstance(src, torch.fx.Node)
 
-            with graph.inserting_after(node):
-                node.replace_all_uses_with(src, propagate_meta=False)
+            node.replace_all_uses_with(src, propagate_meta=False)
+            # Dropout is not removed in dead node elimination (nightly version)
+            exported_program.graph.erase_node(node)
 
             modified = True
             logger.debug(f"{node.name} is replaced with {src}")
