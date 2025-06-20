@@ -1,0 +1,28 @@
+version: 2
+test:
+  - name: TICO_TCA
+    testCaseLanguage: PYTHON
+    testFW: PYUNIT
+    testCaseFolder:
+      - test/
+
+    testFile:
+      - extension: py
+        starts:
+          - test_
+
+    testCase:
+      - condition:
+        - functionName:
+            starts:
+              - test_
+
+    positiveTestCase:
+      - condition:
+        - inverse: negativeTestCase
+
+    negativeTestCase:
+      - condition:
+        - testName:
+            ends:
+              - _neg
