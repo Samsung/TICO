@@ -21,9 +21,8 @@ import copy
 import torch
 from torch.export import ExportedProgram
 
-from tico.serialize.quant_param import QPARAM_KEY, QuantParam, to_qparam_dtype
+from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
-from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import get_quant_dtype
@@ -42,11 +41,33 @@ class FoldQuantOps(PassBase):
     To export quantized circle, this pass removes (Q - DQ) nodes and saves those quantization info
      to previous op's metadata.
 
-    [BEFORE]
-      op (float) - Quantize - Dequantize - (float)
+    ────────────────────────────────────────────────────────────────
+    BEFORE                             AFTER
+    ────────────────────────────────────────────────────────────────
+      op(float) ─ Q ─ DQ ─ …            op(float, meta[QPARAM])
 
-    [AFTER]
-      op (float with meta[QPARAM_KEY])
+      op ─ Q1 ─ DQ1 ─ Q2 ─ DQ2          op(meta[QPARAM]) ─ Q2
+                 ▲                                          ▲
+                 │ (Q1, DQ1 folded)                         │ (re-quantization kept)
+
+      op ─ Q ─┬─ DQ0                    op(meta[QPARAM])
+              ├─ DQ1                    (each DQ* folded, Q dropped when orphaned)
+              └─ DQ2
+    ────────────────────────────────────────────────────────────────
+
+    Algorithm
+    ---------
+    1. Iterate over *all* Dequantize nodes.
+    2. For each DQ, verify it is driven by a Quantize node `q` and that
+       `q` and `dq` share identical (scale, zero-point, dtype).
+    3. a) If the producer op has **no** QPARAM, attach one, then replace
+          *this* DQ's usages with the producer op.
+       b) If the producer is already quantized with a different dtype,
+          this is a *re-quantization*: attach QPARAM to `q` and keep it,
+          but still remove the DQ.
+    4. After all replacements, run `graph.eliminate_dead_code()`.
+       Any Quantize that became orphaned because *all* its DQs were folded
+       is deleted automatically.
     """
 
     def __init__(self):
@@ -81,15 +102,9 @@ class FoldQuantOps(PassBase):
             if q_args.dtype != dq_args.dtype:
                 continue
 
-            # Case 1. op is not quantized
-            # - Quantize op
-            # Case 2. op is quantized
-            # 2.1. op_dtype == qdq_dtype
-            # - Just skip (NOTE Need requantization?)
-            # 2.2. op_dtype != qdq_dtype
-            # - Insert Quantize operator
-
-            # Case 1
+            # ───────────────────────────────────────────
+            # Case 1: op not yet quantized
+            # ───────────────────────────────────────────
             if QPARAM_KEY not in op.meta:
                 qparam = QuantParam()
                 qparam.scale = [q_args.scale]
@@ -100,21 +115,36 @@ class FoldQuantOps(PassBase):
                 dq.replace_all_uses_with(op, propagate_meta=False)
 
                 logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
+            # ───────────────────────────────────────────
+            # Case 2: op already quantized
+            #        2.1 same dtype  → nothing to do
+            #        2.2 diff dtype  → leave Q in place
+            # ───────────────────────────────────────────
             else:
-                op_qparam: QuantParam = op.meta[QPARAM_KEY]
+                existing_qp: QuantParam = op.meta[QPARAM_KEY]
                 qdq_dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
-                # Case 2.2
-                if op_qparam.dtype != qdq_dtype:
-                    # If op is already quantized with a dtype different from qdq, leave quantize
-                    qparam = QuantParam()
-                    qparam.scale = [q_args.scale]
-                    qparam.zero_point = [q_args.zero_p]
-                    qparam.dtype = qdq_dtype
-                    q.meta[QPARAM_KEY] = qparam
-                    assert len(q.users) == 1, "Fix me unless"
+
+                if existing_qp.dtype != qdq_dtype:
+                    # Attach QPARAM to Q once
+                    if QPARAM_KEY not in q.meta:
+                        qparam = QuantParam()
+                        qparam.scale = [q_args.scale]
+                        qparam.zero_point = [q_args.zero_p]
+                        qparam.dtype = qdq_dtype
+                        q.meta[QPARAM_KEY] = qparam
+                        assert len(q.users) == 1, "Fix me unless"
 
                     dq.replace_all_uses_with(q, propagate_meta=False)
                     logger.debug(f"{dq.name} is folded ({q.name} is left).")
+                else:
+                    # Same dtype → the Quantize–Dequantize pair is redundant.
+                    assert existing_qp.scale and existing_qp.scale[0] == q_args.scale
+                    assert (
+                        existing_qp.zero_point
+                        and existing_qp.zero_point[0] == q_args.zero_p
+                    )
+                    dq.replace_all_uses_with(op, propagate_meta=False)
+                    logger.debug(f"Removed redundant {dq.name}")
 
         graph.eliminate_dead_code()
         graph.lint()
