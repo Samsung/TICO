@@ -1,0 +1,51 @@
+name: Publish Official Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_name:
+        description: 'Git reference (branch or tag) to build and publish'
+        required: true
+        type: string
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout the specified ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_name }}
+
+      - name: "Build package"
+        run: |
+          ./ccex build
+      
+      - name: "Upload artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: "wheel"
+          path: "./dist/"
+
+  publish-to-pypi:
+    needs:
+      - build-and-upload
+    runs-on: ubuntu-22.04
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/TICO
+
+    permissions:
+      id-token: write  # IMPORTANT: mandatory for trusted publishing
+
+    steps:
+      - name: "Download all the dists"
+        uses: actions/download-artifact@v4
+        with:
+          name: "wheel"
+          path: "./dist/"
+
+      - name: "Publish distribution to PyPI"
+        uses: pypa/gh-action-pypi-publish@release/v1
