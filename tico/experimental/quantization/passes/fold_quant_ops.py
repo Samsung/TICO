@@ -116,8 +116,6 @@ class FoldQuantOps(PassBase):
                     dq.replace_all_uses_with(q, propagate_meta=False)
                     logger.debug(f"{dq.name} is folded ({q.name} is left).")
 
-            logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
-
         graph.eliminate_dead_code()
         graph.lint()
         graph_module.recompile()
