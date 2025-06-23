@@ -18,6 +18,21 @@ jobs:
         with:
           ref: ${{ inputs.ref_name }}
 
+      # Verify version consistency between tag and version.py
+      - name: Check version.py matches ref_name
+        run: |
+          FILE_VERSION=$(python -c 'exec(open("version.py").read()); print(VERSION)')
+          INPUT_REF="${{ inputs.ref_name }}"
+          TAG_VERSION="${INPUT_REF#v}"  # Strip leading 'v' from ref_name
+
+          echo "VERSION in version.py: $FILE_VERSION"
+          echo "VERSION from ref_name: $TAG_VERSION"
+
+          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::VERSION in version.py ($FILE_VERSION) does not match ref_name ($INPUT_REF)"
+            exit 1
+          fi
+
       - name: "Build package"
         run: |
           ./ccex build
