@@ -121,10 +121,10 @@ class FoldQuantOps(PassBase):
             #        2.2 diff dtype  → leave Q in place
             # ───────────────────────────────────────────
             else:
-                existing_qp: QuantParam = op.meta[QPARAM_KEY]
+                op_qparam: QuantParam = op.meta[QPARAM_KEY]
                 qdq_dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
 
-                if existing_qp.dtype != qdq_dtype:
+                if op_qparam.dtype != qdq_dtype:
                     # Attach QPARAM to Q once
                     if QPARAM_KEY not in q.meta:
                         qparam = QuantParam()
@@ -138,10 +138,10 @@ class FoldQuantOps(PassBase):
                     logger.debug(f"{dq.name} is folded ({q.name} is left).")
                 else:
                     # Same dtype → the Quantize–Dequantize pair is redundant.
-                    assert existing_qp.scale and existing_qp.scale[0] == q_args.scale
+                    assert op_qparam.scale and op_qparam.scale[0] == q_args.scale
                     assert (
-                        existing_qp.zero_point
-                        and existing_qp.zero_point[0] == q_args.zero_p
+                        op_qparam.zero_point
+                        and op_qparam.zero_point[0] == q_args.zero_p
                     )
                     dq.replace_all_uses_with(op, propagate_meta=False)
                     logger.debug(f"Removed redundant {dq.name}")
