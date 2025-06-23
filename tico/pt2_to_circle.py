@@ -14,6 +14,7 @@
 
 import argparse
 import os
+from typing import Optional
 
 import torch
 import yaml
@@ -27,8 +28,10 @@ def convert(
     input: str,
     output: str,
     verbose: bool = False,
-    config: CompileConfigBase = get_default_config(),
+    config: Optional[CompileConfigBase] = None,
 ):
+    if config is None:
+        config = get_default_config()
     # TODO Check input and output
 
     if verbose:
@@ -73,6 +76,7 @@ def main():
 
     args = parser.parse_args()
 
+    config = None
     if args.config:
         with open(args.config) as f:
             config_dict = yaml.safe_load(f)

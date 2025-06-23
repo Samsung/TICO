@@ -117,6 +117,7 @@ class CastMixedTypeArgs(PassBase):
                 lhs_val, rhs_val, type_promotion_kind=ops_to_promote[node.target]
             )[1]
             arg_to_promote = None
+            ori_type = None
             if lhs_val.dtype == type_to_promote:
                 ori_type = rhs_val.dtype
                 arg_to_promote = rhs

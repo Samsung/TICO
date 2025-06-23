@@ -110,6 +110,8 @@ class ConvertConv1dToConv2d(PassBase):
                 conv2d_op = torch.ops.aten.conv2d.default
             elif isinstance(padding, str):
                 conv2d_op = torch.ops.aten.conv2d.padding
+            else:
+                raise RuntimeError("Invalid input")
 
             conv2d = create_node(
                 graph,

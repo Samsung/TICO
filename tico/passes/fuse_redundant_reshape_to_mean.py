@@ -86,6 +86,8 @@ class FuseRedundantReshapeToMean(PassBase):
                 updated_args = node.args + (keep_dims,)
             elif len(mean_args) == 3:
                 updated_args = node.args
+            else:
+                raise RuntimeError("Invalid input")
             node.args = updated_args
             node.meta["val"] = fused_val
             user_node.replace_all_uses_with(node, propagate_meta=False)

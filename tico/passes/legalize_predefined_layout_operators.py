@@ -163,6 +163,7 @@ class LegalizePreDefinedLayoutOperators(PassBase):
                 node.update_arg(node.args.index(weight), weight_permute)
 
         with graph.inserting_before(node):
+            legalized_op = None
             if groups == 1:
                 if isinstance(padding, list):
                     legalized_op = torch.ops.circle_custom.conv2d
@@ -175,6 +176,7 @@ class LegalizePreDefinedLayoutOperators(PassBase):
                     legalized_op = torch.ops.circle_custom.depthwise_conv2d.padding
             else:
                 assert groups == 1 or groups == input_shape[1]  # Cannot reach here
+            assert legalized_op is not None
 
             circle_op = create_node(
                 graph, legalized_op, args=node.args, kwargs=node.kwargs, origin=node

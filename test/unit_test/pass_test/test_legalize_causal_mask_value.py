@@ -25,11 +25,13 @@ from test.utils.pass_value_test import PassTest
 
 
 def get_mask_value(exported_program):
+    mask_node = None
     for node in exported_program.graph.nodes:
         if node.op == "call_function" and node.target in ops.aten.add:
             args = AddTensorArgs(*node.args, **node.kwargs)
             mask_node = args.input
 
+    assert mask_node is not None
     assert isinstance(mask_node, torch.fx.Node)
     mask_name = exported_program.graph_signature.inputs_to_lifted_tensor_constants[
         mask_node.name

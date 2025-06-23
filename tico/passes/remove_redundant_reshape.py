@@ -242,12 +242,16 @@ class RemoveRedundantReshapePattern3(PassBase):
             softmax = reshape_1_args.input
 
             # softmax
+            softmax_args = None
             if not is_target_node(softmax, ops.aten.softmax):
                 continue
             if softmax.target == torch.ops.aten._softmax.default:
                 softmax_args = SoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type, assignment]
             elif softmax.target == torch.ops.aten._safe_softmax.default:
                 softmax_args = SafeSoftmaxArgs(*softmax.args, **softmax.kwargs)  # type: ignore[arg-type, assignment]
+            else:
+                raise RuntimeError("Invalid input")
+            assert softmax_args is not None
             add, softmax_dim = (
                 softmax_args.input,
                 softmax_args.dim,

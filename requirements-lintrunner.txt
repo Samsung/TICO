@@ -1,24 +1,15 @@
-# Mostly copied from executorch repo
-
 # Lintrunner itself
 lintrunner==0.11.0
 lintrunner-adapters==0.11.0
 
-# Flake 8 and its dependencies
-flake8==6.0.0
-flake8-breakpoint==1.1.0
-flake8-bugbear==23.6.5
-flake8-comprehensions==3.12.0
-flake8-pyi==23.5.0
-flake8-import-order==0.18.2
-mccabe==0.7.0
-pycodestyle==2.10.0
-torchfix==0.1.1
+# Linter
+pylint==3.3.1
+astroid==3.3.10 # for pylint
 
-# UFMT
+# Formatter
 black==22.12.0
 ufmt==2.0.1
 usort==1.0.5
 
-# MYPY
+# Type checker
 mypy==1.9.0

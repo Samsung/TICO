@@ -102,6 +102,7 @@ class AnyVisitor(NodeVisitor):
         input_shape = list(extract_shape(input))
         output_shape = list(extract_shape(node))
 
+        dim_i32 = None
         if dim is None:
             dims = tuple(i for i in range(0, len(input_shape)))
             dim_i32 = tuple(
@@ -111,8 +112,12 @@ class AnyVisitor(NodeVisitor):
             dim_i32 = circle_legalize_dtype_to(dim, dtype=torch.int32)
         if isinstance(dim, tuple):
             dim_i32 = tuple(circle_legalize_dtype_to(d, dtype=torch.int32) for d in dim)
+        assert dim_i32 is not None
 
-        inputs = [input, dim_i32]
+        inputs = [
+            input,
+            dim_i32,
+        ]  # type: ignore[list-item]
         outputs = [node]
 
         dtype_torch = extract_torch_dtype(input)

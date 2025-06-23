@@ -102,7 +102,9 @@ def Idefics3VisionTransformer_forward(
 
 
 def Idefics3VisionEmbeddings_forward(
-    self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor
+    self,
+    pixel_values: torch.FloatTensor,
+    patch_attention_mask: Optional[torch.BoolTensor] = None,
 ) -> torch.Tensor:
     batch_size, _, max_im_h, max_im_w = pixel_values.shape
 
