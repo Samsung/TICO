@@ -51,7 +51,7 @@ def get_quant_type(min: int, max: int) -> torch.dtype:
     if min == -32767 and max == 32767:
         return torch.int16
 
-    raise RuntimeError("Not supported min/max values")
+    raise RuntimeError(f"Not supported min/max values: {min}/{max}")
 
 
 def get_constant_from_tensor(
