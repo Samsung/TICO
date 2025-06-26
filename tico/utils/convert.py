@@ -38,6 +38,7 @@ from tico.passes.cast_aten_where_arg_type import CastATenWhereArgType
 from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.convert_conv1d_to_conv2d import ConvertConv1dToConv2d
+from tico.passes.convert_conv_to_conv_transpose2d import ConvertConvToConvTranspose2D
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.convert_repeat_to_expand_copy import ConvertRepeatToExpandCopy
 from tico.passes.convert_to_relu6 import ConvertToReLU6
@@ -223,6 +224,7 @@ def convert_exported_module_to_circle(
             SegmentIndexSelectConst(),
             LegalizeCausalMaskValue(enabled=config.get("legalize_causal_mask_value")),
             LowerToResizeNearestNeighbor(),
+            ConvertConvToConvTranspose2D(),
             LegalizePreDefinedLayoutOperators(),
             LowerPow2ToMul(),
             ConvertConv1dToConv2d(),
