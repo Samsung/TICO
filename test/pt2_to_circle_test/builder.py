@@ -17,6 +17,7 @@ import io
 import os
 import unittest
 from pathlib import Path
+from copy import deepcopy
 
 import torch
 
@@ -104,14 +105,14 @@ class NNModuleTest(TestRunnerBase):
         # WHY?
         #   Some model changes its state during export (e.g., EfficientFormerL1)
         #   See https://github.com/pytorch/pytorch/issues/155114
-        torch_result = infer_nnmodule(self.nnmodule, self.example_inputs)
+        torch_result = infer_nnmodule(self.nnmodule, deepcopy(self.example_inputs))
 
         if without_pt2:
             # torch.nn.Module --> ExportedProgram --> pt2 ----- (ExportedProgram) ------- > circle
             #                                       (--> load_from_pt2_file -->)
             convert_nnmodule_to_circle(
                 self.nnmodule,
-                self.example_inputs,
+                deepcopy(self.example_inputs),
                 circle_model_path,
                 dynamic_shapes=dynamic_shapes,
             )
@@ -119,7 +120,7 @@ class NNModuleTest(TestRunnerBase):
             # torch.nn.Module --> ExportedProgram ----------------------------------------> circle
             convert_nnmodule_to_pt2(
                 self.nnmodule,
-                self.example_inputs,
+                deepcopy(self.example_inputs),
                 pt2_model_path,
                 dynamic_shapes=dynamic_shapes,
             )
@@ -133,13 +134,13 @@ class NNModuleTest(TestRunnerBase):
         USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert" or dynamic
         if self.use_onert or USE_ONERT:
             circle_result = infer_circle(
-                circle_model_path, self.example_inputs, "onert"
+                circle_model_path, deepcopy(self.example_inputs), "onert"
             )
             torch_shape = torch_result[0].shape
             circle_result[0] = circle_result[0].reshape(torch_shape)
         else:
             circle_result = infer_circle(
-                circle_model_path, self.example_inputs, "circle-interpreter"
+                circle_model_path, deepcopy(self.example_inputs), "circle-interpreter"
             )
         validate_result(torch_result, circle_result, **self.tolerance)
 
