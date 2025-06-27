@@ -174,7 +174,7 @@ def check_training_ops(exported_program: ExportedProgram):
 
     if found:
         raise RuntimeError(
-            f"Detected training-mode ops {sorted(found)}. Call `model.eval()` before export."
+            f"Detected training-mode ops {found}. Call `model.eval()` before export."
         )
 
 
