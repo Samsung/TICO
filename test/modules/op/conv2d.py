@@ -220,6 +220,24 @@ class ConvWithSamePadding(torch.nn.Module):
         return (torch.randn(20, 16, 50, 100),)
 
 
+class ConvWithSamePadding2(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv2d = torch.nn.Conv2d(
+            in_channels=8,
+            out_channels=16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+        )
+
+    def forward(self, input):
+        return self.conv2d(input)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 8, 32, 32),)
+
+
 class ConvWithPadding(torch.nn.Module):
     def __init__(self):
         super().__init__()

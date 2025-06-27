@@ -40,8 +40,8 @@ def is_same_padding(
     if isinstance(padding, list):
         assert len(padding) == 2, "Padding should be a list of length 2."
 
-        input_HW = input_shape[1:2]  # N H W C
-        output_HW = output_shape[1:2]  # N H W C
+        input_HW = tuple(input_shape[1:3])  # N H W C
+        output_HW = tuple(output_shape[1:3])  # N H W C
         return input_HW == output_HW
 
     raise InvalidArgumentError("Invalid padding.")
