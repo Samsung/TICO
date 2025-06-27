@@ -21,10 +21,12 @@ from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch imp
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 
+from test.modules.op.add import SimpleAdd
 from test.modules.op.bmm import SimpleBatchMatMul
 from test.modules.op.linear import SimpleLinear
 from test.modules.op.mul import SimpleMulWithTensor
 from test.modules.op.permute import SimplePermute
+from test.modules.op.relu import SimpleRelu
 from test.modules.op.reshape import ReshapeTorchAPI
 
 
@@ -210,5 +212,27 @@ class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
             torch.ops.aten.reshape.default,
             input_dtype="int16",
             desired_dtype="uint8",
+        )
+        self.run_test()
+
+
+class ReluTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_i16o8(self):
+        self.setup(
+            SimpleRelu(),
+            torch.ops.aten.relu.default,
+            input_dtype="int16",
+            desired_dtype="int16",
+        )
+        self.run_test()
+
+
+class AddTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_i16o8(self):
+        self.setup(
+            SimpleAdd(),
+            torch.ops.aten.add.Tensor,
+            input_dtype="int16",
+            desired_dtype="int16",
         )
         self.run_test()
