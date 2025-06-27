@@ -120,10 +120,10 @@ class Conv2dVisitor(NodeVisitor):
         conv_input: torch.fx.node.Node | circle.Tensor.TensorT = input_
         weight_shape = list(extract_shape(weight))
 
-        if is_same_padding(padding, input_shape, output_shape) and stride == [1, 1]:
-            conv2d_padding_type = SAME
-        elif is_valid_padding(padding):
+        if is_valid_padding(padding):
             conv2d_padding_type = VALID
+        elif is_same_padding(padding, input_shape, output_shape) and stride == [1, 1]:
+            conv2d_padding_type = SAME
         else:
             assert isinstance(padding, list) and len(padding) == 2
 
