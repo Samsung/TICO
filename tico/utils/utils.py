@@ -396,10 +396,10 @@ def is_target_node(
     """
     if not isinstance(target_ops, list):
         target_ops = [target_ops]
-    assert all(isinstance(t, torch._ops.OpOverload) for t in target_ops), target_ops
+    # assert all(isinstance(t, torch._ops.OpOverload) for t in target_ops), target_ops
 
-    if node.op != "call_function":
-        return False
+    # if node.op != "call_function":
+    #    return False
     if node.target not in target_ops:
         return False
 
