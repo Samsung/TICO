@@ -1,0 +1,20 @@
+[MESSAGES CONTROL]
+disable=
+  W, C, R,
+  # Docstring
+  C0114,    # missing-module-docstring
+  C0115,    # missing-class-docstring
+  C0116,    # missing-function-docstring
+  # Naming
+  C0103,    # invalid-name
+  # Length
+  C0301,    # line-too-long
+  # Imports
+  E0401,    # import-error
+  W0611,    # unused-import
+  # Misc
+  E1120,    # no-value-for-parameter
+  E1102,    # not-callable
+  W0107,    # unnecessary-pass
+  W0511,    # fixme
+  W1309,    # f-string-without-interpolation
