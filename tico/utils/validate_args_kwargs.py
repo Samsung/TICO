@@ -210,6 +210,45 @@ class ConstantPadNdArgs:
 
 @enforce_type
 @dataclass
+class ConvArgs:
+    """
+    convolution(Tensor input, Tensor weight, Tensor? bias, SymInt[] stride, SymInt[] padding, SymInt[] dilation, bool transposed, SymInt[] output_padding, SymInt groups) -> Tensor
+    """
+
+    input: torch.fx.Node
+    weight: torch.fx.Node
+    bias: Union[torch.fx.Node, None]
+    stride: List[int]
+    padding: List[int]
+    dilation: List[int]
+    transposed: bool
+    output_padding: List[int]
+    groups: int
+
+
+@enforce_type
+@dataclass
+class ConvTranspose2DArgs:
+    """
+    conv_transpose2d.input(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] output_padding=0, SymInt groups=1, SymInt[2] dilation=1) -> Tensor
+    """
+
+    input: torch.fx.Node
+    weight: torch.fx.Node
+    bias: Union[torch.fx.Node, None] = None
+    stride: List[int] = field(default_factory=lambda: [1, 1])
+    padding: List[int] = field(default_factory=lambda: [0, 0])
+    output_padding: List[int] = field(default_factory=lambda: [0, 0])
+    groups: int = 1
+    dilation: List[int] = field(default_factory=lambda: [1, 1])
+
+    def __post_init__(self):
+        assert len(self.stride) == 2, len(self.stride)
+        assert len(self.dilation) == 2, len(self.dilation)
+
+
+@enforce_type
+@dataclass
 class Conv2DArgs:
     """
     conv2d(Tensor input, Tensor weight, Tensor? bias=None, SymInt[2] stride=1, SymInt[2] padding=0, SymInt[2] dilation=1, SymInt groups=1) -> Tensor
