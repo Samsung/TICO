@@ -237,6 +237,9 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                 if qparam_dtype(x) == qparam_dtype(node):
                     continue
 
+                if qparam_dtype(x) != qparam_dtype(y):
+                    continue
+
                 if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
                     quantize = _insert_quantize_op_after(node)
 
