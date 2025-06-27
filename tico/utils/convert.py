@@ -162,6 +162,22 @@ def check_unsupported_target(exported_program: ExportedProgram):
         raise NotYetSupportedError("NOT SUPPORTED OPERATOR IN GRAPH MODULE")
 
 
+def check_training_ops(exported_program: ExportedProgram):
+    TRAINING_OPS = {
+        torch.ops.aten.dropout.default,
+        torch.ops.aten.native_dropout.default,
+    }
+    found = set()
+    for node in exported_program.graph.nodes:
+        if node.op == "call_function" and node.target in TRAINING_OPS:
+            found.add(node.target)
+
+    if found:
+        raise RuntimeError(
+            f"Detected training-mode ops {sorted(found)}. Call `model.eval()` before export."
+        )
+
+
 def convert_exported_module_to_circle(
     exported_program: ExportedProgram,
     config: CompileConfigBase = get_default_config(),
@@ -170,6 +186,7 @@ def convert_exported_module_to_circle(
     logger.debug("Input ExportedProgram (must be core aten)")
     logger.debug(exported_program)
 
+    check_training_ops(exported_program)
     # PRE-EDGE PASSES
     #
     # Here are the passes that run before to_edge() conversion.
