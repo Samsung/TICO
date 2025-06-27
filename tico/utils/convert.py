@@ -20,20 +20,23 @@ import torch
 from torch.export import export, ExportedProgram
 
 from tico.config import CompileConfigBase, get_default_config
-from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
-from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch import (
-    InsertQuantizeOnDtypeMismatch,
-)
-from tico.experimental.quantization.passes.propagate_qparam_backward import (
-    PropagateQParamBackward,
-)
-from tico.experimental.quantization.passes.propagate_qparam_forward import (
-    PropagateQParamForward,
-)
-from tico.experimental.quantization.passes.quantize_bias import QuantizeBias
-from tico.experimental.quantization.passes.remove_weight_dequant_op import (
-    RemoveWeightDequantOp,
-)
+from tico.utils.feature_registry import FEATURES
+
+if FEATURES["EXPERIMENTAL_ENABLED"]:
+    from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
+    from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch import (
+        InsertQuantizeOnDtypeMismatch,
+    )
+    from tico.experimental.quantization.passes.propagate_qparam_backward import (
+        PropagateQParamBackward,
+    )
+    from tico.experimental.quantization.passes.propagate_qparam_forward import (
+        PropagateQParamForward,
+    )
+    from tico.experimental.quantization.passes.quantize_bias import QuantizeBias
+    from tico.experimental.quantization.passes.remove_weight_dequant_op import (
+        RemoveWeightDequantOp,
+    )
 from tico.passes.cast_aten_where_arg_type import CastATenWhereArgType
 from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
 from tico.passes.const_prop_pass import ConstPropPass
@@ -94,6 +97,27 @@ def traced_run_decompositions(exported_program: ExportedProgram):
     Therefore, we do not decompose Conv-related Ops and convert them directly to circle ops.
     """
 
+    def run_decompositions_v24(ep: ExportedProgram):
+        from torch._decomp import core_aten_decompositions
+
+        _decomp_table = core_aten_decompositions()
+        _preserve_ops = (
+            torch.ops.aten.conv2d.default,
+            torch.ops.aten.conv2d.padding,
+            torch.ops.aten.conv1d.default,
+            torch.ops.aten.conv1d.padding,
+            torch.ops.aten.instance_norm.default,
+            torch.ops.aten.relu6.default,  # Do not decompose to hardtanh
+            torch.ops.aten.prelu.default,
+            torch.ops.aten.linear.default,
+        )
+        for op in _preserve_ops:
+            if op in _decomp_table:
+                del _decomp_table[op]
+
+        ep = ep.run_decompositions(decomp_table=_decomp_table)
+        return ep
+
     def run_decompositions_v25(ep: ExportedProgram):
         _preserve_ops = (
             torch.ops.aten.conv2d.default,
@@ -129,7 +153,9 @@ def traced_run_decompositions(exported_program: ExportedProgram):
         ep = ep.run_decompositions(decomp_table=_decomp_table)
         return ep
 
-    if torch.__version__.startswith("2.5"):
+    if torch.__version__.startswith("2.4"):
+        return run_decompositions_v24(exported_program)
+    elif torch.__version__.startswith("2.5"):
         return run_decompositions_v25(exported_program)
     elif (
         torch.__version__.startswith("2.6")
