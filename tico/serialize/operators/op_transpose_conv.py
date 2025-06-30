@@ -20,7 +20,11 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
-from tico.serialize.circle_mapping import extract_circle_dtype, extract_shape
+from tico.serialize.circle_mapping import (
+    circle_legalize_dtype_to,
+    extract_circle_dtype,
+    extract_shape,
+)
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
@@ -142,10 +146,10 @@ class TransposeConvVisitor(NodeVisitor):
             bias = [0.0] * out_channel  # type: ignore[assignment]
 
         # First arguemnt is output shape of tconv.
-        tconv_output = torch.tensor(
-            [input_shape[0], output_shape[1], output_shape[2], weight_shape[0]],
-            dtype=torch.int32,
-        )
+        assert output_shape[0] == input_shape[0]
+        assert output_shape[3] == weight_shape[0]
+        tconv_output = circle_legalize_dtype_to(output_shape, dtype=torch.int32)
+
         tconv_output_tensor = self.graph.add_const_tensor(
             tconv_output, source_node=node
         )
