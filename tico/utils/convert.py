@@ -186,7 +186,6 @@ def convert_exported_module_to_circle(
     logger.debug("Input ExportedProgram (must be core aten)")
     logger.debug(exported_program)
 
-    check_training_ops(exported_program)
     # PRE-EDGE PASSES
     #
     # Here are the passes that run before to_edge() conversion.
@@ -275,6 +274,7 @@ def convert_exported_module_to_circle(
         quantize_graph.run(exported_program)
 
     check_unsupported_target(exported_program)
+    check_training_ops(exported_program)
     circle_program = build_circle(exported_program)
 
     return circle_program
