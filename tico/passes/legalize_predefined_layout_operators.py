@@ -30,6 +30,7 @@ from tico.utils.utils import is_target_node
 from tico.utils.validate_args_kwargs import (
     AvgPool2dArgs,
     Conv2DArgs,
+    ConvTranspose2DArgs,
     DequantizePerChannelArgs,
     DequantizePerTensorArgs,
     InstanceNormArgs,
@@ -37,7 +38,9 @@ from tico.utils.validate_args_kwargs import (
 )
 
 
-def get_permute_weight_input(conv_args: Conv2DArgs) -> torch.fx.Node:
+def get_permute_weight_input(
+    conv_args: Conv2DArgs | ConvTranspose2DArgs,
+) -> torch.fx.Node:
     """
     Retrieves the weight input for the permute operation.
 
@@ -178,6 +181,85 @@ class LegalizePreDefinedLayoutOperators(PassBase):
                 assert groups == 1 or groups == input_shape[1]  # Cannot reach here
             assert legalized_op is not None
 
+            circle_op = create_node(
+                graph, legalized_op, args=node.args, kwargs=node.kwargs, origin=node
+            )
+            # output permute
+            NHWC_to_NCHW = [0, 3, 1, 2]
+            conv_out_permute = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(circle_op, NHWC_to_NCHW),
+            )
+        node.replace_all_uses_with(conv_out_permute, propagate_meta=True)
+
+        logger.debug(f"{node.name} is replaced with {circle_op.name}")
+        modified = True
+        return modified
+
+    def legalize_conv_transpose2d(self, exported_program, node) -> bool:
+        logger = logging.getLogger(__name__)
+        modified = False
+
+        graph_module = exported_program.graph_module
+        graph = graph_module.graph
+
+        args = ConvTranspose2DArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        input = args.input
+        padding = args.padding
+        groups = args.groups
+        dilation = args.dilation
+
+        input_shape = extract_shape(input)
+        if not (len(input_shape) == 4):
+            raise NotYetSupportedError(
+                f"Only support 4D input tensor: node's input shape: {input_shape}"
+            )
+
+        if groups != 1:
+            raise NotYetSupportedError(
+                f"Only support groups=1: node's groups: {groups}"
+            )
+
+        if dilation != [1, 1]:
+            raise NotYetSupportedError(
+                f"Only support dilation=[1, 1]: node's groups: {dilation}"
+            )
+
+        NCHW_to_NHWC = [0, 2, 3, 1]
+        # input permute
+        with graph.inserting_after(input):
+            input_permute = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(input, NCHW_to_NHWC),
+                origin=input,
+            )
+            node.update_arg(node.args.index(input), input_permute)
+
+        # weight permute
+        weight = get_permute_weight_input(args)
+        with graph.inserting_after(weight):
+            perm = [1, 2, 3, 0]  # IOHW_to_OHWI
+            weight_permute = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(weight, perm),
+                origin=weight,
+            )
+            if args.weight.target in [
+                torch.ops.quantized_decomposed.dequantize_per_channel.default,
+                torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+            ]:
+                dq = args.weight
+                dq.update_arg(dq.args.index(weight), weight_permute)
+                # Need to update dq.meta["val"] in FillMetaVal pass.
+                del dq.meta["val"]
+            else:
+                node.update_arg(node.args.index(weight), weight_permute)
+
+        with graph.inserting_before(node):
+            legalized_op = torch.ops.circle_custom.transpose_conv
             circle_op = create_node(
                 graph, legalized_op, args=node.args, kwargs=node.kwargs, origin=node
             )
@@ -365,6 +447,7 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         target_to_legalize_func = {
             torch.ops.aten.conv2d.default: self.legalize_conv2d,
             torch.ops.aten.conv2d.padding: self.legalize_conv2d,
+            torch.ops.aten.conv_transpose2d.input: self.legalize_conv_transpose2d,
             torch.ops.aten.max_pool2d_with_indices.default: self.legalize_max_pool2d_with_indices,
             torch.ops.aten.avg_pool2d.default: self.legalize_avg_pool2d,
             torch.ops.aten.instance_norm.default: self.legalize_instance_norm,

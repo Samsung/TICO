@@ -371,6 +371,113 @@ def CircleDepthwiseConv2dPadding():
         return NHWC_output
 
 
+def CircleTransposeConv():
+    """
+    Note that this op follows the input spec of `aten.conv_transpose2d.input` whose number
+     of arguments meets (2 <= node.args <= 8) condition.
+    [RESTRICTION]
+      Therefore, I tried to define a spec of it as transpose_conv(input, weight, *args).
+      But, custom operators in torch do not support positional-only args. So, I set it
+       them as None by default.
+    """
+
+    @custom_op("circle_custom::transpose_conv", mutates_args=())
+    def transpose_conv(
+        input_: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        stride: Optional[List[int]] = None,
+        padding: Optional[List[int]] = None,
+        output_padding: Optional[List[int]] = None,
+        groups: Optional[int] = None,
+        dilation: Optional[List[int]] = None,
+    ) -> torch.Tensor:
+        """
+        Set default values.
+        Custom operators have limited types when it comes to default values.
+        So, let's set them by None in input specs, and then, set it by default values.
+        https://github.com/pytorch/pytorch/blob/6b05aafc/torch/_library/infer_schema.py#L131-L144
+        """
+        stride = [1, 1] if stride is None else stride
+        padding = [0, 0] if padding is None else padding
+        output_padding = [0, 0] if output_padding is None else output_padding
+        groups = 1 if groups is None else groups
+        dilation = [1, 1] if dilation is None else dilation
+        if groups != 1:
+            raise RuntimeError(
+                f"CircleTransposeConv only supports 1 'groups'. the node's groups: {groups}"
+            )
+
+        NHWC_to_NCHW = [0, 3, 1, 2]
+        OHWI_to_IOHW = [3, 0, 1, 2]
+        NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
+        OIHW_weight = torch.ops.aten.permute.default(weight, OHWI_to_IOHW)
+
+        args = [
+            NCHW_input,
+            OIHW_weight,
+            bias,
+            stride,
+            padding,
+            output_padding,
+            groups,
+            dilation,
+        ]
+        NCHW_output = torch.ops.aten.conv_transpose2d.input(*args)
+        NCHW_to_NHWC = [0, 2, 3, 1]
+        NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
+
+        return NHWC_output
+
+    @register_fake("circle_custom::transpose_conv")
+    def _(
+        input_: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        stride: Optional[List[int]] = None,
+        padding: Optional[List[int]] = None,
+        output_padding: Optional[List[int]] = None,
+        groups: Optional[int] = None,
+        dilation: Optional[List[int]] = None,
+    ):
+        """
+        Set default values.
+        Custom operators have limited types when it comes to default values.
+        So, let's set them by None in input specs, and then, set it by default values.
+        https://github.com/pytorch/pytorch/blob/6b05aafc/torch/_library/infer_schema.py#L131-L144
+        """
+        stride = [1, 1] if stride is None else stride
+        padding = [0, 0] if padding is None else padding
+        output_padding = [0, 0] if output_padding is None else output_padding
+        groups = 1 if groups is None else groups
+        dilation = [1, 1] if dilation is None else dilation
+        if groups != 1:
+            raise RuntimeError(
+                f"CircleConv2d only supports 1 'groups'. the node's groups: {groups}"
+            )
+
+        NHWC_to_NCHW = [0, 3, 1, 2]
+        OHWI_to_IOHW = [3, 0, 1, 2]
+        NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
+        OIHW_weight = torch.ops.aten.permute.default(weight, OHWI_to_IOHW)
+
+        args = [
+            NCHW_input,
+            OIHW_weight,
+            bias,
+            stride,
+            padding,
+            output_padding,
+            groups,
+            dilation,
+        ]
+        NCHW_output = torch.ops.aten.conv_transpose2d.input(*args)
+        NCHW_to_NHWC = [0, 2, 3, 1]
+        NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
+
+        return NHWC_output
+
+
 def CircleMaxPool2D():
     """
     Note that this op follows the input spec of `aten.max_pool2d_with_indices.default` whose number
@@ -603,6 +710,7 @@ def RegisterOps():
     CircleDepthwiseConv2dPadding()
     CircleConv2d()
     CircleConv2dPadding()
+    CircleTransposeConv()
     CircleMaxPool2D()
     CircleAvgPool2D()
     CircleInstanceNorm()
