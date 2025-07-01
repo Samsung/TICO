@@ -26,20 +26,20 @@ from test.modules.op.add import SimpleAdd
 class ConvertTest(unittest.TestCase):
     def test_args(self):
         m = SimpleAdd()
-        tico.convert(m, m.get_example_inputs())
+        tico.convert(m.eval(), m.get_example_inputs())
 
     def test_kwargs(self):
         m = SimpleAdd()
         inputs = m.get_example_inputs()
         kwargs = {"x": inputs[0], "y": inputs[1]}
-        tico.convert(m, tuple(), kwargs)
+        tico.convert(m.eval(), tuple(), kwargs)
 
     def test_args_kwargs(self):
         m = SimpleAdd()
         inputs = m.get_example_inputs()
         args = (inputs[0],)
         kwargs = {"y": inputs[1]}
-        tico.convert(m, args, kwargs)
+        tico.convert(m.eval(), args, kwargs)
 
 
 class ConvertFromExportedProgramTest(unittest.TestCase):

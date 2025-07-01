@@ -28,7 +28,7 @@ class InferSimpleAddTest(unittest.TestCase):
         # Input: torch.ones(1), torch.ones(1)
         m = SimpleAdd()
         self.torch_model = m
-        self.circle_model = tico.convert(m, m.get_example_inputs())
+        self.circle_model = tico.convert(m.eval(), m.get_example_inputs())
 
     def test_add_float(self):
         x = torch.randn(1)
@@ -61,7 +61,7 @@ class InferCatTest(unittest.TestCase):
         # convert
         m = SimpleCatDefault()
         torch_model = m
-        circle_model = tico.convert(m, m.get_example_inputs())
+        circle_model = tico.convert(m.eval(), m.get_example_inputs())
         # test
         x = torch.randn(3)
         y = torch.randn(2)
@@ -75,7 +75,7 @@ class InferCatTest(unittest.TestCase):
         # convert
         m = SimpleCatWithDim()
         torch_model = m
-        circle_model = tico.convert(m, m.get_example_inputs())
+        circle_model = tico.convert(m.eval(), m.get_example_inputs())
         # test
         x = torch.randn(3, 3)
         y = torch.randn(3, 3)
