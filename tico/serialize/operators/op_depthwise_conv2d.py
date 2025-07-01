@@ -26,7 +26,7 @@ from tico.serialize.operators.node_visitor import NodeVisitor, register_node_vis
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.define import define_pad_node
-from tico.utils.padding import analyze_padding
+from tico.utils.padding import identify_padding
 from tico.utils.validate_args_kwargs import Conv2DArgs
 
 
@@ -131,7 +131,7 @@ class DepthwiseConv2dVisitor(NodeVisitor):
         depthMultiplier = weight_shape[3] // input_shape[3]
         assert weight_shape[3] % input_shape[3] == 0, "depthMultiplier must be integer"
 
-        pad_decision = analyze_padding(padding, input_shape, output_shape, stride)
+        pad_decision = identify_padding(padding, input_shape, output_shape, stride)
 
         conv_input: torch.fx.Node | circle.Tensor.TensorT = input_
         if pad_decision.explicit_pad_hw is not None:

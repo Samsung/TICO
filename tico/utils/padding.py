@@ -28,7 +28,7 @@ class ConvPadding(IntEnum):
     VALID = 1  # no implicit padding
 
 
-class PaddingDecision(NamedTuple):
+class ConvPaddingInfo(NamedTuple):
     """
     Result of padding analysis.
     """
@@ -37,12 +37,12 @@ class PaddingDecision(NamedTuple):
     explicit_pad_hw: Optional[Tuple[int, int]]  # None -> no extra Pad() op needed
 
 
-def analyze_padding(
+def identify_padding(
     padding: PaddingValue,
     input_shape: Sequence[int],
     output_shape: Sequence[int],
     stride: Sequence[int],
-) -> PaddingDecision:
+) -> ConvPaddingInfo:
     """
     Normalizes all PyTorch `padding` variants to a single decision.
 
@@ -56,9 +56,9 @@ def analyze_padding(
     if isinstance(padding, str):
         pad = padding.lower()
         if pad == "valid":
-            return PaddingDecision(ConvPadding.VALID, None)
+            return ConvPaddingInfo(ConvPadding.VALID, None)
         if pad == "same":
-            return PaddingDecision(ConvPadding.SAME, None)
+            return ConvPaddingInfo(ConvPadding.SAME, None)
         raise InvalidArgumentError(f"Unknown padding string: {padding}")
 
     # ─── 2. List / tuple form ─────────────────────────────────────────────
@@ -70,13 +70,13 @@ def analyze_padding(
     pad_h, pad_w = padding
     # [0, 0]  → VALID
     if pad_h == 0 and pad_w == 0:
-        return PaddingDecision(ConvPadding.VALID, None)
+        return ConvPaddingInfo(ConvPadding.VALID, None)
 
     # SAME heuristic: output H/W already match input when stride is 1
     hw_in = tuple(input_shape[1:3])
     hw_out = tuple(output_shape[1:3])
     if hw_in == hw_out and stride == [1, 1]:
-        return PaddingDecision(ConvPadding.SAME, None)
+        return ConvPaddingInfo(ConvPadding.SAME, None)
 
     # Anything else = explicit symmetric padding
-    return PaddingDecision(ConvPadding.VALID, (pad_h, pad_w))
+    return ConvPaddingInfo(ConvPadding.VALID, (pad_h, pad_w))
