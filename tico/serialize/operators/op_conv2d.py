@@ -26,7 +26,7 @@ from tico.serialize.operators.node_visitor import NodeVisitor, register_node_vis
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.define import define_pad_node
-from tico.utils.padding import is_same_padding, is_valid_padding, SAME, VALID
+from tico.utils.padding import analyze_padding
 from tico.utils.validate_args_kwargs import Conv2DArgs
 
 
@@ -111,53 +111,39 @@ class Conv2dVisitor(NodeVisitor):
 
         assert groups == 1, "Only support group 1 conv2d"
 
-        input_dtype: int = extract_circle_dtype(input_)
         input_shape = list(extract_shape(input_))
-        assert len(input_shape) == 4, len(input_shape)
-        output_shape = extract_shape(node)
-        assert len(output_shape) == 4, len(output_shape)
-
-        conv_input: torch.fx.node.Node | circle.Tensor.TensorT = input_
+        output_shape = list(extract_shape(node))
         weight_shape = list(extract_shape(weight))
+        assert len(input_shape) == 4, len(input_shape)
+        assert len(output_shape) == 4, len(output_shape)
+        assert len(weight_shape) == 4, len(weight_shape)
 
-        if is_valid_padding(padding):
-            conv2d_padding_type = VALID
-        elif is_same_padding(padding, input_shape, output_shape) and stride == [1, 1]:
-            conv2d_padding_type = SAME
-        else:
-            assert isinstance(padding, list) and len(padding) == 2
+        pad_decision = analyze_padding(padding, input_shape, output_shape, stride)
 
-            conv2d_padding_type = VALID
-
-            # Padding is not valid or same, so we use valid padding and add padding operator before conv2d operator.
-            # when data_foramt is "NHWC", padding should be [[0, 0], [pad_top, pad_bottom], [pad_left, pad_right], [0, 0]]
+        conv_input: torch.fx.Node | circle.Tensor.TensorT = input_
+        if pad_decision.explicit_pad_hw is not None:
+            pad_h, pad_w = pad_decision.explicit_pad_hw
             paddings = torch.tensor(
                 [
                     [0, 0],
-                    [padding[0], padding[0]],
-                    [padding[1], padding[1]],
+                    [pad_h, pad_h],
+                    [pad_w, pad_w],
                     [0, 0],
                 ],
                 dtype=torch.int32,
             )
             pad_output_shape = [
                 input_shape[0],
-                input_shape[1],
-                input_shape[2],
+                input_shape[1] + pad_h * 2,
+                input_shape[2] + pad_w * 2,
                 input_shape[3],
             ]
-            # Add (pad_top+pad_bottom) to pad_output_shape_h
-            pad_output_shape[1] += padding[0] * 2
-            # Add (pad_left+pad_Right) to pad_output_shape_w
-            pad_output_shape[2] += padding[1] * 2
             # create padded output tensor
-            input_qparam: Optional[QuantParam] = (
-                input_.meta[QPARAM_KEY] if QPARAM_KEY in input_.meta else None
-            )
+            input_qparam: Optional[QuantParam] = input_.meta.get(QPARAM_KEY)
             pad_output = self.graph.add_tensor_from_scratch(
                 prefix=f"{node.name}_input_pad_output",
                 shape=pad_output_shape,
-                dtype=input_dtype,
+                dtype=extract_circle_dtype(input_),
                 qparam=input_qparam,
                 source_node=node,
             )
@@ -170,13 +156,11 @@ class Conv2dVisitor(NodeVisitor):
 
         if bias is None:
             # luci-interpreter can't run no bias conv. Let's add zero vector for bias.
-            assert len(weight_shape) == 4
-            out_channel = weight_shape[0]
-            bias = [0.0] * out_channel  # type: ignore[assignment]
+            bias = [0.0] * weight_shape[0]  # type: ignore[assignment]
 
         # Conv2D
         conv2d_operator = self.define_conv2d_node(
-            conv2d_padding_type,  # 'SAME'(0) or 'VALID'(1)
+            pad_decision.conv_padding_type,  # 'SAME'(0) or 'VALID'(1)
             stride,
             dilation,
             [conv_input, weight, bias],

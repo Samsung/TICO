@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch._ops
@@ -24,8 +24,9 @@ from tico.serialize.circle_mapping import extract_circle_dtype, extract_shape
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.define import define_pad_node
-from tico.utils.padding import is_same_padding, is_valid_padding, SAME, VALID
+from tico.utils.padding import analyze_padding
 from tico.utils.validate_args_kwargs import Conv2DArgs
 
 
@@ -114,63 +115,49 @@ class DepthwiseConv2dVisitor(NodeVisitor):
         dilation = args.dilation
         groups = args.groups
 
-        input_dtype: int = extract_circle_dtype(input_)
         input_shape = list(extract_shape(input_))  # OHWI
-        assert len(input_shape) == 4, len(input_shape)
-
         output_shape = list(extract_shape(node))  # OHWI
-        assert len(output_shape) == 4, len(output_shape)
-
         weight_shape = list(extract_shape(weight))  # 1HWO
+        assert len(input_shape) == 4, len(input_shape)
+        assert len(output_shape) == 4, len(output_shape)
+        assert len(weight_shape) == 4
+        assert weight_shape[0] == 1
+        assert weight_shape[3] == output_shape[3]
+        assert input_shape[3] == groups
         assert (
             weight_shape[3] % groups == 0
         ), "Depthwise convolution requires output channel to be divisible by groups"
 
-        assert weight_shape[0] == 1
-        assert weight_shape[3] == output_shape[3]
-        assert input_shape[3] == groups
-
         depthMultiplier = weight_shape[3] // input_shape[3]
         assert weight_shape[3] % input_shape[3] == 0, "depthMultiplier must be integer"
 
-        conv_input: torch.fx.node.Node | circle.Tensor.TensorT = input_
+        pad_decision = analyze_padding(padding, input_shape, output_shape, stride)
 
-        if is_valid_padding(padding):
-            dconv2d_padding_type = VALID
-        elif is_same_padding(padding, input_shape, output_shape):
-            dconv2d_padding_type = SAME
-        else:
-            assert isinstance(padding, list) and len(padding) == 2
-
-            dconv2d_padding_type = VALID
-
-            # Padding is not valid or same, so we use valid padding and add padding operator before conv2d operator.
-            # when data_format is "NHWC", padding should be [[0, 0], [pad_top, pad_bottom], [pad_left, pad_right], [0, 0]]
+        conv_input: torch.fx.Node | circle.Tensor.TensorT = input_
+        if pad_decision.explicit_pad_hw is not None:
+            pad_h, pad_w = pad_decision.explicit_pad_hw
             paddings = torch.tensor(
                 [
                     [0, 0],
-                    [padding[0], padding[0]],
-                    [padding[1], padding[1]],
+                    [pad_h, pad_h],
+                    [pad_w, pad_w],
                     [0, 0],
                 ],
                 dtype=torch.int32,
             )
             pad_output_shape = [
                 input_shape[0],
-                input_shape[1],
-                input_shape[2],
+                input_shape[1] + pad_h * 2,
+                input_shape[2] + pad_w * 2,
                 input_shape[3],
             ]
-            # Add (pad_top+pad_bottom) to pad_output_shape_h
-            pad_output_shape[1] += padding[0] * 2
-            # Add (pad_left+pad_Right) to pad_output_shape_w
-            pad_output_shape[2] += padding[1] * 2
             # create padded output tensor
-
+            input_qparam: Optional[QuantParam] = input_.meta.get(QPARAM_KEY)
             pad_output = self.graph.add_tensor_from_scratch(
                 prefix=f"{node.name}_input_pad_output",
                 shape=pad_output_shape,
-                dtype=input_dtype,
+                dtype=extract_circle_dtype(input_),
+                qparam=input_qparam,
                 source_node=node,
             )
             # CirclePad
@@ -182,13 +169,11 @@ class DepthwiseConv2dVisitor(NodeVisitor):
 
         if bias is None:
             # luci-interpreter can't run no bias conv. Let's add zero vector for bias.
-            assert len(weight_shape) == 4
-            out_channel = weight_shape[3]
-            bias = [0.0] * out_channel  # type: ignore[assignment]
+            bias = [0.0] * weight_shape[3]  # type: ignore[assignment]
 
         # DConv2D
         dconv2d_operator = self.define_dconv_node(
-            dconv2d_padding_type,
+            pad_decision.conv_padding_type,
             stride,
             dilation,
             depthMultiplier,

@@ -12,36 +12,71 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from enum import IntEnum
+from typing import NamedTuple, Optional, Sequence, Tuple, Union
+
 import torch
 
 from tico.utils.errors import InvalidArgumentError
 
-SAME = 0
-VALID = 1
+
+PaddingValue = Union[str, Sequence[int]]  # "same" | "valid" | [pad_h, pad_w]
 
 
-def is_valid_padding(padding: str | list):
+class ConvPadding(IntEnum):
+    SAME = 0  # auto-pad, HW out == HW in
+    VALID = 1  # no implicit padding
+
+
+class PaddingDecision(NamedTuple):
+    """
+    Result of padding analysis.
+    """
+
+    conv_padding_type: ConvPadding
+    explicit_pad_hw: Optional[Tuple[int, int]]  # None -> no extra Pad() op needed
+
+
+def analyze_padding(
+    padding: PaddingValue,
+    input_shape: Sequence[int],
+    output_shape: Sequence[int],
+    stride: Sequence[int],
+) -> PaddingDecision:
+    """
+    Normalizes all PyTorch `padding` variants to a single decision.
+
+    Rules
+    -----
+    1. "valid" or [0, 0]                              → VALID, no Pad().
+    2. "same" or the shapes already match (stride==1) → SAME, no Pad().
+    3. Any other 2-element list                       → VALID + explicit Pad().
+    """
+    # ─── 1. String form ────────────────────────────────────────────────────
     if isinstance(padding, str):
-        return padding == "valid"
+        pad = padding.lower()
+        if pad == "valid":
+            return PaddingDecision(ConvPadding.VALID, None)
+        if pad == "same":
+            return PaddingDecision(ConvPadding.SAME, None)
+        raise InvalidArgumentError(f"Unknown padding string: {padding}")
 
-    if isinstance(padding, list):
-        assert len(padding) == 2, "Padding should be a list of length 2."
-        return padding == [0, 0]
+    # ─── 2. List / tuple form ─────────────────────────────────────────────
+    if not (isinstance(padding, (list, tuple)) and len(padding) == 2):
+        raise InvalidArgumentError(
+            "Padding must be 'valid', 'same', or a [pad_h, pad_w] list"
+        )
 
-    raise InvalidArgumentError("Invalid padding.")
+    pad_h, pad_w = padding
+    # [0, 0]  → VALID
+    if pad_h == 0 and pad_w == 0:
+        return PaddingDecision(ConvPadding.VALID, None)
 
+    # SAME heuristic: output H/W already match input when stride is 1
+    hw_in = tuple(input_shape[1:3])
+    hw_out = tuple(output_shape[1:3])
+    if hw_in == hw_out and stride == [1, 1]:
+        return PaddingDecision(ConvPadding.SAME, None)
 
-def is_same_padding(
-    padding: str | list, input_shape: list | torch.Size, output_shape: list | torch.Size
-):
-    if isinstance(padding, str):
-        return padding == "same"
-
-    if isinstance(padding, list):
-        assert len(padding) == 2, "Padding should be a list of length 2."
-
-        input_HW = tuple(input_shape[1:3])  # N H W C
-        output_HW = tuple(output_shape[1:3])  # N H W C
-        return input_HW == output_HW
-
-    raise InvalidArgumentError("Invalid padding.")
+    # Anything else = explicit symmetric padding
+    return PaddingDecision(ConvPadding.VALID, (pad_h, pad_w))
