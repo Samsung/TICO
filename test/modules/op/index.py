@@ -60,11 +60,11 @@ class SimpleIndexTensorBuffer(torch.nn.Module):
 class SimpleIndexTensor(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("idx", torch.tensor([0, 1]))
 
     def forward(self, x, y):
-        idx = torch.tensor([0, 1])
         z = x + y
-        return z[idx]
+        return z[self.idx]
 
     def get_example_inputs(self):
         return (torch.randn(2, 3), torch.randn(2, 3))
@@ -87,10 +87,11 @@ class IndexTensor2x1(torch.nn.Module):
 class IndexTensorAxis1(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("axis", torch.tensor([0, 0]))
 
     def forward(self, x, y):
         z = x + y
-        return z[1, [0, 0]]
+        return z[1, self.axis]
 
     def get_example_inputs(self):
         return (torch.randn(2, 3), torch.randn(2, 3))
@@ -99,9 +100,10 @@ class IndexTensorAxis1(torch.nn.Module):
 class IndexTensorAxis0And1(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("axis", torch.tensor([2, 3]))
 
     def forward(self, x):
-        return x[1, [2, 3]]
+        return x[1, self.axis]
 
     def get_example_inputs(self):
         return (torch.randn(5, 4),)
@@ -110,10 +112,11 @@ class IndexTensorAxis0And1(torch.nn.Module):
 class IndexTensorWithSlice(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("axis", torch.tensor([0, 0]))
 
     def forward(self, x, y):
         z = x + y
-        return z[1:, [0, 0], :, :2]
+        return z[1:, self.axis, :, :2]
 
     def get_example_inputs(self):
         return (

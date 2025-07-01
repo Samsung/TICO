@@ -42,9 +42,10 @@ class SimpleIndexSelectWithDim1(torch.nn.Module):
 class SimpleIndexSelectWithConstScalarIndex(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("idx", torch.tensor([3]))
 
     def forward(self, input_):
-        result = torch.index_select(input_, 2, torch.tensor([3]))
+        result = torch.index_select(input_, 2, self.idx)
         return result
 
     def get_example_inputs(self):
@@ -54,9 +55,10 @@ class SimpleIndexSelectWithConstScalarIndex(torch.nn.Module):
 class SimpleIndexSelectWithConstIndex(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("idx", torch.tensor([3, 1, 2]))
 
     def forward(self, x, y):
-        result = torch.index_select(x, 2, torch.tensor([3, 1, 2])) + y
+        result = torch.index_select(x, 2, self.idx) + y
         return result
 
     def get_example_inputs(self):

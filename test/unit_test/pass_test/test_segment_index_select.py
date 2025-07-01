@@ -23,9 +23,10 @@ from test.utils.pass_value_test import SinglePassValueTest
 class SimpleIndexSelectWithConstIndex(torch.nn.Module):
     def __init__(self):
         super().__init__()
+        self.register_buffer("idx", torch.tensor([3, 1, 2]))
 
     def forward(self, x, y):
-        result = torch.index_select(x, 2, torch.tensor([3, 1, 2])) + y
+        result = torch.index_select(x, 2, self.idx) + y
         return result
 
     def get_example_inputs(self):

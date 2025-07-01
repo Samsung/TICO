@@ -23,15 +23,17 @@ class FakeQuantizePerChannel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.channel = 10
+        self.register_buffer("s", torch.tensor([1.0] * self.channel))
+        self.register_buffer("zp", torch.zeros(self.channel))
 
     def forward(self, input):
-        s = torch.tensor([1.0] * self.channel)
-        zp = torch.zeros(self.channel)
         axis = 1
         qmin = 0
         qmax = 255
 
-        return torch.fake_quantize_per_channel_affine(input, s, zp, axis, qmin, qmax)
+        return torch.fake_quantize_per_channel_affine(
+            input, self.s, self.zp, axis, qmin, qmax
+        )
 
     def get_example_inputs(self):
         return (torch.randn(1, self.channel, 64, 64),)
