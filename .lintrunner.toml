@@ -14,7 +14,7 @@ command = [
     'pylint_linter',
     '--',
     '--rcfile=.pylintrc',
-    '--job=0',
+    '--jobs=0',
     '@{{PATHSFILE}}'
 ]
 init_command = [
