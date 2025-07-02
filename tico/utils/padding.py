@@ -51,6 +51,11 @@ def identify_padding(
     1. "valid" or [0, 0]                              → VALID, no Pad().
     2. "same" or the shapes already match (stride==1) → SAME, no Pad().
     3. Any other 2-element list                       → VALID + explicit Pad().
+
+    TODO The following SAME padding check assumes stride == 1.
+         For stride > 1, Conv2D and TransposeConv2D require different formulas
+          to determine the SAME padding. Update this logic to handle general
+         stride values correctly for both cases.
     """
     # ─── 1. String form ────────────────────────────────────────────────────
     if isinstance(padding, str):
