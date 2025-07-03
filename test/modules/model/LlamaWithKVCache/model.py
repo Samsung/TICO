@@ -25,6 +25,7 @@ class LlamaWithKVCache(torch.nn.Module):
             num_hidden_layers=8,
             num_attention_heads=8,
             use_cache=True,
+            attn_implementation = 'eager'
         )
         self.model = LlamaModel(config=self.config).to("cpu")
         self.rtol = 1e-4
@@ -67,4 +68,9 @@ class LlamaWithKVCache(torch.nn.Module):
             attention_mask,
             position_ids,
             past_key_values,
+            
         )
+
+
+m = LlamaWithKVCache()
+m.forward(*m.get_example_inputs())
