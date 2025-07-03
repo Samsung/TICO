@@ -26,9 +26,10 @@ runs:
     - shell: bash
       id: download-step
       run: |
-        chmod +x ${{ github.action_path }}/entrypoint.sh
-        ${{ github.action_path }}/entrypoint.sh     \
-                            "${{ inputs.owner }}"   \
-                            "${{ inputs.repo }}"    \
-                            "${{ inputs.tag }}"     \
-                            "${{ inputs.filename }}"
+        cd .github/actions/download-release-asset/
+        chmod +x entrypoint.sh
+        ./entrypoint.sh                 \
+                "${{ inputs.owner }}"   \
+                "${{ inputs.repo }}"    \
+                "${{ inputs.tag }}"     \
+                "${{ inputs.filename }}"

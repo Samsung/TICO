@@ -66,7 +66,7 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          apt-get install -y curl git lsb-release unzip
+          apt-get install -y curl git lsb-release unzip jq
       - uses: actions/checkout@v4
       - name: Install python dependencies
         run: |
@@ -78,36 +78,21 @@ jobs:
           CODENAME=$(lsb_release -cs)
           echo "codename=$CODENAME" >> "$GITHUB_OUTPUT"
 
-      # TODO Enable this step after one-compiler 1.30.0 release.
-      # - name: Download one-compiler package
-      #   id: download
-      #   uses: ./.github/actions/download-release-asset
-      #   with:
-      #     owner: Samsung
-      #     repo: ONE
-      #     tag: 1.30.0
-      #     filename: one-compiler-${{ steps.os.outputs.codename }}_1.30.0_amd64.deb
-      # - name: "Install one-compiler"
-      #   run: |
-      #     dpkg -i ${{ steps.download.outputs.filename }}
-      #     apt-get install -f -y
-      #     onecc --version
+      - name: Download one-compiler package
+        id: download
+        uses: ./.github/actions/download-release-asset
+        with:
+          owner: Samsung
+          repo: ONE
+          tag: 1.30.0
+          filename: one-compiler-deb-${{ steps.os.outputs.codename }}-1.30.0.tar.gz
 
-      - name: Download issue attatchment (one-compiler latest)
+      - name: "Install one-compiler"
+        working-directory: ./.github/actions/download-release-asset
         run: |
-          curl -L -o one-compiler-latest.zip \
-            "https://github.com/user-attachments/files/19561702/one-compiler_1.30.0.25040116_amd64.zip"
-
-      - name: Unzip and install the one-compiler package
-        run: |
-          unzip one-compiler-latest.zip -d one-compiler-package
-          ls -l one-compiler-package
-
-          dpkg -i one-compiler-package/*.deb
-          apt-get install -f -y # fix dependencies if needed
-
-      - name: Check installation
-        run: |
+          tar -xvzf ${{ steps.download.outputs.filename }}
+          dpkg -i one-compiler_1.30.0_amd64.deb
+          apt-get install -f -y
           onecc --version || echo "Installation failed."
 
       - name: "Build package"
