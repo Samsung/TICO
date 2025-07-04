@@ -14,61 +14,19 @@
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import torch.fx
-import torch
-from torch._export.utils import (
-    get_buffer,
-    get_lifted_tensor_constant,
-    get_param,
-    is_buffer,
-    is_lifted_tensor_constant,
-    is_param,
-)
-from torch.export import ExportedProgram
-
-from tico.passes import ops
-from tico.serialize.circle_graph import extract_shape
+from torch.export import export, ExportedProgram
 from tico.utils import logging
-from tico.utils.graph import create_node, is_single_value_tensor
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_const_diff_on_pass
-from tico.utils.utils import is_target_node
-from tico.utils.validate_args_kwargs import IndexSelectArgs, SelectCopyIntArgs
-
 from tico.utils.canonicalize import canonicalize
-
-import torch
-from torch.export import export
-
-from transformers.cache_utils import DynamicCache
-from transformers.models.llama.modeling_llama import LlamaConfig
-from test.modules.model.Llama.model import Llama
 from torch.fx.passes.utils.matcher_utils import SubgraphMatcher
-from tico.passes.patterns.attention import LlamaAttention, LlamaModelAttentionProjection
-from transformers.models.llama.modeling_llama import LlamaConfig
+from tico.passes.patterns.attention import LlamaAttentionWithOutputs
 
 def get_llama_attention_ep():
-    mod = LlamaAttention(config = LlamaConfig(
-                hidden_size=512,
-                num_hidden_layers=8,
-                num_attention_heads=8,
-                attn_implementation = "eager",
-            ), layer_idx = 0)
+    mod = LlamaAttentionWithOutputs()
     llama_attention_ep = export(mod, mod.get_example_inputs())
     return llama_attention_ep
 
-def get_projection_ep():
-    mod = LlamaModelAttentionProjection(LlamaConfig(), layer_idx = 1)
-    projection_ep = export(mod, mod.get_example_inputs())
-    return projection_ep
-    
-### export_with_remove_dead_placeholders
-#
-# Without this, 
-#   File "/home/dayoung.lee/miniconda3/envs/py310/lib/python3.10/site-packages/torch/fx/passes/utils/matcher_utils.py", line 100, in __init__
-#     len(node.users) > 0
-# AssertionError: SubgraphMatcher cannot be initialized with an pattern with dead code
 
 def remove_dead_placeholders(exported):
     # 그래프에서 dead placeholder 찾기
