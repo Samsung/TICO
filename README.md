@@ -271,7 +271,7 @@ By default, `./ccex test` runs all modules with the `circle-interpreter` engine.
  You can override this and run tests using the `onert` runtime instead.
 
 
-##### 0. Installing ONERT
+##### 0. Install ONERT
 
 ```bash
 pip install onert
