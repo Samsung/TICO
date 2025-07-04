@@ -31,6 +31,7 @@ from tico.utils.utils import quant_min_max, set_new_meta_val
 from tico.utils.validate_args_kwargs import (
     AddTensorArgs,
     BmmArgs,
+    CatArgs,
     LinearArgs,
     MulTensorArgs,
     PermuteArgs,
@@ -79,7 +80,7 @@ def _u8_to_i16(qparam: QuantParam) -> QuantParam:
     max_ = u8_scale * (255 - u8_zerop)
     min_ = u8_scale * (-u8_zerop)
 
-    abs_max = abs(max([max_, min_], key=abs))
+    abs_max = max(abs(max_), abs(min_))
     s16_scale = abs_max / 32767
     s16_zerop = 0
 
@@ -272,6 +273,38 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                     continue
 
                 if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
+                    quantize = _insert_quantize_op_after(node)
+
+                    quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+                    node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+                    logger.debug(
+                        f"quantize_per_tensor.default is inserted after {node.name}."
+                    )
+                else:
+                    raise NotYetSupportedError("Unsupported dtype")
+
+            elif node.target == torch.ops.aten.cat.default:
+                cat_args = CatArgs(*node.args, **node.kwargs)
+                tensors = cat_args.tensors
+
+                if any(not isinstance(x, torch.fx.Node) for x in tensors):
+                    continue
+
+                if any(QPARAM_KEY not in x.meta for x in tensors):
+                    continue
+
+                if QPARAM_KEY not in node.meta:
+                    continue
+
+                assert len(tensors) > 0
+                in_dtype = qparam_dtype(tensors[0])
+                if in_dtype == qparam_dtype(node):
+                    continue
+
+                if any(qparam_dtype(x) != in_dtype for x in tensors):
+                    continue
+
+                if in_dtype == "int16" and qparam_dtype(node) == "uint8":
                     quantize = _insert_quantize_op_after(node)
 
                     quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
