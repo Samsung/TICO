@@ -27,10 +27,7 @@ designed for optimized on-device neural network inference.
 0. Prerequisites
 
 - Python 3.10
-- [one-compiler nightly](https://github.com/Samsung/TICO/issues/2)
-  - This project depends on [ONE](https://github.com/Samsung/ONE) Compiler, and it uses 
-  nightly features that are not yet available in the official release. Until one-compiler 1.30.0
-  is released, you must use a prebuilt nighlty version of ONE Compiler.
+- [one-compiler 1.30.0](https://github.com/Samsung/ONE/releases/tag/1.30.0)
 
 We highly recommend to use a virtual env, e.g., conda.
 
@@ -53,7 +50,7 @@ This will generate `build` and `dist` directories in the root directory.
 **Available options**
 - `--dist` To install the package from .whl (without this option, _TICO_ is installed in an editable mode)
 - `--torch_ver <torch version>` To install a specific torch version (default: 2.6).
-  - Available <torch version>: 2.5, 2.6, nightly
+  - Available <torch version>: 2.5, 2.6, 2.7, nightly
 
 4. Now you can convert a torch module to a `.circle`.
 
@@ -274,17 +271,10 @@ By default, `./ccex test` runs all modules with the `circle-interpreter` engine.
  You can override this and run tests using the `onert` runtime instead.
 
 
-##### 0. Installing ONERT Nightly
-
-Some ONERT features are only available in the nightly build until the next official release.
- To install the ONERT wheel from the issue comment:
-
-1. Download the `.whl` file linked 
-in [the relevant Github issue comment](https://github.com/Samsung/TICO/issues/2#issuecomment-2841487306).
-2. Install it with pip, for example:
+##### 0. Installing ONERT
 
 ```bash
-pip install /path/to/onert_nightly.whl
+pip install onert
 ```
 
 ##### 1. Command-Line Flag
