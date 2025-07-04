@@ -287,9 +287,6 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
                 cat_args = CatArgs(*node.args, **node.kwargs)
                 tensors = cat_args.tensors
 
-                if any(not isinstance(x, torch.fx.Node) for x in tensors):
-                    continue
-
                 if any(QPARAM_KEY not in x.meta for x in tensors):
                     continue
 
