@@ -27,7 +27,9 @@ designed for optimized on-device neural network inference.
 0. Prerequisites
 
 - Python 3.10
-- [one-compiler 1.30.0](https://github.com/Samsung/ONE/releases/tag/1.30.0)
+- (Optional) [one-compiler 1.30.0](https://github.com/Samsung/ONE/releases/tag/1.30.0)
+  - It's only required if you want to run inference with the converted Circle model. If you're
+   only converting models and don't plan to run them, this dependency is not needed.
 
 We highly recommend to use a virtual env, e.g., conda.
 
