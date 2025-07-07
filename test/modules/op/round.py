@@ -14,7 +14,10 @@
 
 import torch
 
+from test.utils import tag
 
+
+@tag.use_onert
 class SimpleRound(torch.nn.Module):
     def __init__(self):
         super().__init__()
