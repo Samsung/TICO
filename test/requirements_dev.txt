@@ -1,1 +1,1 @@
--r ../infra/dependency/torchvision_dev.txt
+onert==0.1.0

@@ -109,14 +109,6 @@ else
 fi
 
 ###############################################################################
-# pip helper  (handles spec + arbitrary flags)
-###############################################################################
-pip_install() {
-  local spec="$1"
-  python3 -m pip install ${spec} --index-url "${INDEX_URL}"
-}
-
-###############################################################################
 # torchvision version mapping per torch family
 ###############################################################################
 declare -A TORCHVISION_FAMILY=(
@@ -130,11 +122,12 @@ declare -A TORCHVISION_FAMILY=(
 ###############################################################################
 if [[ -n "${REQUEST_IS_NIGHTLY}" ]]; then
   echo "[INFO] Installing torchvision (nightly) from ${INDEX_URL}"
-  pip_install "-r ${SCRIPTS_DIR}/../dependency/torchvision_dev.txt"
+  python3 -m pip install -r ${SCRIPTS_DIR}/../dependency/torchvision_dev.txt \
+   --index-url "${INDEX_URL}"
 else
   VISION_VER="${TORCHVISION_FAMILY[${FAMILY}]}"
   echo "[INFO] Installing torchvision==${VISION_VER} from ${INDEX_URL}"
-  pip_install "torchvision==${VISION_VER}"
+  python3 -m pip install "torchvision==${VISION_VER}" --index-url "${INDEX_URL}"
 fi
 
 
@@ -146,15 +139,14 @@ if [[ -n "${REQUEST_IS_NIGHTLY}" ]]; then
     "${TEST_DIR}/requirements_dev.txt"
   )
 else
-  DEP_FILE="${SCRIPTS_DIR}/../dependency/torchvision_${FAMILY/./_}.txt"
   TEST_FILE="${TEST_DIR}/requirements_${FAMILY/./_}.txt"
-  EXTRA_REQ_FILES=("${DEP_FILE}" "${TEST_FILE}")
+  EXTRA_REQ_FILES=("${TEST_FILE}")
 fi
 
 for req in "${EXTRA_REQ_FILES[@]}"; do
   if [[ -f "${req}" ]]; then
     echo "[INFO] Installing auxiliary test deps from ${req##*/}"
-    pip_install "-r ${req}"
+    python3 -m pip install -r ${req}
   fi
 done
 
