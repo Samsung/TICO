@@ -1,0 +1,39 @@
+# Copyright (c) 2025 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import torch
+
+from tico.experimental.quantization.custom.observers.base import ObserverBase
+
+
+class PercentileObserver(ObserverBase):
+    """
+    Observer that clips extreme values to a percentile range before computing
+    min/max. Useful for outlier suppression.
+    """
+
+    def __init__(self, percentile: float = 99.9, **kwargs):
+        super().__init__(**kwargs)
+        self.percentile = percentile
+
+    @torch.no_grad()
+    def collect(self, x):
+        if not self.enabled:
+            return
+
+        pct = self.percentile
+        low = torch.quantile(x.detach(), (100 - pct) / 200.0)
+        high = torch.quantile(x.detach(), 1 - (100 - pct) / 200.0)
+        self.min_val = torch.minimum(self.min_val, low)
+        self.max_val = torch.maximum(self.max_val, high)
