@@ -113,7 +113,7 @@ fi
 ###############################################################################
 pip_install() {
   local spec="$1"
-  python3 -m pip install ${spec} --index-url "${INDEX_URL}"
+  python3 -m pip install ${spec} --index-url "${INDEX_URL}" --extra-index-url https://pypi.org/simple
 }
 
 ###############################################################################
