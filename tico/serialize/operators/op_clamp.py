@@ -92,9 +92,9 @@ class ClampVisitor(NodeVisitor):
         input = args.input
         min_val = args.min
         max_val = args.max
-        
+
         input_dtype = extract_torch_dtype(input)
-        
+
         if min_val is not None:
             min_val = torch.tensor(min_val, dtype=input_dtype)
         if max_val is not None:
