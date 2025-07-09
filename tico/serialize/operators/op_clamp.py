@@ -27,6 +27,7 @@ from tico.serialize.circle_graph import (
     extract_circle_dtype,
     extract_shape,
 )
+from tico.serialize.circle_mapping import extract_torch_dtype
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
@@ -91,6 +92,13 @@ class ClampVisitor(NodeVisitor):
         input = args.input
         min_val = args.min
         max_val = args.max
+        
+        input_dtype = extract_torch_dtype(input)
+        
+        if min_val is not None:
+            min_val = torch.tensor(min_val, dtype=input_dtype)
+        if max_val is not None:
+            max_val = torch.tensor(max_val, dtype=input_dtype)
 
         if min_val is None and max_val is None:
             raise ValueError("Both min and max cannot be None")
