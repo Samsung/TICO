@@ -73,6 +73,7 @@ class AtenOps:
             torch.ops.aten.view.default,
             torch.ops.aten.view_copy.default,
         ]
+        self._to_copy = [torch.ops.aten._to_copy.default]
 
 
 aten = AtenOps()

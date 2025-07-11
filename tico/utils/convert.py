@@ -35,6 +35,7 @@ from tico.experimental.quantization.passes.remove_weight_dequant_op import (
     RemoveWeightDequantOp,
 )
 from tico.passes.cast_aten_where_arg_type import CastATenWhereArgType
+from tico.passes.cast_clamp_mixed_type_args import CastClampMixedTypeArgs
 from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.convert_conv1d_to_conv2d import ConvertConv1dToConv2d
@@ -251,6 +252,7 @@ def convert_exported_module_to_circle(
             ConvertConv1dToConv2d(),
             *LowerToSlicePasses(),
             FuseLeadingUnsqueezeReshape(),
+            CastClampMixedTypeArgs(),
         ]
     )
     circle_legalize.run(exported_program)

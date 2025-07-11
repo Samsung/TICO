@@ -101,3 +101,15 @@ class DoubleClampsFrom0to6WithBigMax(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(5, 3) * 10,)
+
+
+class ClampIntInputFloatMinMax(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        x = torch.clamp(x, -100.0, 100.0)
+        return x
+
+    def get_example_inputs(self):
+        return (torch.randint(-200, 200, (5, 3)),)
