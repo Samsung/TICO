@@ -37,6 +37,8 @@ from tico.utils.serialize import finalise_tensor_names
 multiple_output_ops = [
     torch.ops.aten.split_with_sizes.default,
     torch.ops.aten.max.dim,
+    torch.ops.circle_custom.llama_attention_with_kvcache,
+    torch.ops.circle_custom.llama_attention_with_kvcache.default,
 ]
 
 # Build circle model from ExportedProgram
@@ -63,6 +65,7 @@ def build_circle(edge_program: ExportedProgram) -> bytes:
             if node.target in multiple_output_ops:
                 continue
             node_val = node.meta["val"]
+
             if node_val.layout != torch.strided:
                 raise RuntimeError(
                     f"Only support dense tensors (node layout: {node_val.layout})"
