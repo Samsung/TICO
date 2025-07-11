@@ -20,14 +20,6 @@ from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
 
 
-from tico.utils import logging
-from tico.utils.graph import create_node
-from tico.utils.passes import PassBase, PassResult
-from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import is_target_node, set_new_meta_val
-from tico.utils.validate_args_kwargs import ClampArgs
-
-
 class CastClampFloatInputIntMin(torch.nn.Module):
     def __init__(self):
         super().__init__()
