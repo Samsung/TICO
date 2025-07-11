@@ -100,7 +100,7 @@ class CastClampMixedTypeArgs(PassBase):
                 else:
                     arg = int(arg)
                 node.update_arg(arg_idx, arg)
-                logger.info(
+                logger.debug(
                     f"Converted {arg_name} value from {arg_dtype} to {output_dtype} for clamp operation at {node.name}"
                 )
                 return True
@@ -110,7 +110,7 @@ class CastClampMixedTypeArgs(PassBase):
         modified |= _convert_arg(max, "max")
 
         if input_dtype != output_dtype:
-            logger.info(
+            logger.debug(
                 f"Inserting cast from {input_dtype} to {output_dtype} for input {input.name}"
             )
             with graph.inserting_after(input):
