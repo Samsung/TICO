@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 import torch
 from torch.export import ExportedProgram
 
+from tico.passes import ops
+
+from tico.serialize.circle_mapping import extract_torch_dtype
 from tico.utils import logging
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
@@ -81,12 +84,8 @@ class CastClampMixedTypeArgs(PassBase):
         min = args.min
         max = args.max
 
-        if "val" not in input.meta or "val" not in node.meta:
-            logger.warning(f"Missing meta['val'] for node {node.name}")
-            return False
-
-        input_dtype = input.meta["val"].dtype
-        output_dtype = node.meta["val"].dtype
+        input_dtype = extract_torch_dtype(input)
+        output_dtype = extract_torch_dtype(node)
 
         def _convert_arg(arg, arg_name: str):
             if arg is None:
@@ -95,13 +94,14 @@ class CastClampMixedTypeArgs(PassBase):
             arg_dtype = torch.tensor(arg).dtype
             arg_idx = node.args.index(arg)
             if arg_dtype != output_dtype:
-                if output_dtype == torch.float32 or output_dtype == torch.float:
+                assert output_dtype in [torch.float, torch.int]
+                if output_dtype == torch.float:
                     arg = float(arg)
                 else:
                     arg = int(arg)
                 node.update_arg(arg_idx, arg)
                 logger.debug(
-                    f"Converted {arg_name} value from {arg_dtype} to {output_dtype} for clamp operation at {node.name}"
+                    f"Casting {arg_name} value from {arg_dtype} to {output_dtype} for clamp operation at {node.name}"
                 )
                 return True
             return False
@@ -129,7 +129,7 @@ class CastClampMixedTypeArgs(PassBase):
         return modified
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
-        target_op = [torch.ops.aten.clamp.default, torch.ops.aten.clamp.Tensor]
+        target_op = ops.aten.clamp
 
         graph_module = exported_program.graph_module
         graph = graph_module.graph
