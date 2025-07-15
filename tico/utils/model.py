@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from tico.interpreter import infer
@@ -32,6 +33,6 @@ class CircleModel:
             buf = bytes(f.read())
         return CircleModel(buf)
 
-    def save(self, circle_path: str) -> None:
+    def save(self, circle_path: str | Path) -> None:
         with open(circle_path, "wb") as f:
             f.write(self.circle_binary)
