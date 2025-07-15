@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from typing import Any
 
 from tico.config.base import CompileConfigBase
 
@@ -20,6 +21,8 @@ from tico.config.base import CompileConfigBase
 @dataclass
 class CompileConfigV1(CompileConfigBase):
     legalize_causal_mask_value: bool = False
+    match_llama_attention: bool = False
+    match_llama_attention_config: Any = None
 
     def get(self, name: str):
         return super().get(name)

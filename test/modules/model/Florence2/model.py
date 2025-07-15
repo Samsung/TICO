@@ -15,7 +15,9 @@
 import requests  # type: ignore[import-untyped]
 import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoProcessor
+from tico.config.v1 import CompileConfigV1
+
+from transformers import AutoModelForCausalLM, AutoProcessor, LlamaConfig, LlamaModel
 
 
 class Florence2(torch.nn.Module):
@@ -64,4 +66,17 @@ class Florence2(torch.nn.Module):
             pixel_values,
             attention_mask,
             decoder_input_ids,
+        )
+
+    def get_compile_config(self):
+        match_llama_attention_config = LlamaConfig(
+            hidden_size=512,
+            num_hidden_layers=8,
+            num_attention_heads=8,
+            use_cache=True,
+            attn_implementation="eager",
+        )
+        return CompileConfigV1(
+            match_llama_attention=True,
+            match_llama_attention_config=match_llama_attention_config,
         )

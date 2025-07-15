@@ -12,13 +12,70 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
 from tico.utils.mx.mx_ops import _quantize_mx
+
+
+def CircleLlamaAttention():
+    @custom_op("circle_custom::llama_attention_with_kvcache", mutates_args=())
+    def llama_attention_with_kvcache(
+        q_w: torch.Tensor,
+        k_w: torch.Tensor,
+        v_w: torch.Tensor,
+        o_w: torch.Tensor,
+        hidden_states: torch.Tensor,
+        position_embedding_0: torch.Tensor,
+        position_embedding_1: torch.Tensor,
+        attention_mask: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # type: ignore[empty-body]
+        return (
+            torch.Tensor(),
+            torch.Tensor(),
+            torch.Tensor(),
+        )
+
+    @register_fake("circle_custom::llama_attention_with_kvcache")
+    def _(
+        q_w: torch.Tensor,
+        k_w: torch.Tensor,
+        v_w: torch.Tensor,
+        o_w: torch.Tensor,
+        hidden_states: torch.Tensor,
+        position_embedding_0: torch.Tensor,
+        position_embedding_1: torch.Tensor,
+        attention_mask: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        seq_len = hidden_states.size(1)
+        updated_key_cache = torch.zeros(
+            key_cache.shape[0],
+            key_cache.shape[1],
+            key_cache.shape[2] + seq_len,
+            key_cache.shape[3],
+        )
+        updated_value_cache = torch.zeros(
+            value_cache.shape[0],
+            value_cache.shape[1],
+            value_cache.shape[2] + seq_len,
+            value_cache.shape[3],
+        )
+
+        return (
+            hidden_states,
+            updated_key_cache,
+            updated_value_cache,
+        )
+
 
 # Note that an operator assumes input tensor has NHWC format.
 def CircleResizeNearestNeighbor():
@@ -715,3 +772,4 @@ def RegisterOps():
     CircleAvgPool2D()
     CircleInstanceNorm()
     CircleQuantizeMX()
+    CircleLlamaAttention()

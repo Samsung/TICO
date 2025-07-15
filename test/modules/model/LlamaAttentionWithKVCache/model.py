@@ -21,7 +21,12 @@ from transformers.models.llama.modeling_llama import LlamaAttention, LlamaConfig
 class LlamaAttentionWithKVCache(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.config = LlamaConfig(use_cache=True)
+        self.config = LlamaConfig(
+            hidden_size=512,
+            num_hidden_layers=8,
+            num_attention_heads=8,
+            use_cache=True,
+        )
         self.model = LlamaAttention(config=self.config, layer_idx=0).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
