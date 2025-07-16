@@ -43,7 +43,8 @@ class CastClampMixedTypeArgs(PassBase):
     - When min/max dtype differs from output:
         Converts min/max values to output dtype
 
-    [before, if input dtype is different from output dtype]
+    (Case 1, if input dtype is different from output dtype)
+    [before]
 
             input               min(or max)
            (dtype=int)         (dtype=float)
@@ -60,6 +61,27 @@ class CastClampMixedTypeArgs(PassBase):
               |                  |
             cast                 |
           (in=int, out=float)    |
+              |                  |
+            clamp <--------------+
+              |
+            output
+           (dtype=float)
+
+    (Case 2, if min(or max) dtype is different from output dtype)
+    [before]
+
+            input               min(or max)
+           (dtype=float)       (dtype=int)
+              |                    |
+            clamp <----------------+
+              |
+            output
+           (dtype=float)
+
+    [after]
+
+            input             min(or max)
+           (dtype=float)     (dtype=float)
               |                  |
             clamp <--------------+
               |
