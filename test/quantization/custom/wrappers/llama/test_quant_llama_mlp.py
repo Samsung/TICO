@@ -20,10 +20,10 @@ import warnings
 import tico
 
 import torch
+from tico.experimental.quantization.custom.mode import Mode
 from tico.experimental.quantization.custom.wrappers.llama.quant_llama_mlp import (
     QuantLlamaMLP,
 )
-from tico.experimental.quantization.custom.wrappers.mode import Mode
 
 
 class DummyMLP(torch.nn.Module):

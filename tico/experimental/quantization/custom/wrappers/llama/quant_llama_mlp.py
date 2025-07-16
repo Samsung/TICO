@@ -12,94 +12,72 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
-from tico.experimental.quantization.custom.dtypes import DType
-from tico.experimental.quantization.custom.observers import MinMaxObserver
-from tico.experimental.quantization.custom.qscheme import QScheme
-from tico.experimental.quantization.custom.wrappers.mode import Mode
+from tico.experimental.quantization.custom.quant_config import QuantConfig
+from tico.experimental.quantization.custom.wrappers.base_quant_module import (
+    QuantModuleBase,
+)
 from tico.experimental.quantization.custom.wrappers.ptq_wrapper import PTQWrapper
-from tico.experimental.quantization.custom.wrappers.quant_silu import QuantSiLU
+from tico.experimental.quantization.custom.wrappers.registry import try_register
 
 
-class QuantLlamaMLP(nn.Module):
-    def __init__(self, mlp_fp: nn.Module):
-        super().__init__()
+@try_register("transformers.models.llama.modeling_llama.LlamaMLP")
+class QuantLlamaMLP(QuantModuleBase):
+    def __init__(
+        self,
+        mlp_fp: nn.Module,
+        *,
+        qcfg: Optional[QuantConfig] = None,
+    ):
+        super().__init__(qcfg)
 
-        # --- helper to wrap Linears ---------------------------------
-        def wrap_linear(m: nn.Linear) -> PTQWrapper:
-            return PTQWrapper(
-                module=m,
-                act_obs=MinMaxObserver(dtype=DType.uint(8)),  # A8
-                weight_obs=MinMaxObserver(  # W8
-                    dtype=DType.uint(8),
-                    qscheme=QScheme.PER_CHANNEL_AFFINE,
-                    channel_axis=0,  # out-features
-                ),
-            )
+        # ----- child configs (hierarchical override) -------------------
+        gate_cfg = qcfg.child("gate_proj") if qcfg else None
+        up_cfg = qcfg.child("up_proj") if qcfg else None
+        down_cfg = qcfg.child("down_proj") if qcfg else None
+        act_cfg = qcfg.child("act") if qcfg else None
 
+        # ----- wrap three Linear layers -------------------------------
         assert hasattr(mlp_fp, "gate_proj") and isinstance(mlp_fp.gate_proj, nn.Linear)
         assert hasattr(mlp_fp, "up_proj") and isinstance(mlp_fp.up_proj, nn.Linear)
         assert hasattr(mlp_fp, "down_proj") and isinstance(mlp_fp.down_proj, nn.Linear)
-        self.gate_proj = wrap_linear(mlp_fp.gate_proj)
-        self.up_proj = wrap_linear(mlp_fp.up_proj)
-        self.down_proj = wrap_linear(mlp_fp.down_proj)
+        self.gate_proj = PTQWrapper(mlp_fp.gate_proj, qcfg=gate_cfg)
+        self.up_proj = PTQWrapper(mlp_fp.up_proj, qcfg=up_cfg)
+        self.down_proj = PTQWrapper(mlp_fp.down_proj, qcfg=down_cfg)
 
+        # ----- activation ---------------------------------------------
         assert hasattr(mlp_fp, "act_fn")
-        # --- activation ---------------------------------------------
-        if isinstance(mlp_fp.act_fn, torch.nn.SiLU):
-            # Need internal quant for sigmoid + mul
-            self.act_fn = QuantSiLU(dtype=DType.uint(8))  # type: ignore[assignment]
-        else:
-            assert isinstance(mlp_fp.act_fn, torch.nn.Module)
-            # Any other weight-less activation
-            self.act_fn = PTQWrapper(
-                module=mlp_fp.act_fn,
-                act_obs=MinMaxObserver(dtype=DType.uint(8)),
-                weight_obs=None,  # no parameters
-            )  # type: ignore[assignment]
+        self.act = PTQWrapper(mlp_fp.act_fn, qcfg=act_cfg)
 
-        # Observer for outer product (act * up)
-        self.mul_obs = MinMaxObserver(dtype=DType.uint(8))
-        # Observer for input
-        self.input_obs = MinMaxObserver(dtype=DType.uint(8))
-
-        self._mode: Mode = Mode.NO_QUANT
-
-    def enable_calibration(self):
-        self._mode = Mode.CALIB
-        for m in (self.gate_proj, self.up_proj, self.down_proj, self.act_fn):
-            m.enable_calibration()  # type: ignore[operator]
-        for obs in (self.input_obs, self.mul_obs):
-            obs.enabled = True
-            obs.reset()
-
-    def freeze_qparams(self):
-        self._mode = Mode.QUANT
-        for m in (self.gate_proj, self.up_proj, self.down_proj, self.act_fn):
-            m.freeze_qparams()  # type: ignore[operator]
-        for obs in (self.input_obs, self.mul_obs):
-            obs.enabled = False
-            obs.compute_qparams()
+        # ----- local observers ----------------------------------------
+        self.act_in_obs = self._make_obs("act_in")
+        self.mul_obs = self._make_obs("mul")
 
     def forward(self, x: torch.Tensor):
-        if self._mode is Mode.CALIB:
-            self.input_obs.collect(x.detach())
-        elif self._mode is Mode.QUANT:
-            x = self.input_obs.fake_quant(x)
+        # 1) quantize input once
+        x_q = self._fq(x, self.act_in_obs)
 
-        g = self.gate_proj(x)
-        u = self.up_proj(x)
-        a = self.act_fn(g)
-        h = a * u
+        # 2) parallel projections
+        g = self.gate_proj(x_q)
+        u = self.up_proj(x_q)
 
-        if self._mode is Mode.CALIB:
-            self.mul_obs.collect(h.detach())
-        elif self._mode is Mode.QUANT:
-            h = self.mul_obs.fake_quant(h)
+        # 3) activation on gate
+        a = self.act(g)
 
+        # 4) element-wise product
+        h = self._fq(a * u, self.mul_obs)
+
+        # 5) final projection
         return self.down_proj(h)
 
-    def extra_repr(self):
-        return f"mode={self._mode.name.lower()}"
+    def _all_observers(self):
+        # local first
+        yield self.act_in_obs
+        yield self.mul_obs
+        # recurse into children that are QuantModuleBase
+        for m in (self.gate_proj, self.up_proj, self.down_proj, self.act):
+            yield from m._all_observers()

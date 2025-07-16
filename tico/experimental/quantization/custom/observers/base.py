@@ -40,9 +40,6 @@ class ObserverBase:
         self.enabled = True
         self.reset()
 
-    # --------------------------------------------------------------------- #
-    #                      Stats collection & utilities                     #
-    # --------------------------------------------------------------------- #
     def reset(self) -> None:
         self.min_val: torch.Tensor = torch.tensor(math.inf)
         self.max_val: torch.Tensor = torch.tensor(-math.inf)
@@ -65,9 +62,6 @@ class ObserverBase:
             self.min_val = torch.minimum(self.min_val, mins)
             self.max_val = torch.maximum(self.max_val, maxs)
 
-    # --------------------------------------------------------------------- #
-    #                     Quantization parameter helpers                    #
-    # --------------------------------------------------------------------- #
     def compute_qparams(self):
         qmin, qmax = self.dtype.qmin, self.dtype.qmax
         rng = self.max_val - self.min_val
@@ -78,16 +72,16 @@ class ObserverBase:
                 scale = torch.ones_like(C)
                 zp = torch.zeros_like(C)
             elif (C > 0).all():
-                scale = C / 1.0
+                scale = C.clone()
                 zp = torch.zeros_like(C)
             else:
                 # C < 0
-                scale = C.abs() / 1.0
+                scale = C.abs().clone()
                 zp = torch.full_like(C, qmax)
         else:
             # normal path
             eps = 1e-12
-            scale = torch.clamp(rng, min=eps) / qmax - qmin
+            scale = torch.clamp(rng, min=eps) / (qmax - qmin)
             zp = torch.round(qmin - self.min_val / scale).clamp(qmin, qmax)
         # cache
         self._cached_scale = scale
@@ -125,5 +119,5 @@ class ObserverBase:
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(dtype={str(self.dtype)}, "
-            f"qscheme={str(self.qscheme)}, enabled={self.enabled})"
+            f"qscheme={str(self.qscheme)}, channel_axis={self.channel_axis}, enabled={self.enabled})"
         )
