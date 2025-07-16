@@ -17,13 +17,9 @@ from typing import Optional
 
 import torch
 from tico.experimental.quantization.custom.dtypes import DType
-from tico.experimental.quantization.custom.observers import (
-    MinMaxObserver,
-    ObserverBase,
-    PercentileObserver,
-)
-from tico.experimental.quantization.custom.qscheme import QScheme
-from tico.experimental.quantization.custom.wrappers.mode import Mode
+from tico.experimental.quantization.custom.mode import Mode
+from tico.experimental.quantization.custom.observers import PercentileObserver
+from tico.experimental.quantization.custom.quant_config import QuantConfig
 from tico.experimental.quantization.custom.wrappers.ptq_wrapper import PTQWrapper
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -31,136 +27,102 @@ from test.modules.op.linear import SimpleLinear
 
 
 class TestPTQWrapper(unittest.TestCase):
-    def setUp(self, act_obs: Optional[ObserverBase] = None):
+    def _build(self, qcfg: Optional[QuantConfig] = None):
         torch.manual_seed(42)
         self.fp32 = torch.nn.Linear(4, 2)
         self.input = torch.randn(32, 4)
+        self.qcfg = qcfg or QuantConfig(default_dtype=DType.uint(8))
+        self.wrapper = PTQWrapper(self.fp32, qcfg=self.qcfg)
 
-        # Activation observers (two algorithms)
-        self.act_obs = (
-            MinMaxObserver(dtype=DType.uint(8)) if act_obs is None else act_obs
-        )
+    def setUp(self):
+        self._build()
 
-        # Per-channel weight observer (axis 0 → out_features)
-        self.weight_obs = MinMaxObserver(
-            dtype=DType.uint(8),
-            qscheme=QScheme.PER_CHANNEL_AFFINE,
-            channel_axis=0,
-        )
-
-        self.wrapper = PTQWrapper(
-            module=self.fp32,
-            act_obs=self.act_obs,
-            weight_obs=self.weight_obs,
-        )
-
-    # ────────────────────────────────────────────────────────────────
-    #  Mode sanity
-    # ────────────────────────────────────────────────────────────────
     def test_default_mode_is_no_quant(self):
         self.assertIs(self.wrapper._mode, Mode.NO_QUANT)
 
     def test_mode_transitions(self):
         self.wrapper.enable_calibration()
         self.assertIs(self.wrapper._mode, Mode.CALIB)
-
         self.wrapper.freeze_qparams()
         self.assertIs(self.wrapper._mode, Mode.QUANT)
 
-    # ────────────────────────────────────────────────────────────────
-    #  Activation algorithm swap
-    # ────────────────────────────────────────────────────────────────
     def test_switch_activation_observer(self):
-        # Re-build and calibrate with minmax observer
+        # ----- pass #1: MinMax (default) ---------------------------
         self.wrapper.enable_calibration()
         _ = self.wrapper(self.input)
         self.wrapper.freeze_qparams()
-        out_mm: torch.Tensor = self.wrapper(self.input)
+        out_mm = self.wrapper(self.input)
 
-        # Calibrate with percentile observer
-        percentile_obs = PercentileObserver(percentile=99.0, dtype=DType.uint(8))
-        self.setUp(percentile_obs)  # reset
+        # ----- pass #2: Percentile via QuantConfig override --------
+        pct_cfg = QuantConfig(
+            default_dtype=DType.uint(8),
+            overrides={
+                # LinearQuant uses act_in / act_out
+                "act_in": {
+                    "factory": PercentileObserver,
+                    "dtype": DType.uint(8),
+                    "percentile": 99.0,
+                },
+                "act_out": {
+                    "factory": PercentileObserver,
+                    "dtype": DType.uint(8),
+                    "percentile": 99.0,
+                },
+            },
+        )
+        self._build(qcfg=pct_cfg)
         self.wrapper.enable_calibration()
         _ = self.wrapper(self.input)
         self.wrapper.freeze_qparams()
-        out_pct: torch.Tensor = self.wrapper(self.input)
+        out_pct = self.wrapper(self.input)
 
         diff = (out_mm - out_pct).abs().mean().item()
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.5)
 
-    # ────────────────────────────────────────────────────────────────
-    #  Weight fake-quant correctness (per-channel)
-    # ────────────────────────────────────────────────────────────────
     def test_weight_fake_quant_channelwise(self):
-        w_fp32 = self.fp32.weight.data.clone()  # [out, in]
+        self.wrapper.enable_calibration()  # collects weight stats now
+        self.wrapper.freeze_qparams()
 
-        assert self.wrapper.weight_obs is not None
-        self.wrapper.weight_obs.collect(w_fp32)  # stats
-        self.wrapper.weight_obs.compute_qparams()  # cache
-        fq_weight = self.wrapper.weight_obs.fake_quant(w_fp32)
+        w_obs = self.wrapper.wrapped.weight_obs
+        w_fp = self.fp32.weight.data
+        fq_w = w_obs.fake_quant(w_fp)
 
-        # Manual per-channel quant → dequant for reference
-        scale, zp = self.wrapper.weight_obs.compute_qparams()
-        ref = torch.empty_like(w_fp32)
-        for c in range(w_fp32.size(0)):
-            q = torch.round(w_fp32[c] / scale[c]) + zp[c]
-            q = q.clamp(
-                self.wrapper.weight_obs.dtype.qmin, self.wrapper.weight_obs.dtype.qmax
-            )
+        scale, zp = w_obs.compute_qparams()
+        ref = torch.empty_like(w_fp)
+        for c in range(w_fp.size(0)):
+            q = torch.round(w_fp[c] / scale[c]) + zp[c]
+            q = q.clamp(w_obs.dtype.qmin, w_obs.dtype.qmax)
             ref[c] = scale[c] * (q - zp[c])
 
-        # Assertions
-        self.assertTrue(torch.allclose(fq_weight, ref, atol=1e-6))
-        self.assertFalse(torch.allclose(fq_weight, w_fp32, atol=1e-6))
+        self.assertTrue(torch.allclose(fq_w, ref, atol=1e-6))
+        self.assertFalse(torch.allclose(fq_w, w_fp, atol=1e-6))
 
 
 class TestPTQSmoke(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
+        self.model = SimpleLinear().eval()
 
-        # Simple model
-        self.model = SimpleLinear()
-        self.model.eval()
-
-        # Calibration dataset
         data = torch.randn(128, 3) * 2
         self.calib_loader = DataLoader(TensorDataset(data), batch_size=32)
 
-        # Activation observers
-        self.act_obs = MinMaxObserver(dtype=DType.uint(8))
-
-        # Per-channel weight observer
-        self.weight_obs = MinMaxObserver(
-            dtype=DType.uint(8),
-            qscheme=QScheme.PER_CHANNEL_AFFINE,
-            channel_axis=0,
-        )
-
-        # Wrap
-        self.model.linear = PTQWrapper(
-            module=self.model.linear,
-            act_obs=self.act_obs,
-            weight_obs=self.weight_obs,
-        )  # type: ignore[assignment]
+        qcfg = QuantConfig(default_dtype=DType.uint(8))
+        self.model.linear = PTQWrapper(self.model.linear, qcfg=qcfg)  # type: ignore
 
     def test_smoke_forward_quantized(self):
-        assert isinstance(self.model.linear, PTQWrapper)
-        # Calibration with minmax
-        self.model.linear.enable_calibration()
+        self.model.linear.enable_calibration()  # type: ignore
         for (x,) in self.calib_loader:
             _ = self.model(x)
-        self.model.linear.freeze_qparams()
-        self.assertIs(self.model.linear._mode, Mode.QUANT)
+        self.model.linear.freeze_qparams()  # type: ignore
+        self.assertIs(self.model.linear._mode, Mode.QUANT)  # type: ignore
 
-        # Forward
         inp = self.model.get_example_inputs()
         with torch.no_grad():
-            fp32_out: torch.Tensor = self.model.linear.module(*inp)  # original module
-            q_out: torch.Tensor = self.model(*inp)  # quant-sim
+            fp32_out = self.model.linear.wrapped.module(*inp)  # original Linear
+            q_out = self.model(*inp)
 
         diff = (fp32_out - q_out).abs().mean().item()
-
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.5)
         self.assertEqual(fp32_out.shape, q_out.shape)

@@ -12,35 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import torch
+import torch.nn as nn
 
 from tico.experimental.quantization.custom.quant_config import QuantConfig
 from tico.experimental.quantization.custom.wrappers.base_quant_module import (
     QuantModuleBase,
 )
-from tico.experimental.quantization.custom.wrappers.registry import lookup
+from tico.experimental.quantization.custom.wrappers.registry import register
 
 
-class PTQWrapper(QuantModuleBase):
+@register(nn.SiLU)
+class QuantSiLU(QuantModuleBase):
     """
-    Adapter that turns a fp module into its quantized counterpart.
-
-    It is itself a QuantModuleBase so composite wrappers can treat
-     it exactly like any other quant module.
+    QuantSiLU — drop-in replacement for nn.SiLU that quantizes
+    both intermediate tensors:
+        • s  = sigmoid(x)   (logistic)
+        • y  = x * s        (mul)
     """
 
-    def __init__(self, module: torch.nn.Module, qcfg: QuantConfig):
+    def __init__(self, fp: nn.SiLU, qcfg: Optional[QuantConfig] = None):
         super().__init__(qcfg)
-        wrapped_cls = lookup(type(module))
-        if wrapped_cls is None:
-            raise NotImplementedError(f"No quant wrapper for {type(module).__name__}")
-        self.wrapped: QuantModuleBase = wrapped_cls(module, qcfg=qcfg)
+        self.sig_obs = self._make_obs("sigmoid")
+        self.mul_obs = self._make_obs("mul")
+        self.module = fp
 
-    def forward(self, *args, **kwargs):
-        return self.wrapped(*args, **kwargs)
+    def forward(self, x: torch.Tensor):
+        s = torch.sigmoid(x)
+        s = self._fq(s, self.sig_obs)
+
+        y = x * s
+        y = self._fq(y, self.mul_obs)
+
+        return y
 
     def _all_observers(self):
-        yield from self.wrapped._all_observers()
-
-    def extra_repr(self) -> str:
-        return self.wrapped.extra_repr()
+        return (self.sig_obs, self.mul_obs)

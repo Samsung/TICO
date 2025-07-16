@@ -12,126 +12,153 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from tico.experimental.quantization.custom.dtypes import DType
-from tico.experimental.quantization.custom.observers import MinMaxObserver
-from tico.experimental.quantization.custom.qscheme import QScheme
-from tico.experimental.quantization.custom.wrappers.mode import Mode
+from tico.experimental.quantization.custom.quant_config import QuantConfig
+from tico.experimental.quantization.custom.wrappers.base_quant_module import (
+    QuantModuleBase,
+)
 from tico.experimental.quantization.custom.wrappers.ptq_wrapper import PTQWrapper
+from tico.experimental.quantization.custom.wrappers.registry import try_register
 
 
-class QuantLlamaAttention(nn.Module):
-    def __init__(self, attn_fp32: nn.Module):
-        super().__init__()
-        cfg = attn_fp32.config
-        self.h_dim = getattr(
-            cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads
-        )
+@try_register("transformers.models.llama.modeling_llama.LlamaAttention")
+class QuantLlamaAttention(QuantModuleBase):
+    def __init__(self, fp32_attn: nn.Module, qcfg: Optional[QuantConfig] = None):
+        super().__init__(qcfg)
+
+        cfg = fp32_attn.config
+        self.hdim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
         self.kv_rep = cfg.num_attention_heads // cfg.num_key_value_heads
 
-        scale = self.h_dim**-0.5
-        self.scale_t = torch.tensor(scale)
-        self.obs_scale = MinMaxObserver(dtype=DType.uint(8))
+        # constant scale (1/√d)
+        self.scale_t = torch.tensor(self.hdim**-0.5)
+        self.obs_scale = self._make_obs("scale")
 
-        # ---- wrap Linear layers ------------------------------------
-        def wrap_lin(m: nn.Linear) -> PTQWrapper:
-            return PTQWrapper(
-                module=m,
-                act_obs=MinMaxObserver(dtype=DType.uint(8)),
-                weight_obs=MinMaxObserver(
-                    dtype=DType.uint(8),
-                    qscheme=QScheme.PER_CHANNEL_AFFINE,
-                    channel_axis=0,
-                ),
-            )
+        # ---- wrap q k v o projections via PTQWrapper ---------------
+        q_cfg = qcfg.child("q_proj") if qcfg else None
+        k_cfg = qcfg.child("k_proj") if qcfg else None
+        v_cfg = qcfg.child("v_proj") if qcfg else None
+        o_cfg = qcfg.child("o_proj") if qcfg else None
+        self.q_proj = PTQWrapper(fp32_attn.q_proj, qcfg=q_cfg)
+        self.k_proj = PTQWrapper(fp32_attn.k_proj, qcfg=k_cfg)
+        self.v_proj = PTQWrapper(fp32_attn.v_proj, qcfg=v_cfg)
+        self.o_proj = PTQWrapper(fp32_attn.o_proj, qcfg=o_cfg)
 
-        self.q_proj = wrap_lin(attn_fp32.q_proj)
-        self.k_proj = wrap_lin(attn_fp32.k_proj)
-        self.v_proj = wrap_lin(attn_fp32.v_proj)
-        self.o_proj = wrap_lin(attn_fp32.o_proj)
+        # ---- create arithmetic observers ---------------------------
+        mk = self._make_obs
+        self.obs_hidden = mk("hidden")
 
-        # ---- observers for EACH arithmetic result ------------------
-        self.obs_hidden = MinMaxObserver(dtype=DType.uint(8))
-
-        self.obs_cos = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_sin = MinMaxObserver(dtype=DType.uint(8))
+        self.obs_cos = mk("cos")
+        self.obs_sin = mk("sin")
 
         # rotate-half sub-steps
-        self.obs_q_x1 = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_q_x2 = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_q_x2neg = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_q_cat = MinMaxObserver(dtype=DType.uint(8))
+        self.obs_q_x1 = mk("q_x1")
+        self.obs_q_x2 = mk("q_x2")
+        self.obs_q_neg = mk("q_neg")
+        self.obs_q_cat = mk("q_cat")
+        self.obs_k_x1 = mk("k_x1")
+        self.obs_k_x2 = mk("k_x2")
+        self.obs_k_neg = mk("k_neg")
+        self.obs_k_cat = mk("k_cat")
 
-        self.obs_k_x1 = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_k_x2 = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_k_x2neg = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_k_cat = MinMaxObserver(dtype=DType.uint(8))
+        # q / k paths
+        self.obs_q_cos = mk("q_cos")
+        self.obs_q_sin = mk("q_sin")
+        self.obs_q_rot = mk("q_rot")
+        self.obs_k_cos = mk("k_cos")
+        self.obs_k_sin = mk("k_sin")
+        self.obs_k_rot = mk("k_rot")
 
-        # q path
-        self.obs_q_cos = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_q_sin = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_q_rot = MinMaxObserver(dtype=DType.uint(8))
+        # logits / softmax / out
+        self.obs_logits_raw = mk("logits_raw")
+        self.obs_logits = mk("logits")
+        self.obs_softmax = mk("softmax")
+        self.obs_attn_out = mk("attn_out")
 
-        # k path
-        self.obs_k_cos = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_k_sin = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_k_rot = MinMaxObserver(dtype=DType.uint(8))
-
-        # attention logits, softmax, attn_out
-        self.obs_logits_raw = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_logits = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_sm = MinMaxObserver(dtype=DType.uint(8))
-        self.obs_attnout = MinMaxObserver(dtype=DType.uint(8))
-
-        self._mode: Mode = Mode.NO_QUANT
-
-    def _rot(self, t, obs_x1, obs_x2, obs_neg, obs_cat):
+    def _rot(self, t, o_x1, o_x2, o_neg, o_cat):
         x1, x2 = torch.chunk(t, 2, dim=-1)
-        x1 = self._fq(x1, obs_x1)
-        x2 = self._fq(x2, obs_x2)
-        x2n = self._fq(-x2, obs_neg)
-        cat = self._fq(torch.cat((x2n, x1), dim=-1), obs_cat)
-        return cat
+        x1 = self._fq(x1, o_x1)
+        x2 = self._fq(x2, o_x2)
+        x2n = self._fq(-x2, o_neg)
+        return self._fq(torch.cat((x2n, x1), -1), o_cat)
 
-    def _fq(self, x: torch.Tensor, obs: MinMaxObserver):  # fake / collect
-        if self._mode is Mode.CALIB:
-            obs.collect(x.detach())
-            return x
-        if self._mode is Mode.QUANT:
-            return obs.fake_quant(x)
-        return x
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        pos_emb: tuple[torch.Tensor, torch.Tensor],
+        attn_mask: torch.Tensor | None = None,
+    ):
 
-    def enable_calibration(self):
-        self._mode = Mode.CALIB
-        for mod in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
-            mod.enable_calibration()
-        for ob in self._all_obs():
-            ob.enabled, _ = True, ob.reset()
+        hidden = self._fq(hidden, self.obs_hidden)
+        B, S, _ = hidden.shape
+        H = self.hdim
 
-    def freeze_qparams(self):
-        self._mode = Mode.QUANT
-        for mod in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
-            mod.freeze_qparams()
-        for ob in self._all_obs():
-            ob.enabled = False
-            ob.compute_qparams()
+        # projections
+        q = self.q_proj(hidden).view(B, S, -1, H).transpose(1, 2)
+        k = self.k_proj(hidden).view(B, S, -1, H).transpose(1, 2)
+        v = self.v_proj(hidden).view(B, S, -1, H).transpose(1, 2)
 
-    def _all_obs(self):
-        return (
+        # rope tables
+        cos, sin = pos_emb
+        cos = self._fq(cos, self.obs_cos)
+        sin = self._fq(sin, self.obs_sin)
+        cos_u, sin_u = cos.unsqueeze(1), sin.unsqueeze(1)
+
+        # q_rot
+        q_half = self._rot(
+            q, self.obs_q_x1, self.obs_q_x2, self.obs_q_neg, self.obs_q_cat
+        )
+        q_cos = self._fq(q * cos_u, self.obs_q_cos)
+        q_sin = self._fq(q_half * sin_u, self.obs_q_sin)
+        q_rot = self._fq(q_cos + q_sin, self.obs_q_rot)
+
+        # k_rot
+        k_half = self._rot(
+            k, self.obs_k_x1, self.obs_k_x2, self.obs_k_neg, self.obs_k_cat
+        )
+        k_cos = self._fq(k * cos_u, self.obs_k_cos)
+        k_sin = self._fq(k_half * sin_u, self.obs_k_sin)
+        k_rot = self._fq(k_cos + k_sin, self.obs_k_rot)
+
+        # logits
+        k_rep = k_rot.repeat_interleave(self.kv_rep, dim=1)
+        logits_raw = self._fq(q_rot @ k_rep.transpose(-2, -1), self.obs_logits_raw)
+        scale = self._fq(self.scale_t, self.obs_scale)
+        logits = self._fq(logits_raw * scale, self.obs_logits)
+
+        assert attn_mask is None
+        # logits = logits + attn_mask
+
+        # softmax
+        soft = torch.softmax(logits, -1, dtype=torch.float32).to(q.dtype)
+        soft = self._fq(soft, self.obs_softmax)
+
+        # attn out
+        v_rep = v.repeat_interleave(self.kv_rep, dim=1)
+        attn_out = (
+            self._fq(soft @ v_rep, self.obs_attn_out).transpose(1, 2).reshape(B, S, -1)
+        )
+
+        # final projection
+        return self.o_proj(attn_out)
+
+    def _all_observers(self):
+        yield from (
             self.obs_hidden,
             self.obs_scale,
             self.obs_cos,
             self.obs_sin,
             self.obs_q_x1,
             self.obs_q_x2,
-            self.obs_q_x2neg,
+            self.obs_q_neg,
             self.obs_q_cat,
             self.obs_k_x1,
             self.obs_k_x2,
-            self.obs_k_x2neg,
+            self.obs_k_neg,
             self.obs_k_cat,
             self.obs_q_cos,
             self.obs_q_sin,
@@ -139,68 +166,8 @@ class QuantLlamaAttention(nn.Module):
             self.obs_k_cos,
             self.obs_k_sin,
             self.obs_k_rot,
-            self.obs_logits,
             self.obs_logits_raw,
-            self.obs_sm,
-            self.obs_attnout,
+            self.obs_logits,
+            self.obs_softmax,
+            self.obs_attn_out,
         )
-
-    def forward(self, hidden: torch.Tensor, pos_emb: tuple[torch.Tensor, torch.Tensor]):
-
-        # --- 1) quant / collect input --------------------------------
-        hidden = self._fq(hidden, self.obs_hidden)
-
-        B, S, _ = hidden.shape
-        H = self.h_dim
-
-        # --- 2) projections -----------------------------------------
-        q = self.q_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # [B,h,S,H]
-        k = self.k_proj(hidden).view(B, S, -1, H).transpose(1, 2)
-        v = self.v_proj(hidden).view(B, S, -1, H).transpose(1, 2)
-
-        # --- 3) RoPE cos/sin  ---------------------------------------
-        cos, sin = pos_emb  # [B,S,H]
-        cos = self._fq(cos, self.obs_cos)
-        sin = self._fq(sin, self.obs_sin)
-
-        cos_u = cos.unsqueeze(1)  # broadcast to heads
-        sin_u = sin.unsqueeze(1)
-
-        # --- 4) q_rot -----------------------------------------------
-        q_half = self._rot(
-            q, self.obs_q_x1, self.obs_q_x2, self.obs_q_x2neg, self.obs_q_cat
-        )
-        q_cos = self._fq(q * cos_u, self.obs_q_cos)
-        q_sin = self._fq(q_half * sin_u, self.obs_q_sin)
-        q_rot = self._fq(q_cos + q_sin, self.obs_q_rot)
-
-        # --- 5) k_rot -----------------------------------------------
-        k_half = self._rot(
-            k, self.obs_k_x1, self.obs_k_x2, self.obs_k_x2neg, self.obs_k_cat
-        )
-        k_cos = self._fq(k * cos_u, self.obs_k_cos)
-        k_sin = self._fq(k_half * sin_u, self.obs_k_sin)
-        k_rot = self._fq(k_cos + k_sin, self.obs_k_rot)
-
-        # --- 6) logits ----------------------------------------------
-        k_rep = k_rot.repeat_interleave(self.kv_rep, dim=1)
-        logits_raw = self._fq(q_rot @ k_rep.transpose(-2, -1), self.obs_logits_raw)
-        scale = self._fq(self.scale_t, self.obs_scale)
-        logits = self._fq(logits_raw * scale, self.obs_logits)
-
-        # --- 7) soft-max (FP32 kernel but INT8 output) --------------
-        sm = F.softmax(logits, dim=-1, dtype=torch.float32).to(q.dtype)
-        sm = self._fq(sm, self.obs_sm)
-
-        # --- 8) attn_out --------------------------------------------
-        v_rep = v.repeat_interleave(self.kv_rep, dim=1)
-        attn_out = (
-            self._fq(sm @ v_rep, self.obs_attnout).transpose(1, 2).reshape(B, S, -1)
-        )
-
-        # --- 9) final projection (PTQWrapper) -----------------------
-        return self.o_proj(attn_out)
-
-    # ----------------------------------------------------------------
-    def extra_repr(self):
-        return f"mode={self._mode.name.lower()}"

@@ -1,8 +1,11 @@
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch, pathlib
+import pathlib, torch
 
-from tico.experimental.quantization.custom.wrappers.llama.quant_llama_attn import QuantLlamaAttention
-from tico.experimental.quantization.custom.wrappers.mode import Mode
+from tico.experimental.quantization.custom.mode import Mode
+
+from tico.experimental.quantization.custom.wrappers.llama.quant_llama_attn import (
+    QuantLlamaAttention,
+)
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 name = "Maykeye/TinyLLama-v0"
 model = AutoModelForCausalLM.from_pretrained(name)
@@ -15,19 +18,19 @@ orig_attn = model.model.layers[0].self_attn
 model.model.layers[0].self_attn = QuantLlamaAttention(orig_attn)
 model.eval()
 
-attn_q = model.model.layers[0].self_attn      # quant wrapper
+attn_q = model.model.layers[0].self_attn  # quant wrapper
 rotary = model.model.rotary_emb
 
 # -------------------------------------------------------------------------
-# 2. Single-pass calibration 
+# 2. Single-pass calibration
 # -------------------------------------------------------------------------
 with torch.no_grad():
     attn_q.enable_calibration()
     for _ in range(16):
-        ids = tokenizer(["hello"]*8, return_tensors="pt")
+        ids = tokenizer(["hello"] * 8, return_tensors="pt")
         embeds = model.model.embed_tokens(ids["input_ids"])
         cos_sin = rotary(embeds, ids["input_ids"])
-        _ = attn_q(embeds, cos_sin)           # observers collect
+        _ = attn_q(embeds, cos_sin)  # observers collect
     attn_q.freeze_qparams()
 
 assert attn_q._mode is Mode.QUANT
@@ -47,6 +50,7 @@ print("mean|diff| =", (int8 - fp32).abs().mean().item())
 # 4. Export the quantized block
 # -------------------------------------------------------------------------
 import tico
+
 B, S, D = 1, 4, model.config.hidden_size
 example = torch.randn(B, S, D)
 example_pos = rotary(example, torch.arange(S)[None, :])

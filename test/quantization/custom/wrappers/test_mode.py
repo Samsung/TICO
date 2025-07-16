@@ -14,7 +14,7 @@
 
 import unittest
 
-from tico.experimental.quantization.custom.wrappers.mode import Mode
+from tico.experimental.quantization.custom.mode import Mode
 
 
 class TestModeEnum(unittest.TestCase):

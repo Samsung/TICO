@@ -86,7 +86,6 @@ class TestScalarObserver(unittest.TestCase):
             self.assertAlmostEqual(scale.item(), abs(value), places=6)
             self.assertEqual(zp.item(), obs.dtype.qmax)
 
-    # ------------------------------------------------------------------
     def test_positive_scalar_uint8(self):
         self._check_scalar(0.5, DType.uint(8))
 
