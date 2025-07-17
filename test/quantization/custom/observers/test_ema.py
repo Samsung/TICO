@@ -75,3 +75,10 @@ class TestEMAObserver(unittest.TestCase):
             torch.allclose(obs.max_val, expected_max),
             f"{obs.max_val} != {expected_max}",
         )
+
+    def test_first_batch(self):
+        x = torch.randn(10)
+        obs = EMAObserver(momentum=0.9, channel_axis=None)
+        obs.collect(x)
+        self.assertFalse(torch.isinf(obs.min_val).any())
+        self.assertFalse(torch.isinf(obs.max_val).any())

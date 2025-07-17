@@ -88,12 +88,21 @@ class QuantLlamaAttention(QuantModuleBase):
 
     def forward(
         self,
-        hidden: torch.Tensor,
-        pos_emb: tuple[torch.Tensor, torch.Tensor],
-        attn_mask: torch.Tensor | None = None,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value=None,  # not supported yet
+        cache_position: Optional[torch.LongTensor] = None,
+        **kwargs,
     ):
+        if past_key_value is not None:
+            raise NotImplementedError("quant wrapper does not support KV cache yet")
+        if attention_mask is not None:
+            raise NotImplementedError(
+                "quant wrapper does not support attention mask yet"
+            )
 
-        hidden = self._fq(hidden, self.obs_hidden)
+        hidden = self._fq(hidden_states, self.obs_hidden)
         B, S, _ = hidden.shape
         H = self.hdim
 
@@ -103,7 +112,7 @@ class QuantLlamaAttention(QuantModuleBase):
         v = self.v_proj(hidden).view(B, S, -1, H).transpose(1, 2)
 
         # rope tables
-        cos, sin = pos_emb
+        cos, sin = position_embeddings
         cos = self._fq(cos, self.obs_cos)
         sin = self._fq(sin, self.obs_sin)
         cos_u, sin_u = cos.unsqueeze(1), sin.unsqueeze(1)
@@ -130,21 +139,23 @@ class QuantLlamaAttention(QuantModuleBase):
         scale = self._fq(self.scale_t, self.obs_scale)
         logits = self._fq(logits_raw * scale, self.obs_logits)
 
-        assert attn_mask is None
+        assert attention_mask is None
         # logits = logits + attn_mask
 
         # softmax
-        soft = torch.softmax(logits, -1, dtype=torch.float32).to(q.dtype)
-        soft = self._fq(soft, self.obs_softmax)
+        attn_weights = torch.softmax(logits, -1, dtype=torch.float32).to(q.dtype)
+        attn_weights = self._fq(attn_weights, self.obs_softmax)
 
         # attn out
         v_rep = v.repeat_interleave(self.kv_rep, dim=1)
         attn_out = (
-            self._fq(soft @ v_rep, self.obs_attn_out).transpose(1, 2).reshape(B, S, -1)
+            self._fq(attn_weights @ v_rep, self.obs_attn_out)
+            .transpose(1, 2)
+            .reshape(B, S, -1)
         )
 
         # final projection
-        return self.o_proj(attn_out)
+        return self.o_proj(attn_out), attn_weights
 
     def _all_observers(self):
         yield from (

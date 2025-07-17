@@ -42,7 +42,7 @@ ids = tokenizer("check", return_tensors="pt")
 emb = model.model.embed_tokens(ids["input_ids"])
 pos = rotary(emb, ids["input_ids"])
 with torch.no_grad():
-    int8 = attn_q(emb, pos)
+    int8 = attn_q(emb, pos)[0]
     fp32 = orig_attn(emb, position_embeddings=pos, attention_mask=None)[0]
 print("mean|diff| =", (int8 - fp32).abs().mean().item())
 

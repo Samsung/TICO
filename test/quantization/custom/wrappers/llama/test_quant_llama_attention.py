@@ -86,7 +86,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         x = torch.randn(2, 6, 8)
         pos = self._rand_rope(2, 6)
         with torch.no_grad():
-            q_out = qattn(x, pos)
+            q_out, _ = qattn(x, pos)
             fp_out, _ = self.fp32(x, pos, attention_mask=None)
 
         diff = (fp_out - q_out).abs().mean().item()
