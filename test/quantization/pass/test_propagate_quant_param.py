@@ -15,6 +15,7 @@
 import unittest
 
 import torch
+from packaging import version
 from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import PT2EConfig
 from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
@@ -23,6 +24,9 @@ from tico.experimental.quantization.passes.propagate_qparam_forward import (
 )
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
+
+# Compare only major/minor version to treat dev/nightly builds as >= 2.9.
+IS_TORCH_GE_29 = version.parse(torch.__version__).release[:2] >= (2, 9)
 
 
 class LinearPermuteModule(torch.nn.Module):
@@ -198,6 +202,10 @@ class SliceModule(torch.nn.Module):
         return (torch.randn(2, 3),)
 
 
+@unittest.skipIf(
+    IS_TORCH_GE_29,
+    "Skip on torch >= 2.9. It doesn't produce aten.slice from torch 2.9.",
+)
 class SliceTest(SingleOpPropagateQParamForwardTest):
     def test_u8(self):
         self.setup(SliceModule(), torch.ops.aten.slice.Tensor, dtype="uint8")

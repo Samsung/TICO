@@ -1,1 +1,1 @@
-torchvision==0.23.0.dev20250617+cpu
+torchvision==0.24.0.dev20250715+cpu

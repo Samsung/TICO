@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from packaging import version
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.lower_to_slice import LowerIndexSelectToSlice, LowerSelectCopyToSlice
@@ -27,6 +28,9 @@ from test.modules.op.select import SimpleConstIndex
 from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
 
+# Compare only major/minor version to treat dev/nightly builds as >= 2.9.
+IS_TORCH_GE_29 = version.parse(torch.__version__).release[:2] >= (2, 9)
+
 
 class TestLowerSelectCopyToSlice(SinglePassValueTest):
     def test_pass(self):
@@ -34,17 +38,27 @@ class TestLowerSelectCopyToSlice(SinglePassValueTest):
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 1
         )
-        self.assertEqual(
-            num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 3
-        )
+        if IS_TORCH_GE_29:
+            self.assertEqual(
+                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 0
+            )
+        else:
+            self.assertEqual(
+                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 3
+            )
 
         self.run_value_test(LowerSelectCopyToSlice())
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 0
         )
-        self.assertEqual(
-            num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 4
-        )
+        if IS_TORCH_GE_29:
+            self.assertEqual(
+                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 1
+            )
+        else:
+            self.assertEqual(
+                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 4
+            )
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.reshape.default]), 1
         )
