@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import unittest
 
 import torch
@@ -67,3 +68,44 @@ class TestPercentileObserver(unittest.TestCase):
         upper = scale * (qmax - zp)
         self.assertTrue(torch.all(fq >= lower - 1e-6))
         self.assertTrue(torch.all(fq <= upper + 1e-6))
+
+    def test_per_channel_collect(self):
+        # shape (C=3, N)
+        t = torch.tensor(
+            [
+                [1.0, 2.0, 50.0],  # ch-0 outlier high
+                [-3.0, -2.0, -100.0],  # ch-1 outlier low
+                [0.5, 0.6, 0.7],  # ch-2 tame
+            ]
+        )  # shape (3,3)
+
+        pct = 50.0  # keep 25–75th pct   -> median-ish
+        obs = PercentileObserver(
+            percentile=pct,
+            dtype=UINT8,
+            qscheme=QScheme.PER_CHANNEL_AFFINE,
+            channel_axis=0,
+        )
+
+        obs.collect(t)
+
+        # expected quantiles per channel
+        low = torch.quantile(t, (100 - pct) / 200.0, dim=1)
+        high = torch.quantile(t, 1 - (100 - pct) / 200.0, dim=1)
+
+        self.assertTrue(torch.allclose(obs.min_val, low))
+        self.assertTrue(torch.allclose(obs.max_val, high))
+        self.assertEqual(obs.min_val.shape, torch.Size([3]))  # vector len C
+
+    def test_multiple_collects_accumulate(self):
+        obs = PercentileObserver(percentile=90.0)
+        x1 = torch.randn(100)
+        x2 = torch.randn(100) + 5.0  # shifted distribution
+
+        obs.collect(x1)
+        first_min, first_max = obs.min_val.clone(), obs.max_val.clone()
+
+        obs.collect(x2)
+        # global mins should be ≤ first_min; max ≥ first_max
+        self.assertLessEqual(obs.min_val.item(), first_min.item())
+        self.assertGreaterEqual(obs.max_val.item(), first_max.item())

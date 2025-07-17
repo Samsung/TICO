@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Optional
+
 import torch
 
 from tico.experimental.quantization.custom.quant_config import QuantConfig
@@ -29,7 +31,7 @@ class PTQWrapper(QuantModuleBase):
      it exactly like any other quant module.
     """
 
-    def __init__(self, module: torch.nn.Module, qcfg: QuantConfig):
+    def __init__(self, module: torch.nn.Module, qcfg: Optional[QuantConfig] = None):
         super().__init__(qcfg)
         wrapped_cls = lookup(type(module))
         if wrapped_cls is None:

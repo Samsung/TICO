@@ -32,8 +32,25 @@ class PercentileObserver(ObserverBase):
         if not self.enabled:
             return
 
-        pct = self.percentile
-        low = torch.quantile(x.detach(), (100 - pct) / 200.0)
-        high = torch.quantile(x.detach(), 1 - (100 - pct) / 200.0)
-        self.min_val = torch.minimum(self.min_val, low)
-        self.max_val = torch.maximum(self.max_val, high)
+        q_low = (100.0 - self.percentile) / 200.0  # two-sided
+        q_high = 1.0 - q_low
+
+        if self.channel_axis is None:
+            # ---------- per-tensor -----------------------------------
+            low = torch.quantile(x.detach(), q_low)
+            high = torch.quantile(x.detach(), q_high)
+            self.min_val = torch.minimum(self.min_val, low)
+            self.max_val = torch.maximum(self.max_val, high)
+
+        else:
+            # ---------- per-channel ----------------------------------
+            cax = self.channel_axis % x.ndim
+            # bring channel axis first, flatten the rest
+            x_flat = x.transpose(0, cax).contiguous().view(x.size(cax), -1)
+
+            low = torch.quantile(x_flat, q_low, dim=1)
+            high = torch.quantile(x_flat, q_high, dim=1)
+
+            # fold into running vectors
+            self.min_val = torch.minimum(self.min_val, low)
+            self.max_val = torch.maximum(self.max_val, high)

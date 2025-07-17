@@ -24,6 +24,7 @@ from tico.experimental.quantization.custom.wrappers.base_quant_module import (
 _WRAPPERS: Dict[Type[nn.Module], Type[QuantModuleBase]] = {}
 _IMPORT_ONCE = False
 _CORE_MODULES = (
+    "tico.experimental.quantization.custom.wrappers.quant_elementwise",
     "tico.experimental.quantization.custom.wrappers.nn.quant_linear",
     "tico.experimental.quantization.custom.wrappers.nn.quant_silu",
     # add future core wrappers here
@@ -31,6 +32,40 @@ _CORE_MODULES = (
 
 
 def _lazy_init():
+    """
+    Deferred one-shot import of **core wrapper modules**.
+
+    Why not import everything when the program first starts?
+    --------------------------------------------------
+    * **Avoid circular-import hell**
+      Core wrappers often import `PTQWrapper`, which in turn calls
+      `registry.lookup()`.  Importing those files eagerly here would create a
+      cycle (`registry → wrapper → registry`).  Delaying the import until the
+      *first* `lookup()` call lets Python finish constructing the registry
+      module before any wrapper files are touched.
+
+    * **Cold-start speed**
+      Most user code never wraps layers explicitly; they only hit
+      `PTQWrapper` if they are doing quantization.  Deferring half-a-dozen
+      heavyweight `import torch …` files until they are really needed
+      reduces library start-up latency in the common path.
+
+    * **Optional dependencies**
+      Core wrappers listed in `_CORE_MODULES` are chosen to be dependency-free
+      (pure PyTorch).  Anything that needs `transformers`, `torchvision`,
+      etc. uses the `@try_register()` decorator inside its own module.  Those
+      optional modules are *not* imported here, so users without the extra
+      packages still get a clean import.
+
+    Implementation notes
+    --------------------
+    * `_IMPORT_ONCE` guard ensures we execute the import loop only once,
+      even if `lookup()` is called from multiple threads.
+    * Each path in `_CORE_MODULES` is a **fully-qualified module string**
+      (e.g. ``"ptq.wrappers.linear_quant"``).  Importing the module runs all
+      its `@register(nn.Layer)` decorators, populating `_WRAPPERS`.
+    * After the first call the function becomes a cheap constant-time no-op.
+    """
     global _IMPORT_ONCE
     if _IMPORT_ONCE:
         return

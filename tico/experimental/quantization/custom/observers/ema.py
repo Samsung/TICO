@@ -43,9 +43,6 @@ class EMAObserver(ObserverBase):
         super().__init__(**kwargs)
         assert 0.0 < momentum < 1.0, "momentum must be in (0, 1)"
         self.momentum = momentum
-        # Override sentinel so we know when the first value arrives
-        self.min_val = None  # type: ignore[assignment]
-        self.max_val = None  # type: ignore[assignment]
 
     @torch.no_grad()
     def collect(self, x: torch.Tensor):
@@ -57,7 +54,9 @@ class EMAObserver(ObserverBase):
         else:
             curr_min, curr_max = reduce_except(x, self.channel_axis)
 
-        if self.min_val is None:  # first batch → hard init
+        if (
+            torch.isinf(self.min_val).any() and torch.isinf(self.max_val).any()
+        ):  # first batch → hard init
             self.min_val, self.max_val = curr_min, curr_max
             return
 
