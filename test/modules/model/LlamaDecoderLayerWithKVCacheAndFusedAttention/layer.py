@@ -22,7 +22,7 @@ def capture_and_forward(self, *args, **kwargs):
         # Just retrieve the ordinary positional inputs only
         name
         for name in sig.parameters.keys()
-        if name not in ("self", "kwargs", "use_cache", "position_ids", "output_attentions")
+        if name not in ("self", "kwargs")
     ]
 
     args_dict = dict(zip(args_names, args))
@@ -34,10 +34,8 @@ def capture_and_forward(self, *args, **kwargs):
         args_tuple = tuple(args_dict.get(name, None) for name in args_names)
         return copy.deepcopy(args_tuple)
 
-    if args_dict["past_key_value"].get_seq_length() != 0 and captured_input == ():
-        input_to_remove = [
-            "use_cache",
-        ]
+    if len(args_dict["past_key_value"].key_cache) != 0:
+        input_to_remove = ["use_cache"]
         captured_input = populate_args(args_dict, input_to_remove)
 
     return forward_org(self, *args, **kwargs)
@@ -78,9 +76,10 @@ with torch.no_grad():
 generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print(generated_text)
 
+
 # ATTENTION FUSER
 
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 
 @torch.library.impl("circle::attention.llama", "CPU")
@@ -112,7 +111,7 @@ def attention_llama(*args, **kwargs):
     return hidden_states
 
 
-from transformers.cache_utils import Cache, DynamicCache
+from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import LlamaAttention
 
 
@@ -148,44 +147,12 @@ def forward_adapter(
     )
 
 
-# Tico
+LlamaAttention.forward = forward_adapter
 
+# Tico
 import tico
 
-from torch import nn
-from transformers.models.llama.modeling_llama import LlamaModel
-
 model = AutoModelForCausalLM.from_pretrained(model_name)
-
-class LlamaDecoderLayers(nn.Module):
-    def __init__(self, model: LlamaModel):
-        super().__init__()
-        self.config = model.config
-        self.layers = model.layers
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
-            layer_outputs = decoder_layer(
-                hidden_states,
-                attention_mask=attention_mask,
-                past_key_value=past_key_values,
-                cache_position=cache_position,
-                position_embeddings=position_embeddings,
-            )
-            hidden_states = layer_outputs[0]
-
-        return hidden_states
-
-layers = LlamaDecoderLayers(model.model)
-LlamaAttention.forward = forward_adapter
-layers.eval()
-circle_model = tico.convert(layers, captured_input)
-circle_model.save(f"tinyllama.model.attn.circle")
+model.eval()
+circle_model = tico.convert(model.model.layers[0], captured_input)
+circle_model.save(f"tinyllama.attn.circle")
