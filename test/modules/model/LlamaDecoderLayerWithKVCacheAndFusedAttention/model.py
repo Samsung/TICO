@@ -22,7 +22,8 @@ def capture_and_forward(self, *args, **kwargs):
         # Just retrieve the ordinary positional inputs only
         name
         for name in sig.parameters.keys()
-        if name not in ("self", "kwargs", "use_cache", "position_ids", "output_attentions")
+        if name
+        not in ("self", "kwargs", "use_cache", "position_ids", "output_attentions")
     ]
 
     args_dict = dict(zip(args_names, args))
@@ -157,6 +158,7 @@ from transformers.models.llama.modeling_llama import LlamaModel
 
 model = AutoModelForCausalLM.from_pretrained(model_name)
 
+
 class LlamaDecoderLayers(nn.Module):
     def __init__(self, model: LlamaModel):
         super().__init__()
@@ -169,8 +171,12 @@ class LlamaDecoderLayers(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+        position_embeddings: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # necessary, but kept here for BC
+    ) -> Tuple[
+        torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]
+    ]:
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             layer_outputs = decoder_layer(
@@ -183,6 +189,7 @@ class LlamaDecoderLayers(nn.Module):
             hidden_states = layer_outputs[0]
 
         return hidden_states
+
 
 layers = LlamaDecoderLayers(model.model)
 LlamaAttention.forward = forward_adapter
