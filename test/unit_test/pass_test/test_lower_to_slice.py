@@ -13,12 +13,12 @@
 # limitations under the License.
 
 import torch
-from packaging import version
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.lower_to_slice import LowerIndexSelectToSlice, LowerSelectCopyToSlice
 from tico.passes.remove_nop import RemoveNop
 from tico.passes.segment_index_select import SegmentIndexSelectConst
+from tico.utils.utils import HAS_TORCH_OVER_29_DEV
 
 from test.modules.op.index_select import (
     SimpleIndexSelectWithConstIndex,
@@ -28,9 +28,6 @@ from test.modules.op.select import SimpleConstIndex
 from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
 
-# Compare only major/minor version to treat dev/nightly builds as >= 2.9.
-IS_TORCH_GE_29 = version.parse(torch.__version__).release[:2] >= (2, 9)
-
 
 class TestLowerSelectCopyToSlice(SinglePassValueTest):
     def test_pass(self):
@@ -38,7 +35,7 @@ class TestLowerSelectCopyToSlice(SinglePassValueTest):
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 1
         )
-        if IS_TORCH_GE_29:
+        if HAS_TORCH_OVER_29_DEV:
             self.assertEqual(
                 num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 0
             )
@@ -51,7 +48,7 @@ class TestLowerSelectCopyToSlice(SinglePassValueTest):
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 0
         )
-        if IS_TORCH_GE_29:
+        if HAS_TORCH_OVER_29_DEV:
             self.assertEqual(
                 num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 1
             )
