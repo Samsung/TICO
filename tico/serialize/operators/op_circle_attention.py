@@ -20,15 +20,16 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
+from torch.library import Library
+
 from tico.serialize.circle_graph import CircleSubgraph, extract_shape
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 
-from torch.library import Library
-
 lib = Library("circle", "DEF")
-lib.define("""
+lib.define(
+    """
 attention.llama(
     Tensor hidden_states,
     Tensor position_cos,
@@ -39,7 +40,9 @@ attention.llama(
     int layer_idx,
     Tensor cache_position
 ) -> Tensor
-""")
+"""
+)
+
 
 @register_node_visitor
 class AttentionVisitor(NodeVisitor):
