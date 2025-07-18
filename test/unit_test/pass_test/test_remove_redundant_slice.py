@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import torch
 from tico.passes import ops
 from tico.passes.remove_redundant_slice import RemoveRedundantSlice
+from tico.utils.torch_compat import export_produces_slice
 
 from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
@@ -33,6 +36,10 @@ class RedundantSliceNet(torch.nn.Module):
 
 
 class RemoveRedundantSliceTest(SinglePassValueTest):
+    @unittest.skipUnless(
+        export_produces_slice(),
+        "Skip when torch doesn't produce redundant slices.",
+    )
     def test_pass(self):
         self.setup(RedundantSliceNet())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.slice), 1)

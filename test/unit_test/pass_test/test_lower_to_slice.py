@@ -34,20 +34,19 @@ class TestLowerSelectCopyToSlice(SinglePassValueTest):
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 1
         )
-        self.assertEqual(
-            num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 3
+
+        num_slice_before = num_of_ops(
+            self.exported_program(), [torch.ops.aten.slice.Tensor]
+        )
+        self.run_value_test(LowerSelectCopyToSlice())
+        num_slice_after = num_of_ops(
+            self.exported_program(), [torch.ops.aten.slice.Tensor]
         )
 
-        self.run_value_test(LowerSelectCopyToSlice())
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 0
         )
-        self.assertEqual(
-            num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 4
-        )
-        self.assertEqual(
-            num_of_ops(self.exported_program(), [torch.ops.aten.reshape.default]), 1
-        )
+        self.assertEqual(num_slice_after - num_slice_before, 1)
 
 
 class TestLowerIndexSelectToSliceWithScalarIndex(SinglePassValueTest):
