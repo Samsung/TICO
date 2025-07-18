@@ -29,7 +29,6 @@ from torch.utils import _pytree as pytree
 from tico.serialize.quant_param import QuantParam
 
 
-HAS_TORCH_OVER_25 = Version(torch.__version__) >= Version("2.5.0")
 HAS_TORCH_OVER_28_DEV = Version(torch.__version__) >= Version("2.8.0.dev")
 
 

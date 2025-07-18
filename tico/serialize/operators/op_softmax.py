@@ -24,25 +24,18 @@ from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.errors import NotYetSupportedError
-from tico.utils.utils import HAS_TORCH_OVER_25
 from tico.utils.validate_args_kwargs import SafeSoftmaxArgs, SoftmaxArgs
 
 
 @register_node_visitor
 class SoftMaxVisitor(NodeVisitor):
-    target: List[torch._ops.OpOverload] = (
-        [
-            torch.ops.aten._softmax.default,
-            # NOTE: Let's treat _safe_softmax as normal _softmax as its usage is for training.
-            # In order for optimization during inference, it can be replaced to softmax.
-            # ref: https://github.com/pytorch/pytorch/pull/133882
-            torch.ops.aten._safe_softmax.default,
-        ]
-        if HAS_TORCH_OVER_25
-        else [
-            torch.ops.aten._softmax.default,
-        ]
-    )
+    target: List[torch._ops.OpOverload] = [
+        torch.ops.aten._softmax.default,
+        # NOTE: Let's treat _safe_softmax as normal _softmax as its usage is for training.
+        # In order for optimization during inference, it can be replaced to softmax.
+        # ref: https://github.com/pytorch/pytorch/pull/133882
+        torch.ops.aten._safe_softmax.default,
+    ]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph):
         super().__init__(op_codes, graph)
