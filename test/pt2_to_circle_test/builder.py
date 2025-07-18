@@ -55,7 +55,7 @@ class NNModuleTest(TestRunnerBase):
         if hasattr(self.nnmodule, "atol"):
             self.tolerance["atol"] = self.nnmodule.atol
 
-    def make(self, dynamic: bool = False):
+    def make(self):
         if self.skip:
 
             @unittest.skip(self.skip_reason)
@@ -81,7 +81,6 @@ class NNModuleTest(TestRunnerBase):
             def wrapper(s):
                 self._run(
                     without_pt2=self.test_without_pt2,
-                    dynamic=dynamic,
                     without_inference=self.test_without_inference,
                     with_golden=self.with_golden,
                 )
@@ -91,14 +90,15 @@ class NNModuleTest(TestRunnerBase):
     def _run(
         self,
         without_pt2=False,
-        dynamic: bool = False,
         without_inference=False,
         with_golden=False,
     ):
         dynamic_shapes = None
-        if dynamic:
-            assert hasattr(self.nnmodule, "get_dynamic_shapes")
+        if hasattr(self.nnmodule, "get_dynamic_shapes"):
             dynamic_shapes = self.nnmodule.get_dynamic_shapes()  # type: ignore[operator]
+            assert (
+                self.use_onert == True
+            ), "Dynamic shapes are only supported with onert runtime. Please set 'use_onert' to True."
 
         compile_config: Optional[CompileConfigBase] = None
         if hasattr(self.nnmodule, "get_compile_config"):
@@ -150,7 +150,7 @@ class NNModuleTest(TestRunnerBase):
         if without_inference:
             return
 
-        USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert" or dynamic
+        USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert"
         if self.use_onert or USE_ONERT:
             circle_result = infer_circle(
                 circle_model_path, deepcopy(self.example_inputs), "onert"
@@ -187,15 +187,6 @@ class NormalTestDictBuilder(TestDictBuilderBase):
             base_name = f"{submodule}.{nnmodule_cls.__name__}"
             module_instance = nnmodule_cls()
 
-            # static test
-            testdict[base_name] = NNModuleTest(base_name, module_instance).make(
-                dynamic=False
-            )
-
-            if hasattr(module_instance, "get_dynamic_shapes"):
-                dyn_name = base_name + "_dynamic"
-                testdict[dyn_name] = NNModuleTest(dyn_name, module_instance).make(
-                    dynamic=True
-                )
+            testdict[base_name] = NNModuleTest(base_name, module_instance).make()
 
         return testdict

@@ -152,6 +152,15 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         assert node.meta.get("val") is not None
         tensor.type = extract_circle_dtype(node)
         tensor.shape = list(extract_shape(node))
+
+        # Handle dynamic shape
+        if any(isinstance(s, torch.SymInt) for s in tensor.shape):
+            tensor.shapeSignature = tensor.shape.copy()
+            for idx, s in enumerate(tensor.shape):
+                if isinstance(s, torch.SymInt):
+                    tensor.shape[idx] = 1
+                    tensor.shapeSignature[idx] = -1
+
         if QPARAM_KEY in node.meta:
             tensor.quantization = to_circle_qparam(node.meta[QPARAM_KEY])
             tensor.type = str_to_circle_dtype(node.meta[QPARAM_KEY].dtype)
@@ -241,6 +250,15 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         if source_node is not None:
             self.name_to_node[tensor.name] = source_node
         tensor.shape = shape
+
+        # Handle dynamic shape
+        if any(isinstance(s, torch.SymInt) for s in tensor.shape):
+            tensor.shapeSignature = tensor.shape.copy()
+            for idx, s in enumerate(tensor.shape):
+                if isinstance(s, torch.SymInt):
+                    tensor.shape[idx] = 1
+                    tensor.shapeSignature[idx] = -1
+
         if qparam is not None:
             tensor.quantization = to_circle_qparam(qparam)
             tensor.type = str_to_circle_dtype(qparam.dtype)

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import torch
+from torch.export import Dim
+
+from test.utils import tag
 
 
 class SimpleDepthwiseConv(torch.nn.Module):
@@ -27,6 +30,28 @@ class SimpleDepthwiseConv(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(1, 8, 64, 64),)
+
+
+@tag.use_onert
+class SimpleDepthwiseConvDynamicShape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv2d = torch.nn.Conv2d(
+            in_channels=8, out_channels=8, kernel_size=3, groups=8, padding=(2, 2)
+        )
+
+    def forward(self, input):
+        return self.conv2d(input)
+
+    def get_example_inputs(self):
+        return (torch.randn(4, 8, 64, 64),)
+
+    def get_dynamic_shapes(self):
+        batch = Dim("batch", min=1, max=128)
+        dynamic_shapes = {
+            "input": {0: batch},
+        }
+        return dynamic_shapes
 
 
 class SimpleDepthwiseConvWithValidPaddingInStr(torch.nn.Module):
