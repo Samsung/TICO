@@ -128,8 +128,8 @@ def forward_adapter(
 ):
     # past_key_value is a dict with key_cache and value_cache.
     # It needs to be decomposed for tico and circle which does not know dict.
-    key_cache = past_key_value.key_cache
-    value_cache = past_key_value.value_cache
+    key_cache = past_key_value.key_cache  # type: ignore[union-attr]
+    value_cache = past_key_value.value_cache  # type: ignore[union-attr]
     return (
         torch.ops.circle.attention.llama(
             hidden_states,
