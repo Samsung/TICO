@@ -29,9 +29,6 @@ from torch.utils import _pytree as pytree
 from tico.serialize.quant_param import QuantParam
 
 
-HAS_TORCH_OVER_28_DEV = Version(torch.__version__) >= Version("2.8.0.dev")
-
-
 def get_fake_mode(exported_program: ExportedProgram):
     fake_mode = detect_fake_mode(
         tuple(

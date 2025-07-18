@@ -13,9 +13,6 @@
 # limitations under the License.
 
 import torch
-from tico.utils.utils import HAS_TORCH_OVER_28_DEV
-
-from test.utils import tag
 
 
 class InterpolateDouble(torch.nn.Module):
@@ -40,10 +37,6 @@ class InterpolateThreeTimes(torch.nn.Module):
         return (torch.randn(1, 2, 3, 4),)
 
 
-@tag.skip_if(
-    not HAS_TORCH_OVER_28_DEV,
-    reason="The case isn't supported yet. It will be supported from torch 2.8.0.dev",
-)
 class InterpolateOnePointFive(torch.nn.Module):
     def __init__(self):
         super().__init__()
