@@ -16,9 +16,10 @@ import os
 from typing import Any, Tuple
 
 import test.utils.helper as helper
-
 import tico.utils
 import tico.utils.model
+import torch
+from tico.interpreter.infer import flatten_and_convert
 
 
 def infer_with_circle_interpreter(circle_path: str, example_inputs: Tuple) -> Any:
@@ -68,7 +69,11 @@ def infer_with_onert(circle_path: str, example_inputs: Tuple) -> Any:
     except ImportError:
         raise RuntimeError("The 'onert' package is required to run this funciton.")
 
+    _args, _kwargs = helper.get_args_kwargs(example_inputs)
+    inputs = _args + tuple(_kwargs.values())
+    inputs = flatten_and_convert(inputs)
+
     session_float = infer.session(circle_path)
-    output = session_float.infer(example_inputs)
+    output = session_float.infer(inputs)
 
     return output
