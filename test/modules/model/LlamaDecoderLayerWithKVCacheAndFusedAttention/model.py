@@ -87,6 +87,10 @@ from typing import List, Optional, Tuple
 @torch.library.impl("circle::attention.llama", "CPU")
 def attention_llama_cpu(
     hidden_states,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
     position_cos,
     position_sin,
     attention_mask,
@@ -102,6 +106,10 @@ def attention_llama_cpu(
 def attention_llama(*args, **kwargs):
     (
         hidden_states,
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj,
         position_cos,
         position_sin,
         attention_mask,
@@ -133,6 +141,10 @@ def forward_adapter(
     return (
         torch.ops.circle.attention.llama(
             hidden_states,
+            self.q_proj.weight,
+            self.k_proj.weight,
+            self.v_proj.weight,
+            self.o_proj.weight,
             position_embeddings[0],  # cos
             position_embeddings[1],  # sin
             attention_mask,

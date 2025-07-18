@@ -32,6 +32,10 @@ lib.define(
     """
 attention.llama(
     Tensor hidden_states,
+    Tensor wq,
+    Tensor wk,
+    Tensor wv,
+    Tensor wo,
     Tensor position_cos,
     Tensor position_sin,
     Tensor? attention_mask,
@@ -59,6 +63,10 @@ class AttentionVisitor(NodeVisitor):
     ) -> circle.Operator.OperatorT:
         (
             hidden_states,
+            wq,
+            wk,
+            wv,
+            wo,
             position_cos,
             position_sin,
             attention_mask,
@@ -67,9 +75,6 @@ class AttentionVisitor(NodeVisitor):
             cache_position,
             layer_idx,
         ) = node.args
-
-        inputs = node.args
-        outputs = [node]
 
         op_index = get_op_index(
             circle.BuiltinOperator.BuiltinOperator.ATTENTION, self._op_codes
