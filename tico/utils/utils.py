@@ -31,7 +31,6 @@ from tico.serialize.quant_param import QuantParam
 
 HAS_TORCH_OVER_25 = Version(torch.__version__) >= Version("2.5.0")
 HAS_TORCH_OVER_28_DEV = Version(torch.__version__) >= Version("2.8.0.dev")
-HAS_TORCH_OVER_29_DEV = Version(torch.__version__) >= Version("2.9.0.dev")
 
 
 def get_fake_mode(exported_program: ExportedProgram):

@@ -23,7 +23,7 @@ from tico.experimental.quantization.passes.propagate_qparam_forward import (
 )
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
-from tico.utils.utils import HAS_TORCH_OVER_29_DEV
+from tico.utils.torch_compat import export_produces_slice
 
 
 class LinearPermuteModule(torch.nn.Module):
@@ -199,9 +199,9 @@ class SliceModule(torch.nn.Module):
         return (torch.randn(2, 3),)
 
 
-@unittest.skipIf(
-    HAS_TORCH_OVER_29_DEV,
-    "Skip on torch >= 2.9. It doesn't produce aten.slice from torch 2.9.",
+@unittest.skipUnless(
+    export_produces_slice(),
+    "Skip when torch doesn't produce redundant slices.",
 )
 class SliceTest(SingleOpPropagateQParamForwardTest):
     def test_u8(self):

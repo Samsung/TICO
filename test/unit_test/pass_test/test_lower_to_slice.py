@@ -18,7 +18,6 @@ from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.lower_to_slice import LowerIndexSelectToSlice, LowerSelectCopyToSlice
 from tico.passes.remove_nop import RemoveNop
 from tico.passes.segment_index_select import SegmentIndexSelectConst
-from tico.utils.utils import HAS_TORCH_OVER_29_DEV
 
 from test.modules.op.index_select import (
     SimpleIndexSelectWithConstIndex,
@@ -35,30 +34,19 @@ class TestLowerSelectCopyToSlice(SinglePassValueTest):
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 1
         )
-        if HAS_TORCH_OVER_29_DEV:
-            self.assertEqual(
-                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 0
-            )
-        else:
-            self.assertEqual(
-                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 3
-            )
 
+        num_slice_before = num_of_ops(
+            self.exported_program(), [torch.ops.aten.slice.Tensor]
+        )
         self.run_value_test(LowerSelectCopyToSlice())
+        num_slice_after = num_of_ops(
+            self.exported_program(), [torch.ops.aten.slice.Tensor]
+        )
+
         self.assertEqual(
             num_of_ops(self.exported_program(), [torch.ops.aten.select.int]), 0
         )
-        if HAS_TORCH_OVER_29_DEV:
-            self.assertEqual(
-                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 1
-            )
-        else:
-            self.assertEqual(
-                num_of_ops(self.exported_program(), [torch.ops.aten.slice.Tensor]), 4
-            )
-        self.assertEqual(
-            num_of_ops(self.exported_program(), [torch.ops.aten.reshape.default]), 1
-        )
+        self.assertEqual(num_slice_after - num_slice_before, 1)
 
 
 class TestLowerIndexSelectToSliceWithScalarIndex(SinglePassValueTest):

@@ -17,7 +17,7 @@ import unittest
 import torch
 from tico.passes import ops
 from tico.passes.remove_redundant_slice import RemoveRedundantSlice
-from tico.utils.utils import HAS_TORCH_OVER_29_DEV
+from tico.utils.torch_compat import export_produces_slice
 
 from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
@@ -36,9 +36,9 @@ class RedundantSliceNet(torch.nn.Module):
 
 
 class RemoveRedundantSliceTest(SinglePassValueTest):
-    @unittest.skipIf(
-        HAS_TORCH_OVER_29_DEV,
-        "Skip on torch >= 2.9. It doesn't produce redundant slice since torch 2.9.",
+    @unittest.skipUnless(
+        export_produces_slice(),
+        "Skip when torch doesn't produce redundant slices.",
     )
     def test_pass(self):
         self.setup(RedundantSliceNet())
