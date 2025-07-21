@@ -192,6 +192,15 @@ class BMMTest(InsertQuantizeOnDtypeMismatchTest):
         )
         self.run_test()
 
+    def test_i8o16(self):
+        self.setup(
+            SimpleBatchMatMul(),
+            torch.ops.aten.bmm.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.run_test()
+
 
 class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i8o16(self):
