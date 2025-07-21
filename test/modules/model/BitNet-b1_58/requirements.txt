@@ -1,1 +1,1 @@
-git+https://github.com/shumingma/transformers.git
+transformers>=4.52.1
