@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import torch
-from transformers.models.bitnet.modeling_bitnet import BitNetConfig, BitNetModel
+from transformers import AutoModelForCausalLM
 
 from test.utils import tag
 
@@ -25,22 +25,26 @@ class BitNet(torch.nn.Module):
 
     Constraints:
     1. Due to flatbuffer 2GB limitation, testing is performed with only 1 decoder layer
-    2. Due to value mismatches in pretrained model weights, testing is performed with untrained ones
     """
 
     def __init__(self):
         super().__init__()
-        torch.manual_seed(5)
-        self.model = BitNetModel(config=BitNetConfig())
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "microsoft/bitnet-b1.58-2B-4T", torch_dtype=torch.float32
+        )
+
+        self.rtol = 1e-3
+        self.atol = 1e-3
 
     def forward(self, *args, **kwargs):
-        return self.model.layers[0](*args, **kwargs)
+        return self.model.model.layers[0](*args, **kwargs)
 
     def get_example_inputs(self):
         batch = 1
         seq_len = 21
         hidden_size = 2560
 
+        torch.manual_seed(5)
         hidden_states = torch.randn((batch, seq_len, hidden_size), dtype=torch.float32)
         position_ids = torch.tensor([[i for i in range(0, seq_len)]], dtype=torch.long)
         position_embeddings = (
