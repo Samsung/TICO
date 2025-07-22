@@ -2,45 +2,6 @@
 prompt = "Lily picked up a flower."
 model_name = "Maykeye/TinyLLama-v0"
 
-captured_input = ()
-
-import copy, inspect, types
-
-from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-
-forward_org = LlamaDecoderLayer.forward
-
-
-def capture_and_forward(self, *args, **kwargs):
-    global captured_input
-
-    # Prepare args tuple for TICO.convert()
-    # Get arg_names in positional args order using inspect
-    sig = inspect.signature(forward_org)
-    args_names = [
-        # signature includes `self`` and `kwargs``.
-        # Just retrieve the ordinary positional inputs only
-        name
-        for name in sig.parameters.keys()
-        if name not in ("self", "kwargs")
-    ]
-
-    args_dict = dict(zip(args_names, args))
-    args_dict.update(kwargs)
-
-    def populate_args(args_dict, filter):
-        for key in filter:
-            args_dict.pop(key, None)
-        args_tuple = tuple(args_dict.get(name, None) for name in args_names)
-        return copy.deepcopy(args_tuple)
-
-    if len(args_dict["past_key_value"].key_cache) != 0:
-        input_to_remove = ["use_cache"]
-        captured_input = populate_args(args_dict, input_to_remove)
-
-    return forward_org(self, *args, **kwargs)
-
-
 # Tokenizer
 from transformers import AutoTokenizer
 
@@ -55,7 +16,6 @@ inputs = tokenizer(
     truncation=True,
 )
 
-
 # Generator
 import torch
 
@@ -63,16 +23,20 @@ from transformers import AutoModelForCausalLM
 
 model = AutoModelForCausalLM.from_pretrained(model_name)
 model.eval()
-model.model.layers[0].forward = types.MethodType(
-    capture_and_forward, model.model.layers[0]
-)
-with torch.no_grad():
+
+from tico.utils.record_input import RecordingInput
+
+condition_fn = lambda args_dict: args_dict["past_key_value"].get_seq_length() != 0
+
+with torch.no_grad(), RecordingInput(model.model.layers[0], condition_fn) as rec:
     outputs = model.generate(
         **inputs,
         max_new_tokens=32,
         do_sample=False,
         pad_token_id=tokenizer.eos_token_id,
     )
+    captured_input = rec.captured_input
+
 generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print(generated_text)
 

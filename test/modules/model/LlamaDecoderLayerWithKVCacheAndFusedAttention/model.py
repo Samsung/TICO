@@ -36,9 +36,7 @@ def capture_and_forward(self, *args, **kwargs):
         return copy.deepcopy(args_tuple)
 
     if args_dict["past_key_value"].get_seq_length() != 0 and captured_input == ():
-        input_to_remove = [
-            "use_cache",
-        ]
+        input_to_remove = []
         captured_input = populate_args(args_dict, input_to_remove)
 
     return forward_org(self, *args, **kwargs)
