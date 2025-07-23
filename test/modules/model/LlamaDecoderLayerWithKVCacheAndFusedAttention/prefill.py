@@ -31,11 +31,29 @@ from tico.utils.record_input import RecordingInput
 # During prefill, "past_key_values" not None, but an empty Cache instance.
 # Passing None makes torch.export happy.
 
-# attention_mask, cache_position
-# ------------------------------
-# For npu, ignore captured values generated from example prompt.
 
-input_to_remove = ["past_key_values", "attention_mask", "cache_position"]
+input_to_remove = [
+    "past_key_values",
+    # DynamicCache is flatten-able operator since 4.50.
+    # See _pytree.py > tree_flatten
+    # SUPPORTED_NODES has *transformers.DynamicCache*
+    # After flattening, DynamicCache becomes { "key_cache": [] , "value_cache": [ ] }
+    # dict.value is returne. dict.key is stored in treespec.
+    #
+    # On prefill, DynamicCache is empty, and dict is empty after flattening.
+    # PyTorch removes empty dict!
+    # If number of args is 4 (including cache), it becomes 3!
+    # To avoid this error, don't pass empty cache, just pass None.
+    "attention_mask",
+    # For left pad,        [0, ⋯, 0, 1, ⋯, 1]
+    # For right right pad, [1, ⋯, 1, 0, ⋯, 0]
+    # ( 0 is pad-token )
+    # This script uses right pad and pass all-1 attention mask (including pad).
+    # Npu computes all positions whether it is pad or not.
+    "cache_position"
+    # It is the list of cache position like [0, 1, ..., 11].
+    # For npu, we always store all values (including pad).
+]
 
 with torch.no_grad(), RecordingInput(model, input_to_remove=input_to_remove) as rec:
     outputs = model.generate(
