@@ -21,7 +21,7 @@ from tico.experimental.quantization.custom.mode import Mode
 
 from tico.experimental.quantization.custom.qscheme import QScheme
 from tico.experimental.quantization.custom.quant_config import QuantConfig
-from tico.experimental.quantization.custom.wrappers.base_quant_module import (
+from tico.experimental.quantization.custom.wrappers.quant_module_base import (
     QuantModuleBase,
 )
 from tico.experimental.quantization.custom.wrappers.registry import register

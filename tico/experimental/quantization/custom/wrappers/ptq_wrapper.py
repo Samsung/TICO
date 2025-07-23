@@ -17,7 +17,7 @@ from typing import Optional
 import torch
 
 from tico.experimental.quantization.custom.quant_config import QuantConfig
-from tico.experimental.quantization.custom.wrappers.base_quant_module import (
+from tico.experimental.quantization.custom.wrappers.quant_module_base import (
     QuantModuleBase,
 )
 from tico.experimental.quantization.custom.wrappers.registry import lookup

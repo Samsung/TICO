@@ -36,8 +36,11 @@ import math, torch, unittest
 from tico.experimental.quantization.custom.dtypes import DType
 from tico.experimental.quantization.custom.mode import Mode
 from tico.experimental.quantization.custom.observers import MinMaxObserver
+from tico.experimental.quantization.custom.observers.percentile import (
+    PercentileObserver,
+)
 from tico.experimental.quantization.custom.quant_config import QuantConfig
-from tico.experimental.quantization.custom.wrappers.base_quant_module import (
+from tico.experimental.quantization.custom.wrappers.quant_module_base import (
     QuantModuleBase,
 )
 
@@ -96,3 +99,39 @@ class TestQuantModuleBase(unittest.TestCase):
         )
         qm = DummyQM(qcfg=cfg)
         self.assertEqual(qm.obs.dtype, DType.uint(4))
+
+
+class TestQuantConfigDefaultFactory(unittest.TestCase):
+    # 1) global change via default_factory -------------------------
+    def test_global_default_factory(self):
+        cfg = QuantConfig(
+            default_dtype=DType.uint(8), default_factory=PercentileObserver
+        )
+        qm = DummyQM(cfg)
+        obs = qm.obs
+        self.assertIsInstance(obs, PercentileObserver)
+
+    # 2) per-observer "factory" override beats default_factory -----
+    def test_factory_override_precedence(self):
+        cfg = QuantConfig(
+            default_dtype=DType.uint(8),
+            default_factory=PercentileObserver,
+            overrides={"act": {"factory": MinMaxObserver}},
+        )
+        qm = DummyQM(cfg)
+        obs = qm.obs
+        self.assertIsInstance(obs, MinMaxObserver)
+
+    # 3) child() inherits parent default_factory -------------------
+    def test_child_inherits_default_factory(self):
+        parent = QuantConfig(
+            default_dtype=DType.uint(8),
+            default_factory=PercentileObserver,
+            overrides={"child_wrap": {"dtype": DType.uint(4)}},
+        )
+        child = parent.child("child_wrap")
+        self.assertIs(child.default_factory, parent.default_factory)
+        # and still works when materialised
+        qm = DummyQM(child)
+        obs = qm.obs
+        self.assertIsInstance(obs, PercentileObserver)

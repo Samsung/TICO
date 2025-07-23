@@ -17,7 +17,7 @@ from typing import Callable, Dict, Type
 
 import torch.nn as nn
 
-from tico.experimental.quantization.custom.wrappers.base_quant_module import (
+from tico.experimental.quantization.custom.wrappers.quant_module_base import (
     QuantModuleBase,
 )
 

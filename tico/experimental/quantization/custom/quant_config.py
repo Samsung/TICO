@@ -13,9 +13,11 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Type
 
 from tico.experimental.quantization.custom.dtypes import DType
+from tico.experimental.quantization.custom.observers.base import ObserverBase
+from tico.experimental.quantization.custom.observers.minmax import MinMaxObserver
 
 
 @dataclass
@@ -29,6 +31,9 @@ class QuantConfig:
     default_dtype : DType
         Fallback dtype for every observer that **does not** receive an explicit
         override.
+    default_factory : Type[ObserverBase], optional
+        Observer class to instantiate when the caller (or an override) does
+         not provide a `factory` key.
     overrides : Mapping[str, Mapping[str, Any]]
         Two-level mapping of *scopes* → *observer-kwargs*.
 
@@ -44,29 +49,29 @@ class QuantConfig:
     Example
     -------
     ```python
-    cfg = QuantConfig(
-        default_dtype=DType.uint(8),
-        overrides={
-            # apply only to this wrapper
-            "mul": {"dtype": DType.uint(4)},
+    from ptq.observers import PercentileObserver
 
-            # apply to a child wrapper (gate_proj)
-            "gate_proj": {
-                "act_in": {"dtype": DType.uint(4)}
-            },
+    cfg = QuantConfig(
+        default_dtype   = DType.uint(8),
+        default_factory = PercentileObserver,   # <- global algorithm
+        overrides={
+            # local override: input observer now MinMax & 4-bit
+            "act_in": {"factory": MinMaxObserver,
+                       "dtype":   DType.uint(4)},
         },
     )
     ```
     """
 
     default_dtype: DType = DType.uint(8)
+    default_factory: Type[ObserverBase] = MinMaxObserver
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def get_kwargs(self, obs_name: str) -> Dict[str, Any]:
         """
         Return kwargs to construct *obs_name* inside **this** wrapper.
 
-        • Always inject `"dtype"` if the caller didn’t specify it.
+        • Always inject `"dtype"` if the caller didn't specify it.
         """
         kw: Dict[str, Any] = dict(self.overrides.get(obs_name, {}))
         kw.setdefault("dtype", self.default_dtype)
@@ -83,7 +88,7 @@ class QuantConfig:
         Other scopes remain invisible to the child.
         """
         sub_overrides = self.overrides.get(scope, {})
-        return QuantConfig(self.default_dtype, sub_overrides)
+        return QuantConfig(self.default_dtype, self.default_factory, sub_overrides)
 
     def __repr__(self):
-        return f"QuantConfig(default_dtype={self.default_dtype}, overrides={dict(self.overrides)})"
+        return f"QuantConfig(default_dtype={self.default_dtype}, default_factory={self.default_factory}, overrides={dict(self.overrides)})"

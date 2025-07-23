@@ -165,7 +165,6 @@ class TestPerplexitySlidingWindow(unittest.TestCase):
     # 2. Short-sequence equivalence
     # ─────────────────────────────────────────────────────────
     def test_short_sequence_equivalence(self) -> None:
-        """If seq_len ≤ max_length, sliding-window PPL == exact PPL."""
         seq_len = self.CONTEXT  # exactly fills one window
         seq = torch.randint(0, self.VOCAB, (1, seq_len), device=self.device)
 
@@ -202,7 +201,6 @@ class TestPerplexitySlidingWindow(unittest.TestCase):
     # 3. Stride invariance on short sequences
     # ─────────────────────────────────────────────────────────
     def test_stride_invariance_short(self) -> None:
-        """Changing stride must not affect PPL when one window suffices."""
         seq = torch.randint(0, self.VOCAB, (1, self.CONTEXT // 2), device=self.device)
 
         ppls: list[float] = []

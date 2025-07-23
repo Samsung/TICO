@@ -87,22 +87,27 @@ class QuantModuleBase(nn.Module, ABC):
     def _make_obs(
         self,
         name: str,
-        *,
-        default_factory=MinMaxObserver,
         **default_kwargs,
     ) -> ObserverBase:
         """
-        Create an observer called *name*.
+        Instantiate an observer called *name*.
 
-        1.  Start from `default_kwargs` (e.g. qscheme, channel_axis).
-        2.  Overlay the user's overrides from `QuantConfig`.
-        3.  If the overrides contain a `"factory"` key, use that class
-            instead of `default_factory`.
+        Resolution order for constructor kwargs
+        ---------------------------------------
+        1. `default_kwargs`  (hard-coded by the wrapper author)
+        2. `self.qcfg.get_kwargs(name)`   (user overrides)
+        3. Observer *class* chosen as::
+
+               kw_cfg.pop("factory", self.qcfg.default_factory)
+
+           i.e. per-observer `factory` beats the wrapper's global
+           `default_factory`; if neither is set, falls back to
+           QuantConfig.default_factory
         """
         kw = default_kwargs.copy()
         kw_cfg = self.qcfg.get_kwargs(name).copy()
 
-        factory = kw_cfg.pop("factory", default_factory)
+        factory = kw_cfg.pop("factory", self.qcfg.default_factory)
         kw.update(kw_cfg)  # user wins
 
         return factory(**kw)
