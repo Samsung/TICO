@@ -30,6 +30,8 @@ with torch.no_grad():
         ids = tokenizer(["hello"] * 8, return_tensors="pt")
         embeds = model.model.embed_tokens(ids["input_ids"])
         cos_sin = rotary(embeds, ids["input_ids"])
+        S = cos_sin[0].shape[1]
+        float_mask = torch.zeros(1, 1, S, S)
         _ = attn_q(embeds, cos_sin)  # observers collect
     attn_q.freeze_qparams()
 
@@ -41,6 +43,8 @@ assert attn_q._mode is Mode.QUANT
 ids = tokenizer("check", return_tensors="pt")
 emb = model.model.embed_tokens(ids["input_ids"])
 pos = rotary(emb, ids["input_ids"])
+S = pos[0].shape[1]
+float_mask = torch.zeros(1, 1, S, S)
 with torch.no_grad():
     int8 = attn_q(emb, pos)[0]
     fp32 = orig_attn(emb, position_embeddings=pos, attention_mask=None)[0]
@@ -54,5 +58,6 @@ import tico
 B, S, D = 1, 4, model.config.hidden_size
 example = torch.randn(B, S, D)
 example_pos = rotary(example, torch.arange(S)[None, :])
+float_mask = torch.zeros(1, 1, S, S)
 cm = tico.convert(attn_q, (example, example_pos))
 cm.save(pathlib.Path("attn.q.circle"))

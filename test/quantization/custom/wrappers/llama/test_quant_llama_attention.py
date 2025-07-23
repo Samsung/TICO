@@ -51,7 +51,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
             attention_bias=False,
             attention_dropout=0.0,
         )
-        cls.fp32 = LlamaAttention(cfg, layer_idx=0)
+        cls.fp_attn = LlamaAttention(cfg, layer_idx=0)
         cls.head_dim = cfg.head_dim  # 4
 
     # dummy RoPE tables with correct last dim
@@ -61,7 +61,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         return emb.cos(), emb.sin()
 
     def test_mode_transitions(self):
-        qattn = QuantLlamaAttention(self.fp32)
+        qattn = QuantLlamaAttention(self.fp_attn)
         self.assertIs(qattn._mode, Mode.NO_QUANT)
 
         qattn.enable_calibration()
@@ -75,7 +75,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertIs(qattn._mode, Mode.QUANT)
 
     def test_forward_diff(self):
-        qattn = QuantLlamaAttention(self.fp32)
+        qattn = QuantLlamaAttention(self.fp_attn)
         qattn.enable_calibration()
         for _ in range(4):
             inp = torch.randn(2, 6, 8)
@@ -87,7 +87,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         pos = self._rand_rope(2, 6)
         with torch.no_grad():
             q_out, _ = qattn(x, pos)
-            fp_out, _ = self.fp32(x, pos, attention_mask=None)
+            fp_out, _ = self.fp_attn(x, pos, attention_mask=None)
 
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0)
@@ -104,9 +104,39 @@ class TestQuantLlamaAttention(unittest.TestCase):
                 }
             },
         )
-        qattn = QuantLlamaAttention(self.fp32, qcfg=cfg)
+        qattn = QuantLlamaAttention(self.fp_attn, qcfg=cfg)
         q_lin = qattn.q_proj.wrapped  # PTQWrapper → LinearQuant
 
         self.assertIsInstance(q_lin, QuantLinear)
         self.assertEqual(q_lin.act_in_obs.dtype, DType.uint(4))
         self.assertEqual(q_lin.act_out_obs.dtype, DType.uint(4))
+
+    def test_forward_with_float_attention_mask(self):
+        torch.manual_seed(123)
+
+        # fresh wrapper
+        qattn = QuantLlamaAttention(self.fp_attn)
+
+        # build a float mask (all-zero here, but could include −1e4 etc.)
+        B, S = 2, 4
+        float_mask = torch.zeros(1, 1, S, S)
+        # quick calibration
+        qattn.enable_calibration()
+        for _ in range(2):
+            x = torch.randn(2, 4, 8)
+            pos = self._rand_rope(2, 4)
+            qattn(x, pos, float_mask)
+        qattn.freeze_qparams()
+
+        # run forward — should not raise
+        x = torch.randn(B, S, 8)
+        pos = self._rand_rope(B, S)
+        with torch.no_grad():
+            q_out, attn_w = qattn(x, pos, attention_mask=float_mask)
+            fp_out, _ = self.fp_attn(x, pos, attention_mask=float_mask)
+
+        diff = (fp_out - q_out).abs().mean().item()
+        self.assertGreater(diff, 0.0)
+        self.assertLess(diff, 0.4)
+        self.assertEqual(q_out.shape, (B, S, 8))
+        self.assertEqual(attn_w.shape, (B, 2, S, S))

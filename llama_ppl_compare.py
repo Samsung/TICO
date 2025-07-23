@@ -22,6 +22,9 @@ from tico.experimental.quantization.custom.utils import perplexity
 from tico.experimental.quantization.custom.wrappers.llama.quant_llama_attn import (
     QuantLlamaAttention,
 )
+from tico.experimental.quantization.custom.wrappers.llama.quant_llama_decoder_layer import (
+    QuantLlamaDecoderLayer,
+)
 from tico.experimental.quantization.custom.wrappers.llama.quant_llama_mlp import (
     QuantLlamaMLP,
 )
@@ -67,9 +70,18 @@ else:
 
     qcfg = QuantConfig()  # all-uint8 defaults
 
-    for layer in int8_model.model.layers:  # replace in-place
-        layer.mlp = QuantLlamaMLP(layer.mlp, qcfg=qcfg.child("mlp"))
-        layer.self_attn = QuantLlamaAttention(layer.self_attn, qcfg=qcfg.child("attn"))
+    # Replace self-attention & MLP
+    # for layer in int8_model.model.layers:  # replace in-place
+    #     layer.mlp = QuantLlamaMLP(layer.mlp, qcfg=qcfg.child("mlp"))
+    #     layer.self_attn = QuantLlamaAttention(layer.self_attn, qcfg=qcfg.child("attn"))
+
+    # Replace DecoderLayer
+    new_layers = torch.nn.ModuleList()
+    for idx, fp_layer in enumerate(int8_model.model.layers):
+        layer_cfg = qcfg.child(f"layer{idx}")
+        q_layer = QuantLlamaDecoderLayer(fp_layer, qcfg=layer_cfg)
+        new_layers.append(q_layer)
+    int8_model.model.layers = new_layers
 
     # ---------------- 3. Calibration (statistics collection) -----------
     print("Calibrating INT-8 observers …")

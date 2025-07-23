@@ -27,10 +27,10 @@ from tico.experimental.quantization.custom.wrappers.registry import try_register
 
 @try_register("transformers.models.llama.modeling_llama.LlamaAttention")
 class QuantLlamaAttention(QuantModuleBase):
-    def __init__(self, fp32_attn: nn.Module, qcfg: Optional[QuantConfig] = None):
+    def __init__(self, fp_attn: nn.Module, qcfg: Optional[QuantConfig] = None):
         super().__init__(qcfg)
 
-        cfg = fp32_attn.config
+        cfg = fp_attn.config
         self.hdim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
         self.kv_rep = cfg.num_attention_heads // cfg.num_key_value_heads
 
@@ -43,10 +43,10 @@ class QuantLlamaAttention(QuantModuleBase):
         k_cfg = qcfg.child("k_proj") if qcfg else None
         v_cfg = qcfg.child("v_proj") if qcfg else None
         o_cfg = qcfg.child("o_proj") if qcfg else None
-        self.q_proj = PTQWrapper(fp32_attn.q_proj, qcfg=q_cfg)
-        self.k_proj = PTQWrapper(fp32_attn.k_proj, qcfg=k_cfg)
-        self.v_proj = PTQWrapper(fp32_attn.v_proj, qcfg=v_cfg)
-        self.o_proj = PTQWrapper(fp32_attn.o_proj, qcfg=o_cfg)
+        self.q_proj = PTQWrapper(fp_attn.q_proj, qcfg=q_cfg)
+        self.k_proj = PTQWrapper(fp_attn.k_proj, qcfg=k_cfg)
+        self.v_proj = PTQWrapper(fp_attn.v_proj, qcfg=v_cfg)
+        self.o_proj = PTQWrapper(fp_attn.o_proj, qcfg=o_cfg)
 
         # ---- create arithmetic observers ---------------------------
         mk = self._make_obs
@@ -76,8 +76,15 @@ class QuantLlamaAttention(QuantModuleBase):
         # logits / softmax / out
         self.obs_logits_raw = mk("logits_raw")
         self.obs_logits = mk("logits")
+        self.obs_mask_add = mk("mask_add")
         self.obs_softmax = mk("softmax")
         self.obs_attn_out = mk("attn_out")
+
+        # Static causal mask template
+        max_seq = cfg.max_position_embeddings
+        mask = torch.full((1, 1, max_seq, max_seq), float("-120"))
+        mask.triu_(1)
+        self.register_buffer("causal_mask_template", mask, persistent=False)
 
     def _rot(self, t, o_x1, o_x2, o_neg, o_cat):
         x1, x2 = torch.chunk(t, 2, dim=-1)
@@ -96,7 +103,9 @@ class QuantLlamaAttention(QuantModuleBase):
         **kwargs,
     ):
         if past_key_value is not None:
-            raise NotImplementedError("quant wrapper does not support KV cache yet")
+            raise NotImplementedError(
+                "QuantLlamaAttention does not support KV cache yet."
+            )
 
         hidden = self._fq(hidden_states, self.obs_hidden)
         B, S, _ = hidden.shape
@@ -135,16 +144,12 @@ class QuantLlamaAttention(QuantModuleBase):
         scale = self._fq(self.scale_t, self.obs_scale)
         logits = self._fq(logits_raw * scale, self.obs_logits)
 
-        if attention_mask is not None:
-            if attention_mask.dtype == torch.bool:
-                attention_mask = attention_mask.to(logits.dtype)
-                attention_mask = attention_mask.masked_fill(
-                    attention_mask == 0, float("-inf")
-                )
-            else:
-                attention_mask = attention_mask.to(logits.dtype)
-
-            logits = logits + attention_mask
+        if attention_mask is None or attention_mask.dtype == torch.bool:
+            _, _, q_len, k_len = logits.shape
+            attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
+                hidden_states.device
+            )
+        logits = self._fq(logits + attention_mask, self.obs_mask_add)
 
         # softmax
         attn_weights = torch.softmax(logits, -1, dtype=torch.float32).to(q.dtype)
@@ -183,6 +188,7 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_k_rot,
             self.obs_logits_raw,
             self.obs_logits,
+            self.obs_mask_add,
             self.obs_softmax,
             self.obs_attn_out,
         )
