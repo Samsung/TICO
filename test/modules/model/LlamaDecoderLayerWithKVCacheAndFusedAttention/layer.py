@@ -26,9 +26,10 @@ model.eval()
 
 from tico.utils.record_input import RecordingInput
 
+target_model = model.model.layers[0]
 condition_fn = lambda args_dict: args_dict["past_key_value"].get_seq_length() != 0
 
-with torch.no_grad(), RecordingInput(model.model.layers[0], condition_fn) as rec:
+with torch.no_grad(), RecordingInput(target_model, condition_fn) as rec:
     outputs = model.generate(
         **inputs,
         max_new_tokens=32,
@@ -123,12 +124,13 @@ def forward_adapter(
     )
 
 
-LlamaAttention.forward = forward_adapter
-
 # Tico
 import tico
 
 model = AutoModelForCausalLM.from_pretrained(model_name)
+
+LlamaAttention.forward = forward_adapter
+
 model.eval()
 circle_model = tico.convert(model.model.layers[0], captured_input)
 circle_model.save(f"tinyllama.layer.attn.circle")
