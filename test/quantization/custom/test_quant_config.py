@@ -34,10 +34,10 @@ class DummyWrapper(nn.Module):
         super().__init__()
         self.qcfg = qcfg or QuantConfig()
 
-        def _make_obs(name: str, default_factory=MinMaxObserver):
+        def _make_obs(name: str, default_observer=MinMaxObserver):
             kw = self.qcfg.get_kwargs(name).copy()
-            factory = kw.pop("factory", default_factory)
-            return factory(**kw)
+            obs_cls = kw.pop("observer", default_observer)
+            return obs_cls(**kw)
 
         self.obs_a = _make_obs("a")  # MinMax by default
         self.obs_b = _make_obs("b")
@@ -59,12 +59,12 @@ class TestQuantConfig(unittest.TestCase):
         self.assertEqual(w.obs_a.dtype, DType.uint(8))  # default
         self.assertEqual(w.obs_b.dtype, DType.uint(4))  # override
 
-    def test_factory_override(self):
+    def test_observer_override(self):
         cfg = QuantConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "a": {
-                    "factory": PercentileObserver,
+                    "observer": PercentileObserver,
                     "dtype": DType.uint(8),
                     "percentile": 99.0,
                 }

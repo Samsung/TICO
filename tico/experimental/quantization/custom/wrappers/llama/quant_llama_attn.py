@@ -97,10 +97,6 @@ class QuantLlamaAttention(QuantModuleBase):
     ):
         if past_key_value is not None:
             raise NotImplementedError("quant wrapper does not support KV cache yet")
-        if attention_mask is not None:
-            raise NotImplementedError(
-                "quant wrapper does not support attention mask yet"
-            )
 
         hidden = self._fq(hidden_states, self.obs_hidden)
         B, S, _ = hidden.shape
@@ -139,8 +135,16 @@ class QuantLlamaAttention(QuantModuleBase):
         scale = self._fq(self.scale_t, self.obs_scale)
         logits = self._fq(logits_raw * scale, self.obs_logits)
 
-        assert attention_mask is None
-        # logits = logits + attn_mask
+        if attention_mask is not None:
+            if attention_mask.dtype == torch.bool:
+                attention_mask = attention_mask.to(logits.dtype)
+                attention_mask = attention_mask.masked_fill(
+                    attention_mask == 0, float("-inf")
+                )
+            else:
+                attention_mask = attention_mask.to(logits.dtype)
+
+            logits = logits + attention_mask
 
         # softmax
         attn_weights = torch.softmax(logits, -1, dtype=torch.float32).to(q.dtype)

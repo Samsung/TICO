@@ -59,12 +59,12 @@ class TestPTQWrapper(unittest.TestCase):
             overrides={
                 # LinearQuant uses act_in / act_out
                 "act_in": {
-                    "factory": PercentileObserver,
+                    "observer": PercentileObserver,
                     "dtype": DType.uint(8),
                     "percentile": 99.0,
                 },
                 "act_out": {
-                    "factory": PercentileObserver,
+                    "observer": PercentileObserver,
                     "dtype": DType.uint(8),
                     "percentile": 99.0,
                 },

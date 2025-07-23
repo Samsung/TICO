@@ -98,19 +98,19 @@ class QuantModuleBase(nn.Module, ABC):
         2. `self.qcfg.get_kwargs(name)`   (user overrides)
         3. Observer *class* chosen as::
 
-               kw_cfg.pop("factory", self.qcfg.default_factory)
+               kw_cfg.pop("observer", self.qcfg.default_observer)
 
-           i.e. per-observer `factory` beats the wrapper's global
-           `default_factory`; if neither is set, falls back to
-           QuantConfig.default_factory
+           i.e. per-observer `observer` beats the wrapper's global
+           `default_observer`; if neither is set, falls back to
+           QuantConfig.default_observer
         """
         kw = default_kwargs.copy()
         kw_cfg = self.qcfg.get_kwargs(name).copy()
 
-        factory = kw_cfg.pop("factory", self.qcfg.default_factory)
+        obs_cls = kw_cfg.pop("observer", self.qcfg.default_observer)
         kw.update(kw_cfg)  # user wins
 
-        return factory(**kw)
+        return obs_cls(**kw)
 
     # nice repr
     def extra_repr(self) -> str:

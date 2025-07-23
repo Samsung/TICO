@@ -31,9 +31,9 @@ class QuantConfig:
     default_dtype : DType
         Fallback dtype for every observer that **does not** receive an explicit
         override.
-    default_factory : Type[ObserverBase], optional
+    default_observer : Type[ObserverBase], optional
         Observer class to instantiate when the caller (or an override) does
-         not provide a `factory` key.
+         not provide a `observer` key.
     overrides : Mapping[str, Mapping[str, Any]]
         Two-level mapping of *scopes* → *observer-kwargs*.
 
@@ -44,7 +44,7 @@ class QuantConfig:
               (e.g. ``"mul"``, ``"act_in"``).
 
         • **Observer-kwargs** is forwarded verbatim to the observer constructor
-          (`dtype`, `num_bits`, `factory`, …).
+          (`dtype`, `num_bits`, `observer`, …).
 
     Example
     -------
@@ -53,10 +53,10 @@ class QuantConfig:
 
     cfg = QuantConfig(
         default_dtype   = DType.uint(8),
-        default_factory = PercentileObserver,   # <- global algorithm
+        default_observer = PercentileObserver,   # <- global algorithm
         overrides={
             # local override: input observer now MinMax & 4-bit
-            "act_in": {"factory": MinMaxObserver,
+            "act_in": {"observer": MinMaxObserver,
                        "dtype":   DType.uint(4)},
         },
     )
@@ -64,7 +64,7 @@ class QuantConfig:
     """
 
     default_dtype: DType = DType.uint(8)
-    default_factory: Type[ObserverBase] = MinMaxObserver
+    default_observer: Type[ObserverBase] = MinMaxObserver
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def get_kwargs(self, obs_name: str) -> Dict[str, Any]:
@@ -88,7 +88,7 @@ class QuantConfig:
         Other scopes remain invisible to the child.
         """
         sub_overrides = self.overrides.get(scope, {})
-        return QuantConfig(self.default_dtype, self.default_factory, sub_overrides)
+        return QuantConfig(self.default_dtype, self.default_observer, sub_overrides)
 
     def __repr__(self):
-        return f"QuantConfig(default_dtype={self.default_dtype}, default_factory={self.default_factory}, overrides={dict(self.overrides)})"
+        return f"QuantConfig(default_dtype={self.default_dtype}, default_observer={self.default_observer}, overrides={dict(self.overrides)})"
