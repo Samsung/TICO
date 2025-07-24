@@ -13,7 +13,8 @@
 # limitations under the License.
 
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
+from transformers.cache_utils import DynamicCache
 
 from test.utils import tag
 
@@ -29,8 +30,10 @@ class BitNet(torch.nn.Module):
 
     def __init__(self):
         super().__init__()
+        model_id = "microsoft/bitnet-b1.58-2B-4T"
+        self.config = AutoConfig.from_pretrained(model_id)
         self.model = AutoModelForCausalLM.from_pretrained(
-            "microsoft/bitnet-b1.58-2B-4T", torch_dtype=torch.float32
+            model_id, torch_dtype=torch.float32
         )
 
         self.rtol = 1e-3
@@ -41,17 +44,52 @@ class BitNet(torch.nn.Module):
 
     def get_example_inputs(self):
         batch = 1
-        seq_len = 21
-        hidden_size = 2560
+        past_seq_len = 21
+        cur_seq_len = 1
+        hidden_size = self.config.hidden_size
+        head_dim = hidden_size // self.config.num_attention_heads
 
         torch.manual_seed(5)
-        hidden_states = torch.randn((batch, seq_len, hidden_size), dtype=torch.float32)
-        position_ids = torch.tensor([[i for i in range(0, seq_len)]], dtype=torch.long)
-        position_embeddings = (
-            torch.rand((batch, seq_len, 128), dtype=torch.float32),
-            torch.rand((batch, seq_len, 128), dtype=torch.float32),
+
+        hidden_states = torch.randn(
+            (batch, cur_seq_len, hidden_size), dtype=torch.float32
         )
+        position_ids = torch.tensor([[past_seq_len]]).to(torch.long)
+
+        past_key_value = DynamicCache()
+        for layer_id in range(self.config.num_hidden_layers):
+            past_key_value.update(
+                torch.randn(
+                    [
+                        1,
+                        self.config.num_key_value_heads,
+                        past_seq_len,
+                        head_dim,
+                    ]
+                ),
+                torch.randn(
+                    [
+                        1,
+                        self.config.num_key_value_heads,
+                        past_seq_len,
+                        head_dim,
+                    ]
+                ),
+                layer_id,
+            )
+
+        cache_position = torch.tensor([past_seq_len]).to(torch.long)
+        position_embeddings = (
+            torch.rand((batch, cur_seq_len, head_dim), dtype=torch.float32),
+            torch.rand((batch, cur_seq_len, head_dim), dtype=torch.float32),
+        )
+
         return (
             hidden_states,
-            {"position_ids": position_ids, "position_embeddings": position_embeddings},
+            {
+                "position_ids": position_ids,
+                "past_key_value": past_key_value,
+                "cache_position": cache_position,
+                "position_embeddings": position_embeddings,
+            },
         )
