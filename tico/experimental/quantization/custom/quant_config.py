@@ -69,13 +69,15 @@ class QuantConfig:
 
     def get_kwargs(self, obs_name: str) -> Dict[str, Any]:
         """
-        Return kwargs to construct *obs_name* inside **this** wrapper.
+        Return user-specified kwargs for *obs_name* inside **this** wrapper.
 
-        • Always inject `"dtype"` if the caller didn't specify it.
+        NOTE:
+        Do NOT inject a dtype here. `_make_obs()` resolves precedence:
+            1) user override (kw_cfg["dtype"])
+            2) wrapper's default passed to `_make_obs(..., dtype=...)`
+            3) self.default_dtype
         """
-        kw: Dict[str, Any] = dict(self.overrides.get(obs_name, {}))
-        kw.setdefault("dtype", self.default_dtype)
-        return kw
+        return dict(self.overrides.get(obs_name, {}))
 
     def child(self, scope: str) -> "QuantConfig":
         """

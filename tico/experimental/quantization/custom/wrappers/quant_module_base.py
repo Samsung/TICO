@@ -90,27 +90,45 @@ class QuantModuleBase(nn.Module, ABC):
         **default_kwargs,
     ) -> ObserverBase:
         """
-        Instantiate an observer called *name*.
+        Instantiate an observer named *name*.
 
-        Resolution order for constructor kwargs
-        ---------------------------------------
-        1. `default_kwargs`  (hard-coded by the wrapper author)
-        2. `self.qcfg.get_kwargs(name)`   (user overrides)
-        3. Observer *class* chosen as::
+        Precedence (3-tier) for keys:
+           • observer:  user > wrapper-default > QuantConfig.default_observer
+           • dtype:     user > wrapper-default > QuantConfig.default_dtype
 
-               kw_cfg.pop("observer", self.qcfg.default_observer)
-
-           i.e. per-observer `observer` beats the wrapper's global
-           `default_observer`; if neither is set, falls back to
-           QuantConfig.default_observer
+        Other kwargs (e.g., qscheme, channel_axis, etc.) remain:
+           user override > wrapper-default
         """
-        kw = default_kwargs.copy()
-        kw_cfg = self.qcfg.get_kwargs(name).copy()
+        _UNSPEC = object()
 
-        obs_cls = kw_cfg.pop("observer", self.qcfg.default_observer)
-        kw.update(kw_cfg)  # user wins
+        wrapper_defaults = default_kwargs.copy()
+        user_cfg = self.qcfg.get_kwargs(name).copy()
 
-        return obs_cls(**kw)
+        def pick3(user_val, wrap_val, global_val):
+            return (
+                user_val
+                if user_val is not _UNSPEC
+                else wrap_val
+                if wrap_val is not _UNSPEC
+                else global_val
+            )
+
+        # 1) resolve observer class
+        user_observer = user_cfg.pop("observer", _UNSPEC)
+        wrapper_observer = wrapper_defaults.pop("observer", _UNSPEC)
+        obs_cls = pick3(user_observer, wrapper_observer, self.qcfg.default_observer)
+
+        # 2) resolve dtype
+        user_dtype = user_cfg.pop("dtype", _UNSPEC)
+        wrapper_dtype = wrapper_defaults.pop("dtype", _UNSPEC)
+        final_dtype = pick3(user_dtype, wrapper_dtype, self.qcfg.default_dtype)
+
+        # 3) merge remaining kwargs: user_cfg wins
+        final_kw = wrapper_defaults
+        final_kw.update(user_cfg)
+        final_kw["dtype"] = final_dtype
+
+        return obs_cls(**final_kw)
 
     # nice repr
     def extra_repr(self) -> str:
