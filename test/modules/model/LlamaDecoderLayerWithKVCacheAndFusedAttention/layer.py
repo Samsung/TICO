@@ -42,95 +42,15 @@ generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print(generated_text)
 
 
-# ATTENTION FUSER
+# Convert
 
-from typing import List, Optional
-
-
-@torch.library.impl("circle::attention.llama", "CPU")
-def attention_llama_cpu(
-    hidden_states,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    position_cos,
-    position_sin,
-    attention_mask,
-    past_key,
-    past_value,
-    layer_idx,
-    cache_position,
-):
-    return hidden_states
-
-
-@torch.library.register_fake("circle::attention.llama")
-def attention_llama(*args, **kwargs):
-    (
-        hidden_states,
-        q_proj,
-        k_proj,
-        v_proj,
-        o_proj,
-        position_cos,
-        position_sin,
-        attention_mask,
-        past_key,
-        past_value,
-        layer_idx,
-        cache_position,
-    ) = args
-    return hidden_states
-
-
-from transformers.cache_utils import DynamicCache
+import tico
+from tico.serialize.operators.op_circle_attention import llama_attention_forward_adapter
 from transformers.models.llama.modeling_llama import LlamaAttention
 
-
-def forward_adapter(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: List[torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[DynamicCache],
-    cache_position: torch.Tensor,
-    **kwargs,
-):
-    # past_key_value is a dict with key_cache and value_cache.
-    # It needs to be decomposed for tico and circle which does not know dict.
-    key_cache = past_key_value.key_cache  # type: ignore[union-attr]
-    value_cache = past_key_value.value_cache  # type: ignore[union-attr]
-    return (
-        torch.ops.circle.attention.llama(
-            hidden_states,
-            self.q_proj.weight,
-            self.k_proj.weight,
-            self.v_proj.weight,
-            self.o_proj.weight,
-            position_embeddings[0],  # cos
-            position_embeddings[1],  # sin
-            attention_mask,
-            # key_cache is a list of cache for each decoder layer.
-            # Assumtion: key cache is continuous
-            #
-            #    k_cache[0] | k_cache[1] | ...  | k_cache[n]
-            key_cache[0],
-            value_cache[0],  # Same to value_cache
-            self.layer_idx,
-            cache_position,
-        ),
-        None,
-    )
-
-
-# Tico
-import tico
+LlamaAttention.forward = llama_attention_forward_adapter
 
 model = AutoModelForCausalLM.from_pretrained(model_name)
-
-LlamaAttention.forward = forward_adapter
-
 model.eval()
 circle_model = tico.convert(model.model.layers[0], captured_input)
 circle_model.save(f"tinyllama.layer.attn.circle")

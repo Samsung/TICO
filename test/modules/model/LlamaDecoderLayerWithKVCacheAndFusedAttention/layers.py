@@ -41,96 +41,17 @@ with torch.no_grad(), RecordingInput(target_model, condition_fn) as rec:
 generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 print(generated_text)
 
+from typing import Any, Optional, Tuple
 
-# ATTENTION FUSER
-
-from typing import Any, List, Optional, Tuple
-
-
-@torch.library.impl("circle::attention.llama", "CPU")
-def attention_llama_cpu(
-    hidden_states,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    position_cos,
-    position_sin,
-    attention_mask,
-    past_key,
-    past_value,
-    layer_idx,
-    cache_position,
-):
-    return hidden_states
-
-
-@torch.library.register_fake("circle::attention.llama")
-def attention_llama(*args, **kwargs):
-    (
-        hidden_states,
-        q_proj,
-        k_proj,
-        v_proj,
-        o_proj,
-        position_cos,
-        position_sin,
-        attention_mask,
-        past_key,
-        past_value,
-        layer_idx,
-        cache_position,
-    ) = args
-    return hidden_states
-
-
-from transformers.cache_utils import Cache, DynamicCache
-from transformers.models.llama.modeling_llama import LlamaAttention
-
-
-def forward_adapter(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: List[torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[DynamicCache],
-    cache_position: torch.Tensor,
-    **kwargs,
-):
-    # past_key_value is a dict with key_cache and value_cache.
-    # It needs to be decomposed for tico and circle which does not know dict.
-    key_cache = past_key_value.key_cache  # type: ignore[union-attr]
-    value_cache = past_key_value.value_cache  # type: ignore[union-attr]
-    return (
-        torch.ops.circle.attention.llama(
-            hidden_states,
-            self.q_proj.weight,
-            self.k_proj.weight,
-            self.v_proj.weight,
-            self.o_proj.weight,
-            position_embeddings[0],  # cos
-            position_embeddings[1],  # sin
-            attention_mask,
-            # key_cache is a list of cache for each decoder layer.
-            # Assumtion: key cache is continuous
-            #
-            #    k_cache[0] | k_cache[1] | ...  | k_cache[n]
-            key_cache[0],
-            value_cache[0],  # Same to value_cache
-            self.layer_idx,
-            cache_position,
-        ),
-        None,
-    )
-
-
-# Tico
-import tico
+# Define DecoderLayers
 
 from torch import nn
-from transformers.models.llama.modeling_llama import LlamaModel
+from transformers.cache_utils import Cache
+from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel
 
-model = AutoModelForCausalLM.from_pretrained(model_name)
+
+# DecoderLayers is not nn.Module. Not torch.export-able.
+# Let's define decoder layers as nn.Module.
 
 
 class LlamaDecoderLayers(nn.Module):
@@ -139,6 +60,8 @@ class LlamaDecoderLayers(nn.Module):
         self.config = model.config
         self.layers = model.layers
 
+    # Make sure signature is same to capturing input.
+    # Just copy and Paste from LlamaDecoderLayer::forward
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -169,8 +92,19 @@ class LlamaDecoderLayers(nn.Module):
         return hidden_states
 
 
+# Convert
+
+import tico
+
+# NOTE:
+# If you want to restore forward, it may be implemented as context manager.
+# However, it is just a simple script to export. No one uses forward after tico conversion.
+from tico.serialize.operators.op_circle_attention import llama_attention_forward_adapter
+
+LlamaAttention.forward = llama_attention_forward_adapter
+
+model = AutoModelForCausalLM.from_pretrained(model_name)
 layers = LlamaDecoderLayers(model.model)
-LlamaAttention.forward = forward_adapter
 layers.eval()
 circle_model = tico.convert(layers, captured_input)
 circle_model.save(f"tinyllama.layers.attn.circle")
