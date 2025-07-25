@@ -376,6 +376,12 @@ def _relu_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
         raise NotYetSupportedError("Unsupported dtype")
 
