@@ -15,6 +15,8 @@
 from enum import IntEnum
 from typing import NamedTuple, Optional, Sequence, Tuple, Union
 
+import torch
+
 from tico.utils.errors import InvalidArgumentError
 
 
@@ -37,8 +39,8 @@ class ConvPaddingInfo(NamedTuple):
 
 def identify_padding(
     padding: PaddingValue,
-    input_shape: Sequence[int],
-    output_shape: Sequence[int],
+    input_shape: Sequence[int | torch.SymInt] | torch.Size,
+    output_shape: Sequence[int | torch.SymInt] | torch.Size,
     stride: Sequence[int],
 ) -> ConvPaddingInfo:
     """

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from torch.export import Dim
 
 from test.utils import tag
 
@@ -28,6 +29,27 @@ class SimpleRepeat(torch.nn.Module):
     def get_example_inputs(self):
         torch.manual_seed(1)
         return (torch.randn(1, 4),)
+
+
+@tag.use_onert
+class SimpleRepeatDynamicShape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        z = x.repeat((128, 1, 1, 1))
+        return z
+
+    def get_example_inputs(self):
+        torch.manual_seed(1)
+        return (torch.randn(1, 4),)
+
+    def get_dynamic_shapes(self):
+        dim = Dim("dim", min=1, max=128)
+        dynamic_shapes = {
+            "x": {1: dim},
+        }
+        return dynamic_shapes
 
 
 class SimpleRepeat2(torch.nn.Module):

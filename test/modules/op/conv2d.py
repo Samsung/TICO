@@ -13,6 +13,9 @@
 # limitations under the License.
 
 import torch
+from torch.export import Dim
+
+from test.utils import tag
 
 # With square kernels and equal stride
 class SimpleConv(torch.nn.Module):
@@ -27,6 +30,28 @@ class SimpleConv(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(20, 16, 50, 100),)
+
+
+@tag.use_onert
+class SimpleConvDynamicShape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv2d = torch.nn.Conv2d(
+            in_channels=16, out_channels=33, kernel_size=3, stride=2
+        )
+
+    def forward(self, input):
+        return self.conv2d(input)
+
+    def get_example_inputs(self):
+        return (torch.randn(20, 16, 50, 100),)
+
+    def get_dynamic_shapes(self):
+        batch = Dim("batch", min=1, max=128)
+        dynamic_shapes = {
+            "input": {0: batch},
+        }
+        return dynamic_shapes
 
 
 class SimpleQuantizedConv(torch.nn.Module):

@@ -20,7 +20,11 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
-from tico.serialize.circle_mapping import extract_circle_dtype, extract_circle_shape
+from tico.serialize.circle_mapping import (
+    extract_circle_dtype,
+    extract_shape,
+    to_circle_shape,
+)
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
@@ -111,16 +115,12 @@ class Conv2dVisitor(NodeVisitor):
 
         assert groups == 1, "Only support group 1 conv2d"
 
-        input_shape, input_shape_signature = extract_circle_shape(input_)
-        output_shape, _ = extract_circle_shape(node)
-        weight_shape, _ = extract_circle_shape(weight)
+        input_shape = extract_shape(input_)
+        output_shape = extract_shape(node)
+        weight_shape = extract_shape(weight)
         assert len(input_shape) == 4, len(input_shape)
         assert len(output_shape) == 4, len(output_shape)
         assert len(weight_shape) == 4, len(weight_shape)
-
-        if input_shape_signature is not None:
-            # TODO: support dynamic shapes
-            raise NotImplementedError("Dynamic shape is not supported yet")
 
         pad_decision = identify_padding(padding, input_shape, output_shape, stride)
 
@@ -136,18 +136,21 @@ class Conv2dVisitor(NodeVisitor):
                 ],
                 dtype=torch.int32,
             )
-            pad_output_shape = [
+            pad_output_shape: List[int | torch.SymInt] = [
                 input_shape[0],
                 input_shape[1] + pad_h * 2,
                 input_shape[2] + pad_w * 2,
                 input_shape[3],
             ]
+            pad_output_cshape, pad_output_cshape_signature = to_circle_shape(
+                pad_output_shape
+            )
             # create padded output tensor
             input_qparam: Optional[QuantParam] = input_.meta.get(QPARAM_KEY)
             pad_output = self.graph.add_tensor_from_scratch(
                 prefix=f"{node.name}_input_pad_output",
-                shape=pad_output_shape,
-                shape_signature=None,
+                shape=pad_output_cshape,
+                shape_signature=pad_output_cshape_signature,
                 dtype=extract_circle_dtype(input_),
                 qparam=input_qparam,
                 source_node=node,

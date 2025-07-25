@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import torch
+from torch.export import Dim
 
-from test.utils.tag import skip
+from test.utils.tag import skip, use_onert
 
 
 class SimpleAvgPool(torch.nn.Module):
@@ -28,6 +29,27 @@ class SimpleAvgPool(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(2, 4, 8, 16),)
+
+
+@use_onert
+class SimpleAvgPoolDynamicShape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.avgpool = torch.nn.AvgPool2d(kernel_size=3, stride=2)
+
+    def forward(self, tensor):
+        result = self.avgpool(tensor)
+        return result
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 4, 8, 16),)
+
+    def get_dynamic_shapes(self):
+        batch = Dim("batch", min=1, max=128)
+        dynamic_shapes = {
+            "tensor": {0: batch},
+        }
+        return dynamic_shapes
 
 
 class AdaptiveAvgPool(torch.nn.Module):
