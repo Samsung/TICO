@@ -14,6 +14,7 @@
 
 
 from tico.serialize.circle_graph import CircleSubgraph
+from tico.serialize.circle_mapping import validate_circle_shape
 from tico.utils.graph import get_module_name_chain
 
 
@@ -37,3 +38,13 @@ def finalise_tensor_names(
     for tensor in graph.tensors:
         if tensor.name in graph.name_to_node:
             tensor.name = f"{get_module_name_chain(graph.name_to_node[tensor.name])}::{tensor.name}"
+
+
+def validate_tensor_shapes(
+    graph: CircleSubgraph,
+) -> None:
+    """
+    Let's validate all tensors' shapes against their shape signatures.
+    """
+    for tensor in graph.tensors:
+        validate_circle_shape(tensor.shape, tensor.shapeSignature)
