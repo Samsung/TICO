@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from torch.export import Dim
 
 from test.utils import tag
 
@@ -28,6 +29,27 @@ class SimpleMaxPool(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(2, 4, 8, 16),)
+
+
+@tag.use_onert
+class SimpleMaxPoolDynamicShape(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.maxpool = torch.nn.MaxPool2d(3, stride=2)
+
+    def forward(self, tensor):
+        result = self.maxpool(tensor)
+        return result
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 4, 8, 16),)
+
+    def get_dynamic_shapes(self):
+        batch = Dim("batch", min=1, max=128)
+        dynamic_shapes = {
+            "tensor": {0: batch},
+        }
+        return dynamic_shapes
 
 
 class MaxPoolWithPadding(torch.nn.Module):

@@ -26,7 +26,7 @@ from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import get_node_visitors
 from tico.utils import logging
-from tico.utils.serialize import finalise_tensor_names
+from tico.utils.serialize import finalise_tensor_names, validate_tensor_shapes
 
 
 multiple_output_ops = [
@@ -104,8 +104,10 @@ def build_circle(ep: ExportedProgram) -> bytes:
             graph.add_operator(circle_op)
             logger.debug(f"call_function: {node.name} ({opcode}) Op exported.")
 
-    # Register subgraph
     finalise_tensor_names(graph)
+    validate_tensor_shapes(graph)
+
+    # Register subgraph
     model.subgraphs.append(graph)
 
     # Encode operator codes

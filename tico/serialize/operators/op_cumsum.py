@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch._ops
@@ -57,7 +57,7 @@ class CumsumVisitor(NodeVisitor):
         if input_dtype == torch.int32:
             input_tensor: circle.Tensor.TensorT = self.graph.get_tensor(input)
             input_shape: List[int] = input_tensor.shape
-            input_shape_signature: List[int] = input_tensor.shapeSignature
+            input_shape_signature: Optional[List[int]] = input_tensor.shapeSignature
             cast_op_index = get_op_index(
                 circle.BuiltinOperator.BuiltinOperator.CAST, self._op_codes
             )

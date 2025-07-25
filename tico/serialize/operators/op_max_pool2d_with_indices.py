@@ -24,8 +24,8 @@ from circle_schema import circle
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.circle_mapping import (
     extract_circle_dtype,
-    extract_circle_shape,
     extract_shape,
+    to_circle_shape,
 )
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
@@ -92,13 +92,15 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
                 ],
                 dtype=torch.int32,
             )
-            input_shape, input_shape_signature = extract_circle_shape(input)
 
-            if input_shape_signature is not None:
-                # TODO: support dynamic shape
-                raise NotImplementedError("Padding with dynamic shape is not supported")
-
+            input_shape = extract_shape(input)
             input_dtype: int = extract_circle_dtype(input)
+
+            input_qparam: Optional[QuantParam] = (
+                input.meta[QPARAM_KEY] if QPARAM_KEY in input.meta else None
+            )
+
+            # create padded input tensor
             padded_input_shape = [
                 input_shape[0],
                 input_shape[1],
@@ -107,18 +109,16 @@ class MaxPool2DWithIndicesVisitor(NodeVisitor):
             ]
             padded_input_shape[1] += padding[0] * 2
             padded_input_shape[2] += padding[1] * 2
-            input_qparam: Optional[QuantParam] = (
-                input.meta[QPARAM_KEY] if QPARAM_KEY in input.meta else None
-            )
-            # create padded input tensor
+            padded_cshape, padded_cshape_signature = to_circle_shape(padded_input_shape)
             padded_input_tensor = self.graph.add_tensor_from_scratch(
                 prefix=f"{input.name}_pad_output",
-                shape=padded_input_shape,
-                shape_signature=None,
+                shape=padded_cshape,
+                shape_signature=padded_cshape_signature,
                 dtype=input_dtype,
                 qparam=input_qparam,
                 source_node=node,
             )
+
             if input_qparam is not None:
                 padding_value = get_integer_dtype_min(input_qparam.dtype)
             else:

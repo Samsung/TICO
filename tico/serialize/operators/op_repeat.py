@@ -21,7 +21,11 @@ import torch
 from circle_schema import circle
 
 from tico.serialize.circle_graph import CircleSubgraph
-from tico.serialize.circle_mapping import extract_circle_dtype, extract_circle_shape
+from tico.serialize.circle_mapping import (
+    extract_circle_dtype,
+    extract_shape,
+    to_circle_shape,
+)
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
@@ -51,10 +55,7 @@ class RepeatVisitor(NodeVisitor):
             elif r < 0:
                 raise InvalidArgumentError("Only support positive repeat value")
 
-        tensor_shape, tensor_shape_signature = extract_circle_shape(input)
-        if tensor_shape_signature is not None:
-            # TODO: support dynamic shape
-            raise NotYetSupportedError("Repeat does not support dynamic shape yet.")
+        tensor_shape = extract_shape(input)
         assert len(tensor_shape) <= len(repeats)
         if len(tensor_shape) != len(repeats):
             # TODO Support len(tensor_shape) < len(repeats)
@@ -73,12 +74,16 @@ class RepeatVisitor(NodeVisitor):
             if r > 1:
                 # Except last created concat, a tensor should be created.
                 if repeat_dim_cnt > 1:
-                    repeated_shape = list(tensor_shape)
+                    repeated_shape: List[int | torch.SymInt] = list(tensor_shape)
                     repeated_shape[idx] = repeated_shape[idx] * r
+
+                    repeated_cshape, repeated_cshape_signature = to_circle_shape(
+                        repeated_shape
+                    )
                     concat_output = self.graph.add_tensor_from_scratch(
                         prefix=f"{node.name}_concat_{idx}",
-                        shape=repeated_shape,
-                        shape_signature=None,  # TODO: support dynamic shape
+                        shape=repeated_cshape,
+                        shape_signature=repeated_cshape_signature,
                         dtype=tensor_dtype,
                         source_node=node,
                     )

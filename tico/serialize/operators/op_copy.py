@@ -110,7 +110,7 @@ class CopyVisitor(NodeVisitor):
         # To connect 'dst' to Reshape node in the graph, 'dst' must be converted to Shape op.
         dst_tensor: circle.Tensor.TensorT = self.graph.get_tensor(dst)
         dst_shape: List[int] = dst_tensor.shape
-        dst_shape_signature: List[int] = dst_tensor.shapeSignature
+        dst_shape_signature: Optional[List[int]] = dst_tensor.shapeSignature
 
         if dst_shape_signature is not None:
             # TODO: support dynamic shape
@@ -134,7 +134,7 @@ class CopyVisitor(NodeVisitor):
 
         src_tensor: circle.Tensor.TensorT = self.graph.get_tensor(src)
         src_shape: List[int] = src_tensor.shape
-        src_shape_signature: List[int] = src_tensor.shapeSignature
+        src_shape_signature: Optional[List[int]] = src_tensor.shapeSignature
 
         if src_shape_signature is not None:
             # TODO: support dynamic shape
