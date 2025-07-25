@@ -134,16 +134,49 @@ def extract_circle_shape(node: torch.fx.Node) -> Tuple[List[int], Optional[List[
 
 def to_circle_shape(torch_shape: torch.Size) -> Tuple[List[int], Optional[List[int]]]:
     shape: List[int] = list(torch_shape)
-    shapeSignature: Optional[List[int]] = None
+    shape_signature: Optional[List[int]] = None
 
     if any(isinstance(s, torch.SymInt) for s in shape):
-        shapeSignature = shape.copy()
+        shape_signature = shape.copy()
         for idx, s in enumerate(shape):
             if isinstance(s, torch.SymInt):
                 shape[idx] = 1
-                shapeSignature[idx] = -1
+                shape_signature[idx] = -1
 
-    return shape, shapeSignature
+    return shape, shape_signature
+
+
+def validate_circle_shape(shape: List[int], shape_signature: Optional[List[int]]):
+    """
+    Validate circle tensor shape and shape_signature.
+    @ref https://github.com/Samsung/TICO/issues/244
+    """
+    if shape_signature is not None:
+        if len(shape_signature) == 0:
+            raise ValueError(
+                "Invalid circle shape: shape_signature must not be an empty list. "
+                "For static shapes, use None instead of []."
+            )
+        if not all(isinstance(s, int) for s in shape_signature):
+            raise ValueError(
+                f"circle tensor shape_signature must be all integer values. {shape_signature}"
+            )
+        for s, ss in zip(shape, shape_signature):
+            if ss == -1:
+                # dynamic shape dimension
+                if s != 1:
+                    raise ValueError(
+                        f"Invalid circle shape: {s} {ss} {shape} {shape_signature}"
+                    )
+            else:
+                # static shape dimension
+                if s != ss:
+                    raise ValueError(
+                        f"Invalid circle shape: {s} {ss} {shape} {shape_signature}"
+                    )
+
+    if not all(isinstance(s, int) for s in shape):
+        raise ValueError(f"circle tensor shape must be all integer values. {shape}")
 
 
 # Return stride of node
