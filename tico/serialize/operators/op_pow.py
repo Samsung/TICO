@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch._ops
@@ -36,7 +36,7 @@ class BasePowVisitor(NodeVisitor):
         assert isinstance(node, torch.fx.Node), type(node)
         node_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)
         node_shape: List[int] = node_tensor.shape
-        node_shape_signature: List[int] = node_tensor.shapeSignature
+        node_shape_signature: Optional[List[int]] = node_tensor.shapeSignature
         op_index = get_op_index(
             circle.BuiltinOperator.BuiltinOperator.CAST, self._op_codes
         )
