@@ -226,6 +226,15 @@ class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
 
 
 class ReluTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_i8o16(self):
+        self.setup(
+            SimpleRelu(),
+            torch.ops.aten.relu.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.run_test()
+
     def test_i16o8(self):
         self.setup(
             SimpleRelu(),
