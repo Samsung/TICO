@@ -23,7 +23,6 @@ from circle_schema import circle
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.circle_mapping import (
     extract_circle_dtype,
-    extract_circle_shape,
     extract_shape,
     to_circle_shape,
 )
@@ -75,7 +74,7 @@ class RepeatVisitor(NodeVisitor):
             if r > 1:
                 # Except last created concat, a tensor should be created.
                 if repeat_dim_cnt > 1:
-                    repeated_shape = list(tensor_shape)
+                    repeated_shape: List[int | torch.SymInt] = list(tensor_shape)
                     repeated_shape[idx] = repeated_shape[idx] * r
 
                     repeated_cshape, repeated_cshape_signature = to_circle_shape(

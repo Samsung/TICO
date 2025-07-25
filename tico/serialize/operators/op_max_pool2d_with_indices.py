@@ -24,8 +24,6 @@ from circle_schema import circle
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.circle_mapping import (
     extract_circle_dtype,
-    extract_circle_shape,
-    extract_shape,
     extract_shape,
     to_circle_shape,
 )
