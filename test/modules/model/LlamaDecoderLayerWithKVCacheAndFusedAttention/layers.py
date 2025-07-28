@@ -99,7 +99,7 @@ import tico
 # NOTE:
 # If you want to restore forward, it may be implemented as context manager.
 # However, it is just a simple script to export. No one uses forward after tico conversion.
-from tico.serialize.operators.op_circle_attention import llama_attention_forward_adapter
+from tico.serialize.operators.onert.op_attention import llama_attention_forward_adapter
 
 LlamaAttention.forward = llama_attention_forward_adapter
 

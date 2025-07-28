@@ -45,7 +45,7 @@ print(generated_text)
 # Convert
 
 import tico
-from tico.serialize.operators.op_circle_attention import llama_attention_forward_adapter
+from tico.serialize.operators.onert.op_attention import llama_attention_forward_adapter
 from transformers.models.llama.modeling_llama import LlamaAttention
 
 LlamaAttention.forward = llama_attention_forward_adapter
