@@ -58,16 +58,19 @@ class RecordingInput:
         self.forward_org = module.forward
         self.condition = condition
         self.input_to_remove = input_to_remove
-        sig = inspect.signature(self.forward_org)
+        self.sig = inspect.signature(self.forward_org)
         self.args_names = [
-            name for name in sig.parameters.keys() if name not in ("self", "kwargs")
+            name
+            for name in self.sig.parameters.keys()
+            if name not in ("self", "kwargs")
         ]
-        self.captured_input = ()
+        self.captured_input = None
 
     def __enter__(self):
         def capture_and_forward(*args, **kwargs):
-            args_dict = dict(zip(self.args_names, args))
-            args_dict.update(kwargs)
+            bound = self.sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            args_dict = dict(bound.arguments)
 
             def populate_args(args_dict, input_to_remove):
                 for key in input_to_remove:
@@ -77,7 +80,7 @@ class RecordingInput:
                 )
                 return copy.deepcopy(args_tuple)
 
-            if self.condition(args_dict) and self.captured_input == ():
+            if self.condition(args_dict) and self.captured_input is None:
                 self.captured_input = populate_args(args_dict, self.input_to_remove)
 
             return self.forward_org(*args, **kwargs)

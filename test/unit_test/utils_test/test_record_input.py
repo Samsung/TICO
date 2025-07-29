@@ -82,4 +82,4 @@ class RecordInputTest(unittest.TestCase):
             m(*inputs)
             captured_input = rec.captured_input
 
-        self.assertEqual(captured_input, ())
+        self.assertEqual(captured_input, None)
