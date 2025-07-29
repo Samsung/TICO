@@ -69,7 +69,7 @@ class RecordingInput:
             args_dict = dict(zip(self.args_names, args))
             args_dict.update(kwargs)
 
-            def populate_args(args_dict, filter):
+            def populate_args(args_dict, input_to_remove):
                 for key in filter:
                     args_dict.pop(key, None)
                 args_tuple = tuple(
