@@ -61,8 +61,14 @@ class RecordingInput:
         self.sig = inspect.signature(self.forward_org)
         self.args_names = [
             name
-            for name in self.sig.parameters.keys()
-            if name not in ("self", "kwargs")
+            for name, param in self.sig.parameters.items()
+            if param.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            and name != "self"
         ]
         self.captured_input = None
 
