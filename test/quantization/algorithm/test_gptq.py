@@ -63,8 +63,9 @@ class GPTQTest(unittest.TestCase):
         # base
         base_q_proj_w = model.model.layers[0].self_attn.q_proj.weight.clone()
 
-        q_m = prepare(model, GPTQConfig(), args=(sample_input,))
-        q_m = convert(q_m)
+        q_m = prepare(model, GPTQConfig())
+        q_m(sample_input)
+        q_m = convert(q_m, inplace=True)
 
         # target
         target_q_proj_w = q_m.model.layers[0].self_attn.q_proj.weight
@@ -80,14 +81,17 @@ class GPTQTest(unittest.TestCase):
     )
     def test_net(self):
         q_m = BigLinear()
+        q_m.eval()
         ori_m = q_m
-        example_inputs = ori_m.get_example_inputs()
 
         # Apply GPTQ
-        q_m = prepare(q_m, GPTQConfig(), args=example_inputs)
-        convert(q_m)
+        q_m = prepare(q_m, GPTQConfig())
+        for _ in range(10):
+            q_m(*ori_m.get_example_inputs())
+        convert(q_m, inplace=True)
 
         # Apply PT2E
+        example_inputs = ori_m.get_example_inputs()
         q_m = prepare(q_m, PT2EConfig(), args=example_inputs)
 
         # Calibration
@@ -97,8 +101,9 @@ class GPTQTest(unittest.TestCase):
         q_m = convert(q_m)
 
         # Export circle
+        # pt2e exported model doesn't have `eval()` api.
+        q_m.training = False
         cm = tico.convert(q_m, example_inputs)
-        cm.save("op.q.circle")
 
         # Evaluate
         results = evaluate(ori_m, cm, BACKEND.TRIV24, mode="return")

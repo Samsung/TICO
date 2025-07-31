@@ -58,7 +58,7 @@ def gather_single_batch_from_list(data_list, idx):
     Returns:
         list: single batch.
     """
-    # obtain a set of keyword input from cache
+    # obtain a set of positional input from cache
     single_batch = []
     for data_item in data_list:
         single_batch.append(data_item[idx])

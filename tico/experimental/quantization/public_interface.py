@@ -59,6 +59,8 @@ def prepare(
     Returns:
         The model prepared for quantization.
     """
+    if hasattr(model, QUANTIZER_ATTRIBUTE_NAME):
+        raise RuntimeError("prepare() already has been called.")
     if quant_config.name == "pt2e" and inplace:
         raise RuntimeError(
             "In-place is not supported for PT2E quantization due to limitation in the underlying Torch APIs. Please set 'inplace=False' to proceed."
@@ -98,6 +100,12 @@ def convert(model, inplace: Optional[bool] = False):
     if isinstance(quantizer, PT2EQuantizer) and inplace:
         raise RuntimeError(
             "In-place is not supported for PT2E quantization due to limitation in the underlying Torch APIs. Please set 'inplace=False' to proceed."
+        )
+    # deepcopy prevents the quantizer from restoring the catcher used for calibration.
+    # TODO Revisit `inplace` policy.
+    if isinstance(quantizer, GPTQQuantizer) and not inplace:
+        raise RuntimeError(
+            "GPTQ quantization only supports `in-place=True`. Please set 'inplace=True' to proceed."
         )
 
     model = model if inplace else copy.deepcopy(model)
