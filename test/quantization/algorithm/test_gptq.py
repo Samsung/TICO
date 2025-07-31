@@ -87,7 +87,7 @@ class GPTQTest(unittest.TestCase):
 
         # Apply GPTQ
         q_m = prepare(q_m, GPTQConfig())
-        for _ in range(10):
+        for _ in range(30):
             args, kwargs = ori_m.get_example_inputs()
             q_m(*args, **kwargs)
         convert(q_m, inplace=True)
