@@ -42,15 +42,18 @@ class SimpleAdd(TestModuleBase):
     def get_calibration_data(self):
         calibration_data = [
             (
-                torch.randn(
-                    (1, 2),
+                (
+                    torch.randn(
+                        (1, 2),
+                    ),
+                    torch.randn(
+                        (1, 2),
+                    ),
                 ),
-                torch.randn(
-                    (1, 2),
-                ),
+                {},
             )
             for i in range(100)
-        ]
+        ]  # type: ignore[var-annotated]
         return calibration_data
 
 

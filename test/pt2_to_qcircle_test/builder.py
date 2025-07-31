@@ -70,7 +70,9 @@ class QuantizationTest(TestRunnerBase):
 
         mod = convert(mod)
 
-        cm = tico.convert(mod, calibration_data[0])
+        # pt2e module doesn't have `eval()` api.
+        mod.training = False
+        cm = tico.convert(mod, args=cal_args, kwargs=cal_kwargs)
 
         test_prefix = self.test_dir / self.test_name.replace(
             "test.modules.", ""
