@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
-from tico.serialize.circle_graph import CircleSubgraph, extract_shape
+from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
