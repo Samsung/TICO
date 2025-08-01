@@ -70,8 +70,8 @@ class SimpleQuantizedConv(TestModuleBase):
         return (torch.randn(1, 16, 50, 100),), {}
 
     def get_calibration_data(self):
-        calibration_data = [self.get_example_inputs() for _ in range(100)]
-        return calibration_data
+        for _ in range(100):
+            yield self.get_example_inputs()
 
 
 class ConvWithNoBias(TestModuleBase):

@@ -60,19 +60,18 @@ class QuantizationTest(TestRunnerBase):
     def _run(self):
         mod = self.nnmodule.eval()
         original_mod = mod
-        calibration_data = original_mod.get_calibration_data()  # type: ignore[operator]
-        cal_args, cal_kwargs = calibration_data[0]
 
-        mod = prepare(mod, self.config, args=cal_args, kwargs=cal_kwargs)
+        cal_args_0, cal_kwargs_0 = next(original_mod.get_calibration_data())  # type: ignore[operator]
+        mod = prepare(mod, self.config, args=cal_args_0, kwargs=cal_kwargs_0)
 
-        for c_args, c_kwargs in calibration_data:
+        for c_args, c_kwargs in original_mod.get_calibration_data():  # type: ignore[operator]
             mod(*c_args, **c_kwargs)
 
         mod = convert(mod)
 
         # pt2e module doesn't have `eval()` api.
         mod.training = False
-        cm = tico.convert(mod, args=cal_args, kwargs=cal_kwargs)
+        cm = tico.convert(mod, cal_args_0, cal_kwargs_0)
 
         test_prefix = self.test_dir / self.test_name.replace(
             "test.modules.", ""

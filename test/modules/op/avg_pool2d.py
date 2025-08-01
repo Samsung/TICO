@@ -68,8 +68,8 @@ class AdaptiveAvgPool(TestModuleBase):
 
     # This test should be done after applying NCHW_to_NHWC with onecc.
     # def get_calibration_data(self):
-    #     calibration_data = [self.get_example_inputs() for _ in range(100)]
-    #     return calibration_data
+    #     for _ in range(100):
+    #         yield self.get_example_inputs()
 
 
 class AvgPoolWithPadding(TestModuleBase):
