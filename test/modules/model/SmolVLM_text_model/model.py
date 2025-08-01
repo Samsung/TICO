@@ -40,4 +40,4 @@ class SmolVLM_text_model(TestModuleBase):
             "output_hidden_states": False,
             "return_dict": True,
         }
-        return (kwargs,), {}
+        return (), kwargs
