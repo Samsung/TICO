@@ -34,7 +34,7 @@ float_model(Python)                          Example Input
 ```
 
 [Reference]
-- https://pytorch.org/tutorials/prototype/pt2e_quant_ptq_static.html
+- https://docs.pytorch.org/ao/main/tutorials_source/pt2e_quant_ptq.html
 
 ## How to use PT2EQuantizer
 
