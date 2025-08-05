@@ -12,7 +12,7 @@ inputs = tokenizer(
     prompt,
     return_tensors="pt",
     padding="max_length",
-    max_length=32,
+    max_length=31,
     truncation=True,
 )
 
