@@ -12,98 +12,118 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
 
 
-def compute_peir(base: torch.Tensor, target: torch.Tensor):
+def compute_max_abs_diff(base: torch.Tensor, target: torch.Tensor) -> float:
     """
-    Calculate the Peak Error to Interval Ratio (PEIR) between two tensors.
-
-    This function computes the PEIR between two tensors using the formula:
-        PEIR = max(abs(tensor1 - tensor2)) / (max(tensor1) - min(tensor2))
+    Return the *maximum* absolute element-wise difference between two tensors.
     """
-    assert base.shape == target.shape, f"shape mismatch: {base.shape} != {target.shape}"
-    base_tensor = base.numpy()
-    target_tensor = target.numpy()
-    assert (
-        base_tensor.dtype == np.float32 and target_tensor.dtype == np.float32
-    ), f"dtype should be float32: base({base_tensor.dtype}), target({target_tensor.dtype})"
+    assert base.shape == target.shape, "shape mismatch"
+    return (base.detach() - target.detach()).abs().max().item()
 
-    base_tensor = base_tensor.reshape(-1)
-    target_tensor = target_tensor.reshape(-1)
 
-    assert (
-        base_tensor.shape == target_tensor.shape
-    ), f"Shape mismatch: {base_tensor.shape} != {target_tensor.shape}"
+def compute_peir(base: torch.Tensor, target: torch.Tensor) -> float:
+    """
+    Peak-Error-to-Interval Ratio (PEIR).
 
-    peak_error = np.max(np.absolute(target_tensor - base_tensor))
-    interval = np.max(base_tensor) - np.min(base_tensor)
-    peir = peak_error / interval  # pylint: disable=invalid-name
+        PEIR = max(|base - target|) / (max(base) - min(base))
 
-    min_value = min([base_tensor.min(), target_tensor.min()])
-    max_value = max([base_tensor.max(), target_tensor.max()])
-
-    interval = max_value - min_value
-    interval = 1.0 if interval == 0.0 else interval  # Avoid zero interval
-
-    return peir
+    The interval denominator uses the reference (*base*) tensor only — this
+    makes PEIR independent of quantisation error in `target`.
+    """
+    assert base.shape == target.shape, "shape mismatch"
+    peak_error = (base.detach() - target.detach()).abs().max().item()
+    interval = (base.detach().max() - base.detach().min()).item()
+    interval = 1.0 if interval == 0.0 else interval  # avoid divide-by-zero
+    return peak_error / interval
 
 
 class MetricCalculator:
     """
-    Compute metrics including both built-in and custom metrics.
+    Lightweight registry-and-dispatcher for **pair-wise tensor comparison metrics**.
 
-    metrics
-        A list of metric names for comparison.
-    custom_metrics
-        A dictionary of metric names and corresponding callable functions for comparison.
-        Example: {'mse': mean_squared_error, 'cosine_similarity': cosine_similarity_fn}
+    Purpose
+    -------
+    Consolidate all metrics used to assess the discrepancy between a reference
+    (usually FP32) tensor and its quantized counterpart, while letting the caller
+    choose *at runtime* which subset to evaluate.
+
+    Built-in metrics
+    ----------------
+    Key                     Description
+    --------------------    -------------------------------------------------
+    "diff" / "max_abs_diff"  Maximum absolute element-wise difference
+    "peir"                   Peak-Error-to-Interval Ratio
+
+    Usage pattern
+    -------------
+    >>> calc = MetricCalculator(custom_metrics={'mse': mse_fn})
+    >>> stats = calc.compute(fp_outs, q_outs, metrics=['diff', 'mse'])
+
+    • **Instantiation** registers any extra user metrics
+      (signature: ``fn(base: Tensor, target: Tensor) -> float``).
+    • **compute(...)** takes two *equal-length* lists of tensors and an optional
+      list of metric names.
+        — If *metrics* is *None*, every registered metric is evaluated.
+        — Returns a dict: ``{metric_name -> [value for each tensor pair]}``.
+
+    Implementation notes
+    --------------------
+    * All tensors are detached before calculation to avoid autograd overhead.
+    * Registrations are stored in `self.registry` (str → callable).
+    * Duplicate metric names between built-ins and custom metrics raise an error
+      at construction time to prevent silent shadowing.
     """
 
-    builtin_metrics = {
+    builtin_metrics: Dict[str, Callable[[torch.Tensor, torch.Tensor], float]] = {
+        "diff": compute_max_abs_diff,
+        "max_abs_diff": compute_max_abs_diff,
         "peir": compute_peir,
     }
 
     def __init__(
         self,
-        metrics: List[str] = list(),
-        custom_metrics: Dict[str, Callable] = dict(),
+        custom_metrics: Optional[
+            Dict[str, Callable[[torch.Tensor, torch.Tensor], float]]
+        ] = None,
     ):
-        self.metrics: Dict[str, Callable] = dict()
+        self.registry: Dict[str, Callable] = self.builtin_metrics.copy()
+        if custom_metrics:
+            dup = self.registry.keys() & custom_metrics.keys()
+            if dup:
+                raise RuntimeError(f"Duplicate metric names: {dup}")
+            assert custom_metrics is not None
+            self.registry.update(custom_metrics)  # type: ignore[arg-type]
 
-        for m in metrics:
-            if m in self.builtin_metrics:
-                self.metrics[m] = self.builtin_metrics[m]
-            else:
-                raise RuntimeError(f"Invalid metric: {m}")
-
-        duplicates = set(self.metrics).intersection(custom_metrics.keys())
-        if len(duplicates) != 0:
-            raise RuntimeError(f"There are duplicate metrics: {duplicates}")
-
-        self.metrics = self.metrics | custom_metrics
-
+    # ----------------------------------------------------------------- #
+    # Public API                                                        #
+    # ----------------------------------------------------------------- #
     def compute(
-        self, output1: List[torch.Tensor], output2: List[torch.Tensor]
+        self,
+        base_outputs: List[torch.Tensor],
+        target_outputs: List[torch.Tensor],
+        metrics: Optional[List[str]] = None,
     ) -> Dict[str, List[Any]]:
         """
-        Compute both built-in metrics (if provided) and custom metrics.
+        Compute selected metrics for every (base, target) pair.
 
-        Returns
-        --------
-        Dict[str, Any]
-            A dictionary with metric names and their computed values.
+        Parameters
+        ----------
+        metrics
+            List of metric names to evaluate **this call**.
+            • None → evaluate *all* registered metrics.
         """
-        results: Dict[str, List[Any]] = dict()
+        sel = metrics or list(self.registry)
+        unknown = set(sel) - self.registry.keys()
+        if unknown:
+            raise RuntimeError(f"Unknown metric(s): {unknown}")
 
-        # Compute built-in metrics
-        if self.metrics is not None:
-            for m in self.metrics:
-                results[m] = list()
-                for out1, out2 in zip(output1, output2):
-                    results[m].append(self.builtin_metrics[m](out1, out2))
-
+        results: Dict[str, List[Any]] = {m: [] for m in sel}
+        for base, tgt in zip(base_outputs, target_outputs):
+            for m in sel:
+                results[m].append(self.registry[m](base, tgt))
         return results

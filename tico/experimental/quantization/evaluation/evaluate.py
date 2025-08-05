@@ -114,7 +114,6 @@ def evaluate(
     input_data: InputDataType = None,
     *,
     mode="plot",
-    metrics: List[str] = ["peir"],
     custom_metrics: Dict[str, Callable] = dict(),
 ) -> Optional[Dict[str, Any]]:
     """
@@ -140,8 +139,6 @@ def evaluate(
             The mode of operation. Options are:
             - "plot": Plot the results (default)
             - "return": Return the results.
-        metrics
-            A list of metric names for comparison.
         custom_metrics
             A dictionary of metric names and corresponding callable functions for comparison.
             Example: {'mse': mean_squared_error, 'cosine_similarity': cosine_similarity_fn}
@@ -205,7 +202,7 @@ def evaluate(
         )
 
     # Computes the comparison score based on the provided metrics.
-    metric_calculator = MetricCalculator(metrics, custom_metrics)
+    metric_calculator = MetricCalculator(custom_metrics)
     results: Dict[str, Any] = metric_calculator.compute(torch_output, circle_output)
 
     if mode == "return":
