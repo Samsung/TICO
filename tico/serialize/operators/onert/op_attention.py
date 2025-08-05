@@ -49,26 +49,6 @@ attention.llama(
 
 # ATTENTION FUSER
 
-from typing import List, Optional
-
-
-@torch.library.impl("circle::attention.llama", "CPU")
-def attention_llama_cpu(
-    hidden_states,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    position_cos,
-    position_sin,
-    attention_mask,
-    past_key,
-    past_value,
-    layer_idx,
-    cache_position,
-):
-    return hidden_states
-
 
 @torch.library.register_fake("circle::attention.llama")
 def attention_llama(*args, **kwargs):
