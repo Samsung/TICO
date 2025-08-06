@@ -12,13 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import unittest
 
 import torch
 from tico.experimental.quantization.evaluation.metric import (
     compute_max_abs_diff,
     compute_peir,
+    cosine_sim,
+    kl_div,
+    mae,
     MetricCalculator,
+    mse,
+    rel_l2,
+    rmse,
+    sqnr_db,
 )
 
 
@@ -56,6 +64,47 @@ class TestMetricKernels(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _ = compute_peir(a, b)
 
+    def test_mae_basic(self):
+        a = torch.tensor([1.0, 2.0, 3.0])
+        b = torch.tensor([1.5, 1.0, 2.0])
+        expected = (0.5 + 1.0 + 1.0) / 3
+        self.assertAlmostEqual(mae(a, b), expected, places=6)
+
+    def test_mse_and_rmse_basic(self):
+        a = torch.tensor([2.0, 2.0])
+        b = torch.tensor([0.0, 0.0])
+        expected_mse = (4.0 + 4.0) / 2
+        expected_rmse = math.sqrt(expected_mse)
+        self.assertAlmostEqual(mse(a, b), expected_mse, places=6)
+        self.assertAlmostEqual(rmse(a, b), expected_rmse, places=6)
+
+    def test_rel_l2_basic(self):
+        a = torch.tensor([3.0, 4.0])  # ||a|| = 5
+        b = torch.tensor([0.0, 0.0])  # error norm = 5
+        expected = 5.0 / 5.0
+        self.assertAlmostEqual(rel_l2(a, b), expected, places=6)
+
+    def test_cosine_similarity(self):
+        a = torch.tensor([1.0, 0.0])
+        b = torch.tensor([2.0, 0.0])  # same direction
+        self.assertAlmostEqual(cosine_sim(a, b), 1.0, places=6)
+
+    def test_sqnr_db(self):
+        a = torch.tensor([1.0, 1.0])
+        b = torch.tensor([1.0, 0.0])
+        # signal = 2, noise = 1 -> SQNR = 10*log10(2)
+        expected = 10 * math.log10(2.0)
+        self.assertAlmostEqual(sqnr_db(a, b), expected, places=6)
+
+    def test_kl_div_zero_identical(self):
+        a = torch.randn(1000)
+        self.assertAlmostEqual(kl_div(a, a), 0.0, places=6)
+
+    def test_kl_div_positive(self):
+        a = torch.randn(1000)
+        b = a + 0.5  # shift distribution
+        self.assertGreater(kl_div(a, b), 0.0)
+
 
 class TestMetricCalculator(unittest.TestCase):
     def setUp(self):
@@ -79,13 +128,13 @@ class TestMetricCalculator(unittest.TestCase):
             _ = calc.compute(self.fp, self.q, metrics=["not_a_metric"])
 
     def test_custom_metric_and_duplicate_rejection(self):
-        def mse(x, y):
-            return torch.mean((x - y) ** 2).item()
+        def l1_norm(x, y):
+            return torch.sum(torch.abs(x - y)).item()
 
         # Legit custom metric
-        calc = MetricCalculator(custom_metrics={"mse": mse})
-        res = calc.compute(self.fp, self.q, metrics=["mse"])
-        self.assertIn("mse", res)
+        calc = MetricCalculator(custom_metrics={"l1_sum": l1_norm})
+        res = calc.compute(self.fp, self.q, metrics=["l1_sum"])
+        self.assertIn("l1_sum", res)
         # Duplicate name should raise at construction time
         with self.assertRaises(RuntimeError):
-            _ = MetricCalculator(custom_metrics={"diff": mse})
+            _ = MetricCalculator(custom_metrics={"diff": l1_norm})

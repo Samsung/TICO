@@ -42,6 +42,163 @@ def compute_peir(base: torch.Tensor, target: torch.Tensor) -> float:
     return peak_error / interval
 
 
+def mae(base: torch.Tensor, target: torch.Tensor) -> float:
+    """
+    Mean Absolute Error (MAE).
+
+    Measures the **average magnitude** of element-wise differences, treating
+    all errors equally (no squaring).
+    Good for a quick, scale-dependent sense of “overall drift”.
+
+    Formula
+    -------
+        MAE = mean(|base - target|)
+
+    Returns
+    -------
+    float
+        Mean absolute error. *Lower is better*.
+    """
+    return (base.detach() - target.detach()).abs().mean().item()
+
+
+def mse(base: torch.Tensor, target: torch.Tensor) -> float:
+    """
+    Mean Squared Error (MSE).
+
+    Penalizes **larger** deviations more heavily than MAE by squaring each
+    difference — helpful to expose occasional large spikes.
+
+    Formula
+    -------
+        MSE = mean((base - target)²)
+
+    Returns
+    -------
+    float
+        Mean squared error. *Lower is better*.
+    """
+    return torch.mean((base.detach() - target.detach()) ** 2).item()
+
+
+def rmse(base: torch.Tensor, target: torch.Tensor) -> float:
+    """
+    Root Mean Squared Error (RMSE).
+
+    Square-root of MSE, restoring the units of the original data while
+    retaining the strong penalty on outliers.
+
+    Formula
+    -------
+        RMSE = sqrt( MSE )
+
+    Returns
+    -------
+    float
+        Root mean squared error. *Lower is better*.
+    """
+    return mse(base, target) ** 0.5
+
+
+def rel_l2(base: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> float:
+    """
+    Relative L2 Error (scale-invariant).
+
+    Normalizes the L2-norm of the error by the L2-norm of the reference,
+    making results comparable across layers with very different magnitudes.
+
+    Formula
+    -------
+        rel_L2 = ||base - target||₂ / (||base||₂ + ε)
+
+    Returns
+    -------
+    float
+        Relative L2 error in the range [0, ∞). *Lower is better*.
+    """
+    num = torch.norm(base.detach() - target.detach()).item()
+    den = torch.norm(base.detach()).item() + eps
+    return num / den
+
+
+def cosine_sim(base: torch.Tensor, target: torch.Tensor) -> float:
+    """
+    Cosine Similarity.
+
+    Captures the **directional alignment** between two tensors, ignoring
+    their magnitudes — particularly insightful for attention key/query
+    vectors or embedding spaces.
+
+    Formula
+    -------
+        cos_sim = (base · target) / (||base||₂ · ||target||₂)
+
+    Returns
+    -------
+    float
+        Cosine similarity in [-1, 1]; *closer to 1 is better*.
+    """
+    return torch.nn.functional.cosine_similarity(
+        base.flatten(), target.flatten(), dim=0
+    ).item()
+
+
+def sqnr_db(base: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> float:
+    """
+    Signal-to-Quantisation-Noise Ratio (SQNR) in decibels.
+
+    Classic communications metric indicating how dominant the original signal
+    energy is over the quantization noise.
+
+    Formula
+    -------
+        SQNR = 10 · log10( Σ base² / (Σ (base - target)² + ε) )
+
+    Returns
+    -------
+    float
+        SQNR in dB; *higher is better*.
+    """
+    signal = torch.sum(base.detach() ** 2).item()
+    noise = torch.sum((base.detach() - target.detach()) ** 2).item() + eps
+    return 10.0 * np.log10(signal / noise)
+
+
+def kl_div(base: torch.Tensor, target: torch.Tensor, *, bins: int = 2048) -> float:
+    """
+    Approximate KL-Divergence between the **distributions** of two tensors.
+
+    Compares histograms built over the same range to quantify how much the
+    quantised distribution diverges from the reference.
+
+    Formula
+    -------
+        D_KL(p‖q) = Σ p(i) · log( p(i) / q(i) )
+
+    Implementation details
+    ----------------------
+    * Histograms share bin edges [min(base), max(base)] to keep intervals equal.
+    * Zero-probability bins are masked to avoid log(0).
+
+    Returns
+    -------
+    float
+        KL-divergence (non-negative); *closer to 0 is better*.
+    """
+    b_hist = torch.histc(
+        base.detach(), bins=bins, min=base.min().item(), max=base.max().item()
+    )
+    t_hist = torch.histc(
+        target.detach(), bins=bins, min=base.min().item(), max=base.max().item()
+    )
+
+    b_pdf = b_hist / b_hist.sum()
+    t_pdf = t_hist / t_hist.sum()
+
+    mask = (b_pdf > 0) & (t_pdf > 0)
+    return torch.sum(b_pdf[mask] * torch.log(b_pdf[mask] / t_pdf[mask])).item()
+
+
 class MetricCalculator:
     """
     Lightweight registry-and-dispatcher for **pair-wise tensor comparison metrics**.
@@ -77,12 +234,30 @@ class MetricCalculator:
     * Registrations are stored in `self.registry` (str → callable).
     * Duplicate metric names between built-ins and custom metrics raise an error
       at construction time to prevent silent shadowing.
+
+    Practical metric bundles
+    ------------------------
+    • Quick sanity check ....................... ["diff", "mae", "peir"]
+        — Spike, average, and range-normalized errors in one glance.
+
+    • Layer-wise sensitivity profiling ......... ["rel_l2", "cosine"]
+        — Scale-invariant magnitude plus directional alignment.
+
+    • Whole-model quality / paper reporting .... ["sqnr"]  or  ["kl"]
+        — Signal-to-noise (dB) or distribution divergence for headline numbers.
     """
 
     builtin_metrics: Dict[str, Callable[[torch.Tensor, torch.Tensor], float]] = {
         "diff": compute_max_abs_diff,
         "max_abs_diff": compute_max_abs_diff,
         "peir": compute_peir,
+        "mae": mae,
+        "mse": mse,
+        "rmse": rmse,
+        "rel_l2": rel_l2,
+        "cosine": cosine_sim,
+        "sqnr": sqnr_db,
+        "kl": kl_div,
     }
 
     def __init__(
