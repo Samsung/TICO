@@ -17,6 +17,7 @@ import types
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
+from tqdm.auto import tqdm
 
 from tico.experimental.quantization.algorithm.gptq.gptq import GPTQ
 from tico.experimental.quantization.algorithm.gptq.utils import (
@@ -181,7 +182,9 @@ class GPTQQuantizer(BaseQuantizer):
             target_layers = [model]
 
         quantizers: Dict[str, Any] = {}
-        for l_idx, layer in enumerate(target_layers):
+        for l_idx, layer in enumerate(
+            tqdm(target_layers, desc="Quantizing layers", unit="layer")
+        ):
             # 1) Identify quantizable submodules within the layer
             full = find_layers(layer)
             sequential = [list(full.keys())]
@@ -210,7 +213,12 @@ class GPTQQuantizer(BaseQuantizer):
 
                 # Run layer forward over all cached batches to build Hessian/statistics
                 batch_num = self.num_batches
-                for batch_idx in range(batch_num):
+                for batch_idx in tqdm(
+                    range(batch_num),
+                    desc=f"[L{l_idx}] collecting",
+                    leave=False,
+                    unit="batch",
+                ):
                     cache_args_batch = gather_single_batch_from_list(
                         self.cache_args, batch_idx
                     )
@@ -238,7 +246,12 @@ class GPTQQuantizer(BaseQuantizer):
                     gptq[name].free()
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer
-            for batch_idx in range(batch_num):
+            for batch_idx in tqdm(
+                range(batch_num),
+                desc=f"[L{l_idx}] re-forward",
+                leave=False,
+                unit="batch",
+            ):
                 cache_args_batch = gather_single_batch_from_list(
                     self.cache_args, batch_idx
                 )

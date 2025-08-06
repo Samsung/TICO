@@ -6,3 +6,4 @@ circle_schema
 cffi==1.17.1
 packaging==25.0
 pyyaml==6.0.2
+tqdm
