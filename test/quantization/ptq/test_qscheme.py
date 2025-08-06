@@ -19,19 +19,19 @@ from tico.experimental.quantization.ptq.qscheme import QScheme
 
 class TestQScheme(unittest.TestCase):
     def test_enum_members(self):
-        self.assertIn(QScheme.PER_TENSOR_AFFINE, QScheme)
-        self.assertIn(QScheme.PER_TENSOR_SYMMETRIC, QScheme)
-        self.assertIn(QScheme.PER_CHANNEL_AFFINE, QScheme)
-        self.assertIn(QScheme.PER_CHANNEL_SYMMETRIC, QScheme)
+        self.assertIn(QScheme.PER_TENSOR_ASYMM, QScheme)
+        self.assertIn(QScheme.PER_TENSOR_SYMM, QScheme)
+        self.assertIn(QScheme.PER_CHANNEL_ASYMM, QScheme)
+        self.assertIn(QScheme.PER_CHANNEL_SYMM, QScheme)
 
     def test_is_per_channel(self):
-        self.assertFalse(QScheme.PER_TENSOR_AFFINE.is_per_channel())
-        self.assertTrue(QScheme.PER_CHANNEL_AFFINE.is_per_channel())
+        self.assertFalse(QScheme.PER_TENSOR_ASYMM.is_per_channel())
+        self.assertTrue(QScheme.PER_CHANNEL_ASYMM.is_per_channel())
 
     def test_is_symmetric(self):
-        self.assertTrue(QScheme.PER_TENSOR_SYMMETRIC.is_symmetric())
-        self.assertFalse(QScheme.PER_CHANNEL_AFFINE.is_symmetric())
+        self.assertTrue(QScheme.PER_TENSOR_SYMM.is_symmetric())
+        self.assertFalse(QScheme.PER_CHANNEL_ASYMM.is_symmetric())
 
     def test_str(self):
-        self.assertEqual(str(QScheme.PER_TENSOR_AFFINE), "per_tensor_affine")
-        self.assertEqual(str(QScheme.PER_CHANNEL_SYMMETRIC), "per_channel_symmetric")
+        self.assertEqual(str(QScheme.PER_TENSOR_ASYMM), "per_tensor_asymm")
+        self.assertEqual(str(QScheme.PER_CHANNEL_SYMM), "per_channel_symm")

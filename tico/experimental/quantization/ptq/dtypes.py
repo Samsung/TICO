@@ -14,17 +14,9 @@
 
 from dataclasses import dataclass
 
-"""
-Dynamo needs `__weakref__` slot in Torch 2.5.
-"""
 
-
-class WeakRefSupport:
-    __slots__ = ("__weakref__",)
-
-
-@dataclass(frozen=True, slots=True)
-class DType(WeakRefSupport):
+@dataclass(frozen=True)
+class DType:
     """
     Self-contained integer dtypes for quantization.
 

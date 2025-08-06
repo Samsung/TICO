@@ -17,23 +17,23 @@ from enum import auto, Enum
 
 class QScheme(Enum):
     # ───── Per-tensor ────────────
-    PER_TENSOR_AFFINE = auto()  # asymmetric
-    PER_TENSOR_SYMMETRIC = auto()  # symmetric
+    PER_TENSOR_ASYMM = auto()
+    PER_TENSOR_SYMM = auto()
     # ───── Per-channel ───────────
-    PER_CHANNEL_AFFINE = auto()
-    PER_CHANNEL_SYMMETRIC = auto()
+    PER_CHANNEL_ASYMM = auto()
+    PER_CHANNEL_SYMM = auto()
 
     # helper
     def is_per_channel(self) -> bool:
         return self in {
-            QScheme.PER_CHANNEL_AFFINE,
-            QScheme.PER_CHANNEL_SYMMETRIC,
+            QScheme.PER_CHANNEL_ASYMM,
+            QScheme.PER_CHANNEL_SYMM,
         }
 
     def is_symmetric(self) -> bool:
         return self in {
-            QScheme.PER_TENSOR_SYMMETRIC,
-            QScheme.PER_CHANNEL_SYMMETRIC,
+            QScheme.PER_TENSOR_SYMM,
+            QScheme.PER_CHANNEL_SYMM,
         }
 
     def __str__(self) -> str:
