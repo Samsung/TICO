@@ -19,6 +19,7 @@ from tico.experimental.quantization.evaluation.metric import (
     compute_max_abs_diff,
     compute_peir,
     MetricCalculator,
+    mse,
 )
 
 
@@ -56,6 +57,12 @@ class TestMetricKernels(unittest.TestCase):
         with self.assertRaises(AssertionError):
             _ = compute_peir(a, b)
 
+    def test_mse_basic(self):
+        a = torch.tensor([2.0, 2.0])
+        b = torch.tensor([0.0, 0.0])
+        expected_mse = (4.0 + 4.0) / 2
+        self.assertAlmostEqual(mse(a, b), expected_mse, places=6)
+
 
 class TestMetricCalculator(unittest.TestCase):
     def setUp(self):
@@ -79,13 +86,13 @@ class TestMetricCalculator(unittest.TestCase):
             _ = calc.compute(self.fp, self.q, metrics=["not_a_metric"])
 
     def test_custom_metric_and_duplicate_rejection(self):
-        def mse(x, y):
-            return torch.mean((x - y) ** 2).item()
+        def l1_norm(x, y):
+            return torch.sum(torch.abs(x - y)).item()
 
         # Legit custom metric
-        calc = MetricCalculator(custom_metrics={"mse": mse})
-        res = calc.compute(self.fp, self.q, metrics=["mse"])
-        self.assertIn("mse", res)
+        calc = MetricCalculator(custom_metrics={"l1_sum": l1_norm})
+        res = calc.compute(self.fp, self.q, metrics=["l1_sum"])
+        self.assertIn("l1_sum", res)
         # Duplicate name should raise at construction time
         with self.assertRaises(RuntimeError):
-            _ = MetricCalculator(custom_metrics={"diff": mse})
+            _ = MetricCalculator(custom_metrics={"diff": l1_norm})

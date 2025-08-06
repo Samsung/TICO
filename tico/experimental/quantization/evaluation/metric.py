@@ -42,6 +42,22 @@ def compute_peir(base: torch.Tensor, target: torch.Tensor) -> float:
     return peak_error / interval
 
 
+def mse(base: torch.Tensor, target: torch.Tensor) -> float:
+    """
+    Mean Squared Error (MSE).
+    Penalizes **larger** deviations more heavily than MAE by squaring each
+    difference — helpful to expose occasional large spikes.
+    Formula
+    -------
+        MSE = mean((base - target)²)
+    Returns
+    -------
+    float
+        Mean squared error. *Lower is better*.
+    """
+    return torch.mean((base.detach() - target.detach()) ** 2).item()
+
+
 class MetricCalculator:
     """
     Lightweight registry-and-dispatcher for **pair-wise tensor comparison metrics**.
@@ -83,6 +99,7 @@ class MetricCalculator:
         "diff": compute_max_abs_diff,
         "max_abs_diff": compute_max_abs_diff,
         "peir": compute_peir,
+        "mse": mse,
     }
 
     def __init__(
