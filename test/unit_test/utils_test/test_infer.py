@@ -20,6 +20,7 @@ import tico
 import torch
 
 from test.modules.op.add import SimpleAdd
+from test.modules.op.avg_pool2d import AvgPoolWithPaddingKwargs
 from test.modules.op.cat import SimpleCatDefault, SimpleCatWithDim
 
 
@@ -86,4 +87,27 @@ class InferCatTest(unittest.TestCase):
             out_np = torch_model((x, y)).numpy()
         np.testing.assert_allclose(
             actual=circle_model((x, y)), desired=out_np, rtol=1e-4, atol=1e-4
+        )
+
+
+class InferAvgPoolReverseKwargsTest(unittest.TestCase):
+    def test_avgpool_reverse_kwargs(self):
+        # convert
+        m = AvgPoolWithPaddingKwargs()
+        torch_model = m
+        args, kwargs = m.get_example_inputs()
+        circle_model = tico.convert(m.eval(), args, kwargs)
+
+        # test
+        tensor0 = torch.randn(2, 4, 8, 16)
+        tensor1 = torch.randn(2, 4, 4, 8)
+        with torch.no_grad():
+            out_np = torch_model(tensor1=tensor1, tensor0=tensor0).numpy()
+
+        kwargs = {
+            "tensor1": tensor1,
+            "tensor0": tensor0,
+        }
+        np.testing.assert_allclose(
+            actual=circle_model(**kwargs), desired=out_np, rtol=1e-4, atol=1e-4
         )

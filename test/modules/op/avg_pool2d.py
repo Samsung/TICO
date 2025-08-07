@@ -11,13 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import torch
+from packaging.version import Version
 from torch.export import Dim
 
 from test.modules.base import TestModuleBase
 
-from test.utils.tag import skip, use_onert
+from test.utils.tag import skip, skip_if, use_onert
 
 
 class SimpleAvgPool(TestModuleBase):
@@ -34,22 +34,28 @@ class SimpleAvgPool(TestModuleBase):
 
 
 @use_onert
+@skip_if(
+    Version(torch.__version__) >= Version("2.9.0.dev"),
+    reason="From torch 2.9.0.dev, dynamic shape requires more torch ir conversions related to symbolic runtime assertions",
+)
 class SimpleAvgPoolDynamicShape(TestModuleBase):
     def __init__(self):
         super().__init__()
         self.avgpool = torch.nn.AvgPool2d(kernel_size=3, stride=2)
 
-    def forward(self, tensor):
-        result = self.avgpool(tensor)
+    def forward(self, x, y):
+        z = x + y
+        result = self.avgpool(z)
         return result
 
     def get_example_inputs(self):
-        return (torch.randn(2, 4, 8, 16),), {}
+        return (torch.randn(2, 4, 8, 16),), {"y": torch.randn(2, 4, 8, 16)}
 
     def get_dynamic_shapes(self):
         batch = Dim("batch", min=1, max=128)
         dynamic_shapes = {
-            "tensor": {0: batch},
+            "x": {0: batch},
+            "y": {0: batch},
         }
         return dynamic_shapes
 
@@ -70,6 +76,23 @@ class AdaptiveAvgPool(TestModuleBase):
     # def get_calibration_data(self):
     #     for _ in range(100):
     #         yield self.get_example_inputs()
+
+
+class AvgPoolWithPaddingKwargs(TestModuleBase):
+    def __init__(self):
+        super().__init__()
+        self.avgpool = torch.nn.AvgPool2d(kernel_size=3, stride=2, padding=1)
+
+    def forward(self, tensor0, tensor1):
+        result = self.avgpool(tensor0) + tensor1
+        return result
+
+    def get_example_inputs(self):
+        # Reverse-ordered kwargs
+        return (), {
+            "tensor1": torch.randn(2, 4, 4, 8),
+            "tensor0": torch.randn(2, 4, 8, 16),
+        }
 
 
 class AvgPoolWithPadding(TestModuleBase):

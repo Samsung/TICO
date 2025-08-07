@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from tico.config.base import CompileConfigBase
+from tico.utils.signature import ModelInputSpec
 
 from test.modules.base import TestModuleBase
 
@@ -188,6 +189,25 @@ class NNModuleTest(TestRunnerBase):
             # trim None outputs
             torch_result = [res for res in torch_result if res is not None]
             validate_result(torch_result, circle_result, **self.tolerance)
+
+        if dynamic_shapes:
+
+            def has_symbolic_input(circle_model_path: str) -> bool:
+                ispec = ModelInputSpec.load(circle_model_path)
+                for idx, shape_sig in enumerate(ispec.shape_signatures):
+                    if shape_sig is None:
+                        continue
+                    else:
+                        assert any(
+                            dim == -1 for dim in shape_sig
+                        ), "Unexpected shape signature: {shape_sig} in {ispec.names[idx]}"
+                        return True
+                return False
+
+            if not has_symbolic_input(circle_model_path):
+                raise RuntimeError(
+                    f"Dynamic shapes were not applied to {circle_model_path} but expected. Check your dynamic shapes."
+                )
 
 
 class NormalTestDictBuilder(TestDictBuilderBase):

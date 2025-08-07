@@ -57,5 +57,4 @@ class LlamaAttentionWithKVCache(TestModuleBase):
             hidden_states,
             position_embeddings,
             attention_mask,
-            past_key_values,
-        ), {}
+        ), {"past_key_values": past_key_values}

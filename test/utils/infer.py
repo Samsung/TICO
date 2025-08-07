@@ -16,7 +16,7 @@ from typing import Any
 
 import tico.utils
 import tico.utils.model
-from tico.interpreter.infer import flatten_and_convert
+from tico.utils.signature import ModelInputSpec
 
 
 def infer_with_circle_interpreter(
@@ -42,7 +42,9 @@ def infer_with_circle_interpreter(
         The output produced by the 'circle-interpreter'
     """
     circle_model = tico.utils.model.CircleModel.load(circle_path)
-    circle_result = circle_model(*forward_args, **forward_kwargs)
+    ispec = ModelInputSpec.load(circle_path)
+    inputs = ispec.bind(forward_args, forward_kwargs, check=True)
+    circle_result = circle_model(*inputs)
 
     if not isinstance(circle_result, list):
         circle_result = [circle_result]
@@ -75,11 +77,10 @@ def infer_with_onert(
     try:
         from onert import infer
     except ImportError:
-        raise RuntimeError("The 'onert' package is required to run this funciton.")
+        raise RuntimeError("The 'onert' package is required to run this function.")
 
-    # TODO properly flatten kwargs to tuple
-    inputs = forward_args + tuple(forward_kwargs.values())
-    inputs = flatten_and_convert(inputs)
+    ispec = ModelInputSpec.load(circle_path)
+    inputs = ispec.bind(forward_args, forward_kwargs, check=True)
 
     session_float = infer.session(circle_path)
     output = session_float.infer(inputs)

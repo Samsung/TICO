@@ -45,3 +45,32 @@ class ConvEmbed(TestModuleBase):
     def get_example_inputs(self):
         H = W = 768
         return (torch.randn(1, 3, H, W), (H, W)), {}
+
+
+class ConvEmbedWithKwargs(TestModuleBase):
+    def __init__(
+        self,
+        patch_size=7,
+        in_chans=3,
+        embed_dim=64,
+        stride=4,
+        padding=2,
+    ):
+        super().__init__()
+        self.patch_size = patch_size
+
+        self.proj = torch.nn.Conv2d(
+            in_chans, embed_dim, kernel_size=patch_size, stride=stride, padding=padding
+        )
+
+    def forward(self, x: torch.Tensor, size: tuple):
+        H, W = size
+        x = self.proj(x)
+        _, _, H, W = x.shape
+        x = x.permute(0, 2, 3, 1)
+
+        return x, (H, W)
+
+    def get_example_inputs(self):
+        H = W = 768
+        return (torch.randn(1, 3, H, W),), {"size": (H, W)}
