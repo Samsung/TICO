@@ -15,11 +15,11 @@
 import torch
 
 
-def reduce_except(x: torch.Tensor, dim_to_keep: int):
+def channelwise_minmax(x: torch.Tensor, channel_axis: int):
     """
-    Reduce over all axes except *dim_to_keep* (useful for per-channel).
+    Compute per-channel (min, max) by reducing all axes except `channel_axis`.
     """
-    dim_to_keep = dim_to_keep % x.ndim  # handle negative indices safely
-    dims = tuple(d for d in range(x.ndim) if d != dim_to_keep)
+    channel_axis = channel_axis % x.ndim  # handle negative indices safely
+    dims = tuple(d for d in range(x.ndim) if d != channel_axis)
 
     return x.amin(dim=dims), x.amax(dim=dims)

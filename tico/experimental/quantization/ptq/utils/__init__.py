@@ -1,5 +1,5 @@
-from tico.experimental.quantization.ptq.utils.reduce_utils import reduce_except
+from tico.experimental.quantization.ptq.utils.reduce_utils import channelwise_minmax
 
 __all__ = [
-    "reduce_except",
+    "channelwise_minmax",
 ]
