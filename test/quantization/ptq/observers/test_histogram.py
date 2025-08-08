@@ -56,7 +56,7 @@ class TestHistogramObserver(unittest.TestCase):
         obs.collect(torch.randn(8, 32))
         scale, zp = obs.compute_qparams()
 
-        self.assertTrue(obs.has_qparms)
+        self.assertTrue(obs.has_qparams)
         self.assertGreater(scale.item(), 0.0)
         self.assertIsInstance(zp.item(), int)
 

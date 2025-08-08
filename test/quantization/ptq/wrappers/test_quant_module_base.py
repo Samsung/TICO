@@ -75,7 +75,7 @@ class TestQuantModuleBase(unittest.TestCase):
 
         self.qm.freeze_qparams()
         self.assertIs(self.qm._mode, Mode.QUANT)
-        self.assertTrue(self.qm.obs.has_qparms)
+        self.assertTrue(self.qm.obs.has_qparams)
 
     def test_fq_collect_and_quantize(self):
         # CALIB pass – observer should collect

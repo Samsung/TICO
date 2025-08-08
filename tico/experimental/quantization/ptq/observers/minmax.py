@@ -12,12 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-A trivial subclass that adds nothing (kept for readability).
-"""
+import torch
 
 from tico.experimental.quantization.ptq.observers.base import ObserverBase
+from tico.experimental.quantization.ptq.utils import reduce_except
 
 
 class MinMaxObserver(ObserverBase):
     """Plain min/max range tracker."""
+
+    @torch.no_grad()
+    def collect(self, x: torch.Tensor) -> None:
+        """
+        Update running min/max with the incoming batch.
+
+        Per-tensor: use global min/max.
+        Per-channel: reduce all axes except the channel axis.
+        """
+        if not self.enabled:
+            return
+
+        if self.channel_axis is None:
+            curr_min, curr_max = x.min(), x.max()
+        else:
+            curr_min, curr_max = reduce_except(x, self.channel_axis)
+
+        # Broadcasting handles scalar-vs-vector cases
+        self.min_val = torch.minimum(self.min_val, curr_min)
+        self.max_val = torch.maximum(self.max_val, curr_max)

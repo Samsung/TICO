@@ -42,6 +42,7 @@ import torch
 import torch.nn.functional as F
 
 from tico.experimental.quantization.ptq.observers.base import ObserverBase
+from tico.experimental.quantization.ptq.utils.reduce_utils import reduce_except
 
 
 class HistogramObserver(ObserverBase):
@@ -82,7 +83,14 @@ class HistogramObserver(ObserverBase):
             return
 
         # ---------- update global min/max first ------------------------
-        super().collect(x)
+        if self.channel_axis is None:
+            curr_min, curr_max = x.min(), x.max()
+        else:
+            curr_min, curr_max = reduce_except(x, self.channel_axis)
+
+        # Broadcasting handles scalar-vs-vector cases
+        self.min_val = torch.minimum(self.min_val, curr_min)
+        self.max_val = torch.maximum(self.max_val, curr_max)
 
         # ---------- update histogram -----------------------------------
         if torch.isinf(self.min_val) or torch.isinf(self.max_val):

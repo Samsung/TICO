@@ -113,11 +113,13 @@ class TestQuantConfigChild(unittest.TestCase):
 
 # ---- Dummy observers for testing (just to distinguish classes) ----
 class DummyObserverA(ObserverBase):
-    pass
+    def collect(self, x):
+        return super().collect(x)
 
 
 class DummyObserverB(ObserverBase):
-    pass
+    def collect(self, x):
+        return super().collect(x)
 
 
 class TestObserverAndDTypePrecedence(unittest.TestCase):
