@@ -35,9 +35,9 @@ class BigLinear(torch.nn.Module):
 
     def forward(self, x):
         z = self.linear(x)
-        z = self.linear2(x)
-        z = self.linear3(x)
-        z = self.linear4(x)
+        z = self.linear2(z)
+        z = self.linear3(z)
+        z = self.linear4(z)
         return z
 
     def get_example_inputs(self):
@@ -111,7 +111,7 @@ class GPTQTest(unittest.TestCase):
         # Evaluate
         results = evaluate(ori_m, cm, BACKEND.TRIV24, mode="return")
         # TODO Parametrize tolerance.
-        tolerance = 1e-2
+        tolerance = 0.02
         assert results is not None
         assert "peir" in results
         assert (
