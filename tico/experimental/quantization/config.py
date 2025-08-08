@@ -42,8 +42,9 @@ class GPTQConfig(BaseConfig):
     Configuration for GPTQ.
     """
 
-    def __init__(self, verbose: bool = False):
+    def __init__(self, verbose: bool = False, show_progress: bool = True):
         self.verbose = verbose
+        self.show_progress = show_progress
 
     @property
     def name(self) -> str:

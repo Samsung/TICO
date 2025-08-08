@@ -183,7 +183,12 @@ class GPTQQuantizer(BaseQuantizer):
 
         quantizers: Dict[str, Any] = {}
         for l_idx, layer in enumerate(
-            tqdm(target_layers, desc="Quantizing layers", unit="layer")
+            tqdm(
+                target_layers,
+                desc="Quantizing layers",
+                unit="layer",
+                disable=not gptq_conf.show_progress,
+            )
         ):
             # 1) Identify quantizable submodules within the layer
             full = find_layers(layer)
@@ -218,6 +223,7 @@ class GPTQQuantizer(BaseQuantizer):
                     desc=f"[L{l_idx}] collecting",
                     leave=False,
                     unit="batch",
+                    disable=not gptq_conf.show_progress,
                 ):
                     cache_args_batch = gather_single_batch_from_list(
                         self.cache_args, batch_idx
@@ -251,6 +257,7 @@ class GPTQQuantizer(BaseQuantizer):
                 desc=f"[L{l_idx}] re-forward",
                 leave=False,
                 unit="batch",
+                disable=not gptq_conf.show_progress,
             ):
                 cache_args_batch = gather_single_batch_from_list(
                     self.cache_args, batch_idx

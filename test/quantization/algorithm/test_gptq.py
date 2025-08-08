@@ -63,7 +63,7 @@ class GPTQTest(unittest.TestCase):
         # base
         base_q_proj_w = model.model.layers[0].self_attn.q_proj.weight.clone()
 
-        q_m = prepare(model, GPTQConfig())
+        q_m = prepare(model, GPTQConfig(show_progress=False))
         q_m(sample_input)
         q_m = convert(q_m, inplace=True)
 
@@ -86,7 +86,7 @@ class GPTQTest(unittest.TestCase):
         args, kwargs = ori_m.get_example_inputs()
 
         # Apply GPTQ
-        q_m = prepare(q_m, GPTQConfig())
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
         for _ in range(30):
             args, kwargs = ori_m.get_example_inputs()
             q_m(*args, **kwargs)
