@@ -20,96 +20,78 @@ from tico.experimental.quantization.ptq.observers.base import ObserverBase
 from tico.experimental.quantization.ptq.qscheme import QScheme
 
 
+class _NoopObserver(ObserverBase):
+    """
+    Minimal concrete subclass for testing ObserverBase behavior.
+    Does not collect statistics; tests rely on load_qparams().
+    """
+
+    def collect(self, x: torch.Tensor) -> None:
+        return  # no-op
+
+
 class TestObserverBase(unittest.TestCase):
-    def test_per_tensor_stats(self):
-        obs = ObserverBase(name="dummy", dtype=DType.uint(4))  # 4-bit unsigned
+    def test_fake_quant_requires_qparams(self):
+        obs = _NoopObserver(name="dummy", dtype=DType.uint(8))
+        x = torch.randn(4)
+        with self.assertRaises(RuntimeError):
+            _ = obs.fake_quant(x)
 
-        x1 = torch.tensor([-1.0, 2.0, 3.0])
-        obs.collect(x1)
+    def test_load_qparams_locks_and_is_used(self):
+        obs = _NoopObserver(name="dummy", dtype=DType.uint(8))  # qmin=0, qmax=255
+        self.assertTrue(obs.enabled)
 
-        x2 = torch.tensor([4.0])
-        obs.collect(x2)
+        scale = torch.tensor(0.1)
+        zp = torch.tensor(5, dtype=torch.int)
+        obs.load_qparams(scale, zp, lock=True)
 
-        self.assertEqual(obs.min_val, -1.0)
-        self.assertEqual(obs.max_val, 4.0)
+        # Locked after load
+        self.assertFalse(obs.enabled)
+        self.assertTrue(obs.has_qparams)
 
-        scale, zp = obs.compute_qparams()
-        qmin, qmax = obs.dtype.qmin, obs.dtype.qmax
-        expected_scale = (4.0 - (-1.0)) / (qmax - qmin)
-        expected_zp = round(qmin - (-1.0) / expected_scale)
-        self.assertAlmostEqual(scale.item(), expected_scale, places=6)
-        self.assertEqual(zp.item(), expected_zp)
-
-    def test_per_tensor_symmetric(self):
-        obs = ObserverBase(
-            name="dummy",
-            dtype=DType.int(8),  # signed 8-bit
-            qscheme=QScheme.PER_TENSOR_SYMM,
-        )
-        obs.collect(torch.tensor([-3.0, 4.0]))
-
-        scale, zp = obs.compute_qparams()
-        qmax = obs.dtype.qmax  # 127 for int8
-        expected_scale = max(abs(-3.0), abs(4.0)) / qmax
-
-        self.assertAlmostEqual(scale.item(), expected_scale, places=6)
-        self.assertEqual(zp.item(), 0)  # symmetric ⇒ zp = 0
-
-    def test_per_channel_stats(self):
-        obs = ObserverBase(
-            name="dummy",
-            dtype=DType.int(5),  # 5-bit signed
-            qscheme=QScheme.PER_CHANNEL_ASYMM,
-            channel_axis=0,
-        )
-        # Tensor shape (C, N)
-        x = torch.tensor([[1.0, 3.0, -2.0], [4.0, -5.0, 0.5]])
-        obs.collect(x)
-        self.assertTrue(
-            torch.equal(torch.as_tensor(obs.min_val), torch.tensor([-2.0, -5.0]))
-        )
-        self.assertTrue(
-            torch.equal(torch.as_tensor(obs.max_val), torch.tensor([3.0, 4.0]))
-        )
-
-    def test_per_channel_affine(self):
-        torch.manual_seed(0)
-        # Toy conv-like activations: shape (C=2, H=2, W=2)
-        x = torch.tensor([[[1.0, -3.0], [2.0, 0.5]], [[4.0, -6.0], [3.0, -1.0]]])
-
-        obs = ObserverBase(
-            name="dummy",
-            dtype=DType.uint(4),
-            qscheme=QScheme.PER_CHANNEL_ASYMM,
-            channel_axis=0,
-        )
-        obs.collect(x)
-        obs.enabled = False  # freeze
-        obs.compute_qparams()
+        # fake-quant uses injected qparams (avoid clamping region)
+        x = torch.tensor([0.0, 0.05, 0.15])
         y = obs.fake_quant(x)
 
-        # Each channel must have been clipped/quantized independently.
-        # A simple invariant: values > channel-max should map to channel-max after dequant.
-        ch_max = torch.tensor([2.0, 4.0])  # from data
-        y_flat = y.view(2, -1)
-        self.assertTrue(torch.all(y_flat[0] <= ch_max[0] + 1e-5))
-        self.assertTrue(torch.all(y_flat[1] <= ch_max[1] + 1e-5))
+        q = torch.round(x / scale) + zp
+        y_expected = (q - zp) * scale
+        self.assertTrue(torch.allclose(y, y_expected, atol=1e-6))
 
-    def test_per_channel_symmetric(self):
-        x = torch.tensor(
-            [[[1.0, -3.0], [2.0, 0.5]], [[4.0, -6.0], [3.0, -1.0]]]
-        )  # shape (C=2, H=2, W=2)
+    def test_reset_clears_minmax_and_cached_qparams(self):
+        obs = _NoopObserver(name="dummy", dtype=DType.uint(8))
+        obs.load_qparams(
+            torch.tensor(0.2), torch.tensor(3, dtype=torch.int), lock=False
+        )
+        self.assertTrue(obs.has_qparams)
 
-        obs = ObserverBase(
+        obs.reset()
+        # min/max sentinels restored
+        self.assertEqual(obs.min_val.item(), float("inf"))
+        self.assertEqual(obs.max_val.item(), float("-inf"))
+        # cached qparams removed
+        self.assertFalse(obs.has_qparams)
+
+    def test_per_channel_fake_quant_path(self):
+        # Ensure per-channel branch in base.fake_quant() behaves with provided axis/params.
+        obs = _NoopObserver(
             name="dummy",
-            dtype=DType.int(4),  # 4-bit signed
-            qscheme=QScheme.PER_CHANNEL_SYMM,
+            dtype=DType.uint(8),
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
             channel_axis=0,
         )
-        obs.collect(x)
-        scale, zp = obs.compute_qparams()
+        x = torch.tensor([[0.05, 0.10, 0.15], [0.02, 0.07, 0.12]])  # shape (C=2, N=3)
 
-        qmax = obs.dtype.qmax  # 7 for int4
-        expected_scale = torch.tensor([3.0, 6.0]) / qmax
-        self.assertTrue(torch.allclose(scale, expected_scale, atol=1e-6))
-        self.assertTrue(torch.equal(zp, torch.zeros_like(zp)))
+        scale = torch.tensor([0.05, 0.02])  # per-channel scales (C,)
+        zp = torch.tensor([10, 3], dtype=torch.int)  # per-channel zero-points (C,)
+        obs.load_qparams(scale, zp, lock=True)
+
+        y = obs.fake_quant(x)
+
+        # Reproduce expected dequant per channel (no clamping region)
+        q0 = torch.round(x[0] / scale[0]) + zp[0]
+        y0 = (q0 - zp[0]) * scale[0]
+        q1 = torch.round(x[1] / scale[1]) + zp[1]
+        y1 = (q1 - zp[1]) * scale[1]
+
+        self.assertTrue(torch.allclose(y[0], y0, atol=1e-6))
+        self.assertTrue(torch.allclose(y[1], y1, atol=1e-6))

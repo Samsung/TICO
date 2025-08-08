@@ -13,18 +13,19 @@
 # limitations under the License.
 
 import math
+from abc import ABC, abstractmethod
 from typing import Optional
 
 import torch
 
 from tico.experimental.quantization.ptq.dtypes import DType, UINT8
 from tico.experimental.quantization.ptq.qscheme import QScheme
-from tico.experimental.quantization.ptq.utils import reduce_except
 
 
-class ObserverBase:
+class ObserverBase(ABC):
     """
-    Tracks activation/weight ranges and converts them into (scale, zero-point).
+    Abstract base class for observers that tracks activation/weight ranges
+     and converts them into (scale, zero-point).
     """
 
     def __init__(
@@ -43,35 +44,36 @@ class ObserverBase:
         self.reset()
 
     def reset(self) -> None:
+        """
+        Reset running statistics to initial (±inf) sentinels.
+        """
         self.min_val: torch.Tensor = torch.tensor(math.inf)
         self.max_val: torch.Tensor = torch.tensor(-math.inf)
+        # Clear cached qparams if any
+        if hasattr(self, "_cached_scale"):
+            del self._cached_scale
+        if hasattr(self, "_cached_zp"):
+            del self._cached_zp
 
     def load_qparams(self, scale: torch.Tensor, zp: torch.Tensor, *, lock: bool = True):
         """
-        Inject externally computed qparams.
+        Inject externally computed qparams and optionally lock the observer.
+
+        When locked, subsequent `collect()` calls are ignored.
         """
         self._cached_scale = scale.detach()
         self._cached_zp = zp.to(torch.int)
         if lock:
             self.enabled = False
 
-    @torch.no_grad()
+    @abstractmethod
     def collect(self, x: torch.Tensor) -> None:
         """
         Update running statistics with a new batch of data.
-        """
-        if not self.enabled:
-            return
 
-        if self.channel_axis is None:
-            # Per-tensor: reduce to scalar
-            self.min_val = torch.minimum(self.min_val, x.min())
-            self.max_val = torch.maximum(self.max_val, x.max())
-        else:
-            # Per-channel: track a vector of size C
-            mins, maxs = reduce_except(x, self.channel_axis)
-            self.min_val = torch.minimum(self.min_val, mins)
-            self.max_val = torch.maximum(self.max_val, maxs)
+        Must be implemented by subclasses (e.g., MinMax, EMA, Histogram, MSE).
+        """
+        raise NotImplementedError
 
     def compute_qparams(self):
         """
@@ -126,11 +128,14 @@ class ObserverBase:
         return scale, zp
 
     @property
-    def has_qparms(self) -> bool:
+    def has_qparams(self) -> bool:
+        """
+        Return True if qparams have been computed or injected.
+        """
         return hasattr(self, "_cached_scale")
 
     def fake_quant(self, x: torch.Tensor):
-        if not self.has_qparms:
+        if not self.has_qparams:
             raise RuntimeError("compute_qparams() must be called before fake_quant().")
         scale, zp = self._cached_scale, self._cached_zp
 
