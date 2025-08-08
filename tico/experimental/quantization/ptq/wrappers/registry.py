@@ -28,6 +28,9 @@ _CORE_MODULES = (
     "tico.experimental.quantization.ptq.wrappers.nn.quant_layernorm",
     "tico.experimental.quantization.ptq.wrappers.nn.quant_linear",
     "tico.experimental.quantization.ptq.wrappers.nn.quant_silu",
+    "tico.experimental.quantization.ptq.wrappers.llama.quant_llama_attn",
+    "tico.experimental.quantization.ptq.wrappers.llama.quant_llama_decoder_layer",
+    "tico.experimental.quantization.ptq.wrappers.llama.quant_llama_mlp",
     # add future core wrappers here
 )
 
