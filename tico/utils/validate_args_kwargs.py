@@ -173,6 +173,19 @@ class CatArgs:
 
 @enforce_type
 @dataclass
+class CircleRMSNormArgs:
+    """
+    This is not aten ops but custom op for RMSNorm.
+    circle_custom.rms_norm(Tensor input, Tensor? weight=None, float? eps=None) -> Tensor
+    """
+
+    input: torch.fx.Node
+    weight: Optional[torch.fx.Node]
+    eps: Optional[float]
+
+
+@enforce_type
+@dataclass
 class ClampArgs:
     """
     clamp(Tensor self, Scalar? min=None, Scalar? max=None) -> Tensor
@@ -929,6 +942,19 @@ class ResizeNearestNeighborArgs:
 
     input: torch.fx.Node
     size: List[int]
+
+
+@enforce_type
+@dataclass
+class RMSNormArgs:
+    """
+    rms_norm(Tensor input, SymInt[] normalized_shape, Tensor? weight=None, float? eps=None) -> Tensor
+    """
+
+    input: torch.fx.Node
+    normalized_shape: List[int]
+    weight: Optional[torch.fx.Node]
+    eps: Optional[float]
 
 
 @enforce_type

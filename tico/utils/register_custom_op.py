@@ -703,6 +703,28 @@ def CircleQuantizeMX():
         return input_
 
 
+def CircleRMSNorm():
+    @custom_op("circle_custom::rms_norm", mutates_args=())
+    def rms_norm(
+        hidden_states: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        eps: float = 1e-05,
+    ) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + eps)
+        return weight * hidden_states.to(input_dtype)
+
+    @register_fake("circle_custom::rms_norm")
+    def _(
+        hidden_states: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        eps: float = 1e-05,
+    ) -> torch.Tensor:
+        return hidden_states.new_empty(hidden_states.size())
+
+
 # Add custom ops to the torch namespace
 def RegisterOps():
     CircleResizeNearestNeighbor()
@@ -715,3 +737,4 @@ def RegisterOps():
     CircleAvgPool2D()
     CircleInstanceNorm()
     CircleQuantizeMX()
+    CircleRMSNorm()
