@@ -15,7 +15,7 @@
 import torch
 
 from tico.experimental.quantization.ptq.observers.base import ObserverBase
-from tico.experimental.quantization.ptq.utils import reduce_except
+from tico.experimental.quantization.ptq.utils import channelwise_minmax
 
 
 class EMAObserver(ObserverBase):
@@ -52,7 +52,7 @@ class EMAObserver(ObserverBase):
         if self.channel_axis is None:
             curr_min, curr_max = x.min(), x.max()
         else:
-            curr_min, curr_max = reduce_except(x, self.channel_axis)
+            curr_min, curr_max = channelwise_minmax(x, self.channel_axis)
 
         if (
             torch.isinf(self.min_val).any() and torch.isinf(self.max_val).any()
