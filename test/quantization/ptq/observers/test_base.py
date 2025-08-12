@@ -34,10 +34,9 @@ class _NoopObserver(ObserverBase):
         # No internal state
         return
 
-    def collect(self, x: torch.Tensor) -> None:
-        if not self.enabled:
-            return
+    def _update_stats(self, x: torch.Tensor) -> None:
         # No stats to update
+        return
 
     def compute_qparams(self):
         # Non-affine observer may return None; still satisfies the interface
@@ -56,9 +55,7 @@ class _CountingObserver(_NoopObserver):
     def reset(self) -> None:
         self.n = 0
 
-    def collect(self, x: torch.Tensor) -> None:
-        if not self.enabled:
-            return
+    def _update_stats(self, x: torch.Tensor) -> None:
         self.n += 1
 
 
@@ -81,6 +78,11 @@ class TestObserverBase(unittest.TestCase):
         obs.enabled = False
         obs.collect(torch.randn(3))
         self.assertEqual(obs.n, 1)
+
+        # Re-enable and verify it resumes updating
+        obs.enabled = True
+        obs.collect(torch.randn(3))
+        self.assertEqual(obs.n, 2)
 
     def test_repr_smoke(self):
         obs = _NoopObserver(

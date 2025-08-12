@@ -29,9 +29,7 @@ class _MinMaxLikeObserver(AffineObserverBase):
     """
 
     @torch.no_grad()
-    def collect(self, x: torch.Tensor) -> None:
-        if not self.enabled:
-            return
+    def _update_stats(self, x: torch.Tensor) -> None:
         if self.channel_axis is None:
             cur_min, cur_max = x.min(), x.max()
         else:

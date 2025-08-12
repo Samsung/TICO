@@ -53,10 +53,21 @@ class ObserverBase(ABC):
         """Clear any running statistics or cached params."""
         raise NotImplementedError
 
-    @abstractmethod
     def collect(self, x: torch.Tensor) -> None:
         """
         Update running statistics with a new batch of data.
+
+        This base implementation guards on `enabled` and then calls `_update_stats(x)`.
+        Subclasses should implement `_update_stats(x)` instead of overriding `collect`.
+        """
+        if not self.enabled:
+            return
+        self._update_stats(x)
+
+    @abstractmethod
+    def _update_stats(self, x: torch.Tensor) -> None:
+        """
+        Update running statistics (min/max, hist, mse buffers, ...).
 
         Must be implemented by subclasses (e.g., MinMax, EMA, Histogram, MSE).
         """

@@ -22,16 +22,13 @@ class MinMaxObserver(AffineObserverBase):
     """Plain min/max range tracker."""
 
     @torch.no_grad()
-    def collect(self, x: torch.Tensor) -> None:
+    def _update_stats(self, x: torch.Tensor) -> None:
         """
         Update running min/max with the incoming batch.
 
         Per-tensor: use global min/max.
         Per-channel: reduce all axes except the channel axis.
         """
-        if not self.enabled:
-            return
-
         if self.channel_axis is None:
             curr_min, curr_max = x.min(), x.max()
         else:
