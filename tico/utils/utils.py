@@ -79,6 +79,59 @@ def enforce_type(callable):
     def check_types(*args, **kwargs):
         parameters = dict(zip(spec.args, args))
         parameters.update(kwargs)
+
+        # Return tuple of flattened types.
+        # Q) What is flatten?
+        # A) Optional/Union is not included. Below are included.
+        # collections: List, Set, ...
+        # primitive types: int, str, ...
+        def _flatten_type(type_hint) -> tuple:
+            # `get_origin` maps Union[...] and Optional[...] varieties to Union
+            if typing.get_origin(type_hint) == typing.Union:
+                # ex. typing.Union[list, int] -> (list, int)
+                # ex. typing.Optional[torch.fx.Node] -> (torch.fx.Node, NoneType)
+                actual_type = tuple(
+                    _flatten_type(t) for t in typing.get_args(type_hint)
+                )
+            else:
+                actual_type = (type_hint,)
+            return actual_type
+
+        # Return true if value matches with type_hint
+        # Return false otherwise
+        def _check_type(value, type_hint):
+            if type_hint == typing.Any:
+                return True
+
+            if isinstance(type_hint, tuple):
+                return any(_check_type(value, t) for t in type_hint)
+
+            if typing.get_origin(type_hint) in (list, set):
+                if not isinstance(value, typing.get_origin(type_hint)):
+                    return False
+
+                for v in value:
+                    if not any([_check_type(v, t) for t in typing.get_args(type_hint)]):
+                        return False
+
+                return True
+
+            if typing.get_origin(type_hint) is dict:
+                if not isinstance(value, typing.get_origin(type_hint)):
+                    return False
+
+                for k, v in value.items():
+                    k_type, v_type = typing.get_args(type_hint)
+                    if not _check_type(k, k_type):
+                        return False
+                    if not _check_type(v, v_type):
+                        return False
+
+                return True
+
+            # TODO: Support more type hints
+            return isinstance(value, type_hint)
+
         for name, value in parameters.items():
             if name == "self":
                 # skip 'self' in spec.args
@@ -89,63 +142,7 @@ def enforce_type(callable):
             ), f"All parameter require type hints. {name} needs a type hint"
 
             type_hint = spec.annotations[name]
-
-            # Return tuple of flattened types.
-            # Q) What is flatten?
-            # A) Optional/Union is not included. Below are included.
-            # collections: List, Set, ...
-            # primitive types: int, str, ...
-            def _flatten_type(type_hint) -> tuple:
-                # `get_origin` maps Union[...] and Optional[...] varieties to Union
-                if typing.get_origin(type_hint) == typing.Union:
-                    # ex. typing.Union[list, int] -> (list, int)
-                    # ex. typing.Optional[torch.fx.Node] -> (torch.fx.Node, NoneType)
-                    actual_type = tuple(
-                        [_flatten_type(t) for t in typing.get_args(type_hint)]
-                    )
-                else:
-                    actual_type = (type_hint,)
-                return actual_type
-
             type_hint = _flatten_type(type_hint)
-
-            # Return true if value matches with type_hint
-            # Return false otherwise
-            def _check_type(value, type_hint):
-                if type_hint == typing.Any:
-                    return True
-
-                if isinstance(type_hint, tuple):
-                    return any([_check_type(value, t) for t in type_hint])
-
-                if typing.get_origin(type_hint) in (list, set):
-                    if not isinstance(value, typing.get_origin(type_hint)):
-                        return False
-
-                    for v in value:
-                        if not any(
-                            [_check_type(v, t) for t in typing.get_args(type_hint)]
-                        ):
-                            return False
-
-                    return True
-
-                if typing.get_origin(type_hint) is dict:
-                    if not isinstance(value, typing.get_origin(type_hint)):
-                        return False
-
-                    for k, v in value.items():
-                        k_type, v_type = typing.get_args(type_hint)
-                        if not _check_type(k, k_type):
-                            return False
-                        if not _check_type(v, v_type):
-                            return False
-
-                    return True
-
-                # TODO: Support more type hints
-                return isinstance(value, type_hint)
-
             type_check_result = _check_type(value, type_hint)
             if not type_check_result:
                 raise ArgTypeError(
