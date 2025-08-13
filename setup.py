@@ -2,6 +2,7 @@
 
 import os
 import re
+from pathlib import Path
 
 from setuptools import find_packages, setup
 from version import VERSION
@@ -23,6 +24,11 @@ with open("tico/__init__.py", "w") as init_file:
     init_file.write(init_file_update)
 
 ############################################################
+### Prepare long_description                             ###
+############################################################
+readme = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
+
+############################################################
 ### Run setup                                            ###
 ############################################################
 setup(
@@ -30,7 +36,7 @@ setup(
     python_requires=">=3.10.0",
     version=VERSION,
     description="Convert exported Torch module to circle",
-    long_description=open("README.md").read(),
+    long_description=readme,
     long_description_content_type="text/markdown",
     license_files=("LICENSE",),
     packages=find_packages(include=["tico*"]),
