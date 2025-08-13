@@ -18,7 +18,7 @@ import torch
 from tico.experimental.quantization.ptq.utils.reduce_utils import channelwise_minmax
 
 
-class TestReduceExcept(unittest.TestCase):
+class TestChannelwiseMinMax(unittest.TestCase):
     def test_keep_dim0(self):
         # (C, N) : keep channel dim = 0
         x = torch.tensor([[1.0, 2.0, -3.0], [4.0, -5.0, 0.5]])
