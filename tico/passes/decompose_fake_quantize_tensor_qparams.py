@@ -244,7 +244,7 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     # So, let's remove `mask` from the output.args first.
                     # mask_user(output).args == (dequantize_per_tensor.tensor, mask)
                     if mask:
-                        len(mask) == 1
+                        assert len(mask) == 1
                         mask_user = list(mask[0].users.keys())[0]
                         assert len(mask_user.args) == 1
                         mask_user.args = ((mask_user.args[0][0],),)
