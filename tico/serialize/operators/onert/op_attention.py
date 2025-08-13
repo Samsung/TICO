@@ -38,7 +38,6 @@ attention.llama(
     Tensor wo,
     Tensor position_cos,
     Tensor position_sin,
-    Tensor? attention_mask,
     Tensor past_key,
     Tensor past_value,
     int layer_idx,
@@ -60,7 +59,6 @@ def attention_llama(*args, **kwargs):
         o_proj,
         position_cos,
         position_sin,
-        attention_mask,
         past_key,
         past_value,
         layer_idx,
@@ -69,7 +67,7 @@ def attention_llama(*args, **kwargs):
     return hidden_states
 
 
-from typing import List, Optional
+from typing import List
 
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import LlamaAttention
@@ -79,8 +77,7 @@ def llama_attention_forward_adapter(
     self: LlamaAttention,
     hidden_states: torch.Tensor,
     position_embeddings: List[torch.Tensor],
-    attention_mask: Optional[torch.Tensor],
-    past_key_value: Optional[DynamicCache],
+    past_key_value: DynamicCache,
     cache_position: torch.Tensor,
     **kwargs,
 ):
@@ -97,13 +94,12 @@ def llama_attention_forward_adapter(
             self.o_proj.weight,
             position_embeddings[0],  # cos
             position_embeddings[1],  # sin
-            attention_mask,
             # key_cache is a list of cache for each decoder layer.
             # Assumtion: key cache is continuous
             #
             #    k_cache[0] | k_cache[1] | ...  | k_cache[n]
-            key_cache[0],
-            value_cache[0],  # Same to value_cache
+            key_cache[self.layer_idx],
+            value_cache[self.layer_idx],  # Same to value_cache
             self.layer_idx,
             cache_position,
         ),
@@ -132,7 +128,6 @@ class AttentionVisitor(NodeVisitor):
             wo,
             position_cos,
             position_sin,
-            attention_mask,
             past_key,
             past_value,
             cache_position,
