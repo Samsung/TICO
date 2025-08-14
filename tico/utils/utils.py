@@ -111,7 +111,7 @@ def enforce_type(callable):
                     return False
 
                 for v in value:
-                    if not any([_check_type(v, t) for t in typing.get_args(type_hint)]):
+                    if not any(_check_type(v, t) for t in typing.get_args(type_hint)):
                         return False
 
                 return True
