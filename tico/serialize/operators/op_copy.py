@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from typing import Dict, List, Optional, TYPE_CHECKING, Union
-
+from copy import deepcopy
 if TYPE_CHECKING:
     import torch._ops
     import torch.fx
@@ -59,9 +59,8 @@ class CopyVisitor(NodeVisitor):
         src: List[int],
         src_sig: Optional[List[int]],
     ) -> bool:
-        assert dst_sig is None
-        assert src_sig is None
-        return dst != src
+        exactly_same = (dst_sig == src_sig) and (dst == src)
+        return not exactly_same
 
     def define_broadcast_to_node(
         self,
@@ -98,54 +97,43 @@ class CopyVisitor(NodeVisitor):
         self,
         node: torch.fx.Node,
     ) -> circle.Operator.OperatorT:
-        if len(node.args) == 3:
-            raise NotYetSupportedError("'non_blocking' is not supported yet.")
-
-        assert len(node.args) == 2, len(node.args)
-
-        args = CopyArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        args = CopyArgs(*node.args, **node.kwargs)
         dst = args.dst
         src = args.src
-
-        # To connect 'dst' to Reshape node in the graph, 'dst' must be converted to Shape op.
-        dst_tensor: circle.Tensor.TensorT = self.graph.get_tensor(dst)
-        dst_shape: List[int] = dst_tensor.shape
-        dst_shape_signature: Optional[List[int]] = dst_tensor.shapeSignature
-
-        if dst_shape_signature is not None:
-            # TODO: support dynamic shape
-            raise NotYetSupportedError("Dynamic shape is not supported yet.")
-
-        dst_shape_tensor = torch.as_tensor(dst_shape, dtype=torch.int32)
-
-        dst_shape_shape = [len(dst_shape)]
-        dst_name: str = dst.name
-
-        shape_output = self.graph.add_tensor_from_scratch(
-            prefix=f"{dst_name}_shape_output",
-            shape=dst_shape_shape,
-            shape_signature=None,
-            dtype=circle.TensorType.TensorType.INT32,
-            source_node=node,
-        )
-
-        shape_operator = self.define_shape_node([dst], [shape_output])
-        self.graph.add_operator(shape_operator)
 
         src_tensor: circle.Tensor.TensorT = self.graph.get_tensor(src)
         src_shape: List[int] = src_tensor.shape
         src_shape_signature: Optional[List[int]] = src_tensor.shapeSignature
-
-        if src_shape_signature is not None:
-            # TODO: support dynamic shape
-            raise NotYetSupportedError("Dynamic shape is not supported yet.")
-
+        
+        dst_tensor: circle.Tensor.TensorT = self.graph.get_tensor(dst)
+        dst_shape: List[int] = dst_tensor.shape
+        dst_shape_signature: Optional[List[int]] = dst_tensor.shapeSignature
+        
         # The src tensor must be broadcastable with the dst tensor.
         do_broadcast = self.check_to_do_broadcast(
             dst_shape, dst_shape_signature, src_shape, src_shape_signature
         )
-        if do_broadcast:
-            # create braodcastTo output tensor
+        
+        if not do_broadcast:
+            # To connect 'dst' to Reshape node in the graph, 'dst' must be converted to Shape op.
+            dst_shape_tensor = torch.as_tensor(dst_shape, dtype=torch.int32)
+
+            dst_shape_shape = [len(dst_shape)]
+            dst_name: str = dst.name
+
+            shape_output = self.graph.add_tensor_from_scratch(
+                prefix=f"{dst_name}_shape_output",
+                shape=dst_shape_shape,
+                shape_signature=None,
+                dtype=circle.TensorType.TensorType.INT32,
+                source_node=node,
+            )
+
+            shape_operator = self.define_shape_node([dst], [shape_output])
+            self.graph.add_operator(shape_operator)
+            inputs = [src, shape_output]
+        else:
+            # create broadcastTo output tensor
             src_name: str = src.name
             src_type: int = src_tensor.type
 
@@ -159,15 +147,21 @@ class CopyVisitor(NodeVisitor):
                 )
             )
 
+            dst_shape_merged = deepcopy(dst_shape)
+            if dst_shape_signature is not None:
+                for idx, sig in enumerate(dst_shape_signature):
+                    if sig == -1:
+                        dst_shape_merged[idx] = -1
+                        
+            dst_shape_tensor = torch.as_tensor(dst_shape_merged, dtype=torch.int32)
             broadcast_to_operator: circle.Operator.OperatorT = (
                 self.define_broadcast_to_node(
-                    [src_tensor, dst_shape_tensor], [broadcast_to_output]
+                    [src_tensor, dst_shape_tensor], [node]
                 )
             )
-            self.graph.add_operator(broadcast_to_operator)
-            inputs: List = [broadcast_to_output, shape_output]
-        else:
-            inputs = [src, shape_output]
+            # self.graph.add_operator(broadcast_to_operator)
+            # inputs: List = [broadcast_to_output, shape_output]
+            return broadcast_to_operator
 
         outputs = [node]
         op_index = get_op_index(
