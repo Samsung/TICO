@@ -34,10 +34,6 @@ class TestMXObserver(unittest.TestCase):
             axis=1,
             shared_exp_method="max",
             round="nearest",
-            # Base kwargs are accepted but not used by MX path
-            dtype=DType.uint(8),
-            qscheme=QScheme.PER_TENSOR_ASYMM,
-            channel_axis=0,
         )
 
         # collect() should do nothing regardless of input; just smoke-test
@@ -57,7 +53,6 @@ class TestMXObserver(unittest.TestCase):
             axis=1,
             shared_exp_method="max",
             round="nearest",
-            dtype=DType.uint(8),
         )
         x = torch.randn(4, 5)
 
@@ -84,7 +79,7 @@ class TestMXObserver(unittest.TestCase):
         """
         Even when 'enabled' is False (no more stats collection), fake_quant should still run.
         """
-        obs = MXObserver(name="mx", elem_format="int8", axis=0, dtype=DType.uint(8))
+        obs = MXObserver(name="mx", elem_format="int8", axis=0)
         obs.enabled = False
         x = torch.randn(3, 3)
 
@@ -104,9 +99,6 @@ class TestMXObserver(unittest.TestCase):
             name="mx",
             elem_format="int8",
             axis=2,  # expected to be passed to quantize_mx
-            dtype=DType.uint(8),
-            qscheme=QScheme.PER_CHANNEL_ASYMM,
-            channel_axis=0,  # irrelevant for MX path
         )
         x = torch.randn(2, 3, 4)
 
@@ -121,9 +113,7 @@ class TestMXObserver(unittest.TestCase):
         """
         repr() should include class name and observer name for debugging.
         """
-        obs = MXObserver(
-            name="mx_debug", elem_format="int8", axis=0, dtype=DType.uint(8)
-        )
+        obs = MXObserver(name="mx_debug", elem_format="int8", axis=0)
         s = repr(obs)
         self.assertIn("MXObserver", s)
         self.assertIn("mx_debug", s)
