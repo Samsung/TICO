@@ -308,6 +308,12 @@ class CopyArgs:
 
     dst: torch.fx.Node
     src: torch.fx.Node
+    non_blocking: bool = False
+
+    def __post_init__(self):
+        if self.non_blocking is True:
+            raise NotImplementedError("non_blocking option is not supported yet.")
+            
 
 
 @enforce_type
