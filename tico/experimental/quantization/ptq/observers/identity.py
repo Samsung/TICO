@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-IdentityObserver: a *no-op* observer for FP-only modules.
+IdentityObserver: a "no-op" observer for FP-only modules.
 
 Motivation
 ----------
@@ -29,11 +29,11 @@ from tico.experimental.quantization.ptq.observers.affine_base import AffineObser
 
 class IdentityObserver(AffineObserverBase):
     """
-    Passthrough observer that **never** alters the tensor.
+    Passthrough observer that NEVER alters the tensor.
 
     • `_update_stats()`   → does nothing
-    • `compute_qparams()` → returns (1.0, 0) *dummy* q-params
-    • `fake_quant()`      → returns *x* unchanged
+    • `compute_qparams()` → returns (1.0, 0) "dummy" q-params
+    • `fake_quant()`      → returns `x` unchanged
     """
 
     def __init__(self, **kwargs):
@@ -67,7 +67,7 @@ class IdentityObserver(AffineObserverBase):
         return self._cached_scale, self._cached_zp
 
     def fake_quant(self, x: torch.Tensor):
-        """Identity mapping — leaves *x* in FP."""
+        """Identity mapping — leaves `x` in FP."""
         return x
 
     def __repr__(self) -> str:

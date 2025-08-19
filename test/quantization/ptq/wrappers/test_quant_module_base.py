@@ -13,18 +13,18 @@
 # limitations under the License.
 
 """
-Unit-tests for the abstract helper class **QuantModuleBase**.
+Unit-tests for the abstract helper class QuantModuleBase.
 
 Because the class is abstract, the tests create a tiny concrete subclass
 (`DummyQM`) that:
 
-1. owns exactly **one** observer (`obs`)
+1. owns exactly one observer (`obs`)
 2. in `forward()` multiplies the input by 2.0 and passes it through `_fq`
    so we can verify collection / fake-quant behaviour.
 
 The suite checks:
 
-* default mode is **NO_QUANT**
+* default mode is NO_QUANT
 * `enable_calibration()` resets the observer and switches mode
 * `_fq()` really collects in CALIB and fake-quantises in QUANT
 * `freeze_qparams()` disables the observer and populates cached q-params

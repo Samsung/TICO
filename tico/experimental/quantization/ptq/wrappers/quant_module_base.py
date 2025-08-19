@@ -106,7 +106,7 @@ class QuantModuleBase(nn.Module, ABC):
         Precedence (3-tier) for keys:
            • observer:  user > wrapper-default > QuantConfig.default_observer
            • dtype:     user > wrapper-default > QuantConfig.default_dtype
-           • qscheme:   user  > wrapper-default > QuantConfig.default_qscheme
+           • qscheme:   user > wrapper-default > QuantConfig.default_qscheme
 
         Other kwargs (e.g., qscheme, channel_axis, etc.) remain:
            user override > wrapper-default

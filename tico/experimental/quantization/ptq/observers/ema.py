@@ -31,7 +31,7 @@ class EMAObserver(AffineObserverBase):
 
         ema = momentum * ema + (1 - momentum) * new_value
 
-    With momentum → 0: *fast* adaptation, momentum → 1: *slow* adaptation.
+    With momentum → 0: FAST adaptation, momentum → 1: SLOW adaptation.
     """
 
     def __init__(

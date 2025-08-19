@@ -24,32 +24,32 @@ from tico.experimental.quantization.ptq.qscheme import QScheme
 @dataclass
 class QuantConfig:
     """
-    *One* object describes the quantization preferences for a single wrapper
-    **and its descendants**.
+    One object describes the quantization preferences for a single wrapper
+    and its descendants.
 
     Parameters
     ----------
     default_dtype : DType
-        Fallback dtype for every observer that **does not** receive an explicit
+        Fallback dtype for every observer that DOES NOT receive an explicit
         override.
     default_observer : Type[ObserverBase], optional
         Observer class to instantiate when the caller (or an override) does
          not provide a `observer` key.
     default_qscheme : QScheme
         Fallback quantization scheme (per-tensor / per-channel,
-        asymmetric / symmetric) for observers that do **not** receive an explicit
+        asymmetric / symmetric) for observers that DO NOT receive an explicit
         override.
     overrides : Mapping[str, Mapping[str, Any]]
-        Two-level mapping of *scopes* → *observer-kwargs*.
+        Two-level mapping of scopes → observer-kwargs.
 
-        • **Scope** can be either
-            - the *attribute name* of a child wrapper
-              (e.g. ``"gate_proj"`` or ``"up_proj"``), or
-            - an *observer logical name* inside *this* wrapper
-              (e.g. ``"mul"``, ``"act_in"``).
+        • SCOPE can be either
+            - the attribute name of a child wrapper
+              (e.g. "gate_proj" or "up_proj"), or
+            - an observer logical name inside this wrapper
+              (e.g. "mul", "act_in").
 
-        • **Observer-kwargs** is forwarded verbatim to the observer constructor
-          (``dtype``, ``qscheme``, ``channel_axis``, ``observer``, …).
+        • "Observer-kwargs" is forwarded verbatim to the observer constructor
+          (`dtype`, `qscheme`, `channel_axis`, `observer`, …).
 
     Example
     -------
