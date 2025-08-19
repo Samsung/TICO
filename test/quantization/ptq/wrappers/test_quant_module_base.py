@@ -74,6 +74,7 @@ class TestQuantModuleBase(unittest.TestCase):
         # observer reset to +inf / -inf
         assert isinstance(self.qm.obs, AffineObserverBase)
         self.assertTrue(math.isinf(self.qm.obs.min_val.item()))
+        self.assertTrue(math.isinf(self.qm.obs.max_val.item()))
 
         self.qm.freeze_qparams()
         self.assertIs(self.qm._mode, Mode.QUANT)
@@ -168,7 +169,7 @@ class TestQuantConfigDefaultObserver(unittest.TestCase):
 class DummyQMWrapperDefault(QuantModuleBase):
     def __init__(self, qcfg: QuantConfig | None = None):
         super().__init__(qcfg)
-        # wrapper-level 기본값: per-channel affine on axis 1
+        # wrapper-level default value: per-channel asymm on axis 1
         self.obs = self._make_obs(
             "act",
             qscheme=QScheme.PER_CHANNEL_ASYMM,

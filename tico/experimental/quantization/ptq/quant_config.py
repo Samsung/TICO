@@ -37,7 +37,7 @@ class QuantConfig:
          not provide a `observer` key.
     default_qscheme : QScheme
         Fallback quantization scheme (per-tensor / per-channel,
-        affine / symmetric) for observers that do **not** receive an explicit
+        asymmetric / symmetric) for observers that do **not** receive an explicit
         override.
     overrides : Mapping[str, Mapping[str, Any]]
         Two-level mapping of *scopes* → *observer-kwargs*.
@@ -61,7 +61,7 @@ class QuantConfig:
         default_qscheme  = QScheme.PER_TENSOR_SYMM,        # <- global scheme
         default_observer = PercentileObserver,             # <- global algorithm
         overrides={
-            # local override: input observer now MinMax & 4-bit, per-channel affine
+            # local override: input observer now MinMax & 4-bit, per-channel asymmetric
             "act_in": {"observer": MinMaxObserver,
                        "dtype":    DType.uint(4),
                        "qscheme":  QScheme.PER_CHANNEL_ASYMM},
