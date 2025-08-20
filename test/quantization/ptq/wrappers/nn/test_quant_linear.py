@@ -36,7 +36,6 @@ class TestQuantLinear(unittest.TestCase):
 
         # Calibration (re-collect static weight range right here)
         self.q_lin.enable_calibration()
-        self.q_lin.weight_obs.collect(self.fp32.weight)  # restore after reset
         _ = self.q_lin(self.x)
         self.assertIs(self.q_lin._mode, Mode.CALIB)
 
@@ -45,7 +44,6 @@ class TestQuantLinear(unittest.TestCase):
 
     def test_quantised_output_close(self):
         self.q_lin.enable_calibration()
-        self.q_lin.weight_obs.collect(self.fp32.weight)  # ensure weight stats
         _ = self.q_lin(self.x)
         self.q_lin.freeze_qparams()
 
@@ -65,7 +63,6 @@ class TestQuantLinear(unittest.TestCase):
 
         # calibration cycle
         self.q_lin.enable_calibration()
-        self.q_lin.weight_obs.collect(self.fp32.weight)
         self.q_lin.freeze_qparams()
 
         post_scale = self.q_lin.weight_obs._cached_scale
