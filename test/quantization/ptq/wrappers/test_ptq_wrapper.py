@@ -82,6 +82,7 @@ class TestPTQWrapper(unittest.TestCase):
 
     def test_weight_fake_quant_channelwise(self):
         self.wrapper.enable_calibration()  # collects weight stats now
+        _ = self.wrapper(self.input)
         self.wrapper.freeze_qparams()
 
         assert isinstance(self.wrapper.wrapped, QuantLinear)
