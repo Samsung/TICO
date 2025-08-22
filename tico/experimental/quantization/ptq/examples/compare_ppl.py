@@ -87,9 +87,8 @@ else:
     ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(DEVICE)
 
     # (a) switch every QuantModuleBase to CALIB mode
-    int8_model.model.layers.apply(
-        lambda m: getattr(m, "enable_calibration", lambda: None)()
-    )
+    for l in int8_model.model.layers:
+        l.enable_calibration()
 
     # (b) run inference to collect ranges
     with torch.no_grad():
@@ -97,9 +96,8 @@ else:
             int8_model(ids[:, i : i + STRIDE])
 
     # (c) freeze (scale, zero-point)
-    int8_model.model.layers.apply(
-        lambda m: getattr(m, "freeze_qparams", lambda: None)()
-    )
+    for l in int8_model.model.layers:
+        l.freeze_qparams()
 
 # -------------------------------------------------------------------------
 # 4. Evaluate perplexity on Wikitext-2

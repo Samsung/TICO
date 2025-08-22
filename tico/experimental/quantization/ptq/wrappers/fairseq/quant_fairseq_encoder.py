@@ -260,8 +260,12 @@ class QuantFairseqEncoder(QuantModuleBase):
         Match original API: reorder the batched dimension (B) according to new_order.
         """
         reordered = dict()  # type: ignore[var-annotated]
+        if len(encoder_out["encoder_out"]) == 0:
+            new_encoder_out = []
+        else:
+            new_encoder_out = [encoder_out["encoder_out"][0].index_select(1, new_order)]
+        reordered["encoder_out"] = new_encoder_out
         keys = [
-            "encoder_out",
             "encoder_padding_mask",
             "encoder_embedding",
             "src_tokens",
@@ -273,7 +277,7 @@ class QuantFairseqEncoder(QuantModuleBase):
             if len(encoder_out[k]) == 0:
                 reordered[k] = []
             else:
-                reordered[k] = [encoder_out[k][0].index_select(1, new_order)]
+                reordered[k] = [encoder_out[k][0].index_select(0, new_order)]
 
         if "encoder_states" in encoder_out:
             encoder_states = encoder_out["encoder_states"]

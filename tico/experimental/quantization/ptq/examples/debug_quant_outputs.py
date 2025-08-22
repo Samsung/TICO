@@ -99,7 +99,8 @@ calib_txt = " ".join(dataset["text"])[:CALIB_TOKENS]
 ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(DEVICE)
 
 # (a) Enable CALIB mode on every QuantModuleBase
-model.model.layers.apply(lambda m: getattr(m, "enable_calibration", lambda: None)())
+for l in model.model.layers:
+    l.enable_calibration()
 
 # Save reference FP activations before observers clamp/quantize
 save_handles, act_cache = save_fp_outputs(model)
@@ -114,7 +115,8 @@ for h in save_handles:
     h.remove()
 
 # (b) Freeze (scale, zero-point) after calibration
-model.model.layers.apply(lambda m: getattr(m, "freeze_qparams", lambda: None)())
+for l in model.model.layers:
+    l.freeze_qparams()
 
 # (c) Register diff hooks and measure per-layer deltas
 cmp_handles = compare_layer_outputs(model, act_cache, metrics=["diff", "peir"])

@@ -138,7 +138,8 @@ calib_txt = " ".join(
 ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(DEVICE)
 
 # (a) Enable CALIB mode on every QuantModuleBase
-q_m.model.layers.apply(lambda m: getattr(m, "enable_calibration", lambda: None)())
+for l in q_m.model.layers:
+    l.enable_calibration()
 
 # (b) Overwrite weight observers with GPTQ statistics
 inject_gptq_qparams(q_m, q_m.quantizers)
@@ -148,7 +149,8 @@ with torch.no_grad():
         q_m(ids[:, i : i + STRIDE])  # observers collect act. ranges
 
 # (c) Freeze all Q-params (scale, zp)
-q_m.model.layers.apply(lambda m: getattr(m, "freeze_qparams", lambda: None)())
+for l in q_m.model.layers:
+    l.freeze_qparams()
 
 # -------------------------------------------------------------------------
 # 6. Evaluate perplexity on Wikitext-2

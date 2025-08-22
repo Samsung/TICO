@@ -48,7 +48,24 @@ class PTQWrapper(QuantModuleBase):
         return self.wrapped(*args, **kwargs)
 
     def _all_observers(self):
-        yield from self.wrapped._all_observers()
+        """
+        PTQWrapper itself owns NO observers (transparent node).
+        Returning an empty iterator prevents double-processing when parents
+        traverse the tree and then recurse into `self.wrapped`.
+        """
+        return ()  # no local observers
+
+    def named_observers(self):
+        """
+        Proxy to the wrapped module so debugging tools can still enumerate observers.
+        """
+        yield from self.wrapped.named_observers()
+
+    def get_observer(self, name: str):
+        """
+        Proxy to the wrapped module for direct lookup by name.
+        """
+        return self.wrapped.get_observer(name)
 
     def extra_repr(self) -> str:
         return self.wrapped.extra_repr()
