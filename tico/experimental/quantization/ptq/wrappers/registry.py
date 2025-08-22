@@ -24,7 +24,10 @@ from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
 _WRAPPERS: Dict[Type[nn.Module], Type[QuantModuleBase]] = {}
 _IMPORT_ONCE = False
 _CORE_MODULES = (
+    "tico.experimental.quantization.ptq.wrappers.quant_elementwise",
+    "tico.experimental.quantization.ptq.wrappers.nn.quant_layernorm",
     "tico.experimental.quantization.ptq.wrappers.nn.quant_linear",
+    "tico.experimental.quantization.ptq.wrappers.nn.quant_silu",
     # add future core wrappers here
 )
 
