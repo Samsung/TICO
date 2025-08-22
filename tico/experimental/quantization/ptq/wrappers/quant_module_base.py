@@ -46,10 +46,24 @@ class QuantModuleBase(nn.Module, ABC):
         self.fp_name = fp_name
 
     def _child_quant_modules(self):
-        """Yield direct children that are QuantModuleBase."""
-        for m in self.children():
+        """
+        Yield immediate QuantModuleBase *descendants*, skipping over pure containers
+        (e.g., ModuleList/Sequential/ModuleDict). Once a QuantModuleBase is found,
+        do NOT descend into it here—let recursion happen level by level.
+        """
+        seen = set()
+        stack = list(self.children())  # start from direct children
+
+        while stack:
+            m = stack.pop()
             if isinstance(m, QuantModuleBase):
-                yield m
+                if id(m) not in seen:
+                    seen.add(id(m))
+                    yield m
+                # IMPORTANT: do not recurse into `m` here; its own call will handle its subtree
+            elif isinstance(m, (nn.ModuleList, nn.ModuleDict, nn.Sequential)):
+                # `m` is a container or a non-quant leaf: keep descending until we hit quant modules
+                stack.extend(list(m.children()))
 
     def enable_calibration(self) -> None:
         self._mode = Mode.CALIB

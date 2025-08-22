@@ -34,6 +34,7 @@ The suite checks:
 import math, torch, unittest
 from typing import Dict
 
+import torch.nn as nn
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.observers import MinMaxObserver
@@ -208,3 +209,165 @@ class TestQuantModuleQScheme(unittest.TestCase):
         qm = DummyQMWrapperDefault(cfg)
         self.assertEqual(qm.obs.qscheme, QScheme.PER_CHANNEL_SYMM)
         self.assertEqual(qm.obs.channel_axis, 0)
+
+
+class ChildQM(QuantModuleBase):
+    """Simple leaf wrapper used for hierarchy tests."""
+
+    def __init__(self, qcfg: QuantConfig | None = None):
+        super().__init__(qcfg)
+        self.obs = self._make_obs("leaf")
+
+    def forward(self, x):
+        return self._fq(x, self.obs)
+
+    def _all_observers(self):
+        return (self.obs,)
+
+
+class OuterQM(QuantModuleBase):
+    """
+    Wrapper that itself owns a child QuantModuleBase.
+    The base helper MUST yield `OuterQM` from its parent, but must NOT
+    descend into `.inner` at that level (recursion happens when OuterQM
+    receives enable_calibration()/freeze_qparams()).
+    """
+
+    def __init__(self, qcfg: QuantConfig | None = None):
+        super().__init__(qcfg)
+        self.obs = self._make_obs("outer")
+        self.inner = ChildQM(qcfg)
+
+    def forward(self, x):
+        return self._fq(x, self.obs)
+
+    def _all_observers(self):
+        return (self.obs,)
+
+
+class TopWithContainers(QuantModuleBase):
+    """
+    Top-level wrapper that mixes plain containers and quant leaves.
+
+    Expected "immediate quant descendants" (skipping pure containers):
+      - leaf_direct
+      - seq[0], seq[2]
+      - mlist[1], mlist[2][0]
+      - mdict['q']
+      - outer  (but NOT outer.inner at this level)
+    """
+
+    def __init__(self, qcfg: QuantConfig | None = None):
+        super().__init__(qcfg)
+
+        # direct child quant
+        self.leaf_direct = ChildQM(qcfg)
+
+        # Sequential containing two quant leaves with a non-quant in the middle
+        self.seq = nn.Sequential(
+            ChildQM(qcfg),  # index 0
+            nn.ReLU(),  # non-quant
+            ChildQM(qcfg),  # index 2
+        )
+
+        # ModuleList that includes: non-quant, quant, nested ModuleList with quant
+        self.mlist = nn.ModuleList(
+            [
+                nn.Linear(3, 3),  # non-quant
+                ChildQM(qcfg),  # quant
+                nn.ModuleList([ChildQM(qcfg)]),  # nested container → quant
+            ]
+        )
+
+        # ModuleDict with one quant and one non-quant entry
+        self.mdict = nn.ModuleDict(
+            {
+                "q": ChildQM(qcfg),
+                "plain": nn.Linear(1, 1),
+            }
+        )
+
+        # A quant child that itself owns a quant child
+        self.outer = OuterQM(qcfg)
+
+    # Top has no observers of its own
+    def _all_observers(self):
+        return ()
+
+
+class TestChildQuantModulesDiscovery(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(0)
+        self.top = TopWithContainers()
+
+    def _ids(self, mods):
+        return {id(m) for m in mods}
+
+    def test_yields_immediate_descendants_across_containers(self):
+        found = list(self.top._child_quant_modules())
+        # All yielded must be QuantModuleBase
+        self.assertTrue(all(isinstance(m, QuantModuleBase) for m in found))
+
+        # Build expected set
+        expected = {
+            id(self.top.leaf_direct),
+            id(self.top.seq[0]),
+            id(self.top.seq[2]),
+            id(self.top.mlist[1]),
+            id(self.top.mlist[2][0]),  # type: ignore[index]
+            id(self.top.mdict["q"]),
+            id(self.top.outer),  # but NOT outer.inner at this level
+        }
+
+        self.assertSetEqual(
+            self._ids(found),
+            expected,
+            "Did not yield the exact immediate quant descendants",
+        )
+
+        # No duplicates
+        self.assertEqual(len(found), len(set(found)), "Duplicate modules were yielded")
+
+    def test_does_not_descend_into_quant_modules(self):
+        found = list(self.top._child_quant_modules())
+        inner = self.top.outer.inner
+        self.assertNotIn(
+            inner,
+            found,
+            "Should not descend into a found QuantModuleBase (outer.inner leaked)",
+        )
+
+    def test_lifecycle_propagates_through_containers(self):
+        """
+        enable_calibration()/freeze_qparams() should propagate to all quant modules,
+        including those behind containers; recursion into children of a found quant
+        module should happen via that module's own call.
+        """
+        # Before
+        for m in self.top._child_quant_modules():
+            self.assertIs(m._mode, Mode.NO_QUANT)
+
+        # Enable calibration at top — should reach *all* quant descendants
+        self.top.enable_calibration()
+
+        # Level 1 descendants (returned by _child_quant_modules)
+        for m in self.top._child_quant_modules():
+            self.assertIs(m._mode, Mode.CALIB, "Level-1 descendant did not enter CALIB")
+
+        # And also grandchildren via recursion (e.g., outer.inner)
+        self.assertIs(
+            self.top.outer.inner._mode,
+            Mode.CALIB,
+            "Grandchild quant module did not enter CALIB via recursion",
+        )
+
+        # Now freeze — everyone should be QUANT
+        self.top.freeze_qparams()
+        for m in self.top._child_quant_modules():
+            self.assertIs(m._mode, Mode.QUANT, "Level-1 descendant did not enter QUANT")
+
+        self.assertIs(
+            self.top.outer.inner._mode,
+            Mode.QUANT,
+            "Grandchild quant module did not enter QUANT via recursion",
+        )
