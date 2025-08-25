@@ -23,6 +23,9 @@ from tico.experimental.quantization.ptq.observers.affine_base import AffineObser
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.nn.quant_linear import QuantLinear
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
+from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
+    QuantModuleBase,
+)
 from torch.utils.data import DataLoader, TensorDataset
 
 from test.modules.op.linear import SimpleLinear
@@ -111,9 +114,10 @@ class TestPTQSmoke(unittest.TestCase):
         self.calib_loader = DataLoader(TensorDataset(data), batch_size=32)
 
         qcfg = QuantConfig(default_dtype=DType.uint(8))
-        self.model.linear = PTQWrapper(self.model.linear, qcfg=qcfg)
+        self.model.linear = PTQWrapper(self.model.linear, qcfg=qcfg)  # type: ignore[assignment]
 
     def test_smoke_forward_quantized(self):
+        assert isinstance(self.model.linear, PTQWrapper)
         self.model.linear.enable_calibration()
         for (x,) in self.calib_loader:
             _ = self.model(x)
@@ -131,3 +135,121 @@ class TestPTQSmoke(unittest.TestCase):
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.5)
         self.assertEqual(fp32_out.shape, q_out.shape)
+
+
+class TestPTQWrapperObserverSurface(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(0)
+        self.fp = torch.nn.Linear(4, 2)
+        self.qcfg = QuantConfig(default_dtype=DType.uint(8))
+        self.wrapper = PTQWrapper(self.fp, qcfg=self.qcfg)
+
+    def test_all_observers_is_empty_for_wrapper(self):
+        # PTQWrapper itself must not expose local observers (prevents double-processing).
+        self.assertEqual(list(self.wrapper._all_observers()), [])
+
+    def test_named_and_get_observer_are_proxies(self):
+        # PTQWrapper should proxy enumeration/lookup to the wrapped module.
+        names_proxy = [name for name, _ in self.wrapper.named_observers()]
+        names_wrapped = [name for name, _ in self.wrapper.wrapped.named_observers()]
+        self.assertEqual(names_proxy, names_wrapped)
+
+        if names_proxy:  # ensure lookup returns the same object
+            sample = names_proxy[0]
+            self.assertIs(
+                self.wrapper.get_observer(sample),
+                self.wrapper.wrapped.get_observer(sample),
+            )
+
+
+class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
+    """
+    Build a tiny parent QuantModuleBase that contains a PTQWrapper child.
+    When `parent.enable_calibration()/freeze_qparams()` propagate into the child,
+    each child's observer should be processed exactly once (no double hits).
+    """
+
+    class ParentQuant(QuantModuleBase):
+        def __init__(self, fp_mod: torch.nn.Module, qcfg: Optional[QuantConfig] = None):
+            super().__init__(qcfg or QuantConfig(default_dtype=DType.uint(8)))
+            # PTQWrapper is a QuantModuleBase child -> visited by _child_quant_modules()
+            self.child = PTQWrapper(fp_mod, qcfg=self.qcfg)
+
+        def forward(self, x):
+            return self.child(x)
+
+        def _all_observers(self):
+            # Parent itself owns no observers; we're testing child's observers only.
+            return []
+
+    def _instrument_counters(self, ptq: PTQWrapper):
+        """
+        Monkey-patch each child's observer to count reset/compute_qparams calls.
+        Returns a dict: name -> obs (with .reset_calls / .compute_calls fields).
+        """
+        hooked = {}
+        for name, obs in ptq.named_observers():
+            # initialize counters
+            obs.reset_calls = 0
+            obs.compute_calls = 0
+
+            # stash originals
+            orig_reset = obs.reset
+            orig_compute = obs.compute_qparams
+
+            def make_reset(o=obs, f=orig_reset):
+                def _r(*a, **k):
+                    o.reset_calls += 1
+                    return f(*a, **k)
+
+                return _r
+
+            def make_compute(o=obs, f=orig_compute):
+                def _c(*a, **k):
+                    o.compute_calls += 1
+                    return f(*a, **k)
+
+                return _c
+
+            obs.reset = make_reset()
+            obs.compute_qparams = make_compute()
+            hooked[name] = obs
+        return hooked
+
+    def test_parent_propagation_calls_each_observer_once(self):
+        torch.manual_seed(0)
+        fp = torch.nn.Linear(4, 2)
+        parent = self.ParentQuant(fp)
+        x = torch.randn(32, 4)
+
+        # Sanity: wrapper owns no local observers but proxies enumeration.
+        self.assertEqual(list(parent.child._all_observers()), [])
+        self.assertGreater(len(list(parent.child.named_observers())), 0)
+
+        # Hook counters on child's observers
+        obs_map = self._instrument_counters(parent.child)
+
+        # 1) enable_calibration() on parent should reset each child observer ONCE
+        parent.enable_calibration()
+        for name, obs in obs_map.items():
+            self.assertEqual(
+                obs.reset_calls,
+                1,
+                msg=f"Observer `{name}` was reset {obs.reset_calls} times (expected 1).",
+            )
+
+        # Run a forward pass to allow observers to collect (if they need it)
+        _ = parent(x)
+
+        # 2) freeze_qparams() on parent should compute_qparams for each child observer ONCE
+        parent.freeze_qparams()
+        for name, obs in obs_map.items():
+            self.assertEqual(
+                obs.compute_calls,
+                1,
+                msg=f"Observer `{name}` computed {obs.compute_calls} times (expected 1).",
+            )
+
+        # Modes propagate
+        self.assertIs(parent._mode, Mode.QUANT)
+        self.assertIs(parent.child._mode, Mode.QUANT)
