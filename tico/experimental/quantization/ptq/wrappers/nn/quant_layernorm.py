@@ -35,7 +35,7 @@ class QuantLayerNorm(QuantModuleBase):
         3) s = c * c                        (square)
         4) v = mean(s, dims)                (variance)
         5) e = v + eps                      (add-eps)
-        6) r = rsqrt(v + eps)               (rsqrt)
+        6) r = rsqrt(e)                     (rsqrt)
         7) n = c * r                        (normalize)
         8) y = (n * γ) + β                  (affine), with:
              • affine_mul : n * γ
