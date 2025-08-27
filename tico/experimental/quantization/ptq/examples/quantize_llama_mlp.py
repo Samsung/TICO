@@ -47,11 +47,19 @@ mlp_q = model.model.layers[0].mlp
 # -------------------------------------------------------------------------
 # 2. Single-pass calibration
 # -------------------------------------------------------------------------
+PROMPTS = [
+    "The quick brown fox jumps over the lazy dog.",
+    "In 2025, AI systems accelerated hardware-software co-design at scale.",
+    "양자화는 왜 어려울까? 분포, 길이, 마스크가 관건이다.",
+    "今日はいい天気ですね。ところでRoPE角度は長さに依存します。",
+    "def quicksort(arr):\n    if len(arr) <= 1: return arr\n    ...",
+    "Prices rose 3.14% — see Figure 2; emails: foo@bar.com!",
+]
+
 with torch.no_grad():
     mlp_q.enable_calibration()
-    for _ in range(16):
-        prompts = ["hello tinyllama "] * 8
-        enc = tokenizer(prompts, return_tensors="pt")
+    for prompt in PROMPTS:
+        enc = tokenizer(prompt, return_tensors="pt")
         emb = model.model.embed_tokens(enc["input_ids"])
         _ = mlp_q(emb)
 
