@@ -90,7 +90,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
         pos = self._rand_rope(2, 6)
         with torch.no_grad():
             q_out, _ = qattn(x, pos)
-            fp_out, _ = self.fp_attn(x, pos, attention_mask=None)
+            fp_outs = self.fp_attn(x, position_embeddings=pos, attention_mask=None)
+            fp_out = fp_outs[0]
 
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0)
@@ -136,7 +137,10 @@ class TestQuantLlamaAttention(unittest.TestCase):
         pos = self._rand_rope(B, S)
         with torch.no_grad():
             q_out, attn_w = qattn(x, pos, attention_mask=float_mask)
-            fp_out, _ = self.fp_attn(x, pos, attention_mask=float_mask)
+            fp_outs = self.fp_attn(
+                x, position_embeddings=pos, attention_mask=float_mask
+            )
+            fp_out = fp_outs[0]
 
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0)
