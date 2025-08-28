@@ -142,11 +142,22 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
             if node.target in multiple_output_ops:
                 continue
             node_val = node.meta["val"]
-            if node_val.layout != torch.strided:
-                raise RuntimeError(
-                    f"Only support dense tensors (node layout: {node_val.layout})"
+
+            if isinstance(node_val, torch.SymInt):
+                # Add as a scalar tensor
+                graph.add_tensor_from_scratch(
+                    node.name,
+                    [],
+                    None,
+                    dtype=to_circle_dtype(torch.int64),
+                    source_node=node,
                 )
-            graph.add_tensor_from_node(node)
+            elif isinstance(node_val, torch.fx.Node):
+                if node_val.layout != torch.strided:
+                    raise RuntimeError(
+                        f"Only support dense tensors (node layout: {node_val.layout})"
+                    )
+                graph.add_tensor_from_node(node)
             logger.debug(f"call_function: {node.name} tensor exported.")
 
         elif node.op == "placeholder":

@@ -76,18 +76,18 @@ def infer(circle_binary: bytes, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError(
             f"Mismatch input length: input({len(user_inputs)}) != circle model({len(model_input_shapes_np)})"
         )
-    for input_idx, user_input in enumerate(user_inputs):
-        # Shape
-        if list(user_input.shape) != list(model_input_shapes_np[input_idx]):
-            raise RuntimeError(
-                f"Mismatch input {input_idx} shape : input({user_input.shape}) != circle model({model_input_shapes_np[input_idx]})"
-            )
-        # Data type
-        user_input_type_cm = to_circle_dtype(user_input.dtype)
-        if user_input_type_cm != model_input_types_cm[input_idx]:
-            raise RuntimeError(
-                f"Mismatch input {input_idx} data type : input({user_input_type_cm}) != circle model({model_input_types_cm[input_idx]})"
-            )
+    # for input_idx, user_input in enumerate(user_inputs):
+    #     # Shape
+    #     if list(user_input.shape) != list(model_input_shapes_np[input_idx]):
+    #         raise RuntimeError(
+    #             f"Mismatch input {input_idx} shape : input({user_input.shape}) != circle model({model_input_shapes_np[input_idx]})"
+    #         )
+    #     # Data type
+    #     user_input_type_cm = to_circle_dtype(user_input.dtype)
+    #     if user_input_type_cm != model_input_types_cm[input_idx]:
+    #         raise RuntimeError(
+    #             f"Mismatch input {input_idx} data type : input({user_input_type_cm}) != circle model({model_input_types_cm[input_idx]})"
+    #         )
 
     # Initialize interpreter
     intp = Interpreter(circle_binary)

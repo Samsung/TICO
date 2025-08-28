@@ -21,7 +21,9 @@ from tico.utils.utils import is_target_node
 
 
 assert_node_targets = [
+    torch.ops.aten._assert_scalar.default,
     torch.ops.aten._assert_tensor_metadata.default,
+    torch.ops.aten.sym_constrain_range_for_size.default, # Related to symbolic shape validation
 ]
 
 
@@ -29,7 +31,7 @@ assert_node_targets = [
 class RemoveRedundantAssertionNodes(PassBase):
     """
     This removes redundant assertion nodes.
-    - `aten.assert_tensor_meta.default`
+    When assertion node is erased, related comparison nodes are also removed by DCE pass.
     """
 
     def __init__(self):

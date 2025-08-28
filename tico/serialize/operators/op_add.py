@@ -17,6 +17,8 @@ from typing import Dict, List, TYPE_CHECKING
 if TYPE_CHECKING:
     import torch._ops
     import torch.fx
+import operator
+
 import torch
 from circle_schema import circle
 
@@ -32,6 +34,7 @@ class AddVisitor(NodeVisitor):
     target: List[torch._ops.OpOverload] = [
         torch.ops.aten.add.Tensor,
         torch.ops.aten.add.Scalar,
+        operator.add,  # builtin operator
     ]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):

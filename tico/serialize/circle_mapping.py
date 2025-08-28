@@ -138,7 +138,10 @@ def to_circle_shape(
     ],  # Sequence[int | torch.SymInt] is added for type covariance
 ) -> Tuple[List[int], Optional[List[int]]]:
 
-    if any(isinstance(s, torch.SymInt) for s in torch_shape):
+    if len(torch_shape) == 0:
+        # Follow static shape spec of scalar tensor
+        return [1], None
+    elif any(isinstance(s, torch.SymInt) for s in torch_shape):
         # Follow dynamic shape spec
         shape = []
         shape_signature = []

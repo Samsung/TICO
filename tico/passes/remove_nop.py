@@ -33,13 +33,14 @@ class RemoveNop(PassBase):
     """
 
     target_ops = (
-        [
-            torch.ops.prims.view_of.default,
-        ]
-        + ops.aten.alias
+        ops.aten.alias
         + ops.aten.clone
         + ops.aten.detach
-        + [torch.ops.aten.lift_fresh_copy.default]
+        + [
+            torch.ops.prims.view_of.default,
+            torch.ops.aten.lift_fresh_copy.default,
+            torch.ops.aten._local_scalar_dense.default,
+        ]
     )
 
     def __init__(self):
