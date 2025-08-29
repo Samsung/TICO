@@ -55,10 +55,6 @@ class SimpleAvgPoolDynamicShape(TestModuleBase):
 
 
 @use_onert
-@skip_if(
-    Version(torch.__version__) >= Version("2.9.0.dev"),
-    reason="From torch 2.9.0.dev, dynamic shape requires more torch ir conversions related to symbolic runtime assertions",
-)
 class SimpleAvgPoolWithAddDynamicShape(TestModuleBase):
     def __init__(self):
         super().__init__()
