@@ -43,9 +43,17 @@ class DummyLM(nn.Module):
     before computing `CrossEntropyLoss` (ignore_index = -100).
     """
 
-    def __init__(self, vocab_size: int, hidden_size: int, n_positions: int):
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        n_positions: int,
+        ignore_index: int = -100,
+    ):
         super().__init__()
-        self.config = SimpleNamespace(n_positions=n_positions, hidden_size=hidden_size)
+        self.config = SimpleNamespace(
+            n_positions=n_positions, hidden_size=hidden_size, ignore_index=ignore_index
+        )
         self.embed = nn.Embedding(vocab_size, hidden_size)
         self.fc = nn.Linear(hidden_size, vocab_size)
 
@@ -74,7 +82,7 @@ class DummyLM(nn.Module):
         shift_labels = labels[:, 1:].contiguous()
         # -----------------------------------------------------------
 
-        loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+        loss_fn = nn.CrossEntropyLoss(ignore_index=self.config.ignore_index)
         loss = loss_fn(
             shift_logits.view(-1, shift_logits.size(-1)),
             shift_labels.view(-1),
@@ -187,3 +195,17 @@ class TestPerplexitySlidingWindow(unittest.TestCase):
             1e-6,
             msg=f"PPLs differ by {spread}: {ppls}",
         )
+
+    def test_non_default_ignore_index(self):
+        model = DummyLM(self.VOCAB, self.HIDDEN, self.CONTEXT, ignore_index=123)
+        seq = torch.randint(0, self.VOCAB, (1, self.CONTEXT), device=self.device)
+        ppl = perplexity(
+            model,
+            seq,
+            self.device,
+            max_length=self.CONTEXT,
+            stride=8,
+            show_progress=False,
+            ignore_index=123,
+        )
+        self.assertIsInstance(ppl, float)

@@ -25,6 +25,7 @@ def perplexity(
     *,
     max_length: Optional[int] = None,
     stride: int = 512,
+    ignore_index: int | None = -100,
     show_progress: bool = True,
 ) -> float:
     """
@@ -53,6 +54,11 @@ def perplexity(
     stride : int, default = 512
         Step size by which the sliding window advances.  Must satisfy
         `1 ≤ stride ≤ max_length`.
+    ignore_index : int, default = -100
+        Label value to ignore in loss computation. This should match
+        the `ignore_index` used by the model's internal
+        `CrossEntropyLoss`. For Hugging Face causal LMs, the
+        convention is `-100`.
     show_progress : bool, default = True
         If True, displays a tqdm progess bar while evaluating.
 
@@ -92,7 +98,7 @@ def perplexity(
 
         input_ids = input_ids_full[:, begin:end]
         target_ids = input_ids.clone()
-        target_ids[:, :-trg_len] = -100  # mask previously-scored tokens
+        target_ids[:, :-trg_len] = ignore_index  # mask previously-scored tokens
 
         with torch.no_grad():
             outputs = model(input_ids, labels=target_ids)
@@ -100,7 +106,7 @@ def perplexity(
             neg_log_likelihood = outputs.loss
 
         # exact number of labels that contributed to loss
-        loss_tokens = (target_ids[:, 1:] != -100).sum().item()
+        loss_tokens = (target_ids[:, 1:] != ignore_index).sum().item()
         nll_sum += neg_log_likelihood * loss_tokens
         n_tokens += int(loss_tokens)
 
