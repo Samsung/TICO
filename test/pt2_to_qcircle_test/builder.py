@@ -26,7 +26,7 @@ from test.modules.base import TestModuleBase
 
 from test.utils.base_builders import TestDictBuilderBase, TestRunnerBase
 
-IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class QuantizationTest(TestRunnerBase):
@@ -50,7 +50,8 @@ class QuantizationTest(TestRunnerBase):
 
     def make(self):
         @unittest.skipIf(
-            not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
+            not IS_INTERNAL_TEST,
+            "Internal test — run only if --include-internal is set",
         )
         def wrapper(s):
             self._run()

@@ -21,12 +21,12 @@ import torch
 from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import SmoothQuantConfig
 
-IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class SmoothQuantTest(unittest.TestCase):
     @unittest.skipIf(
-        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )
     @torch.inference_mode()
     def test_value(self):

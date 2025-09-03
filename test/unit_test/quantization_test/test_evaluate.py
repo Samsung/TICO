@@ -23,7 +23,7 @@ from tico.experimental.quantization.config import PT2EConfig
 from tico.experimental.quantization.evaluation.backend import BACKEND
 from tico.experimental.quantization.evaluation.evaluate import evaluate
 
-IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class TwoLinear(torch.nn.Module):
@@ -44,7 +44,7 @@ class TwoLinear(torch.nn.Module):
 class EvaluateTest(unittest.TestCase):
     # This test needs triv24-toolchain package.
     @unittest.skipIf(
-        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )
     def test_evaluate_simple_linear(self):
         m: Any = TwoLinear().eval()

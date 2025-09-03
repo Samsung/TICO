@@ -22,7 +22,7 @@ from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config import GPTQConfig, PT2EConfig
 from tico.experimental.quantization.evaluation.evaluate import BACKEND, evaluate
 
-IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class BigLinear(torch.nn.Module):
@@ -46,7 +46,7 @@ class BigLinear(torch.nn.Module):
 
 class GPTQTest(unittest.TestCase):
     @unittest.skipIf(
-        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )
     @torch.inference_mode()
     def test_model(self):
@@ -77,7 +77,7 @@ class GPTQTest(unittest.TestCase):
         # https://github.com/pytorch/pytorch/issues/148171
 
     @unittest.skipIf(
-        not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )
     def test_net(self):
         q_m = BigLinear()

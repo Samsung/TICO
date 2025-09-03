@@ -28,7 +28,7 @@ from tico.experimental.quantization.ptq.utils.introspection import (
 )
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 
-IS_CI_MODE = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
 class DummyModel(nn.Module):
@@ -74,7 +74,7 @@ class TestBuildFqnMap(unittest.TestCase):
 
 
 @unittest.skipIf(
-    not IS_CI_MODE, "Internal test — skipped unless --include-internal is set"
+    not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
 )
 class TestSmoothQuantPTQDiff(unittest.TestCase):
     """
