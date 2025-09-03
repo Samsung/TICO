@@ -25,7 +25,10 @@ from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
 from tico.experimental.quantization.ptq.wrappers.registry import try_register
 
 
-@try_register("transformers.models.llama.modeling_llama.LlamaAttention")
+@try_register(
+    "transformers.models.llama.modeling_llama.LlamaAttention",
+    "transformers.models.llama.modeling_llama.LlamaSdpaAttention",
+)
 class QuantLlamaAttention(QuantModuleBase):
     def __init__(
         self,

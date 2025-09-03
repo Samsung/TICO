@@ -90,7 +90,9 @@ def register(
 
 
 # ───────────────────────────── conditional decorator
-def try_register(path: str) -> Callable[[Type[QuantModuleBase]], Type[QuantModuleBase]]:
+def try_register(
+    *paths: str,
+) -> Callable[[Type[QuantModuleBase]], Type[QuantModuleBase]]:
     """
     @try_register("transformers.models.llama.modeling_llama.LlamaMLP")
 
@@ -99,14 +101,15 @@ def try_register(path: str) -> Callable[[Type[QuantModuleBase]], Type[QuantModul
     """
 
     def _decorator(quant_cls: Type[QuantModuleBase]):
-        module_name, _, cls_name = path.rpartition(".")
-        try:
-            mod = importlib.import_module(module_name)
-            fp_cls = getattr(mod, cls_name)
-            _WRAPPERS[fp_cls] = quant_cls
-        except (ModuleNotFoundError, AttributeError):
-            # transformers not installed or class renamed – silently skip
-            pass
+        for path in paths:
+            module_name, _, cls_name = path.rpartition(".")
+            try:
+                mod = importlib.import_module(module_name)
+                fp_cls = getattr(mod, cls_name)
+                _WRAPPERS[fp_cls] = quant_cls
+            except (ModuleNotFoundError, AttributeError):
+                # optional dep missing or class renamed – skip silently
+                pass
         return quant_cls
 
     return _decorator
