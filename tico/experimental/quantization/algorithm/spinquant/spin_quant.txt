@@ -1,0 +1,4 @@
+# requirments.txt
+transformers
+datasets
+tqdm

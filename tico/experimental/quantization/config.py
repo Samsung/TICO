@@ -67,3 +67,16 @@ class SmoothQuantConfig(BaseConfig):
     @property
     def name(self) -> str:
         return "smooth_quant"
+
+
+class SpinQuantConfig(BaseConfig):
+    """
+    Configuration for spin quant.
+    """
+
+    def __init__(self, mode: str = "hadamard"):
+        self.mode = mode
+
+    @property
+    def name(self) -> str:
+        return "spin_quant"
