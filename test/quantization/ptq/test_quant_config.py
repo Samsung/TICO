@@ -15,8 +15,9 @@
 import unittest
 
 from tico.experimental.quantization.ptq.dtypes import DType
-from tico.experimental.quantization.ptq.observers import EMAObserver, MinMaxObserver
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
+from tico.experimental.quantization.ptq.observers.ema import EMAObserver
+from tico.experimental.quantization.ptq.observers.minmax import MinMaxObserver
 from tico.experimental.quantization.ptq.qscheme import QScheme
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (

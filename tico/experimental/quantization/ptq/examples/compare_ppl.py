@@ -26,7 +26,7 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
-from tico.experimental.quantization.ptq.utils import perplexity
+from tico.experimental.quantization.ptq.utils.metrics import perplexity
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 
 # -------------------------------------------------------------------------

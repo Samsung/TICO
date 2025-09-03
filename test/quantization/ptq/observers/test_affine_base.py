@@ -19,7 +19,7 @@ import torch
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
 from tico.experimental.quantization.ptq.qscheme import QScheme
-from tico.experimental.quantization.ptq.utils import channelwise_minmax
+from tico.experimental.quantization.ptq.utils.reduce_utils import channelwise_minmax
 
 
 class _MinMaxLikeObserver(AffineObserverBase):

@@ -37,10 +37,10 @@ from typing import Dict
 import torch.nn as nn
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.observers import MinMaxObserver
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
 from tico.experimental.quantization.ptq.observers.base import ObserverBase
 from tico.experimental.quantization.ptq.observers.ema import EMAObserver
+from tico.experimental.quantization.ptq.observers.minmax import MinMaxObserver
 from tico.experimental.quantization.ptq.qscheme import QScheme
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (

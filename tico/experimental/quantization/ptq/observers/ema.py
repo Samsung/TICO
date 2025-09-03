@@ -15,7 +15,7 @@
 import torch
 
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
-from tico.experimental.quantization.ptq.utils import channelwise_minmax
+from tico.experimental.quantization.ptq.utils.reduce_utils import channelwise_minmax
 
 
 class EMAObserver(AffineObserverBase):

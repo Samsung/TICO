@@ -18,8 +18,8 @@ from typing import Optional
 import torch
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.observers import IdentityObserver
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
+from tico.experimental.quantization.ptq.observers.identity import IdentityObserver
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.nn.quant_linear import QuantLinear
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
