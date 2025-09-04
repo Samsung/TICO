@@ -106,6 +106,7 @@ class NNModuleTest(TestRunnerBase):
                 assert (
                     self.use_onert
                 ), "Dynamic shapes are only supported with onert runtime. Please set 'use_onert' to True."
+                dynamic_shapes = self.nnmodule.get_dynamic_shapes()
 
         compile_config: Optional[CompileConfigBase] = None
         if hasattr(self.nnmodule, "get_compile_config"):
