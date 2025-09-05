@@ -80,6 +80,7 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
         self.encoder_decoder_attention: bool = bool(
             getattr(fp_attn, "encoder_decoder_attention", False)
         )
+        assert self.self_attention != self.encoder_decoder_attention
 
         # PTQ-wrapped projections
         qc = qcfg.child("q_proj") if qcfg else None
