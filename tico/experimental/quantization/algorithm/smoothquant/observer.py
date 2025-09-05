@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import functools
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 import torch
 
@@ -21,18 +21,24 @@ import torch
 class ChannelwiseMaxActsObserver:
     """
     Observer to calcuate channelwise maximum activation
+    It supports collecting activations from either module inputs or outputs.
     """
 
-    def __init__(self, model):
+    def __init__(
+        self, model: torch.nn.Module, acts_from: Literal["input", "output"] = "input"
+    ):
         """
         model
             A torch module whose activations are to be analyzed.
+        acts_from
+            Where to hook: "input" for forward-pre-hook, "output" for forward-hook.
         hooks
-            A list to store the hooks which are registered to collect activation statistics.
+            A list to store the hooks registered to collect activation statistics.
         max_acts
-            A dictionary to store the maximum activation values
+            A dictionary to store the per-channel maxima.
         """
         self.model = model
+        self.acts_from: Literal["input", "output"] = acts_from
         self.hooks: List[Any] = []
         self.max_acts: Dict[str, torch.Tensor] = {}
 
@@ -62,13 +68,25 @@ class ChannelwiseMaxActsObserver:
                 input = input[0]
             stat_tensor(name, input)
 
+        def stat_output_hook(m, input, output, name):
+            if isinstance(output, tuple):
+                output = output[0]
+            stat_tensor(name, output)
+
         for name, m in self.model.named_modules():
             if isinstance(m, torch.nn.Linear):
-                self.hooks.append(
-                    m.register_forward_pre_hook(
-                        functools.partial(stat_input_hook, name=name)
+                if self.acts_from == "input":
+                    self.hooks.append(
+                        m.register_forward_pre_hook(
+                            functools.partial(stat_input_hook, name=name)
+                        )
                     )
-                )
+                else:  # "output"
+                    self.hooks.append(
+                        m.register_forward_hook(
+                            functools.partial(stat_output_hook, name=name)
+                        )
+                    )
 
     def remove(self):
         for hook in self.hooks:

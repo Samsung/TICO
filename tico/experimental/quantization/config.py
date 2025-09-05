@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 
 class BaseConfig(ABC):
@@ -60,9 +60,15 @@ class SmoothQuantConfig(BaseConfig):
         self,
         alpha: float = 0.5,
         custom_alpha_map: Optional[Dict[str, float]] = None,
+        acts_from: Literal["input", "output"] = "input",
     ):
         self.alpha = alpha
         self.custom_alpha_map = custom_alpha_map
+        # Where to collect activation statistics from:
+        # - "input": use forward-pre-hook (Tensor before the Linear op)
+        # - "output": use forward-hook    (Tensor after the Linear op)
+        # Default is "input".
+        self.acts_from = acts_from
 
     @property
     def name(self) -> str:
