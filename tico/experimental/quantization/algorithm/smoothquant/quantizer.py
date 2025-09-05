@@ -30,6 +30,25 @@ from tico.experimental.quantization.quantizer import BaseQuantizer
 class SmoothQuantQuantizer(BaseQuantizer):
     """
     Quantizer for applying the SmoothQuant algorithm
+
+    Q) Why allow choosing between input and output activations?
+
+    SmoothQuant relies on channel-wise activation statistics to balance
+    weights and activations. In practice, there are two natural sources:
+
+    - "input": captures the tensor right before a Linear layer
+      (forward-pre-hook). This matches the original SmoothQuant paper
+      and focuses on scaling the raw hidden state.
+
+    - "output": captures the tensor right after a Linear layer
+      (forward-hook). This can better reflect post-weight dynamics,
+      especially when subsequent operations (bias, activation functions)
+      dominate the dynamic range.
+
+    Allowing both options provides flexibility: depending on model
+    architecture and calibration data, one may yield lower error than
+    the other. The default remains "input" for compatibility, but "output"
+    can be selected to empirically reduce error or runtime overhead.
     """
 
     def __init__(self, config: SmoothQuantConfig):
@@ -37,6 +56,7 @@ class SmoothQuantQuantizer(BaseQuantizer):
 
         self.alpha = config.alpha
         self.custom_alpha_map = config.custom_alpha_map
+        self.acts_from = config.acts_from  # "input" (default) or "output"
         self.observer: Optional[ChannelwiseMaxActsObserver] = None
 
     @torch.no_grad()
@@ -55,7 +75,8 @@ class SmoothQuantQuantizer(BaseQuantizer):
         Returns:
             The model prepared for SmoothQuant quantization.
         """
-        self.observer = ChannelwiseMaxActsObserver(model)
+        # Attach hooks according to `config.acts_from`
+        self.observer = ChannelwiseMaxActsObserver(model, acts_from=self.acts_from)
         self.observer.attach()
 
         return model
