@@ -22,6 +22,9 @@ from tico.experimental.quantization.algorithm.pt2e.quantizer import PT2EQuantize
 from tico.experimental.quantization.algorithm.smoothquant.quantizer import (
     SmoothQuantQuantizer,
 )
+from tico.experimental.quantization.algorithm.spinquant.quantizer import (
+    SpinQuantQuantizer,
+)
 from tico.experimental.quantization.config import BaseConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
 
@@ -30,6 +33,7 @@ config_to_quantizer: Dict[str, Type[BaseQuantizer]] = {
     "pt2e": PT2EQuantizer,
     "gptq": GPTQQuantizer,
     "smooth_quant": SmoothQuantQuantizer,
+    "spin_quant": SpinQuantQuantizer,
 }
 
 QUANTIZER_ATTRIBUTE_NAME = "tico_quantizer"
