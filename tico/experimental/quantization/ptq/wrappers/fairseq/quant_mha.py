@@ -164,15 +164,6 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
         x = x.view(B, self.num_heads, T, self.head_dim).permute(2, 0, 1, 3).contiguous()
         return x.view(T, B, self.embed_dim)
 
-    def _get_state(
-        self, incremental_state: Optional[Dict], create: bool = False
-    ) -> Optional[Dict]:
-        if incremental_state is None:
-            return None
-        if create and self._state_key not in incremental_state:
-            incremental_state[self._state_key] = {}
-        return incremental_state.get(self._state_key, None)
-
     def forward(
         self,
         query: torch.Tensor,  # [Tq,B,C]
