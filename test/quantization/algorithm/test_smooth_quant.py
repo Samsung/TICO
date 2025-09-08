@@ -198,7 +198,6 @@ class SmoothQuantOutputHookTest(unittest.TestCase):
         base_fc1_w = model.encoder.layer.fc1.weight.detach().clone()
         base_fc2_w = model.encoder.layer.fc2.weight.detach().clone()
         base_fc1_b = model.encoder.layer.fc1.bias.detach().clone()
-        base_fc2_b = model.encoder.layer.fc2.bias.detach().clone()
 
         # Prepare with OUTPUT hooks
         cfg = SmoothQuantConfig(alpha=0.6, acts_from="output")
@@ -233,7 +232,6 @@ class SmoothQuantOutputHookTest(unittest.TestCase):
         new_fc1_w = model_sq.encoder.layer.fc1.weight.detach()
         new_fc2_w = model_sq.encoder.layer.fc2.weight.detach()
         new_fc1_b = model_sq.encoder.layer.fc1.bias.detach()
-        new_fc2_b = model_sq.encoder.layer.fc2.bias.detach()
 
         self.assertFalse(
             torch.allclose(base_fc1_w, new_fc1_w),
