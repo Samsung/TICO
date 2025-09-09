@@ -33,6 +33,7 @@ _CORE_MODULES = (
     "tico.experimental.quantization.ptq.wrappers.llama.quant_decoder_layer",
     "tico.experimental.quantization.ptq.wrappers.llama.quant_mlp",
     # fairseq
+    "tico.experimental.quantization.ptq.wrappers.fairseq.quant_encoder",
     "tico.experimental.quantization.ptq.wrappers.fairseq.quant_encoder_layer",
     "tico.experimental.quantization.ptq.wrappers.fairseq.quant_mha",
     # add future core wrappers here
