@@ -31,9 +31,11 @@ def CircleResizeNearestNeighbor():
         W_scale_factor = size[2] / W
         if H_scale_factor != W_scale_factor:
             raise RuntimeError("Scale factor of H and W should be same.")
-        return torch.nn.functional.interpolate(
-            input_, scale_factor=H_scale_factor, mode="nearest"
+        permuted = torch.permute(input_, [0, 3, 1, 2])
+        resized = torch.nn.functional.interpolate(
+            permuted, scale_factor=H_scale_factor, mode="nearest"
         )
+        return torch.permute(resized, [0, 2, 3, 1])
 
     @register_fake("circle_custom::resize_nearest_neighbor")
     def _(input_: torch.Tensor, size: List[int]):
@@ -631,7 +633,7 @@ def CircleInstanceNorm():
         bias: Optional[torch.Tensor] = None,
         running_mean: Optional[torch.Tensor] = None,
         running_var: Optional[torch.Tensor] = None,
-        use_input_stats: bool = False,
+        use_input_stats: bool = True,
         momentum: float = 0.1,
         eps: float = 1e-05,
         cudnn_enabled: bool = False,
@@ -639,7 +641,7 @@ def CircleInstanceNorm():
         NHWC_to_NCHW = [0, 3, 1, 2]
         NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
 
-        args = [NCHW_input, weight, bias, None, None, False, momentum, eps, False]
+        args = [NCHW_input, weight, bias, None, None, True, momentum, eps, False]
         NCHW_output = torch.ops.aten.instance_norm.default(*args)
         NCHW_to_NHWC = [0, 2, 3, 1]
         NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
