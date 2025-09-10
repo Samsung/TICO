@@ -20,9 +20,11 @@ from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch imp
 )
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
+from tico.utils.errors import NotYetSupportedError
 
 from test.modules.op.add import SimpleAdd
 from test.modules.op.bmm import SimpleBatchMatMul
+from test.modules.op.cat import SimpleCatDefault
 from test.modules.op.linear import SimpleLinear
 from test.modules.op.mul import SimpleMulWithTensor
 from test.modules.op.permute import SimplePermute
@@ -254,3 +256,389 @@ class AddTest(InsertQuantizeOnDtypeMismatchTest):
             desired_dtype="int16",
         )
         self.run_test()
+
+    def test_no_mismatch_add(self):
+        # Test case where input and output dtypes are the same (uint8)
+        self.setup(
+            SimpleAdd(),
+            torch.ops.aten.add.Tensor,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        # Manually set output dtype to be same as input for this test
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        # Dtypes should remain unchanged
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_mismatch_input_dtypes_add(self):
+        # Test case where inputs x and y have different dtypes
+        self.setup(
+            SimpleAdd(),
+            torch.ops.aten.add.Tensor,
+            input_dtype="uint8",  # This will be set for the first placeholder
+            desired_dtype="int16",
+        )
+        # Manually set a different dtype for the second input
+        # Find the second placeholder node
+        user_inputs = []
+        for node in self.ep.graph.nodes:
+            if (
+                node.op == "placeholder"
+                and node.name in self.ep.graph_signature.user_inputs
+            ):
+                user_inputs.append(node)
+        self.assertGreaterEqual(len(user_inputs), 2)
+        second_input_qparam = QuantParam()
+        second_input_qparam.scale = [1.0]
+        second_input_qparam.zero_point = [0]
+        second_input_qparam.dtype = "int16"
+        user_inputs[1].meta[QPARAM_KEY] = second_input_qparam
+
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(
+            self.target.args[1].meta[QPARAM_KEY].dtype, "int16"
+        )  # Assuming args[1] is the second input
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        # Dtypes should remain unchanged as handler should return early
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+
+    def test_unsupported_add_dtype(self):
+        self.setup(
+            SimpleAdd(),
+            torch.ops.aten.add.Tensor,
+            input_dtype="uint8",
+            desired_dtype="float32",  # An unsupported target dtype
+        )
+        # Manually set output dtype to an unsupported type for conversion
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+    def test_i16_to_u8_add(self):
+        self.setup(
+            SimpleAdd(),
+            torch.ops.aten.add.Tensor,
+            input_dtype="int16",
+            desired_dtype="uint8",  # Pass will change node's qparam to i16
+        )
+        # The pass expects output dtype to be uint8 if input is int16 for this path
+        # The setup method sets output dtype based on input_dtype, which is int16 -> uint8.
+        # So desired_dtype should be uint8, and the pass will modify node's qparam to int16.
+        # Let's adjust the setup for this specific case.
+        self.target.meta[QPARAM_KEY].dtype = "uint8"  # Target output is uint8
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        # After pass, node's dtype should be int16 because it was converted from u8
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        # The inserted quantize op should have uint8
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "uint8")
+
+
+class CatTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_no_mismatch_cat(self):
+        # Test case where input and output dtypes are the same (uint8)
+        self.setup(
+            SimpleCatDefault(),
+            torch.ops.aten.cat.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        # Manually set output dtype to be same as input
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(
+            self.target.args[0][0].meta[QPARAM_KEY].dtype, "uint8"
+        )  # args[0] is a list of tensors
+
+    def test_i16_to_u8_cat(self):
+        self.setup(
+            SimpleCatDefault(),
+            torch.ops.aten.cat.default,
+            input_dtype="int16",
+            desired_dtype="uint8",  # Pass will change node's qparam to i16
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"  # Target output is uint8
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_unsupported_cat_dtype(self):
+        self.setup(
+            SimpleCatDefault(),
+            torch.ops.aten.cat.default,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+
+class LinearDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_u8_to_i16_linear(self):
+        self.setup(
+            SimpleLinear(),
+            torch.ops.aten.linear.default,
+            input_dtype="uint8",
+            # desired_dtype will be int16 after pass modifies node's qparam
+        )
+        # Setup already makes node's qparam int16 if input is uint8
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        # Input dtype is uint8
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        # After pass, node's dtype should be u8 (converted from i16)
+        # A quantize op (i16) should be inserted after
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "int16")
+
+    def test_no_mismatch_linear(self):
+        self.setup(
+            SimpleLinear(),
+            torch.ops.aten.linear.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_unsupported_linear_dtype(self):
+        self.setup(
+            SimpleLinear(),
+            torch.ops.aten.linear.default,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+
+class MulDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_no_mismatch_mul(self):
+        self.setup(
+            SimpleMulWithTensor(),
+            torch.ops.aten.mul.Tensor,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_unsupported_mul_dtype(self):
+        self.setup(
+            SimpleMulWithTensor(),
+            torch.ops.aten.mul.Tensor,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+
+class BMMDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_u8_to_i16_bmm(self):
+        self.setup(
+            SimpleBatchMatMul(),
+            torch.ops.aten.bmm.default,
+            input_dtype="uint8",
+        )
+        # Setup makes node's qparam int16 if input is uint8
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        # After pass, node's dtype should be u8 (converted from i16)
+        # A quantize op (i16) should be inserted after
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "int16")
+
+    def test_no_mismatch_bmm(self):
+        self.setup(
+            SimpleBatchMatMul(),
+            torch.ops.aten.bmm.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_unsupported_bmm_dtype(self):
+        self.setup(
+            SimpleBatchMatMul(),
+            torch.ops.aten.bmm.default,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+
+class PermuteDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_no_mismatch_permute(self):
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_u8_to_i16_permute(self):
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="uint8",
+        )
+        # Setup makes node's qparam int16 if input is uint8
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        # After pass, node's dtype should be u8 (converted from i16)
+        # A quantize op (i16) should be inserted after
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "int16")
+
+    def test_unsupported_permute_dtype(self):
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+
+class ReshapeDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_no_mismatch_reshape(self):
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_u8_to_i16_reshape(self):
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="uint8",
+        )
+        # Setup makes node's qparam int16 if input is uint8
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        # After pass, node's dtype should be u8 (converted from i16)
+        # A quantize op (i16) should be inserted after
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "int16")
+
+    def test_unsupported_reshape_dtype(self):
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
+
+
+class ReluDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_no_mismatch_relu(self):
+        self.setup(
+            SimpleRelu(),
+            torch.ops.aten.relu.default,
+            input_dtype="uint8",
+            desired_dtype="uint8",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "uint8"
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, self.input_dtype)
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+
+    def test_u8_to_i16_relu(self):
+        self.setup(
+            SimpleRelu(),
+            torch.ops.aten.relu.default,
+            input_dtype="uint8",
+        )
+        # Setup makes node's qparam int16 if input is uint8
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "int16")
+        self.assertEqual(self.target.args[0].meta[QPARAM_KEY].dtype, "uint8")
+
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        target_pass.call(self.ep)
+
+        # After pass, node's dtype should be u8 (converted from i16)
+        # A quantize op (i16) should be inserted after
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "uint8")
+        self.assertEqual(list(self.target.users)[0].meta[QPARAM_KEY].dtype, "int16")
+
+    def test_unsupported_relu_dtype(self):
+        self.setup(
+            SimpleRelu(),
+            torch.ops.aten.relu.default,
+            input_dtype="uint8",
+            desired_dtype="float32",
+        )
+        self.target.meta[QPARAM_KEY].dtype = "float32"
+        target_pass = InsertQuantizeOnDtypeMismatch()
+        with self.assertRaises(NotYetSupportedError):
+            target_pass.call(self.ep)
