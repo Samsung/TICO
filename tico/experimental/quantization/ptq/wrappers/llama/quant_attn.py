@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -131,28 +131,38 @@ class QuantLlamaAttention(QuantModuleBase):
         x2n = self._fq(-x2, o_neg)
         return self._fq(torch.cat((x2n, x1), -1), o_cat)
 
+    @staticmethod
+    def _concat_kv(
+        past: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        k_new: torch.Tensor,
+        v_new: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Concat along sequence dim (dim=2): (B, n_kv, S, H)."""
+        if past is None:
+            return k_new, v_new
+        past_k, past_v = past
+        k = torch.cat([past_k, k_new], dim=2)
+        v = torch.cat([past_v, v_new], dim=2)
+        return k, v
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value=None,  # not supported yet
+        past_key_value=None,  # tuple(k, v) or HF Cache-like object
+        use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ):
-        if past_key_value is not None:
-            raise NotImplementedError(
-                "QuantLlamaAttention does not support KV cache yet."
-            )
-
         hidden = self._fq(hidden_states, self.obs_hidden)
         B, S, _ = hidden.shape
         H = self.hdim
 
         # projections
-        q = self.q_proj(hidden).view(B, S, -1, H).transpose(1, 2)
-        k = self.k_proj(hidden).view(B, S, -1, H).transpose(1, 2)
-        v = self.v_proj(hidden).view(B, S, -1, H).transpose(1, 2)
+        q = self.q_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # (B, n_h, S, H)
+        k = self.k_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # (B, n_kv, S, H)
+        v = self.v_proj(hidden).view(B, S, -1, H).transpose(1, 2)  # (B, n_kv, S, H)
 
         # rope tables
         cos, sin = position_embeddings
@@ -176,14 +186,37 @@ class QuantLlamaAttention(QuantModuleBase):
         k_sin = self._fq(k_half * sin_u, self.obs_k_sin)
         k_rot = self._fq(k_cos + k_sin, self.obs_k_rot)
 
+        # --- build/update KV for attention & present_key_value -------------
+        present_key_value: Tuple[torch.Tensor, torch.Tensor]
+
+        # HF Cache path (if available)
+        if use_cache and hasattr(past_key_value, "update"):
+            # Many HF Cache impls use update(k, v) and return (k_total, v_total)
+            try:
+                k_total, v_total = past_key_value.update(k_rot, v)
+                present_key_value = (k_total, v_total)
+                k_for_attn, v_for_attn = k_total, v_total
+            except Exception:
+                # Fallback to tuple concat if Cache signature mismatches
+                k_for_attn, v_for_attn = self._concat_kv(
+                    getattr(past_key_value, "kv", None), k_rot, v
+                )
+                present_key_value = (k_for_attn, v_for_attn)
+        else:
+            # Tuple or None path
+            pkv_tuple = past_key_value if isinstance(past_key_value, tuple) else None
+            k_for_attn, v_for_attn = self._concat_kv(pkv_tuple, k_rot, v)
+            present_key_value = (k_for_attn, v_for_attn)
+
         # logits
-        k_rep = k_rot.repeat_interleave(self.kv_rep, dim=1)
+        k_rep = k_for_attn.repeat_interleave(self.kv_rep, dim=1)  # (B, n_h, K, H)
         logits_raw = self._fq(q_rot @ k_rep.transpose(-2, -1), self.obs_logits_raw)
         scale = self._fq(self.scale_t, self.obs_scale)
         logits = self._fq(logits_raw * scale, self.obs_logits)
 
         if attention_mask is None or attention_mask.dtype == torch.bool:
-            _, _, q_len, k_len = logits.shape
+            _, _, q_len, _ = logits.shape
+            k_len = k_for_attn.size(2)
             assert isinstance(self.causal_mask_template, torch.Tensor)
             attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
                 hidden_states.device
@@ -196,7 +229,7 @@ class QuantLlamaAttention(QuantModuleBase):
         attn_weights = self._fq(attn_weights, self.obs_softmax)
 
         # attn out
-        v_rep = v.repeat_interleave(self.kv_rep, dim=1)
+        v_rep = v_for_attn.repeat_interleave(self.kv_rep, dim=1)  # (B, n_h, K, H)
         attn_out = (
             self._fq(attn_weights @ v_rep, self.obs_attn_out)
             .transpose(1, 2)
@@ -204,7 +237,13 @@ class QuantLlamaAttention(QuantModuleBase):
         )
 
         # final projection
-        return self.o_proj(attn_out), attn_weights
+        out = self.o_proj(attn_out)
+
+        # return with/without cache
+        if use_cache:
+            return out, attn_weights, present_key_value
+        else:
+            return out, attn_weights
 
     def _all_observers(self):
         # local first

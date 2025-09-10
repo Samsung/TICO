@@ -136,7 +136,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             L = hidden_states.size(1)
             attention_mask = self._slice_causal(L, hidden_states.device)
 
-        hidden_states, _ = self.self_attn(
+        attn_out = self.self_attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -147,13 +147,25 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-        hidden_states = residual + hidden_states
+        if use_cache:
+            hidden_states_attn, _attn_weights, present_key_value = attn_out
+        else:
+            hidden_states_attn, _attn_weights = attn_out
+            present_key_value = None
+
+        hidden_states = residual + hidden_states_attn
 
         # ─── MLP block ─────────────────────────────────────────────────
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        # Return type policy:
+        # - If use_cache: always return (hidden_states, present_key_value)
+        # - Else: return as configured (tuple/tensor) for HF compatibility
+        if use_cache:
+            return hidden_states, present_key_value
 
         if self.return_type == "tuple":
             return (hidden_states,)
