@@ -227,14 +227,22 @@ def validate_result(
                 desired=circle_res.shape,
                 err_msg=f"Shape mismatches.\nexpected result: {expected_res.shape}\ncircle result: {circle_res.shape}",
             )
-        np.testing.assert_allclose(
-            actual=circle_res,
-            desired=expected_res,
-            rtol=rtol,
-            atol=atol,
-            err_msg=f"Value mismatches.\nexpected result: {expected_res}\ncircle result: {circle_res}",
-        )
-
+            circle_tensor = torch.from_numpy(circle_res)
+            torch.testing.assert_close(
+                actual=expected_res,
+                expected=circle_tensor,
+                rtol=rtol,
+                atol=atol,
+                msg=lambda msg: f"Value mismatches.\n\n{msg}"
+            )
+        else:
+            np.testing.assert_allclose(
+                actual=circle_res,
+                desired=expected_res,
+                rtol=rtol,
+                atol=atol,
+                err_msg=f"Value mismatches.\nexpected result: {expected_res}\ncircle result: {circle_res}",
+            )
         if isinstance(expected_res, torch.Tensor):
             expected_dtype: torch.dtype = expected_res.dtype
             result_dtype: torch.dtype = numpy_dtype_to_torch_dtype(circle_res.dtype)
