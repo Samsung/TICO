@@ -45,7 +45,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_resize_nearest_neighbor_unequal_scale_factors(self):
         """Test CircleResizeNearestNeighbor with unequal scale factors"""
-        # This should cover the error case in resize_nearest_neighbor
         input_tensor = torch.randn(1, 32, 32, 3)
         size = [1, 64, 48, 3]  # Unequal scale factors
 
@@ -56,7 +55,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_conv2d_with_defaults(self):
         """Test CircleConv2d with default parameters"""
-        # This should cover lines 74-94 in register_custom_op.py
         input_tensor = torch.randn(1, 32, 32, 3)  # NHWC
         weight_tensor = torch.randn(16, 3, 3, 3)  # OHWI
 
@@ -84,7 +82,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_conv2d_invalid_groups(self):
         """Test CircleConv2d with invalid groups parameter"""
-        # This should cover the error case in conv2d
         input_tensor = torch.randn(1, 32, 32, 3)
         weight_tensor = torch.randn(16, 3, 3, 3)
 
@@ -119,7 +116,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_depthwise_conv2d_basic(self):
         """Test CircleDepthwiseConv2d basic functionality"""
-        # This should cover lines 203-248 in register_custom_op.py
         input_tensor = torch.randn(1, 32, 32, 16)  # NHWC, 16 channels
         weight_tensor = torch.randn(1, 3, 3, 16)  # OHW1 format
         groups = 16
@@ -151,7 +147,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_depthwise_conv2d_invalid_groups_assertion(self):
         """Test CircleDepthwiseConv2d with invalid groups assertion"""
-        # This should cover the assertion error in depthwise_conv2d
         input_tensor = torch.randn(1, 32, 32, 16)
         weight_tensor = torch.randn(1, 3, 3, 16)
 
@@ -162,7 +157,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_depthwise_conv2d_padding_basic(self):
         """Test CircleDepthwiseConv2dPadding basic functionality"""
-        # This should cover lines 248-320 in register_custom_op.py
         input_tensor = torch.randn(1, 32, 32, 16)
         weight_tensor = torch.randn(1, 3, 3, 16)
         groups = 16
@@ -177,7 +171,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_transpose_conv_basic(self):
         """Test CircleTransposeConv basic functionality"""
-        # This should cover lines 320-401 in register_custom_op.py
         input_tensor = torch.randn(1, 16, 16, 16)  # NHWC
         weight_tensor = torch.randn(16, 3, 3, 16)  # OHWI format
 
@@ -211,7 +204,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_transpose_conv_invalid_groups(self):
         """Test CircleTransposeConv with invalid groups parameter"""
-        # This should cover the error case in transpose_conv
         input_tensor = torch.randn(1, 16, 16, 16)
         weight_tensor = torch.randn(16, 3, 3, 16)
 
@@ -226,7 +218,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_maxpool2d_with_defaults(self):
         """Test CircleMaxPool2D with default parameters"""
-        # This should cover lines 401-455 in register_custom_op.py
         input_tensor = torch.randn(1, 32, 32, 3)
         kernel_size = [2, 2]
 
@@ -255,7 +246,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_avgpool2d_with_defaults(self):
         """Test CircleAvgPool2D with default parameters"""
-        # This should cover lines 455-507 in register_custom_op.py
         input_tensor = torch.randn(1, 32, 32, 3)
         kernel_size = [2, 2]
 
@@ -291,7 +281,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_instance_norm_basic(self):
         """Test CircleInstanceNorm basic functionality"""
-        # This should cover lines 507-567 in register_custom_op.py
         input_tensor = torch.randn(2, 32, 32, 3)  # NHWC
         weight_tensor = torch.randn(3)
         bias_tensor = torch.randn(3)
@@ -328,7 +317,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_quantize_mx_int8(self):
         """Test CircleQuantizeMX with int8 format"""
-        # This should cover lines 567-639 in register_custom_op.py
         input_tensor = torch.randn(2, 32, 32, 3)
         elem_format = "int8"
         axis = -1
@@ -340,7 +328,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_quantize_mx_unsupported_format(self):
         """Test CircleQuantizeMX with unsupported format"""
-        # This should cover the error case in quantize_mx
         input_tensor = torch.randn(2, 32, 32, 3)
         elem_format = "unsupported_format"
         axis = -1
@@ -367,7 +354,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def test_circle_rms_norm_basic(self):
         """Test CircleRMSNorm basic functionality"""
-        # This should cover lines 639-682 in register_custom_op.py
         hidden_states = torch.randn(2, 32, 3)
         weight = torch.randn(3)
 
@@ -420,7 +406,6 @@ class TestRegisterCustomOp(unittest.TestCase):
     @patch("tico.utils.register_custom_op._quantize_mx")
     def test_circle_quantize_mx_mocked(self, mock_quantize_mx):
         """Test CircleQuantizeMX with mocked _quantize_mx function"""
-        # This should cover the call to _quantize_mx
         mock_quantize_mx.return_value = torch.randn(2, 32, 32, 3)
 
         input_tensor = torch.randn(2, 32, 32, 3)
