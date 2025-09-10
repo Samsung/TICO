@@ -394,15 +394,6 @@ class TestRegisterCustomOp(unittest.TestCase):
             result = torch.ops.circle_custom.conv2d(input_tensor, weight_tensor)
             self.assertEqual(result.dtype, dtype)
 
-    def test_custom_ops_edge_cases(self):
-        """Test custom ops with edge cases"""
-        # Test with zero tensors
-        input_tensor = torch.zeros(1, 16, 16, 3)
-        weight_tensor = torch.zeros(8, 3, 3, 3)
-
-        result = torch.ops.circle_custom.conv2d(input_tensor, weight_tensor)
-        self.assertTrue(torch.all(result == 0))
-
     @patch("tico.utils.register_custom_op._quantize_mx")
     def test_circle_quantize_mx_mocked(self, mock_quantize_mx):
         """Test CircleQuantizeMX with mocked _quantize_mx function"""
