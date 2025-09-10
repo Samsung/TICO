@@ -25,11 +25,6 @@ class TestRegisterCustomOp(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        # Create test tensors
-        self.input_tensor = torch.randn(1, 32, 32, 3)  # NHWC format
-        self.weight_tensor = torch.randn(16, 3, 3, 3)  # OHWI format
-        self.bias_tensor = torch.randn(16)
-
         # Register all custom ops
         register_custom_op.RegisterOps()
 
