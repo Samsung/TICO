@@ -229,8 +229,8 @@ def validate_result(
             )
             circle_tensor = torch.from_numpy(circle_res)
             torch.testing.assert_close(
-                actual=expected_res,
-                expected=circle_tensor,
+                actual=circle_tensor,
+                expected=expected_res,
                 rtol=rtol,
                 atol=atol,
                 msg=lambda msg: f"Value mismatches.\n\n{msg}"
