@@ -565,6 +565,18 @@ class InstanceNormArgs:
 
 @enforce_type
 @dataclass
+class LeArgs:
+    """
+    le.Scalar(Tensor self, Scalar other) -> Tensor
+    le.Tensor(Tensor self, Tensor other) -> Tensor
+    """
+
+    input: Union[torch.fx.Node, torch.Tensor, float, int]
+    other: Union[torch.fx.Node, torch.Tensor, float, int]
+
+
+@enforce_type
+@dataclass
 class LeakyReluArgs:
     """
     leaky_relu(Tensor self, Scalar negative_slope=0.01) -> Tensor
