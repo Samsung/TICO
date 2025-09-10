@@ -233,7 +233,7 @@ def validate_result(
                 expected=expected_res,
                 rtol=rtol,
                 atol=atol,
-                msg=lambda msg: f"Value mismatches.\n\n{msg}"
+                msg=lambda msg: f"Value mismatches.\n\n{msg}",
             )
         else:
             np.testing.assert_allclose(
