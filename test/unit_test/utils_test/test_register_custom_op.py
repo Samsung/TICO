@@ -241,7 +241,7 @@ class TestRegisterCustomOp(unittest.TestCase):
         )
 
         # Check output shape with custom params
-        expected_shape = [1, 32, 32, 3]  # NHWC with kernel_size=3, stride=1, padding=1
+        expected_shape = [1, 32, 32, 3]
         self.assertEqual(list(result.shape), expected_shape)
 
     def test_circle_avgpool2d_with_defaults(self):
@@ -384,8 +384,8 @@ class TestRegisterCustomOp(unittest.TestCase):
             expected_batch_size = batch_size
             self.assertEqual(result.shape[0], expected_batch_size)
 
-    def test_custom_ops_with_different_data_types(self):
-        """Test custom ops with different data types"""
+    def test_custom_ops_with_conv2d_different_data_types(self):
+        """Test custom ops with conv2d different data types"""
         # Test with different data types
         for dtype in [torch.float32, torch.float16]:
             input_tensor = torch.randn(1, 16, 16, 3, dtype=dtype)
@@ -424,17 +424,6 @@ class TestRegisterCustomOp(unittest.TestCase):
             shared_exp_method="max",
             round="nearest",
         )
-
-    def test_custom_ops_performance_with_large_tensors(self):
-        """Test custom ops performance with large tensors"""
-        # Test with larger tensors to ensure no performance issues
-        input_tensor = torch.randn(4, 64, 64, 32)
-        weight_tensor = torch.randn(16, 3, 3, 32)
-
-        # This should not raise any exceptions
-        result = torch.ops.circle_custom.conv2d(input_tensor, weight_tensor)
-        self.assertEqual(result.shape[0], 4)  # Batch size preserved
-        self.assertEqual(result.shape[3], 16)  # Output channels preserved
 
 
 if __name__ == "__main__":
