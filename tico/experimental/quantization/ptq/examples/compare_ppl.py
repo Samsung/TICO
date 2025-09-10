@@ -20,6 +20,10 @@
 #   • Full post-training UINT-8 flow (wrap → calibrate → eval).
 # =============================================================================
 
+import argparse
+import sys
+from typing import Optional
+
 import torch
 import tqdm
 from datasets import load_dataset
@@ -28,14 +32,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.utils.metrics import perplexity
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
-
-# -------------------------------------------------------------------------
-# 0. Global configuration
-# -------------------------------------------------------------------------
-MODEL_NAME = "meta-llama/Meta-Llama-3-1B"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-STRIDE = 512  # sliding-window stride for perplexity
-RUN_FP = True  # set False → run UINT-8 path
 
 # Token-budget presets for activation calibration
 TOKENS: dict[str, int] = {
@@ -46,76 +42,198 @@ TOKENS: dict[str, int] = {
     # Production / 4-bit observer smoothing
     "production": 200_000,
 }
-CALIB_TOKENS = TOKENS["baseline"]
-print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
 
-# -------------------------------------------------------------------------
-# 1. Load model
-# -------------------------------------------------------------------------
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}
 
-if RUN_FP:
-    # -- FP32 baseline ------------------------------------------------------
-    print("Loading FP32 model …")
-    fp_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE).eval()
-    fp_model.config.use_cache = False
-else:
-    # -- UINT-8 pipeline -----------------------------------------------------
-    print("Creating UINT-8 clone …")
-    uint8_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE).eval()
-    uint8_model.config.use_cache = False
+# Hardcoded dataset settings
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+TRAIN_SPLIT = "train"
+TEST_SPLIT = "test"
 
-    # ---------------------------------------------------------------------
-    # 2. Wrap every Transformer layer with PTQWrapper
-    # ---------------------------------------------------------------------
-    qcfg = QuantConfig()  # all-uint8 defaults
 
-    wrapped_layers = torch.nn.ModuleList()
-    for idx, layer in enumerate(uint8_model.model.layers):
-        layer_cfg = qcfg.child(f"layer{idx}")
-        wrapped_layers.append(PTQWrapper(layer, qcfg=layer_cfg))
-    uint8_model.model.layers = wrapped_layers
+def main():
+    parser = argparse.ArgumentParser(description="Quick PTQ example (FP or UINT8)")
+    parser.add_argument(
+        "--mode",
+        choices=["fp", "uint8"],
+        default="fp",
+        help="Choose FP baseline only or full UINT8 PTQ path.",
+    )
+    parser.add_argument(
+        "--model", type=str, required=True, help="HF repo name or local path."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (cuda|cpu).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=list(DTYPE_MAP.keys()),
+        default="float32",
+        help="Model dtype for load (float32|bfloat16|float16).",
+    )
+    parser.add_argument(
+        "--stride", type=int, default=512, help="Sliding-window stride for perplexity."
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Optional HF token for gated/private models.",
+    )
+    parser.add_argument(
+        "--use-cache",
+        dest="use_cache",
+        action="store_true",
+        default=False,
+        help="Use model KV cache if enabled (off by default).",
+    )
+    parser.add_argument(
+        "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
+    )
+    # 2) calib-preset default = debug
+    parser.add_argument(
+        "--calib-preset",
+        choices=list(TOKENS.keys()),
+        default="debug",
+        help="Calibration token budget preset.",
+    )
 
-    # ---------------------------------------------------------------------
-    # 3. Single-pass activation calibration
-    # ---------------------------------------------------------------------
-    print("Calibrating UINT-8 observers …")
-    calib_txt = " ".join(
-        load_dataset("wikitext", "wikitext-2-raw-v1", split="train")["text"]
-    )[:CALIB_TOKENS]
-    ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(DEVICE)
+    args = parser.parse_args()
 
-    # (a) switch every QuantModuleBase to CALIB mode
-    for l in uint8_model.model.layers:
-        l.enable_calibration()
+    # Basic setup
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device)
+    dtype = DTYPE_MAP[args.dtype]
 
-    # (b) run inference to collect ranges
-    with torch.no_grad():
-        for i in tqdm.trange(0, ids.size(1) - 1, STRIDE, desc="Calibration"):
-            uint8_model(ids[:, i : i + STRIDE])
+    print("=== Config ===")
+    print(f"Mode             : {args.mode}")
+    print(f"Model            : {args.model}")
+    print(f"Device           : {device.type}")
+    print(f"DType            : {args.dtype}")
+    print(f"Stride           : {args.stride}")
+    print(f"Use HF cache?    : {args.use_cache}")
+    print(f"Calib preset     : {args.calib_preset}")
+    print()
 
-    # (c) freeze (scale, zero-point)
-    for l in uint8_model.model.layers:
-        l.freeze_qparams()
+    # -------------------------------------------------------------------------
+    # 1. Load model and tokenizer
+    # -------------------------------------------------------------------------
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+    )
 
-# -------------------------------------------------------------------------
-# 4. Evaluate perplexity on Wikitext-2
-# -------------------------------------------------------------------------
-print("\nCalculating perplexities …")
-test_ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-enc = tokenizer("\n\n".join(test_ds["text"]), return_tensors="pt")
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=dtype,
+            trust_remote_code=args.trust_remote_code,
+            token=args.hf_token,
+        )
+        .to(device)
+        .eval()
+    )
 
-if RUN_FP:
-    ppl_fp = perplexity(fp_model, enc, DEVICE, stride=STRIDE)
-else:
-    ppl_int8 = perplexity(uint8_model, enc, DEVICE, stride=STRIDE)
+    model.config.use_cache = args.use_cache
 
-# -------------------------------------------------------------------------
-# 5. Report
-# -------------------------------------------------------------------------
-print("\n┌── Wikitext-2 test perplexity ─────────────")
-if RUN_FP:
-    print(f"│ FP32  : {ppl_fp:8.2f}")
-else:
-    print(f"│ UINT-8 : {ppl_int8:8.2f}")
-print("└───────────────────────────────────────────")
+    if args.mode == "fp":
+        fp_model = model
+    else:
+        # INT8 PTQ path
+        uint8_model = model
+
+        CALIB_TOKENS = TOKENS[args.calib_preset]
+        print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
+
+        # ---------------------------------------------------------------------
+        # 2. Wrap every Transformer layer with PTQWrapper
+        # ---------------------------------------------------------------------
+        qcfg = QuantConfig()  # all-uint8 defaults
+
+        wrapped_layers = torch.nn.ModuleList()
+        for idx, layer in enumerate(uint8_model.model.layers):
+            layer_cfg = qcfg.child(f"layer{idx}")
+            wrapped_layers.append(PTQWrapper(layer, qcfg=layer_cfg))
+        uint8_model.model.layers = wrapped_layers
+
+        # ---------------------------------------------------------------------
+        # 3. Single-pass activation calibration
+        # ---------------------------------------------------------------------
+        print("Calibrating UINT-8 observers …")
+        calib_txt = " ".join(
+            load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)["text"]
+        )[:CALIB_TOKENS]
+        ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
+
+        # (a) switch every QuantModuleBase to CALIB mode
+        for l in uint8_model.model.layers:
+            l.enable_calibration()
+
+        # (b) run inference to collect ranges
+        iterator = range(0, ids.size(1) - 1, args.stride)
+        if not args.no_tqdm:
+            iterator = tqdm.tqdm(iterator, desc="Calibration")
+        with torch.no_grad():
+            for i in iterator:
+                uint8_model(ids[:, i : i + args.stride])
+
+        # (c) freeze (scale, zero-point)
+        for l in uint8_model.model.layers:
+            l.freeze_qparams()
+
+    # -------------------------------------------------------------------------
+    # 4. Evaluate perplexity
+    # -------------------------------------------------------------------------
+    print("\nCalculating perplexities …")
+    test_ds = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT)
+    enc = tokenizer("\n\n".join(test_ds["text"]), return_tensors="pt")
+
+    if args.mode == "fp":
+        ppl_fp = perplexity(
+            fp_model,
+            enc,
+            args.device,
+            stride=args.stride,
+            show_progress=not args.no_tqdm,
+        )
+    else:
+        ppl_int8 = perplexity(
+            uint8_model,
+            enc,
+            args.device,
+            stride=args.stride,
+            show_progress=not args.no_tqdm,
+        )
+
+    # -------------------------------------------------------------------------
+    # 5. Report
+    # -------------------------------------------------------------------------
+    print("\n┌── Wikitext-2 test perplexity ─────────────")
+    if args.mode == "fp":
+        print(f"│ FP     : {ppl_fp:8.2f}")
+    else:
+        print(f"│ UINT-8 : {ppl_int8:8.2f}")
+    print("└───────────────────────────────────────────")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"\n[Error] {e}", file=sys.stderr)
+        sys.exit(1)
