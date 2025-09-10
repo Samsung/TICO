@@ -197,11 +197,10 @@ class LowerToResizeNearestNeighbor(PassBase):
             node.replace_all_uses_with(nhwc_to_nchw, propagate_meta=True)
             return resize_nearest_neighbor
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         logger = logging.getLogger(__name__)
 
         modified = False
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         for node in graph.nodes:
             if not is_target_node(

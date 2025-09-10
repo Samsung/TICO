@@ -34,6 +34,9 @@ from tico.experimental.quantization.passes.quantize_bias import QuantizeBias
 from tico.experimental.quantization.passes.remove_weight_dequant_op import (
     RemoveWeightDequantOp,
 )
+from tico.experimental.controlflow.passes.map_subgraph import (
+    MapSubgraph,
+)
 from tico.passes.cast_aten_where_arg_type import CastATenWhereArgType
 from tico.passes.cast_clamp_mixed_type_args import CastClampMixedTypeArgs
 from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
@@ -83,6 +86,7 @@ from tico.utils.trace_decorators import (
     trace_graph_diff_on_func,
 )
 from tico.utils.utils import has_quantization_ops, SuppressWarning
+from tico.utils.subgraph import get_gm_map
 
 
 @trace_const_diff_on_func
@@ -153,6 +157,7 @@ def check_unsupported_target(exported_program: ExportedProgram):
     supported_target = list(get_support_targets())
     # Ignore `getitem` since it is no-op for multiple outputs.
     supported_target.append(operator.getitem)
+    supported_target.append(torch.ops.higher_order.cond)
     unsupported = []
     for n in exported_program.graph.nodes:
         if n.op != "call_function":
@@ -192,22 +197,27 @@ def convert_exported_module_to_circle(
         config = get_default_config()
 
     assert isinstance(config, CompileConfigBase)
+    
+    for gm_info in get_gm_map(exported_program):
+        if gm_info["name"]: #non-root subgraph
+            graph_module = getattr(exported_program.graph_module, gm_info["name"])
+        else:
+            graph_module = exported_program.graph_module
+        logger = logging.getLogger(__name__)
+        logger.debug("Input ExportedProgram (must be core aten)")
+        logger.debug(exported_program)
 
-    logger = logging.getLogger(__name__)
-    logger.debug("Input ExportedProgram (must be core aten)")
-    logger.debug(exported_program)
-
-    # PRE-EDGE PASSES
-    #
-    # Here are the passes that run before to_edge() conversion.
-    # Let's decompose nodes that are not Aten Canonical, which can't be converted to the edge IR.
-    decompose_quantize_op = PassManager(
-        passes=[
-            DecomposeFakeQuantize(),
-            DecomposeFakeQuantizeTensorQParams(),
-        ]
-    )
-    decompose_quantize_op.run(exported_program)
+        # PRE-EDGE PASSES
+        #
+        # Here are the passes that run before to_edge() conversion.
+        # Let's decompose nodes that are not Aten Canonical, which can't be converted to the edge IR.
+        decompose_quantize_op = PassManager(
+            passes=[
+                DecomposeFakeQuantize(),
+                DecomposeFakeQuantizeTensorQParams(),
+            ]
+        )
+        decompose_quantize_op.run(exported_program, graph_module)
 
     # This pass should be run before 'RestoreLinear' and after 'decompose_quantize_op'.
     # TODO run pass regardless of the orders.
@@ -220,70 +230,84 @@ def convert_exported_module_to_circle(
         #   UserWarning: At pre-dispatch tracing, we assume that any custom op marked with
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
         exported_program = traced_run_decompositions(exported_program)
-
-    # TODO Distinguish legalize and optimize
-    circle_legalize = PassManager(
-        passes=[
-            FillMetaVal(),
-            ExtractDtypeKwargsPass(),
-            RemoveNop(),
-            ConvertLayoutOpToReshape(),
-            RestoreLinear(),
-            ConvertToReLU6(),
-            DecomposeAddmm(),
-            DecomposeSliceScatter(),
-            DecomposeGroupNorm(),
-            DecomposeBatchNorm(),
-            DecomposeGroupedConv2d(),
-            CastATenWhereArgType(),
-            ConvertRepeatToExpandCopy(),
-            *RemoveRedundantPermutePasses(),
-            RemoveRedundantAssertionNodes(),
-            RemoveRedundantExpand(),
-            RemoveRedundantSlice(),
-            FuseRedundantReshapeToMean(),
-            *RemoveRedundantViewPasses(),
-            RemoveRedundantToCopy(),
-            MergeConsecutiveCat(),
-            CastMixedTypeArgs(preserve_ep_invariant=True),
-            ConstPropPass(),
-            SegmentIndexSelectConst(),
-            LegalizeCausalMaskValue(enabled=config.get("legalize_causal_mask_value")),
-            LowerToResizeNearestNeighbor(),
-            LegalizePreDefinedLayoutOperators(),
-            LowerPow2ToMul(),
-            ConvertConv1dToConv2d(),
-            *LowerToSlicePasses(),
-            FuseLeadingUnsqueezeReshape(),
-            CastClampMixedTypeArgs(),
-        ]
-    )
-    circle_legalize.run(exported_program)
-
-    # After this stage, ExportedProgram invariant is broken, i.e.,
-    # graph can have a constant torch.tensor not lifted to a placeholder
-    circle_legalize = PassManager(
-        passes=[
-            FillMetaVal(),
-            CastMixedTypeArgs(preserve_ep_invariant=False),
-        ]
-    )
-    circle_legalize.run(exported_program)
-
-    # TODO Give an option to enable quantiztion to user
-    enable_quantization = has_quantization_ops(exported_program.graph)
-    if enable_quantization:
-        quantize_graph = PassManager(
+            
+    for gm_info in get_gm_map(exported_program):
+        if gm_info["name"]: #non-root subgraph
+            graph_module = getattr(exported_program.graph_module, gm_info["name"])
+        else:
+            graph_module = exported_program.graph_module
+        graph = graph_module.graph
+        
+        reinterpret_pass = PassManager(
             passes=[
-                FoldQuantOps(),
-                RemoveWeightDequantOp(),
-                PropagateQParamForward(),
-                PropagateQParamBackward(),
-                QuantizeBias(),
-                InsertQuantizeOnDtypeMismatch(),
+                MapSubgraph(),
             ]
         )
-        quantize_graph.run(exported_program)
+        reinterpret_pass.run(exported_program, graph_module)
+
+        # TODO Distinguish legalize and optimize
+        circle_legalize = PassManager(
+            passes=[
+                FillMetaVal(),
+                ExtractDtypeKwargsPass(),
+                RemoveNop(),
+                ConvertLayoutOpToReshape(),
+                RestoreLinear(),
+                ConvertToReLU6(),
+                DecomposeAddmm(),
+                DecomposeSliceScatter(),
+                DecomposeGroupNorm(),
+                DecomposeBatchNorm(),
+                DecomposeGroupedConv2d(),
+                CastATenWhereArgType(),
+                ConvertRepeatToExpandCopy(),
+                *RemoveRedundantPermutePasses(),
+                RemoveRedundantAssertionNodes(),
+                RemoveRedundantExpand(),
+                RemoveRedundantSlice(),
+                FuseRedundantReshapeToMean(),
+                *RemoveRedundantViewPasses(),
+                RemoveRedundantToCopy(),
+                MergeConsecutiveCat(),
+                CastMixedTypeArgs(preserve_ep_invariant=True),
+                ConstPropPass(),
+                SegmentIndexSelectConst(),
+                LegalizeCausalMaskValue(enabled=config.get("legalize_causal_mask_value")),
+                LowerToResizeNearestNeighbor(),
+                LegalizePreDefinedLayoutOperators(),
+                LowerPow2ToMul(),
+                ConvertConv1dToConv2d(),
+                *LowerToSlicePasses(),
+                FuseLeadingUnsqueezeReshape(),
+                CastClampMixedTypeArgs(),
+            ]
+        )
+        circle_legalize.run(exported_program, graph_module)
+
+        # After this stage, ExportedProgram invariant is broken, i.e.,
+        # graph can have a constant torch.tensor not lifted to a placeholder
+        circle_legalize = PassManager(
+            passes=[
+                FillMetaVal(),
+                CastMixedTypeArgs(preserve_ep_invariant=False),
+            ]
+        )
+        circle_legalize.run(exported_program, graph_module)
+
+        # TODO Give an option to enable quantiztion to user
+        enable_quantization = has_quantization_ops(graph)
+        if enable_quantization:
+            quantize_graph = PassManager(
+                passes=[
+                    FoldQuantOps(),
+                    RemoveWeightDequantOp(),
+                    PropagateQParamForward(),
+                    PropagateQParamBackward(),
+                    QuantizeBias(),
+                    InsertQuantizeOnDtypeMismatch(),
+                ]
+            )
+            quantize_graph.run(exported_program)
 
     check_unsupported_target(exported_program)
     check_training_ops(exported_program)

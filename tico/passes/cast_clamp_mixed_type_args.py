@@ -92,11 +92,10 @@ class CastClampMixedTypeArgs(PassBase):
     def __init__(self):
         super().__init__()
 
-    def convert(self, exported_program: ExportedProgram, node: torch.fx.Node) -> bool:
+    def convert(self, exported_program: ExportedProgram, node: torch.fx.Node, graph_module) -> bool:
         logger = logging.getLogger(__name__)
         modified = False
 
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
 
         # clamp(Tensor self, Scalar? min=None, Scalar? max=None) -> Tensor
@@ -150,17 +149,15 @@ class CastClampMixedTypeArgs(PassBase):
 
         return modified
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         target_op = ops.aten.clamp
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
             if not is_target_node(node, target_op):
                 continue
 
-            modified |= self.convert(exported_program, node)
+            modified |= self.convert(exported_program, node, graph_module)
 
         graph.eliminate_dead_code()
         graph.lint()

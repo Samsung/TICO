@@ -55,7 +55,7 @@ class RemoveRedundantReshapePattern1(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         """
         [BEFORE]
             `(AxBxC) - aten.reshape` - (1xAxBxC) - `aten.permute` - (1xAxCxB) - `aten.mul` - (1xAxCxB) - `aten.reshape - (AxCxB)`
@@ -63,8 +63,6 @@ class RemoveRedundantReshapePattern1(PassBase):
             `(AxBxC) - `aten.permute` - (AxCxB) - `aten.mul` - (AxCxB)`
         """
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for reshape1 in graph.nodes:
@@ -139,7 +137,7 @@ class RemoveRedundantReshapePattern2(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         """
         [BEFORE]
             `(AxBxC) - aten.reshape` - (1xAxBxC) - `aten.permute` - (Bx1xAxC) - `aten.reshape - (Bx(A*C))`
@@ -147,8 +145,6 @@ class RemoveRedundantReshapePattern2(PassBase):
             `(AxBxC) - `aten.permute` - (BxAxC) - `aten.reshape` - (Bx(A*C))`
         """
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for reshape1 in graph.nodes:
@@ -218,7 +214,7 @@ class RemoveRedundantReshapePattern3(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         """
         [BEFORE]
             (AxBxC) - aten.reshape - (1xAxBxC) - aten.add - (1xAxBxC) - aten.softmax - (1xAxBxC) - aten.reshape - (AxBxC)
@@ -230,8 +226,6 @@ class RemoveRedundantReshapePattern3(PassBase):
             (AxBxC) /   (add)                (softmax)
         """
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for reshape_1 in graph.nodes:
@@ -332,18 +326,16 @@ class RemoveRedundantReshapePattern4(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         """
         NOTE: Below graph is just an example. This pattern matches not only for the 3D tensors.
         What this pattern aims to remove is that the consecutive `aten.reshape` ops.
         [BEFORE]
-            (AxBxC) - aten.reshape - (AxB'xC') - aten.reshape - (A'xB''xC')
+            (AxBxC) - aten.reshape - (AxB'xC') - aten.reshape - (A'xB''xC)
         [AFTER]
-            (AxBxC) - aten.reshape - (A'xB''xC')
+            (AxBxC) - aten.reshape - (A'xB''xC)
         """
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for reshape1 in graph.nodes:
@@ -399,7 +391,7 @@ class RemoveRedundantReshapePattern5(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         """
         [BEFORE]
             (AxBxC) - aten.reshape - (AxBxC)
@@ -407,8 +399,6 @@ class RemoveRedundantReshapePattern5(PassBase):
             (AxBxC)
         """
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
 

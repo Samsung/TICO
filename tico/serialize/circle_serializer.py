@@ -35,17 +35,7 @@ multiple_output_ops = [
 ]
 
 
-def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
-    """Initialize a new Circle model and subgraph.
-
-    Returns:
-        Tuple containing the model and subgraph
-    """
-    model = CircleModel()
-    model.add_buffer(circle.Buffer.BufferT())  # Add empty buffer at the front
-    graph = CircleSubgraph(model)
-    return model, graph
-
+from tico.utils.subgraph import get_gm_map
 
 def build_circle(ep: ExportedProgram) -> bytes:
     """Convert ExportedProgram to Circle format.
@@ -58,57 +48,73 @@ def build_circle(ep: ExportedProgram) -> bytes:
     """
     logger = logging.getLogger(__name__)
     builder = flatbuffers.Builder()
-    model, graph = _initialize_model()
-
-    # Export tensors
-    _export_tensors(graph, ep)
-
-    # Register inputs
-    logger.debug("---------------Register inputs--------------")
-    for in_spec in ep.graph_signature.input_specs:
-        if in_spec.kind != InputKind.USER_INPUT:
-            continue
-        # NoneType ConstantArgument is ignored.
-        if isinstance(in_spec.arg, ConstantArgument) and in_spec.arg.value == None:
-            continue
-        arg_name = in_spec.arg.name
-        graph.add_input(arg_name)
-        logger.debug(f"Registered input: {arg_name}")
-
-    # Register outputs
-    logger.debug("---------------Register outputs--------------")
-    for user_output in ep.graph_signature.user_outputs:
-        if user_output == None:
-            logger.debug("Ignore 'None' output")
-            continue
-
-        graph.add_output(user_output)
-        logger.debug(f"Registered output: {user_output}")
-
-    # Export operators
-    logger.debug("---------------Export operators--------------")
+    model = CircleModel()
+    
     op_codes: Dict[OpCode, int] = {}
-    visitors = get_node_visitors(op_codes, graph)
-    for node in ep.graph.nodes:
-        if node.op != "call_function":
-            continue
+    
+    for gm_info in get_gm_map(ep):
+        if gm_info["name"]: #non-root subgraph
+            graph_module = getattr(ep.graph_module, gm_info["name"])
+        else:
+            graph_module = ep.graph_module
+        ep_graph = graph_module.graph
+        
+        graph = CircleSubgraph(model)
+        # Export tensors
+        if gm_info["name"]: #non-root subgraph
+            _export_tensors_for_subgraph(graph, ep_graph, ep)
+        else:
+            _export_tensors(graph, ep_graph, ep)
+        if gm_info["index"] == 0: # Root graph
+            # Register inputs
+            logger.debug("---------------Register inputs--------------")
+            for in_spec in ep.graph_signature.input_specs:
+                if in_spec.kind != InputKind.USER_INPUT:
+                    continue
+                # NoneType ConstantArgument is ignored.
+                if isinstance(in_spec.arg, ConstantArgument) and in_spec.arg.value == None:
+                    continue
+                arg_name = in_spec.arg.name
+                graph.add_input(arg_name)
+                logger.debug(f"Registered input: {arg_name}")
 
-        opcode = node.target
-        if opcode == operator.getitem:
-            continue
-        if opcode not in visitors:
-            raise RuntimeError(f"{opcode} is not yet supported")
-        circle_op = visitors[opcode].define_node(node)
+            # Register outputs
+            logger.debug("---------------Register outputs--------------")
+            for user_output in ep.graph_signature.user_outputs:
+                if user_output == None:
+                    logger.debug("Ignore 'None' output")
+                    continue
 
-        if circle_op:
-            graph.add_operator(circle_op)
-            logger.debug(f"call_function: {node.name} ({opcode}) Op exported.")
+                graph.add_output(user_output)
+                logger.debug(f"Registered output: {user_output}")
 
-    finalise_tensor_names(graph)
-    validate_tensor_shapes(graph)
+        # Export operators
+        logger.debug("---------------Export operators--------------")
+        visitors = get_node_visitors(op_codes, graph)
+        ep_graph.print_tabular()
+        breakpoint()
+        for node in ep_graph.nodes:
+            if node.op != "call_function":
+                continue
 
-    # Register subgraph
-    model.subgraphs.append(graph)
+            opcode = node.target
+            if opcode == operator.getitem:
+                continue
+            if opcode == torch.ops.higher_order.cond:
+                # TODO process
+                continue
+            if opcode not in visitors:
+                raise RuntimeError(f"{opcode} is not yet supported")
+            circle_op = visitors[opcode].define_node(node)
+
+            if circle_op:
+                graph.add_operator(circle_op)
+                logger.debug(f"call_function: {node.name} ({opcode}) Op exported.")
+
+        finalise_tensor_names(graph)
+        validate_tensor_shapes(graph)
+        
+        model.subgraphs.append(graph)
 
     # Encode operator codes
     model.operatorCodes = [
@@ -126,7 +132,7 @@ def build_circle(ep: ExportedProgram) -> bytes:
     return bytes(buf)
 
 
-def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
+def _export_tensors(graph: CircleSubgraph, ep_graph, ep: ExportedProgram) -> None:
     """Export all tensors from the exported program to the circle graph.
 
     Args:
@@ -137,11 +143,13 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
     logger.debug("---------------Export tensors--------------")
     buf_name_to_data = {name: buf for name, buf in ep.named_buffers()}
 
-    for node in ep.graph.nodes:
+    for node in ep_graph.nodes:
         if node.op == "call_function":
             if node.target in multiple_output_ops:
                 continue
             node_val = node.meta["val"]
+            if node.name == 'cond':
+                continue
             if node_val.layout != torch.strided:
                 raise RuntimeError(
                     f"Only support dense tensors (node layout: {node_val.layout})"
@@ -150,7 +158,7 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
             logger.debug(f"call_function: {node.name} tensor exported.")
 
         elif node.op == "placeholder":
-            _handle_placeholder_node(graph, node, ep, buf_name_to_data)
+            _handle_placeholder_node(graph, node, ep_graph, ep, buf_name_to_data)
 
         elif node.op == "get_attr":
             _handle_get_attr_node(graph, node)
@@ -171,9 +179,57 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
             raise AssertionError(f"Unknown fx.Node op {node.op}")
 
 
+def _export_tensors_for_subgraph(graph: CircleSubgraph, ep_graph, ep: ExportedProgram) -> None:
+    """Export all tensors from the exported program to the circle graph.
+
+    Args:
+        graph: The CircleSubgraph to add tensors to
+        ep: The exported PyTorch program
+    """
+    logger = logging.getLogger(__name__)
+    logger.debug("---------------Export tensors--------------")
+    buf_name_to_data = {name: buf for name, buf in ep.named_buffers()} #model-wise context
+
+    for node in ep_graph.nodes:
+        if node.op == "call_function":
+            if node.target in multiple_output_ops:
+                continue
+            node_val = node.meta["val"]
+            if node.name == 'cond':
+                continue
+            if node_val.layout != torch.strided:
+                raise RuntimeError(
+                    f"Only support dense tensors (node layout: {node_val.layout})"
+                )
+            graph.add_tensor_from_node(node)
+            logger.debug(f"call_function: {node.name} tensor exported.")
+
+        elif node.op == "placeholder":
+            _handle_placeholder_node(graph, node, ep_graph, ep, buf_name_to_data)
+            graph.add_input(node.name) # This is added for subgraph
+
+        elif node.op == "get_attr":
+            _handle_get_attr_node(graph, node)
+        elif node.op == "output":
+            for output in node.args[0]: 
+                if isinstance(output, torch.fx.Node):
+                    assert graph.has_tensor(output.name)
+                graph.add_output(output.name) # This is added for subgraph
+            continue
+
+        elif node.op == "call_method":
+            raise AssertionError("Not yet implemented")
+
+        elif node.op == "call_module":
+            raise AssertionError("Not yet implemented")
+
+        else:
+            raise AssertionError(f"Unknown fx.Node op {node.op}")
+
 def _handle_placeholder_node(
     graph: CircleSubgraph,
     node: torch.fx.Node,
+    ep_graph, 
     ep: ExportedProgram,
     buf_name_to_data: dict,
 ) -> None:
@@ -319,20 +375,22 @@ def _handle_get_attr_node(
         node: The get_attr node to process
     """
     assert isinstance(node.target, str)
-    attr_tensor = getattr(node.graph.owning_module, node.target)
+    attr = getattr(node.graph.owning_module, node.target)
 
-    if not isinstance(attr_tensor, torch.Tensor):
-        raise ValueError(f"Attribute {node.target} is not a tensor")
+    if isinstance(attr, torch.fx.graph_module.GraphModule):
+        pass
+    elif isinstance(attr, torch.Tensor):
+        attr_shape, attr_shape_signature = to_circle_shape(attr.shape)
 
-    attr_shape, attr_shape_signature = to_circle_shape(attr_tensor.shape)
+        graph.add_tensor_from_scratch(
+            prefix=node.name,
+            shape=attr_shape,
+            shape_signature=attr_shape_signature,
+            dtype=to_circle_dtype(attr.dtype),
+            source_node=node,
+        )
 
-    graph.add_tensor_from_scratch(
-        prefix=node.name,
-        shape=attr_shape,
-        shape_signature=attr_shape_signature,
-        dtype=to_circle_dtype(attr_tensor.dtype),
-        source_node=node,
-    )
-
-    logger = logging.getLogger(__name__)
-    logger.debug(f"Exported attribute tensor: {node.name}")
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Exported attribute tensor: {node.name}")
+    else:
+        raise ValueError(f"Unsupported get_attr target type {type(attr)}")

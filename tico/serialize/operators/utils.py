@@ -40,6 +40,7 @@ def get_op_index(opcode: int, opcode_map: Dict[OpCode, int]) -> int:
         op_index = opcode_map[op_code]
     return op_index
 
+import torch
 
 # TODO Move this to CircleSubGraph
 def create_builtin_operator(
@@ -47,8 +48,21 @@ def create_builtin_operator(
 ) -> circle.Operator.OperatorT:
     operator = circle.Operator.OperatorT()
     operator.opcodeIndex = op_index
-    operator.inputs = [graph.get_tid(input) for input in inputs]
-    operator.outputs = [graph.get_tid(output) for output in outputs]
+    
+    operator.inputs = []
+    for inp in inputs:
+        if isinstance(inp, torch.fx.immutable_collections.immutable_list):
+            operator.inputs.append(tuple(graph.get_tid(inp_item) for inp_item in inp)) # TODO: extend to multiple tuple processing
+            print(f"input: {inp}")
+        else:
+            operator.inputs.append(graph.get_tid(inp))
+    operator.outputs = []
+    for outp in outputs:
+        if isinstance(outp, torch.fx.immutable_collections.immutable_list):
+            print(f"output: {outp}")
+            operator.outputs.append(tuple(graph.get_tid(outp_item) for outp_item in outp)) # TODO: extend to multiple tuple processing
+        else:
+            operator.outputs.append(graph.get_tid(outp))
     return operator
 
 

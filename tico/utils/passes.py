@@ -31,7 +31,7 @@ class PassBase(ABC):
     """
 
     @abstractmethod
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, gm) -> PassResult:
         pass
 
 
@@ -51,7 +51,7 @@ class PassManager:
         self.passes: List[PassBase] = passes
         self.strategy: PassStrategy = strategy
 
-    def run(self, exported_program: ExportedProgram):
+    def run(self, exported_program: ExportedProgram, graph_module):
         MAXIMUM_STEP_COUNT = 1000
         step = 0
         while True:
@@ -59,10 +59,10 @@ class PassManager:
             for _pass in self.passes:
                 # Automatically update the signatures of the input and output.
                 # https://github.com/pytorch/executorch/issues/4013#issuecomment-2187161844
-                with exported_program.graph_module._set_replace_hook(
+                with graph_module._set_replace_hook(
                     exported_program.graph_signature.get_replace_hook()
                 ):
-                    result = _pass.call(exported_program)
+                    result = _pass.call(exported_program, graph_module)
                 modified = modified or result.modified
                 if modified and self.strategy == PassStrategy.RESTART:
                     break

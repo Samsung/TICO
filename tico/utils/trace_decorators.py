@@ -28,13 +28,11 @@ def trace_const_diff_on_pass(cls):
 
     def _call_traced(fn):
         @wraps(fn)
-        def wrapped(*args):
-            _, exported_program = args
+        def wrapped(self, exported_program, graph_module):
             assert isinstance(exported_program, ExportedProgram)
-            graph_module = exported_program.graph_module
             assert isinstance(graph_module, torch.fx.GraphModule), type(graph_module)
             capture_const(exported_program)
-            ret = fn(*args)
+            ret = fn(self, exported_program, graph_module)
             log_const(exported_program, title=str(cls.__name__), recapture=False)
             return ret
 
@@ -54,13 +52,11 @@ def trace_graph_diff_on_pass(cls):
 
     def _call_traced(fn):
         @wraps(fn)
-        def wrapped(*args):
-            _, exported_program = args
+        def wrapped(self, exported_program, graph_module):
             assert isinstance(exported_program, ExportedProgram)
-            graph_module = exported_program.graph_module
             assert isinstance(graph_module, torch.fx.GraphModule), type(graph_module)
             capture(graph_module.graph)
-            ret = fn(*args)
+            ret = fn(self, exported_program, graph_module)
             log(graph_module.graph, title=str(cls.__name__), recapture=False)
             return ret
 

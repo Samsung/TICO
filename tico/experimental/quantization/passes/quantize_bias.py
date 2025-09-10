@@ -41,10 +41,8 @@ class QuantizeBias(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph: torch.fx.Graph = graph_module.graph
         for node in graph.nodes:
             if node.op != "call_function":

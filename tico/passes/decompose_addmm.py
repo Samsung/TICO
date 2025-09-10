@@ -57,8 +57,8 @@ class DecomposeAddmm(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
-        gm = exported_program.graph_module
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
+        gm = graph_module
         graph: torch.fx.Graph = gm.graph
         modified = False
 

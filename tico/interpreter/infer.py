@@ -63,7 +63,7 @@ def infer(circle_binary: bytes, *args: Any, **kwargs: Any) -> Any:
 
     # Get input spec from circle binary.
     model = circle.Model.Model.GetRootAsModel(circle_binary, 0)
-    assert model.SubgraphsLength() == 1
+    # assert model.SubgraphsLength() == 1
     graph = model.Subgraphs(0)
     model_input_tensors = [
         graph.Tensors(graph.Inputs(o)) for o in range(graph.InputsLength())

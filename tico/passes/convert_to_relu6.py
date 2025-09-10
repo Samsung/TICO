@@ -155,10 +155,8 @@ class ConvertToReLU6(PassBase):
             ConvertDoubleClampsToReLU6(),
         ]
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:

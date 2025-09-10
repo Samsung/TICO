@@ -90,10 +90,8 @@ class CastMixedTypeArgs(PassBase):
         self.preserve_ep_invariant = preserve_ep_invariant
 
     # TODO Folding float and int values before this pass
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:
