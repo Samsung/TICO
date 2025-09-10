@@ -227,34 +227,20 @@ def validate_result(
                 desired=circle_res.shape,
                 err_msg=f"Shape mismatches.\nexpected result: {expected_res.shape}\ncircle result: {circle_res.shape}",
             )
+            expected_tensor = expected_res
             circle_tensor = torch.from_numpy(circle_res)
-            torch.testing.assert_close(
-                actual=circle_tensor,
-                expected=expected_res,
-                equal_nan=True,
-                rtol=rtol,
-                atol=atol,
-                msg=lambda msg: f"Value mismatches.\n\n{msg}",
-            )
-        else:
-            np.testing.assert_allclose(
-                actual=circle_res,
-                desired=expected_res,
-                rtol=rtol,
-                atol=atol,
-                err_msg=f"Value mismatches.\nexpected result: {expected_res}\ncircle result: {circle_res}",
-            )
-        if isinstance(expected_res, torch.Tensor):
-            expected_dtype: torch.dtype = expected_res.dtype
-            result_dtype: torch.dtype = numpy_dtype_to_torch_dtype(circle_res.dtype)
-            assert (
-                expected_dtype == result_dtype
-            ), f"Type mismatches.\nexpected result: {expected_dtype}\ncircle result: {result_dtype}"
         elif isinstance(expected_res, (int, float)):
-            expected_type: type = type(expected_res)
-            result_type: type = type(circle_res.item())
-            assert (
-                expected_type == result_type
-            ), f"Type mismatches.\nexpected result: {expected_type}\ncircle result: {result_type}"
+            expected_tensor = torch.tensor(expected_res)
+            circle_tensor = torch.from_numpy(circle_res)
         else:
             raise TypeError("Expected result must be a tensor or scalar value.")
+
+        # Check both dypte and value mismatch
+        torch.testing.assert_close(
+            actual=circle_tensor,
+            expected=expected_tensor,
+            equal_nan=True,
+            check_dtype=True,
+            rtol=rtol,
+            atol=atol,
+        )
