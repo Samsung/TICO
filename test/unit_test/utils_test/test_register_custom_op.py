@@ -17,7 +17,6 @@ from unittest.mock import MagicMock, patch
 
 import tico.utils.register_custom_op as register_custom_op
 import torch
-import torch.nn as nn
 
 
 class TestRegisterCustomOp(unittest.TestCase):
@@ -117,7 +116,7 @@ class TestRegisterCustomOp(unittest.TestCase):
     def test_circle_depthwise_conv2d_basic(self):
         """Test CircleDepthwiseConv2d basic functionality"""
         input_tensor = torch.randn(1, 32, 32, 16)  # NHWC, 16 channels
-        weight_tensor = torch.randn(1, 3, 3, 16)  # OHW1 format
+        weight_tensor = torch.randn(1, 3, 3, 16)  # OHWI format
         groups = 16
 
         result = torch.ops.circle_custom.depthwise_conv2d(
