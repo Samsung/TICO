@@ -245,9 +245,10 @@ class DecomposeFakeQuantizeTensorQParams(PassBase):
                     # mask_user(output).args == (dequantize_per_tensor.tensor, mask)
                     if mask:
                         assert len(mask) == 1
-                        mask_user = list(mask[0].users.keys())[0]
-                        assert len(mask_user.args) == 1
-                        mask_user.args = ((mask_user.args[0][0],),)
+                        if len(mask[0].users) > 0:
+                            mask_user = list(mask[0].users.keys())[0]
+                            assert len(mask_user.args) == 1
+                            mask_user.args = ((mask_user.args[0][0],),)
                 modified = True
             if (
                 node.target
