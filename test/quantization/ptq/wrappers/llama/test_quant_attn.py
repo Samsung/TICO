@@ -179,7 +179,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertEqual(v0.shape, (B, 1, S_prefill, self.head_dim))
 
         # Decode step: S=1, pass tuple past
-        x1 = torch.randn(B, 1, 8)
+        S = 1
+        x1 = torch.randn(B, S, 8)
         pos1 = self._rand_rope(B, 1)
         with torch.no_grad():
             out1, attn_w1, present1 = qattn(
