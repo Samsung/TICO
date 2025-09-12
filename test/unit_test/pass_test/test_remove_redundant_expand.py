@@ -32,9 +32,29 @@ class RedundantExpandNet(torch.nn.Module):
         return (torch.randn(3, 4),), {}
 
 
+class RedundantExpandWithMinusOneNet(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        # Example: x is (3, 4), expand(-1, 4) results in (3, 4)
+        z = x.expand(-1, x.size(1))
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(3, 4),), {}
+
+
 class RemoveRedundantExpandTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantExpandNet())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
+
+        self.run_value_test(RemoveRedundantExpand())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 0)
+
+    def test_pass_with_minus_one(self):
+        self.setup(RedundantExpandWithMinusOneNet())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
 
         self.run_value_test(RemoveRedundantExpand())
