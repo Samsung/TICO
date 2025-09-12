@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import torch
-from transformers import LlamaConfig, LlamaModel
+from transformers import GenerationConfig, LlamaConfig, LlamaForCausalLM
 
 from test.modules.base import TestModuleBase
 
@@ -22,39 +22,43 @@ class Llama_32_1B(TestModuleBase):
 
     def __init__(self):
         super().__init__()
-        self.model = LlamaModel(config=LlamaConfig(
+        # LlamaConfig extracted from meta-llama/Llama-3.2-1B
+        # Adjust num_hidden_layers to 1 for testing purpose
+        self.config = LlamaConfig(
             _attn_implementation_autoset=True,
-            architectures=['LlamaForCausalLM'],
+            architectures=["LlamaForCausalLM"],
             attention_bias=False,
             attention_dropout=0.0,
             bos_token_id=128000,
             eos_token_id=128001,
             head_dim=64,
-            hidden_act='silu',
+            hidden_act="silu",
             hidden_size=2048,
             initializer_range=0.02,
             intermediate_size=8192,
             max_position_embeddings=131072,
             mlp_bias=False,
-            model_type='llama',
+            model_type="llama",
             num_attention_heads=32,
-            num_hidden_layers=16,
+            num_hidden_layers=1,
             num_key_value_heads=8,
             pretraining_tp=1,
             rms_norm_eps=1e-05,
             rope_scaling={
-                'factor': 32.0,
-                'high_freq_factor': 4.0,
-                'low_freq_factor': 1.0,
-                'original_max_position_embeddings': 8192,
-                'rope_type': 'llama3'
+                "factor": 32.0,
+                "high_freq_factor": 4.0,
+                "low_freq_factor": 1.0,
+                "original_max_position_embeddings": 8192,
+                "rope_type": "llama3",
             },
             rope_theta=500000.0,
             tie_word_embeddings=True,
             torch_dtype=torch.float16,
             use_cache=True,
             vocab_size=128256,
-        )).to("cpu")
+        )
+        self.model = LlamaForCausalLM(config=self.config).to("cpu")
+
         self.rtol = 1e-4
         self.atol = 1e-4
 
@@ -65,5 +69,4 @@ class Llama_32_1B(TestModuleBase):
         # >>> tokenizer = LlamaTokenizerFast.from_pretrained("meta-llama/Llama-3.2-1B")
         # >>> tokenizer.encode("Hello my name is")
         # [128000, 9906, 856, 836, 374]
-        return (torch.Tensor([[12800, 9906, 856, 836,
-                               374]]).to(dtype=torch.int32), ), {}
+        return (torch.Tensor([[12800, 9906, 856, 836, 374]]).to(dtype=torch.int32),), {}
