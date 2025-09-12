@@ -39,6 +39,7 @@ from tico.passes.cast_clamp_mixed_type_args import CastClampMixedTypeArgs
 from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.convert_conv1d_to_conv2d import ConvertConv1dToConv2d
+from tico.passes.convert_expand_to_slice_cat import ConvertExpandToSliceCat
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.convert_matmul_to_linear import ConvertMatmulToLinear
 from tico.passes.convert_repeat_to_expand_copy import ConvertRepeatToExpandCopy
@@ -250,6 +251,7 @@ def convert_exported_module_to_circle(
             ConstPropPass(),
             SegmentIndexSelectConst(),
             LegalizeCausalMaskValue(enabled=config.get("legalize_causal_mask_value")),
+            ConvertExpandToSliceCat(enabled=config.get("convert_expand_to_slice_cat")),
             ConvertMatmulToLinear(
                 enable_lhs_const=config.get("convert_lhs_const_mm_to_fc"),
                 enable_rhs_const=config.get("convert_rhs_const_mm_to_fc"),
