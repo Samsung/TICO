@@ -141,10 +141,8 @@ class ConvertConv1dToConv2d(PassBase):
         modified = True
         return modified
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         target_conv_op = [torch.ops.aten.conv1d.default, torch.ops.aten.conv1d.padding]
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:

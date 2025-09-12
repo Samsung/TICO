@@ -49,11 +49,10 @@ class FuseLeadingUnsqueezeReshape(PassBase):
         x - aten.reshape([1]*k + s1) - aten.permute(list(range(k)) + [d+k for d in p])
     """
 
-    def call(self, ep: ExportedProgram) -> PassResult:
+    def call(self, ep: ExportedProgram, graph_module) -> PassResult:
         logger = logging.getLogger(__name__)
 
-        gm = ep.graph_module
-        graph = gm.graph
+        graph = graph_module.graph
         modified = False
         for reshape_back in graph.nodes:
             if not is_target_node(reshape_back, ops.aten.reshape):
@@ -107,6 +106,6 @@ class FuseLeadingUnsqueezeReshape(PassBase):
         if modified:
             graph.eliminate_dead_code()
             graph.lint()
-            gm.recompile()
+            graph_module.recompile()
 
         return PassResult(modified)

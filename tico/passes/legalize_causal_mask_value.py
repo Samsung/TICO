@@ -43,14 +43,12 @@ class LegalizeCausalMaskValue(PassBase):
         super().__init__()
         self.enabled = enabled
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         if not self.enabled:
             return PassResult(False)
 
         new_mask = -120  # Make it configurable
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
 

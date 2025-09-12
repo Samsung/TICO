@@ -63,10 +63,10 @@ class DecomposeFakeQuantize(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         modified = False
 
-        gm = exported_program.graph_module
+        gm = graph_module
         g = gm.graph
         qd = torch.ops.quantized_decomposed  # type: ignore[return]
         for node in gm.graph.nodes:

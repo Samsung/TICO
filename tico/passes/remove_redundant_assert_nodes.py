@@ -37,8 +37,7 @@ class RemoveRedundantAssertionNodes(PassBase):
     def __init__(self):
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
-        graph_module = exported_program.graph_module
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:

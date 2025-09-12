@@ -49,12 +49,12 @@ from tico.utils.utils import get_fake_mode
 
 def get_constant_placeholder_to_tensor_dict(
     exported_program: ExportedProgram,
+    graph_module,
 ) -> OrderedDict[torch.fx.Node, torch.Tensor]:
     """
     Returns a dictionary of constant placeholder node to constant tensor.
     """
     const_node_to_tensor: OrderedDict[torch.fx.Node, torch.Tensor] = OrderedDict()
-    graph_module = exported_program.graph_module
     graph: torch.fx.Graph = graph_module.graph
     for node in graph.nodes:
         if node.op != "placeholder":
@@ -114,13 +114,13 @@ def get_data(
 
 def propagate_constants(
     exported_program: ExportedProgram,
+    graph_module
 ) -> OrderedDict[torch.fx.Node, torch.Tensor]:
     """
     Propagates constants and returns a dictionary of node to constant tensors of the graph.
     """
-    const_node_to_tensor = get_constant_placeholder_to_tensor_dict(exported_program)
+    const_node_to_tensor = get_constant_placeholder_to_tensor_dict(exported_program, graph_module)
 
-    graph_module = exported_program.graph_module
     graph: torch.fx.Graph = graph_module.graph
     for node in graph.nodes:
         if node.op != "call_function":
@@ -177,6 +177,7 @@ def erase_constant_node(
 def create_constant_placeholder(
     const_node_to_tensor: Mapping[torch.fx.Node, torch.Tensor],
     exported_program: ExportedProgram,
+    graph_module
 ) -> List[torch.fx.Node]:
     """
     This function creates constant placeholder nodes according to the given constant nodes (`const_node_to_tensor`) and replace it with the original node.
@@ -265,19 +266,17 @@ class ConstPropPass(PassBase):
     def __init__(self) -> None:
         super().__init__()
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         logger = logging.getLogger(__name__)
-
-        graph_module = exported_program.graph_module
         graph: torch.fx.Graph = graph_module.graph
 
         # [1], [2]
         const_node_to_tensor: OrderedDict[
             torch.fx.Node, torch.Tensor
-        ] = propagate_constants(exported_program)
+        ] = propagate_constants(exported_program, graph_module)
         # [3]
         placeholders = create_constant_placeholder(
-            const_node_to_tensor, exported_program
+            const_node_to_tensor, exported_program, graph_module
         )
         # [4]
         new_name_to_spec = create_input_specs(placeholders)

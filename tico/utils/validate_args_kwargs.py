@@ -205,6 +205,27 @@ class CloneArgs:
     input: torch.fx.Node
     memory_format: Optional[torch.memory_format] = None
 
+@enforce_type
+@dataclass
+class CircleIfArgs:
+    """
+    """
+    pred: torch.fx.Node
+    then_graph_idx: int
+    else_graph_idx: int
+    if_args: torch.fx.immutable_collections.immutable_list
+
+@enforce_type
+@dataclass
+class CondArgs:
+    """
+    # This is not aten operator but `torch.ops.higher_order_op.cond`
+    """
+    condition: torch.fx.Node
+    true_graph: torch.fx.Node
+    false_graph: torch.fx.Node
+    cond_args: torch.fx.immutable_collections.immutable_list
+
 
 @enforce_type
 @dataclass

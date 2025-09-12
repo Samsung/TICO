@@ -434,7 +434,7 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         modified = True
         return modified
 
-    def call(self, exported_program: ExportedProgram) -> PassResult:
+    def call(self, exported_program: ExportedProgram, graph_module) -> PassResult:
         target_to_legalize_func = {
             torch.ops.aten.conv2d.default: self.legalize_conv2d,
             torch.ops.aten.conv2d.padding: self.legalize_conv2d,
@@ -443,8 +443,6 @@ class LegalizePreDefinedLayoutOperators(PassBase):
             torch.ops.aten.avg_pool2d.default: self.legalize_avg_pool2d,
             torch.ops.aten.instance_norm.default: self.legalize_instance_norm,
         }
-
-        graph_module = exported_program.graph_module
         graph = graph_module.graph
         modified = False
         for node in graph.nodes:

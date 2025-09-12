@@ -69,7 +69,7 @@ class CircleModel(circle.Model.ModelT):
     def __init__(self):
         super().__init__()
         self.subgraphs: List[circle.SubGraph.SubGraphT] = []
-        self.buffers: List[circle.Buffer.BufferT] = []
+        self.buffers: List[circle.Buffer.BufferT] = [circle.Buffer.BufferT()] # Add empty buffer at the front
 
     def add_subgraph(self, graph: circle.SubGraph.SubGraphT) -> None:
         self.subgraphs.append(graph)
@@ -79,7 +79,6 @@ class CircleModel(circle.Model.ModelT):
         self.buffers.append(buffer)
         buf_id = len(self.buffers) - 1  # last index
         return buf_id
-
 
 @final
 class CircleSubgraph(circle.SubGraph.SubGraphT):
@@ -97,6 +96,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         # human-readable tensor names after serialization.
         self.name_to_node: Dict[str, torch.fx.Node] = {}
         self.counter: defaultdict = defaultdict(int)
+        
 
     # Generate a unique name with prefix.
     # Naming rule
@@ -129,7 +129,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
 
     def add_output(self, output: Any) -> None:
         if isinstance(output, str):
-            assert output in self.name_to_tid
+            assert output in self.name_to_tid, f"{output} is not in {self.name_to_tid}"
             output_name = output
         elif isinstance(output, int | float):
             # output is built-in type.
@@ -324,4 +324,5 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
             return self.name_to_tid[node_name]
 
         # Unreachable
+        breakpoint()
         raise RuntimeError("fx Node was not converted to tensor.")

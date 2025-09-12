@@ -12,13 +12,55 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
 from tico.utils.mx.mx_ops import _quantize_mx
+from tico.utils.subgraph import get_gm_map
+
+# Note that an operator assumes input tensor has NHWC format.
+def CircleIf():
+    @custom_op("circle_custom::if_", mutates_args=())
+    def if_(pred: torch.Tensor, true_graph_idx: int, false_graph_idx: int, if_args: List[torch.Tensor]) -> torch.Tensor:
+        true_graph = None
+        false_graph = None
+        for gm_info in get_gm_map():
+            if gm_info["index"] == true_graph_idx:
+                true_graph = gm_info["gm"]
+                continue
+            if gm_info["index"] == false_graph_idx:
+                false_graph = gm_info["gm"]
+                continue
+            
+        if pred:
+            result = true_graph(*if_args)
+            assert len(result) == 1 # TODO: Support tuple of result
+            return result[0]
+        else:
+            result = false_graph(*if_args)
+            assert len(result) == 1 # TODO: Support tuple of result
+            return result[0]
+
+    @register_fake("circle_custom::if_")
+    def _(pred: torch.Tensor, true_graph_idx: int, false_graph_idx: int, if_args: List):
+        true_graph = None
+        false_graph = None
+        for gm_info in get_gm_map():
+            if gm_info["index"] == true_graph_idx:
+                true_graph = gm_info["gm"]
+                continue
+            if gm_info["index"] == false_graph_idx:
+                false_graph = gm_info["gm"]
+                continue
+            
+        result = true_graph(*if_args)
+        assert len(result) == 1 # TODO: Support tuple of result
+        
+        return result[0]
+
 
 # Note that an operator assumes input tensor has NHWC format.
 def CircleResizeNearestNeighbor():
@@ -740,3 +782,4 @@ def RegisterOps():
     CircleInstanceNorm()
     CircleQuantizeMX()
     CircleRMSNorm()
+    CircleIf()

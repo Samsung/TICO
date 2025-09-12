@@ -117,8 +117,8 @@ class ModelInputSpec:
 
     def __init__(self, circle_binary):
         model = circle.Model.Model.GetRootAsModel(circle_binary, 0)
-        assert model.SubgraphsLength() == 1, "Only one subgraph is supported"
 
+        # Assumption; Circle model's user IO signature is defined in the first subgraph
         graph = model.Subgraphs(0)
         tensors = [graph.Tensors(graph.Inputs(o)) for o in range(graph.InputsLength())]
 
