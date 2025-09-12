@@ -72,4 +72,5 @@ class CircleExecutor(BackendExecutor):
         return out
 
     def __del__(self):
-        self.temp_dir.cleanup()
+        if hasattr(self, "temp_dir") and self.temp_dir:
+            self.temp_dir.cleanup()
