@@ -46,12 +46,9 @@ class RemoveRedundantExpand(PassBase):
             input, size = args.input, args.size
 
             input_shape = extract_shape(input)
+            output_shape = extract_shape(node)
 
-            is_same_shape = lambda src, tgt: len(src) == len(tgt) and all(
-                s == t or t == -1 for s, t in zip(src, tgt)
-            )
-
-            if not is_same_shape(input_shape, size):
+            if input_shape != output_shape:
                 continue
 
             node.replace_all_uses_with(input, propagate_meta=False)
