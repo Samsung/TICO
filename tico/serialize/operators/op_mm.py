@@ -30,7 +30,7 @@ from tico.utils.validate_args_kwargs import MatmulArgs
 @register_node_visitor
 class MatmulDefaultVisitor(NodeVisitor):
     """
-    Convert matmul to equavalent BatchMatMul or FullyConnected with Transpose.
+    Convert matmul to equavalent BatchMatMul
     """
 
     target: List[torch._ops.OpOverload] = [torch.ops.aten.mm.default]
@@ -57,112 +57,9 @@ class MatmulDefaultVisitor(NodeVisitor):
 
         return operator
 
-    def define_transpose_node(self, inputs, outputs) -> circle.Operator.OperatorT:
-        def set_transpose_option(operator):
-            operator.builtinOptionsType = (
-                circle.BuiltinOptions.BuiltinOptions.TransposeOptions
-            )
-            option = circle.TransposeOptions.TransposeOptionsT()
-            operator.builtinOptions = option
-
-        transpose_op_index = get_op_index(
-            circle.BuiltinOperator.BuiltinOperator.TRANSPOSE, self._op_codes
-        )
-        operator = create_builtin_operator(
-            self.graph, transpose_op_index, inputs, outputs
-        )
-        set_transpose_option(operator)
-        return operator
-
-    def define_fc_node(self, inputs, outputs) -> circle.Operator.OperatorT:
-        def set_fc_option(operator):
-            operator.builtinOptionsType = (
-                circle.BuiltinOptions.BuiltinOptions.FullyConnectedOptions
-            )
-            option = circle.FullyConnectedOptions.FullyConnectedOptionsT()
-
-            option.fusedActivationFunction = (
-                circle.ActivationFunctionType.ActivationFunctionType.NONE
-            )
-            option.weightsFormat = (
-                circle.FullyConnectedOptionsWeightsFormat.FullyConnectedOptionsWeightsFormat.DEFAULT
-            )
-            option.keepNumDims = False
-            option.asymmetricQuantizeInputs = False
-            option.quantizedBiasType = circle.TensorType.TensorType.FLOAT32
-
-            operator.builtinOptions = option
-
-        fc_op_index = get_op_index(
-            circle.BuiltinOperator.BuiltinOperator.FULLY_CONNECTED, self._op_codes
-        )
-        operator = create_builtin_operator(self.graph, fc_op_index, inputs, outputs)
-        set_fc_option(operator)
-        return operator
-
-    """
-    Define FullyConnnected with Tranpose operator.
-    Note that those sets of operators are equivalent.
-    (1) Matmul
-    matmul( lhs[H, K], rhs[K, W'] ) -> output(H, W')
-    
-    (2) Transpose + FullyConneccted
-    transpose( rhs[K, W'] ) -> trs_output[W', K]
-    fullyconnected( lhs[H, K], trs_output[W', K] ) -> output(H, W')
-    """
-
-    def define_fc_with_transpose(
-        self, node, inputs, outputs
-    ) -> circle.Operator.OperatorT:
-        lhs, rhs = inputs
-
-        # get transpose shape
-        rhs_tid: int = self.graph.get_tid_registered(rhs)
-        rhs_tensor: circle.Tensor.TensorT = self.graph.tensors[rhs_tid]
-        rhs_name: str = rhs.name
-        rhs_type: int = rhs_tensor.type
-        rhs_shape: List[int] = rhs_tensor.shape
-        assert len(rhs_shape) == 2, len(rhs_shape)
-        rhs_shape_transpose = [rhs_shape[1], rhs_shape[0]]
-
-        # create transpose output tensor
-        trs_output = self.graph.add_tensor_from_scratch(
-            prefix=f"{rhs_name}_transposed_output",
-            shape=rhs_shape_transpose,
-            shape_signature=None,
-            dtype=rhs_type,
-            source_node=node,
-        )
-        trs_perm = self.graph.add_const_tensor(data=[1, 0], source_node=node)
-        trs_operator = self.define_transpose_node([rhs, trs_perm], [trs_output])
-        self.graph.add_operator(trs_operator)
-
-        # define fc node
-        fc_input = lhs
-        fc_weight = trs_output
-        fc_shape = [fc_weight.shape[0]]
-        fc_bias = self.graph.add_const_tensor(
-            data=[0.0] * fc_shape[0], source_node=node
-        )
-
-        operator = self.define_fc_node([fc_input, fc_weight, fc_bias], outputs)
-
-        return operator
-
     def define_node(
         self, node: torch.fx.Node, prior_latency=True
     ) -> circle.Operator.OperatorT:
-        """
-        NOTE: Possibility of accuracy-latency trade-off
-        From ONE compiler's perspective:
-        - BMM uses per-tensor quantization for both rhs and lhs.
-        - FC uses per-channel quantization for weight and per-tensor for input.
-        Thus, FC is better in terms of accuracy.
-        FC necessarily involves an additional transpose operation to be identical with mm.
-        If transposed operand is const, it can be optimized by constant folding.
-        Thus, convert FC only if tranpose can be folded.
-        TODO set prior_latency outside
-        """
         args = MatmulArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         input = args.input
         other = args.other
@@ -170,9 +67,6 @@ class MatmulDefaultVisitor(NodeVisitor):
         inputs = [input, other]
         outputs = [node]
 
-        if not is_const(other) and prior_latency:
-            operator = self.define_bmm_node(inputs, outputs)
-        else:
-            operator = self.define_fc_with_transpose(node, inputs, outputs)
+        operator = self.define_bmm_node(inputs, outputs)
 
         return operator

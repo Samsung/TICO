@@ -172,7 +172,7 @@ class ConvertToReLU6(PassBase):
                 converter.convert(exported_program, node)
                 modified = True
                 logger.debug(f"{node.name} is replaced with ReLU6 operator")
-                break
+                continue
 
         graph.eliminate_dead_code()
         graph.lint()
