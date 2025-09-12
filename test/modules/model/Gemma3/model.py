@@ -40,6 +40,7 @@ class Gemma3(TestModuleBase):
             "sdpa_without_vmap", ALL_ATTENTION_FUNCTIONS["sdpa"]
         )
         self.model.config._attn_implementation = "sdpa_without_vmap"
+        self.model.config.use_cache = False
 
         self.rtol = 1e-3
         self.atol = 1e-3
@@ -55,6 +56,5 @@ class Gemma3(TestModuleBase):
             (input_ids,),
             {
                 "attention_mask": attention_mask,
-                "use_cache": False,
             },
         )
