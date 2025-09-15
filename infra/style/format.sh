@@ -10,7 +10,7 @@ while [[ "$#" -gt 0 ]]; do
       APPLY_PATCH_OPTION=""
       shift
       ;;
-    --diff-only)
+    -d|--diff-only)
       CHECK_DIFF_ONLY="1"
       shift
       ;;
