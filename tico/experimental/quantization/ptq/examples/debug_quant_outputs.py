@@ -12,19 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
-import tqdm
-from datasets import load_dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
-from tico.experimental.quantization.ptq.utils.introspection import (
-    build_fqn_map,
-    compare_layer_outputs,
-    save_fp_outputs,
-)
-from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
-
 # ============================================================================
 # LAYER-WISE DIFF DEBUGGING PIPELINE
 # ----------------------------------------------------------------------------
@@ -43,12 +30,21 @@ from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 # problematic modules during post-training quantization.
 # ============================================================================
 
-# -------------------------------------------------------------------------
-# 0. Global configuration
-# -------------------------------------------------------------------------
-MODEL_NAME = "meta-llama/Meta-Llama-3-1B"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-STRIDE = 512
+import argparse
+import sys
+
+import torch
+import tqdm
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.ptq.utils.introspection import (
+    build_fqn_map,
+    compare_layer_outputs,
+    save_fp_outputs,
+)
+from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 
 # Token-budget presets for activation calibration
 TOKENS: dict[str, int] = {
@@ -59,71 +55,182 @@ TOKENS: dict[str, int] = {
     # Production / 4-bit observer smoothing
     "production": 200_000,
 }
-CALIB_TOKENS = TOKENS["baseline"]
-print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
 
-# -------------------------------------------------------------------------
-# 1. Load the FP backbone
-# -------------------------------------------------------------------------
-print("Loading FP model …")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE).eval()
-model.config.use_cache = False  # disable KV-cache → full forward
-m_to_fqn = build_fqn_map(model)  # map modules → fully-qualified names
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}
 
-# Use Wikitext-2 train split for calibration.
-dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+# Hardcoded dataset settings
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+TRAIN_SPLIT = "train"
 
-# -------------------------------------------------------------------------
-# 2. Wrap every layer with PTQWrapper (UINT-8 activations)
-# -------------------------------------------------------------------------
-print("Wrapping layers with PTQWrapper …")
-qcfg = QuantConfig()  # default: per-tensor UINT8
 
-new_layers = torch.nn.ModuleList()
-for idx, fp_layer in enumerate(model.model.layers):
-    layer_cfg = qcfg.child(f"layer{idx}")
-    q_layer = PTQWrapper(
-        fp_layer,
-        qcfg=layer_cfg,
-        fp_name=m_to_fqn.get(fp_layer),
+def main():
+    parser = argparse.ArgumentParser(
+        description="Layer-wise diff debugging pipeline for PTQ"
     )
-    new_layers.append(q_layer)
+    parser.add_argument(
+        "--model", type=str, required=True, help="HF repo name or local path."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (cuda|cpu|mps).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=list(DTYPE_MAP.keys()),
+        default="float32",
+        help="Model dtype for load (float32|bfloat16|float16).",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=512,
+        help="Sliding-window stride used during calibration.",
+    )
+    parser.add_argument(
+        "--calib-preset",
+        choices=list(TOKENS.keys()),
+        default="debug",
+        help="Calibration token budget preset.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Optional HF token for gated/private repos.",
+    )
+    parser.add_argument(
+        "--use-cache",
+        dest="use_cache",
+        action="store_true",
+        default=False,
+        help="Use model KV cache if enabled (off by default).",
+    )
+    parser.add_argument(
+        "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
+    )
 
-model.model.layers = new_layers  # swap in quant wrappers
+    args = parser.parse_args()
 
-# -------------------------------------------------------------------------
-# 3. Activation calibration plus FP-vs-UINT8 diffing
-# -------------------------------------------------------------------------
-print("Calibrating UINT-8 observers …")
-calib_txt = " ".join(dataset["text"])[:CALIB_TOKENS]
-ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(DEVICE)
+    # Basic setup
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device)
+    dtype = DTYPE_MAP[args.dtype]  # noqa: E999 (kept readable)
 
-# (a) Enable CALIB mode on every QuantModuleBase
-for l in model.model.layers:
-    l.enable_calibration()
+    print("=== Config ===")
+    print(f"Model            : {args.model}")
+    print(f"Device           : {device.type}")
+    print(f"DType            : {args.dtype}")
+    print(f"Stride           : {args.stride}")
+    print(
+        f"Calib preset     : {args.calib_preset} ({TOKENS[args.calib_preset]:,} tokens)"
+    )
+    print(f"Use HF cache?    : {args.use_cache}")
+    print()
 
-# Save reference FP activations before observers clamp/quantize
-save_handles, act_cache = save_fp_outputs(model)
+    # -------------------------------------------------------------------------
+    # 1. Load the FP backbone and tokenizer
+    # -------------------------------------------------------------------------
+    print("Loading FP model …")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+    )
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=dtype,
+            trust_remote_code=args.trust_remote_code,
+            token=args.hf_token,
+        )
+        .to(device)
+        .eval()
+    )
 
-with torch.no_grad():
-    for i in tqdm.trange(0, ids.size(1) - 1, STRIDE, desc="Act-calibration"):
-        inputs = ids[:, i : i + STRIDE]
-        model(inputs)  # observers collect act. ranges
+    # Disable KV cache to force full forward passes for introspection
+    model.config.use_cache = args.use_cache
 
-# Remove save hooks now that FP activations are cached
-for h in save_handles:
-    h.remove()
+    # Build module -> FQN map before wrapping
+    m_to_fqn = build_fqn_map(model)
 
-# (b) Freeze (scale, zero-point) after calibration
-for l in model.model.layers:
-    l.freeze_qparams()
+    # Prepare calibration inputs (HF Wikitext-2 train split)
+    CALIB_TOKENS = TOKENS[args.calib_preset]
+    print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
+    # Use Wikitext-2 train split for calibration.
+    dataset = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
 
-# (c) Register diff hooks and measure per-layer deltas
-cmp_handles = compare_layer_outputs(model, act_cache, metrics=["diff", "peir"])
-# Use same inputs for comparison.
-model(inputs)
+    # -------------------------------------------------------------------------
+    # 2. Wrap every layer with PTQWrapper (UINT-8 activations)
+    # -------------------------------------------------------------------------
+    print("Wrapping layers with PTQWrapper …")
+    qcfg = QuantConfig()  # default: per-tensor UINT8
 
-assert isinstance(cmp_handles, list)
-for h in cmp_handles:
-    h.remove()
+    new_layers = torch.nn.ModuleList()
+    for idx, fp_layer in enumerate(model.model.layers):
+        layer_cfg = qcfg.child(f"layer{idx}")
+        q_layer = PTQWrapper(
+            fp_layer,
+            qcfg=layer_cfg,
+            fp_name=m_to_fqn.get(fp_layer),
+        )
+        new_layers.append(q_layer)
+
+    model.model.layers = new_layers  # swap in quant wrappers
+
+    # -------------------------------------------------------------------------
+    # 3. Activation calibration plus FP-vs-UINT8 diffing
+    # -------------------------------------------------------------------------
+    print("Calibrating UINT-8 observers …")
+    calib_txt = " ".join(dataset["text"])[:CALIB_TOKENS]
+    ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
+
+    # (a) Enable CALIB mode on every QuantModuleBase
+    for l in model.model.layers:
+        l.enable_calibration()
+
+    # Save reference FP activations before observers clamp/quantize
+    save_handles, act_cache = save_fp_outputs(model)
+
+    with torch.no_grad():
+        for i in tqdm.trange(0, ids.size(1) - 1, args.stride, desc="Act-calibration"):
+            inputs = ids[:, i : i + args.stride]
+            model(inputs)  # observers collect act. ranges
+
+    # Remove save hooks now that FP activations are cached
+    for h in save_handles:
+        h.remove()
+
+    # (b) Freeze (scale, zero-point) after calibration
+    for l in model.model.layers:
+        l.freeze_qparams()
+
+    # (c) Register diff hooks and measure per-layer deltas
+    cmp_handles = compare_layer_outputs(model, act_cache, metrics=["diff", "peir"])
+    # Use same inputs for comparison.
+    with torch.no_grad():
+        model(inputs)
+
+    assert isinstance(cmp_handles, list)
+    for h in cmp_handles:
+        h.remove()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"\n[Error] {e}", file=sys.stderr)
+        sys.exit(1)
