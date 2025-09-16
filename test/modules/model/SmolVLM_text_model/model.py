@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from tico.config.v1 import CompileConfigV1
 from transformers import AutoModelForImageTextToText
 
 from test.modules.base import TestModuleBase
@@ -41,3 +42,6 @@ class SmolVLM_text_model(TestModuleBase):
             "return_dict": True,
         }
         return (), kwargs
+
+    def get_compile_config(self):
+        return CompileConfigV1(remove_constant_input=True)

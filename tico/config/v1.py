@@ -20,6 +20,7 @@ from tico.config.base import CompileConfigBase
 @dataclass
 class CompileConfigV1(CompileConfigBase):
     legalize_causal_mask_value: bool = False
+    remove_constant_input: bool = False
 
     def get(self, name: str):
         return super().get(name)

@@ -20,6 +20,7 @@ import torch
 from circle_schema import circle
 from torch.export.exported_program import ConstantArgument, ExportedProgram, InputKind
 
+from tico.config import CompileConfigBase
 from tico.serialize.circle_mapping import to_circle_dtype, to_circle_shape
 from tico.serialize.operators import *
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
@@ -47,7 +48,7 @@ def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
     return model, graph
 
 
-def build_circle(ep: ExportedProgram) -> bytes:
+def build_circle(ep: ExportedProgram, config: CompileConfigBase) -> bytes:
     """Convert ExportedProgram to Circle format.
 
     Args:
@@ -68,9 +69,13 @@ def build_circle(ep: ExportedProgram) -> bytes:
     for in_spec in ep.graph_signature.input_specs:
         if in_spec.kind != InputKind.USER_INPUT:
             continue
-        # NoneType ConstantArgument is ignored.
-        if isinstance(in_spec.arg, ConstantArgument) and in_spec.arg.value == None:
-            continue
+        if isinstance(in_spec.arg, ConstantArgument):
+            # ConstantArgument is ignored when option is given
+            if config.get("remove_constant_input"):
+                continue
+            # NoneType ConstantArgument is ignored.
+            if in_spec.arg.value == None:
+                continue
         arg_name = in_spec.arg.name
         graph.add_input(arg_name)
         logger.debug(f"Registered input: {arg_name}")

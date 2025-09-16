@@ -287,7 +287,7 @@ def convert_exported_module_to_circle(
 
     check_unsupported_target(exported_program)
     check_training_ops(exported_program)
-    circle_program = build_circle(exported_program)
+    circle_program = build_circle(exported_program, config)
 
     return circle_program
 
