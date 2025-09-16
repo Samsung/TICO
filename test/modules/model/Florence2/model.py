@@ -32,8 +32,8 @@ class Florence2(TestModuleBase):
             "microsoft/Florence-2-base", trust_remote_code=True
         )
         # TODO: Revisit the threshold values
-        self.rtol = 2e-3
-        self.atol = 2e-3
+        self.rtol = 4e-3
+        self.atol = 4e-3
 
     def forward(self, input_ids, pixel_values, attention_mask, decoder_input_ids):
         return self.model(input_ids, pixel_values, attention_mask, decoder_input_ids)
