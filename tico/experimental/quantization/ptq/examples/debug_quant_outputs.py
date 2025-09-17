@@ -85,7 +85,7 @@ def main():
         "--dtype",
         choices=list(DTYPE_MAP.keys()),
         default="float32",
-        help="Model dtype for load (float32|bfloat16|float16).",
+        help=f"Model dtype for load.",
     )
     parser.add_argument(
         "--stride",
