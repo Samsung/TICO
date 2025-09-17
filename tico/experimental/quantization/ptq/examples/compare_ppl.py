@@ -126,7 +126,9 @@ def main():
     print(f"DType            : {args.dtype}")
     print(f"Stride           : {args.stride}")
     print(f"Use HF cache?    : {args.use_cache}")
-    print(f"Calib preset     : {args.calib_preset}")
+    print(
+        f"Calib preset     : {args.calib_preset} ({TOKENS[args.calib_preset]:,} tokens)"
+    )
     print()
 
     # -------------------------------------------------------------------------

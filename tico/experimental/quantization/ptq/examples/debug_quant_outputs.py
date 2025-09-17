@@ -204,8 +204,11 @@ def main():
     # Save reference FP activations before observers clamp/quantize
     save_handles, act_cache = save_fp_outputs(model)
 
+    iterator = range(0, ids.size(1) - 1, args.stride)
+    if not args.no_tqdm:
+        iterator = tqdm.tqdm(iterator, desc="Act-Calibration")
     with torch.no_grad():
-        for i in tqdm.trange(0, ids.size(1) - 1, args.stride, desc="Act-calibration"):
+        for i in iterator:
             inputs = ids[:, i : i + args.stride]
             model(inputs)  # observers collect act. ranges
 
