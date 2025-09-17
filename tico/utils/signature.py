@@ -141,22 +141,21 @@ class ModelInputSpec:
         args = flatten_and_convert_args(args)
         kwargs = flatten_and_convert_kwargs(kwargs)
 
+        arg_num = len(args) + len(kwargs)
+        m_input_num = len(self.names)
+        if arg_num != m_input_num:
+            raise ValueError(
+                f"Mismatch: number of model inputs and number of passed arguments are not the same: inputs({m_input_num}) != passed({arg_num}), input spec: {self.names}"
+            )
+
         # 1. positional arguments
         for i, val in enumerate(args):
-            if i >= len(self.names):
-                raise ValueError(f"Too many positional arguments ({i+1}).")
             name = self.names[i]
-            if name in kwargs:
-                raise TypeError(
-                    f"Got multiple values for argument '{name}' (positional and keyword)."
-                )
             inputs.append(val)
 
         # 2. keyword arguments
         for idx in range(len(args), len(self.names)):
             name = self.names[idx]
-            if name not in kwargs:
-                raise ValueError(f"Missing argument for input '{name}'.")
             inputs.append(kwargs[name])
 
         if check:

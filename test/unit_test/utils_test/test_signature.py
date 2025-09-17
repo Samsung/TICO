@@ -72,7 +72,9 @@ class UtilsSignatureTest(unittest.TestCase):
             "lin": torch.randn(2, 2, dtype=torch.float32),
             "x1": torch.randn(2, 3),
         }
-        with self.assertRaises(TypeError):
+        with self.assertRaisesRegex(
+            TypeError, "type torch.int64 != expected torch.float32"
+        ):
             spec.bind(args, kwargs, check=True)
 
     def test_bind_shape_check_fail(self):
@@ -82,7 +84,7 @@ class UtilsSignatureTest(unittest.TestCase):
             "lin": torch.randn(20, 20, dtype=torch.float32),
             "x1": torch.randn(2, 3),
         }  # shape mismatch
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "wrong dimension"):
             spec.bind(args, kwargs, check=True)
 
     def test_bind_missing_arg_fail(self):
@@ -91,7 +93,7 @@ class UtilsSignatureTest(unittest.TestCase):
         kwargs = {
             "x1": torch.randn(2, 3),
         }  # 'lin' is missing
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "arguments are not the same"):
             spec.bind(args, kwargs, check=True)
 
     def test_bind_too_many_positional_fail(self):
@@ -102,7 +104,7 @@ class UtilsSignatureTest(unittest.TestCase):
             torch.randn(2, 3),
             torch.randn(2, 3),
         )  # Too many args
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "arguments are not the same"):
             spec.bind(args, {}, check=True)
 
     def test_bind_multiple_values_fail(self):
@@ -115,7 +117,7 @@ class UtilsSignatureTest(unittest.TestCase):
             "x1": torch.randn(2, 3),  # x1 !! multiple value for x1
             "lin": torch.randn(20, 20, dtype=torch.float32),
         }  # shape mismatch
-        with self.assertRaises(TypeError):
+        with self.assertRaisesRegex(ValueError, "arguments are not the same"):
             spec.bind(args, kwargs, check=True)
 
     def test_bind_tuple(self):
@@ -173,3 +175,12 @@ class UtilsSignatureTest(unittest.TestCase):
         assert inputs[0].shape == torch.Size([2, 3])
         assert inputs[1].shape == torch.Size([2, 3])
         assert inputs[2].shape == torch.Size([2, 2])
+
+    def test_bind_input_num_mismatch(self):
+        spec = ModelInputSpec(self.circle_model.circle_binary)
+        args = (torch.randn(2, 3, dtype=torch.float32),)
+        kwargs = {
+            "lin": torch.randn(2, 2, dtype=torch.float32),
+        }
+        with self.assertRaisesRegex(ValueError, "arguments are not the same"):
+            spec.bind(args, kwargs, check=True)
