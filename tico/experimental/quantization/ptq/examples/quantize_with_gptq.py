@@ -24,6 +24,8 @@
 #   6. Freeze all Q-params and compute Wikitext-2 perplexity.
 # =============================================================================
 
+import argparse
+import sys
 from typing import Any
 
 import torch
@@ -42,12 +44,6 @@ from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
 )
 
-# -------------------------------------------------------------------------
-# 0. Global configuration
-# -------------------------------------------------------------------------
-MODEL_NAME = "meta-llama/Meta-Llama-3-1B"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-STRIDE = 512
 
 # Token-budget presets for activation calibration
 TOKENS: dict[str, int] = {
@@ -58,7 +54,18 @@ TOKENS: dict[str, int] = {
     # Production / 4-bit observer smoothing
     "production": 200_000,
 }
-CALIB_TOKENS = TOKENS["baseline"]
+
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}
+
+# Hardcoded dataset settings
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+TRAIN_SPLIT = "train"
+TEST_SPLIT = "test"
 
 # -------------------------------------------------------------------------
 # 1. Helper — copy GPTQ (scale, zp) into PTQ observers
@@ -89,77 +96,191 @@ def inject_gptq_qparams(
         obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
 
 
-# -------------------------------------------------------------------------
-# 2. Load the FP backbone
-# -------------------------------------------------------------------------
-print("Loading FP model …")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(DEVICE).eval()
-model.config.use_cache = False  # disable KV-cache → full forward
-m_to_fqn = build_fqn_map(model)  # map modules → fully-qualified names
-
-# -------------------------------------------------------------------------
-# 3. Run GPTQ (weight-only) pass
-# -------------------------------------------------------------------------
-print("Applying GPTQ …")
-dataset = load_dataset("wikiText", "wikitext-2-raw-v1", split="test")
-q_m = prepare(model, GPTQConfig(), inplace=True)
-
-for d in tqdm.tqdm(dataset, desc="GPTQ calibration"):
-    ids = tokenizer(d["text"], return_tensors="pt").input_ids.to(DEVICE)
-    q_m(ids)  # observers gather weight stats
-
-q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
-
-# -------------------------------------------------------------------------
-# 4. Wrap every layer with PTQWrapper (activation UINT-8)
-# -------------------------------------------------------------------------
-qcfg = QuantConfig()  # default: per-tensor UINT8
-new_layers = torch.nn.ModuleList()
-
-for idx, fp_layer in enumerate(q_m.model.layers):
-    layer_cfg = qcfg.child(f"layer{idx}")
-    q_layer = PTQWrapper(
-        fp_layer,
-        qcfg=layer_cfg,
-        fp_name=m_to_fqn.get(fp_layer),
+def main():
+    parser = argparse.ArgumentParser(
+        description="GPTQ+PTQ pipeline (weight-only + activation UINT8)"
     )
-    new_layers.append(q_layer)
+    parser.add_argument(
+        "--model", type=str, required=True, help="HF repo name or local path."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (cuda|cpu|mps).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=list(DTYPE_MAP.keys()),
+        default="float32",
+        help="Model dtype for load.",
+    )
+    parser.add_argument(
+        "--stride",
+        type=int,
+        default=512,
+        help="Sliding-window stride used for calibration and eval.",
+    )
+    parser.add_argument(
+        "--calib-preset",
+        choices=list(TOKENS.keys()),
+        default="debug",
+        help="Activation calibration token budget preset.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Optional HF token for gated/private repos.",
+    )
+    parser.add_argument(
+        "--use-cache",
+        dest="use_cache",
+        action="store_true",
+        default=False,
+        help="Use model KV cache if enabled (off by default).",
+    )
+    parser.add_argument(
+        "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
+    )
 
-q_m.model.layers = new_layers
+    args = parser.parse_args()
 
-# -------------------------------------------------------------------------
-# 5. Single-pass activation calibration
-# -------------------------------------------------------------------------
-print("Calibrating UINT-8 observers …")
-calib_txt = " ".join(
-    load_dataset("wikitext", "wikitext-2-raw-v1", split="train")["text"]
-)[:CALIB_TOKENS]
-ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(DEVICE)
+    # Basic setup
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device)
+    dtype = DTYPE_MAP[args.dtype]
 
-# (a) Enable CALIB mode on every QuantModuleBase
-for l in q_m.model.layers:
-    l.enable_calibration()
+    print("=== Config ===")
+    print(f"Model            : {args.model}")
+    print(f"Device           : {device.type}")
+    print(f"DType            : {args.dtype}")
+    print(f"Stride           : {args.stride}")
+    print(
+        f"Calib preset     : {args.calib_preset} ({TOKENS[args.calib_preset]:,} tokens)"
+    )
+    print(f"Use HF cache?    : {args.use_cache}")
+    print()
 
-# (b) Overwrite weight observers with GPTQ statistics
-inject_gptq_qparams(q_m, q_m.quantizers)
+    # -------------------------------------------------------------------------
+    # 2. Load the FP backbone and tokenizer
+    # -------------------------------------------------------------------------
+    print("Loading FP model …")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+    )
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=dtype,
+            trust_remote_code=args.trust_remote_code,
+            token=args.hf_token,
+        )
+        .to(device)
+        .eval()
+    )
 
-with torch.no_grad():
-    for i in tqdm.trange(0, ids.size(1) - 1, STRIDE, desc="Act-calibration"):
-        q_m(ids[:, i : i + STRIDE])  # observers collect act. ranges
+    model.config.use_cache = args.use_cache
 
-# (c) Freeze all Q-params (scale, zp)
-for l in q_m.model.layers:
-    l.freeze_qparams()
+    # Build module -> FQN map BEFORE wrapping
+    m_to_fqn = build_fqn_map(model)
 
-# -------------------------------------------------------------------------
-# 6. Evaluate perplexity on Wikitext-2
-# -------------------------------------------------------------------------
-print("\nCalculating perplexities …")
-test_ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-enc = tokenizer("\n\n".join(test_ds["text"]), return_tensors="pt")
-ppl_uint8 = perplexity(q_m, enc, DEVICE, stride=STRIDE)
+    # -------------------------------------------------------------------------
+    # 3. Run GPTQ (weight-only) pass
+    # -------------------------------------------------------------------------
+    print("Applying GPTQ …")
+    dataset_test = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT)
+    q_m = prepare(model, GPTQConfig(), inplace=True)
 
-print("\n┌── Wikitext-2 test perplexity ─────────────")
-print(f"│ UINT-8 : {ppl_uint8:8.2f}")
-print("└───────────────────────────────────────────")
+    it = (
+        dataset_test
+        if args.no_tqdm
+        else tqdm.tqdm(dataset_test, desc="GPTQ calibration")
+    )
+    for d in it:
+        ids = tokenizer(d["text"], return_tensors="pt").input_ids.to(device)
+        q_m(ids)  # observers gather weight stats
+
+    q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
+
+    # -------------------------------------------------------------------------
+    # 4. Wrap every layer with PTQWrapper (activation UINT-8)
+    # -------------------------------------------------------------------------
+    print("Wrapping layers with PTQWrapper …")
+    layers = q_m.model.layers
+    if not isinstance(layers, (list, torch.nn.ModuleList)):
+        raise TypeError(f"'model.layers' must be list/ModuleList, got {type(layers)}")
+
+    qcfg = QuantConfig()  # default: per-tensor UINT8
+    wrapped = torch.nn.ModuleList()
+    for idx, fp_layer in enumerate(layers):
+        layer_cfg = qcfg.child(f"layer{idx}")
+        wrapped.append(
+            PTQWrapper(
+                fp_layer,
+                qcfg=layer_cfg,
+                fp_name=m_to_fqn.get(fp_layer),
+            )
+        )
+    q_m.model.layers = wrapped
+
+    # -------------------------------------------------------------------------
+    # 5. Single-pass activation calibration
+    # -------------------------------------------------------------------------
+    print("Calibrating UINT-8 observers …")
+    CALIB_TOKENS = TOKENS[args.calib_preset]
+    print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
+    dataset_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
+    calib_txt = " ".join(dataset_train["text"])[:CALIB_TOKENS]
+    train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
+
+    # (a) Enable CALIB mode on every QuantModuleBase
+    for l in q_m.model.layers:
+        l.enable_calibration()
+
+    # (b) Overwrite weight observers with GPTQ statistics
+    if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
+        inject_gptq_qparams(q_m, q_m.quantizers)
+    else:
+        print(
+            "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
+        )
+
+    # (c) Forward passes to collect activation ranges
+    iterator = range(0, train_ids.size(1) - 1, args.stride)
+    if not args.no_tqdm:
+        iterator = tqdm.tqdm(iterator, desc="Act-calibration")
+    with torch.no_grad():
+        for i in iterator:
+            q_m(train_ids[:, i : i + args.stride])
+
+    # (d) Freeze all Q-params (scale, zero-point)
+    for l in q_m.model.layers:
+        l.freeze_qparams()
+
+    # -------------------------------------------------------------------------
+    # 6. Evaluate perplexity on Wikitext-2
+    # -------------------------------------------------------------------------
+    print("\nCalculating perplexities …")
+    enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
+    ppl_uint8 = perplexity(q_m, enc, device, stride=args.stride)
+
+    print("\n┌── Wikitext-2 test perplexity ─────────────")
+    print(f"│ UINT-8 : {ppl_uint8:8.2f}")
+    print("└───────────────────────────────────────────")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        print(f"\n[Error] {e}", file=sys.stderr)
+        sys.exit(1)
