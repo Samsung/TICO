@@ -19,7 +19,6 @@ from test.modules.base import TestModuleBase
 
 
 class Llama_32_1B(TestModuleBase):
-
     def __init__(self):
         super().__init__()
         # LlamaConfig extracted from meta-llama/Llama-3.2-1B
