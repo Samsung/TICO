@@ -20,7 +20,7 @@ import torch
 from circle_schema import circle
 from torch.export.exported_program import ConstantArgument, ExportedProgram, InputKind
 
-from tico.config import CompileConfigBase
+from tico.config import CompileConfigBase, get_default_config
 from tico.serialize.circle_mapping import to_circle_dtype, to_circle_shape
 from tico.serialize.operators import *
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
@@ -48,7 +48,9 @@ def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
     return model, graph
 
 
-def build_circle(ep: ExportedProgram, config: CompileConfigBase) -> bytes:
+def build_circle(
+    ep: ExportedProgram, config: CompileConfigBase = get_default_config()
+) -> bytes:
     """Convert ExportedProgram to Circle format.
 
     Args:

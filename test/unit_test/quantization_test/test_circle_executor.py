@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.export
 
-from tico.config import get_default_config
 from tico.experimental.quantization.evaluation.executor.circle_executor import (
     CircleExecutor,
 )
@@ -21,8 +20,7 @@ class TestCircleExecutor(unittest.TestCase):
     def _create_dummy_circle_model(self):
         mod = AddModule()
         ep = torch.export.export(mod, (torch.randn(1, 3), torch.randn(1, 3)))
-        config = get_default_config()
-        circle_bytes = build_circle(ep, config)
+        circle_bytes = build_circle(ep)
         return CircleModel(circle_bytes)
 
     @patch("pathlib.Path.is_file")
