@@ -13,12 +13,18 @@
 # limitations under the License.
 
 import torch
+from tico.config.v1 import CompileConfigV1
 from transformers import LlamaConfig, LlamaForCausalLM
+from transformers.cache_utils import DynamicCache
+from transformers.models.llama.modeling_llama import (
+    LlamaDecoderLayer,
+    LlamaRotaryEmbedding,
+)
 
 from test.modules.base import TestModuleBase
 
 
-class Llama_32_1B(TestModuleBase):
+class Llama_32_1B_Decoder(TestModuleBase):
     def __init__(self):
         super().__init__()
         # LlamaConfig extracted from meta-llama/Llama-3.2-1B
@@ -56,16 +62,36 @@ class Llama_32_1B(TestModuleBase):
             use_cache=True,
             vocab_size=128256,
         )
-        self.model = LlamaForCausalLM(config=self.config).to("cpu")
+        self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
+
+        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
 
         self.rtol = 1e-4
         self.atol = 1e-4
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, *args, **kwargs):
+        return self.model(*args, **kwargs)
 
     def get_example_inputs(self):
-        # >>> tokenizer = LlamaTokenizerFast.from_pretrained("meta-llama/Llama-3.2-1B")
-        # >>> tokenizer.encode("Hello my name is")
-        # [128000, 9906, 856, 836, 374]
-        return (torch.Tensor([[12800, 9906, 856, 836, 374]]).to(dtype=torch.int32),), {}
+        seq_len = 5
+        past_key_values = DynamicCache()
+
+        hidden_states = torch.rand([1, seq_len, 2048])
+
+        cache_position = torch.arange(seq_len)
+
+        position_ids = cache_position.unsqueeze(0)
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        return (hidden_states, ), {
+            "position_ids": position_ids,
+            "cache_position": cache_position,
+            "past_key_values": past_key_values,
+            "position_embeddings": position_embeddings,
+            "use_cache": self.config.use_cache,
+        }
+
+    # def get_compile_config(self):
+    #     return CompileConfigV1(remove_constant_input=True)
