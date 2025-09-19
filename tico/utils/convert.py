@@ -253,6 +253,9 @@ def convert_exported_module_to_circle(
             ConvertMatmulToLinear(
                 enable_lhs_const=config.get("convert_lhs_const_mm_to_fc"),
                 enable_rhs_const=config.get("convert_rhs_const_mm_to_fc"),
+                enable_single_batch_lhs_const_bmm=config.get(
+                    "convert_single_batch_lhs_const_bmm_to_fc"
+                ),
             ),
             LowerToResizeNearestNeighbor(),
             LegalizePreDefinedLayoutOperators(),

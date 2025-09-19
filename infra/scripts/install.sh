@@ -187,7 +187,8 @@ choose_req_file() {
 
 REQ_FILE="$(choose_req_file)"
 echo "[INFO] Installing auxiliary requirements from ${REQ_FILE##*/}"
-python3 -m pip install -r "$REQ_FILE"
+# python3 -m pip install -r "$REQ_FILE" --pre
+python3 -m pip install onert --pre
 
 ###############################################################################
 # TICO itself

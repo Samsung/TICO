@@ -20,11 +20,13 @@ import torch
 from torch._export.utils import is_buffer, is_lifted_tensor_constant, is_param
 from torch.export import ExportedProgram
 
+from tico.serialize.circle_mapping import extract_shape
+
 from tico.utils import logging
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import MatmulArgs
+from tico.utils.validate_args_kwargs import BmmArgs, MatmulArgs
 
 
 class Converter:  # type: ignore[empty-body]
@@ -57,14 +59,14 @@ class MatmulToLinearConverter(Converter):
                 torch.ops.aten.permute.default,
                 args=(rhs, [1, 0]),
             )
-            fc_node = create_node(
+            linear_node = create_node(
                 graph,
                 torch.ops.aten.linear.default,
                 args=(lhs, transpose_node),
             )
-            node.replace_all_uses_with(fc_node, propagate_meta=True)
+            node.replace_all_uses_with(linear_node, propagate_meta=True)
 
-        return fc_node
+        return linear_node
 
 
 class RhsConstMatmulToLinearConverter(MatmulToLinearConverter):
@@ -110,18 +112,125 @@ class LhsConstMatmulToLinearConverter(MatmulToLinearConverter):
                 return True
             elif is_buffer(exported_program, lhs):
                 return True
-            else:
-                return False
         return False
 
     def convert(self, exported_program, node) -> torch.fx.Node:
         return super().convert(exported_program, node)
 
 
+class SingleBatchLhsConstBmmToLinearConverter(Converter):
+    """
+    Convert `single-batched & lhs-const BatchMatMul` to `linear` operation.
+
+    [1] exchange lhs and rhs
+    [2] transpose rhs
+    [3] transpose output
+
+    **Before**
+
+    lhs[1,a,b](const)   rhs[1,b,c]
+    |                   |
+    |                   |
+    ---------bmm---------
+              |
+            output[1,a,c]
+
+
+    **After**
+
+    rhs[1,b,c]
+    |
+    tr                  lhs'[a,b](const-folded)
+    |[1,c,b]            |
+    |                   |
+    ---------fc--------
+             |[1,c,a]
+             tr
+             |
+            output[1,a,c]
+
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def match(self, exported_program, node) -> bool:
+        if not node.target == torch.ops.aten.bmm.default:
+            return False
+
+        bmm_args = BmmArgs(*node.args, **node.kwargs)
+        lhs = bmm_args.input
+        rhs = bmm_args.mat2
+
+        # [1] Single-batch
+        lhs_shape = extract_shape(lhs)
+        rhs_shape = extract_shape(rhs)
+
+        assert len(lhs_shape) == len(
+            rhs_shape
+        ), f"Bmm input's ranks must be the same but got {lhs_shape} and {rhs_shape}"
+
+        if not (lhs_shape[0] == rhs_shape[0] == 1):
+            return False
+
+        # [2] Lhs is constant
+        if not isinstance(lhs, torch.fx.Node):
+            return False
+        if not (
+            is_lifted_tensor_constant(exported_program, lhs)
+            or is_param(exported_program, lhs)
+            or is_buffer(exported_program, lhs)
+        ):
+            return False
+
+        return True
+
+    def convert(self, exported_program, node) -> torch.fx.Node:
+        graph_module = exported_program.graph_module
+        graph = graph_module.graph
+
+        bmm_args = BmmArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+
+        lhs = bmm_args.input  # const
+        rhs = bmm_args.mat2  # non-const
+        lhs_shape = extract_shape(lhs)
+        rhs_shape = extract_shape(rhs)
+        assert rhs_shape[0] == 1
+        assert lhs_shape[0] == 1
+
+        with graph.inserting_before(node):
+            rhs_tr = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(rhs, [0, 2, 1]),
+            )
+            lhs_reshape = create_node(
+                graph,
+                torch.ops.aten.view.default,
+                args=(lhs, list(lhs_shape[1:])),
+            )
+
+            linear_node = create_node(
+                graph,
+                torch.ops.aten.linear.default,
+                args=(rhs_tr, lhs_reshape),
+            )
+
+            tr_linear_node = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(linear_node, [0, 2, 1]),
+            )
+
+            node.replace_all_uses_with(tr_linear_node, propagate_meta=False)
+
+        return tr_linear_node
+
+
 @trace_graph_diff_on_pass
 class ConvertMatmulToLinear(PassBase):
     """
-    This pass converts matmul to linear selectively
+    This pass converts matmul(partially includes single-batch bmm) to linear selectively
 
     How to select between `matmul` and `linear`?
 
@@ -164,6 +273,7 @@ class ConvertMatmulToLinear(PassBase):
         self,
         enable_lhs_const: Optional[bool] = False,
         enable_rhs_const: Optional[bool] = True,
+        enable_single_batch_lhs_const_bmm: Optional[bool] = False,
     ):
         super().__init__()
         self.converters: List[Converter] = []
@@ -171,6 +281,8 @@ class ConvertMatmulToLinear(PassBase):
             self.converters.append(LhsConstMatmulToLinearConverter())
         if enable_rhs_const:
             self.converters.append(RhsConstMatmulToLinearConverter())
+        if enable_single_batch_lhs_const_bmm:
+            self.converters.append(SingleBatchLhsConstBmmToLinearConverter())
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)

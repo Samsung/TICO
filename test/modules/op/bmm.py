@@ -13,8 +13,10 @@
 # limitations under the License.
 
 import torch
+from tico.config.v1 import CompileConfigV1
 
 from test.modules.base import TestModuleBase
+from test.utils.tag import test_negative, use_onert
 
 
 class SimpleBatchMatMul(TestModuleBase):
@@ -27,3 +29,39 @@ class SimpleBatchMatMul(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(2, 4, 5), torch.randn(2, 5, 3)), {}
+
+
+@use_onert
+class SimpleSingleBatchLhsConstBmm(TestModuleBase):
+    def __init__(self):
+        super().__init__()
+        self.const_lhs = torch.randn(1, 4, 5)
+
+    def forward(self, rhs):
+        z = torch.bmm(self.const_lhs, rhs)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 5, 3),), {}
+
+    def get_compile_config(self):
+        return CompileConfigV1(convert_single_batch_lhs_const_bmm_to_fc=True)
+
+
+@use_onert
+@test_negative(expected_err="NNFW_STATUS_ERROR")
+class SimpleSingleBatchLhsConstBmm_NEG(TestModuleBase):
+    """
+    Without CompileConfigV1(convert_single_batch_lhs_const_bmm_to_fc=True), it fails
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.const_lhs = torch.randn(1, 4, 5)
+
+    def forward(self, rhs):
+        z = torch.bmm(self.const_lhs, rhs)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 5, 3),), {}
