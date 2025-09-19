@@ -32,7 +32,7 @@ class SimpleBatchMatMul(TestModuleBase):
 
 
 @use_onert
-class SimpleBatchMatMulConstLhs1B(TestModuleBase):
+class SimpleSingleBatchLhsConstBmm(TestModuleBase):
     def __init__(self):
         super().__init__()
         self.const_lhs = torch.randn(1, 4, 5)
@@ -50,7 +50,7 @@ class SimpleBatchMatMulConstLhs1B(TestModuleBase):
 
 @use_onert
 @test_negative(expected_err="NNFW_STATUS_ERROR")
-class SimpleBatchMatMulConstLhs1B_NEG(TestModuleBase):
+class SimpleSingleBatchLhsConstBmm_NEG(TestModuleBase):
     """
     Without CompileConfigV1(convert_lhs_const_mm_to_fc=True), it fails
     """
