@@ -42,7 +42,7 @@ float_model(Python)                          Example Input
 import torch
 
 from tico.quantization. import prepare, convert
-from tico.quantization.config import PT2EConfig
+from tico.quantization.config.pt2e import PT2EConfig
 import tico
 
 class TwoLinear(torch.nn.Module):

@@ -25,7 +25,7 @@ from tico.experimental.quantization.algorithm.gptq.utils import (
     gather_single_batch_from_dict,
     gather_single_batch_from_list,
 )
-from tico.experimental.quantization.config import BaseConfig, GPTQConfig
+from tico.experimental.quantization.config.gptq import GPTQConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
 
 
@@ -44,7 +44,7 @@ class GPTQQuantizer(BaseQuantizer):
         3) convert(model) to consume the collected data and apply GPTQ.
     """
 
-    def __init__(self, config: BaseConfig):
+    def __init__(self, config: GPTQConfig):
         super().__init__(config)
 
         # cache_args[i] -> list of the i-th positional argument for each batch

@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config import SmoothQuantConfig
+from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.utils.introspection import (
     build_fqn_map,

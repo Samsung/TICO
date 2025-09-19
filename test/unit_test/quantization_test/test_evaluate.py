@@ -19,7 +19,7 @@ from typing import Any
 import tico
 import torch
 from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config import PT2EConfig
+from tico.experimental.quantization.config.pt2e import PT2EConfig
 from tico.experimental.quantization.evaluation.backend import BACKEND
 from tico.experimental.quantization.evaluation.evaluate import evaluate
 

@@ -23,7 +23,7 @@ from tico.experimental.quantization.algorithm.smoothquant.observer import (
 from tico.experimental.quantization.algorithm.smoothquant.smooth_quant import (
     apply_smoothing,
 )
-from tico.experimental.quantization.config import SmoothQuantConfig
+from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
 
 

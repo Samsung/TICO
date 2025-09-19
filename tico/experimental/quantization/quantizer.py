@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from tico.experimental.quantization.config import BaseConfig
+from tico.experimental.quantization.config.base import BaseConfig
 
 
 class BaseQuantizer(ABC):

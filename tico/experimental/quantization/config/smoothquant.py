@@ -12,43 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from abc import ABC, abstractmethod
 from typing import Dict, Literal, Optional
 
-
-class BaseConfig(ABC):
-    """
-    Base configuration class for quantization.
-    """
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        pass
-
-
-class PT2EConfig(BaseConfig):
-    """
-    Configuration for pytorch 2.0 export quantization.
-    """
-
-    @property
-    def name(self) -> str:
-        return "pt2e"
-
-
-class GPTQConfig(BaseConfig):
-    """
-    Configuration for GPTQ.
-    """
-
-    def __init__(self, verbose: bool = False, show_progress: bool = True):
-        self.verbose = verbose
-        self.show_progress = show_progress
-
-    @property
-    def name(self) -> str:
-        return "gptq"
+from tico.experimental.quantization.config.base import BaseConfig
 
 
 class SmoothQuantConfig(BaseConfig):

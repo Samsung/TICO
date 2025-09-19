@@ -16,7 +16,7 @@ import unittest
 
 import torch
 from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config import PT2EConfig
+from tico.experimental.quantization.config.pt2e import PT2EConfig
 from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.experimental.quantization.passes.propagate_qparam_forward import (
     PropagateQParamForward,

@@ -23,7 +23,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config import SmoothQuantConfig
+from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 

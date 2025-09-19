@@ -21,7 +21,7 @@ Below is an example that demonstrates how to use the SmoothQuant algorithm via t
 
 ```python
 from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config import SmoothQuantConfig
+from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
 
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer

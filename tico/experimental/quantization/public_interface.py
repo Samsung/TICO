@@ -22,7 +22,7 @@ from tico.experimental.quantization.algorithm.pt2e.quantizer import PT2EQuantize
 from tico.experimental.quantization.algorithm.smoothquant.quantizer import (
     SmoothQuantQuantizer,
 )
-from tico.experimental.quantization.config import BaseConfig
+from tico.experimental.quantization.config.base import BaseConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
 
 

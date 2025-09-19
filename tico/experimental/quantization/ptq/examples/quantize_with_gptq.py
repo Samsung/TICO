@@ -34,7 +34,7 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config import GPTQConfig
+from tico.experimental.quantization.config.gptq import GPTQConfig
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
 from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.utils.introspection import build_fqn_map

@@ -19,7 +19,7 @@ Below is an example that demonstrates how to use the GPTQ algorithm via the publ
 
 ```python
 from tico.quantization. import prepare, convert
-from tico.quantization.config import GPTQConfig
+from tico.quantization.config.gptq import GPTQConfig
 import tico
 
 from datasets import load_dataset
