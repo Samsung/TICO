@@ -122,10 +122,7 @@ class SingleBatchLhsConstBmmToLinearConverter(Converter):
     """
     Convert `single-batched & lhs-const BatchMatMul` to `linear` operation.
 
-    How?
     [1] exchange lhs and rhs
-        WHY? `linear` operator's rhs needs to be 2-dim.
-        By placing rhs as a constant, we can fold it during constant folding phase.
     [2] transpose rhs
     [3] transpose output
 
@@ -276,14 +273,16 @@ class ConvertMatmulToLinear(PassBase):
         self,
         enable_lhs_const: Optional[bool] = False,
         enable_rhs_const: Optional[bool] = True,
+        enable_single_batch_lhs_const_bmm: Optional[bool] = False,
     ):
         super().__init__()
         self.converters: List[Converter] = []
         if enable_lhs_const:
-            self.converters.append(SingleBatchLhsConstBmmToLinearConverter())
             self.converters.append(LhsConstMatmulToLinearConverter())
         if enable_rhs_const:
             self.converters.append(RhsConstMatmulToLinearConverter())
+        if enable_single_batch_lhs_const_bmm:
+            self.converters.append(SingleBatchLhsConstBmmToLinearConverter())
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)

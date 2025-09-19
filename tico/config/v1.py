@@ -23,6 +23,7 @@ class CompileConfigV1(CompileConfigBase):
     remove_constant_input: bool = False
     convert_lhs_const_mm_to_fc: bool = False
     convert_rhs_const_mm_to_fc: bool = True
+    convert_single_batch_lhs_const_bmm_to_fc: bool = False
 
     def get(self, name: str):
         return super().get(name)

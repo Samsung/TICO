@@ -45,14 +45,14 @@ class SimpleSingleBatchLhsConstBmm(TestModuleBase):
         return (torch.randn(1, 5, 3),), {}
 
     def get_compile_config(self):
-        return CompileConfigV1(convert_lhs_const_mm_to_fc=True)
+        return CompileConfigV1(convert_single_batch_lhs_const_bmm_to_fc=True)
 
 
 @use_onert
 @test_negative(expected_err="NNFW_STATUS_ERROR")
 class SimpleSingleBatchLhsConstBmm_NEG(TestModuleBase):
     """
-    Without CompileConfigV1(convert_lhs_const_mm_to_fc=True), it fails
+    Without CompileConfigV1(convert_single_batch_lhs_const_bmm_to_fc=True), it fails
     """
 
     def __init__(self):
