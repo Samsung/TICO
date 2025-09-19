@@ -228,10 +228,10 @@ def validate_result(
                 err_msg=f"Shape mismatches.\nexpected result: {expected_res.shape}\ncircle result: {circle_res.shape}",
             )
             expected_tensor = expected_res
-            circle_tensor = torch.from_numpy(circle_res)
+            circle_tensor = torch.from_numpy(circle_res.copy())
         elif isinstance(expected_res, (int, float)):
             expected_tensor = torch.tensor(expected_res)
-            circle_tensor = torch.from_numpy(circle_res)
+            circle_tensor = torch.from_numpy(circle_res.copy())
         else:
             raise TypeError("Expected result must be a tensor or scalar value.")
 
