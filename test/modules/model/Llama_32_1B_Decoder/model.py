@@ -24,9 +24,13 @@ from transformers.models.llama.modeling_llama import (
 from test.modules.base import TestModuleBase
 
 
-class Llama_32_1B_Decoder(TestModuleBase):
+seq_len = 5
+
+
+class Wrapper(torch.nn.Module):
     def __init__(self):
         super().__init__()
+
         # LlamaConfig extracted from meta-llama/Llama-3.2-1B
         # Adjust num_hidden_layers to 1 for testing purpose
         self.config = LlamaConfig(
@@ -64,7 +68,39 @@ class Llama_32_1B_Decoder(TestModuleBase):
         )
         self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
 
+        hidden_states_sample = torch.rand([1, seq_len, 2048])
+
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+        self.past_key_values = DynamicCache()
+        self.cache_position = torch.arange(seq_len)
+        self.position_ids = self.cache_position.unsqueeze(0)
+        self.position_embeddings = self.rotary_emb(
+            hidden_states_sample, self.position_ids
+        )
+
+    def forward(self, *args, **kwargs):
+        last_hidden_state = self.model.forward(
+            *args,
+            **{
+                "position_ids": self.position_ids,
+                "cache_position": self.cache_position,
+                "past_key_value": self.past_key_values,
+                "use_cache": self.config.use_cache,
+                "position_embeddings": self.position_embeddings,
+            },
+        )
+        return (last_hidden_state[0], self.past_key_values,)
+
+    def get_example_inputs(self):
+        hidden_states = torch.rand([1, seq_len, 2048])
+        return (hidden_states,), {}
+
+
+class Llama_32_1B_Decoder(TestModuleBase):
+    def __init__(self):
+        super().__init__()
+
+        self.model = Wrapper()
 
         self.rtol = 1e-4
         self.atol = 1e-4
@@ -73,25 +109,5 @@ class Llama_32_1B_Decoder(TestModuleBase):
         return self.model(*args, **kwargs)
 
     def get_example_inputs(self):
-        seq_len = 5
-        past_key_values = DynamicCache()
-
         hidden_states = torch.rand([1, seq_len, 2048])
-
-        cache_position = torch.arange(seq_len)
-
-        position_ids = cache_position.unsqueeze(0)
-
-        # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        return (hidden_states, ), {
-            "position_ids": position_ids,
-            "cache_position": cache_position,
-            "past_key_values": past_key_values,
-            "position_embeddings": position_embeddings,
-            "use_cache": self.config.use_cache,
-        }
-
-    # def get_compile_config(self):
-    #     return CompileConfigV1(remove_constant_input=True)
+        return (hidden_states,), {}
