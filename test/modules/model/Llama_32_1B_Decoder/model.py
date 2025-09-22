@@ -13,8 +13,7 @@
 # limitations under the License.
 
 import torch
-from tico.config.v1 import CompileConfigV1
-from transformers import LlamaConfig, LlamaForCausalLM
+from transformers import LlamaConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import (
     LlamaDecoderLayer,
@@ -22,6 +21,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from test.modules.base import TestModuleBase
+from test.utils.tag import target
 
 
 seq_len = 5
@@ -69,9 +69,9 @@ class Wrapper(torch.nn.Module):
         self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
-        # self.past_key_values = DynamicCache()
-        self.register_buffer("cache_position", torch.arange(seq_len))
-        self.register_buffer("position_ids", torch.arange(seq_len).unsqueeze(0))
+        self.cache_position = torch.arange(seq_len)
+        position_ids = self.cache_position.unsqueeze(0)
+        self.register_buffer("position_ids", position_ids)
 
     def forward(self, *args, **kwargs):
         hidden_states = args[0]
@@ -92,11 +92,8 @@ class Wrapper(torch.nn.Module):
             past_key_values.to_legacy_cache(),
         )
 
-    def get_example_inputs(self):
-        hidden_states = torch.rand([1, seq_len, 2048])
-        return (hidden_states,), {}
 
-
+@target
 class Llama_32_1B_Decoder(TestModuleBase):
     def __init__(self):
         super().__init__()

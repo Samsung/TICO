@@ -56,6 +56,7 @@ from tico.passes.extract_dtype_kwargs import ExtractDtypeKwargsPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.fuse_leading_unsqueeze_reshape import FuseLeadingUnsqueezeReshape
 from tico.passes.fuse_redundant_reshape_to_mean import FuseRedundantReshapeToMean
+from tico.passes.legalize_expand import LegalizeExpand
 from tico.passes.legalize_causal_mask_value import LegalizeCausalMaskValue
 from tico.passes.legalize_predefined_layout_operators import (
     LegalizePreDefinedLayoutOperators,
@@ -250,6 +251,7 @@ def convert_exported_module_to_circle(
             ConstPropPass(),
             SegmentIndexSelectConst(),
             LegalizeCausalMaskValue(enabled=config.get("legalize_causal_mask_value")),
+            LegalizeExpand(),
             ConvertMatmulToLinear(
                 enable_lhs_const=config.get("convert_lhs_const_mm_to_fc"),
                 enable_rhs_const=config.get("convert_rhs_const_mm_to_fc"),
