@@ -67,12 +67,15 @@ class LegalizeExpand(PassBase):
             permute_input_shape = extract_shape(permute_input)
 
             print(f"permute dims: {permute_dims}")
+            print(f"permut_input shape: {permute_input_shape}")
+
+            expand_ratio = int(expand_shape[2] / permute_dims[2])
 
             cat_nodes = []
 
             for i in range(permute_input_shape[1]):
                 # [1, 8, 5, 64] -> [1, 1, 5, 64]
-                with graph.inserting_after(expand_input):
+                with graph.inserting_before(node):
                     slice_copy_args = (permute_input, 1, i, i + 1, 1)
                     slice_node = create_node(
                         graph,
@@ -82,7 +85,7 @@ class LegalizeExpand(PassBase):
                     )
                 # [1, 1, 5, 64] -> [1, 4, 5, 64]
                 with graph.inserting_after(slice_node):
-                    cat_args = ([slice_node] * 4, 1)
+                    cat_args = ([slice_node] * expand_ratio, 1)
                     cat_node = create_node(
                         graph,
                         torch.ops.aten.cat.default,
