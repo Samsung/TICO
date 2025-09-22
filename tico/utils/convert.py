@@ -56,8 +56,8 @@ from tico.passes.extract_dtype_kwargs import ExtractDtypeKwargsPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.fuse_leading_unsqueeze_reshape import FuseLeadingUnsqueezeReshape
 from tico.passes.fuse_redundant_reshape_to_mean import FuseRedundantReshapeToMean
-from tico.passes.legalize_expand import LegalizeExpand
 from tico.passes.legalize_causal_mask_value import LegalizeCausalMaskValue
+from tico.passes.legalize_expand import LegalizeExpand
 from tico.passes.legalize_predefined_layout_operators import (
     LegalizePreDefinedLayoutOperators,
 )
