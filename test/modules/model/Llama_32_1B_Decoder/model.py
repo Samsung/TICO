@@ -25,15 +25,24 @@ from test.modules.base import TestModuleBase
 from test.utils.tag import target
 
 
-seq_len = 5
+# Define the sequence length for the test case.
+SEQ_LEN = 64
 
 
 class Wrapper(torch.nn.Module):
+    """
+    A wrapper for a single LlamaDecoderLayer to facilitate testing.
+
+    This wrapper configures a LlamaDecoderLayer based on Llama-3.2-1B settings,
+    but with only one hidden layer. It handles the creation of necessary inputs
+    like position embeddings and cache for a forward pass.
+    """
+
     def __init__(self):
         super().__init__()
 
-        # LlamaConfig extracted from meta-llama/Llama-3.2-1B
-        # Adjust num_hidden_layers to 1 for testing purpose
+        # LlamaConfig extracted from meta-llama/Llama-3.2-1B.
+        # The number of hidden layers is adjusted to 1 for testing a single decoder layer.
         self.config = LlamaConfig(
             _attn_implementation_autoset=True,
             architectures=["LlamaForCausalLM"],
@@ -70,15 +79,16 @@ class Wrapper(torch.nn.Module):
         self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
-        self.cache_position = torch.arange(seq_len)
+        self.cache_position = torch.arange(SEQ_LEN)
         position_ids = self.cache_position.unsqueeze(0)
         self.register_buffer("position_ids", position_ids)
 
     def forward(self, *args, **kwargs):
         hidden_states = args[0]
+        # A new, empty cache is created for each forward pass for stateless testing.
         past_key_values = DynamicCache()
         position_embeddings = self.rotary_emb(hidden_states, self.position_ids)
-        last_hidden_state = self.model.forward(
+        layer_outputs = self.model.forward(
             *args,
             **{
                 "position_ids": self.position_ids,
@@ -88,14 +98,17 @@ class Wrapper(torch.nn.Module):
                 "position_embeddings": position_embeddings,
             },
         )
+        hidden_states = layer_outputs[0]
         return (
-            last_hidden_state[0],
+            hidden_states,
             past_key_values.to_legacy_cache(),
         )
 
 
 @target
 class Llama_32_1B_Decoder(TestModuleBase):
+    """Test module for a single Llama-3.2-1B decoder layer."""
+
     def __init__(self):
         super().__init__()
 
@@ -108,7 +121,7 @@ class Llama_32_1B_Decoder(TestModuleBase):
         return self.model(*args, **kwargs)
 
     def get_example_inputs(self):
-        hidden_states = torch.rand([1, seq_len, 2048])
+        hidden_states = torch.rand([1, SEQ_LEN, 2048])
         return (hidden_states,), {}
 
     def get_compile_config(self):
