@@ -31,13 +31,17 @@ from tico.utils.validate_args_kwargs import AddTensorArgs, ExpandArgs, PermuteAr
 
 
 @trace_graph_diff_on_pass
-class LegalizeExpand(PassBase):
+class LegalizeExpandForTRIV(PassBase):
     """
-    This pass replaces `aten.reshape` + `aten.expand` pattern with `aten.cat`
+    This pass replaces `aten.reshape` + `aten.expand` pattern by rewriting it using
+    a series of `aten.slice` and `aten.cat` operations.
+
+    This pass is specialized for expand of KVCache.
     """
 
-    def __init__(self):
+    def __init__(self, enabled: bool = False):
         super().__init__()
+        self.enabled = enabled
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
@@ -46,46 +50,66 @@ class LegalizeExpand(PassBase):
         graph = graph_module.graph
         modified = False
 
+        # This pass handles expand on EXPAND_DIM only
+        CAT_DIM = 1
+        EXPAND_DIM = 2
+
         for node in graph.nodes:
+            if not self.enabled:
+                return PassResult(False)
+
             if not is_target_node(node, ops.aten.expand):
                 continue
 
-            args = ExpandArgs(*node.args, **node.kwargs)
-            expand_input = args.input
-            expand_shape = args.size
-            print(f"expand shape: {expand_shape}")
+            expand_node = node
+            expand_args = ExpandArgs(*expand_node.args, **expand_node.kwargs)
+            expand_input = expand_args.input
+            expand_shape = extract_shape(expand_node)
 
             if not isinstance(expand_input, torch.fx.Node) or not is_target_node(
                 expand_input, ops.aten.reshape
             ):
                 continue
 
-            permute_args = PermuteArgs(*expand_input.args, **expand_input.kwargs)
+            permute_node = expand_input
+            permute_args = PermuteArgs(*permute_node.args, **permute_node.kwargs)
             permute_input = permute_args.input
-            permute_dims = permute_args.dims
+            permute_shape = extract_shape(permute_node)
 
             permute_input_shape = extract_shape(permute_input)
 
-            print(f"permute dims: {permute_dims}")
-            print(f"permut_input shape: {permute_input_shape}")
+            if len(expand_shape) != len(permute_shape):
+                continue
 
-            expand_ratio = int(expand_shape[2] / permute_dims[2])
+            # Ensure all dimensions *except* at EXPAND_DIM are identical.
+            if not (
+                expand_shape[:EXPAND_DIM] == permute_shape[:EXPAND_DIM]
+                and expand_shape[EXPAND_DIM + 1 :] == permute_shape[EXPAND_DIM + 1 :]
+            ):
+                continue
+
+            # Ensure the expansion dimension is a clean multiple.
+            if expand_shape[EXPAND_DIM] % permute_shape[EXPAND_DIM] != 0:
+                continue
+
+            expand_ratio = expand_shape[EXPAND_DIM] // permute_shape[EXPAND_DIM]
+
+            if expand_ratio <= 1:
+                continue
 
             cat_nodes = []
 
-            for i in range(permute_input_shape[1]):
-                # [1, 8, 5, 64] -> [1, 1, 5, 64]
+            for i in range(permute_input_shape[CAT_DIM]):
                 with graph.inserting_before(node):
-                    slice_copy_args = (permute_input, 1, i, i + 1, 1)
+                    slice_copy_args = (permute_input, CAT_DIM, i, i + 1, 1)
                     slice_node = create_node(
                         graph,
                         torch.ops.aten.slice.Tensor,
                         args=slice_copy_args,
                         origin=node,
                     )
-                # [1, 1, 5, 64] -> [1, 4, 5, 64]
                 with graph.inserting_after(slice_node):
-                    cat_args = ([slice_node] * expand_ratio, 1)
+                    cat_args = ([slice_node] * expand_ratio, CAT_DIM)
                     cat_node = create_node(
                         graph,
                         torch.ops.aten.cat.default,
@@ -94,9 +118,8 @@ class LegalizeExpand(PassBase):
                     )
                     cat_nodes.append(cat_node)
 
-            # [1, 4, 5, 64]*8 -> [1, 32, 5, 64]
             with graph.inserting_after(node):
-                cat_args = (cat_nodes, 1)
+                cat_args = (cat_nodes, CAT_DIM)
                 cat_node = create_node(
                     graph,
                     torch.ops.aten.cat.default,

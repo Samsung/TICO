@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from tico.config.v1 import CompileConfigV1
 from transformers import LlamaConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import (
@@ -109,3 +110,6 @@ class Llama_32_1B_Decoder(TestModuleBase):
     def get_example_inputs(self):
         hidden_states = torch.rand([1, seq_len, 2048])
         return (hidden_states,), {}
+
+    def get_compile_config(self):
+        return CompileConfigV1(legalize_expand_for_triv=True)
