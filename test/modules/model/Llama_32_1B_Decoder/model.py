@@ -68,28 +68,29 @@ class Wrapper(torch.nn.Module):
         )
         self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
 
-        hidden_states_sample = torch.rand([1, seq_len, 2048])
-
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
-        self.past_key_values = DynamicCache()
-        self.cache_position = torch.arange(seq_len)
-        self.position_ids = self.cache_position.unsqueeze(0)
-        self.position_embeddings = self.rotary_emb(
-            hidden_states_sample, self.position_ids
-        )
+        # self.past_key_values = DynamicCache()
+        self.register_buffer("cache_position", torch.arange(seq_len))
+        self.register_buffer("position_ids", torch.arange(seq_len).unsqueeze(0))
 
     def forward(self, *args, **kwargs):
+        hidden_states = args[0]
+        past_key_values = DynamicCache()
+        position_embeddings = self.rotary_emb(hidden_states, self.position_ids)
         last_hidden_state = self.model.forward(
             *args,
             **{
                 "position_ids": self.position_ids,
                 "cache_position": self.cache_position,
-                "past_key_value": self.past_key_values,
+                "past_key_value": past_key_values,
                 "use_cache": self.config.use_cache,
-                "position_embeddings": self.position_embeddings,
+                "position_embeddings": position_embeddings,
             },
         )
-        return (last_hidden_state[0], self.past_key_values,)
+        return (
+            last_hidden_state[0],
+            past_key_values.to_legacy_cache(),
+        )
 
     def get_example_inputs(self):
         hidden_states = torch.rand([1, seq_len, 2048])
