@@ -25,9 +25,9 @@ class KVCacheExpandNet(torch.nn.Module):
         super().__init__()
 
     def forward(self, x):
-        x = torch.reshape(x, [1, 8, 1, 5, 64])
+        x = torch.ops.aten.reshape.default(x, [1, 8, 1, 5, 64])
         x = x.expand([1, 8, 4, 5, 64])
-        x = torch.reshape(x, [32, 5, 64])
+        x = torch.ops.aten.reshape.default(x, [32, 5, 64])
         return x
 
     def get_example_inputs(self):
@@ -50,9 +50,9 @@ class NonKVCacheExpandNet(torch.nn.Module):
         super().__init__()
 
     def forward(self, x):
-        x = torch.reshape(x, [1, 1, 5, 64])
+        x = torch.ops.aten.reshape.default(x, [1, 1, 5, 64])
         x = x.expand([8, 1, 5, 64])
-        x = torch.reshape(x, [8, 5, 64])
+        x = torch.ops.aten.reshape.default(x, [8, 5, 64])
         return x
 
     def get_example_inputs(self):
