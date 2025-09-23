@@ -13,8 +13,11 @@
 # limitations under the License.
 
 import torch
+from packaging.version import Version
+
 from tico.passes import ops
 from tico.passes.convert_expand_to_slice_cat import ConvertExpandToSliceCat
+from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 
 from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
@@ -25,9 +28,9 @@ class KVCacheExpandNet(torch.nn.Module):
         super().__init__()
 
     def forward(self, x):
-        x = torch.ops.aten.reshape.default(x, [1, 8, 1, 5, 64])
+        x = torch.reshape(x, [1, 8, 1, 5, 64])
         x = x.expand([1, 8, 4, 5, 64])
-        x = torch.ops.aten.reshape.default(x, [32, 5, 64])
+        x = torch.reshape(x, [32, 5, 64])
         return x
 
     def get_example_inputs(self):
@@ -38,6 +41,9 @@ class ConvertKVCacheExpandTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(KVCacheExpandNet())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
+
+        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.run_value_test(ConvertExpandToSliceCat(True))
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 0)
@@ -50,9 +56,9 @@ class NonKVCacheExpandNet(torch.nn.Module):
         super().__init__()
 
     def forward(self, x):
-        x = torch.ops.aten.reshape.default(x, [1, 1, 5, 64])
+        x = torch.reshape(x, [1, 1, 5, 64])
         x = x.expand([8, 1, 5, 64])
-        x = torch.ops.aten.reshape.default(x, [8, 5, 64])
+        x = torch.reshape(x, [8, 5, 64])
         return x
 
     def get_example_inputs(self):
@@ -63,6 +69,9 @@ class ConvertNonKVCacheExpandTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(NonKVCacheExpandNet())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
+
+        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
+            self.run_value_test(ConvertLayoutOpToReshape())
 
         self.run_value_test(ConvertExpandToSliceCat(True))
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
