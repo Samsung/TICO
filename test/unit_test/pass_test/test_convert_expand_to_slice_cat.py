@@ -62,7 +62,6 @@ class NonKVCacheExpandNet(torch.nn.Module):
 class ConvertNonKVCacheExpandTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(NonKVCacheExpandNet())
-        print(self.exported_program())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
 
         self.run_value_test(ConvertExpandToSliceCat(True))
