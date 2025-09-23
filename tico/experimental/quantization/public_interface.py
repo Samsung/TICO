@@ -41,6 +41,7 @@ def prepare(
     args: Optional[Any] = None,
     kwargs: Optional[Dict[str, Any]] = None,
     inplace: Optional[bool] = False,
+    specified_quantizer: Optional[Type[BaseQuantizer]] = None,
 ):
     """
     Prepare the model for quantization using the provided configuration.
@@ -68,7 +69,12 @@ def prepare(
 
     model = model if inplace else copy.deepcopy(model)
 
-    quantizer = config_to_quantizer[quant_config.name](quant_config)
+    if config_to_quantizer.get(quant_config.name) is not None:
+        quantizer = config_to_quantizer[quant_config.name](quant_config)
+    else:
+        if specified_quantizer is None:
+            raise RuntimeError("No quantizer exists")
+        quantizer = specified_quantizer(quant_config)
     model = quantizer.prepare(model, args, kwargs)
     setattr(model, QUANTIZER_ATTRIBUTE_NAME, quantizer)
 
