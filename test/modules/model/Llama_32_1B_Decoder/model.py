@@ -125,4 +125,4 @@ class Llama_32_1B_Decoder(TestModuleBase):
         return (hidden_states,), {}
 
     def get_compile_config(self):
-        return CompileConfigV1(legalize_expand_for_triv=True)
+        return CompileConfigV1(convert_expand_to_slice_cat=True)

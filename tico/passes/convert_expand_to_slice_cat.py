@@ -31,12 +31,13 @@ from tico.utils.validate_args_kwargs import AddTensorArgs, ExpandArgs, PermuteAr
 
 
 @trace_graph_diff_on_pass
-class LegalizeExpandForTRIV(PassBase):
+class ConvertExpandToSliceCat(PassBase):
     """
     This pass replaces `aten.reshape` + `aten.expand` pattern by rewriting it using
     a series of `aten.slice` and `aten.cat` operations.
 
     This pass is specialized for expand of KVCache.
+    - Expects (batch, num_key_value_heads, seq_len, head_dim) as input shape of reshape
     """
 
     def __init__(self, enabled: bool = False):
@@ -75,6 +76,11 @@ class LegalizeExpandForTRIV(PassBase):
             permute_args = PermuteArgs(*permute_node.args, **permute_node.kwargs)
             permute_input = permute_args.input
             permute_shape = extract_shape(permute_node)
+
+            print(permute_shape)
+
+            if permute_shape[EXPAND_DIM] != 1:
+                continue
 
             permute_input_shape = extract_shape(permute_input)
 
