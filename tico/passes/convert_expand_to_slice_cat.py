@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch.fx
 import torch
-from torch._export.utils import is_lifted_tensor_constant
 from torch.export import ExportedProgram
 
 from tico.passes import ops
@@ -27,7 +26,7 @@ from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
-from tico.utils.validate_args_kwargs import AddTensorArgs, ExpandArgs, PermuteArgs
+from tico.utils.validate_args_kwargs import ExpandArgs, ReshapeArgs
 
 
 @trace_graph_diff_on_pass
@@ -45,6 +44,9 @@ class ConvertExpandToSliceCat(PassBase):
         self.enabled = enabled
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
+        if not self.enabled:
+            return PassResult(False)
+
         logger = logging.getLogger(__name__)
 
         graph_module = exported_program.graph_module
@@ -56,9 +58,6 @@ class ConvertExpandToSliceCat(PassBase):
         EXPAND_DIM = 2
 
         for node in graph.nodes:
-            if not self.enabled:
-                return PassResult(False)
-
             if not is_target_node(node, ops.aten.expand):
                 continue
 
@@ -72,40 +71,40 @@ class ConvertExpandToSliceCat(PassBase):
             ):
                 continue
 
-            permute_node = expand_input
-            permute_args = PermuteArgs(*permute_node.args, **permute_node.kwargs)
-            permute_input = permute_args.input
-            permute_shape = extract_shape(permute_node)
+            reshape_node = expand_input
+            reshape_args = ReshapeArgs(*reshape_node.args, **reshape_node.kwargs)
+            reshape_input = reshape_args.input
+            reshape_shape = extract_shape(reshape_node)
 
-            if permute_shape[EXPAND_DIM] != 1:
+            if reshape_shape[EXPAND_DIM] != 1:
                 continue
 
-            permute_input_shape = extract_shape(permute_input)
+            reshape_input_shape = extract_shape(reshape_input)
 
-            if len(expand_shape) != len(permute_shape):
+            if len(expand_shape) != len(reshape_shape):
                 continue
 
             # Ensure all dimensions *except* at EXPAND_DIM are identical.
             if not (
-                expand_shape[:EXPAND_DIM] == permute_shape[:EXPAND_DIM]
-                and expand_shape[EXPAND_DIM + 1 :] == permute_shape[EXPAND_DIM + 1 :]
+                expand_shape[:EXPAND_DIM] == reshape_shape[:EXPAND_DIM]
+                and expand_shape[EXPAND_DIM + 1 :] == reshape_shape[EXPAND_DIM + 1 :]
             ):
                 continue
 
             # Ensure the expansion dimension is a clean multiple.
-            if expand_shape[EXPAND_DIM] % permute_shape[EXPAND_DIM] != 0:
+            if expand_shape[EXPAND_DIM] % reshape_shape[EXPAND_DIM] != 0:
                 continue
 
-            expand_ratio = expand_shape[EXPAND_DIM] // permute_shape[EXPAND_DIM]
+            expand_ratio = expand_shape[EXPAND_DIM] // reshape_shape[EXPAND_DIM]
 
             if expand_ratio <= 1:
                 continue
 
             cat_nodes = []
 
-            for i in range(permute_input_shape[CAT_DIM]):
+            for i in range(reshape_input_shape[CAT_DIM]):
                 with graph.inserting_before(node):
-                    slice_copy_args = (permute_input, CAT_DIM, i, i + 1, 1)
+                    slice_copy_args = (reshape_input, CAT_DIM, i, i + 1, 1)
                     slice_node = create_node(
                         graph,
                         torch.ops.aten.slice.Tensor,
