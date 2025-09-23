@@ -13,24 +13,16 @@
 # limitations under the License.
 
 import copy
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 
 import torch
 
 from tico.experimental.quantization.algorithm.gptq.quantizer import GPTQQuantizer
 from tico.experimental.quantization.algorithm.pt2e.quantizer import PT2EQuantizer
-from tico.experimental.quantization.algorithm.smoothquant.quantizer import (
-    SmoothQuantQuantizer,
-)
 from tico.experimental.quantization.config.base import BaseConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
+from tico.experimental.quantization.quantizer_registry import get_quantizer
 
-
-config_to_quantizer: Dict[str, Type[BaseQuantizer]] = {
-    "pt2e": PT2EQuantizer,
-    "gptq": GPTQQuantizer,
-    "smooth_quant": SmoothQuantQuantizer,
-}
 
 QUANTIZER_ATTRIBUTE_NAME = "tico_quantizer"
 
@@ -61,14 +53,15 @@ def prepare(
     """
     if hasattr(model, QUANTIZER_ATTRIBUTE_NAME):
         raise RuntimeError("prepare() already has been called.")
-    if quant_config.name == "pt2e" and inplace:
+    quantizer = get_quantizer(quant_config)
+
+    if isinstance(quantizer, PT2EQuantizer) and inplace:
         raise RuntimeError(
             "In-place is not supported for PT2E quantization due to limitation in the underlying Torch APIs. Please set 'inplace=False' to proceed."
         )
 
     model = model if inplace else copy.deepcopy(model)
 
-    quantizer = config_to_quantizer[quant_config.name](quant_config)
     model = quantizer.prepare(model, args, kwargs)
     setattr(model, QUANTIZER_ATTRIBUTE_NAME, quantizer)
 

@@ -22,9 +22,12 @@ from tico.experimental.quantization.algorithm.pt2e.annotation.annotator import (
     get_asymmetric_quantization_config,
     PT2EAnnotator,
 )
+from tico.experimental.quantization.config.pt2e import PT2EConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
+from tico.experimental.quantization.quantizer_registry import register_quantizer
 
 
+@register_quantizer(PT2EConfig)
 class PT2EQuantizer(BaseQuantizer):
     """
     Quantizer for applying pytorch 2.0 export quantization (typically for activation quantization).

@@ -38,4 +38,4 @@ class SmoothQuantConfig(BaseConfig):
 
     @property
     def name(self) -> str:
-        return "smooth_quant"
+        return "smoothquant"

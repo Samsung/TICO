@@ -27,6 +27,7 @@ from tico.experimental.quantization.algorithm.gptq.utils import (
 )
 from tico.experimental.quantization.config.gptq import GPTQConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
+from tico.experimental.quantization.quantizer_registry import register_quantizer
 
 
 class StopForward(Exception):
@@ -35,6 +36,7 @@ class StopForward(Exception):
     pass
 
 
+@register_quantizer(GPTQConfig)
 class GPTQQuantizer(BaseQuantizer):
     """
     Quantizer for applying the GPTQ algorithm (typically for weight quantization).

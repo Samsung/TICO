@@ -25,8 +25,10 @@ from tico.experimental.quantization.algorithm.smoothquant.smooth_quant import (
 )
 from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
 from tico.experimental.quantization.quantizer import BaseQuantizer
+from tico.experimental.quantization.quantizer_registry import register_quantizer
 
 
+@register_quantizer(SmoothQuantConfig)
 class SmoothQuantQuantizer(BaseQuantizer):
     """
     Quantizer for applying the SmoothQuant algorithm
