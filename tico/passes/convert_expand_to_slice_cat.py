@@ -98,7 +98,8 @@ class ConvertExpandToSliceCat(PassBase):
             # Ensure all dimensions *except* at EXPAND_DIM are identical.
             if not (
                 expand_shape[:EXPAND_DIM] == pre_reshape_shape[:EXPAND_DIM]
-                and expand_shape[EXPAND_DIM + 1 :] == pre_reshape_shape[EXPAND_DIM + 1 :]
+                and expand_shape[EXPAND_DIM + 1 :]
+                == pre_reshape_shape[EXPAND_DIM + 1 :]
             ):
                 continue
 
@@ -120,7 +121,7 @@ class ConvertExpandToSliceCat(PassBase):
                         graph,
                         torch.ops.aten.slice.Tensor,
                         args=slice_copy_args,
-                        origin=expand
+                        origin=expand,
                     )
                 with graph.inserting_after(slice_node):
                     cat_args = ([slice_node] * expand_ratio, CAT_DIM)
