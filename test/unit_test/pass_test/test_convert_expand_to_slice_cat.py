@@ -46,7 +46,7 @@ class ConvertKVCacheExpandTest(SinglePassValueTest):
             self.run_value_test(ConvertLayoutOpToReshape())
 
         self.run_value_test(ConvertExpandToSliceCat(True))
-        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 1)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 0)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.slice), 8)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.cat), 9)
