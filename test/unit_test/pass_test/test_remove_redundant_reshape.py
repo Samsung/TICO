@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import torch
-from packaging.version import Version
 
 from tico.passes import ops
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
@@ -51,9 +50,7 @@ class RedundantReshapePattern1(torch.nn.Module):
 class RemoveRedundantReshapePattern1Test(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantReshapePattern1())
-
-        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
@@ -89,9 +86,7 @@ class RedundantReshapePattern2(torch.nn.Module):
 class RemoveRedundantReshapePattern2Test(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantReshapePattern2())
-
-        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
@@ -245,9 +240,7 @@ class RedundantReshapePattern4(torch.nn.Module):
 class RemoveRedundantReshapePattern4Test(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantReshapePattern4())
-
-        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
@@ -272,9 +265,7 @@ class RedundantReshapePattern5(torch.nn.Module):
 class RemoveRedundantReshapePattern5Test(SinglePassValueTest):
     def test_pass(self):
         self.setup(RedundantReshapePattern5())
-
-        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_value_test(ConvertLayoutOpToReshape())
 
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 1)
 
