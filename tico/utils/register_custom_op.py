@@ -19,6 +19,7 @@ from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
 from tico.utils.mx.mx_ops import _quantize_mx
+from tico.utils.validate_args_kwargs import TopKArgs
 
 # Note that an operator assumes input tensor has NHWC format.
 def CircleResizeNearestNeighbor():
@@ -664,6 +665,50 @@ def CircleInstanceNorm():
         return input.new_empty(input.size())
 
 
+def CircleTopK():
+    @custom_op(
+        "circle_custom::top_k",
+        mutates_args=(),
+        schema="(Tensor input, int k) -> (Tensor, Tensor)",
+    )
+    def top_k(
+        input: torch.Tensor,
+        k: int,
+        dim: int = -1,
+        largest: bool = True,
+        sorted: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert (dim == -1) or (dim == len(input.size()) - 1)
+        assert largest is True
+        assert sorted is True
+
+        topk_out_0, topk_out_1 = torch.ops.aten.topk.default(input, k, dim)
+        topk_out_1_int32 = torch.ops.aten.to.dtype(topk_out_1, dtype=torch.int32)
+
+        return (
+            topk_out_0,
+            topk_out_1_int32,
+        )
+
+    @register_fake("circle_custom::top_k")
+    def _(
+        input: FakeTensor,
+        k: int,
+        dim: int = -1,
+        largest: bool = True,
+        sorted: bool = True,
+    ) -> tuple[FakeTensor, FakeTensor]:
+        assert (dim == -1) or (dim == len(input.size()) - 1)
+        assert largest is True
+        assert sorted is True
+        topk_out0, topk_out1 = torch.ops.aten.topk.default(input, k, dim)
+
+        return (
+            topk_out0,
+            topk_out1.new_empty(size=topk_out1.size(), dtype=torch.int32),
+        )
+
+
 def CircleQuantizeMX():
     # This operator conducts fake-quantization of microscaling
     # NOTE Why using "quantize"_mx not "fake_quantize"_mx?
@@ -740,3 +785,4 @@ def RegisterOps():
     CircleInstanceNorm()
     CircleQuantizeMX()
     CircleRMSNorm()
+    CircleTopK()
