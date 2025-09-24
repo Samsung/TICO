@@ -78,20 +78,26 @@ jobs:
           CODENAME=$(lsb_release -cs)
           echo "codename=$CODENAME" >> "$GITHUB_OUTPUT"
 
+      - name: Specify ONE version and binary
+        id: one
+        run: |
+          VERSION=1.30.1
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "filename=one-compiler-${{ steps.os.outputs.codename }}_${VERSION}_amd64.deb" >> "$GITHUB_OUTPUT"
+
       - name: Download one-compiler package
         id: download
         uses: ./.github/actions/download-release-asset
         with:
           owner: Samsung
           repo: ONE
-          tag: 1.30.1
-          filename: one-compiler-deb-${{ steps.os.outputs.codename }}-1.30.1.tar.gz
+          tag: ${{ steps.one.outputs.version }}
+          filename: ${{ steps.one.outputs.filename }}
 
       - name: "Install one-compiler"
         working-directory: ./.github/actions/download-release-asset
         run: |
-          tar -xvzf ${{ steps.download.outputs.filename }}
-          dpkg -i one-compiler_1.30.0_amd64.deb
+          dpkg -i ${{ steps.one.outputs.filename }}
           apt-get install -f -y
           onecc --version || echo "Installation failed."
 
