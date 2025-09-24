@@ -91,7 +91,7 @@ def build_circle(
 
         graph.add_output(user_output)
         logger.debug(f"Registered output: {user_output}")
-
+    
     # Export operators
     logger.debug("---------------Export operators--------------")
     op_codes: Dict[OpCode, int] = {}
@@ -153,6 +153,7 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
                 raise RuntimeError(
                     f"Only support dense tensors (node layout: {node_val.layout})"
                 )
+            
             graph.add_tensor_from_node(node)
             logger.debug(f"call_function: {node.name} tensor exported.")
 

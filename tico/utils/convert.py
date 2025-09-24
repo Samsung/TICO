@@ -198,6 +198,8 @@ def convert_exported_module_to_circle(
     logger.debug("Input ExportedProgram (must be core aten)")
     logger.debug(exported_program)
 
+    nodes = list(exported_program.graph.nodes)
+    print(nodes[0].meta['val'])
     # PRE-EDGE PASSES
     #
     # Here are the passes that run before to_edge() conversion.
@@ -222,6 +224,8 @@ def convert_exported_module_to_circle(
         #     CompositeImplicitAutograd and have functional schema are safe to not decompose.
         exported_program = traced_run_decompositions(exported_program)
 
+    nodes = list(exported_program.graph.nodes)
+    print(nodes[0].meta['val'])
     # TODO Distinguish legalize and optimize
     circle_legalize = PassManager(
         passes=[
@@ -267,7 +271,9 @@ def convert_exported_module_to_circle(
         ]
     )
     circle_legalize.run(exported_program)
-
+    
+    nodes = list(exported_program.graph.nodes)
+    print(nodes[0].meta['val'])
     # After this stage, ExportedProgram invariant is broken, i.e.,
     # graph can have a constant torch.tensor not lifted to a placeholder
     circle_legalize = PassManager(
@@ -278,6 +284,8 @@ def convert_exported_module_to_circle(
     )
     circle_legalize.run(exported_program)
 
+    nodes = list(exported_program.graph.nodes)
+    print(nodes[0].meta['val'])
     # TODO Give an option to enable quantiztion to user
     enable_quantization = has_quantization_ops(exported_program.graph)
     if enable_quantization:

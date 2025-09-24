@@ -15,6 +15,8 @@
 import torch
 
 from test.modules.base import TestModuleBase
+from torch.export import Dim
+from test.utils.tag import use_onert
 
 
 class SimpleCopy(TestModuleBase):
@@ -39,3 +41,23 @@ class SimpleCopyWithBroadcastTo(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(5, 5), torch.randn(1, 5)), {}
+
+@use_onert
+class SimpleCopyWithBroadcastToDynamicShape(TestModuleBase):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, dst, src):
+        dst.copy_(src)
+        return dst
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 5), torch.randn(1, 5)), {}
+    
+    def get_dynamic_shapes(self):
+        dim = Dim("dim", min=1, max=128)
+        dynamic_shapes = {
+            "dst": {0: dim},
+            "src": {},
+            }
+        return dynamic_shapes
