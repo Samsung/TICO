@@ -18,6 +18,7 @@ from packaging.version import Version
 from tico.passes import ops
 from tico.passes.convert_expand_to_slice_cat import ConvertExpandToSliceCat
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
+from tico.passes.remove_nop import RemoveNop
 
 from test.utils.helper import num_of_ops
 from test.utils.pass_value_test import SinglePassValueTest
@@ -40,12 +41,15 @@ class KVCacheExpandNet(torch.nn.Module):
 class ConvertKVCacheExpandTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(KVCacheExpandNet())
+        self.ep = self.ep.run_decompositions()
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
 
-        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_pass(RemoveNop())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
         self.run_value_test(ConvertExpandToSliceCat(True))
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 1)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 0)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.slice), 8)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.cat), 9)
@@ -68,10 +72,12 @@ class NonKVCacheExpandNet(torch.nn.Module):
 class ConvertNonKVCacheExpandTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(NonKVCacheExpandNet())
+        self.ep = self.ep.run_decompositions()
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 1)
 
-        if Version(torch.__version__) <= Version("2.6.0.dev20241015"):
-            self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_value_test(ConvertLayoutOpToReshape())
+        self.run_pass(RemoveNop())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
 
         self.run_value_test(ConvertExpandToSliceCat(True))
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 2)
