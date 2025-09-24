@@ -69,7 +69,6 @@ class AtenOps:
             torch.ops.aten.unsqueeze_copy.default,
         ]
         self.view = [
-            torch.ops.aten.view,
             torch.ops.aten.view.default,
             torch.ops.aten.view_copy.default,
         ]
