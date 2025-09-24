@@ -58,44 +58,55 @@ class ConvertExpandToSliceCat(PassBase):
         EXPAND_DIM = 2
 
         for node in graph.nodes:
-            if not is_target_node(node, ops.aten.expand):
+            if not isinstance(node, torch.fx.Node) or not is_target_node(
+                node, ops.aten.reshape
+            ):
                 continue
 
-            expand_node = node
-            expand_args = ExpandArgs(*expand_node.args, **expand_node.kwargs)
+            post_reshape = node
+            post_reshape_args = ReshapeArgs(*post_reshape.args, **post_reshape.kwargs)
+            post_reshape_input = post_reshape_args.input
+
+            if not isinstance(post_reshape_input, torch.fx.Node) or not is_target_node(
+                post_reshape_input, ops.aten.expand
+            ):
+                continue
+
+            expand = post_reshape_input
+            expand_args = ExpandArgs(*expand.args, **expand.kwargs)
             expand_input = expand_args.input
-            expand_shape = extract_shape(expand_node)
+            expand_shape = extract_shape(expand)
 
             if not isinstance(expand_input, torch.fx.Node) or not is_target_node(
                 expand_input, ops.aten.reshape
             ):
                 continue
 
-            reshape_node = expand_input
-            reshape_args = ReshapeArgs(*reshape_node.args, **reshape_node.kwargs)
-            reshape_input = reshape_args.input
-            reshape_shape = extract_shape(reshape_node)
+            pre_reshape = expand_input
+            pre_reshape_args = ReshapeArgs(*pre_reshape.args, **pre_reshape.kwargs)
+            pre_reshape_input = pre_reshape_args.input
+            pre_reshape_shape = extract_shape(pre_reshape)
 
-            if reshape_shape[EXPAND_DIM] != 1:
+            if pre_reshape_shape[EXPAND_DIM] != 1:
                 continue
 
-            reshape_input_shape = extract_shape(reshape_input)
+            reshape_input_shape = extract_shape(pre_reshape_input)
 
-            if len(expand_shape) != len(reshape_shape):
+            if len(expand_shape) != len(pre_reshape_shape):
                 continue
 
             # Ensure all dimensions *except* at EXPAND_DIM are identical.
             if not (
-                expand_shape[:EXPAND_DIM] == reshape_shape[:EXPAND_DIM]
-                and expand_shape[EXPAND_DIM + 1 :] == reshape_shape[EXPAND_DIM + 1 :]
+                expand_shape[:EXPAND_DIM] == pre_reshape_shape[:EXPAND_DIM]
+                and expand_shape[EXPAND_DIM + 1 :] == pre_reshape_shape[EXPAND_DIM + 1 :]
             ):
                 continue
 
             # Ensure the expansion dimension is a clean multiple.
-            if expand_shape[EXPAND_DIM] % reshape_shape[EXPAND_DIM] != 0:
+            if expand_shape[EXPAND_DIM] % pre_reshape_shape[EXPAND_DIM] != 0:
                 continue
 
-            expand_ratio = expand_shape[EXPAND_DIM] // reshape_shape[EXPAND_DIM]
+            expand_ratio = expand_shape[EXPAND_DIM] // pre_reshape_shape[EXPAND_DIM]
 
             if expand_ratio <= 1:
                 continue
@@ -103,13 +114,13 @@ class ConvertExpandToSliceCat(PassBase):
             cat_nodes = []
 
             for i in range(reshape_input_shape[CAT_DIM]):
-                with graph.inserting_before(node):
-                    slice_copy_args = (reshape_input, CAT_DIM, i, i + 1, 1)
+                with graph.inserting_before(expand):
+                    slice_copy_args = (pre_reshape_input, CAT_DIM, i, i + 1, 1)
                     slice_node = create_node(
                         graph,
                         torch.ops.aten.slice.Tensor,
                         args=slice_copy_args,
-                        origin=node,
+                        origin=expand
                     )
                 with graph.inserting_after(slice_node):
                     cat_args = ([slice_node] * expand_ratio, CAT_DIM)
@@ -117,22 +128,22 @@ class ConvertExpandToSliceCat(PassBase):
                         graph,
                         torch.ops.aten.cat.default,
                         args=cat_args,
-                        origin=node,
+                        origin=expand,
                     )
                     cat_nodes.append(cat_node)
 
-            with graph.inserting_after(node):
+            with graph.inserting_after(expand):
                 cat_args = (cat_nodes, CAT_DIM)
                 cat_node = create_node(
                     graph,
                     torch.ops.aten.cat.default,
                     args=cat_args,
-                    origin=node,
+                    origin=expand,
                 )
-                node.replace_all_uses_with(cat_node)
+                expand.replace_all_uses_with(cat_node)
 
             modified = True
-            logger.debug(f"{node.name} is replaced with {cat_node.name} operators")
+            logger.debug(f"{expand.name} is replaced with {cat_node.name} operators")
 
         graph.eliminate_dead_code()
         graph.lint()
