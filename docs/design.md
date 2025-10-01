@@ -34,7 +34,7 @@
 - **Pass Architecture**: Separate **legalization** and **optimization**, but allow interleaving under a **Pass Manager** with scheduling & invariants.
 - **Quantization**: Post-Training Quantization (PTQ) is **detected and applied conditionally** (fold/propagate qparams, bias quantization, dtype mismatch fix).
 - **Validation**: Multi-stage validation (unsupported ops / training ops / invariant checks) + E2E inference parity check against PyTorch outputs.
-- **Testing**: Container-friendly, **model-by-model isolated** runtime, selectable NPU runtimes (`circle-interpreter` / `onert`), golden tests and tolerance.
+- **Testing**: Container-friendly, **model-by-model isolated** runtime, selectable circle runtimes (`circle-interpreter` / `onert`), golden tests and tolerance.
 - **Extensibility**: Plugin-style registration for passes, quantizers, runtimes, and config flags; clear contract for pass I/O and invariants.
 
 

@@ -37,7 +37,7 @@ This project focuses on:
 
 - **PyTorch**: Open-source machine learning framework.
 - **NPU**: Neural Processing Unit.
-- **Circle**: Proprietary intermediate representation (IR) format compatible with NPU compilers.
+- **Circle**: Open-source intermediate representation (IR) format compatible with NPU compilers.
 - **Quantization**: Technique to reduce numerical precision (e.g., 16-bit, 8-bit) for performance improvement.
 - **Optimization**: Process of improving model efficiency, such as kernel fusion or operator reordering.
 
@@ -57,11 +57,11 @@ This project focuses on:
 
 | ID     | Requirement Name               | Description |
 |--------|--------------------------------|-------------|
-| RNF-1  | Performance: Conversion Speed  | Conversion process should complete within approximately 10 seconds. |
-| RNF-2  | Performance: File Size         | Converted Circle files should be equal to or smaller than the original PyTorch model size. |
-| RNF-3  | Reliability                    | Converted model outputs should match original PyTorch outputs with at least 99% fidelity. |
-| RNF-4  | Maintainability: Operator Support | The library should support a wide range of PyTorch operators/layers and allow easy extension for new ones. |
-| RNF-5  | Maintainability: Compiler Updates | Must remain compatible with continuously updated NPU compiler versions. |
+| RNF-1  | Performance: Conversion Speed  | Conversion of a baseline model (**Llama-3.2-1B**) must complete within **10 seconds** on a standard Linux environment (Ubuntu 22.04, Python 3.10, PyTorch 2.6, CPU-only). For larger models, conversion time should scale approximately linearly with parameter count. |
+| RNF-2  | Performance: File Size         | Converted Circle files should be equal to or smaller than the serialized PyTorch model size saved via `torch.save(model.state_dict())`. |
+| RNF-3  | Reliability                    | Converted model outputs should remain close to the PyTorch reference outputs. The similarity is measured using **PEIR (Peak Error Interval Ratio)** defined as `max(\|a - b\|) / (max(a) - min(a))`. The PEIR must not exceed **3% (0.03)** for any output tensor. |
+| RNF-4  | Maintainability: Operator Support | The library should support operator coverage sufficient for modern Transformer and LLM architectures. |
+| RNF-5  | Maintainability: Schema & Framework Updates | Must remain compatible with recent PyTorch versions (2.5 ~ latest stable) and the Circle schema specification. |
 | RNF-6  | Usability: API Design          | Provide an intuitive API that enables transformation, optimization, and quantization with minimal code. |
 | RNF-7  | Operating Environment          | Guarantee operation on Python 3.10+ and Linux-based systems. |
 | RNF-8  | Compliance                     | Must comply with open-source policies and internal NPU-related regulations. |
