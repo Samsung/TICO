@@ -40,6 +40,9 @@ def main():
         default=os.environ.get("CCEX_RUNTIME", "circle-interpreter"),
         help="Which inference runtime to use (or set CCEX_RUNTIME)",
     )
+    parser.add_argument(
+        "-p", "--perf", action="store_true", help="Run performance tests."
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode")
     args = parser.parse_args()
 
@@ -76,7 +79,12 @@ def main():
     # Run commands
     ##############
 
-    if args.all or (not args.keyword and not args.model):
+    if args.perf:
+        print(f"RUN performance tests ...")
+
+        cmd = f"python3 -m test.performance.benchmark_perf".split(" ")
+        subprocess.run(cmd, check=True)
+    elif args.all or (not args.keyword and not args.model):
         print("RUN ALL unit tests ...")
 
         cmd = f"python3 -m unittest discover -s {test_dir} -v".split(" ")
