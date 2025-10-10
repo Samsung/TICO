@@ -35,7 +35,7 @@
 | **RF‑5**: NPU Compiler Compatibility | `test/pt2_to_qcircle_test/` | `test_op.py` | Uses the `onert` runtime (installed via `requirements_pre_*.txt`) to validate compatibility. |
 | **RNF‑1**: Conversion Speed | `test/performance/` | `benchmark_perf.py` | Benchmark script should time `tico.convert()` on Llama‑3.2‑1B and larger models. |
 | **RNF‑2**: File Size | `test/performance/` | `benchmark_perf.py` | Compare Circle file size against `torch.save(...).size`. |
-| **RNF‑3**: Accuracy (PEIR ≤ 0.03) | `test/pt2_to_qcircle_test/` | `test_op.py` | Uses `tico.utils.validate_args_kwargs` to compute PEIR for each output tensor. |
+| **RNF‑3**: Accuracy (PEIR ≤ 0.03) | `test/pt2_to_qcircle_test/` | `test_op.py` | Uses `tico.experimental.quantization.evaluation.metric.compute_peir` to compute PEIR for each output tensor. |
 | **RNF‑4 / RNF‑5**: Operator Coverage & Schema Updates | `test/unit_test/pass_test/` & `test/unit_test/quantization_test/` | Various | New operators are added to the test suite when they are supported. |
 | **RNF‑6**: API Usability | `test/README.md` (manual) & example scripts in `test/` | – | Example scripts (`dump_exported_program.py`, `dump_pt2_model.py`) demonstrate the public API. |
 | **RNF‑7 / RNF‑8**: Environment & Compliance | CI workflows (`.github/workflows/*.yaml`) | – | CI runs on Linux with Python 3.10+, checks license headers. |
