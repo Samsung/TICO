@@ -44,7 +44,7 @@ def quantize(
         data = np.array(data)
     # Perfrom quantization
     if not scale:
-        logger.warn("WARNING: scale value is 0. 1e-7 will be used instead.")
+        logger.warning("WARNING: scale value is 0. 1e-7 will be used instead.")
         scale = 1e-7
     rescaled = np.round(data / scale) + zero_point
     # Clamp the values
