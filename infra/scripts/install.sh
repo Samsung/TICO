@@ -24,7 +24,7 @@
 ###############################################################################
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SUPPORTED_FAMILIES=("2.5" "2.6" "2.7")
+SUPPORTED_FAMILIES=("2.5" "2.6" "2.7" "2.8")
 DEFAULT_FAMILY="2.6"
 
 show_help() {
@@ -34,8 +34,8 @@ Usage: ./ccex install [OPTIONS]
 --dist                 Install from wheel in ./dist instead of editable mode
 --torch_ver VER        Torch version or family to install.
                        Accepts:
-                         • 2.5  | 2.6  | 2.7      (family, installs latest)
-                         • 2.6.3, 2.7.0+cu118 ... (exact)
+                         • 2.5  | 2.6  | 2.7 | 2.8  (family, installs latest)
+                         • 2.6.3, 2.7.0+cu118 ...   (exact)
                          • nightly
                        Default: ${DEFAULT_FAMILY}
 --cuda_ver MAJ.MIN     Override detected CUDA version (e.g. 12.1)

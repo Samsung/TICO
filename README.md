@@ -51,7 +51,7 @@ This will generate `build` and `dist` directories in the root directory.
 **Available options**
 - `--dist` To install the package from .whl (without this option, _TICO_ is installed in an editable mode)
 - `--torch_ver <torch version>` To install a specific torch version (default: 2.6).
-  - Available <torch version>: 2.5, 2.6, 2.7, nightly
+  - Available <torch version>: 2.5, 2.6, 2.7, 2.8, nightly
 
 4. Now you can convert a torch module to a `.circle`.
 
