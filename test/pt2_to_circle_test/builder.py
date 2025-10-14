@@ -38,6 +38,20 @@ from test.utils.base_builders import TestDictBuilderBase, TestRunnerBase
 from test.utils.tag import is_tagged
 
 
+@contextlib.contextmanager
+def suppress_stderr_fd():
+    """Suppress C/C++ level stderr output (fd=2)"""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stderr = os.dup(2)  # duplicate current stderr fd
+    try:
+        os.dup2(devnull, 2)  # redirect fd=2 to /dev/null
+        yield
+    finally:
+        os.dup2(old_stderr, 2)  # restore original stderr
+        os.close(devnull)
+        os.close(old_stderr)
+
+
 class NNModuleTest(TestRunnerBase):
     def __init__(self, test_name: str, nnmodule: TestModuleBase):
         super().__init__(test_name, nnmodule)
@@ -70,7 +84,7 @@ class NNModuleTest(TestRunnerBase):
             def wrapper(s):
                 # Suppress the error message by redirecting stdout and discarding it.
                 # Since the argument of `redirect_stdout` should have `isatty()` method, `io.StringIO()` is used.
-                with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()), suppress_stderr_fd():
                     with s.assertRaises(Exception) as e:
                         self._run(without_pt2=True)
                     assert self.expected_err in str(
