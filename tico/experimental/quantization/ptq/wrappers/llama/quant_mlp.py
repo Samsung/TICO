@@ -17,7 +17,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
@@ -31,7 +31,7 @@ class QuantLlamaMLP(QuantModuleBase):
         self,
         mlp_fp: nn.Module,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)

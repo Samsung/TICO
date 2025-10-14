@@ -17,9 +17,9 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+from tico.experimental.quantization.config.ptq import PTQConfig
 
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.fairseq.quant_decoder import (
     QuantFairseqDecoder,
 )
@@ -210,7 +210,7 @@ class TestQuantFairseqDecoder(unittest.TestCase):
             padding_idx=self.pad,
             **fp_kwargs,
         )
-        dec = QuantFairseqDecoder(fp, qcfg=QuantConfig(), fp_name="dec0")
+        dec = QuantFairseqDecoder(fp, qcfg=PTQConfig(), fp_name="dec0")
         return dec, fp
 
     def _mk_inputs(self, pad_last_col: bool = True):

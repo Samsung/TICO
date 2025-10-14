@@ -28,13 +28,14 @@ The suite checks:
 * `enable_calibration()` resets the observer and switches mode
 * `_fq()` really collects in CALIB and fake-quantises in QUANT
 * `freeze_qparams()` disables the observer and populates cached q-params
-* `_make_obs()` merges overrides from a `QuantConfig`
+* `_make_obs()` merges overrides from a `PTQConfig`
 """
 
 import math, torch, unittest
 from typing import Dict
 
 import torch.nn as nn
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
@@ -42,7 +43,6 @@ from tico.experimental.quantization.ptq.observers.base import ObserverBase
 from tico.experimental.quantization.ptq.observers.ema import EMAObserver
 from tico.experimental.quantization.ptq.observers.minmax import MinMaxObserver
 from tico.experimental.quantization.ptq.qscheme import QScheme
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
 )
@@ -50,7 +50,7 @@ from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
 
 # concrete toy subclass
 class DummyQM(QuantModuleBase):
-    def __init__(self, qcfg: QuantConfig | None = None):
+    def __init__(self, qcfg: PTQConfig | None = None):
         super().__init__(qcfg)
         self.obs = self._make_obs("act")
 
@@ -97,7 +97,7 @@ class TestQuantModuleBase(unittest.TestCase):
         self.assertFalse(torch.allclose(q_out, fp_out))
 
     def test_make_obs_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "act": {"dtype": DType.uint(4)},
@@ -136,14 +136,14 @@ class TestQuantModuleBase(unittest.TestCase):
 class TestQuantConfigDefaultObserver(unittest.TestCase):
     # 1) global change via default_observer -------------------------
     def test_global_default_observer(self):
-        cfg = QuantConfig(default_dtype=DType.uint(8), default_observer=EMAObserver)
+        cfg = PTQConfig(default_dtype=DType.uint(8), default_observer=EMAObserver)
         qm = DummyQM(cfg)
         obs = qm.obs
         self.assertIsInstance(obs, EMAObserver)
 
     # 2) per-observer "observer" override beats default_observer -----
     def test_observer_override_precedence(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_observer=EMAObserver,
             overrides={"act": {"observer": MinMaxObserver}},
@@ -154,7 +154,7 @@ class TestQuantConfigDefaultObserver(unittest.TestCase):
 
     # 3) child() inherits parent default_observer -------------------
     def test_child_inherits_default_observer(self):
-        parent = QuantConfig(
+        parent = PTQConfig(
             default_dtype=DType.uint(8),
             default_observer=EMAObserver,
             overrides={"child_wrap": {"dtype": DType.uint(4)}},
@@ -168,7 +168,7 @@ class TestQuantConfigDefaultObserver(unittest.TestCase):
 
 
 class DummyQMWrapperDefault(QuantModuleBase):
-    def __init__(self, qcfg: QuantConfig | None = None):
+    def __init__(self, qcfg: PTQConfig | None = None):
         super().__init__(qcfg)
         # wrapper-level default value: per-channel asymm on axis 1
         self.obs = self._make_obs(
@@ -186,18 +186,18 @@ class DummyQMWrapperDefault(QuantModuleBase):
 
 class TestQuantModuleQScheme(unittest.TestCase):
     def test_config_default_qscheme(self):
-        cfg = QuantConfig(default_qscheme=QScheme.PER_CHANNEL_SYMM)
+        cfg = PTQConfig(default_qscheme=QScheme.PER_CHANNEL_SYMM)
         qm = DummyQM(cfg)
         self.assertEqual(qm.obs.qscheme, QScheme.PER_CHANNEL_SYMM)
 
     def test_wrapper_default_qscheme_applied(self):
-        cfg = QuantConfig(default_qscheme=QScheme.PER_TENSOR_ASYMM)
+        cfg = PTQConfig(default_qscheme=QScheme.PER_TENSOR_ASYMM)
         qm = DummyQMWrapperDefault(cfg)
         self.assertEqual(qm.obs.qscheme, QScheme.PER_CHANNEL_ASYMM)
         self.assertEqual(qm.obs.channel_axis, 1)
 
     def test_user_override_qscheme_wins(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_qscheme=QScheme.PER_TENSOR_ASYMM,
             overrides={
                 "act": {
@@ -214,7 +214,7 @@ class TestQuantModuleQScheme(unittest.TestCase):
 class ChildQM(QuantModuleBase):
     """Simple leaf wrapper used for hierarchy tests."""
 
-    def __init__(self, qcfg: QuantConfig | None = None):
+    def __init__(self, qcfg: PTQConfig | None = None):
         super().__init__(qcfg)
         self.obs = self._make_obs("leaf")
 
@@ -233,7 +233,7 @@ class OuterQM(QuantModuleBase):
     receives enable_calibration()/freeze_qparams()).
     """
 
-    def __init__(self, qcfg: QuantConfig | None = None):
+    def __init__(self, qcfg: PTQConfig | None = None):
         super().__init__(qcfg)
         self.obs = self._make_obs("outer")
         self.inner = ChildQM(qcfg)
@@ -257,7 +257,7 @@ class TopWithContainers(QuantModuleBase):
       - outer  (but NOT outer.inner at this level)
     """
 
-    def __init__(self, qcfg: QuantConfig | None = None):
+    def __init__(self, qcfg: PTQConfig | None = None):
         super().__init__(qcfg)
 
         # direct child quant

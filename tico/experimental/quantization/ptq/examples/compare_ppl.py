@@ -29,7 +29,7 @@ import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.utils.metrics import perplexity
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 
@@ -165,7 +165,7 @@ def main():
         # ---------------------------------------------------------------------
         # 2. Wrap every Transformer layer with PTQWrapper
         # ---------------------------------------------------------------------
-        qcfg = QuantConfig()  # all-uint8 defaults
+        qcfg = PTQConfig()  # all-uint8 defaults
 
         wrapped_layers = torch.nn.ModuleList()
         for idx, layer in enumerate(uint8_model.model.layers):

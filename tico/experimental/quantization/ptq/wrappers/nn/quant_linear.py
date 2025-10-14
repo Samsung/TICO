@@ -17,9 +17,10 @@ from typing import Optional
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tico.experimental.quantization.config.ptq import PTQConfig
+
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.qscheme import QScheme
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
 )
@@ -34,7 +35,7 @@ class QuantLinear(QuantModuleBase):
         self,
         fp: nn.Linear,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None
     ):
         super().__init__(qcfg, fp_name=fp_name)

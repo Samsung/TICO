@@ -14,12 +14,13 @@
 
 import unittest
 
+from tico.experimental.quantization.config.ptq import PTQConfig
+
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
 from tico.experimental.quantization.ptq.observers.ema import EMAObserver
 from tico.experimental.quantization.ptq.observers.minmax import MinMaxObserver
 from tico.experimental.quantization.ptq.qscheme import QScheme
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
 )
@@ -39,15 +40,15 @@ class DummyWrapper(QuantModuleBase):
         return (self.obs_act_in, self.obs_act_out)
 
 
-class TestQuantConfig(unittest.TestCase):
+class TestPTQConfig(unittest.TestCase):
     def test_default_dtype_applied(self):
-        cfg = QuantConfig(default_dtype=DType.uint(8))
+        cfg = PTQConfig(default_dtype=DType.uint(8))
         w = DummyWrapper(cfg)
         self.assertEqual(w.obs_act_in.dtype, DType.uint(8))
         self.assertEqual(w.obs_act_out.dtype, DType.uint(8))
 
     def test_per_observer_dtype_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={"act_out": {"dtype": DType.uint(4)}},
         )
@@ -56,7 +57,7 @@ class TestQuantConfig(unittest.TestCase):
         self.assertEqual(w.obs_act_out.dtype, DType.uint(4))  # override
 
     def test_observer_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "act_in": {
@@ -71,15 +72,15 @@ class TestQuantConfig(unittest.TestCase):
         self.assertIsInstance(w.obs_act_out, MinMaxObserver)  # unaffected
 
 
-class TestQuantConfigChild(unittest.TestCase):
+class TestPTQConfigChild(unittest.TestCase):
     def test_child_inherits_default_dtype(self):
-        parent = QuantConfig(default_dtype=DType.uint(8))
+        parent = PTQConfig(default_dtype=DType.uint(8))
         child = parent.child("gate_proj")
         self.assertEqual(child.default_dtype, DType.uint(8))
         self.assertEqual(child.default_dtype, DType.uint(8))
 
     def test_child_override_applied(self):
-        parent = QuantConfig(
+        parent = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "gate_proj": {"act_in": {"dtype": DType.uint(4)}},
@@ -95,14 +96,14 @@ class TestQuantConfigChild(unittest.TestCase):
         self.assertEqual(parent.get_kwargs("mul")["dtype"], DType.uint(4))
 
     def test_child_is_view_not_copy(self):
-        parent = QuantConfig(default_dtype=DType.uint(8))
+        parent = PTQConfig(default_dtype=DType.uint(8))
         child = parent.child("dummy")
         # mutate child's overrides → parent unaffected
         child.overrides["x"] = {"dtype": DType.int(8)}  # type: ignore[index]
         self.assertNotIn("x", parent.overrides)
 
     def test_child_inherits_default_qscheme(self):
-        parent = QuantConfig(default_qscheme=QScheme.PER_CHANNEL_SYMM)
+        parent = PTQConfig(default_qscheme=QScheme.PER_CHANNEL_SYMM)
         child = parent.child("gate_proj")
         self.assertEqual(child.default_qscheme, QScheme.PER_CHANNEL_SYMM)
 
@@ -122,9 +123,9 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
     """
     Ensure `_make_obs()` applies 3-level precedence to dtype/observer:
 
-        1) User override in QuantConfig.overrides[name]
+        1) User override in PTQConfig.overrides[name]
         2) Wrapper default passed via `_make_obs(..., dtype=..., observer=...)`
-        3) QuantConfig.default_dtype or default_observer
+        3) PTQConfig.default_dtype or default_observer
 
     And other kwargs follow:
         user override > wrapper default
@@ -133,9 +134,9 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
     def test_user_override_wins(self):
         """
         If user supplies both dtype and observer, they must override
-        both wrapper defaults and QuantConfig defaults.
+        both wrapper defaults and PTQConfig defaults.
         """
-        qcfg = QuantConfig(
+        qcfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_observer=MinMaxObserver,
             overrides={
@@ -166,9 +167,9 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
     def test_wrapper_default_when_no_user_override(self):
         """
         If the user supplies nothing for a given name, wrapper defaults must
-        override QuantConfig defaults.
+        override PTQConfig defaults.
         """
-        qcfg = QuantConfig(
+        qcfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_observer=MinMaxObserver,
             overrides={
@@ -191,10 +192,10 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
 
     def test_other_kwargs_user_override_precedence(self):
         """
-        For keys without QuantConfig-level defaults (like qscheme/channel_axis),
+        For keys without PTQConfig-level defaults (like qscheme/channel_axis),
         user overrides > wrapper defaults.
         """
-        qcfg = QuantConfig(
+        qcfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_observer=MinMaxObserver,
             overrides={
@@ -216,12 +217,12 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
         self.assertEqual(wrapper.obs_act_in.qscheme, QScheme.PER_TENSOR_ASYMM)
         self.assertIsNone(wrapper.obs_act_in.channel_axis)
 
-    def test_quantconfig_get_kwargs_does_not_inject_dtype(self):
+    def test_PTQConfig_get_kwargs_does_not_inject_dtype(self):
         """
-        Ensure QuantConfig.get_kwargs() itself doesn't inject dtype anymore.
+        Ensure PTQConfig.get_kwargs() itself doesn't inject dtype anymore.
         It should return exactly the user override dict.
         """
-        qcfg = QuantConfig(
+        qcfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={"bar": {"qscheme": QScheme.PER_TENSOR_ASYMM}},
         )
@@ -231,9 +232,9 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
 
     def test_config_default_when_neither_user_nor_wrapper(self):
         """
-        If neither user nor wrapper provides dtype/qscheme, fallback to QuantConfig defaults.
+        If neither user nor wrapper provides dtype/qscheme, fallback to PTQConfig defaults.
         """
-        qcfg = QuantConfig(
+        qcfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_qscheme=QScheme.PER_TENSOR_ASYMM,
             default_observer=MinMaxObserver,
@@ -248,9 +249,9 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
         self.assertIsNone(wrapper.obs_act_in.channel_axis)
 
 
-class TestQuantConfigQScheme(unittest.TestCase):
+class TestPTQConfigQScheme(unittest.TestCase):
     def test_default_qscheme_applied(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_qscheme=QScheme.PER_CHANNEL_SYMM,
         )
@@ -259,7 +260,7 @@ class TestQuantConfigQScheme(unittest.TestCase):
         self.assertEqual(w.obs_act_out.qscheme, QScheme.PER_CHANNEL_SYMM)
 
     def test_per_observer_qscheme_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_qscheme=QScheme.PER_CHANNEL_ASYMM,
             overrides={

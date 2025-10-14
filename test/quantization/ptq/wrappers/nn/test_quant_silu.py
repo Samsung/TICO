@@ -16,9 +16,9 @@ import unittest
 
 import torch
 import torch.nn as nn
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.nn.quant_silu import QuantSiLU
 
 
@@ -51,7 +51,7 @@ class TestQuantSiLU(unittest.TestCase):
         self.assertLess(diff, 0.3)  # acceptably close
 
     def test_dtype_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "sigmoid": {"dtype": DType.uint(4)},

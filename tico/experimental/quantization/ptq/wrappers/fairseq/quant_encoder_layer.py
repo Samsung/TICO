@@ -23,7 +23,7 @@ from typing import Optional
 import torch.nn as nn
 from torch import Tensor
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.wrappers.fairseq.quant_mha import (
     QuantFairseqMultiheadAttention,
 )
@@ -49,7 +49,7 @@ class QuantFairseqEncoderLayer(QuantModuleBase):
         self,
         fp_layer: nn.Module,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)

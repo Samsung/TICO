@@ -17,9 +17,9 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from tico.experimental.quantization.config.ptq import PTQConfig
 
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.fairseq.quant_encoder import (
     QuantFairseqEncoder,
 )
@@ -83,7 +83,7 @@ class QuantDummyEncoderLayer(QuantModuleBase):
         self,
         fp_layer: DummyFPEncoderLayer,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
@@ -186,7 +186,7 @@ class TestQuantFairseqEncoder(unittest.TestCase):
         )
         enc = QuantFairseqEncoder(
             fp,
-            qcfg=QuantConfig(),
+            qcfg=PTQConfig(),
             fp_name="enc",
             use_external_inputs=False,
             return_type="dict",

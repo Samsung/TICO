@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
@@ -53,7 +53,7 @@ class QuantFairseqDecoder(QuantModuleBase):
         self,
         fp_decoder: nn.Module,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
@@ -116,7 +116,7 @@ class QuantFairseqDecoder(QuantModuleBase):
 
         prefix = _safe_prefix(fp_name)
 
-        # Prepare child QuantConfig namespaces: layers/<idx>
+        # Prepare child PTQConfig namespaces: layers/<idx>
         layers_qcfg = qcfg.child("layers") if qcfg else None
         for i, layer in enumerate(fp_layers):
             child_cfg = layers_qcfg.child(str(i)) if layers_qcfg else None

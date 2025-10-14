@@ -18,12 +18,12 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import tico
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.evaluation.metric import compute_peir
 from tico.experimental.quantization.evaluation.utils import plot_two_outputs
 from tico.experimental.quantization.ptq.dtypes import INT16
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.qscheme import QScheme
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.llama.quant_mlp import QuantLlamaMLP
 from tico.utils.utils import SuppressWarning
 
@@ -38,7 +38,7 @@ model.eval()
 fp32_mlp = model.model.layers[0].mlp
 model.model.layers[0].mlp = QuantLlamaMLP(
     fp32_mlp,
-    qcfg=QuantConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM),
+    qcfg=PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM),
 )  # PTQWrapper(fp32_mlp) is also fine
 model.eval()
 

@@ -38,7 +38,7 @@ import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.utils.introspection import (
     build_fqn_map,
     compare_layer_outputs,
@@ -176,7 +176,7 @@ def main():
     # 2. Wrap every layer with PTQWrapper (UINT-8 activations)
     # -------------------------------------------------------------------------
     print("Wrapping layers with PTQWrapper …")
-    qcfg = QuantConfig()  # default: per-tensor UINT8
+    qcfg = PTQConfig()  # default: per-tensor UINT8
 
     new_layers = torch.nn.ModuleList()
     for idx, fp_layer in enumerate(model.model.layers):

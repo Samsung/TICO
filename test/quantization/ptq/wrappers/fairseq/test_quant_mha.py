@@ -17,9 +17,9 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-from tico.experimental.quantization.ptq.mode import Mode
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
+from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.wrappers.fairseq.quant_mha import (
     QuantFairseqMultiheadAttention,
 )
@@ -73,7 +73,7 @@ class TestQuantFairseqMHA(unittest.TestCase):
         self.Dh = self.E // self.H
         self.B = 3  # batch
         self.T = 4  # sequence length
-        self.qcfg = QuantConfig()
+        self.qcfg = PTQConfig()
 
     def _make_inputs(self, Tq=None, Tk=None, Tv=None):
         Tq = Tq or self.T

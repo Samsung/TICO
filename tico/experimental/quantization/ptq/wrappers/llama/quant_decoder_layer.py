@@ -17,7 +17,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.wrappers.llama.quant_attn import (
     QuantLlamaAttention,
 )
@@ -56,7 +56,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         self,
         fp_layer: nn.Module,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
         return_type: Optional[str] = None,
     ):
@@ -165,7 +165,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         # - If use_cache: always return (hidden_states, present_key_value)
         # - Else: return as configured (tuple/tensor) for HF compatibility
         if use_cache:
-            return hidden_states, present_key_value
+            return hidden_states, present_key_value  # type: ignore[return-value]
 
         if self.return_type == "tuple":
             return (hidden_states,)

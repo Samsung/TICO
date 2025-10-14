@@ -16,7 +16,7 @@ from typing import Optional
 
 import torch
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
 )
@@ -34,7 +34,7 @@ class PTQWrapper(QuantModuleBase):
     def __init__(
         self,
         module: torch.nn.Module,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         *,
         fp_name: Optional[str] = None,
     ):

@@ -17,9 +17,10 @@ from typing import Iterable, Optional, Tuple
 
 import torch.nn as nn
 
+from tico.experimental.quantization.config.ptq import PTQConfig
+
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.observers.base import ObserverBase
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 
 
 class QuantModuleBase(nn.Module, ABC):
@@ -29,7 +30,7 @@ class QuantModuleBase(nn.Module, ABC):
     Responsibilities
     ----------------
     • Own *one* Mode enum (`NO_QUANT / CALIB / QUANT`)
-    • Own a QuantConfig describing default / per-observer dtypes
+    • Own a PTQConfig describing default / per-observer dtypes
     • Expose a canonical lifecycle:
           enable_calibration()
           freeze_qparams()
@@ -38,10 +39,10 @@ class QuantModuleBase(nn.Module, ABC):
     """
 
     def __init__(
-        self, qcfg: Optional[QuantConfig] = None, *, fp_name: Optional[str] = None
+        self, qcfg: Optional[PTQConfig] = None, *, fp_name: Optional[str] = None
     ) -> None:
         super().__init__()
-        self.qcfg = qcfg or QuantConfig()
+        self.qcfg = qcfg or PTQConfig()
         self._mode: Mode = Mode.NO_QUANT  # default state
         self.fp_name = fp_name
 
@@ -118,9 +119,9 @@ class QuantModuleBase(nn.Module, ABC):
         Instantiate an observer named *name*.
 
         Precedence (3-tier) for keys:
-           • observer:  user > wrapper-default > QuantConfig.default_observer
-           • dtype:     user > wrapper-default > QuantConfig.default_dtype
-           • qscheme:   user > wrapper-default > QuantConfig.default_qscheme
+           • observer:  user > wrapper-default > PTQConfig.default_observer
+           • dtype:     user > wrapper-default > PTQConfig.default_dtype
+           • qscheme:   user > wrapper-default > PTQConfig.default_qscheme
 
         Other kwargs (e.g., qscheme, channel_axis, etc.) remain:
            user override > wrapper-default

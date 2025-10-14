@@ -19,8 +19,8 @@ import torch
 import torch.nn as nn
 
 from tico.experimental.quantization import convert, prepare
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.utils.introspection import (
     build_fqn_map,
     compare_layer_outputs,
@@ -121,7 +121,7 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
         sq_model = convert(sq_model, inplace=True)
 
         # PTQ-wrap first 4 layers
-        qcfg = QuantConfig()
+        qcfg = PTQConfig()
         new_layers = torch.nn.ModuleList()
         for idx, fp_layer in enumerate(sq_model.model.layers):
             if idx >= 4:

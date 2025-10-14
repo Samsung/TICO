@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
     QuantModuleBase,
@@ -59,7 +59,7 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
         self,
         fp_attn: nn.Module,
         *,
-        qcfg: Optional[QuantConfig] = None,
+        qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
         max_seq: int = 4096,
         use_static_causal: bool = False,

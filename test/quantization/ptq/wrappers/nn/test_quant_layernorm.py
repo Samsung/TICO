@@ -17,10 +17,10 @@ import unittest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.nn.quant_layernorm import (
     QuantLayerNorm,
 )
@@ -96,7 +96,7 @@ class TestQuantLayerNorm(unittest.TestCase):
         self.assertTrue(torch.allclose(pre_scale, post_scale))
 
     def test_dtype_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "act_in": {"dtype": DType.uint(4)},

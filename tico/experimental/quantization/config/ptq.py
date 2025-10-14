@@ -15,6 +15,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Type
 
+from tico.experimental.quantization.config.base import BaseConfig
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.observers.base import ObserverBase
 from tico.experimental.quantization.ptq.observers.minmax import MinMaxObserver
@@ -22,7 +23,7 @@ from tico.experimental.quantization.ptq.qscheme import QScheme
 
 
 @dataclass
-class QuantConfig:
+class PTQConfig(BaseConfig):
     """
     One object describes the quantization preferences for a single wrapper
     and its descendants.
@@ -56,7 +57,7 @@ class QuantConfig:
     ```python
     from ptq.observers import PercentileObserver
 
-    cfg = QuantConfig(
+    cfg = PTQConfig(
         default_dtype   = DType.uint(8),
         default_qscheme  = QScheme.PER_TENSOR_SYMM,        # <- global scheme
         default_observer = PercentileObserver,             # <- global algorithm
@@ -75,6 +76,10 @@ class QuantConfig:
     default_qscheme: QScheme = QScheme.PER_TENSOR_ASYMM
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
+    @property
+    def name(self) -> str:
+        return "ptq"
+
     def get_kwargs(self, obs_name: str) -> Dict[str, Any]:
         """
         Return user-specified kwargs for *obs_name* inside **this** wrapper.
@@ -87,7 +92,7 @@ class QuantConfig:
         """
         return dict(self.overrides.get(obs_name, {}))
 
-    def child(self, scope: str) -> "QuantConfig":
+    def child(self, scope: str) -> "PTQConfig":
         """
         Produce a *view* for a child wrapper.
 
@@ -100,7 +105,7 @@ class QuantConfig:
         Other scopes remain invisible to the child.
         """
         sub_overrides = self.overrides.get(scope, {})
-        return QuantConfig(
+        return PTQConfig(
             self.default_dtype,
             self.default_observer,
             default_qscheme=self.default_qscheme,
@@ -108,4 +113,4 @@ class QuantConfig:
         )
 
     def __repr__(self):
-        return f"QuantConfig(default_dtype={self.default_dtype}, default_observer={self.default_observer}, default_qscheme={self.default_qscheme}, overrides={dict(self.overrides)})"
+        return f"PTQConfig(default_dtype={self.default_dtype}, default_observer={self.default_observer}, default_qscheme={self.default_qscheme}, overrides={dict(self.overrides)})"

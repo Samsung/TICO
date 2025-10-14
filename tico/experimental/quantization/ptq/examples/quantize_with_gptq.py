@@ -35,8 +35,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config.gptq import GPTQConfig
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.observers.affine_base import AffineObserverBase
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.utils.introspection import build_fqn_map
 from tico.experimental.quantization.ptq.utils.metrics import perplexity
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
@@ -219,7 +219,7 @@ def main():
     if not isinstance(layers, (list, torch.nn.ModuleList)):
         raise TypeError(f"'model.layers' must be list/ModuleList, got {type(layers)}")
 
-    qcfg = QuantConfig()  # default: per-tensor UINT8
+    qcfg = PTQConfig()  # default: per-tensor UINT8
     wrapped = torch.nn.ModuleList()
     for idx, fp_layer in enumerate(layers):
         layer_cfg = qcfg.child(f"layer{idx}")

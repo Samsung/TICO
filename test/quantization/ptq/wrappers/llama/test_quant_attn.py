@@ -21,10 +21,10 @@ import importlib.util
 import unittest
 
 import torch
+from tico.experimental.quantization.config.ptq import PTQConfig
 
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.llama.quant_attn import (
     QuantLlamaAttention,
 )
@@ -99,7 +99,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_per_projection_override(self):
-        cfg = QuantConfig(
+        cfg = PTQConfig(
             default_dtype=DType.uint(8),
             overrides={
                 "q_proj": {
@@ -206,8 +206,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
                     self.k = k
                     self.v = v
                 else:
-                    self.k = torch.cat([self.k, k], dim=2)
-                    self.v = torch.cat([self.v, v], dim=2)
+                    self.k = torch.cat([self.k, k], dim=2)  # type: ignore[list-item]
+                    self.v = torch.cat([self.v, v], dim=2)  # type: ignore[list-item]
                 return self.k, self.v
 
         torch.manual_seed(1)

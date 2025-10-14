@@ -19,7 +19,7 @@ We verify for each wrapper:
   1.  It is discoverable via the registry & PTQWrapper factory
   2.  Mode transitions NO_QUANT → CALIB → QUANT
   3.  Quantized output differs from—but stays close to—FP
-  4.  QuantConfig overrides propagate to observers
+  4.  PTQConfig overrides propagate to observers
 """
 
 import inspect
@@ -27,9 +27,9 @@ import unittest
 from typing import Callable, List, Tuple, Type
 
 import torch
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.dtypes import DType
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 from tico.experimental.quantization.ptq.wrappers.quant_elementwise import (
     QuantElementwise,
@@ -99,7 +99,7 @@ class TestElementwiseWrappers(unittest.TestCase):
         }
 
         for fp32_mod, _, _ in ACTIVATIONS:
-            cfg = QuantConfig(default_dtype=DType.uint(8), overrides=override)
+            cfg = PTQConfig(default_dtype=DType.uint(8), overrides=override)
             qw = PTQWrapper(fp32_mod, qcfg=cfg)
             wrapped = qw.wrapped  # QuantElementwise subclass
 

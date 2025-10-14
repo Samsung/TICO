@@ -17,9 +17,9 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
+from tico.experimental.quantization.config.ptq import PTQConfig
 
 from tico.experimental.quantization.ptq.mode import Mode
-from tico.experimental.quantization.ptq.quant_config import QuantConfig
 
 from tico.experimental.quantization.ptq.wrappers.fairseq.quant_decoder_layer import (
     QuantFairseqDecoderLayer,
@@ -129,7 +129,7 @@ class TestQuantFairseqDecoderLayer(unittest.TestCase):
         self.B = 3
         self.T = 5
         self.S = 6  # encoder length
-        self.qcfg = QuantConfig()
+        self.qcfg = PTQConfig()
 
     def _mk_inputs(self, T=None, B=None, E=None, S=None):
         T = T or self.T
