@@ -1,1 +1,1 @@
-torch==2.9.0.dev20250825+cpu
+torch==2.10.0.dev20251012+cpu
