@@ -1,2 +1,0 @@
-# TEST DEPENDENCIES TO BE INSTALLED WITH `pip install --pre`
-onert==0.2.0.dev250922

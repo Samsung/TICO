@@ -135,14 +135,8 @@ fi
 ###############################################################################
 # 2) Install additional test-only requirements
 ###############################################################################
-if [[ -n "${REQUEST_IS_NIGHTLY}" ]]; then
-  EXTRA_REQ_FILE="${TEST_DIR}/requirements_dev.txt"
-  EXTRA_REQ_PRE_FILE="${TEST_DIR}/requirements_pre_dev.txt"
-else
-  EXTRA_REQ_FILE="${TEST_DIR}/requirements_${FAMILY/./_}.txt"
-  EXTRA_REQ_PRE_FILE="${TEST_DIR}/requirements_pre_${FAMILY/./_}.txt"
-fi
-
+EXTRA_REQ_FILE="${TEST_DIR}/requirements.txt"
+EXTRA_REQ_PRE_FILE="${TEST_DIR}/requirements_pre.txt"
 python3 -m pip install -r ${EXTRA_REQ_FILE}
 python3 -m pip install -r ${EXTRA_REQ_PRE_FILE} --pre
 
