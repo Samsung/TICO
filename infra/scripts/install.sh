@@ -174,18 +174,7 @@ fi
 ###############################################################################
 # Install the auxiliary Python requirements
 ###############################################################################
-choose_req_file() {
-  if [[ -n "$REQUEST_IS_NIGHTLY" ]]; then
-    echo "${SCRIPTS_DIR}/install_requirements_dev.txt"
-    return
-  fi
-
-  local fam="$(echo "$_TORCH_VER" | grep -oE '^[0-9]+\.[0-9]+' || echo "${DEFAULT_FAMILY}")"
-  local file="${SCRIPTS_DIR}/install_requirements_${fam/./_}.txt"
-  echo "$file"
-}
-
-REQ_FILE="$(choose_req_file)"
+REQ_FILE="${SCRIPTS_DIR}/install_requirements.txt"
 echo "[INFO] Installing auxiliary requirements from ${REQ_FILE##*/}"
 python3 -m pip install -r "$REQ_FILE"
 
