@@ -31,7 +31,7 @@ class RemoveWeightDequantOpTest(unittest.TestCase):
         assert isinstance(m, SimpleLinear)
         args, kwargs = m.get_example_inputs()
 
-        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs)
+        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs, inplace=False)
 
         # Calibration
         for i in range(10):
@@ -39,7 +39,7 @@ class RemoveWeightDequantOpTest(unittest.TestCase):
             q_m(*cal_args, **cal_kwargs)
 
         # Quantization
-        q_m = convert(q_m)
+        q_m = convert(q_m, inplace=False)
 
         # 5. Export module
         ep = torch.export.export(q_m, args)

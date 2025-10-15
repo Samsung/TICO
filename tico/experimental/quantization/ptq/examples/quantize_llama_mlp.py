@@ -18,6 +18,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import tico
+from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.evaluation.metric import compute_peir
 from tico.experimental.quantization.evaluation.utils import plot_two_outputs
@@ -36,13 +37,13 @@ model.eval()
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 fp32_mlp = model.model.layers[0].mlp
-model.model.layers[0].mlp = QuantLlamaMLP(
-    fp32_mlp,
-    qcfg=PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM),
-)  # PTQWrapper(fp32_mlp) is also fine
+model.model.layers[0].mlp = prepare(
+    fp32_mlp, PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM)
+)
 model.eval()
 
 mlp_q = model.model.layers[0].mlp
+assert isinstance(mlp_q.wrapped, QuantLlamaMLP)
 
 # -------------------------------------------------------------------------
 # 2. Single-pass calibration
@@ -57,13 +58,12 @@ PROMPTS = [
 ]
 
 with torch.no_grad():
-    mlp_q.enable_calibration()
     for prompt in PROMPTS:
         enc = tokenizer(prompt, return_tensors="pt")
         emb = model.model.embed_tokens(enc["input_ids"])
         _ = mlp_q(emb)
 
-    mlp_q.freeze_qparams()
+convert(mlp_q)
 
 assert mlp_q._mode is Mode.QUANT, "Quantization mode should be active now."
 

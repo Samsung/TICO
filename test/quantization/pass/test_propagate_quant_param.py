@@ -45,14 +45,14 @@ class PropagateQParamForwardTest(unittest.TestCase):
         assert isinstance(m, LinearPermuteModule)
         args, kwargs = m.get_example_inputs()
 
-        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs)
+        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs, inplace=False)
 
         # Calibration
         for i in range(10):
             cal_args, cal_kwargs = m.get_example_inputs()
             q_m(*cal_args, **cal_kwargs)
 
-        q_m = convert(q_m)
+        q_m = convert(q_m, inplace=False)
 
         ep = torch.export.export(q_m, args, kwargs)
 

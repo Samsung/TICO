@@ -38,6 +38,7 @@ import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.utils.introspection import (
     build_fqn_map,
@@ -177,18 +178,7 @@ def main():
     # -------------------------------------------------------------------------
     print("Wrapping layers with PTQWrapper …")
     qcfg = PTQConfig()  # default: per-tensor UINT8
-
-    new_layers = torch.nn.ModuleList()
-    for idx, fp_layer in enumerate(model.model.layers):
-        layer_cfg = qcfg.child(f"layer{idx}")
-        q_layer = PTQWrapper(
-            fp_layer,
-            qcfg=layer_cfg,
-            fp_name=m_to_fqn.get(fp_layer),
-        )
-        new_layers.append(q_layer)
-
-    model.model.layers = new_layers  # swap in quant wrappers
+    prepare(model, qcfg)
 
     # -------------------------------------------------------------------------
     # 3. Activation calibration plus FP-vs-UINT8 diffing
@@ -196,10 +186,6 @@ def main():
     print("Calibrating UINT-8 observers …")
     calib_txt = " ".join(dataset["text"])[:CALIB_TOKENS]
     ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
-
-    # (a) Enable CALIB mode on every QuantModuleBase
-    for l in model.model.layers:
-        l.enable_calibration()
 
     # Save reference FP activations before observers clamp/quantize
     save_handles, act_cache = save_fp_outputs(model)
@@ -216,11 +202,10 @@ def main():
     for h in save_handles:
         h.remove()
 
-    # (b) Freeze (scale, zero-point) after calibration
-    for l in model.model.layers:
-        l.freeze_qparams()
+    # Freeze (scale, zero-point) after calibration
+    convert(model)
 
-    # (c) Register diff hooks and measure per-layer deltas
+    # Register diff hooks and measure per-layer deltas
     cmp_handles = compare_layer_outputs(model, act_cache, metrics=["diff", "peir"])
     # Use same inputs for comparison.
     with torch.no_grad():

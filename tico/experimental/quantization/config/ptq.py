@@ -75,6 +75,8 @@ class PTQConfig(BaseConfig):
     default_observer: Type[ObserverBase] = MinMaxObserver
     default_qscheme: QScheme = QScheme.PER_TENSOR_ASYMM
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # If True, any module that cannot be wrapped will raise.
+    strict_wrap: bool = True
 
     @property
     def name(self) -> str:
@@ -110,7 +112,8 @@ class PTQConfig(BaseConfig):
             self.default_observer,
             default_qscheme=self.default_qscheme,
             overrides=sub_overrides,
+            strict_wrap=self.strict_wrap,
         )
 
     def __repr__(self):
-        return f"PTQConfig(default_dtype={self.default_dtype}, default_observer={self.default_observer}, default_qscheme={self.default_qscheme}, overrides={dict(self.overrides)})"
+        return f"PTQConfig(default_dtype={self.default_dtype}, default_observer={self.default_observer}, default_qscheme={self.default_qscheme}, overrides={dict(self.overrides)}, strict_wrap={self.strict_wrap})"

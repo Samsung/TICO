@@ -17,9 +17,10 @@ import pathlib
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from tico.experimental.quantization import convert, prepare
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.evaluation.metric import compute_peir
 from tico.experimental.quantization.evaluation.utils import plot_two_outputs
-
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.wrappers.llama.quant_attn import (
     QuantLlamaAttention,
@@ -34,12 +35,11 @@ tokenizer = AutoTokenizer.from_pretrained(name)
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 orig_attn = model.model.layers[0].self_attn
-model.model.layers[0].self_attn = QuantLlamaAttention(
-    orig_attn
-)  # PTQWrapper(orig_attn) is also fine
+model.model.layers[0].self_attn = prepare(orig_attn, PTQConfig())
 model.eval()
 
 attn_q = model.model.layers[0].self_attn  # quant wrapper
+assert isinstance(attn_q.wrapped, QuantLlamaAttention)
 rotary = model.model.rotary_emb
 
 # -------------------------------------------------------------------------
@@ -55,7 +55,6 @@ PROMPTS = [
 ]
 
 with torch.no_grad():
-    attn_q.enable_calibration()
     for prompt in PROMPTS:
         ids = tokenizer(prompt, return_tensors="pt")
         embeds = model.model.embed_tokens(ids["input_ids"])
@@ -63,7 +62,8 @@ with torch.no_grad():
         S = cos_sin[0].shape[1]
         float_mask = torch.zeros(1, 1, S, S)
         _ = attn_q(embeds, cos_sin)  # observers collect
-    attn_q.freeze_qparams()
+
+convert(attn_q)
 
 assert attn_q._mode is Mode.QUANT, "Quantization mode should be active now."
 

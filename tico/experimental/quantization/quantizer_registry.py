@@ -53,14 +53,17 @@ def get_quantizer(cfg: BaseConfig) -> BaseQuantizer:
     # Lazy import by naming convention
     name = getattr(cfg, "name", None)
     if name:
-        try:
-            importlib.import_module(
-                f"tico.experimental.quantization.algorithm.{name}.quantizer"
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to import quantizer module for config name='{name}': {e}"
-            )
+        if name == "ptq":
+            importlib.import_module(f"tico.experimental.quantization.ptq.quantizer")
+        else:
+            try:
+                importlib.import_module(
+                    f"tico.experimental.quantization.algorithm.{name}.quantizer"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to import quantizer module for config name='{name}': {e}"
+                )
 
     qcls = _lookup(cfg)
     if qcls is not None:

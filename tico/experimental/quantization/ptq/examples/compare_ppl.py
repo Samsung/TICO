@@ -22,16 +22,15 @@
 
 import argparse
 import sys
-from typing import Optional
 
 import torch
 import tqdm
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from tico.experimental.quantization import convert, prepare
 from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.ptq.utils.metrics import perplexity
-from tico.experimental.quantization.ptq.wrappers.ptq_wrapper import PTQWrapper
 
 # Token-budget presets for activation calibration
 TOKENS: dict[str, int] = {
@@ -166,12 +165,7 @@ def main():
         # 2. Wrap every Transformer layer with PTQWrapper
         # ---------------------------------------------------------------------
         qcfg = PTQConfig()  # all-uint8 defaults
-
-        wrapped_layers = torch.nn.ModuleList()
-        for idx, layer in enumerate(uint8_model.model.layers):
-            layer_cfg = qcfg.child(f"layer{idx}")
-            wrapped_layers.append(PTQWrapper(layer, qcfg=layer_cfg))
-        uint8_model.model.layers = wrapped_layers
+        prepare(uint8_model, qcfg)
 
         # ---------------------------------------------------------------------
         # 3. Single-pass activation calibration
@@ -182,11 +176,7 @@ def main():
         )[:CALIB_TOKENS]
         ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
 
-        # (a) switch every QuantModuleBase to CALIB mode
-        for l in uint8_model.model.layers:
-            l.enable_calibration()
-
-        # (b) run inference to collect ranges
+        # Run inference to collect ranges
         iterator = range(0, ids.size(1) - 1, args.stride)
         if not args.no_tqdm:
             iterator = tqdm.tqdm(iterator, desc="Calibration")
@@ -194,9 +184,8 @@ def main():
             for i in iterator:
                 uint8_model(ids[:, i : i + args.stride])
 
-        # (c) freeze (scale, zero-point)
-        for l in uint8_model.model.layers:
-            l.freeze_qparams()
+        # Freeze (scale, zero-point)
+        convert(uint8_model)
 
     # -------------------------------------------------------------------------
     # 4. Evaluate perplexity

@@ -32,7 +32,7 @@ def prepare(
     quant_config: BaseConfig,
     args: Optional[Any] = None,
     kwargs: Optional[Dict[str, Any]] = None,
-    inplace: Optional[bool] = False,
+    inplace: Optional[bool] = True,
 ):
     """
     Prepare the model for quantization using the provided configuration.
@@ -68,7 +68,7 @@ def prepare(
     return model
 
 
-def convert(model, inplace: Optional[bool] = False):
+def convert(model, inplace: Optional[bool] = True):
     """
     Convert the prepared model to a quantized model using the provided configuration.
 

@@ -95,14 +95,14 @@ class GPTQTest(unittest.TestCase):
 
         # Apply PT2E
         args, kwargs = ori_m.get_example_inputs()
-        q_m = prepare(q_m, PT2EConfig(), args=args, kwargs=kwargs)
+        q_m = prepare(q_m, PT2EConfig(), args=args, kwargs=kwargs, inplace=False)
 
         # Calibration
         for i in range(100):
             args, kwargs = ori_m.get_example_inputs()
             q_m(*args, **kwargs)
 
-        q_m = convert(q_m)
+        q_m = convert(q_m, inplace=False)
 
         # Export circle
         # pt2e exported model doesn't have `eval()` api.

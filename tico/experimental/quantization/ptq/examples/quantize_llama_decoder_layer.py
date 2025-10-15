@@ -31,6 +31,8 @@ import pathlib
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from tico.experimental.quantization import convert, prepare
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.evaluation.metric import compute_peir
 from tico.experimental.quantization.evaluation.utils import plot_two_outputs
 from tico.experimental.quantization.ptq.mode import Mode
@@ -50,12 +52,11 @@ rotary = model.model.rotary_emb  # RoPE helper
 # 1. Swap in the quant wrapper
 # -------------------------------------------------------------------------
 fp32_layer = model.model.layers[0]  # keep a reference for diff check
-model.model.layers[0] = QuantLlamaDecoderLayer(
-    fp32_layer
-)  # PTQWrapper(fp32_layer) is also fine
+model.model.layers[0] = prepare(fp32_layer, PTQConfig())
 model.eval()
 
 qlayer = model.model.layers[0]  # alias for brevity
+assert isinstance(qlayer.wrapped, QuantLlamaDecoderLayer)
 
 # -------------------------------------------------------------------------
 # 2. Single-pass calibration (gather activation ranges)
@@ -70,7 +71,6 @@ PROMPTS = [
 ]
 
 with torch.no_grad():
-    qlayer.enable_calibration()
     for prompt in PROMPTS:
         ids = tokenizer(prompt, return_tensors="pt")
         hidden = model.model.embed_tokens(ids["input_ids"])
@@ -78,7 +78,8 @@ with torch.no_grad():
         S = pos[0].shape[1]
         attn_mask = torch.zeros(1, 1, S, S)  # causal-mask placeholder
         _ = qlayer(hidden, attention_mask=attn_mask, position_embeddings=pos)
-    qlayer.freeze_qparams()
+
+convert(qlayer)
 
 assert qlayer._mode is Mode.QUANT, "Quantization mode should be active now."
 

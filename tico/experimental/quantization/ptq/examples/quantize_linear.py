@@ -29,12 +29,14 @@ import pathlib
 import torch
 import torch.nn as nn
 
+from tico.experimental.quantization import convert, prepare
+from tico.experimental.quantization.config.ptq import PTQConfig
 from tico.experimental.quantization.evaluation.metric import compute_peir
 from tico.experimental.quantization.evaluation.utils import plot_two_outputs
-
 from tico.experimental.quantization.ptq.mode import Mode
 from tico.experimental.quantization.ptq.wrappers.nn.quant_linear import QuantLinear
 from tico.utils.utils import SuppressWarning
+
 
 # -------------------------------------------------------------------------
 # 0. Define a toy model (1 Linear layer only)
@@ -60,20 +62,19 @@ fp32_layer = model.fc
 # -------------------------------------------------------------------------
 # 1. Replace the Linear with QuantLinear wrapper
 # -------------------------------------------------------------------------
-model.fc = QuantLinear(fp32_layer)  # type: ignore[assignment]
-# model.fc = PTQWrapper(fp32_layer) (Wrapping helper class)
+model.fc = prepare(fp32_layer, PTQConfig())  # type: ignore[assignment]
 qlayer = model.fc  # alias for brevity
 
 # -------------------------------------------------------------------------
 # 2. Single-pass calibration (collect activation ranges)
 # -------------------------------------------------------------------------
-assert isinstance(qlayer, QuantLinear)
+assert isinstance(qlayer.wrapped, QuantLinear)
 with torch.no_grad():
-    qlayer.enable_calibration()
     for _ in range(16):  # small toy batch
         x = torch.randn(4, 16)  # (batch=4, features=16)
         _ = model(x)
-    qlayer.freeze_qparams()  # lock scales & zero-points
+
+convert(qlayer)
 
 assert qlayer._mode is Mode.QUANT, "Quantization mode should be active now."
 

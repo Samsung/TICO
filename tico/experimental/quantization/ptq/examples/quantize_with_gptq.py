@@ -215,22 +215,8 @@ def main():
     # 4. Wrap every layer with PTQWrapper (activation UINT-8)
     # -------------------------------------------------------------------------
     print("Wrapping layers with PTQWrapper …")
-    layers = q_m.model.layers
-    if not isinstance(layers, (list, torch.nn.ModuleList)):
-        raise TypeError(f"'model.layers' must be list/ModuleList, got {type(layers)}")
-
     qcfg = PTQConfig()  # default: per-tensor UINT8
-    wrapped = torch.nn.ModuleList()
-    for idx, fp_layer in enumerate(layers):
-        layer_cfg = qcfg.child(f"layer{idx}")
-        wrapped.append(
-            PTQWrapper(
-                fp_layer,
-                qcfg=layer_cfg,
-                fp_name=m_to_fqn.get(fp_layer),
-            )
-        )
-    q_m.model.layers = wrapped
+    prepare(q_m, qcfg)
 
     # -------------------------------------------------------------------------
     # 5. Single-pass activation calibration
@@ -242,11 +228,7 @@ def main():
     calib_txt = " ".join(dataset_train["text"])[:CALIB_TOKENS]
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
 
-    # (a) Enable CALIB mode on every QuantModuleBase
-    for l in q_m.model.layers:
-        l.enable_calibration()
-
-    # (b) Overwrite weight observers with GPTQ statistics
+    # Overwrite weight observers with GPTQ statistics
     if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
         inject_gptq_qparams(q_m, q_m.quantizers)
     else:
@@ -254,7 +236,7 @@ def main():
             "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
         )
 
-    # (c) Forward passes to collect activation ranges
+    # Forward passes to collect activation ranges
     iterator = range(0, train_ids.size(1) - 1, args.stride)
     if not args.no_tqdm:
         iterator = tqdm.tqdm(iterator, desc="Act-calibration")
@@ -262,9 +244,8 @@ def main():
         for i in iterator:
             q_m(train_ids[:, i : i + args.stride])
 
-    # (d) Freeze all Q-params (scale, zero-point)
-    for l in q_m.model.layers:
-        l.freeze_qparams()
+    # Freeze all Q-params (scale, zero-point)
+    convert(q_m)
 
     # -------------------------------------------------------------------------
     # 6. Evaluate perplexity on Wikitext-2
