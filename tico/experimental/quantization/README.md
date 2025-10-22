@@ -57,20 +57,21 @@ q_model = prepare(
     model,
     activation_config,
     args=(input_tensor,),
-    kwargs={'kwarg': value}
+    kwargs={'kwarg': value},
+    inplace=False
 )
 
 # Perform calibration using your calibration routine (e.g., run_fn(model)).
 run_fn(q_model)
 
 # Convert the model after calibration.
-q_model = convert(q_model, activation_config)
+q_model = convert(q_model, activation_config, inplace=False)
 
 # Example for Weight Quantization using GPTQ:
 weight_config = GPTQConfig()
-prepare(q_model, weight_config, inplace=True)
+prepare(q_model, weight_config)
 run_fn(q_model)
-convert(q_model, weight_config, inplace=True)
+convert(q_model, weight_config)
 
 # Evaluate the quantized model
 eval(q_model)

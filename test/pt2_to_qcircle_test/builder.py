@@ -63,12 +63,14 @@ class QuantizationTest(TestRunnerBase):
         original_mod = mod
 
         cal_args_0, cal_kwargs_0 = next(original_mod.get_calibration_data())  # type: ignore[operator]
-        mod = prepare(mod, self.config, args=cal_args_0, kwargs=cal_kwargs_0)
+        mod = prepare(
+            mod, self.config, args=cal_args_0, kwargs=cal_kwargs_0, inplace=False
+        )
 
         for c_args, c_kwargs in original_mod.get_calibration_data():  # type: ignore[operator]
             mod(*c_args, **c_kwargs)
 
-        mod = convert(mod)
+        mod = convert(mod, inplace=False)
 
         # pt2e module doesn't have `eval()` api.
         mod.training = False
