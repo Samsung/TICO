@@ -65,7 +65,8 @@ so extending PTQ for a new model family simply requires subclassing and registra
 The PTQ API provides a unified entry point for quantizing any model:
 
 ```python
-from quantization.ptq import PTQConfig, prepare, convert
+from tico.quantization import prepare, convert
+from tico.quantization.config import PTQConfig
 
 # Step 1: Prepare the model
 model = prepare(model, PTQConfig())
