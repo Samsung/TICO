@@ -54,7 +54,7 @@ def get_quantizer(cfg: BaseConfig) -> BaseQuantizer:
     name = getattr(cfg, "name", None)
     if name:
         if name == "ptq":
-            importlib.import_module(f"tico.experimental.quantization.ptq.quantizer")
+            importlib.import_module(f"tico.experimental.quantization.wrapq.quantizer")
         else:
             try:
                 importlib.import_module(

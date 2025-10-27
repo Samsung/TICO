@@ -34,12 +34,12 @@ from tico.experimental.quantization.evaluation.utils import (
     plot_two_outputs,
     quantize,
 )
-from tico.experimental.quantization.ptq.utils.introspection import (
+from tico.experimental.quantization.wrapq.utils.introspection import (
     build_fqn_map,
     compare_layer_outputs,
     save_fp_outputs,
 )
-from tico.experimental.quantization.ptq.wrappers.quant_module_base import (
+from tico.experimental.quantization.wrapq.wrappers.quant_module_base import (
     QuantModuleBase,
 )
 from tico.utils.model import CircleModel
@@ -331,7 +331,7 @@ class TestEvaluationUtils(unittest.TestCase):
 
 
 class TestIntrospectionUtils(unittest.TestCase):
-    """Test utility functions from ptq/utils/introspection.py"""
+    """Test utility functions from wrapq/utils/introspection.py"""
 
     def test_build_fqn_map(self):
         """Test build_fqn_map function"""
@@ -451,7 +451,7 @@ class TestIntrospectionUtils(unittest.TestCase):
         for handle in handles:
             handle.remove()
 
-    @patch("tico.experimental.quantization.ptq.utils.introspection.MetricCalculator")
+    @patch("tico.experimental.quantization.wrapq.utils.introspection.MetricCalculator")
     @patch("builtins.print")
     def test_compare_layer_outputs_print_mode(self, mock_print, mock_metric_calculator):
         """Test compare_layer_outputs in print mode"""
@@ -500,7 +500,7 @@ class TestIntrospectionUtils(unittest.TestCase):
         for handle in handles:
             handle.remove()
 
-    @patch("tico.experimental.quantization.ptq.utils.introspection.MetricCalculator")
+    @patch("tico.experimental.quantization.wrapq.utils.introspection.MetricCalculator")
     def test_compare_layer_outputs_collect_mode(self, mock_metric_calculator):
         """Test compare_layer_outputs in collect mode"""
 

@@ -719,197 +719,197 @@ test_u8 (quantization.pass.test_propagate_quant_param.ReshapeTest) ... ok
 test_s16 (quantization.pass.test_propagate_quant_param.SliceTest) ... ok
 test_u8 (quantization.pass.test_propagate_quant_param.SliceTest) ... ok
 test_pass (quantization.pass.test_remove_weight_dequant_op.RemoveWeightDequantOpTest) ... ok
-test_degenerate_constant_cases (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_fake_quant_requires_qparams (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_load_qparams_and_fake_quant (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_per_channel_asymm_stats_and_qparams (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_per_channel_fake_quant_path (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_per_tensor_asymm_qparams (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_per_tensor_symmetric_qparams (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_reset_clears_minmax_and_qparams (quantization.ptq.observers.test_affine_base.TestAffineObserverBase) ... ok
-test_collect_respects_enabled_flag (quantization.ptq.observers.test_base.TestObserverBase) ... ok
-test_compute_qparams_contract_allows_none (quantization.ptq.observers.test_base.TestObserverBase) ... ok
-test_repr_smoke (quantization.ptq.observers.test_base.TestObserverBase) ... ok
-test_ema_updates (quantization.ptq.observers.test_ema.TestEMAObserver) ... ok
-test_first_batch (quantization.ptq.observers.test_ema.TestEMAObserver) ... ok
-test_per_channel_ema (quantization.ptq.observers.test_ema.TestEMAObserver) ... ok
-test_collect_is_noop (quantization.ptq.observers.test_identity.TestIdentityObserver) ... ok
-test_compute_qparams_constant (quantization.ptq.observers.test_identity.TestIdentityObserver) ... ok
-test_fake_quant_identity (quantization.ptq.observers.test_identity.TestIdentityObserver) ... ok
-test_initial_state (quantization.ptq.observers.test_identity.TestIdentityObserver) ... ok
-test_per_channel_minmax (quantization.ptq.observers.test_minmax.TestMinMaxObserver) ... ok
-test_per_tensor_minmax (quantization.ptq.observers.test_minmax.TestMinMaxObserver) ... ok
-test_reset (quantization.ptq.observers.test_minmax.TestMinMaxObserver) ... ok
-test_negative_scalar_uint8 (quantization.ptq.observers.test_minmax.TestScalarObserver) ... ok
-test_positive_scalar_uint8 (quantization.ptq.observers.test_minmax.TestScalarObserver) ... ok
-test_zero_scalar_uint8 (quantization.ptq.observers.test_minmax.TestScalarObserver) ... ok
-test_axis_is_independent_from_base_channel_axis (quantization.ptq.observers.test_mx.TestMXObserver)
+test_degenerate_constant_cases (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_fake_quant_requires_qparams (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_load_qparams_and_fake_quant (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_per_channel_asymm_stats_and_qparams (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_per_channel_fake_quant_path (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_per_tensor_asymm_qparams (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_per_tensor_symmetric_qparams (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_reset_clears_minmax_and_qparams (quantization.wrapq.observers.test_affine_base.TestAffineObserverBase) ... ok
+test_collect_respects_enabled_flag (quantization.wrapq.observers.test_base.TestObserverBase) ... ok
+test_compute_qparams_contract_allows_none (quantization.wrapq.observers.test_base.TestObserverBase) ... ok
+test_repr_smoke (quantization.wrapq.observers.test_base.TestObserverBase) ... ok
+test_ema_updates (quantization.wrapq.observers.test_ema.TestEMAObserver) ... ok
+test_first_batch (quantization.wrapq.observers.test_ema.TestEMAObserver) ... ok
+test_per_channel_ema (quantization.wrapq.observers.test_ema.TestEMAObserver) ... ok
+test_collect_is_noop (quantization.wrapq.observers.test_identity.TestIdentityObserver) ... ok
+test_compute_qparams_constant (quantization.wrapq.observers.test_identity.TestIdentityObserver) ... ok
+test_fake_quant_identity (quantization.wrapq.observers.test_identity.TestIdentityObserver) ... ok
+test_initial_state (quantization.wrapq.observers.test_identity.TestIdentityObserver) ... ok
+test_per_channel_minmax (quantization.wrapq.observers.test_minmax.TestMinMaxObserver) ... ok
+test_per_tensor_minmax (quantization.wrapq.observers.test_minmax.TestMinMaxObserver) ... ok
+test_reset (quantization.wrapq.observers.test_minmax.TestMinMaxObserver) ... ok
+test_negative_scalar_uint8 (quantization.wrapq.observers.test_minmax.TestScalarObserver) ... ok
+test_positive_scalar_uint8 (quantization.wrapq.observers.test_minmax.TestScalarObserver) ... ok
+test_zero_scalar_uint8 (quantization.wrapq.observers.test_minmax.TestScalarObserver) ... ok
+test_axis_is_independent_from_base_channel_axis (quantization.wrapq.observers.test_mx.TestMXObserver)
 MXObserver.axis must be used for shared-exponent grouping regardless of base.channel_axis. ... ok
-test_compute_qparams_returns_none_and_collect_noop (quantization.ptq.observers.test_mx.TestMXObserver)
+test_compute_qparams_returns_none_and_collect_noop (quantization.wrapq.observers.test_mx.TestMXObserver)
 MXObserver does not produce affine qparams; compute_qparams() returns None. ... ok
-test_fake_quant_calls_quantize_mx_with_expected_args (quantization.ptq.observers.test_mx.TestMXObserver)
+test_fake_quant_calls_quantize_mx_with_expected_args (quantization.wrapq.observers.test_mx.TestMXObserver)
 fake_quant(x) must delegate to quantize_mx with the configured arguments. ... ok
-test_fake_quant_still_runs_when_disabled (quantization.ptq.observers.test_mx.TestMXObserver)
+test_fake_quant_still_runs_when_disabled (quantization.wrapq.observers.test_mx.TestMXObserver)
 Even when 'enabled' is False (no more stats collection), fake_quant should still run. ... ok
-test_repr_smoke (quantization.ptq.observers.test_mx.TestMXObserver)
+test_repr_smoke (quantization.wrapq.observers.test_mx.TestMXObserver)
 repr() should include class name and observer name for debugging. ... ok
-test_presets (quantization.ptq.test_dtype.TestDType) ... ok
-test_range_signed (quantization.ptq.test_dtype.TestDType) ... ok
-test_range_unsigned (quantization.ptq.test_dtype.TestDType) ... ok
-test_str (quantization.ptq.test_dtype.TestDType) ... ok
-test_member_names (quantization.ptq.test_mode.TestModeEnum) ... ok
-test_ordering (quantization.ptq.test_mode.TestModeEnum) ... ok
-test_str_representation (quantization.ptq.test_mode.TestModeEnum) ... ok
-test_enum_members (quantization.ptq.test_qscheme.TestQScheme) ... ok
-test_is_per_channel (quantization.ptq.test_qscheme.TestQScheme) ... ok
-test_is_symmetric (quantization.ptq.test_qscheme.TestQScheme) ... ok
-test_str (quantization.ptq.test_qscheme.TestQScheme) ... ok
-test_config_default_when_neither_user_nor_wrapper (quantization.ptq.test_quant_config.TestObserverAndDTypePrecedence)
+test_presets (quantization.wrapq.test_dtype.TestDType) ... ok
+test_range_signed (quantization.wrapq.test_dtype.TestDType) ... ok
+test_range_unsigned (quantization.wrapq.test_dtype.TestDType) ... ok
+test_str (quantization.wrapq.test_dtype.TestDType) ... ok
+test_member_names (quantization.wrapq.test_mode.TestModeEnum) ... ok
+test_ordering (quantization.wrapq.test_mode.TestModeEnum) ... ok
+test_str_representation (quantization.wrapq.test_mode.TestModeEnum) ... ok
+test_enum_members (quantization.wrapq.test_qscheme.TestQScheme) ... ok
+test_is_per_channel (quantization.wrapq.test_qscheme.TestQScheme) ... ok
+test_is_symmetric (quantization.wrapq.test_qscheme.TestQScheme) ... ok
+test_str (quantization.wrapq.test_qscheme.TestQScheme) ... ok
+test_config_default_when_neither_user_nor_wrapper (quantization.wrapq.test_quant_config.TestObserverAndDTypePrecedence)
 If neither user nor wrapper provides dtype/qscheme, fallback to QuantConfig defaults. ... ok
-test_other_kwargs_user_override_precedence (quantization.ptq.test_quant_config.TestObserverAndDTypePrecedence)
+test_other_kwargs_user_override_precedence (quantization.wrapq.test_quant_config.TestObserverAndDTypePrecedence)
 For keys without QuantConfig-level defaults (like qscheme/channel_axis), ... ok
-test_quantconfig_get_kwargs_does_not_inject_dtype (quantization.ptq.test_quant_config.TestObserverAndDTypePrecedence)
+test_quantconfig_get_kwargs_does_not_inject_dtype (quantization.wrapq.test_quant_config.TestObserverAndDTypePrecedence)
 Ensure QuantConfig.get_kwargs() itself doesn't inject dtype anymore. ... ok
-test_user_override_wins (quantization.ptq.test_quant_config.TestObserverAndDTypePrecedence)
+test_user_override_wins (quantization.wrapq.test_quant_config.TestObserverAndDTypePrecedence)
 If user supplies both dtype and observer, they must override ... ok
-test_wrapper_default_when_no_user_override (quantization.ptq.test_quant_config.TestObserverAndDTypePrecedence)
+test_wrapper_default_when_no_user_override (quantization.wrapq.test_quant_config.TestObserverAndDTypePrecedence)
 If the user supplies nothing for a given name, wrapper defaults must ... ok
-test_default_dtype_applied (quantization.ptq.test_quant_config.TestQuantConfig) ... ok
-test_observer_override (quantization.ptq.test_quant_config.TestQuantConfig) ... ok
-test_per_observer_dtype_override (quantization.ptq.test_quant_config.TestQuantConfig) ... ok
-test_child_inherits_default_dtype (quantization.ptq.test_quant_config.TestQuantConfigChild) ... ok
-test_child_inherits_default_qscheme (quantization.ptq.test_quant_config.TestQuantConfigChild) ... ok
-test_child_is_view_not_copy (quantization.ptq.test_quant_config.TestQuantConfigChild) ... ok
-test_child_override_applied (quantization.ptq.test_quant_config.TestQuantConfigChild) ... ok
-test_default_qscheme_applied (quantization.ptq.test_quant_config.TestQuantConfigQScheme) ... ok
-test_per_observer_qscheme_override (quantization.ptq.test_quant_config.TestQuantConfigQScheme) ... ok
-test_bidirectional_consistency (quantization.ptq.utils.test_introspection.TestBuildFqnMap) ... ok
-test_direct_child_name (quantization.ptq.utils.test_introspection.TestBuildFqnMap) ... ok
-test_root_included (quantization.ptq.utils.test_introspection.TestBuildFqnMap) ... ok
-test_sequential_children (quantization.ptq.utils.test_introspection.TestBuildFqnMap) ... ok
-test_total_entries (quantization.ptq.utils.test_introspection.TestBuildFqnMap) ... ok
-test_custom_metric (quantization.ptq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
-test_layerwise_diff (quantization.ptq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
-test_layerwise_peir (quantization.ptq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
-test_metric_subset_selection (quantization.ptq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
-test_non_default_ignore_index (quantization.ptq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
-test_returns_positive_float (quantization.ptq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
-test_short_sequence_equivalence (quantization.ptq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
-test_stride_invariance_short (quantization.ptq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
-test_keep_dim0 (quantization.ptq.utils.test_reduce_utils.TestChannelwiseMinMax) ... ok
-test_keep_middle_dim (quantization.ptq.utils.test_reduce_utils.TestChannelwiseMinMax) ... ok
-test_keep_negative_index (quantization.ptq.utils.test_reduce_utils.TestChannelwiseMinMax) ... ok
-test_export_decoder_single_step_invokes_convert (quantization.ptq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... Saved decoder single-step export to: dummy.circle
+test_default_dtype_applied (quantization.wrapq.test_quant_config.TestQuantConfig) ... ok
+test_observer_override (quantization.wrapq.test_quant_config.TestQuantConfig) ... ok
+test_per_observer_dtype_override (quantization.wrapq.test_quant_config.TestQuantConfig) ... ok
+test_child_inherits_default_dtype (quantization.wrapq.test_quant_config.TestQuantConfigChild) ... ok
+test_child_inherits_default_qscheme (quantization.wrapq.test_quant_config.TestQuantConfigChild) ... ok
+test_child_is_view_not_copy (quantization.wrapq.test_quant_config.TestQuantConfigChild) ... ok
+test_child_override_applied (quantization.wrapq.test_quant_config.TestQuantConfigChild) ... ok
+test_default_qscheme_applied (quantization.wrapq.test_quant_config.TestQuantConfigQScheme) ... ok
+test_per_observer_qscheme_override (quantization.wrapq.test_quant_config.TestQuantConfigQScheme) ... ok
+test_bidirectional_consistency (quantization.wrapq.utils.test_introspection.TestBuildFqnMap) ... ok
+test_direct_child_name (quantization.wrapq.utils.test_introspection.TestBuildFqnMap) ... ok
+test_root_included (quantization.wrapq.utils.test_introspection.TestBuildFqnMap) ... ok
+test_sequential_children (quantization.wrapq.utils.test_introspection.TestBuildFqnMap) ... ok
+test_total_entries (quantization.wrapq.utils.test_introspection.TestBuildFqnMap) ... ok
+test_custom_metric (quantization.wrapq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
+test_layerwise_diff (quantization.wrapq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
+test_layerwise_peir (quantization.wrapq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
+test_metric_subset_selection (quantization.wrapq.utils.test_introspection.TestSmoothQuantPTQDiff) ... ok
+test_non_default_ignore_index (quantization.wrapq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
+test_returns_positive_float (quantization.wrapq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
+test_short_sequence_equivalence (quantization.wrapq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
+test_stride_invariance_short (quantization.wrapq.utils.test_metrics.TestPerplexitySlidingWindow) ... ok
+test_keep_dim0 (quantization.wrapq.utils.test_reduce_utils.TestChannelwiseMinMax) ... ok
+test_keep_middle_dim (quantization.wrapq.utils.test_reduce_utils.TestChannelwiseMinMax) ... ok
+test_keep_negative_index (quantization.wrapq.utils.test_reduce_utils.TestChannelwiseMinMax) ... ok
+test_export_decoder_single_step_invokes_convert (quantization.wrapq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... Saved decoder single-step export to: dummy.circle
 ok
-test_forward_shapes (quantization.ptq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
-test_kv_arg_count_mismatch (quantization.ptq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
-test_make_example_inputs_shapes (quantization.ptq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
-test_meta_inference (quantization.ptq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
-test_buffered_future_mask_shape_and_values (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_extract_features_alignment (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_forward_external_step (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_forward_logits_and_extra (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_get_normalized_probs (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_incremental_decoding_two_steps (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_lifecycle_propagation (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_max_positions (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_reorder_incremental_state_scripting_noop (quantization.ptq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
-test_cross_self_attention_path (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_forward_external_single_step (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_forward_shapes_tuple (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_lifecycle_propagation (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_maybe_apply_head_scale (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_need_head_weights_shape (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_prev_attn_state_static_kv_reuse (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_prev_self_attn_state_accumulate (quantization.ptq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
-test_external_inputs_dict_return (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_external_inputs_tensor_return (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_forward_standard_dict_shapes (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_forward_torchscript_wrapper (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_lifecycle_propagation (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_max_positions_with_and_without_positional (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_numerical_sanity_with_or_without_embed_scale (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_padding_zeroing_before_stack (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_reorder_encoder_out (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_upgrade_state_dict_named_behavior (quantization.ptq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
-test_additive_float_masks (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_forward_shapes_flags (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_lifecycle_propagation (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_mask_handling (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_numerical_sanity (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_qcfg_child_overrides_for_activation_observer (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_return_fc_semantics_pre_norm (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_submodules_wrapped (quantization.ptq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
-test_cross_attention_static_kv_reuse (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_forward_self_attention_shapes (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_incremental_self_attention_accumulates (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_lifecycle_propagation (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_need_head_weights_shape (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_observer_lookup_and_uniqueness (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_return_new_kv_shapes (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_static_causal_mask_upper_triangle_small (quantization.ptq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
-test_cache_grows_across_multiple_single_token_steps (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_cache_mock_object_update (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_cache_tuple_concat_prefill_then_decode (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_forward_diff (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_forward_with_float_attention_mask (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_mask_slicing_with_cache_q_len_lt_k_len (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_mode_transitions (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_per_projection_override (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_use_cache_no_past_equivalence (quantization.ptq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
-test_forward_diff (quantization.ptq.wrappers.llama.test_quant_decoder_layer.TestQuantLlamaDecoderLayer) ... ok
-test_layernorm_preserved (quantization.ptq.wrappers.llama.test_quant_decoder_layer.TestQuantLlamaDecoderLayer) ... ok
-test_mode_transitions (quantization.ptq.wrappers.llama.test_quant_decoder_layer.TestQuantLlamaDecoderLayer) ... ok
-test_mode_and_forward (quantization.ptq.wrappers.llama.test_quant_mlp.TestQuantLlamaMLP) ... ok
-test_calib_quant_export (quantization.ptq.wrappers.llama.test_quant_mlp.TestSubgraphExport) ... ok
-test_dtype_override (quantization.ptq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm) ... ok
-test_mode_transitions (quantization.ptq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm) ... ok
-test_no_affine_path (quantization.ptq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm) ... ok
-test_no_quant_matches_reference_various_shapes (quantization.ptq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm)
+test_forward_shapes (quantization.wrapq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
+test_kv_arg_count_mismatch (quantization.wrapq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
+test_make_example_inputs_shapes (quantization.wrapq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
+test_meta_inference (quantization.wrapq.wrappers.fairseq.test_decoder_export_single_step.TestDecoderExportSingleStep) ... ok
+test_buffered_future_mask_shape_and_values (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_extract_features_alignment (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_forward_external_step (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_forward_logits_and_extra (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_get_normalized_probs (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_incremental_decoding_two_steps (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_lifecycle_propagation (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_max_positions (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_reorder_incremental_state_scripting_noop (quantization.wrapq.wrappers.fairseq.test_quant_decoder.TestQuantFairseqDecoder) ... ok
+test_cross_self_attention_path (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_forward_external_single_step (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_forward_shapes_tuple (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_lifecycle_propagation (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_maybe_apply_head_scale (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_need_head_weights_shape (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_prev_attn_state_static_kv_reuse (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_prev_self_attn_state_accumulate (quantization.wrapq.wrappers.fairseq.test_quant_decoder_layer.TestQuantFairseqDecoderLayer) ... ok
+test_external_inputs_dict_return (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_external_inputs_tensor_return (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_forward_standard_dict_shapes (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_forward_torchscript_wrapper (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_lifecycle_propagation (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_max_positions_with_and_without_positional (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_numerical_sanity_with_or_without_embed_scale (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_padding_zeroing_before_stack (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_reorder_encoder_out (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_upgrade_state_dict_named_behavior (quantization.wrapq.wrappers.fairseq.test_quant_encoder.TestQuantFairseqEncoder) ... ok
+test_additive_float_masks (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_forward_shapes_flags (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_lifecycle_propagation (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_mask_handling (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_numerical_sanity (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_qcfg_child_overrides_for_activation_observer (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_return_fc_semantics_pre_norm (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_submodules_wrapped (quantization.wrapq.wrappers.fairseq.test_quant_encoder_layer.TestQuantFairseqEncoderLayer) ... ok
+test_cross_attention_static_kv_reuse (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_forward_self_attention_shapes (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_incremental_self_attention_accumulates (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_lifecycle_propagation (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_need_head_weights_shape (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_observer_lookup_and_uniqueness (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_return_new_kv_shapes (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_static_causal_mask_upper_triangle_small (quantization.wrapq.wrappers.fairseq.test_quant_mha.TestQuantFairseqMHA) ... ok
+test_cache_grows_across_multiple_single_token_steps (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_cache_mock_object_update (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_cache_tuple_concat_prefill_then_decode (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_forward_diff (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_forward_with_float_attention_mask (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_mask_slicing_with_cache_q_len_lt_k_len (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_mode_transitions (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_per_projection_override (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_use_cache_no_past_equivalence (quantization.wrapq.wrappers.llama.test_quant_attn.TestQuantLlamaAttention) ... ok
+test_forward_diff (quantization.wrapq.wrappers.llama.test_quant_decoder_layer.TestQuantLlamaDecoderLayer) ... ok
+test_layernorm_preserved (quantization.wrapq.wrappers.llama.test_quant_decoder_layer.TestQuantLlamaDecoderLayer) ... ok
+test_mode_transitions (quantization.wrapq.wrappers.llama.test_quant_decoder_layer.TestQuantLlamaDecoderLayer) ... ok
+test_mode_and_forward (quantization.wrapq.wrappers.llama.test_quant_mlp.TestQuantLlamaMLP) ... ok
+test_calib_quant_export (quantization.wrapq.wrappers.llama.test_quant_mlp.TestSubgraphExport) ... ok
+test_dtype_override (quantization.wrapq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm) ... ok
+test_mode_transitions (quantization.wrapq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm) ... ok
+test_no_affine_path (quantization.wrapq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm) ... ok
+test_no_quant_matches_reference_various_shapes (quantization.wrapq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm)
 In NO_QUANT mode, the wrapper must match PyTorch LayerNorm exactly, ... ok
-test_quantised_output_close (quantization.ptq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm)
+test_quantised_output_close (quantization.wrapq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm)
 After a standard calibrate->freeze cycle, quantized output should: ... ok
-test_weight_stats_survive (quantization.ptq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm)
+test_weight_stats_survive (quantization.wrapq.wrappers.nn.test_quant_layernorm.TestQuantLayerNorm)
 Re-running a calibration cycle should not change fixed affine param stats. ... ok
-test_dtype_override (quantization.ptq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
-test_mode_transitions (quantization.ptq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
-test_quantised_output_close (quantization.ptq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
-test_weight_stats_survive (quantization.ptq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
-test_dtype_override (quantization.ptq.wrappers.nn.test_quant_silu.TestQuantSiLU) ... ok
-test_mode_transitions (quantization.ptq.wrappers.nn.test_quant_silu.TestQuantSiLU) ... ok
-test_quantised_output (quantization.ptq.wrappers.nn.test_quant_silu.TestQuantSiLU) ... ok
-test_smoke_forward_quantized (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQSmoke) ... ok
-test_default_mode_is_no_quant (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
-test_mode_transitions (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
-test_switch_activation_observer (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
-test_weight_fake_quant_channelwise (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
-test_parent_propagation_calls_each_observer_once (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapperNoDoubleProcessing) ... ok
-test_all_observers_is_empty_for_wrapper (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapperObserverSurface) ... ok
-test_named_and_get_observer_are_proxies (quantization.ptq.wrappers.test_ptq_wrapper.TestPTQWrapperObserverSurface) ... ok
-test_dtype_override (quantization.ptq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
-test_missing_FUNC_raises (quantization.ptq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
-test_mode_and_forward_diff (quantization.ptq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
-test_registry_and_factory (quantization.ptq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
-test_does_not_descend_into_quant_modules (quantization.ptq.wrappers.test_quant_module_base.TestChildQuantModulesDiscovery) ... ok
-test_lifecycle_propagates_through_containers (quantization.ptq.wrappers.test_quant_module_base.TestChildQuantModulesDiscovery)
+test_dtype_override (quantization.wrapq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
+test_mode_transitions (quantization.wrapq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
+test_quantised_output_close (quantization.wrapq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
+test_weight_stats_survive (quantization.wrapq.wrappers.nn.test_quant_linear.TestQuantLinear) ... ok
+test_dtype_override (quantization.wrapq.wrappers.nn.test_quant_silu.TestQuantSiLU) ... ok
+test_mode_transitions (quantization.wrapq.wrappers.nn.test_quant_silu.TestQuantSiLU) ... ok
+test_quantised_output (quantization.wrapq.wrappers.nn.test_quant_silu.TestQuantSiLU) ... ok
+test_smoke_forward_quantized (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQSmoke) ... ok
+test_default_mode_is_no_quant (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
+test_mode_transitions (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
+test_switch_activation_observer (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
+test_weight_fake_quant_channelwise (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapper) ... ok
+test_parent_propagation_calls_each_observer_once (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapperNoDoubleProcessing) ... ok
+test_all_observers_is_empty_for_wrapper (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapperObserverSurface) ... ok
+test_named_and_get_observer_are_proxies (quantization.wrapq.wrappers.test_ptq_wrapper.TestPTQWrapperObserverSurface) ... ok
+test_dtype_override (quantization.wrapq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
+test_missing_FUNC_raises (quantization.wrapq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
+test_mode_and_forward_diff (quantization.wrapq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
+test_registry_and_factory (quantization.wrapq.wrappers.test_quant_elementwise.TestElementwiseWrappers) ... ok
+test_does_not_descend_into_quant_modules (quantization.wrapq.wrappers.test_quant_module_base.TestChildQuantModulesDiscovery) ... ok
+test_lifecycle_propagates_through_containers (quantization.wrapq.wrappers.test_quant_module_base.TestChildQuantModulesDiscovery)
 enable_calibration()/freeze_qparams() should propagate to all quant modules, ... ok
-test_yields_immediate_descendants_across_containers (quantization.ptq.wrappers.test_quant_module_base.TestChildQuantModulesDiscovery) ... ok
-test_child_inherits_default_observer (quantization.ptq.wrappers.test_quant_module_base.TestQuantConfigDefaultObserver) ... ok
-test_global_default_observer (quantization.ptq.wrappers.test_quant_module_base.TestQuantConfigDefaultObserver) ... ok
-test_observer_override_precedence (quantization.ptq.wrappers.test_quant_module_base.TestQuantConfigDefaultObserver) ... ok
-test_extra_repr (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_fp_name_storage (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_fq_collect_and_quantize (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_get_observer (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_make_obs_override (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_mode_cycle (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_named_observers (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
-test_config_default_qscheme (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleQScheme) ... ok
-test_user_override_qscheme_wins (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleQScheme) ... ok
-test_wrapper_default_qscheme_applied (quantization.ptq.wrappers.test_quant_module_base.TestQuantModuleQScheme) ... ok
-test_register_and_lookup (quantization.ptq.wrappers.test_registry.TestRegistry) ... ok
-test_try_register_graceful_skip (quantization.ptq.wrappers.test_registry.TestRegistry) ... ok
-test_try_register_success (quantization.ptq.wrappers.test_registry.TestRegistry) ... ok
+test_yields_immediate_descendants_across_containers (quantization.wrapq.wrappers.test_quant_module_base.TestChildQuantModulesDiscovery) ... ok
+test_child_inherits_default_observer (quantization.wrapq.wrappers.test_quant_module_base.TestQuantConfigDefaultObserver) ... ok
+test_global_default_observer (quantization.wrapq.wrappers.test_quant_module_base.TestQuantConfigDefaultObserver) ... ok
+test_observer_override_precedence (quantization.wrapq.wrappers.test_quant_module_base.TestQuantConfigDefaultObserver) ... ok
+test_extra_repr (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_fp_name_storage (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_fq_collect_and_quantize (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_get_observer (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_make_obs_override (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_mode_cycle (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_named_observers (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleBase) ... ok
+test_config_default_qscheme (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleQScheme) ... ok
+test_user_override_qscheme_wins (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleQScheme) ... ok
+test_wrapper_default_qscheme_applied (quantization.wrapq.wrappers.test_quant_module_base.TestQuantModuleQScheme) ... ok
+test_register_and_lookup (quantization.wrapq.wrappers.test_registry.TestRegistry) ... ok
+test_try_register_graceful_skip (quantization.wrapq.wrappers.test_registry.TestRegistry) ... ok
+test_try_register_success (quantization.wrapq.wrappers.test_registry.TestRegistry) ... ok
 test_get_quantizer_returns_instance_not_class (quantization.test_quantizer_registry.QuantizerRegistryTest)
 Factory must instantiate the quantizer with the provided config. ... ok
 test_lazy_import_by_naming_convention_success (quantization.test_quantizer_registry.QuantizerRegistryTest)

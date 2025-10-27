@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Type
 
 from tico.experimental.quantization.config.base import BaseConfig
-from tico.experimental.quantization.ptq.dtypes import DType
-from tico.experimental.quantization.ptq.observers.base import ObserverBase
-from tico.experimental.quantization.ptq.observers.minmax import MinMaxObserver
-from tico.experimental.quantization.ptq.qscheme import QScheme
+from tico.experimental.quantization.wrapq.dtypes import DType
+from tico.experimental.quantization.wrapq.observers.base import ObserverBase
+from tico.experimental.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.experimental.quantization.wrapq.qscheme import QScheme
 
 
 @dataclass
@@ -55,7 +55,7 @@ class PTQConfig(BaseConfig):
     Example
     -------
     ```python
-    from ptq.observers import PercentileObserver
+    from wrapq.observers import PercentileObserver
 
     cfg = PTQConfig(
         default_dtype   = DType.uint(8),
