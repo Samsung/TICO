@@ -17,19 +17,15 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-from tico.experimental.quantization.config.ptq import PTQConfig
+from tico.quantization.config.ptq import PTQConfig
 
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.wrappers.fairseq.quant_decoder import (
-    QuantFairseqDecoder,
-)
-from tico.experimental.quantization.wrapq.wrappers.fairseq.quant_decoder_layer import (
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.fairseq.quant_decoder import QuantFairseqDecoder
+from tico.quantization.wrapq.wrappers.fairseq.quant_decoder_layer import (
     QuantFairseqDecoderLayer,
 )
-from tico.experimental.quantization.wrapq.wrappers.quant_module_base import (
-    QuantModuleBase,
-)
-from tico.experimental.quantization.wrapq.wrappers.registry import register
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.registry import register
 
 
 # ────────────────────────────────────────────────────────────

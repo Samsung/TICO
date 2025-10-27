@@ -14,7 +14,7 @@
 
 import unittest
 
-from tico.experimental.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.qscheme import QScheme
 
 
 class TestQScheme(unittest.TestCase):

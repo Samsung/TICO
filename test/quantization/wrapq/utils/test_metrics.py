@@ -16,7 +16,7 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-from tico.experimental.quantization.wrapq.utils.metrics import perplexity
+from tico.quantization.wrapq.utils.metrics import perplexity
 from torch import nn
 
 """

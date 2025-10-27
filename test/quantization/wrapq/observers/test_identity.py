@@ -16,7 +16,7 @@ import unittest
 
 import torch
 
-from tico.experimental.quantization.wrapq.observers.identity import IdentityObserver
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 
 
 class TestIdentityObserver(unittest.TestCase):

@@ -27,7 +27,7 @@ Checks
 
 import unittest
 
-from tico.experimental.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.mode import Mode
 
 
 class TestModeEnum(unittest.TestCase):

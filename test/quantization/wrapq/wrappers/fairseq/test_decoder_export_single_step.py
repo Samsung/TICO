@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.nn as nn
 
-from tico.experimental.quantization.wrapq.wrappers.fairseq.decoder_export_single_step import (
+from tico.quantization.wrapq.wrappers.fairseq.decoder_export_single_step import (
     DecoderExportSingleStep,
     export_decoder_single_step,
     make_example_inputs,

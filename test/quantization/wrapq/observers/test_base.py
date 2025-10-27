@@ -16,9 +16,9 @@ import unittest
 
 import torch
 
-from tico.experimental.quantization.wrapq.dtypes import DType, UINT8
-from tico.experimental.quantization.wrapq.observers.base import ObserverBase
-from tico.experimental.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.dtypes import DType, UINT8
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.qscheme import QScheme
 
 
 class _NoopObserver(ObserverBase):

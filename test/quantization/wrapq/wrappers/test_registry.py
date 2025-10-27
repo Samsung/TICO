@@ -28,14 +28,8 @@ import unittest
 
 import torch.nn as nn
 
-from tico.experimental.quantization.wrapq.wrappers.quant_module_base import (
-    QuantModuleBase,
-)
-from tico.experimental.quantization.wrapq.wrappers.registry import (
-    lookup,
-    register,
-    try_register,
-)
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.registry import lookup, register, try_register
 
 
 # Dummy fp32 & quant modules for tests

@@ -18,17 +18,17 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from tico.experimental.quantization.config.ptq import PTQConfig
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.qscheme import QScheme
-from tico.experimental.quantization.wrapq.wrappers.fairseq.quant_encoder_layer import (
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.wrappers.fairseq.quant_encoder_layer import (
     QuantFairseqEncoderLayer,
 )
-from tico.experimental.quantization.wrapq.wrappers.fairseq.quant_mha import (
+from tico.quantization.wrapq.wrappers.fairseq.quant_mha import (
     QuantFairseqMultiheadAttention,
 )
-from tico.experimental.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 # ────────────────────────────────────────────────────────────

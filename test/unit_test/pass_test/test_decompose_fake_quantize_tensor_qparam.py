@@ -13,16 +13,14 @@
 # limitations under the License.
 
 import torch
-from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
-from tico.experimental.quantization.passes.remove_weight_dequant_op import (
-    RemoveWeightDequantOp,
-)
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
 from tico.passes.decompose_fake_quantize_tensor_qparams import (
     DecomposeFakeQuantizeTensorQParams,
 )
 from tico.passes.fill_meta_val import FillMetaVal
+from tico.quantization.passes.fold_quant_ops import FoldQuantOps
+from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.serialize.quant_param import QPARAM_KEY
 
 from test.utils.helper import num_of_ops

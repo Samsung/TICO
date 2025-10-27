@@ -17,8 +17,8 @@ import unittest
 
 import torch
 
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
 )
 

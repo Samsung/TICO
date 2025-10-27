@@ -27,21 +27,19 @@ import unittest
 from typing import Callable, List, Tuple, Type
 
 import torch
-from tico.experimental.quantization.config.ptq import PTQConfig
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
-from tico.experimental.quantization.wrapq.wrappers.quant_elementwise import (
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
+from tico.quantization.wrapq.wrappers.quant_elementwise import (
     QuantElementwise,
     QuantGELU,
     QuantReLU,
     QuantSigmoid,
     QuantTanh,
 )
-from tico.experimental.quantization.wrapq.wrappers.quant_module_base import (
-    QuantModuleBase,
-)
-from tico.experimental.quantization.wrapq.wrappers.registry import lookup
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.registry import lookup
 
 ACTIVATIONS: List[
     Tuple[

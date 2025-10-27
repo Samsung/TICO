@@ -16,10 +16,8 @@ import unittest
 from typing import List
 
 import torch
-from tico.experimental.quantization.passes.propagate_qparam_backward import (
-    PropagateQParamBackward,
-)
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
+from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs
 

@@ -3,14 +3,12 @@ import unittest
 from typing import Any, Optional
 
 import torch
-from tico.experimental.quantization.algorithm.pt2e.annotation.config import (
-    QuantizationConfig,
-)
+from tico.quantization.algorithm.pt2e.annotation.config import QuantizationConfig
 
-from tico.experimental.quantization.algorithm.pt2e.annotation.op.adaptive_avg_pool2d import (
+from tico.quantization.algorithm.pt2e.annotation.op.adaptive_avg_pool2d import (
     _annotate_adaptive_avg_pool2d,
 )
-from tico.experimental.quantization.algorithm.pt2e.utils import get_input_act_qspec
+from tico.quantization.algorithm.pt2e.utils import get_input_act_qspec
 from torch.ao.quantization.quantizer import (
     QuantizationAnnotation,
     SharedQuantizationSpec,
@@ -65,7 +63,7 @@ class TestAnnotateAdaptiveAvgPool2d(unittest.TestCase):
         )
 
         self.quantization_config = QuantizationConfig(
-            input_activation=input_qspec,
+            input_activation=input_qspec,  # type: ignore[arg-type]
             output_activation=None,
             weight=None,
             bias=None,

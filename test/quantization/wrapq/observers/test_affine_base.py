@@ -16,12 +16,10 @@ import unittest
 
 import torch
 
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.observers.affine_base import (
-    AffineObserverBase,
-)
-from tico.experimental.quantization.wrapq.qscheme import QScheme
-from tico.experimental.quantization.wrapq.utils.reduce_utils import channelwise_minmax
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.utils.reduce_utils import channelwise_minmax
 
 
 class _MinMaxLikeObserver(AffineObserverBase):

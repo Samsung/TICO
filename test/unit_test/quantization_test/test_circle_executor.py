@@ -4,9 +4,7 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.export
 
-from tico.experimental.quantization.evaluation.executor.circle_executor import (
-    CircleExecutor,
-)
+from tico.quantization.evaluation.executor.circle_executor import CircleExecutor
 from tico.serialize.circle_serializer import build_circle
 from tico.utils.model import CircleModel
 
@@ -30,12 +28,8 @@ class TestCircleExecutor(unittest.TestCase):
             CircleExecutor()
 
     @patch("pathlib.Path.is_file")
-    @patch(
-        "tico.experimental.quantization.evaluation.executor.circle_executor.run_bash_cmd"
-    )
-    @patch(
-        "tico.experimental.quantization.evaluation.executor.circle_executor.CircleModel.load"
-    )
+    @patch("tico.quantization.evaluation.executor.circle_executor.run_bash_cmd")
+    @patch("tico.quantization.evaluation.executor.circle_executor.CircleModel.load")
     def test_compile_and_run_inference(self, mock_load, mock_run_bash, mock_is_file):
         mock_is_file.return_value = True
 
@@ -62,7 +56,7 @@ class TestCircleExecutor(unittest.TestCase):
 
         # Check the result
         self.assertEqual(len(result), 1)
-        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3])))
+        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3])))  # type: ignore[arg-type]
 
     @patch("pathlib.Path.is_file")
     def test_run_inference_before_compile_raises_error(self, mock_is_file):
@@ -72,9 +66,7 @@ class TestCircleExecutor(unittest.TestCase):
             executor.run_inference([])
 
     @patch("pathlib.Path.is_file")
-    @patch(
-        "tico.experimental.quantization.evaluation.executor.circle_executor.CircleModel.load"
-    )
+    @patch("tico.quantization.evaluation.executor.circle_executor.CircleModel.load")
     def test_run_inference_with_single_tensor_output(self, mock_load, mock_is_file):
         mock_is_file.return_value = True
 
@@ -95,4 +87,4 @@ class TestCircleExecutor(unittest.TestCase):
 
         # Check the result
         self.assertEqual(len(result), 1)
-        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3])))
+        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3])))  # type: ignore[arg-type]

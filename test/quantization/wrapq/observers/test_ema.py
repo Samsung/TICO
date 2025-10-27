@@ -15,9 +15,9 @@
 import unittest
 
 import torch
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.observers.ema import EMAObserver
-from tico.experimental.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.ema import EMAObserver
+from tico.quantization.wrapq.qscheme import QScheme
 
 
 class TestEMAObserver(unittest.TestCase):

@@ -20,20 +20,6 @@ import torch
 from torch.export import export, ExportedProgram
 
 from tico.config import CompileConfigBase, get_default_config
-from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
-from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch import (
-    InsertQuantizeOnDtypeMismatch,
-)
-from tico.experimental.quantization.passes.propagate_qparam_backward import (
-    PropagateQParamBackward,
-)
-from tico.experimental.quantization.passes.propagate_qparam_forward import (
-    PropagateQParamForward,
-)
-from tico.experimental.quantization.passes.quantize_bias import QuantizeBias
-from tico.experimental.quantization.passes.remove_weight_dequant_op import (
-    RemoveWeightDequantOp,
-)
 from tico.passes.cast_aten_where_arg_type import CastATenWhereArgType
 from tico.passes.cast_clamp_mixed_type_args import CastClampMixedTypeArgs
 from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
@@ -74,6 +60,14 @@ from tico.passes.remove_redundant_slice import RemoveRedundantSlice
 from tico.passes.remove_redundant_to_copy import RemoveRedundantToCopy
 from tico.passes.restore_linear import RestoreLinear
 from tico.passes.segment_index_select import SegmentIndexSelectConst
+from tico.quantization.passes.fold_quant_ops import FoldQuantOps
+from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
+    InsertQuantizeOnDtypeMismatch,
+)
+from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
+from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
+from tico.quantization.passes.quantize_bias import QuantizeBias
+from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.serialize.circle_serializer import build_circle
 from tico.serialize.operators.node_visitor import get_support_targets
 from tico.utils import logging

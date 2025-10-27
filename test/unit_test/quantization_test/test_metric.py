@@ -15,7 +15,7 @@
 import unittest
 
 import torch
-from tico.experimental.quantization.evaluation.metric import (
+from tico.quantization.evaluation.metric import (
     compute_max_abs_diff,
     compute_peir,
     MetricCalculator,

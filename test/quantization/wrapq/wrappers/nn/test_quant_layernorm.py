@@ -17,15 +17,11 @@ import unittest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from tico.experimental.quantization.config.ptq import PTQConfig
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.observers.affine_base import (
-    AffineObserverBase,
-)
-from tico.experimental.quantization.wrapq.wrappers.nn.quant_layernorm import (
-    QuantLayerNorm,
-)
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.wrappers.nn.quant_layernorm import QuantLayerNorm
 
 
 class TestQuantLayerNorm(unittest.TestCase):

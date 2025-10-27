@@ -15,7 +15,7 @@
 import unittest
 
 import torch
-from tico.experimental.quantization.wrapq.utils.reduce_utils import channelwise_minmax
+from tico.quantization.wrapq.utils.reduce_utils import channelwise_minmax
 
 
 class TestChannelwiseMinMax(unittest.TestCase):

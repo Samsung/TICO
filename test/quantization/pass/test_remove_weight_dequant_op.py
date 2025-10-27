@@ -15,11 +15,9 @@
 import unittest
 
 import torch
-from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config.pt2e import PT2EConfig
-from tico.experimental.quantization.passes.remove_weight_dequant_op import (
-    RemoveWeightDequantOp,
-)
+from tico.quantization import convert, prepare
+from tico.quantization.config.pt2e import PT2EConfig
+from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 
 from test.modules.op.linear import SimpleLinear
 from test.utils.helper import num_of_ops

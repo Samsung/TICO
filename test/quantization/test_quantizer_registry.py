@@ -17,13 +17,10 @@ import types
 import unittest
 from unittest.mock import patch
 
-from tico.experimental.quantization.config.base import BaseConfig
-from tico.experimental.quantization.quantizer import BaseQuantizer
+from tico.quantization.config.base import BaseConfig
+from tico.quantization.quantizer import BaseQuantizer
 
-from tico.experimental.quantization.quantizer_registry import (
-    get_quantizer,
-    register_quantizer,
-)
+from tico.quantization.quantizer_registry import get_quantizer, register_quantizer
 
 
 # ---------- Helper classes used only in tests ----------
@@ -133,14 +130,14 @@ class QuantizerRegistryTest(unittest.TestCase):
     def test_lazy_import_by_naming_convention_success(self):
         """
         get_quantizer should import:
-          tico.experimental.quantization.algorithm.{name}.quantizer
+          tico.quantization.algorithm.{name}.quantizer
         and find the registered quantizer afterward.
         """
         algo_name = "fakealgo"
         cfg = _LazyConfig(algo_name)
 
         # Install a fake module that registers upon import
-        module_name = f"tico.experimental.quantization.algorithm.{algo_name}.quantizer"
+        module_name = f"tico.quantization.algorithm.{algo_name}.quantizer"
 
         _install_fake_quantizer_module(
             module_name, config_cls=_LazyConfig, quantizer_cls=_AnotherDummyQuantizer
@@ -171,7 +168,7 @@ class QuantizerRegistryTest(unittest.TestCase):
         """
         algo_name = "importable_but_unregistered"
         cfg = _UnregisteredImportConfig(algo_name)
-        module_name = f"tico.experimental.quantization.algorithm.{algo_name}.quantizer"
+        module_name = f"tico.quantization.algorithm.{algo_name}.quantizer"
 
         # Create a module that does NOT register anything
         mod = types.ModuleType(module_name)

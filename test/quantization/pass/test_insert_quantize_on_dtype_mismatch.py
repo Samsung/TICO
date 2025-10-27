@@ -15,10 +15,10 @@
 import unittest
 
 import torch
-from tico.experimental.quantization.passes.insert_quantize_on_dtype_mismatch import (
+from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
+from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
-from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.errors import NotYetSupportedError
 

@@ -4,7 +4,7 @@ include =
 omit =
     ; From external sources
     tico/utils/mx/*
-    tico/experimental/quantization/algorithm/gptq/*
+    tico/quantization/algorithm/gptq/*
 
 [report]
 exclude_lines =

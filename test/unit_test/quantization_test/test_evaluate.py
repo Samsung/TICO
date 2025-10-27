@@ -18,10 +18,10 @@ from typing import Any
 
 import tico
 import torch
-from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config.pt2e import PT2EConfig
-from tico.experimental.quantization.evaluation.backend import BACKEND
-from tico.experimental.quantization.evaluation.evaluate import evaluate
+from tico.quantization import convert, prepare
+from tico.quantization.config.pt2e import PT2EConfig
+from tico.quantization.evaluation.backend import BACKEND
+from tico.quantization.evaluation.evaluate import evaluate
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 

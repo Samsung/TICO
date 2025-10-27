@@ -15,9 +15,9 @@
 import unittest
 
 import torch
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.observers.minmax import MinMaxObserver
-from tico.experimental.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.qscheme import QScheme
 
 
 class TestMinMaxObserver(unittest.TestCase):

@@ -14,7 +14,7 @@
 
 import unittest
 
-from tico.experimental.quantization.wrapq.dtypes import DType, INT8, UINT4
+from tico.quantization.wrapq.dtypes import DType, INT8, UINT4
 
 
 class TestDType(unittest.TestCase):

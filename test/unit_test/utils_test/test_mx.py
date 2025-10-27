@@ -15,7 +15,7 @@
 import unittest
 
 import torch
-from tico.experimental.quantization.evaluation.metric import compute_peir
+from tico.quantization.evaluation.metric import compute_peir
 from tico.utils.mx.mx_ops import quantize_mx
 
 from torch.export import export

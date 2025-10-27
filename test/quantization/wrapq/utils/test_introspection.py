@@ -18,15 +18,15 @@ import unittest
 import torch
 import torch.nn as nn
 
-from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config.ptq import PTQConfig
-from tico.experimental.quantization.config.smoothquant import SmoothQuantConfig
-from tico.experimental.quantization.wrapq.utils.introspection import (
+from tico.quantization import convert, prepare
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.smoothquant import SmoothQuantConfig
+from tico.quantization.wrapq.utils.introspection import (
     build_fqn_map,
     compare_layer_outputs,
     save_fp_outputs,
 )
-from tico.experimental.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 

@@ -16,10 +16,10 @@ import unittest
 
 import torch
 import torch.nn as nn
-from tico.experimental.quantization.config.ptq import PTQConfig
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.wrappers.nn.quant_silu import QuantSiLU
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.nn.quant_silu import QuantSiLU
 
 
 class TestQuantSiLU(unittest.TestCase):

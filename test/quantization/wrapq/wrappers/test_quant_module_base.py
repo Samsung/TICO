@@ -35,19 +35,15 @@ import math, torch, unittest
 from typing import Dict
 
 import torch.nn as nn
-from tico.experimental.quantization.config.ptq import PTQConfig
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.mode import Mode
-from tico.experimental.quantization.wrapq.observers.affine_base import (
-    AffineObserverBase,
-)
-from tico.experimental.quantization.wrapq.observers.base import ObserverBase
-from tico.experimental.quantization.wrapq.observers.ema import EMAObserver
-from tico.experimental.quantization.wrapq.observers.minmax import MinMaxObserver
-from tico.experimental.quantization.wrapq.qscheme import QScheme
-from tico.experimental.quantization.wrapq.wrappers.quant_module_base import (
-    QuantModuleBase,
-)
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.ema import EMAObserver
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 # concrete toy subclass

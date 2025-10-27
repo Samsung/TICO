@@ -15,13 +15,11 @@
 import unittest
 
 import torch
-from tico.experimental.quantization import convert, prepare
-from tico.experimental.quantization.config.pt2e import PT2EConfig
-from tico.experimental.quantization.passes.fold_quant_ops import FoldQuantOps
-from tico.experimental.quantization.passes.propagate_qparam_forward import (
-    PropagateQParamForward,
-)
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
+from tico.quantization import convert, prepare
+from tico.quantization.config.pt2e import PT2EConfig
+from tico.quantization.passes.fold_quant_ops import FoldQuantOps
+from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.torch_compat import export_produces_slice
 

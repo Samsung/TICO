@@ -19,14 +19,14 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 import torch.nn as nn
-from tico.experimental.quantization.evaluation.backend import BACKEND
+from tico.quantization.evaluation.backend import BACKEND
 
-from tico.experimental.quantization.evaluation.evaluate import (
+from tico.quantization.evaluation.evaluate import (
     _convert_to_torch_tensor,
     _validate_input_data,
     evaluate,
 )
-from tico.experimental.quantization.evaluation.utils import (
+from tico.quantization.evaluation.utils import (
     dequantize,
     ensure_list,
     find_invalid_types,
@@ -34,14 +34,12 @@ from tico.experimental.quantization.evaluation.utils import (
     plot_two_outputs,
     quantize,
 )
-from tico.experimental.quantization.wrapq.utils.introspection import (
+from tico.quantization.wrapq.utils.introspection import (
     build_fqn_map,
     compare_layer_outputs,
     save_fp_outputs,
 )
-from tico.experimental.quantization.wrapq.wrappers.quant_module_base import (
-    QuantModuleBase,
-)
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.utils.model import CircleModel
 
 
@@ -113,8 +111,8 @@ class TestEvaluateFunctions(unittest.TestCase):
             evaluate(nn.Linear(3, 2), Mock(spec=CircleModel), "invalid_backend")  # type: ignore[arg-type]
         self.assertIn("Invalid backend", str(context.exception))
 
-    @patch("tico.experimental.quantization.evaluation.evaluate.get_graph_input_output")
-    @patch("tico.experimental.quantization.evaluation.evaluate.BACKEND_TO_EXECUTOR")
+    @patch("tico.quantization.evaluation.evaluate.get_graph_input_output")
+    @patch("tico.quantization.evaluation.evaluate.BACKEND_TO_EXECUTOR")
     def test_evaluate_invalid_mode(self, mock_backend_executor, mock_get_io):
         """Test evaluate with invalid mode"""
         # Setup mocks to avoid Circle model parsing and executor issues
@@ -230,7 +228,7 @@ class TestEvaluationUtils(unittest.TestCase):
         with self.assertRaises(AssertionError):
             dequantize(data, scale, zero_point, dtype)
 
-    @patch("tico.experimental.quantization.evaluation.utils.circle.Model.Model")
+    @patch("tico.quantization.evaluation.utils.circle.Model.Model")
     def test_get_graph_input_output(self, mock_circle_model):
         """Test get_graph_input_output function"""
         # Setup mocks
@@ -451,7 +449,7 @@ class TestIntrospectionUtils(unittest.TestCase):
         for handle in handles:
             handle.remove()
 
-    @patch("tico.experimental.quantization.wrapq.utils.introspection.MetricCalculator")
+    @patch("tico.quantization.wrapq.utils.introspection.MetricCalculator")
     @patch("builtins.print")
     def test_compare_layer_outputs_print_mode(self, mock_print, mock_metric_calculator):
         """Test compare_layer_outputs in print mode"""
@@ -500,7 +498,7 @@ class TestIntrospectionUtils(unittest.TestCase):
         for handle in handles:
             handle.remove()
 
-    @patch("tico.experimental.quantization.wrapq.utils.introspection.MetricCalculator")
+    @patch("tico.quantization.wrapq.utils.introspection.MetricCalculator")
     def test_compare_layer_outputs_collect_mode(self, mock_metric_calculator):
         """Test compare_layer_outputs in collect mode"""
 

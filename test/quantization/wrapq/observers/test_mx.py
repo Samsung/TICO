@@ -17,9 +17,9 @@ from unittest.mock import patch
 
 import torch
 
-from tico.experimental.quantization.wrapq.dtypes import DType
-from tico.experimental.quantization.wrapq.observers.mx import MXObserver
-from tico.experimental.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
 
 
 class TestMXObserver(unittest.TestCase):
@@ -56,7 +56,7 @@ class TestMXObserver(unittest.TestCase):
         )
         x = torch.randn(4, 5)
 
-        patch_path = "tico.experimental.quantization.wrapq.observers.mx.quantize_mx"
+        patch_path = "tico.quantization.wrapq.observers.mx.quantize_mx"
         with patch(patch_path) as qmx:
             # Return a distinctive tensor so we can assert passthrough
             qmx.side_effect = lambda input_, **kwargs: input_ * 2
@@ -83,7 +83,7 @@ class TestMXObserver(unittest.TestCase):
         obs.enabled = False
         x = torch.randn(3, 3)
 
-        patch_path = "tico.experimental.quantization.wrapq.observers.mx.quantize_mx"
+        patch_path = "tico.quantization.wrapq.observers.mx.quantize_mx"
         with patch(patch_path) as qmx:
             qmx.side_effect = lambda input_, **kwargs: input_ + 1.0
             y = obs.fake_quant(x)
@@ -102,7 +102,7 @@ class TestMXObserver(unittest.TestCase):
         )
         x = torch.randn(2, 3, 4)
 
-        patch_path = "tico.experimental.quantization.wrapq.observers.mx.quantize_mx"
+        patch_path = "tico.quantization.wrapq.observers.mx.quantize_mx"
         with patch(patch_path) as qmx:
             qmx.side_effect = lambda input_, **kwargs: input_
             _ = obs.fake_quant(x)
