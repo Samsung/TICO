@@ -1,6 +1,6 @@
-## quantization
+# quantization
 
-### Overview
+## Overview
 
 The _quantization_ module provides a unified, modular interface for quantizing large language models (LLMs). 
 Its primary goal is to simplify the process of preparing, calibrating, and converting models into their 
@@ -28,7 +28,7 @@ At the top level, the module exposes two primary public interface functions: _pr
 This design ensures that users interact only with the high‑level functions and configuration objects, 
 while the internal details of each quantization algorithm are encapsulated within dedicated quantizer classes.
 
-### Purpose
+## Purpose
 
 The module is designed to:
 - Simplify Model Quantization: Provide a simple, high-level API that abstracts the calibration and 
@@ -38,46 +38,36 @@ The module is designed to:
 - Promote Modularity and Extensibility: Offer a clear separation between the public API, configuration 
   classes, and internal quantizer implementations, ensuring the module is easy to extend and maintain.
 
-### Usage
+## Directory Structure
 
-Below is an example workflow demonstrating how to use the public interface to prepare and convert a 
- model for quantization.
+The module is composed of two main layers:
 
-```python
-from tico.quantization import prepare, convert, PT2EConfig, GPTQConfig
+- Algorithm layer (quantization/algorithm/)
+  - Implements algorithm-specific quantization logics (e.g., GPTQ, PT2E).
+- Infrastructure layer (quantization/wrapq/)
+  - Provides a generic, wrapper-based quantization backend shared across algorithms.
 
-# Load your pre-trained PyTorch model
-model = load_pytorch_model()
+Ready-to-run examples can be found in `quantization/wrapq/examples/`.
 
-# Example for Activation Quantization using PT2E:
-activation_config = PT2EConfig()
-
-# Prepare the model with example inputs separated into args and kwargs.
-q_model = prepare(
-    model,
-    activation_config,
-    args=(input_tensor,),
-    kwargs={'kwarg': value},
-    inplace=False
-)
-
-# Perform calibration using your calibration routine (e.g., run_fn(model)).
-run_fn(q_model)
-
-# Convert the model after calibration.
-q_model = convert(q_model, activation_config, inplace=False)
-
-# Example for Weight Quantization using GPTQ:
-weight_config = GPTQConfig()
-prepare(q_model, weight_config)
-run_fn(q_model)
-convert(q_model, weight_config)
-
-# Evaluate the quantized model
-eval(q_model)
+```bash
+quantization/
+├── algorithm/        # Algorithm-specific quantizers
+│   ├── gptq/
+│   ├── pt2e/
+│   └── ...
+├── config/           # Configuration definitions
+├── evaluation/       # Evaluation utilities
+├── passes/           # Graph-level passes and transformations
+└── wrapq/            # Wrapper-based quantization infrastructure
+    ├── examples
+    ├── observers
+    ├── utils
+    └── wrappers/
+        ├── llama/
+        └── nn/
 ```
 
-### Contributing: Adding a New Algorithm
+## Contributing: Adding a New Algorithm
 
 We welcome contributions that enhance the module by adding support for new quantization algorithms. 
 If you are interested in contributing a new algorithm, please follow these steps:
