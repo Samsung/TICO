@@ -13,6 +13,7 @@ designed for optimized on-device neural network inference.
   - [From torch module](#from-torch-module)
   - [From .pt2](#from-pt2)
   - [Running circle models directly in Python](#running-circle-models-directly-in-python)
+  - [Quantization](#quantization)
 
 ### For Developers
 
@@ -170,6 +171,48 @@ circle_model = tico.convert(torch_module, example_inputs)
 circle_model(*example_inputs)
 # numpy.ndarray([2., 2., 2., 2.], dtype=float32)
 ```
+
+### Quantization
+
+The `tico.quantization` module provides a unified and modular interface for quantizing
+ large language models (LLMs) and other neural networks.
+ 
+It introduces a simple two-step workflow — **prepare** and **convert** — that
+ abstracts the details of different quantization algorithms.
+
+#### Basic Usage
+
+```python
+from tico.quantization import prepare, convert
+from tico.quantization.config.gptq import GPTQConfig
+import torch
+import torch.nn as nn
+
+class LinearModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(8, 8)
+
+    def forward(self, x):
+        return self.linear(x)
+
+model = LinearModel().eval()
+
+# 1. Prepare for quantization
+quant_config = GPTQConfig()
+prepared_model = prepare(model, quant_config)
+
+# 2. Calibration
+for d in dataset:
+    prepared_model(d)
+
+# 3. Apply GPTQ
+quantized_model = convert(prepared_model, quant_config)
+```
+
+For detailed documentation, design notes, and contributing guidelines, 
+see [tico/quantization/README.md](./tico/quantization/README.md).
+
 
 ## For Developers
 
