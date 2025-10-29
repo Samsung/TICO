@@ -34,9 +34,9 @@ def load_tests(loader, tests, pattern):
     For exact model matching, use exact directory name instead of pattern matching.
     """
     suite = TestSuite()
-    
+
     test_model = os.environ.get("CCEX_TEST_MODEL")
-    
+
     if test_model:
         # Exact model matching - use this directory only
         model_dir = str(testdir) + "/modules/model"
@@ -46,10 +46,12 @@ def load_tests(loader, tests, pattern):
             raise Exception(
                 f"No test directory matching '{test_model}' found in {testdir}/modules/model"
             )
-    elif hasattr(loader, 'testNamePatterns') and loader.testNamePatterns:
+    elif hasattr(loader, "testNamePatterns") and loader.testNamePatterns:
         # Fall back to pattern matching for backward compatibility
         pattern_name = loader.testNamePatterns[0]
-        matches = fnmatch.filter(os.listdir(str(testdir) + "/modules/model"), pattern_name)
+        matches = fnmatch.filter(
+            os.listdir(str(testdir) + "/modules/model"), pattern_name
+        )
     else:
         # No filtering specified - return empty suite
         return suite
