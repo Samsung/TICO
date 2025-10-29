@@ -31,15 +31,32 @@ def load_tests(loader, tests, pattern):
     https://docs.python.org/ko/3.13/library/unittest.html#load-tests-protocol
 
     Load only tests which matches the pattern given by the user, among them which are defined in `model` directory.
+    For exact model matching, use exact directory name instead of pattern matching.
     """
     suite = TestSuite()
-    matches = fnmatch.filter(
-        os.listdir(str(testdir) + "/modules/model"), loader.testNamePatterns[0]
-    )
+    
+    test_model = os.environ.get("CCEX_TEST_MODEL")
+    
+    if test_model:
+        # Exact model matching - use this directory only
+        model_dir = str(testdir) + "/modules/model"
+        if os.path.exists(os.path.join(model_dir, test_model)):
+            matches = [test_model]
+        else:
+            raise Exception(
+                f"No test directory matching '{test_model}' found in {testdir}/modules/model"
+            )
+    elif hasattr(loader, 'testNamePatterns') and loader.testNamePatterns:
+        # Fall back to pattern matching for backward compatibility
+        pattern_name = loader.testNamePatterns[0]
+        matches = fnmatch.filter(os.listdir(str(testdir) + "/modules/model"), pattern_name)
+    else:
+        # No filtering specified - return empty suite
+        return suite
 
     if len(matches) == 0:
         raise Exception(
-            f"No test files matching '{loader.testNamePatterns[0]}' found in {testdir}/modules/model"
+            f"No test files matching '{test_model or (loader.testNamePatterns[0] if hasattr(loader, 'testNamePatterns') and loader.testNamePatterns else 'any')}' found in {testdir}/modules/model"
         )
 
     for match in matches:

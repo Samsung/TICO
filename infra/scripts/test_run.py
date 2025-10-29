@@ -103,10 +103,12 @@ def main():
     elif args.model:
         print(f"RUN unit tests for model {args.model} ...")
 
-        cmd = f"python3 -m unittest test.pt2_to_circle_test.test_model -k {args.model} -v".split(
-            " "
-        )
-        subprocess.run(cmd, check=True)
+        # Set environment variable for exact model matching
+        env = os.environ.copy()
+        env["CCEX_TEST_MODEL"] = args.model
+        
+        cmd = f"python3 -m unittest test.pt2_to_circle_test.test_model -v".split(" ")
+        subprocess.run(cmd, check=True, env=env)
     else:
         assert False, "Cannot reach here"
 
