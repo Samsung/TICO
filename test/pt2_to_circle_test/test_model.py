@@ -37,23 +37,12 @@ def load_tests(loader, tests, pattern):
 
     test_model = os.environ.get("CCEX_TEST_MODEL")
 
-    if test_model:
-        matches = fnmatch.filter(
-            os.listdir(str(testdir) + "/modules/model"), test_model
-        )
-    elif hasattr(loader, "testNamePatterns") and loader.testNamePatterns:
-        # Fall back to pattern matching for backward compatibility
-        pattern_name = loader.testNamePatterns[0]
-        matches = fnmatch.filter(
-            os.listdir(str(testdir) + "/modules/model"), pattern_name
-        )
-    else:
-        # No filtering specified - return empty suite
-        return suite
+    assert test_model
+    matches = fnmatch.filter(os.listdir(str(testdir) + "/modules/model"), test_model)
 
     if len(matches) == 0:
         raise Exception(
-            f"No test files matching '{test_model or (loader.testNamePatterns[0] if hasattr(loader, 'testNamePatterns') and loader.testNamePatterns else 'any')}' found in {testdir}/modules/model"
+            f"No test files matching {test_model} found in {testdir}/modules/model"
         )
 
     for match in matches:
