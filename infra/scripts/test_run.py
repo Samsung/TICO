@@ -103,7 +103,7 @@ def main():
     elif args.model:
         print(f"RUN unit tests for model {args.model} ...")
 
-        # Set environment variable for exact model matching
+        # Set environment variable for model matching
         env = os.environ.copy()
         env["CCEX_TEST_MODEL"] = args.model
 
