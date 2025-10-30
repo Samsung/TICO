@@ -27,11 +27,31 @@ import torch.nn as nn
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+
+def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
+
+    cur_weights = W.clone()
+    mults = torch.pow(torch.diag(Hinv), -1)
+    Hinv_U = torch.triu(Hinv, diagonal=1)
+
+    init_weights = W.clone()
+    for _ in range(max_num_of_iters):
+        cur_Q = quantize(cur_weights, scale, zero, maxq)
+
+        d_W = torch.mul((cur_weights - cur_Q), mults)
+        cur_weights = init_weights - torch.matmul(d_W, Hinv_U)
+        del d_W, cur_Q
+        d_W = cur_Q = None
+
+    del init_weights
+    init_weights = None
+
+    cur_Q = quantize(cur_weights, scale, zero, maxq)
+
+    return cur_Q, cur_weights
 
 
-class GPTQ:
+class FPI_GPTQ:
     def __init__(self, layer):
         self.layer = layer
         self.dev = self.layer.weight.device
@@ -76,11 +96,7 @@ class GPTQ:
 
     def fasterquant(
         self,
-        blocksize=128,
         percdamp=0.01,
-        groupsize=-1,
-        actorder=False,
-        static_groups=False,
         verbose=False,
     ):
         W = self.layer.weight.data.clone()
@@ -100,22 +116,12 @@ class GPTQ:
         H[dead, dead] = 1
         W[:, dead] = 0
 
-        if static_groups:
-            import copy
+        # actorder
+        perm = torch.argsort(torch.diag(H), descending=True)
+        W = W[:, perm]
+        H = H[perm][:, perm]
+        invperm = torch.argsort(perm)
 
-            groups = []
-            for i in range(0, self.columns, groupsize):
-                quantizer = copy.deepcopy(self.quantizer)
-                quantizer.find_params(W[:, i : (i + groupsize)], weight=True)
-                groups.append(quantizer)
-
-        if actorder:
-            perm = torch.argsort(torch.diag(H), descending=True)
-            W = W[:, perm]
-            H = H[perm][:, perm]
-            invperm = torch.argsort(perm)
-
-        Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
         damp = percdamp * torch.mean(torch.diag(H))
@@ -127,59 +133,21 @@ class GPTQ:
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
 
-        assert isinstance(Hinv, torch.Tensor)
-        for i1 in range(0, self.columns, blocksize):
-            i2 = min(i1 + blocksize, self.columns)
-            count = i2 - i1
-
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
-
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
-
-                if groupsize != -1:
-                    if not static_groups:
-                        if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(
-                                W[:, (i1 + i) : (i1 + i + groupsize)], weight=True
-                            )
-                    else:
-                        idx: torch.Tensor | int = i1 + i
-                        if actorder:
-                            idx = perm[idx]
-                        self.quantizer = groups[idx // groupsize]
-
-                q = quantize(
-                    w.unsqueeze(1),
-                    self.quantizer.scale,
-                    self.quantizer.zero,
-                    self.quantizer.maxq,
-                ).flatten()
-                Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
-
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
-
-            Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
-
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+        Q, W = iterate_GPTQ(
+            self.quantizer.scale,
+            self.quantizer.zero,
+            self.quantizer.maxq,
+            W,
+            Hinv=Hinv,
+            max_num_of_iters=50,
+        )
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         if verbose:
             print("time %.2f" % (time.time() - tick))
-            print("error", torch.sum(Losses).item())
 
-        if actorder:
-            Q = Q[:, invperm]
+        Q = Q[:, invperm]
 
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype

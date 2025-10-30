@@ -71,7 +71,8 @@ class PTQConfig(BaseConfig):
     ```
     """
 
-    default_dtype: DType = DType.uint(8)
+    # just for testing
+    default_dtype: DType = DType.int(16)  # DType.uint(8)
     default_observer: Type[ObserverBase] = MinMaxObserver
     default_qscheme: QScheme = QScheme.PER_TENSOR_ASYMM
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)

@@ -31,6 +31,23 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
 
+def get_conv2d_weights_for_depthwise_conv(layer):
+    assert layer.groups == layer.in_channels
+    assert layer.weight.shape[1] == 1
+    W_conv = torch.zeros(
+        (
+            layer.weight.shape[0],
+            layer.weight.shape[0],
+            layer.weight.shape[-2],
+            layer.weight.shape[-1],
+        )
+    )
+
+    for i in range(layer.out_channels):
+        W_conv[i, i] = layer.weight[i, 0]
+    return W_conv
+
+
 class GPTQ:
     def __init__(self, layer):
         self.layer = layer
