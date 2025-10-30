@@ -38,20 +38,9 @@ def load_tests(loader, tests, pattern):
     test_model = os.environ.get("CCEX_TEST_MODEL")
 
     if test_model:
-        if "*" in test_model or "?" in test_model or "[" in test_model:
-            # Pattern matching with wildcards
-            matches = fnmatch.filter(
-                os.listdir(str(testdir) + "/modules/model"), test_model
-            )
-        else:
-            # Exact model matching
-            model_dir = str(testdir) + "/modules/model"
-            if os.path.exists(os.path.join(model_dir, test_model)):
-                matches = [test_model]
-            else:
-                raise Exception(
-                    f"No test directory matching '{test_model}' found in {testdir}/modules/model"
-                )
+        matches = fnmatch.filter(
+            os.listdir(str(testdir) + "/modules/model"), test_model
+        )
     elif hasattr(loader, "testNamePatterns") and loader.testNamePatterns:
         # Fall back to pattern matching for backward compatibility
         pattern_name = loader.testNamePatterns[0]
