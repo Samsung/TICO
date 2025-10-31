@@ -303,7 +303,8 @@ $ pip install -r test/modules/model/<model_name>/requirements.txt
 # Run test for a single model
 $ ./ccex test -m <model_name>
 # Run models whose names contain "Llama" (e.g., Llama, LlamaDecoderLayer, LlamaWithGQA, etc.)
-$ ./ccex test -m Llama*
+# Note that you should use quotes for the wildcard(*) pattern
+$ ./ccex test -m "Llama*"
 ```
 
 For example, to run a single model
