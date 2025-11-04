@@ -41,8 +41,7 @@ attention.llama(
     Tensor attention_mask,
     Tensor past_key,
     Tensor past_value,
-    Tensor cache_position,
-    int layer_idx
+    Tensor cache_position
 ) -> Tensor
 """
 )
@@ -64,7 +63,6 @@ def attention_llama(*args, **kwargs):
         past_key,
         past_value,
         cache_position,
-        layer_idx,
     ) = args
     return hidden_states
 
@@ -105,7 +103,6 @@ def llama_attention_forward_adapter(
             key_cache[self.layer_idx],
             value_cache[self.layer_idx],  # Same to value_cache
             cache_position,
-            self.layer_idx,
         ),
         None,
     )
@@ -136,7 +133,6 @@ class AttentionVisitor(NodeVisitor):
             past_key,
             past_value,
             cache_position,
-            layer_idx,
         ) = node.args
 
         op_index = get_op_index(
@@ -153,9 +149,6 @@ class AttentionVisitor(NodeVisitor):
         operator.builtinOptionsType = (
             circle.BuiltinOptions.BuiltinOptions.AttentionOptions
         )
-        option = circle.AttentionOptions.AttentionOptionsT()
-        option.layer_idx = layer_idx
-
-        operator.builtinOptions = option
+        operator.builtinOptions = circle.AttentionOptions.AttentionOptionsT()
 
         return operator
