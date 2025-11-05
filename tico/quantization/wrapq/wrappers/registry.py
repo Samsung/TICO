@@ -26,6 +26,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.nn.quant_layernorm",
     "tico.quantization.wrapq.wrappers.nn.quant_linear",
     "tico.quantization.wrapq.wrappers.nn.quant_silu",
+    "tico.quantization.wrapq.wrappers.transformers.quant_siluactivation",
     # llama
     "tico.quantization.wrapq.wrappers.llama.quant_attn",
     "tico.quantization.wrapq.wrappers.llama.quant_decoder_layer",
