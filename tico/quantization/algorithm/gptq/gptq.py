@@ -36,6 +36,11 @@ class GPTQ:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
+        if isinstance(self.layer, nn.Conv2d):
+            W = W.flatten(1)
+
+        if isinstance(self.layer, nn.Conv1d):
+            W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H: Optional[torch.Tensor] = torch.zeros(
@@ -48,10 +53,22 @@ class GPTQ:
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
-        if isinstance(self.layer, nn.Linear):
-            if len(inp.shape) == 3:
+        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, nn.Conv1d):
+            if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
+        if isinstance(self.layer, nn.Conv2d):
+            unfold = nn.Unfold(
+                self.layer.kernel_size,
+                dilation=self.layer.dilation,
+                padding=self.layer.padding,
+                stride=self.layer.stride,
+            )
+
+            inp = unfold(inp)
+            inp = inp.permute([1, 0, 2])
+            inp = inp.flatten(1)
+
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
@@ -67,6 +84,10 @@ class GPTQ:
         verbose=False,
     ):
         W = self.layer.weight.data.clone()
+        if isinstance(self.layer, nn.Conv2d):
+            W = W.flatten(1)
+        if isinstance(self.layer, nn.Conv1d):
+            W = W.t()
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():
