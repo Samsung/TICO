@@ -23,14 +23,17 @@ _WRAPPERS: Dict[Type[nn.Module], Type[QuantModuleBase]] = {}
 _IMPORT_ONCE = False
 _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.quant_elementwise",
+    ## nn ##
     "tico.quantization.wrapq.wrappers.nn.quant_layernorm",
     "tico.quantization.wrapq.wrappers.nn.quant_linear",
+    # This includes not only `nn.SiLU` but also `SiLUActivation` from transformers
+    # as they are same operation.
     "tico.quantization.wrapq.wrappers.nn.quant_silu",
-    # llama
+    ## llama ##
     "tico.quantization.wrapq.wrappers.llama.quant_attn",
     "tico.quantization.wrapq.wrappers.llama.quant_decoder_layer",
     "tico.quantization.wrapq.wrappers.llama.quant_mlp",
-    # fairseq
+    ## fairseq ##
     "tico.quantization.wrapq.wrappers.fairseq.quant_decoder_layer",
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder",
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder_layer",

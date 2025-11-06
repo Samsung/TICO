@@ -19,14 +19,15 @@ import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
-from tico.quantization.wrapq.wrappers.registry import register
+from tico.quantization.wrapq.wrappers.registry import try_register
 
 
-@register(nn.SiLU)
+@try_register("torch.nn.SiLU", "transformers.activations.SiLUActivation")
 class QuantSiLU(QuantModuleBase):
     """
-    QuantSiLU — drop-in replacement for nn.SiLU that quantizes
-    both intermediate tensors:
+    QuantSiLU — drop-in quantized implementation of the SiLU operation.
+
+    This module quantizes both intermediate tensors:
         • s  = sigmoid(x)   (logistic)
         • y  = x * s        (mul)
     """
