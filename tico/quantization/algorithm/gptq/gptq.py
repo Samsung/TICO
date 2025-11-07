@@ -36,11 +36,9 @@ class GPTQ:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
-            W = W.flatten(1)
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+            W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
 
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H: Optional[torch.Tensor] = torch.zeros(
@@ -53,7 +51,7 @@ class GPTQ:
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
-        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, nn.Conv1d):
+        if isinstance(self.layer, nn.Linear):
             if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
@@ -65,6 +63,22 @@ class GPTQ:
                 stride=self.layer.stride,
             )
 
+            inp = unfold(inp)
+            inp = inp.permute([1, 0, 2])
+            inp = inp.flatten(1)
+
+        if isinstance(self.layer, nn.Conv1d):
+            # nn.Conv1d is basically the same as nn.Conv2d so we can use the same idea as for nn.Conv2d
+            unfold = nn.Unfold(
+                (1, self.layer.kernel_size[0]),
+                dilation=(1, self.layer.dilation[0]),
+                padding=(1, self.layer.padding[0]),
+                stride=(1, self.layer.stride[0]),
+            )
+
+            inp = inp.unsqueeze(
+                -2
+            )  # (batch, C_in, L)->(batch, C_in, 1, L), valid for Conv2D
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
@@ -84,10 +98,8 @@ class GPTQ:
         verbose=False,
     ):
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+            W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():
