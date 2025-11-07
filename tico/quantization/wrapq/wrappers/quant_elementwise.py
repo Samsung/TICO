@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -31,7 +31,7 @@ class QuantElementwise(QuantModuleBase):
     """
 
     # subclass must set this
-    FUNC: Callable[[torch.Tensor], torch.Tensor] | None = None
+    FUNC: Any = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -68,7 +68,7 @@ class QuantElementwise(QuantModuleBase):
 
 
 """
-Why `FUNC` is a `staticmethod`
+Q1) Why `FUNC` is a `staticmethod`
 
 - Prevents automatic binding: calling `self.FUNC(x)` will not inject `self`,
   so the callable keeps the expected signature `Tensor -> Tensor`
@@ -85,27 +85,67 @@ Why `FUNC` is a `staticmethod`
   than an `nn.Module` instance that would appear in the module tree.
 
 - Small perf/alloc win: no bound-method objects are created on each call.
+
+Q2) Why we define small Python wrappers (_relu, _tanh, etc.)
+
+- torch.relu / torch.tanh / torch.sigmoid are CPython built-ins.
+  Their type is `builtin_function_or_method`, not a Python `FunctionType`.
+  This causes `torch.export` (and FX tracing) to fail with:
+    "expected FunctionType, found builtin_function_or_method".
+
+- By defining a thin Python wrapper (e.g., `def _tanh(x): return torch.tanh(x)`),
+  we convert it into a normal Python function object (`FunctionType`),
+  which satisfies export/tracing requirements.
+
+- Functionally, this adds zero overhead and preserves semantics,
+  but makes the callable introspectable (has __code__, __name__, etc.)
+  and compatible with TorchDynamo / FX graph capture.
+
+- It also keeps FUNC pure and stateless, ensuring the elementwise op
+  is represented as `call_function(_tanh)` in the traced graph
+  rather than a bound `call_method` or module attribute access.
 """
 
-# Sigmoid
+
+def _relu(x: torch.Tensor) -> torch.Tensor:
+    return torch.relu(x)
+
+
+def _tanh(x: torch.Tensor) -> torch.Tensor:
+    return torch.tanh(x)
+
+
+def _sigmoid(x: torch.Tensor) -> torch.Tensor:
+    return torch.sigmoid(x)
+
+
+def _gelu(x: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.gelu(x)
+
+
 @register(nn.Sigmoid)
 class QuantSigmoid(QuantElementwise):
-    FUNC = staticmethod(torch.sigmoid)
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _sigmoid(x)
 
 
-# Tanh
 @register(nn.Tanh)
 class QuantTanh(QuantElementwise):
-    FUNC = staticmethod(torch.tanh)
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _tanh(x)
 
 
-# ReLU
 @register(nn.ReLU)
 class QuantReLU(QuantElementwise):
-    FUNC = staticmethod(torch.relu)
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _relu(x)
 
 
-# GELU (approximate)
 @register(nn.GELU)
 class QuantGELU(QuantElementwise):
-    FUNC = staticmethod(torch.nn.functional.gelu)
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _gelu(x)
