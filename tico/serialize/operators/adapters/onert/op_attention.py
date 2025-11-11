@@ -20,57 +20,13 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
-from torch.library import Library
+from transformers.cache_utils import DynamicCache
+from transformers.models.llama.modeling_llama import LlamaAttention
 
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
-
-lib = Library("circle", "DEF")
-lib.define(
-    """
-attention.llama(
-    Tensor hidden_states,
-    Tensor wq,
-    Tensor wk,
-    Tensor wv,
-    Tensor wo,
-    Tensor position_cos,
-    Tensor position_sin,
-    Tensor attention_mask,
-    Tensor past_key,
-    Tensor past_value,
-    Tensor cache_position
-) -> Tensor
-"""
-)
-
-# ATTENTION FUSER
-
-
-@torch.library.register_fake("circle::attention.llama")
-def attention_llama(*args, **kwargs):
-    (
-        hidden_states,
-        q_proj,
-        k_proj,
-        v_proj,
-        o_proj,
-        position_cos,
-        position_sin,
-        attention_mask,
-        past_key,
-        past_value,
-        cache_position,
-    ) = args
-    return hidden_states
-
-
-from typing import List, Optional
-
-from transformers.cache_utils import DynamicCache
-from transformers.models.llama.modeling_llama import LlamaAttention
 
 
 def llama_attention_forward_adapter(
@@ -87,7 +43,7 @@ def llama_attention_forward_adapter(
     key_cache = past_key_value.key_cache  # type: ignore[union-attr]
     value_cache = past_key_value.value_cache  # type: ignore[union-attr]
     return (
-        torch.ops.circle.attention.llama(
+        torch.ops.circle_custom.attention(
             hidden_states,
             self.q_proj.weight,
             self.k_proj.weight,
@@ -111,7 +67,7 @@ def llama_attention_forward_adapter(
 @register_node_visitor
 class AttentionVisitor(NodeVisitor):
     target: List[torch._ops.OpOverload] = [
-        torch.ops.circle.attention.llama,
+        torch.ops.circle_custom.attention.default,
     ]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
