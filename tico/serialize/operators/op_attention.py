@@ -20,48 +20,11 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
-from transformers.cache_utils import DynamicCache
-from transformers.models.llama.modeling_llama import LlamaAttention
-
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 
-
-def llama_attention_forward_adapter(
-    self: LlamaAttention,
-    hidden_states: torch.Tensor,
-    position_embeddings: List[torch.Tensor],
-    attention_mask: torch.Tensor,
-    past_key_value: DynamicCache,
-    cache_position: torch.Tensor,
-    **kwargs,
-):
-    # past_key_value is a dict with key_cache and value_cache.
-    # It needs to be decomposed for tico and circle which does not know dict.
-    key_cache = past_key_value.key_cache  # type: ignore[union-attr]
-    value_cache = past_key_value.value_cache  # type: ignore[union-attr]
-    return (
-        torch.ops.circle_custom.attention(
-            hidden_states,
-            self.q_proj.weight,
-            self.k_proj.weight,
-            self.v_proj.weight,
-            self.o_proj.weight,
-            position_embeddings[0],  # cos
-            position_embeddings[1],  # sin
-            attention_mask,
-            # key_cache is a list of cache for each decoder layer.
-            # Assumtion: key cache is continuous
-            #
-            #    k_cache[0] | k_cache[1] | ...  | k_cache[n]
-            key_cache[self.layer_idx],
-            value_cache[self.layer_idx],  # Same to value_cache
-            cache_position,
-        ),
-        None,
-    )
 
 
 @register_node_visitor

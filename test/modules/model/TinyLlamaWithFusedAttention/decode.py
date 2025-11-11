@@ -58,7 +58,7 @@ print(generated_text)
 
 # Tico
 import tico
-from tico.serialize.operators.adapters.onert.op_attention import (
+from tico.serialize.operators.adapters.onert.llama_attention import (
     llama_attention_forward_adapter,
 )
 from transformers.models.llama.modeling_llama import LlamaAttention
