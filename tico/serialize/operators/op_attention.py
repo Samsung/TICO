@@ -24,7 +24,7 @@ from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
-
+from tico.utils.validate_args_kwargs import CircleAttentionArgs
 
 
 @register_node_visitor
@@ -40,20 +40,7 @@ class AttentionVisitor(NodeVisitor):
         self,
         node: torch.fx.Node,
     ) -> circle.Operator.OperatorT:
-        (
-            hidden_states,
-            wq,
-            wk,
-            wv,
-            wo,
-            position_cos,
-            position_sin,
-            attention_mask,
-            past_key,
-            past_value,
-            cache_position,
-        ) = node.args
-
+        args = CircleAttentionArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         op_index = get_op_index(
             circle.BuiltinOperator.BuiltinOperator.ATTENTION, self._op_codes
         )
