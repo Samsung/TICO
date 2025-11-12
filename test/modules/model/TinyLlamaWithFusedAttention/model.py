@@ -1,5 +1,5 @@
 import torch
-
+from tico.config.v1 import CompileConfigV1
 from tico.serialize.operators.adapters.llama_rmsnorm import patched_llama_rmsnorm
 from tico.serialize.operators.adapters.onert.llama_attention import (
     llama_attention_forward_adapter,
@@ -76,3 +76,6 @@ class TinyLlamaWithFusedAttention(TestModuleBase):
         generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
         print(generated_text)
         return captured_input, {}
+
+    def get_compile_config(self):
+        return CompileConfigV1(convert_single_batch_lhs_const_bmm_to_fc=True)
