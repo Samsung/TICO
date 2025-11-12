@@ -45,9 +45,7 @@ class AttentionVisitor(NodeVisitor):
             circle.BuiltinOperator.BuiltinOperator.ATTENTION, self._op_codes
         )
 
-        # remove last arg (= layer_idx) from inputs.
-        # layer_idx is attention op's param, not input.
-        inputs = node.args[:-1]
+        inputs = node.args
         outputs = [node]
         operator = create_builtin_operator(self.graph, op_index, inputs, outputs)
 
