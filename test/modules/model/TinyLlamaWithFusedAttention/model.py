@@ -30,6 +30,7 @@ class TinyLlamaWithFusedAttention(TestModuleBase):
             )
         self.rtol = 1e-4
         self.atol = 1e-4
+        register_dynamic_cache()
 
     def forward(self, *args, **kwargs):
         self._call_count += 1
