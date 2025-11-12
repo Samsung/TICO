@@ -54,18 +54,9 @@ class TinyLlamaWithFusedAttention(TestModuleBase):
         model = self.original_model
         model.eval()
 
-        # past_key_values
-        # ---------------
-        # During prefill, "past_key_values" not None, but an empty Cache instance.
-        # Passing None makes torch.export happy.
-
         input_to_remove = [
             "attention_mask",
-            # For left pad,        [0, ⋯, 0, 1, ⋯, 1]
-            # For right right pad, [1, ⋯, 1, 0, ⋯, 0]
-            # ( 0 is pad-token )
-            # This script uses right pad and pass all-1 attention mask (including pad).
-            # Npu computes all positions whether it is pad or not.
+            # attention mask will be manually provided, not from example input
         ]
         condition_fn = (
             lambda args_dict: args_dict["past_key_values"].get_seq_length() != 0
