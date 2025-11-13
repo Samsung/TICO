@@ -15,21 +15,15 @@
 from tico.quantization.config.base import BaseConfig
 
 
-class GPTQConfig(BaseConfig):
+class RTNConfig(BaseConfig):
     """
-    Configuration for GPTQ.
+    Configuration for RTN. (Round-To-Nearest configuration)
     """
 
-    def __init__(
-        self,
-        verbose: bool = False,
-        show_progress: bool = True,
-        quantize_convs_groupwise: bool = False,
-    ):
+    def __init__(self, verbose: bool = False, show_progress: bool = True):
         self.verbose = verbose
         self.show_progress = show_progress
-        self.quantize_convs_groupwise = quantize_convs_groupwise
 
     @property
     def name(self) -> str:
-        return "gptq"
+        return "rtn"
