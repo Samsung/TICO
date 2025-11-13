@@ -194,12 +194,6 @@ class GPTQQuantizer(BaseQuantizer):
         ):
             # 1) Identify quantizable submodules within the layer
             full = find_layers(layer, layers=[torch.nn.Linear, torch.nn.Conv2d])
-            # filter out depthwise convolutions and alike
-            full = {
-                key: full[key]
-                for key in full.keys()
-                if not isinstance(full[key], torch.nn.Conv2d) or full[key].groups == 1
-            }
             sequential = [list(full.keys())]
 
             # 2) Set up GPTQ objects and gather stats
@@ -208,9 +202,12 @@ class GPTQQuantizer(BaseQuantizer):
 
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
-                    gptq[name] = GPTQ(subset[name])
+                    gptq[name] = GPTQ(
+                        subset[name],
+                        quantize_convs_groupwise=gptq_conf.quantize_convs_groupwise,
+                    )
                     gptq[name].quantizer.configure(
-                        bits=8, perchannel=True, sym=False, mse=False
+                        bits=3, perchannel=True, sym=False, mse=False
                     )
 
                 # Hook to collect (inp, out) for GPTQ
