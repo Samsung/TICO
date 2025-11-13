@@ -181,6 +181,27 @@ class GPTQ:
         if actorder:
             Q = Q[:, invperm]
 
+        if isinstance(self.layer, nn.Conv2d):
+            if groupsize == -1:  # TODO support groupsize != -1
+                Q[:, dead] = quantize(
+                    self.layer.weight.flatten(1)[:, dead],
+                    self.quantizer.scale,
+                    self.quantizer.zero,
+                    self.quantizer.maxq,
+                )
+        else:
+            if groupsize == -1:  # TODO support groupsize != -1
+                Q[:, dead] = quantize(
+                    self.layer.weight[:, dead],
+                    self.quantizer.scale,
+                    self.quantizer.zero,
+                    self.quantizer.maxq,
+                )
+
+        assert (
+            groupsize == -1 or torch.sum(dead) == 0
+        )  # TODO `dead` elements should be RTN quantized for groupwise
+
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype
         )

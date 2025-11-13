@@ -151,6 +151,21 @@ class FPI_GPTQ:
 
         Q = Q[:, invperm]
 
+        if isinstance(self.layer, nn.Conv2d):
+            Q[:, dead] = quantize(
+                self.layer.weight.flatten(1)[:, dead],
+                self.quantizer.scale,
+                self.quantizer.zero,
+                self.quantizer.maxq,
+            )
+        else:
+            Q[:, dead] = quantize(
+                self.layer.weight[:, dead],
+                self.quantizer.scale,
+                self.quantizer.zero,
+                self.quantizer.maxq,
+            )
+
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype
         )

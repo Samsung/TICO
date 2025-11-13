@@ -44,6 +44,9 @@ class BigLinear(torch.nn.Module):
     def get_example_inputs(self):
         return (torch.randn(1, 2048),), {}
 
+    def get_zero_inputs(self):
+        return (torch.zeros(1, 2048),), {}
+
 
 class NormConv2D(torch.nn.Module):
     def __init__(self):
@@ -58,6 +61,9 @@ class NormConv2D(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(1, 128, 32, 32),), {}
+
+    def get_zero_inputs(self):
+        return (torch.zeros(1, 128, 32, 32),), {}
 
 
 class GPTQTest(unittest.TestCase):
@@ -182,3 +188,36 @@ class GPTQTest(unittest.TestCase):
         assert (
             results["peir"][0] < tolerance
         ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_net_on_zero_inputs(self):
+        q_m = BigLinear()
+        q_m.eval()
+        ori_m = q_m
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_zero_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+
+        assert torch.sum(q_m.linear.weight != 0) > 0, "weights should not be all zeros"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv2d_on_zero_inputs(self):
+        q_m = NormConv2D()
+        q_m.eval()
+        ori_m = q_m
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_zero_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        assert torch.sum(q_m.conv.weight != 0) > 0, "weights should not be all zeros"
