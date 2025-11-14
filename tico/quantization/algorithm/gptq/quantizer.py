@@ -207,7 +207,7 @@ class GPTQQuantizer(BaseQuantizer):
                         quantize_convs_groupwise=gptq_conf.quantize_convs_groupwise,
                     )
                     gptq[name].quantizer.configure(
-                        bits=3, perchannel=True, sym=False, mse=False
+                        bits=4, perchannel=True, sym=False, mse=False
                     )
 
                 # Hook to collect (inp, out) for GPTQ

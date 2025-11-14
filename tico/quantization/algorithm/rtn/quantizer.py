@@ -93,7 +93,7 @@ class RTNQuantizer(BaseQuantizer):
                 for name in subset:
                     layer = subset[name]
                     quantizer = Quantizer()
-                    quantizer.configure(bits=3, perchannel=True, sym=False, mse=False)
+                    quantizer.configure(bits=4, perchannel=True, sym=False, mse=False)
 
                     W = layer.weight.data.clone()
                     if isinstance(layer, torch.nn.Conv2d) or isinstance(
