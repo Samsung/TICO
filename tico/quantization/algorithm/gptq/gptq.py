@@ -18,6 +18,7 @@
 
 # https://github.com/IST-DASLab/gptq/blob/2d65066/gptq.py
 
+import copy
 import math
 import time
 from typing import Optional
@@ -30,22 +31,33 @@ from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
+depthwise_conv_many_matrices_implementation = True  # False
+
 
 class GPTQ:
-    def __init__(self, layer):
+    def __init__(self, layer, quantize_convs_groupwise: bool = False):
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
 
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
-        self.H: Optional[torch.Tensor] = torch.zeros(
-            (self.columns, self.columns), device=self.dev
-        )
+
+        self.H: Optional[torch.Tensor] = None
+
+        if (
+            (isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d))
+            and quantize_convs_groupwise
+            and self.layer.groups != 1
+        ):
+            self.H = torch.zeros(
+                (self.layer.groups, self.columns, self.columns), device=self.dev
+            )
+        else:
+            self.H = torch.zeros((self.columns, self.columns), device=self.dev)
+
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
 
@@ -53,7 +65,8 @@ class GPTQ:
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
-        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, nn.Conv1d):
+        processed = False
+        if isinstance(self.layer, nn.Linear):
             if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
@@ -65,14 +78,226 @@ class GPTQ:
                 stride=self.layer.stride,
             )
 
+            if self.layer.groups == 1:
+                inp = unfold(inp)
+                inp = inp.permute([1, 0, 2])
+                inp = inp.flatten(1)
+            elif len(self.H.shape) > 2:  # type: ignore[union-attr]
+                # groupwise
+                H_0 = torch.zeros_like(self.H)
+                self.H *= self.nsamples / (self.nsamples + tmp)
+                self.nsamples += tmp
+
+                # ind_range = inp.shape[1] // self.layer.groups
+                # for i in range(self.layer.groups):
+                #     inp_ = unfold(inp[:, i : i + ind_range, :, :])
+                #     inp_ = inp_.permute([1, 0, 2])
+                #     inp_ = inp_.flatten(1)
+                #     H_0[i] += inp_.matmul(inp_.t())
+                #     inp_ = math.sqrt(2 / self.nsamples) * inp_.float()
+                #     self.H[i] += inp_.matmul(inp_.t())
+
+                inp_ = inp.reshape(
+                    inp.size(0) * self.layer.groups,
+                    inp.size(1) // self.layer.groups,
+                    inp.shape[2],
+                    inp.shape[3],
+                )
+                inp_ = unfold(inp_)
+                inp_ = math.sqrt(2 / self.nsamples) * inp_.float()
+                # H_1 = torch.matmul(inp_, inp_.permute([0, 2, 1]))
+                self.H += torch.matmul(inp_, inp_.permute([0, 2, 1]))
+                processed = True
+                #   H_1 = torch.zeros_like(H_0)
+                #   inp_ = inp.reshape(
+                #       inp.size(0) * self.layer.groups,
+                #       inp.size(1) // self.layer.groups,
+                #       inp.shape[2],
+                #       inp.shape[3],
+                #   )
+                #   unfold = nn.Unfold(
+                #       self.layer.kernel_size,
+                #       dilation=self.layer.dilation,
+                #       padding=self.layer.padding,
+                #       stride=self.layer.stride,
+                #   )
+                #   # output size (batch_size, channels * \prod kernel_size, num_patches)
+                #   inp_ = unfold(inp_)
+                #   inp_ = inp_.permute([1, 0, 2])
+                #   inp_ = inp_.flatten(1)
+                #   inp_ = math.sqrt(2 / self.nsamples) * inp_.float()
+                #   H_1 += torch.matmul(inp_, inp_.t())
+                #   dist = torch.mean(torch.abs(H_0 - H_1)) / torch.max(torch.abs(H_1))
+                #   assert(dist < 1.e-05) #it should be very low with math.sqrt(2 / self.nsamples) * reshaped_inp.float() turned off
+            else:
+                # the idea behind conversion of depthwise convolution to matmul is described here
+                # https://discuss.pytorch.org/t/conv1d-implementation-using-torch-nn-functional-unfold/109643/2
+                # although depthwise convolution is equal to a set of MatMul
+                # (please note `w.view(1, groups, out_channels // groups, -1)` in the reference above it is not w.flatten(1))
+                # it occures that for bits (>=4) we can approximate groupwise Hessians with their sum
+                # so that we will have just a single Hessian and the usual GPTQ applies
+                inp = inp.reshape(
+                    inp.size(0) * self.layer.groups,
+                    inp.size(1) // self.layer.groups,
+                    inp.shape[2],
+                    inp.shape[3],
+                )
+                inp = unfold(inp)
+                inp = inp.permute([1, 0, 2])
+                inp = inp.flatten(1)
+
+        if isinstance(self.layer, nn.Conv1d):
+            # nn.Conv1d is basically the same as nn.Conv2d so we can use the same idea as for nn.Conv2d
+            unfold = nn.Unfold(
+                (1, self.layer.kernel_size[0]),
+                dilation=(1, self.layer.dilation[0]),
+                padding=(1, self.layer.padding[0]),
+                stride=(1, self.layer.stride[0]),
+            )
+
+            inp = inp.unsqueeze(
+                -2
+            )  # (batch, C_in, L)->(batch, C_in, 1, L), valid for Conv2D
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
 
-        self.H *= self.nsamples / (self.nsamples + tmp)
-        self.nsamples += tmp
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        self.H += inp.matmul(inp.t())
+        if not processed:
+            self.H *= self.nsamples / (self.nsamples + tmp)
+            self.nsamples += tmp
+            inp = math.sqrt(2 / self.nsamples) * inp.float()
+            self.H += inp.matmul(inp.t())
+
+    def fasterquant_group_wise(
+        self, blocksize, percdamp, groupsize, actorder, static_groups, verbose
+    ):
+        assert len(self.H.shape) == 3  # type: ignore[union-attr]
+        assert groupsize == -1
+
+        tick = time.time()
+        assert isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d)
+
+        if not self.quantizer.ready():
+            self.quantizer.find_params(self.layer.weight.flatten(1), weight=True)
+
+        group_quatizers = []
+        num_of_channels_per_group = self.layer.out_channels // self.layer.groups
+        for out_gr in range(self.H.shape[0]):  # type: ignore[index, union-attr]
+            H = self.H[out_gr].clone()  # type: ignore[index]
+
+            W = self.layer.weight[
+                out_gr
+                * num_of_channels_per_group : (out_gr + 1)
+                * num_of_channels_per_group
+            ].clone()
+            W = W.flatten(1)
+            W_orig = W.clone()
+            
+            group_quantizer = copy.deepcopy(self.quantizer)
+            group_quantizer.find_params(W, weight=True)
+
+            assert isinstance(H, torch.Tensor)
+            dead = torch.diag(H) == 0
+            H[dead, dead] = 1
+            W[:, dead] = 0
+
+            if actorder:
+                perm = torch.argsort(torch.diag(H), descending=True)
+                W = W[:, perm]
+                H = H[perm][:, perm]
+                invperm = torch.argsort(perm)
+
+            Losses = torch.zeros_like(W)
+            Q = torch.zeros_like(W)
+
+            damp = percdamp * torch.mean(torch.diag(H))
+            diag = torch.arange(self.columns, device=self.dev)
+            H[diag, diag] += damp
+            H = torch.linalg.cholesky(H)
+            assert isinstance(H, torch.Tensor)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True)
+            Hinv = H
+
+            assert isinstance(Hinv, torch.Tensor)
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
+
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+                Hinv1 = Hinv[i1:i2, i1:i2]
+
+                for i in range(count):
+                    w = W1[:, i]
+                    d = Hinv1[i, i]
+
+                    q = quantize(
+                        w.unsqueeze(1),
+                        group_quantizer.scale,
+                        group_quantizer.zero,
+                        group_quantizer.maxq,
+                    ).flatten()
+                    Q1[:, i] = q
+                    Losses1[:, i] = (w - q) ** 2 / d**2
+
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1
+
+                Q[:, i1:i2] = Q1
+                Losses[:, i1:i2] = Losses1 / 2
+
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if verbose:
+                print("time %.2f" % (time.time() - tick))
+                print("error", torch.sum(Losses).item())
+
+            if actorder:
+                Q = Q[:, invperm]
+            
+            Q[:, dead] = quantize(
+                W_orig[:, dead],
+                group_quantizer.scale,
+                group_quantizer.zero,
+                group_quantizer.maxq,
+            )
+            
+            self.layer.weight[
+                out_gr
+                * num_of_channels_per_group : (out_gr + 1)
+                * num_of_channels_per_group
+            ] = Q.reshape(
+                self.layer.weight[
+                    out_gr
+                    * num_of_channels_per_group : (out_gr + 1)
+                    * num_of_channels_per_group
+                ].shape
+            ).to(
+                self.layer.weight.data.dtype
+            )
+            group_quatizers.append(group_quantizer)
+
+        # copy quantizers
+        for out_gr, group_quantizer in enumerate(group_quatizers):
+            self.quantizer.scale[
+                out_gr
+                * num_of_channels_per_group : (out_gr + 1)
+                * num_of_channels_per_group
+            ] = group_quantizer.scale
+            self.quantizer.zero[
+                out_gr
+                * num_of_channels_per_group : (out_gr + 1)
+                * num_of_channels_per_group
+            ] = group_quantizer.zero
+
+        del self.H
+        self.H = None
 
     def fasterquant(
         self,
@@ -83,11 +308,14 @@ class GPTQ:
         static_groups=False,
         verbose=False,
     ):
+        if len(self.H.shape) == 3:  # type: ignore[union-attr]
+            return self.fasterquant_group_wise(
+                blocksize, percdamp, groupsize, actorder, static_groups, verbose
+            )
+
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():
