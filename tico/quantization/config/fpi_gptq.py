@@ -20,9 +20,10 @@ class FPIGPTQConfig(GPTQConfig):
     Configuration for FPIGPTQ (Fixed Point Iteration).
     """
 
-    def __init__(self, verbose: bool = False, show_progress: bool = True):
+    def __init__(self, verbose: bool = False, show_progress: bool = True, quantize_convs_groupwise: bool = False):
         self.verbose = verbose
         self.show_progress = show_progress
+        self.quantize_convs_groupwise = quantize_convs_groupwise
 
     @property
     def name(self) -> str:

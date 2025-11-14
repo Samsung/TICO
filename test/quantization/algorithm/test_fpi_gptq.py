@@ -65,6 +65,19 @@ class NormConv2D(torch.nn.Module):
     def get_zero_inputs(self):
         return (torch.zeros(1, 128, 32, 32),), {}
 
+class GroupwiseConv2D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(32, 32, (2, 2), stride=1, groups=32)
+        self.conv2 = torch.nn.Conv2d(32, 16, (3, 3), stride=1, groups=2)
+
+    def forward(self, x):
+        z = self.conv(x)
+        z = self.conv2(z)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 32, 16, 16),), {}
 
 class FPIGPTQTest(unittest.TestCase):
     @unittest.skipIf(
@@ -191,3 +204,27 @@ class FPIGPTQTest(unittest.TestCase):
             q_m(*args, **kwargs)
         convert(q_m, inplace=True)
         assert torch.sum(q_m.conv.weight != 0) > 0, "weights should not be all zeros"
+        
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_groupwise_conv2d(self):
+        q_m = GroupwiseConv2D()
+        q_m.eval()
+        ori_m = q_m
+        args, kwargs = ori_m.get_example_inputs()
+
+        # Apply GPTQ
+        q_m = prepare(q_m, FPIGPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_example_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.conv" in q_m.quantizers
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.conv2" in q_m.quantizers
+        ), "second conv node is not quantized"
