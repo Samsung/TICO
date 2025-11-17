@@ -12,24 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.base import BaseConfig
 
 
-class FPIGPTQConfig(GPTQConfig):
+class RTNConfig(BaseConfig):
     """
-    Configuration for FPIGPTQ (Fixed Point Iteration).
+    Configuration for RTN. (Round-To-Nearest configuration)
     """
 
-    def __init__(
-        self,
-        verbose: bool = False,
-        show_progress: bool = True,
-        quantize_convs_groupwise: bool = False,
-    ):
+    def __init__(self, verbose: bool = False, show_progress: bool = True):
         self.verbose = verbose
         self.show_progress = show_progress
-        self.quantize_convs_groupwise = quantize_convs_groupwise
 
     @property
     def name(self) -> str:
-        return "fpi_gptq"
+        return "rtn"
