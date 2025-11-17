@@ -85,7 +85,10 @@ class FPIGPTQQuantizer(GPTQQuantizer):
 
                 gptq: Dict[str, FPI_GPTQ] = {}
                 for name in subset:
-                    gptq[name] = FPI_GPTQ(subset[name], quantize_convs_groupwise=gptq_conf.quantize_convs_groupwise)
+                    gptq[name] = FPI_GPTQ(
+                        subset[name],
+                        quantize_convs_groupwise=gptq_conf.quantize_convs_groupwise,
+                    )
                     gptq[name].quantizer.configure(
                         bits=4, perchannel=True, sym=False, mse=False
                     )

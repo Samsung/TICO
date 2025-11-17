@@ -30,15 +30,17 @@ from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 
 def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
 
-    max_num_of_iters = max(1, max_num_of_iters) #constrain it to be at least one iteration
-    
+    max_num_of_iters = max(
+        1, max_num_of_iters
+    )  # constrain it to be at least one iteration
+
     cur_weights = W.clone()
     if len(Hinv.shape) == 2:
         mults = torch.pow(torch.diag(Hinv), -1)
         Hinv_U = torch.triu(Hinv, diagonal=1)
     else:
         mults = torch.pow(torch.diagonal(Hinv, dim1=-2, dim2=-1), -1)
-        Hinv_U = torch.triu(Hinv, diagonal = 1)
+        Hinv_U = torch.triu(Hinv, diagonal=1)
 
     init_weights = W.clone()
     for _ in range(max_num_of_iters):
@@ -48,11 +50,11 @@ def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
         if len(Hinv.shape) == 2:
             cur_weights = init_weights - torch.matmul(d_W, Hinv_U)
         else:
-            #for i in range(Hinv.shape[0]):
+            # for i in range(Hinv.shape[0]):
             #    cur_weights[i] = init_weights[i] - torch.matmul(d_W[i], Hinv_U[i])
             mm = torch.bmm(d_W.unsqueeze(-2), Hinv_U).squeeze(-2)
             cur_weights = init_weights - mm
-            
+
         del d_W, cur_Q
         d_W = cur_Q = None
 
@@ -76,7 +78,7 @@ class FPI_GPTQ:
             W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
-        
+
         self.H: Optional[torch.Tensor] = None
 
         if (
@@ -89,7 +91,7 @@ class FPI_GPTQ:
             )
         else:
             self.H = torch.zeros((self.columns, self.columns), device=self.dev)
-            
+
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
 
@@ -98,7 +100,7 @@ class FPI_GPTQ:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
         processed = False
-        
+
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, nn.Conv1d):
             if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
@@ -117,7 +119,7 @@ class FPI_GPTQ:
                 inp = inp.flatten(1)
             elif len(self.H.shape) > 2:  # type: ignore[union-attr]
                 # groupwise
-                #H_0 = torch.zeros_like(self.H)
+                # H_0 = torch.zeros_like(self.H)
                 self.H *= self.nsamples / (self.nsamples + tmp)
                 self.nsamples += tmp
 
@@ -178,7 +180,7 @@ class FPI_GPTQ:
                 inp = unfold(inp)
                 inp = inp.permute([1, 0, 2])
                 inp = inp.flatten(1)
-                
+
         if not processed:
             self.H *= self.nsamples / (self.nsamples + tmp)
             self.nsamples += tmp
@@ -193,7 +195,7 @@ class FPI_GPTQ:
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
-        
+
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():
@@ -202,19 +204,19 @@ class FPI_GPTQ:
         H = self.H
         del self.H
         assert isinstance(H, torch.Tensor)
-        
-        meanH = torch.sum(H, dim = 0)
-        
+
+        meanH = torch.sum(H, dim=0)
+
         dead = torch.diagonal(H, dim1=-2, dim2=-1) == 0
         for i in range(H.shape[0]):
             H[i, dead[i], dead[i]] = 1
             W[i, dead[i]] = 0
-        
+
         # actorder
-        #perm = torch.argsort(torch.diag(meanH), descending=True)
-        #W = W[:, perm]
-        #H = H[:, perm, :][:, :, perm]
-        #meanH=meanH[perm][:, perm]
+        # perm = torch.argsort(torch.diag(meanH), descending=True)
+        # W = W[:, perm]
+        # H = H[:, perm, :][:, :, perm]
+        # meanH=meanH[perm][:, perm]
         perm = torch.argsort(torch.diagonal(H, dim1=-2, dim2=-1), descending=True)
         for i in range(H.shape[0]):
             W[i] = W[i, perm[i]]
@@ -222,10 +224,10 @@ class FPI_GPTQ:
         invperm = torch.argsort(perm)
 
         Q = torch.zeros_like(W)
-        
+
         damp = percdamp * torch.mean(torch.diagonal(H, dim1=-2, dim2=-1), dim=-1)
         diag = torch.arange(self.columns, device=self.dev)
-        for i in  range(H.shape[0]):
+        for i in range(H.shape[0]):
             H[i, diag, diag] += damp[i]
 
         H = torch.linalg.cholesky(H)
@@ -250,7 +252,7 @@ class FPI_GPTQ:
             Losses = 0.5 * ((Q - W) / torch.diagonal(Hinv, dim1=-2, dim2=-1)) ** 2
             print("error", torch.sum(Losses).item())
 
-#        Q = Q[:, invperm]
+        #        Q = Q[:, invperm]
         for i in range(H.shape[0]):
             Q[i] = Q[i, invperm[i]]
 
@@ -268,17 +270,15 @@ class FPI_GPTQ:
         self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
             self.layer.weight.data.dtype
         )
-        
+
     def fasterquant(
         self,
         percdamp=0.01,
         verbose=False,
     ):
         if len(self.H.shape) == 3:  # type: ignore[union-attr]
-            return self.fasterquant_group_wise(
-                percdamp, verbose
-            )
-            
+            return self.fasterquant_group_wise(percdamp, verbose)
+
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
@@ -317,7 +317,7 @@ class FPI_GPTQ:
             self.quantizer.maxq,
             W,
             Hinv=Hinv,
-            max_num_of_iters=min(50, self.columns),#max_num_of_iters=50,
+            max_num_of_iters=min(50, self.columns),  # max_num_of_iters=50,
         )
 
         if torch.cuda.is_available():
@@ -328,7 +328,7 @@ class FPI_GPTQ:
             print("error", torch.sum(Losses).item())
 
         Q = Q[:, invperm]
-        
+
         if isinstance(self.layer, nn.Conv2d):
             Q[:, dead] = quantize(
                 self.layer.weight.flatten(1)[:, dead],
@@ -343,7 +343,6 @@ class FPI_GPTQ:
                 self.quantizer.zero,
                 self.quantizer.maxq,
             )
-
 
         if isinstance(self.layer, nn.Conv2d):
             Q[:, dead] = quantize(

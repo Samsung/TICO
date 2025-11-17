@@ -65,6 +65,7 @@ class NormConv2D(torch.nn.Module):
     def get_zero_inputs(self):
         return (torch.zeros(1, 128, 32, 32),), {}
 
+
 class GroupwiseConv2D(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -78,6 +79,7 @@ class GroupwiseConv2D(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(1, 32, 16, 16),), {}
+
 
 class FPIGPTQTest(unittest.TestCase):
     @unittest.skipIf(
@@ -204,7 +206,7 @@ class FPIGPTQTest(unittest.TestCase):
             q_m(*args, **kwargs)
         convert(q_m, inplace=True)
         assert torch.sum(q_m.conv.weight != 0) > 0, "weights should not be all zeros"
-        
+
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )

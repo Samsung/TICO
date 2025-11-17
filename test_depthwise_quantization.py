@@ -26,8 +26,8 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 
 from tico.quantization import convert, prepare
-from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.fpi_gptq import FPIGPTQConfig
+from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.rtn import RTNConfig
 
 list_of_available_models = [
@@ -277,7 +277,10 @@ def get_statistics_of_model_quantization(
 
     # Evaluate the quantized model
     acc1_quantized, acc5_quantized = validate(
-        data_loader, model, criterion=torch.nn.CrossEntropyLoss().to(dev), num_of_images=num_of_images_for_validation
+        data_loader,
+        model,
+        criterion=torch.nn.CrossEntropyLoss().to(dev),
+        num_of_images=num_of_images_for_validation,
     )
 
     return q_time, acc1_quantized, acc5_quantized
@@ -325,7 +328,9 @@ def compare_FPI_quantization_of_model(
         ) = get_statistics_of_model_quantization(
             model,
             data_loader,
-            weight_config=FPIGPTQConfig(quantize_convs_groupwise=False),#GPTQConfig(),
+            weight_config=FPIGPTQConfig(
+                quantize_convs_groupwise=False
+            ),  # GPTQConfig(),
             num_of_images_for_gptq_calibration=num_of_images_for_gptq_calibration,
             num_of_images_for_validation=num_of_validation_images,
             dev=dev,
@@ -339,7 +344,9 @@ def compare_FPI_quantization_of_model(
         ) = get_statistics_of_model_quantization(
             model,
             data_loader,
-            weight_config=FPIGPTQConfig(quantize_convs_groupwise=True), #GPTQConfig(quantize_convs_groupwise=True)
+            weight_config=FPIGPTQConfig(
+                quantize_convs_groupwise=True
+            ),  # GPTQConfig(quantize_convs_groupwise=True)
             num_of_images_for_gptq_calibration=num_of_images_for_gptq_calibration,
             dev=dev,
         )

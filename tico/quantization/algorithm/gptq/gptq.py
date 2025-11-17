@@ -192,7 +192,7 @@ class GPTQ:
             ].clone()
             W = W.flatten(1)
             W_orig = W.clone()
-            
+
             group_quantizer = copy.deepcopy(self.quantizer)
             group_quantizer.find_params(W, weight=True)
 
@@ -260,14 +260,14 @@ class GPTQ:
 
             if actorder:
                 Q = Q[:, invperm]
-            
+
             Q[:, dead] = quantize(
                 W_orig[:, dead],
                 group_quantizer.scale,
                 group_quantizer.zero,
                 group_quantizer.maxq,
             )
-            
+
             self.layer.weight[
                 out_gr
                 * num_of_channels_per_group : (out_gr + 1)
