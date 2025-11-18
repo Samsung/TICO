@@ -85,9 +85,30 @@ class FPI_GPTQ:
                 stride=self.layer.stride,
             )
 
-            inp = unfold(inp)
-            inp = inp.permute([1, 0, 2])
-            inp = inp.flatten(1)
+            if self.layer.groups != 1:
+                # the idea behind conversion of depthwise convolution to matmul is described here
+                # https://discuss.pytorch.org/t/conv1d-implementation-using-torch-nn-functional-unfold/109643/2
+                # although depthwise convolution is equal to a set of MatMuls
+                # (please note `w.view(1, groups, out_channels // groups, -1)` in the reference above is not just w.flatten(1))
+                # we can approximate groupwise Hessians with their mean
+                # so that we will have just a single Hessian and the usual GPTQ applies
+                inp = inp.reshape(
+                    inp.size(0) * self.layer.groups,
+                    inp.size(1) // self.layer.groups,
+                    inp.shape[2],
+                    inp.shape[3],
+                )  # inp.shape == (batch*groups, in_channels / groups, H, W) to meet Groupwise-wise Convolution, so that each group is colvolved with its own filter
+
+            inp = unfold(
+                inp
+            )  # inp.shape == (batch*groups, k_h*k_w*in_channels / groups, flattened_patches)
+            inp = inp.permute(
+                [1, 0, 2]
+            )  # inp.shape == (k_h*k_w*in_channels / groups, batch * groups, flattened_patches)
+            inp = inp.flatten(
+                1
+            )  # inp.shape == (k_h*k_w*in_channels / groups, batch * groups * flattened_patches)
+            # so inp.matmul(inp.t()).shape == (k_x*k_y*in_channels / groups, k_x*k_y*in_channels / groups) == W.flatten(1)
 
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
@@ -139,7 +160,9 @@ class FPI_GPTQ:
             self.quantizer.maxq,
             W,
             Hinv=Hinv,
-            max_num_of_iters=50,
+            max_num_of_iters=min(
+                50, self.columns
+            ),  # we don't need to iterate more than self.columns
         )
 
         if torch.cuda.is_available():
