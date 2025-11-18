@@ -85,3 +85,14 @@ class ToWithIntegerPlusFloat(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(1, 3),), {}
+
+
+class SimpleToForCast(TestModuleBase):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x.to(torch.int32)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3),), {}

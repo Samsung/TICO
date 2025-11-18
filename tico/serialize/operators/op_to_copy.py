@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import torch._ops
     import torch.fx
 import torch
 from circle_schema import circle
+
+from tico.passes import ops
 
 from tico.serialize.circle_mapping import (
     extract_circle_dtype,
@@ -29,12 +31,12 @@ from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.errors import NotYetSupportedError
-from tico.utils.validate_args_kwargs import ToCopyArgs
+from tico.utils.validate_args_kwargs import ToCopyArgs, ToDtypeArgs, ToDtypeLayoutArgs
 
 
 @register_node_visitor
 class ToCopyVisitor(NodeVisitor):
-    target: List[torch._ops.OpOverload] = [torch.ops.aten._to_copy.default]
+    target: List[torch._ops.OpOverload] = ops.aten.to_copy
 
     def __init__(self, op_codes: Dict[OpCode, int], graph):
         super().__init__(op_codes, graph)
@@ -60,42 +62,55 @@ class ToCopyVisitor(NodeVisitor):
 
         return operator
 
+    def parse_args(self, op: torch._ops.OpOverload, args, kwargs):
+        ret: Union[ToCopyArgs, ToDtypeArgs, ToDtypeLayoutArgs]
+        if op is torch.ops.aten._to_copy.default:
+            ret = ToCopyArgs(*args, **kwargs)
+        elif op is torch.ops.aten.to.dtype:
+            ret = ToDtypeArgs(*args, **kwargs)
+        elif op is torch.ops.aten.to.dtype_layout:
+            ret = ToDtypeLayoutArgs(*args, **kwargs)
+        else:
+            raise NotImplementedError(f"Unsupported to_copy/to operator: {op}")
+
+        return ret
+
     def define_node(
         self,
         node: torch.fx.Node,
     ) -> circle.Operator.OperatorT:
-        supported_kwargs = ["dtype", "device", "layout"]
-        if not all(k in supported_kwargs for k in node.kwargs):
-            unsupported_node_kargs = list(node.kwargs.keys())
-            for supported_key in supported_kwargs:
-                if supported_key in node.kwargs:
-                    unsupported_node_kargs.remove(supported_key)
-            raise NotYetSupportedError(
-                f"Support only {supported_kwargs} kwargs now. Do not support {unsupported_node_kargs}"
-            )
-
-        args = ToCopyArgs(*node.args, **node.kwargs)  # type: ignore[arg-type, call-arg]
+        args = ToCopyArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         input = args.input
         dtype = args.dtype
+        layout = args.layout
+        # device is meaningless in circle
+
+        pin_memory = args.pin_memory
+        non_blocking = args.non_blocking
+        memory_format = args.memory_format
+
+        if pin_memory is not None:
+            raise NotYetSupportedError("Do not support pin_memory yet")
+        if non_blocking is True:
+            raise NotYetSupportedError("Do not support non_blocking yet")
+        if memory_format is not None:
+            raise NotYetSupportedError("Do not support memory_format yet")
 
         input_meta = input.meta["val"]
         # https://pytorch.org/docs/stable/tensor_attributes.html#torch-layout
         # layout is two types: torch.strided(dense Tensors), torch.sparse_coo(sparse COO Tensors)
         if "layout" in input.kwargs and input.kwargs["layout"] != input_meta:
             raise NotYetSupportedError(
-                f"Only support when node and its input have same layout: (input layout: {input_meta}), (node layout: {node.kwargs['layout']})."
+                f"Only support when node and its input have same layout: (input layout: {input_meta}), (node layout: {layout})."
             )
 
-        if dtype is not None:
-            target_type = node.kwargs["dtype"]
-        else:
-            # device and layout are meaningless
-            target_type = extract_torch_dtype(node)
-        assert isinstance(target_type, torch.dtype), type(target_type)
+        if dtype is None:
+            dtype = extract_torch_dtype(node)
+        assert isinstance(dtype, torch.dtype), type(dtype)
 
         # define cast node
         in_type: int = extract_circle_dtype(input)
-        out_type: int = to_circle_dtype(target_type)
+        out_type: int = to_circle_dtype(dtype)
         inputs = [input]
         outputs = [node]
         operator = self.define_cast_node(inputs, outputs, in_type, out_type)

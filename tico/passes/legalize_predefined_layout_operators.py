@@ -17,6 +17,8 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
+from operator import getitem
+
 import torch
 from torch.export import ExportedProgram
 
@@ -26,7 +28,7 @@ from tico.utils.errors import NotYetSupportedError
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import is_target_node
+from tico.utils.utils import is_target_node, set_new_meta_val
 from tico.utils.validate_args_kwargs import (
     AvgPool2dArgs,
     Conv2DArgs,
@@ -35,6 +37,7 @@ from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     InstanceNormArgs,
     MaxPool2dWithIndicesArgs,
+    TopKArgs,
 )
 
 
@@ -434,6 +437,49 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         modified = True
         return modified
 
+    def legalize_top_k(self, exported_program, node) -> bool:
+        logger = logging.getLogger(__name__)
+        modified = False
+
+        graph_module = exported_program.graph_module
+        graph = graph_module.graph
+
+        args = TopKArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        input_ = args.input
+        k = args.k
+        dim = args.dim
+
+        if not (dim == -1 or dim == len(extract_shape(input_)) - 1):
+            raise NotYetSupportedError("Only support dim = -1 (last dimension)")
+
+        with graph.inserting_after(input_):
+            circle_topk = create_node(
+                graph,
+                torch.ops.circle_custom.top_k,
+                args=(input_, k),
+                origin=input_,
+            )
+
+        with graph.inserting_after(circle_topk):
+            topk_values = create_node(graph, getitem, args=(circle_topk, 0))
+            topk_indices = create_node(graph, getitem, args=(circle_topk, 1))
+        with graph.inserting_after(topk_indices):
+            topk_indices_int64 = create_node(
+                graph,
+                torch.ops.aten._to_copy.default,
+                args=(topk_indices,),
+                kwargs={"dtype": torch.int64},
+            )
+
+        get_item, get_item_1 = node.users.keys()
+        get_item.replace_all_uses_with(topk_values, propagate_meta=True)
+        get_item_1.replace_all_uses_with(topk_indices_int64, propagate_meta=True)
+
+        logger.debug(f"{node.name} is replaced with {circle_topk.name}")
+        modified = True
+
+        return modified
+
     def call(self, exported_program: ExportedProgram) -> PassResult:
         target_to_legalize_func = {
             torch.ops.aten.conv2d.default: self.legalize_conv2d,
@@ -442,6 +488,7 @@ class LegalizePreDefinedLayoutOperators(PassBase):
             torch.ops.aten.max_pool2d_with_indices.default: self.legalize_max_pool2d_with_indices,
             torch.ops.aten.avg_pool2d.default: self.legalize_avg_pool2d,
             torch.ops.aten.instance_norm.default: self.legalize_instance_norm,
+            torch.ops.aten.topk.default: self.legalize_top_k,
         }
 
         graph_module = exported_program.graph_module

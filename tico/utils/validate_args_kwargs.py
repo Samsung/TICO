@@ -1187,6 +1187,24 @@ class ToDtypeLayoutArgs:
 
 @enforce_type
 @dataclass
+class TopKArgs:
+    """
+    topk(Tensor self, SymInt k, int dim=-1, bool largest=True, bool sorted=True) -> (Tensor values, Tensor indices)
+    """
+
+    input: torch.fx.Node
+    k: int
+    dim: int = -1
+    largest: bool = True
+    sorted: bool = True
+
+    def __post_init__(self):
+        assert self.largest is True, "Only support largest=True"
+        assert self.sorted is True, "Only support sorted=True"
+
+
+@enforce_type
+@dataclass
 class UnSqueezeArgs:
     """
     unsqueeze(Tensor(a) self, int dim) -> Tensor(a)

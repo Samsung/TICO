@@ -33,6 +33,8 @@ from tico.utils.serialize import finalise_tensor_names, validate_tensor_shapes
 multiple_output_ops = [
     torch.ops.aten.split_with_sizes.default,
     torch.ops.aten.max.dim,
+    torch.ops.aten.topk.default,
+    torch.ops.circle_custom.top_k,
 ]
 
 

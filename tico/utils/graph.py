@@ -16,10 +16,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
+from operator import getitem
+
 import torch
 from torch.export import ExportedProgram
 from torch.export.exported_program import InputKind, InputSpec, TensorArgument
@@ -238,7 +240,7 @@ def get_module_name_chain(node: Optional[torch.fx.Node]) -> str:
 
 def create_node(
     graph: torch.fx.Graph,
-    target: torch._ops.OpOverload,
+    target: Callable,
     args: Optional[Tuple[Any, ...]] = None,
     kwargs: Optional[Dict[str, Any]] = None,
     *,
@@ -252,7 +254,7 @@ def create_node(
     graph : torch.fx.Graph
         The graph that will own the newly-created node.
 
-    target : torch._ops.OpOverload
+    target : Callable
         The op to call (e.g. `torch.add` or "call_function" target).
 
     args : Tuple[Any, ...], optional
