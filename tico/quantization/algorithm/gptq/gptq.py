@@ -36,11 +36,9 @@ class GPTQ:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
-            W = W.flatten(1)
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+            W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
 
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H: Optional[torch.Tensor] = torch.zeros(
@@ -53,7 +51,7 @@ class GPTQ:
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
-        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, nn.Conv1d):
+        if isinstance(self.layer, nn.Linear):
             if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
@@ -65,6 +63,50 @@ class GPTQ:
                 stride=self.layer.stride,
             )
 
+            if self.layer.groups != 1:
+                # the idea behind conversion of depthwise convolution to matmul is described here
+                # https://discuss.pytorch.org/t/conv1d-implementation-using-torch-nn-functional-unfold/109643/2
+                # although depthwise convolution is equal to a set of MatMuls
+                # (please note `w.view(1, groups, out_channels // groups, -1)` in the reference above is not just w.flatten(1))
+                # we can approximate groupwise Hessians with their mean
+                # so that we will have just a single Hessian and the usual GPTQ applies
+                inp = inp.reshape(
+                    inp.size(0) * self.layer.groups,
+                    inp.size(1) // self.layer.groups,
+                    inp.shape[2],
+                    inp.shape[3],
+                )  # inp.shape == (batch*groups, in_channels / groups, H, W) to meet Groupwise-wise Convolution, so that each group is colvolved with its own filter
+
+            inp = unfold(
+                inp
+            )  # inp.shape == (batch*groups, k_h*k_w*in_channels / groups, flattened_patches)
+            inp = inp.permute(
+                [1, 0, 2]
+            )  # inp.shape == (k_h*k_w*in_channels / groups, batch * groups, flattened_patches)
+            inp = inp.flatten(
+                1
+            )  # inp.shape == (k_h*k_w*in_channels / groups, batch * groups * flattened_patches)
+            # so inp.matmul(inp.t()).shape == (k_x*k_y*in_channels / groups, k_x*k_y*in_channels / groups) == W.flatten(1)
+
+        if isinstance(self.layer, nn.Conv1d):
+            # nn.Conv1d is basically the same as nn.Conv2d so we can use the same idea as for nn.Conv2d
+            unfold = nn.Unfold(
+                (1, self.layer.kernel_size[0]),
+                dilation=(1, self.layer.dilation[0]),
+                padding=(1, self.layer.padding[0]),
+                stride=(1, self.layer.stride[0]),
+            )
+            if self.layer.groups != 1:
+                # please see Conv2D for additional info
+                inp = inp.reshape(
+                    inp.size(0) * self.layer.groups,
+                    inp.size(1) // self.layer.groups,
+                    inp.shape[2]
+                )  # inp.shape == (batch*groups, in_channels / groups, L) to meet Groupwise-wise Convolution, so that each group is colvolved with its own filter
+
+            inp = inp.unsqueeze(
+                -2
+            )  # (batch, C_in, L)->(batch*groups, in_channels / groups, 1, L), valid for Conv2D
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
@@ -84,10 +126,8 @@ class GPTQ:
         verbose=False,
     ):
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+            W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():

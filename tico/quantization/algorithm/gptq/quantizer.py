@@ -113,6 +113,15 @@ class GPTQQuantizer(BaseQuantizer):
                 raise RuntimeError(
                     "GPTQ Quantizer assumes the model has a nested structure like `model.model.layers`, commonly found in LLaMA and other Hugging Face transformer models."
                 )
+        elif hasattr(model, "backbone"):
+            if hasattr(model.backbone, "layers") and isinstance(
+                model.backbone.layers, torch.nn.ModuleList
+            ):
+                self._first_layer_ref = model.backbone.layers[0]
+            else:
+                raise RuntimeError(
+                    "GPTQ Quantizer assumes the model has a nested structure like `model.model.layers`, commonly found in LLaMA and other Hugging Face transformer models."
+                )
         else:
             # fallback if the model is not LLaMA-like; treat whole model as single layer
             self._first_layer_ref = model
@@ -180,9 +189,13 @@ class GPTQQuantizer(BaseQuantizer):
         # Identify layers
         if hasattr(model, "model"):
             target_layers = model.model.layers
+        elif hasattr(model, "backbone"):
+            target_layers = model.backbone.layers
         else:
             target_layers = [model]
-
+        
+        num_of_quant_elems = 0
+        
         quantizers: Dict[str, Any] = {}
         for l_idx, layer in enumerate(
             tqdm(
@@ -196,12 +209,6 @@ class GPTQQuantizer(BaseQuantizer):
             full = find_layers(
                 layer, layers=[torch.nn.Linear, torch.nn.Conv2d, torch.nn.Conv1d]
             )
-            # filter out depthwise convolutions and alike
-            full = {
-                key: full[key]
-                for key in full.keys()
-                if not isinstance(full[key], torch.nn.Conv2d) or full[key].groups == 1
-            }
             sequential = [list(full.keys())]
 
             # 2) Set up GPTQ objects and gather stats
@@ -212,8 +219,9 @@ class GPTQQuantizer(BaseQuantizer):
                 for name in subset:
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
-                        bits=8, perchannel=True, sym=False, mse=False
+                        bits=4, perchannel=True, sym=False, mse=False
                     )
+                    num_of_quant_elems += subset[name].weight.numel()
 
                 # Hook to collect (inp, out) for GPTQ
                 def add_batch(name):
@@ -289,7 +297,10 @@ class GPTQQuantizer(BaseQuantizer):
         # Restore the original cache configuration.
         if orig_use_cache is not None:
             model.config.use_cache = orig_use_cache
-
+         
+        if gptq_conf.verbose:
+            print(f"num_of_quanized_elements {num_of_quant_elems / (1024 * 1024)} MiB")
+            
         # Clear caches to free memory
         self.cache_args.clear()
         self.cache_kwargs.clear()
