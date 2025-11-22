@@ -49,13 +49,13 @@ class RecordingInput:
     def __init__(
         self,
         module: nn.Module,
-        condition: Callable[[dict], bool] = lambda args_dict: True,
+        condition: Optional[Callable[[dict], bool]] = None,
         *,
         input_to_remove: Optional[List[str]] = [],
     ):
         self.module = module
         self.forward_org = module.forward
-        self.condition = condition
+        self.condition = condition or (lambda args_dict: True)
         self.input_to_remove = input_to_remove
         self.sig = inspect.signature(self.forward_org)
 
