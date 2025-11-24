@@ -173,6 +173,26 @@ class CatArgs:
 
 @enforce_type
 @dataclass
+class CircleAttentionArgs:
+    """
+    For circle.BuiltinOperator.BuiltinOperator.ATTENTION
+    """
+
+    hidden_states: torch.fx.Node
+    wq: torch.fx.Node
+    wk: torch.fx.Node
+    wv: torch.fx.Node
+    wo: torch.fx.Node
+    position_cos: torch.fx.Node
+    position_sin: torch.fx.Node
+    attention_mask: torch.fx.Node
+    past_key: torch.fx.Node
+    past_value: torch.fx.Node
+    cache_position: torch.fx.Node
+
+
+@enforce_type
+@dataclass
 class CircleRMSNormArgs:
     """
     For circle.BuiltinOperator.BuiltinOperator.RMS_NORM

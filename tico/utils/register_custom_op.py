@@ -727,6 +727,41 @@ def CircleRMSNorm():
         return hidden_states.new_empty(hidden_states.size())
 
 
+def CircleAttention():
+    @custom_op("circle_custom::attention", mutates_args=())
+    def attention(
+        hidden_states: torch.Tensor,
+        wq: torch.Tensor,
+        wk: torch.Tensor,
+        wv: torch.Tensor,
+        wo: torch.Tensor,
+        position_cos: torch.Tensor,
+        position_sin: torch.Tensor,
+        attention_mask: torch.Tensor,
+        past_key: torch.Tensor,
+        past_value: torch.Tensor,
+        cache_position: torch.Tensor,
+    ) -> torch.Tensor:
+        # TODO It is recommended to add corresponding tests after implementing this.
+        return None  # type: ignore[return-value]
+
+    @register_fake("circle_custom::attention")
+    def _(
+        hidden_states: torch.Tensor,
+        wq: torch.Tensor,
+        wk: torch.Tensor,
+        wv: torch.Tensor,
+        wo: torch.Tensor,
+        position_cos: torch.Tensor,
+        position_sin: torch.Tensor,
+        attention_mask: torch.Tensor,
+        past_key: torch.Tensor,
+        past_value: torch.Tensor,
+        cache_position: torch.Tensor,
+    ) -> torch.Tensor:
+        return hidden_states
+
+
 # Add custom ops to the torch namespace
 def RegisterOps():
     CircleResizeNearestNeighbor()
@@ -740,3 +775,4 @@ def RegisterOps():
     CircleInstanceNorm()
     CircleQuantizeMX()
     CircleRMSNorm()
+    CircleAttention()
