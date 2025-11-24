@@ -172,7 +172,7 @@ class NNModuleTest(TestRunnerBase):
                 config=compile_config,
             )
 
-        # verify_circle(circle_model_path, opt_circle_model_path)
+        verify_circle(circle_model_path, opt_circle_model_path)
 
         if dynamic_shapes:
 
