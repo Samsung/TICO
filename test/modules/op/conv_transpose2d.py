@@ -124,3 +124,32 @@ class ConvTStride2OutPad1(TestModuleBase):
     def get_example_inputs(self):
         # (1, 12, 15, 15) → (1, 20, 31, 31)
         return (torch.randn(1, 12, 15, 15),), {}
+
+
+class ConvTComplicated(TestModuleBase):
+    """
+    - in_channels = 16
+    - out_channels = 16
+    - kernel_size = (1, 3)
+    - stride = (1, 2)
+    - padding = (0, 1)
+    - output_padding = (0, 1)
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.tconv = torch.nn.ConvTranspose2d(
+            in_channels=16,
+            out_channels=16,
+            kernel_size=(1, 3),
+            stride=(1, 2),
+            padding=(0, 1),
+            output_padding=(0, 1),
+            bias=True,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.tconv(x)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 16, 1, 8),), {}

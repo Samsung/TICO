@@ -35,6 +35,7 @@ class ConvPaddingInfo(NamedTuple):
 
     conv_padding_type: ConvPadding
     explicit_pad_hw: Optional[Tuple[int, int]]  # None -> no extra Pad() op needed
+    output_crop_hw: Optional[Tuple[int, int]]
 
 
 def identify_padding(
@@ -42,6 +43,7 @@ def identify_padding(
     input_shape: Sequence[int | torch.SymInt] | torch.Size,
     output_shape: Sequence[int | torch.SymInt] | torch.Size,
     stride: Sequence[int],
+    is_transpose: bool = False,
 ) -> ConvPaddingInfo:
     """
     Normalizes all PyTorch `padding` variants to a single decision.
@@ -61,9 +63,9 @@ def identify_padding(
     if isinstance(padding, str):
         pad = padding.lower()
         if pad == "valid":
-            return ConvPaddingInfo(ConvPadding.VALID, None)
+            return ConvPaddingInfo(ConvPadding.VALID, None, None)
         if pad == "same":
-            return ConvPaddingInfo(ConvPadding.SAME, None)
+            return ConvPaddingInfo(ConvPadding.SAME, None, None)
         raise InvalidArgumentError(f"Unknown padding string: {padding}")
 
     # ─── 2. List / tuple form ─────────────────────────────────────────────
@@ -73,15 +75,21 @@ def identify_padding(
         )
 
     pad_h, pad_w = padding
+
+    if is_transpose:
+        if pad_h == 0 and pad_w == 0:
+            return ConvPaddingInfo(ConvPadding.VALID, None, None)
+        return ConvPaddingInfo(ConvPadding.VALID, None, (pad_h, pad_w))
+
     # [0, 0]  → VALID
     if pad_h == 0 and pad_w == 0:
-        return ConvPaddingInfo(ConvPadding.VALID, None)
+        return ConvPaddingInfo(ConvPadding.VALID, None, None)
 
     # SAME heuristic: output H/W already match input when stride is 1
     hw_in = tuple(input_shape[1:3])
     hw_out = tuple(output_shape[1:3])
     if hw_in == hw_out and stride == [1, 1]:
-        return ConvPaddingInfo(ConvPadding.SAME, None)
+        return ConvPaddingInfo(ConvPadding.SAME, None, None)
 
     # Anything else = explicit symmetric padding
-    return ConvPaddingInfo(ConvPadding.VALID, (pad_h, pad_w))
+    return ConvPaddingInfo(ConvPadding.VALID, (pad_h, pad_w), None)

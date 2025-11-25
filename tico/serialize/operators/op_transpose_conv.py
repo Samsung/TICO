@@ -66,6 +66,29 @@ class TransposeConvVisitor(NodeVisitor):
         set_transpose_conv_option(operator, stride)
         return operator
 
+    def define_slice_node(
+        self,
+        src_tensor,
+        begin_vals: List[int],
+        size_vals: List[int],
+        dst_tensor,
+    ) -> circle.Operator.OperatorT:
+        slice_op_index = get_op_index(
+            circle.BuiltinOperator.BuiltinOperator.SLICE, self._op_codes
+        )
+
+        # Begin / Size as int32 const tensors
+        begin_arr = circle_legalize_dtype_to(begin_vals, dtype=torch.int32)
+        size_arr = circle_legalize_dtype_to(size_vals, dtype=torch.int32)
+
+        operator = create_builtin_operator(
+            self.graph, slice_op_index, [src_tensor, begin_arr, size_arr], [dst_tensor]
+        )
+        operator.builtinOptionsType = circle.BuiltinOptions.BuiltinOptions.SliceOptions
+        option = circle.SliceOptions.SliceOptionsT()
+        operator.builtinOptions = option
+        return operator
+
     def __init__(self, op_codes: Dict[OpCode, int], graph):
         super().__init__(op_codes, graph)
 
@@ -88,65 +111,58 @@ class TransposeConvVisitor(NodeVisitor):
         assert len(output_shape) == 4, len(output_shape)
         assert len(weight_shape) == 4, len(weight_shape)
 
-        pad_decision = identify_padding(padding, input_shape, output_shape, stride)
+        pad_decision = identify_padding(
+            padding, input_shape, output_shape, stride, is_transpose=True
+        )
 
         conv_input: torch.fx.Node | circle.Tensor.TensorT = input_
-        if pad_decision.explicit_pad_hw is not None:
-            pad_h, pad_w = pad_decision.explicit_pad_hw
-            paddings = torch.tensor(
-                [
-                    [0, 0],
-                    [pad_h, pad_h],
-                    [pad_w, pad_w],
-                    [0, 0],
-                ],
-                dtype=torch.int32,
-            )
-            pad_output_shape: List[int | torch.SymInt] = [
-                input_shape[0],
-                input_shape[1] + pad_h * 2,
-                input_shape[2] + pad_w * 2,
-                input_shape[3],
-            ]
-            pad_output_cshape, pad_output_cshape_signature = to_circle_shape(
-                pad_output_shape
-            )
-            # create padded output tensor
-            input_qparam: Optional[QuantParam] = input_.meta.get(QPARAM_KEY)
-            pad_output = self.graph.add_tensor_from_scratch(
-                prefix=f"{node.name}_input_pad_output",
-                shape=pad_output_cshape,
-                shape_signature=pad_output_cshape_signature,
-                dtype=extract_circle_dtype(input_),
-                qparam=input_qparam,
-                source_node=node,
-            )
-            # CirclePad
-            pad_operator = define_pad_node(
-                self.graph, self._op_codes, [input_, paddings], [pad_output]
-            )
-            self.graph.add_operator(pad_operator)
-            conv_input = pad_output
-
         if bias is None:
             # luci-interpreter can't run no bias conv. Let's add zero vector for bias.
             bias = [0.0] * weight_shape[0]  # type: ignore[assignment]
 
-        # First arguemnt is output shape of tconv.
-        assert output_shape[0] == input_shape[0]
-        assert output_shape[3] == weight_shape[0]
-        tconv_output = circle_legalize_dtype_to(output_shape, dtype=torch.int32)
+        # Compute pre-crop output shape if we need to apply an explicit crop.
+        if pad_decision.output_crop_hw is not None:
+            pad_h, pad_w = pad_decision.output_crop_hw
+            pre_h = int(output_shape[1]) + 2 * pad_h
+            pre_w = int(output_shape[2]) + 2 * pad_w
+            pre_out_shape = [output_shape[0], pre_h, pre_w, output_shape[3]]  # NHWC
+        else:
+            pre_out_shape = list(output_shape)
 
-        tconv_output_tensor = self.graph.add_const_tensor(
-            tconv_output, source_node=node
-        )
+        tconv_output = circle_legalize_dtype_to(pre_out_shape, dtype=torch.int32)
 
-        # TConv2D
+        pre_out_cshape, pre_out_csig = to_circle_shape(pre_out_shape)
+        tconv_tmp = node  # type: ignore[assignment]
+        if pad_decision.output_crop_hw is not None:
+            tconv_tmp = self.graph.add_tensor_from_scratch(  # type: ignore[assignment]
+                prefix=f"{node.name}_tconv_out_pre_crop",
+                shape=pre_out_cshape,
+                shape_signature=pre_out_csig,
+                dtype=extract_circle_dtype(node),
+                qparam=node.meta.get(QPARAM_KEY),
+                source_node=node,
+            )
+
         tconv2d_operator = self.define_transpose_conv_node(
-            pad_decision.conv_padding_type,  # 'SAME'(0) or 'VALID'(1)
+            pad_decision.conv_padding_type,
             stride,
-            [tconv_output_tensor, weight, conv_input, bias],
-            [node],
+            [tconv_output, weight, conv_input, bias],
+            [tconv_tmp],
         )
+
+        # If we need an output crop, insert a SLICE to produce the final tensor.
+        if pad_decision.output_crop_hw is not None:
+            self.graph.add_operator(tconv2d_operator)
+            pad_h, pad_w = pad_decision.output_crop_hw
+            begin = [0, pad_h, pad_w, 0]
+            size = [
+                int(output_shape[0]),
+                int(output_shape[1]),
+                int(output_shape[2]),
+                int(output_shape[3]),
+            ]
+
+            slice_op = self.define_slice_node(tconv_tmp, begin, size, node)
+            return slice_op
 
         return tconv2d_operator
