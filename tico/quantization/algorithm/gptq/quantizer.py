@@ -193,7 +193,9 @@ class GPTQQuantizer(BaseQuantizer):
             )
         ):
             # 1) Identify quantizable submodules within the layer
-            full = find_layers(layer, layers=[torch.nn.Linear, torch.nn.Conv2d])
+            full = find_layers(
+                layer, layers=[torch.nn.Linear, torch.nn.Conv2d, torch.nn.Conv1d]
+            )
             sequential = [list(full.keys())]
 
             # 2) Set up GPTQ objects and gather stats
