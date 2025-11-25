@@ -34,6 +34,7 @@ from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.quantization import convert, prepare
+from tico.quantization.config.fpi_gptq import FPIGPTQConfig
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -181,12 +182,14 @@ def main():
             torch_dtype=dtype,
             trust_remote_code=args.trust_remote_code,
             token=args.hf_token,
+            cache_dir="/mnt/storage/transformers_cache",
         )
         .to(device)
         .eval()
     )
 
     model.config.use_cache = args.use_cache
+    model.config.max_position_embeddings = 2048
 
     # Build module -> FQN map BEFORE wrapping
     m_to_fqn = build_fqn_map(model)
@@ -194,63 +197,101 @@ def main():
     # -------------------------------------------------------------------------
     # 3. Run GPTQ (weight-only) pass
     # -------------------------------------------------------------------------
+    dataset_test = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT)
+    enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
+    ppl_original = 14.33  # perplexity(model, enc, device, stride=model.config.max_position_embeddings)
+    print("\n┌── Wikitext-2 test perplexity ─────────────")
+    print(f"│ Original: {ppl_original:8.2f}")
+    print("└───────────────────────────────────────────")
+
+    import random
+
+    dataset_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
+    calib_txt = " ".join(dataset_train["text"])
+    train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
+
+    import time
+
+    tick = time.time()
     print("Applying GPTQ …")
     dataset_test = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT)
-    q_m = prepare(model, GPTQConfig(), inplace=True)
+    # just for testing
+    # q_m = prepare(model, FPIGPTQConfig(verbose=True), inplace=True)
+    q_m = prepare(model, GPTQConfig(verbose=True), inplace=True)
 
     it = (
         dataset_test
         if args.no_tqdm
         else tqdm.tqdm(dataset_test, desc="GPTQ calibration")
     )
-    for d in it:
-        ids = tokenizer(d["text"], return_tensors="pt").input_ids.to(device)
-        q_m(ids)  # observers gather weight stats
+
+    nsamples = 128
+    seqlen = q_m.config.max_position_embeddings
+    for _ in range(nsamples):
+        i = random.randint(0, train_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = train_ids[:, i:j]
+        with torch.no_grad():
+            q_m(inp)
+
+    # index = 0
+    # for d in it:
+    #     ids = tokenizer(d["text"], return_tensors="pt").input_ids.to(device)
+    #     if ids.dtype != torch.int64:
+    #         continue
+    #     q_m(ids)  # observers gather weight stats
+    #     index += 1
+    #     if index > 128:
+    #         break
 
     q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
+    q_time = time.time() - tick
+    print(f"time_of_quantization {q_time}")
 
     # -------------------------------------------------------------------------
     # 4. Wrap every layer with PTQWrapper (activation UINT-8)
     # -------------------------------------------------------------------------
-    print("Wrapping layers with PTQWrapper …")
-    qcfg = PTQConfig()  # default: per-tensor UINT8
-    prepare(q_m, qcfg)
-
-    # -------------------------------------------------------------------------
-    # 5. Single-pass activation calibration
-    # -------------------------------------------------------------------------
-    print("Calibrating UINT-8 observers …")
-    CALIB_TOKENS = TOKENS[args.calib_preset]
-    print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
-    dataset_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
-    calib_txt = " ".join(dataset_train["text"])[:CALIB_TOKENS]
-    train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
-
-    # Overwrite weight observers with GPTQ statistics
-    if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
-        inject_gptq_qparams(q_m, q_m.quantizers)
-    else:
-        print(
-            "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
-        )
-
-    # Forward passes to collect activation ranges
-    iterator = range(0, train_ids.size(1) - 1, args.stride)
-    if not args.no_tqdm:
-        iterator = tqdm.tqdm(iterator, desc="Act-calibration")
-    with torch.no_grad():
-        for i in iterator:
-            q_m(train_ids[:, i : i + args.stride])
-
-    # Freeze all Q-params (scale, zero-point)
-    convert(q_m)
+    #   print("Wrapping layers with PTQWrapper …")
+    #   qcfg = PTQConfig()  # default: per-tensor UINT8
+    #   prepare(q_m, qcfg)
+    #
+    #   # -------------------------------------------------------------------------
+    #   # 5. Single-pass activation calibration
+    #   # -------------------------------------------------------------------------
+    #   print("Calibrating UINT-8 observers …")
+    #   CALIB_TOKENS = TOKENS[args.calib_preset]
+    #   print(f"Calibrating with {CALIB_TOKENS:,} tokens.\n")
+    #   dataset_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
+    #   calib_txt = " ".join(dataset_train["text"])[:CALIB_TOKENS]
+    #   train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
+    #
+    #   # Overwrite weight observers with GPTQ statistics
+    #   if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
+    #       inject_gptq_qparams(q_m, q_m.quantizers)
+    #   else:
+    #       print(
+    #           "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
+    #       )
+    #
+    #   # Forward passes to collect activation ranges
+    #   iterator = range(0, train_ids.size(1) - 1, args.stride)
+    #   if not args.no_tqdm:
+    #       iterator = tqdm.tqdm(iterator, desc="Act-calibration")
+    #   with torch.no_grad():
+    #       for i in iterator:
+    #           q_m(train_ids[:, i : i + args.stride])
+    #
+    #   # Freeze all Q-params (scale, zero-point)
+    #   convert(q_m)
 
     # -------------------------------------------------------------------------
     # 6. Evaluate perplexity on Wikitext-2
     # -------------------------------------------------------------------------
     print("\nCalculating perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
-    ppl_uint8 = perplexity(q_m, enc, device, stride=args.stride)
+    ppl_uint8 = perplexity(
+        q_m, enc, device, stride=model.config.max_position_embeddings
+    )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
     print(f"│ UINT-8 : {ppl_uint8:8.2f}")
@@ -258,8 +299,6 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"\n[Error] {e}", file=sys.stderr)
-        sys.exit(1)
+    # try:
+    main()
+#    sys.exit(1)

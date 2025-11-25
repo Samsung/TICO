@@ -56,11 +56,9 @@ class FPI_GPTQ:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
 
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H: Optional[torch.Tensor] = torch.zeros(
@@ -73,7 +71,7 @@ class FPI_GPTQ:
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
-        if isinstance(self.layer, nn.Linear) or isinstance(self.layer, nn.Conv1d):
+        if isinstance(self.layer, nn.Linear):
             if len(inp.shape) > 2:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
@@ -110,6 +108,31 @@ class FPI_GPTQ:
             )  # inp.shape == (k_h*k_w*in_channels / groups, batch * groups * flattened_patches)
             # so inp.matmul(inp.t()).shape == (k_x*k_y*in_channels / groups, k_x*k_y*in_channels / groups) == W.flatten(1)
 
+        if isinstance(self.layer, nn.Conv1d):
+            # nn.Conv1d is basically the same as nn.Conv2d so we can use the same idea as for nn.Conv2d
+            # TODO reduce code duplication
+            # represent conv1d as conv2d(1, k) on reshaped_input(batch, in_channels, 1, L)
+            unfold = nn.Unfold(
+                (1, self.layer.kernel_size[0]),
+                dilation=(1, self.layer.dilation[0]),
+                padding=(1, self.layer.padding[0]),
+                stride=(1, self.layer.stride[0]),
+            )
+            if self.layer.groups != 1:
+                # please see Conv2D for additional info
+                inp = inp.reshape(
+                    inp.size(0) * self.layer.groups,
+                    inp.size(1) // self.layer.groups,
+                    inp.shape[2],
+                )  # inp.shape == (batch*groups, in_channels / groups, L) to meet Groupwise-wise Convolution, so that each group is colvolved with its own filter
+
+            inp = inp.unsqueeze(
+                -2
+            )  # (batch*groups, in_channels / groups, L)->(batch*groups, in_channels / groups, 1, L), valid for Conv2D
+            inp = unfold(inp)
+            inp = inp.permute([1, 0, 2])
+            inp = inp.flatten(1)
+
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
@@ -121,10 +144,8 @@ class FPI_GPTQ:
         verbose=False,
     ):
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
-        if isinstance(self.layer, nn.Conv1d):
-            W = W.t()
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():
@@ -174,7 +195,7 @@ class FPI_GPTQ:
 
         Q = Q[:, invperm]
 
-        if isinstance(self.layer, nn.Conv2d):
+        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             Q[:, dead] = quantize(
                 self.layer.weight.flatten(1)[:, dead],
                 self.quantizer.scale,

@@ -63,8 +63,12 @@ class FPIGPTQQuantizer(GPTQQuantizer):
         # Identify layers
         if hasattr(model, "model"):
             target_layers = model.model.layers
+        elif hasattr(model, "backbone"):
+            target_layers = model.backbone.layers
         else:
             target_layers = [model]
+
+        num_of_quant_elems = 0
 
         quantizers: Dict[str, Any] = {}
         for l_idx, layer in enumerate(
@@ -76,8 +80,9 @@ class FPIGPTQQuantizer(GPTQQuantizer):
             )
         ):
             # 1) Identify quantizable submodules within the layer
-            full = find_layers(layer, layers=[torch.nn.Linear, torch.nn.Conv2d])
-
+            full = find_layers(
+                layer, layers=[torch.nn.Linear, torch.nn.Conv2d, torch.nn.Conv1d]
+            )
             sequential = [list(full.keys())]
 
             # 2) Set up (as in GPTQ)
@@ -88,8 +93,9 @@ class FPIGPTQQuantizer(GPTQQuantizer):
                 for name in subset:
                     gptq[name] = FPI_GPTQ(subset[name])
                     gptq[name].quantizer.configure(
-                        bits=8, perchannel=True, sym=False, mse=False
+                        bits=4, perchannel=True, sym=False, mse=False
                     )
+                    num_of_quant_elems += subset[name].weight.numel()
 
                 # Hook to collect (inp, out) for GPTQ
                 def add_batch(name):
@@ -158,6 +164,9 @@ class FPIGPTQQuantizer(GPTQQuantizer):
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+
+        if gptq_conf.verbose:
+            print(f"num_of_quantized_elements {num_of_quant_elems / (1024 * 1024)} MiB")
 
         # Restore the original cache configuration.
         if orig_use_cache is not None:
