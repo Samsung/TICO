@@ -115,7 +115,7 @@ class FPI_GPTQ:
             unfold = nn.Unfold(
                 (1, self.layer.kernel_size[0]),
                 dilation=(1, self.layer.dilation[0]),
-                padding=(1, self.layer.padding[0]),
+                padding=(0, self.layer.padding[0]),
                 stride=(1, self.layer.stride[0]),
             )
             if self.layer.groups != 1:
