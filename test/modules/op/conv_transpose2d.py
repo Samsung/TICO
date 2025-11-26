@@ -153,3 +153,142 @@ class ConvTComplicated(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(1, 16, 1, 8),), {}
+
+
+class ConvToConvTRecoverShape_K3S2P1(TestModuleBase):
+    """
+    Conv2d followed by ConvTranspose2d that recovers original shape.
+    kernel_size=3, stride=2, padding=1, output_padding=1
+    32x32 -> 16x16 -> 32x32
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+        )
+        self.tconv = torch.nn.ConvTranspose2d(
+            in_channels=16,
+            out_channels=3,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            output_padding=1,  # Required to recover 32x32 from 16x16
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.tconv(x)
+        return x
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3, 32, 32),), {}
+
+
+class ConvToConvTRecoverShape_K4S2P1(TestModuleBase):
+    """
+    Conv2d followed by ConvTranspose2d that recovers original shape.
+    kernel_size=4, stride=2, padding=1, output_padding=0
+    32x32 -> 16x16 -> 32x32
+    This is a "perfect" configuration that doesn't need output_padding!
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+        )
+        self.tconv = torch.nn.ConvTranspose2d(
+            in_channels=16,
+            out_channels=3,
+            kernel_size=4,
+            stride=2,
+            padding=1,
+            output_padding=0,  # No output padding needed
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.tconv(x)
+        return x
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3, 32, 32),), {}
+
+
+class ConvToConvTRecoverShape_K5S1P2(TestModuleBase):
+    """
+    Conv2d followed by ConvTranspose2d with "same" padding.
+    kernel_size=5, stride=1, padding=2, output_padding=0
+    32x32 -> 32x32 -> 32x32
+    Demonstrates "same" padding where spatial dimensions are preserved.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=5,
+            stride=1,
+            padding=2,  # "same" padding: (kernel_size - 1) // 2
+        )
+        self.tconv = torch.nn.ConvTranspose2d(
+            in_channels=16,
+            out_channels=3,
+            kernel_size=5,
+            stride=1,
+            padding=2,
+            output_padding=0,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.tconv(x)
+        return x
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3, 32, 32),), {}
+
+
+class ConvToConvTRecoverShape_Asymmetric(TestModuleBase):
+    """
+    Conv2d followed by ConvTranspose2d with non-square input.
+    kernel_size=3, stride=2, padding=1, output_padding=1
+    28x28 -> 14x14 -> 28x28
+    Demonstrates handling of non-power-of-2 dimensions.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.conv = torch.nn.Conv2d(
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+        )
+        self.tconv = torch.nn.ConvTranspose2d(
+            in_channels=16,
+            out_channels=3,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            output_padding=1,  # Required to recover 28x28 from 14x14
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)
+        x = self.tconv(x)
+        return x
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3, 28, 28),), {}
