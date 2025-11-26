@@ -91,11 +91,11 @@ class GPTQ:
         if isinstance(self.layer, nn.Conv1d):
             # nn.Conv1d is basically the same as nn.Conv2d so we can use the same idea as for nn.Conv2d
             # TODO reduce code duplication
-            # represent conv1d as conv2d(1, k) on reshpaed_input(batch, in_channels, 1, L)
+            # represent conv1d as conv2d(1, k) on reshaped_input(batch, in_channels, 1, L)
             unfold = nn.Unfold(
                 (1, self.layer.kernel_size[0]),
                 dilation=(1, self.layer.dilation[0]),
-                padding=(1, self.layer.padding[0]),
+                padding=(0, self.layer.padding[0]),
                 stride=(1, self.layer.stride[0]),
             )
             if self.layer.groups != 1:
