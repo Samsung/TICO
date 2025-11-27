@@ -115,7 +115,7 @@ class DecomposeBatchNorm(PassBase):
                 continue
 
             input_shape = extract_shape(input_)
-            assert len(input_shape) == 4
+            assert len(input_shape) >= 2, len(input_shape)
             C = input_shape[1]
 
             weight_value = (
@@ -145,11 +145,15 @@ class DecomposeBatchNorm(PassBase):
             # Calculate constants for mul and add
             mul_const = weight_value / torch.sqrt(var_value + eps)
             add_const = bias_value - (mul_const * mean_value)
-            # N, C, H, W
+
+            # Make sure channel count matches
             assert len(mul_const) == len(add_const) == C
-            # reshape along with channel dimension
-            mul_const = mul_const.view(1, mul_const.shape[0], 1, 1)
-            add_const = add_const.view(1, add_const.shape[0], 1, 1)
+
+            # Build a broadcastable shape like (1, C, 1, ...)
+            view_shape = [1] * len(input_shape)
+            view_shape[1] = C
+            mul_const = mul_const.view(*view_shape)
+            add_const = add_const.view(*view_shape)
 
             # Placeholder nodes must be the first N nodes in the nodes list of a graph.
             # Therefore, insert the newly created placeholders at the start of the node list.
