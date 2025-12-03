@@ -183,6 +183,12 @@ class GPTQQuantizer(BaseQuantizer):
         else:
             target_layers = [model]
 
+        num_of_quant_elems = 0
+        num_of_all_elements = 0
+        for module in model.modules():
+            if hasattr(module, "weight"):
+                num_of_all_elements += module.weight.numel()
+
         quantizers: Dict[str, Any] = {}
         for l_idx, layer in enumerate(
             tqdm(
@@ -194,7 +200,13 @@ class GPTQQuantizer(BaseQuantizer):
         ):
             # 1) Identify quantizable submodules within the layer
             full = find_layers(
-                layer, layers=[torch.nn.Linear, torch.nn.Conv2d, torch.nn.Conv1d]
+                layer,
+                layers=[
+                    torch.nn.Linear,
+                    torch.nn.Conv2d,
+                    torch.nn.Conv1d,
+                    torch.nn.ConvTranspose2d,
+                ],
             )
             sequential = [list(full.keys())]
 
@@ -206,8 +218,9 @@ class GPTQQuantizer(BaseQuantizer):
                 for name in subset:
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
-                        bits=8, perchannel=True, sym=False, mse=False
+                        bits=3, perchannel=True, sym=False, mse=False
                     )
+                    num_of_quant_elems += subset[name].weight.numel()
 
                 # Hook to collect (inp, out) for GPTQ
                 def add_batch(name):
@@ -283,6 +296,10 @@ class GPTQQuantizer(BaseQuantizer):
         # Restore the original cache configuration.
         if orig_use_cache is not None:
             model.config.use_cache = orig_use_cache
+
+        if gptq_conf.verbose:
+            print(f"num_of_all_elements {num_of_all_elements / (1024 * 1024)} MiB")
+            print(f"num_of_quantized_elements {num_of_quant_elems / (1024 * 1024)} MiB")
 
         # Clear caches to free memory
         self.cache_args.clear()
