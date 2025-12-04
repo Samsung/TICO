@@ -119,6 +119,24 @@ class GroupwiseConv1D(torch.nn.Module):
         return (torch.randn(1, 32, 16),), {}
 
 
+class TransposedConv2DGeneral(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.tconv = torch.nn.ConvTranspose2d(16, 32, (2, 2), stride=2, groups=1)
+        self.tconv2 = torch.nn.ConvTranspose2d(
+            32, 16, (3, 3), stride=4, groups=2
+        )  # general groupwise
+
+    def forward(self, x):
+        z = self.tconv(x)
+        z = self.tconv2(z)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 16, 7, 7),), {}
+
+
 class GPTQTest(unittest.TestCase):
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
@@ -352,3 +370,29 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
         # TODO add PT2E quantization (right now it can't be evaluated on backend)
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_transposed_conv2d(self):
+        q_m = TransposedConv2DGeneral()
+        q_m.eval()
+        ori_m = q_m
+        args, kwargs = ori_m.get_example_inputs()
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_example_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.tconv" in q_m.quantizers
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.tconv2" in q_m.quantizers
+        ), "second conv node is not quantized"
+
+        # TODO add PT2E quantization

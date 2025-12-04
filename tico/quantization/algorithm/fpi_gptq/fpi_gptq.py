@@ -25,6 +25,12 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from tico.quantization.algorithm.gptq.gptq import (
+    conv2d_weights_to_convtranspose2d_weights,
+    convtranspose2d_weights_to_conv2d_weights,
+    get_matmul_input_for_convtranspose2d,
+)
+
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 
 
@@ -57,6 +63,9 @@ class FPI_GPTQ:
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+            W = W.flatten(1)
+        elif isinstance(self.layer, nn.ConvTranspose2d):
+            W = convtranspose2d_weights_to_conv2d_weights(self.layer, W)
             W = W.flatten(1)
 
         self.rows = W.shape[0]
@@ -132,6 +141,8 @@ class FPI_GPTQ:
             inp = unfold(inp)
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
+        if isinstance(self.layer, nn.ConvTranspose2d):
+            inp = get_matmul_input_for_convtranspose2d(self.layer, inp)
 
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
@@ -146,6 +157,11 @@ class FPI_GPTQ:
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
             W = W.flatten(1)
+        elif isinstance(self.layer, nn.ConvTranspose2d):
+            W = convtranspose2d_weights_to_conv2d_weights(self.layer, W)
+            conv2d_shape = W.shape
+            W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
+
         W = W.float()
         tick = time.time()
         if not self.quantizer.ready():
@@ -202,6 +218,15 @@ class FPI_GPTQ:
                 self.quantizer.zero,
                 self.quantizer.maxq,
             )
+        elif isinstance(self.layer, nn.ConvTranspose2d):
+            Q[:, dead] = quantize(
+                convtranspose2d_weights_to_conv2d_weights(
+                    self.layer, self.layer.weight.data
+                ).flatten(1)[:, dead],
+                self.quantizer.scale,
+                self.quantizer.zero,
+                self.quantizer.maxq,
+            )
         else:
             Q[:, dead] = quantize(
                 self.layer.weight[:, dead],
@@ -210,9 +235,15 @@ class FPI_GPTQ:
                 self.quantizer.maxq,
             )
 
-        self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
-            self.layer.weight.data.dtype
-        )
+        if isinstance(self.layer, nn.ConvTranspose2d):
+            Q_conv2d = Q.reshape(conv2d_shape).to(self.layer.weight.data.dtype)
+            self.layer.weight.data = conv2d_weights_to_convtranspose2d_weights(
+                self.layer, Q_conv2d
+            )
+        else:
+            self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(
+                self.layer.weight.data.dtype
+            )
 
     def free(self):
         self.H = None

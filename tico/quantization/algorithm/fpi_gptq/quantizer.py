@@ -77,7 +77,13 @@ class FPIGPTQQuantizer(GPTQQuantizer):
         ):
             # 1) Identify quantizable submodules within the layer
             full = find_layers(
-                layer, layers=[torch.nn.Linear, torch.nn.Conv2d, torch.nn.Conv1d]
+                layer,
+                layers=[
+                    torch.nn.Linear,
+                    torch.nn.Conv2d,
+                    torch.nn.Conv1d,
+                    torch.nn.ConvTranspose2d,
+                ],
             )
             sequential = [list(full.keys())]
 
