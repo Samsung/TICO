@@ -103,7 +103,7 @@ jobs:
 
       - name: "Build package"
         run: |
-          pip install setuptools
+          pip install build
           ./ccex build
 
       - name: "Run install"
