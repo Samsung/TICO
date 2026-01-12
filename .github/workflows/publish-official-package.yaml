@@ -13,30 +13,34 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Checkout the specified ref
+      - name: "Checkout the specified ref"
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref_name }}
-
-      # Verify version consistency between tag and version.py
-      - name: Check version.py matches ref_name
-        run: |
-          FILE_VERSION=$(python -c 'exec(open("version.py").read()); print(VERSION)')
-          INPUT_REF="${{ inputs.ref_name }}"
-          TAG_VERSION="${INPUT_REF#v}"  # Strip leading 'v' from ref_name
-
-          echo "VERSION in version.py: $FILE_VERSION"
-          echo "VERSION from ref_name: $TAG_VERSION"
-
-          if [ "$FILE_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::VERSION in version.py ($FILE_VERSION) does not match ref_name ($INPUT_REF)"
-            exit 1
-          fi
+          fetch-depth: 0 # Import all commit history and tag
 
       - name: "Build package"
         run: |
           ./ccex build
-      
+
+      - name: "Check requested version (ref_name)"
+        run: |
+          INPUT_REF="${{ inputs.ref_name }}"
+          TAG_VERSION="${INPUT_REF#v}"  # Strip leading 'v' from ref_name
+
+          VERSION="$(versioningit)"
+          CLEAN_VERSION="$(echo "$VERSION" | cut -d'.' -f1-3)"
+
+          echo "$CLEAN_VERSION"
+
+          echo "VERSION from prepared package: $CLEAN_VERSION"
+          echo "VERSION from ref_name: $TAG_VERSION"
+
+          if [ "$CLEAN_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::VERSION($CLEAN_VERSION) of current package does not match your requested ref_name ($INPUT_REF)"
+            exit 1
+          fi
+
       - name: "Upload artifact"
         uses: actions/upload-artifact@v4
         with:
@@ -44,6 +48,7 @@ jobs:
           path: "./dist/"
 
   publish-to-pypi:
+
     needs:
       - build-and-upload
     runs-on: ubuntu-22.04

@@ -68,6 +68,8 @@ jobs:
           apt-get update
           apt-get install -y curl git lsb-release unzip jq
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Import all commit history and tag
       - name: Install python dependencies
         run: |
           apt-get install -y python3-venv python3-pip
@@ -101,9 +103,14 @@ jobs:
           apt-get install -f -y
           onecc --version || echo "Installation failed."
 
+      - name: Trust all directories for Git
+        run: |
+          # Enable access to git from 'versioningit'
+          git config --global --add safe.directory "*"
+
       - name: "Build package"
         run: |
-          pip install setuptools
+          pip install build
           ./ccex build
 
       - name: "Run install"

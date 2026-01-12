@@ -5,6 +5,7 @@ __pycache__/
 # Distribution
 build/
 dist/
+*/_version.py
 *.egg-info/
 .eggs/
 
