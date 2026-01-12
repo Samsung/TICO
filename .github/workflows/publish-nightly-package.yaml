@@ -18,6 +18,11 @@ jobs:
         with:
           fetch-depth: 0 # Import all commit history and tag
 
+      - name: Trust all directories for Git
+        run: |
+          # Enable access to git from 'versioningit'
+          git config --global --add safe.directory "*"
+
       - name: "Build package"
         run: |
           ./ccex build
