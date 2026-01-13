@@ -321,6 +321,27 @@ class Conv1DArgs:
 
 @enforce_type
 @dataclass
+class Conv3DArgs:
+    """
+    conv3d(Tensor input, Tensor weight, Tensor? bias=None, SymInt[3] stride=1, SymInt[3] padding=0, SymInt[3] dilation=1, SymInt groups=1) -> Tensor
+    conv3d.padding(Tensor input, Tensor weight, Tensor? bias=None, SymInt[3] stride=1, str padding="valid", SymInt[3] dilation=1, SymInt groups=1) -> Tensor
+    """
+
+    input: torch.fx.Node
+    weight: torch.fx.Node
+    bias: Union[torch.fx.Node, None] = None
+    stride: List[int] = field(default_factory=lambda: [1, 1, 1])
+    padding: Union[List[int], str] = field(default_factory=lambda: [0, 0, 0])
+    dilation: List[int] = field(default_factory=lambda: [1, 1, 1])
+    groups: int = 1
+
+    def __post_init__(self):
+        assert len(self.stride) == 3, len(self.stride)
+        assert len(self.dilation) == 3, len(self.dilation)
+
+
+@enforce_type
+@dataclass
 class CopyArgs:
     """
     copy(Tensor self, Tensor src, bool non_blocking=False) -> Tensor

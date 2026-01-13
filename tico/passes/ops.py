@@ -38,6 +38,10 @@ class AtenOps:
             torch.ops.aten.conv1d.default,
             torch.ops.aten.conv1d.padding,
         ]
+        self.conv3d = [
+            torch.ops.aten.conv3d.default,
+            torch.ops.aten.conv3d.padding,
+        ]
         self.detach = [
             torch.ops.aten.detach_.default,
             torch.ops.aten.detach.default,
