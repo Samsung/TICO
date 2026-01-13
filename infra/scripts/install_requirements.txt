@@ -1,4 +1,3 @@
-setuptools==78.1.1
 wheel==0.43.0
 
 circle_schema
