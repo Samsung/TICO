@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import torch
+
 from test.modules.base import TestModuleBase
 
 
@@ -61,7 +62,12 @@ class Conv3dWithDilation(TestModuleBase):
     def __init__(self):
         super().__init__()
         self.conv3d = torch.nn.Conv3d(
-            in_channels=3, out_channels=8, kernel_size=3, stride=1, padding=1, dilation=2
+            in_channels=3,
+            out_channels=8,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            dilation=2,
         )
 
     def forward(self, input):
@@ -89,7 +95,12 @@ class Conv3dNoBias(TestModuleBase):
     def __init__(self):
         super().__init__()
         self.conv3d = torch.nn.Conv3d(
-            in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1, bias=False
+            in_channels=3,
+            out_channels=16,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
         )
 
     def forward(self, input):
@@ -103,7 +114,11 @@ class Conv3dNonSquareKernel(TestModuleBase):
     def __init__(self):
         super().__init__()
         self.conv3d = torch.nn.Conv3d(
-            in_channels=3, out_channels=16, kernel_size=(3, 5, 3), stride=(1, 2, 1), padding=1
+            in_channels=3,
+            out_channels=16,
+            kernel_size=(3, 5, 3),
+            stride=(1, 2, 1),
+            padding=1,
         )
 
     def forward(self, input):
@@ -157,12 +172,18 @@ class Conv3dWithSamePadding(TestModuleBase):
 
 class Qwen2VLConv3dBasic(TestModuleBase):
     """
-    Conv3D module similar to Qwen2.5-VL video processing components.    
+    Conv3D module similar to Qwen2.5-VL video processing components.
     """
+
     def __init__(self):
         super().__init__()
         self.conv3d = torch.nn.Conv3d(
-            in_channels=3, out_channels=1280, kernel_size=(2, 14, 14), stride=(2, 14, 14), padding=(0, 0, 0), bias=True
+            in_channels=3,
+            out_channels=1280,
+            kernel_size=(2, 14, 14),
+            stride=(2, 14, 14),
+            padding=(0, 0, 0),
+            bias=True,
         )
 
     def forward(self, input):
@@ -256,7 +277,9 @@ class GroupedConv3dWithTensorWeightBias(TestModuleBase):
 
     def forward(self, input, weight, bias):
         groups = 3
-        return torch.nn.functional.conv3d(input, weight, bias, padding="same", groups=groups)
+        return torch.nn.functional.conv3d(
+            input, weight, bias, padding="same", groups=groups
+        )
 
     def get_example_inputs(self):
         IC = OC = 9

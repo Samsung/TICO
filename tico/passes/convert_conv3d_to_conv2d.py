@@ -11,7 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING, List
+from typing import List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -33,57 +33,133 @@ from tico.utils.validate_args_kwargs import Conv3DArgs
 class ConvertConv3dToConv2d(PassBase):
     """
     This pass converts `torch.ops.aten.conv3d` to multiple `torch.ops.aten.conv2d` operations
+
+    [before]                       input(dim=5)         weight(dim=5)
+                                      │                   │
+                                      │                   │
+                                   conv3d<----------------+
+                                      │
+                                      │
+                                   output(dim=5)
+
+    [after]                        input(dim=5)                              weight(dim=5)
+                                      │                                         │
+                                      │                                 ┌───────┴───────┐
+                                      │                                 │ weight slice  │
+                                      │                                 │ (kT times)    │
+                                      │                                 └───────┬───────┘
+                                      │                                         │
+                                      │                                 ┌───────┴───────┐
+                                      │                                 │  squeeze dims │
+                                      │                                 │ (remove dim=2)│
+                                      │                                 └───────┬───────┘
+                                      │                                         │
+                                      │                                 ┌───────┴────────────┐
+                                      │                                 │ weight_2d[0..kT-1] │
+                                      │                                 │ [C_out,C_in,kH,kW] │
+                                      │                                 └───────┬────────────┘
+                                      │                                         │
+                    ┌─────────────────┴──────────────────────────────┐          |
+                    │  temporal padding (if needed)                  │          |
+                    │  ┌────────────┐  ┌────────────┐  ┌───────────┐ │          |
+                    │  │ zeros      │  │  input     │  │zeros      │ │          |
+                    │  │ [N,C,p,H,W]│  │ [N,C,T,H,W]│  │[N,C,p,H,W]│ │          |
+                    │  └────┬───────┘  └────┬───────┘  └────┬──────┘ │          |
+                    │       └───────────┼───┴───────────────┘        │          |
+                    │                   │                            │          |
+                    │           ┌───────┴───────┐                    │          |
+                    │           │     cat       │                    │          |
+                    │           │ (dim=2)       │                    │          |
+                    │           └───────┬───────┘                    │          |
+                    │                   │                            │          |
+                    │           ┌───────┴───────┐                    │          |
+                    │           │  padded_input │                    │          |
+                    │           │ [N,C,T+2p,H,W]│                    │          |
+                    │           └───────┬───────┘                    │          |
+                    └───────────────────┼────────────────────────────┘          |
+                                        │                                       |
+                    ┌───────────────────┴───────────────────────────────┐       |
+                    │           Temporal Processing Loop                │       |
+                    │  ┌────────────────────────────────────────────┐   │       |
+                    │  │ For t_out = 0..T_out-1:                    │   │       |
+                    │  │   For i = 0..kT-1:                         │   │       |
+                    │  │     t_idx = t_out*stride[0] + i*dilation[0]│   │       |
+                    │  │     ┌─────────────────────────┐            │   │       |
+                    │  │     │ slice input[t_idx]      │            │   │       |
+                    │  │     │ [N,C,H,W]               │            │   │       |
+                    │  │     └─────────┬───────────────┘            │   │       |
+                    │  │               │                            │   │       |
+                    │  │     ┌─────────┴───────────────┐            │   │       |
+                    │  │     │ squeeze dims            │            │   │       |
+                    │  │     │ [N,C,H,W]               │            │   │       |
+                    │  │     └─────────┬───────────────┘            │   │       |
+                    │  │               │                            │   │       |
+                    │  │     ┌─────────┴───────────────┐            │   │       |
+                    │  │     │ conv2d(input,weight)    │            │   │───────┘
+                    │  │     │ [N,C_out,H_out,W_out]   │            │   │
+                    │  │     └─────────┬───────────────┘            │   │
+                    │  │               │                            │   │
+                    │  │     ┌─────────┴───────────────┐            │   │
+                    │  │     │ where(valid_mask,       │            │   │
+                    │  │     │      conv2d, zeros)     │            │   │
+                    │  │     └─────────┬───────────────┘            │   │
+                    │  │               │                            │   │
+                    │  │     ┌─────────┴───────────────┐            │   │
+                    │  │     │ accumulate (add)        │            │   │
+                    │  │     └─────────┬───────────────┘            │   │
+                    │  └───────────────┼────────────────────────────┘   │
+                    │                  │                                │
+                    │           ┌──────┴───────────┐                    │
+                    │           │ add bias (if any)│                    │
+                    │           └───────┬──────────┘                    │
+                    │                   │                               │
+                    │           ┌───────┴──────────┐                    │
+                    │           │ unsqueeze (dim=2)│                    │
+                    │           └───────┬──────────┘                    │
+                    └───────────────────┼───────────────────────────────┘
+                                        │
+                    ┌───────────────────┴───────────────────────┐
+                    │           cat (dim=2)                     │
+                    │           [N,C_out,T_out,H_out,W_out]     │
+                    └───────────────────┬───────────────────────┘
+                                        │
+                                   output(dim=5)
     """
-    
+
     def __init__(self):
         super().__init__()
 
-    def _convert_padding_to_list(self, padding, kernel_size):
-        """Convert padding string or tuple to list format for Conv2D"""
+    def _parse_3d_padding(self, padding, kernel_size):
+        """
+        Parse 3D padding parameter and return (temporal, H, W) tuple.
+
+        Args:
+            padding: Can be str ('same', 'valid'), int, list, or tuple
+            kernel_size: 3D kernel size (kT, kH, kW)
+
+        Returns:
+            Tuple of 3 padding values: (temporal_padding, H_padding, W_padding)
+        """
         if isinstance(padding, str):
             if padding == "same":
                 # For 'same' padding, use kernel_size // 2
                 if isinstance(kernel_size, int):
-                    return [kernel_size // 2, kernel_size // 2]
+                    return kernel_size // 2, kernel_size // 2, kernel_size // 2
                 else:
-                    # kernel_size is (kH, kW) for Conv2D
-                    return [kernel_size[0] // 2, kernel_size[1] // 2]
+                    return kernel_size[0] // 2, kernel_size[1] // 2, kernel_size[2] // 2
             elif padding == "valid":
-                return [0, 0]
+                return 0, 0, 0
             else:
                 raise NotYetSupportedError(f"Unsupported padding string: {padding}")
         elif isinstance(padding, (list, tuple)):
             if len(padding) == 1:
-                return [padding[0], padding[0]]
-            elif len(padding) == 2:
-                return list(padding)
+                return padding[0], padding[0], padding[0]
             elif len(padding) == 3:
-                # For 3D padding, extract spatial dimensions (H, W)
-                # padding[0] is temporal, padding[1] is H, padding[2] is W
-                return [padding[1], padding[2]]
+                return padding[0], padding[1], padding[2]
             else:
                 raise NotYetSupportedError(f"Unsupported padding format: {padding}")
         else:  # int
-            return [padding, padding]
-
-    def _get_temporal_padding(self, padding):
-        """Extract temporal padding from 3D padding"""
-        if isinstance(padding, str):
-            if padding == "same":
-                return 1  # Will be calculated based on kernel_size
-            elif padding == "valid":
-                return 0
-            else:
-                raise NotYetSupportedError(f"Unsupported padding string: {padding}")
-        elif isinstance(padding, (list, tuple)):
-            if len(padding) == 1:
-                return padding[0]
-            elif len(padding) == 3:
-                return padding[0]  # temporal padding is first element
-            else:
-                raise NotYetSupportedError(f"Unsupported padding format: {padding}")
-        else:  # int
-            return padding
+            return padding, padding, padding
 
     def convert(self, exported_program: ExportedProgram, node: torch.fx.Node) -> bool:
         logger = logging.getLogger(__name__)
@@ -93,7 +169,7 @@ class ConvertConv3dToConv2d(PassBase):
 
         # Extract conv3d arguments
         args = Conv3DArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
-        
+
         input = args.input
         weight = args.weight
         bias = args.bias
@@ -104,50 +180,32 @@ class ConvertConv3dToConv2d(PassBase):
 
         input_shape = extract_shape(input)
         weight_shape = extract_shape(weight)
-        
+
         if not (len(input_shape) == 5):
             raise NotYetSupportedError(
                 f"Only support 5D input tensor: node's input shape: {input_shape}"
             )
-        
+
         if not (len(weight_shape) == 5):
             raise NotYetSupportedError(
                 f"Only support 5D weight tensor: node's weight shape: {weight_shape}"
             )
 
-        # Extract dimensions
         N, C_in, T_in, H_in, W_in = input_shape
         C_out, C_in_weight, kT, kH, kW = weight_shape
-        
-        # Calculate temporal padding
-        temporal_padding = self._get_temporal_padding(padding)
-        if isinstance(padding, str) and padding == "same":
-            temporal_padding = kT // 2
 
-        # Convert spatial padding to list format for Conv2D
-        spatial_padding = self._convert_padding_to_list(padding, (kH, kW))
+        temporal_padding, h_padding, w_padding = self._parse_3d_padding(
+            padding, (kT, kH, kW)
+        )
 
         # Calculate output dimensions
-        T_out = (T_in + 2 * temporal_padding - 
-                dilation[0] * (kT - 1) - 1) // stride[0] + 1
-        
-        # Calculate conv2d output dimensions - use actual spatial padding values
-        if isinstance(padding, (list, tuple)) and len(padding) == 3:
-            actual_h_padding = padding[1]
-            actual_w_padding = padding[2]
-        elif isinstance(padding, (list, tuple)) and len(padding) == 2:
-            actual_h_padding = padding[0]
-            actual_w_padding = padding[1]
-        elif isinstance(padding, (list, tuple)) and len(padding) == 1:
-            actual_h_padding = actual_w_padding = padding[0]
-        else:  # int or str
-            actual_h_padding = actual_w_padding = spatial_padding[0]  # Use first element for both
+        T_out = (T_in + 2 * temporal_padding - dilation[0] * (kT - 1) - 1) // stride[
+            0
+        ] + 1
 
-        H_out = (H_in + 2 * actual_h_padding - 
-                dilation[1] * (kH - 1) - 1) // stride[1] + 1
-        W_out = (W_in + 2 * actual_w_padding - 
-                dilation[2] * (kW - 1) - 1) // stride[2] + 1
-        
+        H_out = (H_in + 2 * h_padding - dilation[1] * (kH - 1) - 1) // stride[1] + 1
+        W_out = (W_in + 2 * w_padding - dilation[2] * (kW - 1) - 1) // stride[2] + 1
+
         # Find the next node after conv3d
         next_node = node.next
         if next_node is None:
@@ -156,7 +214,7 @@ class ConvertConv3dToConv2d(PassBase):
                 if n.op == "output":
                     next_node = n
                     break
-        
+
         if next_node is None:
             raise RuntimeError("Could not find insertion point for temporal outputs")
 
@@ -172,7 +230,7 @@ class ConvertConv3dToConv2d(PassBase):
                     args=(weight, 2, t, t + 1, 1),
                     origin=weight,
                 )
-                
+
                 # Remove temporal dimension: [C_out, C_in, 1, kH, kW] -> [C_out, C_in, kH, kW]
                 weight_2d = create_node(
                     graph,
@@ -189,11 +247,13 @@ class ConvertConv3dToConv2d(PassBase):
                     graph,
                     torch.ops.aten.zeros.default,
                     args=([N, C_in, temporal_padding, H_in, W_in],),
-                    kwargs={'dtype': input.meta.get('dtype', torch.float32), 
-                           'device': input.meta.get('device', 'cpu')},
+                    kwargs={
+                        "dtype": input.meta.get("dtype", torch.float32),
+                        "device": input.meta.get("device", "cpu"),
+                    },
                     origin=input,
                 )
-                
+
                 # Cat: [zero_padding, input, zero_padding] -> [N, C, T+2*padding, H, W]
                 padded_input = create_node(
                     graph,
@@ -211,32 +271,32 @@ class ConvertConv3dToConv2d(PassBase):
             for t_out in range(T_out):
                 # Calculate input time position
                 t_in = t_out * stride[0]
-                
+
                 # Initialize accumulator for this temporal position
                 acc = None
-                
+
                 for i, weight_2d in enumerate(weight_2d_layers):
                     # Calculate actual time index with dilation
                     t_idx = t_in + i * dilation[0]
-                    
+
                     # Create constant for time index
                     t_idx_const = create_node(
                         graph,
                         torch.ops.aten.scalar_tensor.default,
                         args=(t_idx,),
-                        kwargs={'dtype': torch.int64},
+                        kwargs={"dtype": torch.int64},
                         origin=node,
                     )
-                    
+
                     # Create constant for T_padded
                     t_padded_const = create_node(
                         graph,
                         torch.ops.aten.scalar_tensor.default,
                         args=(T_padded,),
-                        kwargs={'dtype': torch.int64},
+                        kwargs={"dtype": torch.int64},
                         origin=node,
                     )
-                    
+
                     # Check if t_idx < T_padded
                     valid_mask = create_node(
                         graph,
@@ -244,7 +304,7 @@ class ConvertConv3dToConv2d(PassBase):
                         args=(t_idx_const, t_padded_const),
                         origin=node,
                     )
-                    
+
                     # Slice input at time t_idx: [N, C_in, T_padded, H_in, W_in] -> [N, C_in, H_in, W_in]
                     input_slice = create_node(
                         graph,
@@ -252,7 +312,7 @@ class ConvertConv3dToConv2d(PassBase):
                         args=(padded_input, 2, t_idx, t_idx + 1, 1),
                         origin=padded_input,
                     )
-                    
+
                     # Remove temporal dimension: [N, C_in, 1, H_in, W_in] -> [N, C_in, H_in, W_in]
                     input_2d = create_node(
                         graph,
@@ -260,7 +320,7 @@ class ConvertConv3dToConv2d(PassBase):
                         args=(input_slice, [2]),
                         origin=input_slice,
                     )
-                    
+
                     # Create conv2d operation with proper input
                     conv2d = create_node(
                         graph,
@@ -270,24 +330,26 @@ class ConvertConv3dToConv2d(PassBase):
                             weight_2d,
                             None,  # bias = False
                             [stride[1], stride[2]],
-                            spatial_padding,  # Use converted list format
+                            [h_padding, w_padding],
                             [dilation[1], dilation[2]],
                             groups,
                         ),
                         origin=node,
                     )
-                    
-                    # Create zero tensor with calculated shape (instead of zeros_like)
+
+                    # Create zero tensor with calculated shape
                     # conv2d output shape: [N, C_out, H_out, W_out]
                     zero_tensor = create_node(
                         graph,
                         torch.ops.aten.zeros.default,
                         args=([N, C_out, H_out, W_out],),
-                        kwargs={'dtype': input.meta.get('dtype', torch.float32), 
-                               'device': input.meta.get('device', 'cpu')},
+                        kwargs={
+                            "dtype": input.meta.get("dtype", torch.float32),
+                            "device": input.meta.get("device", "cpu"),
+                        },
                         origin=conv2d,
                     )
-                    
+
                     # Apply conditional execution
                     conv2d_masked = create_node(
                         graph,
@@ -295,7 +357,7 @@ class ConvertConv3dToConv2d(PassBase):
                         args=(valid_mask, conv2d, zero_tensor),
                         origin=conv2d,
                     )
-                    
+
                     if acc is None:
                         # First temporal slice
                         acc = conv2d_masked
@@ -307,7 +369,7 @@ class ConvertConv3dToConv2d(PassBase):
                             args=(acc, conv2d_masked),
                             origin=acc,
                         )
-                
+
                 # Add bias if present
                 if bias is not None:
                     bias_reshaped = create_node(
@@ -322,7 +384,7 @@ class ConvertConv3dToConv2d(PassBase):
                         args=(acc, bias_reshaped),
                         origin=acc,
                     )
-                
+
                 temporal_outputs.append(acc)
 
             # Step 4: Stack temporal outputs using cat instead of stack
@@ -337,7 +399,7 @@ class ConvertConv3dToConv2d(PassBase):
                     origin=temp_output,
                 )
                 unsqueezed_outputs.append(unsqueezed)
-            
+
             # Cat along time dimension: [N, C_out, T_out, H_out, W_out]
             stacked_output = create_node(
                 graph,
@@ -357,9 +419,9 @@ class ConvertConv3dToConv2d(PassBase):
         target_conv_op = [torch.ops.aten.conv3d.default, torch.ops.aten.conv3d.padding]
         graph_module = exported_program.graph_module
         graph = graph_module.graph
-        
+
         modified = False
-        
+
         # Process all Conv3D nodes in forward pass order
         for node in graph.nodes:
             if not is_target_node(node, target_conv_op):
