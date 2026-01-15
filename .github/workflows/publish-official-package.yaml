@@ -54,8 +54,9 @@ jobs:
     runs-on: ubuntu-22.04
 
     environment:
-      name: pypi
-      url: https://pypi.org/p/TICO
+      name: testpypi
+      url: https://test.pypi.org/p/TICO
+
 
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
@@ -69,3 +70,5 @@ jobs:
 
       - name: "Publish distribution to PyPI"
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
