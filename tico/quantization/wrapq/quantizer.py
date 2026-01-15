@@ -115,6 +115,7 @@ class PTQQuantizer(BaseQuantizer):
                     assert not self.strict_wrap
                     wrapped = self._wrap_supported(wrapped, child_cfg)
                 root[i] = wrapped  # type: ignore[index]
+            return root
 
         if isinstance(root, nn.ModuleDict):
             for k, child in list(root.items()):
@@ -128,6 +129,7 @@ class PTQQuantizer(BaseQuantizer):
                     assert not self.strict_wrap
                     wrapped = self._wrap_supported(wrapped, child_cfg)
                 root[k] = wrapped  # type: ignore[index]
+            return root
 
         # Case C: Leaf node
         root_name = getattr(root, "_get_name", lambda: None)()

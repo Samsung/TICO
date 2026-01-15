@@ -16,8 +16,11 @@ import unittest
 
 import torch
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
+from tico.passes.decompose_fake_quantize_tensor_qparams import (
+    DecomposeFakeQuantizeTensorQParams,
+)
 from tico.quantization import convert, prepare
-from tico.quantization.config.pt2e import PT2EConfig
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
@@ -43,17 +46,18 @@ class PropagateQParamForwardTest(unittest.TestCase):
         assert isinstance(m, LinearPermuteModule)
         args, kwargs = m.get_example_inputs()
 
-        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs, inplace=False)
+        m.linear = prepare(m.linear, PTQConfig())
 
         # Calibration
         for i in range(10):
             cal_args, cal_kwargs = m.get_example_inputs()
-            q_m(*cal_args, **cal_kwargs)
+            m(*cal_args, **cal_kwargs)
 
-        q_m = convert(q_m, inplace=False)
+        m.linear = convert(m.linear)
 
-        ep = torch.export.export(q_m, args, kwargs)
+        ep = torch.export.export(m, args, kwargs)
 
+        DecomposeFakeQuantizeTensorQParams().call(ep)
         FoldQuantOps().call(ep)
         # Before pass
         for node in ep.graph.nodes:

@@ -19,9 +19,10 @@ from typing import Any
 import tico
 import torch
 from tico.quantization import convert, prepare
-from tico.quantization.config.pt2e import PT2EConfig
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.backend import BACKEND
 from tico.quantization.evaluation.evaluate import evaluate
+from tico.utils.utils import SuppressWarning
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
@@ -29,12 +30,13 @@ IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 class TwoLinear(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.linear = torch.nn.Linear(5, 10)
-        self.linear2 = torch.nn.Linear(10, 20)
+        self.m = torch.nn.ModuleList()
+        self.m.append(torch.nn.Linear(5, 10))
+        self.m.append(torch.nn.Linear(10, 20))
 
     def forward(self, x):
-        z = self.linear(x)
-        z = self.linear2(z)
+        z = self.m[0](x)
+        z = self.m[1](z)
         return z
 
     def get_example_inputs(self):
@@ -47,22 +49,24 @@ class EvaluateTest(unittest.TestCase):
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )
     def test_evaluate_simple_linear(self):
-        m: Any = TwoLinear().eval()
-        args, kwargs = m.get_example_inputs()
+        q_m: Any = TwoLinear().eval()
+        ori_m = q_m
+        args, kwargs = q_m.get_example_inputs()
 
-        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs, inplace=False)
+        prepare(q_m.m, PTQConfig())
 
         # 3. Calibration
         for i in range(100):
-            cal_args, cal_kwargs = m.get_example_inputs()
+            cal_args, cal_kwargs = ori_m.get_example_inputs()
             q_m(*cal_args, **cal_kwargs)
 
-        q_m = convert(q_m, inplace=False)
+        convert(q_m.m)
 
         # Export circle
-        ep = torch.export.export(q_m, args, kwargs)
-        cm = tico.convert_from_exported_program(ep)
-        results = evaluate(m, cm, BACKEND.TRIV24, mode="return")
+        with SuppressWarning(FutureWarning, ".*LeafSpec*"):
+            ep = torch.export.export(q_m, args, kwargs)
+            cm = tico.convert_from_exported_program(ep)
+        results = evaluate(q_m, cm, BACKEND.TRIV24, mode="return")
         assert results is not None
         self.assertTrue("peir" in results)
         self.assertEqual(len(results["peir"]), 1)

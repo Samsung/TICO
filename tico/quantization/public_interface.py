@@ -18,7 +18,6 @@ from typing import Any, Dict, Optional
 import torch
 
 from tico.quantization.algorithm.gptq.quantizer import GPTQQuantizer
-from tico.quantization.algorithm.pt2e.quantizer import PT2EQuantizer
 from tico.quantization.config.base import BaseConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import get_quantizer
@@ -55,11 +54,6 @@ def prepare(
         raise RuntimeError("prepare() already has been called.")
     quantizer = get_quantizer(quant_config)
 
-    if isinstance(quantizer, PT2EQuantizer) and inplace:
-        raise RuntimeError(
-            "In-place is not supported for PT2E quantization due to limitation in the underlying Torch APIs. Please set 'inplace=False' to proceed."
-        )
-
     model = model if inplace else copy.deepcopy(model)
 
     model = quantizer.prepare(model, args, kwargs)
@@ -90,10 +84,6 @@ def convert(model, inplace: Optional[bool] = True):
     else:
         raise RuntimeError("Call prepare() function first.")
 
-    if isinstance(quantizer, PT2EQuantizer) and inplace:
-        raise RuntimeError(
-            "In-place is not supported for PT2E quantization due to limitation in the underlying Torch APIs. Please set 'inplace=False' to proceed."
-        )
     # deepcopy prevents the quantizer from restoring the catcher used for calibration.
     # TODO Revisit `inplace` policy.
     if isinstance(quantizer, GPTQQuantizer) and not inplace:

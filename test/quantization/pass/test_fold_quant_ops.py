@@ -16,8 +16,11 @@ import unittest
 
 import torch
 from tico.passes.decompose_fake_quantize import DecomposeFakeQuantize
+from tico.passes.decompose_fake_quantize_tensor_qparams import (
+    DecomposeFakeQuantizeTensorQParams,
+)
 from tico.quantization import convert, prepare
-from tico.quantization.config.pt2e import PT2EConfig
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.serialize.quant_param import QPARAM_KEY
 
@@ -51,21 +54,20 @@ class S16ToU8Relu(torch.nn.Module):
 
 class FoldQuantOpsTest(unittest.TestCase):
     def test_pass(self):
-        m: SimpleSub | torch.nn.Module = SimpleSub().eval()
-        assert isinstance(m, SimpleSub)
-        args, kwargs = m.get_example_inputs()
+        m = torch.nn.SiLU().eval()
 
-        q_m = prepare(m, PT2EConfig(), args=args, kwargs=kwargs, inplace=False)
+        q_m = prepare(m, PTQConfig())
 
         # Calibration
         for _ in range(10):
-            cal_args, cal_kwargs = m.get_example_inputs()
-            q_m(*cal_args, **cal_kwargs)
+            cal_args = (torch.randn(2, 3),)
+            q_m(*cal_args)
 
-        q_m = convert(q_m, inplace=False)
+        q_m = convert(q_m)
 
-        ep = torch.export.export(q_m, args, kwargs)
+        ep = torch.export.export(q_m, cal_args)
 
+        DecomposeFakeQuantizeTensorQParams().call(ep)
         # input, other, sub
         self.assertEqual(
             num_of_ops(
@@ -82,7 +84,7 @@ class FoldQuantOpsTest(unittest.TestCase):
         for node in ep.graph.nodes:
             if node.op != "call_function":
                 continue
-            if node.target == torch.ops.aten.sub.Tensor:
+            if node.target == torch.ops.aten.sigmoid.default:
                 self.assertFalse(QPARAM_KEY in node.meta)
 
         target_pass = FoldQuantOps()
@@ -103,7 +105,7 @@ class FoldQuantOpsTest(unittest.TestCase):
         for node in ep.graph.nodes:
             if node.op != "call_function":
                 continue
-            if node.target == torch.ops.aten.sub.Tensor:
+            if node.target == torch.ops.aten.sigmoid.default:
                 self.assertTrue(QPARAM_KEY in node.meta)
 
     def test_requantize(self):

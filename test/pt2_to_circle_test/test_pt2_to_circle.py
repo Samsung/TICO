@@ -93,7 +93,8 @@ def convert_pt2_to_circle(
     circle_model_path: str,
     config: Optional[CompileConfigBase] = None,
 ):
-    tico.pt2_to_circle.convert(pt2_model_path, circle_model_path, config=config)
+    with SuppressWarning(FutureWarning, ".*LeafSpec*"):
+        tico.pt2_to_circle.convert(pt2_model_path, circle_model_path, config=config)
 
 
 @print_name_on_exception
@@ -112,7 +113,8 @@ def convert_nnmodule_to_circle(
             kwargs=forward_kwargs,
             dynamic_shapes=dynamic_shapes,
         )
-    circle_program = convert_exported_module_to_circle(exported_program, config)
+    with SuppressWarning(FutureWarning, ".*LeafSpec*"):
+        circle_program = convert_exported_module_to_circle(exported_program, config)
     circle_binary = circle_program
     with open(circle_model_path, "wb") as f:
         f.write(circle_binary)

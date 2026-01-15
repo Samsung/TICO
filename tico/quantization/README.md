@@ -18,7 +18,7 @@ At the top level, the module exposes two primary public interface functions: _pr
       leverages the statistics collected during calibration to perform the quantization transformation.
 
 - Algorithm-Specific Configuration
-  - Users supply algorithm-specific configuration objects (e.g., PT2EConfig for activation quantization 
+  - Users supply algorithm-specific configuration objects (e.g., PTQConfig for activation quantization 
     or GPTQConfig for weight quantization) to the public interface. These configuration objects encapsulate
     the parameters for each quantization method.
 
@@ -34,7 +34,7 @@ The module is designed to:
 - Simplify Model Quantization: Provide a simple, high-level API that abstracts the calibration and 
   conversion complexities.
 - Support Multiple Algorithms: Enable users to choose quantization algorithms by specifying configuration 
-  objects (e.g., PT2EConfig, GPTQConfig).
+  objects (e.g., PTQConfig, GPTQConfig).
 - Promote Modularity and Extensibility: Offer a clear separation between the public API, configuration 
   classes, and internal quantizer implementations, ensuring the module is easy to extend and maintain.
 
@@ -43,7 +43,7 @@ The module is designed to:
 The module is composed of two main layers:
 
 - Algorithm layer (quantization/algorithm/)
-  - Implements algorithm-specific quantization logics (e.g., GPTQ, PT2E).
+  - Implements algorithm-specific quantization logics (e.g., GPTQ).
 - Infrastructure layer (quantization/wrapq/)
   - Provides a generic, wrapper-based quantization backend shared across algorithms.
 
@@ -53,7 +53,7 @@ Ready-to-run examples can be found in `quantization/wrapq/examples/`.
 quantization/
 ├── algorithm/        # Algorithm-specific quantizers
 │   ├── gptq/
-│   ├── pt2e/
+│   ├── smoothquant/
 │   └── ...
 ├── config/           # Configuration definitions
 ├── evaluation/       # Evaluation utilities

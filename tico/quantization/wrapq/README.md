@@ -18,7 +18,7 @@ The guiding principles are:
 
 1. **Transparency** — Quantization logic is explicit and inspectable.
 2. **Orthogonality** — Quantization config, calibration, and algorithm are independent layers.
-3. **Composability** — Wrappers can be reused or mixed with different algorithms (e.g., PT2E, GPTQ).
+3. **Composability** — Wrappers can be reused or mixed with different algorithms (e.g., GPTQ).
 4. **Determinism** — Once calibrated, all quantization parameters are fixed and reproducible.
 
 ---

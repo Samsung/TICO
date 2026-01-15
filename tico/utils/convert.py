@@ -140,6 +140,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
         or torch.__version__.startswith("2.8")
         or torch.__version__.startswith("2.9")
         or torch.__version__.startswith("2.10")
+        or torch.__version__.startswith("2.11")
     ):
         return run_decompositions(exported_program)
     else:
@@ -320,7 +321,10 @@ def convert(
             mod, args, kwargs, dynamic_shapes=dynamic_shapes, strict=strict
         )
 
-    circle_binary = convert_exported_module_to_circle(exported_program, config=config)
+    with SuppressWarning(FutureWarning, ".*LeafSpec*"):
+        circle_binary = convert_exported_module_to_circle(
+            exported_program, config=config
+        )
 
     return CircleModel(circle_binary)
 

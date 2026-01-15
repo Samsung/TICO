@@ -37,15 +37,13 @@ gptq_config = GPTQConfig()
 prepare(model, gptq_config, args=(sample_input,), inplace=True)
 # No calibration is needed
 convert(q_m, inplace=True)
-
-# PT2E Quantization
 ```
 
 ### Precautions and Future Enhancements
 
 After _convert()_ is executed, the weights are updated; however, the algorithm performs
 a fake quantization internally, so the weights remain as float types. Therefore, an additional
-quantization step—such as using PT2E—must be applied afterwards. One potential issue is
+quantization step—such as using `wrapq`—must be applied afterwards. One potential issue is
 that if the internal fake quantization method for weights differs from the weight quantization
 applied after _convert()_, the effectiveness of GPTQ may be diminished.
 
