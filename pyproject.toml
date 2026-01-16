@@ -36,17 +36,16 @@ method = "git"
 match = ["v*"] # Only recognize tags starting with 'v' (e.g., v0.1.0)
 
 [tool.versioningit.next-version]
-# 태그 이후 커밋이 발생하면 무조건 Minor 버전을 올림 (0.1.0 -> 0.2.0)
+# If there's commit after release, increase minor version (0.1.0 -> 0.2.0)
 method = "minor"
 
 [tool.versioningit.format]
-# 1. 정식 태그가 찍힌 경우: 0.1.0
-# 2. 태그 이후 커밋이 있는 경우: 0.2.0.dev260112 (다음버전 + .dev + 날짜)
+# In case there's a new commit after official tag, mark 'dev' + date
 distance = "{next_version}.dev{committer_date:%y%m%d}"
-# 3. 로컬에서 수정 중인 파일이 있는 경우 (+dirty 추가)
+# In case there's local change, mark 'dirty'
 dirty = "{next_version}.dev{committer_date:%y%m%d}+dirty"
 distance-dirty = "{next_version}.dev{committer_date:%y%m%d}+dirty"
 
 [tool.versioningit.write]
-# 빌드 시 버전을 기록할 파일 (tico/__init__.py에서 참조 가능)
+# Version will be written on this file, created during build process.
 file = "tico/_version.py"
