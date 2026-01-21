@@ -12,18 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
+
 from tico.quantization.config.base import BaseConfig
 
 
+@dataclass
 class GPTQConfig(BaseConfig):
     """
-    Configuration for GPTQ.
+    Configuration for GPTQ weight quantization.
     """
 
-    def __init__(self, verbose: bool = False, show_progress: bool = True):
-        self.verbose = verbose
-        self.show_progress = show_progress
+    # general
+    verbose: bool = False
+    show_progress: bool = True
+
+    # quantizer.configure params (weight quantization spec)
+    weight_bits: int = 8
+    perchannel: bool = True
+    symmetric: bool = False
+    mse: bool = False
+
+    # GPTQ.fasterquant params (algorithm hyperparams)
+    percdamp: float = 0.01
+    groupsize: int = -1
+    actorder: bool = True
+    static_groups: bool = False
 
     @property
     def name(self) -> str:
         return "gptq"
+
+    def validate(self) -> None:
+        if self.weight_bits <= 0:
+            raise ValueError(f"weight_bits must be positive. got {self.weight_bits}")
+        if self.groupsize != -1 and self.groupsize <= 0:
+            raise ValueError(f"groupsize must be -1 or positive. got {self.groupsize}")
+        if not (0.0 < self.percdamp <= 1.0):
+            raise ValueError(f"percdamp must be in (0, 1]. got {self.percdamp}")

@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import dataclass
+
 from tico.quantization.config.gptq import GPTQConfig
 
 
+@dataclass
 class FPIGPTQConfig(GPTQConfig):
     """
     Configuration for FPIGPTQ (Fixed Point Iteration).

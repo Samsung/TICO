@@ -170,6 +170,7 @@ class GPTQQuantizer(BaseQuantizer):
 
         gptq_conf = self.config
         assert isinstance(gptq_conf, GPTQConfig)
+        gptq_conf.validate()
         # Disable use_cache during calibration
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             orig_use_cache = model.config.use_cache
@@ -212,7 +213,10 @@ class GPTQQuantizer(BaseQuantizer):
                 for name in subset:
                     gptq[name] = GPTQ(subset[name])
                     gptq[name].quantizer.configure(
-                        bits=8, perchannel=True, sym=False, mse=False
+                        bits=gptq_conf.weight_bits,
+                        perchannel=gptq_conf.perchannel,
+                        sym=gptq_conf.symmetric,
+                        mse=gptq_conf.mse,
                     )
 
                 # Hook to collect (inp, out) for GPTQ
@@ -252,10 +256,10 @@ class GPTQQuantizer(BaseQuantizer):
                     if gptq_conf.verbose:
                         print(f"[Layer {l_idx}] {name} -> Quantizing ...")
                     gptq[name].fasterquant(
-                        percdamp=0.01,
-                        groupsize=-1,
-                        actorder=True,
-                        static_groups=False,
+                        percdamp=gptq_conf.percdamp,
+                        groupsize=gptq_conf.groupsize,
+                        actorder=gptq_conf.actorder,
+                        static_groups=gptq_conf.static_groups,
                         verbose=gptq_conf.verbose,
                     )
                     quantizers[f"model.layers.{l_idx}.{name}"] = gptq[name].quantizer
