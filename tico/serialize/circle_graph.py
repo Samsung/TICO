@@ -152,7 +152,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         self.name_to_node[tensor.name] = node
         assert node.meta.get("val") is not None
         tensor.type = extract_circle_dtype(node)
-        tensor.shape, tensor.shapeSignature = extract_circle_shape(node)  # type: ignore[assignment]
+        tensor.shape, tensor.shapeSignature = extract_circle_shape(node)
 
         if QPARAM_KEY in node.meta:
             tensor.quantization = to_circle_qparam(node.meta[QPARAM_KEY])
