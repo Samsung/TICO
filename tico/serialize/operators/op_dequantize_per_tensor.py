@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     import torch._ops
     import torch.fx
 import torch
-import torch.ao.quantization.fx._decomposed  # register `dequantize_per_tensor``
+import torch.ao.quantization.fx._decomposed  # register `dequantize_per_tensor`
 from circle_schema import circle
 
 from tico.serialize.circle_graph import CircleSubgraph

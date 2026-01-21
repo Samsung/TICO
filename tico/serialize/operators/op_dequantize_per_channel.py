@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     import torch.fx
 import numpy as np
 import torch
+import torch.ao.quantization.fx._decomposed  # register `dequantize_per_channel`
 from circle_schema import circle
 
 from tico.serialize.circle_graph import CircleSubgraph
