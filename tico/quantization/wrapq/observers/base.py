@@ -16,12 +16,13 @@ from abc import ABC, abstractmethod
 from typing import Optional, Tuple
 
 import torch
+import torch.nn as nn
 
 from tico.quantization.wrapq.dtypes import DType, UINT8
 from tico.quantization.wrapq.qscheme import QScheme
 
 
-class ObserverBase(ABC):
+class ObserverBase(nn.Module, ABC):
     """
     Minimal abstract base for all observers/quantizers.
 
@@ -41,12 +42,12 @@ class ObserverBase(ABC):
         qscheme: QScheme = QScheme.PER_TENSOR_ASYMM,
         channel_axis: Optional[int] = None,  # None → per-tensor
     ):
+        super().__init__()
         self.name = name
         self.dtype = dtype
         self.qscheme = qscheme
         self.channel_axis = channel_axis if qscheme.is_per_channel() else None
         self.enabled = True
-        self.reset()
 
     @abstractmethod
     def reset(self) -> None:

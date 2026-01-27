@@ -25,6 +25,11 @@ from tico.quantization.wrapq.qscheme import QScheme
 class AffineObserverBase(ObserverBase):
     """Base for affine observers (min/max → scale/zp)."""
 
+    min_val: torch.Tensor
+    max_val: torch.Tensor
+    _cached_scale: torch.Tensor
+    _cached_zp: torch.Tensor
+
     def __init__(
         self,
         *,
@@ -37,16 +42,40 @@ class AffineObserverBase(ObserverBase):
             name=name, dtype=dtype, qscheme=qscheme, channel_axis=channel_axis
         )
 
+        # Register internal statistics as buffers so they:
+        #  - move correctly with `model.to(device)`
+        #  - are included in state_dict (if persistent)
+        #  - follow PyTorch module semantics
+        #
+        # Shapes may later expand (e.g. per-channel),
+        # but the buffers themselves remain tracked.
+        self.register_buffer("min_val", torch.tensor(math.inf))
+        self.register_buffer("max_val", torch.tensor(-math.inf))
+
+        # Cached quantization parameters.
+        # Marked as non-persistent since they can be recomputed.
+        self.register_buffer("_cached_scale", torch.tensor([]), persistent=False)
+        self.register_buffer(
+            "_cached_zp", torch.tensor([], dtype=torch.int), persistent=False
+        )
+
+        self.reset()
+
     def reset(self) -> None:
         """
         Reset running min/max and drop cached qparams.
+
+        Do NOT reassign new tensors here.
+        Updating buffers in-place ensures that device and dtype
+        tracking remains correct.
         """
-        self.min_val: torch.Tensor = torch.tensor(math.inf)
-        self.max_val: torch.Tensor = torch.tensor(-math.inf)
-        if hasattr(self, "_cached_scale"):
-            del self._cached_scale
-        if hasattr(self, "_cached_zp"):
-            del self._cached_zp
+        assert isinstance(self.min_val, torch.Tensor)
+        assert isinstance(self.max_val, torch.Tensor)
+        self.min_val.fill_(math.inf)
+        self.max_val.fill_(-math.inf)
+        # Clear cached qparams while keeping buffer registration intact
+        self._cached_scale = self._cached_scale.new_empty((0,))  # type: ignore[has-type]
+        self._cached_zp = self._cached_zp.new_empty((0,), dtype=torch.int)  # type: ignore[has-type]
 
     def load_qparams(self, scale: torch.Tensor, zp: torch.Tensor, *, lock: bool = True):
         """
@@ -61,9 +90,11 @@ class AffineObserverBase(ObserverBase):
 
     @property
     def has_qparams(self) -> bool:
-        return hasattr(self, "_cached_scale")
+        return self._cached_scale.numel() != 0
 
     def compute_qparams(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(self.min_val, torch.Tensor)
+        assert isinstance(self.max_val, torch.Tensor)
         qmin, qmax = self.dtype.qmin, self.dtype.qmax
         rng = self.max_val - self.min_val
         eps = 1e-12

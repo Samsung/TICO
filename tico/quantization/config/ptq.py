@@ -72,7 +72,7 @@ class PTQConfig(BaseConfig):
     """
 
     default_dtype: DType = DType.uint(8)
-    default_observer: Type[ObserverBase] = MinMaxObserver
+    default_observer: Type[ObserverBase] = MinMaxObserver  # type: ignore[type-abstract]
     default_qscheme: QScheme = QScheme.PER_TENSOR_ASYMM
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     # If True, any module that cannot be wrapped will raise.

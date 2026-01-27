@@ -136,7 +136,7 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
         """
         qcfg = PTQConfig(
             default_dtype=DType.uint(8),
-            default_observer=MinMaxObserver,
+            default_observer=MinMaxObserver,  # type: ignore[type-abstract]
             overrides={
                 "act_in": {
                     "dtype": DType.uint(4),
@@ -169,7 +169,7 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
         """
         qcfg = PTQConfig(
             default_dtype=DType.uint(8),
-            default_observer=MinMaxObserver,
+            default_observer=MinMaxObserver,  # type: ignore[type-abstract]
             overrides={
                 # nothing for 'act_out'
             },
@@ -195,7 +195,7 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
         """
         qcfg = PTQConfig(
             default_dtype=DType.uint(8),
-            default_observer=MinMaxObserver,
+            default_observer=MinMaxObserver,  # type: ignore[type-abstract]
             overrides={
                 "act_in": {
                     "qscheme": QScheme.PER_TENSOR_ASYMM,
@@ -235,7 +235,7 @@ class TestObserverAndDTypePrecedence(unittest.TestCase):
         qcfg = PTQConfig(
             default_dtype=DType.uint(8),
             default_qscheme=QScheme.PER_TENSOR_ASYMM,
-            default_observer=MinMaxObserver,
+            default_observer=MinMaxObserver,  # type: ignore[type-abstract]
             overrides={},
         )
 
