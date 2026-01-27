@@ -18,10 +18,22 @@ import torch
 import tqdm
 
 
+def _resolve_device(device: torch.device, model: torch.nn.Module):
+    if device != "auto":
+        return torch.device(device)
+
+    for p in model.parameters():
+        if p is not None:
+            return p.device
+
+    # fallback
+    return torch.device("cpu")
+
+
 def perplexity(
     model: torch.nn.Module,
     encodings: torch.Tensor,
-    device: torch.device | str,
+    device: torch.device | str = "auto",
     *,
     max_length: Optional[int] = None,
     stride: int = 512,
@@ -74,13 +86,17 @@ def perplexity(
     except AttributeError:  # already a tensor
         input_ids_full = encodings
     assert isinstance(input_ids_full, torch.Tensor)
+    device = _resolve_device(device, model)
     input_ids_full = input_ids_full.to(device)
 
     if max_length is None:
         assert hasattr(model, "config")
-        assert hasattr(model.config, "max_position_embeddings")
-        assert isinstance(model.config.max_position_embeddings, int)
-        max_length = model.config.max_position_embeddings
+        model_config = model.config
+        if hasattr(model.config, "text_config"):
+            model_config = model.config.text_config
+        assert hasattr(model_config, "max_position_embeddings")
+        assert isinstance(model_config.max_position_embeddings, int)
+        max_length = model_config.max_position_embeddings
     assert max_length is not None
     assert (
         1 <= stride <= max_length
