@@ -29,6 +29,8 @@ _CORE_MODULES = (
     # This includes not only `nn.SiLU` but also `SiLUActivation` from transformers
     # as they are same operation.
     "tico.quantization.wrapq.wrappers.nn.quant_silu",
+    ## ops ##
+    "tico.quantization.wrapq.wrappers.ops.quant_rmsnorm",
     ## llama ##
     "tico.quantization.wrapq.wrappers.llama.quant_attn",
     "tico.quantization.wrapq.wrappers.llama.quant_decoder_layer",
@@ -38,6 +40,8 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder",
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder_layer",
     "tico.quantization.wrapq.wrappers.fairseq.quant_mha",
+    ## qwen_vl ##
+    "tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attn",
     # add future core wrappers here
 )
 
