@@ -87,8 +87,8 @@ class TestPTQWrapper(unittest.TestCase):
         self.wrapper.freeze_qparams()
 
         assert isinstance(self.wrapper.wrapped, QuantLinear)
-        assert isinstance(self.wrapper.wrapped.weight_obs, AffineObserverBase)
-        w_obs = self.wrapper.wrapped.weight_obs
+        assert isinstance(self.wrapper.wrapped.obs_weight, AffineObserverBase)
+        w_obs = self.wrapper.wrapped.obs_weight
         w_fp = self.fp32.weight.data
         fq_w = w_obs.fake_quant(w_fp)
 

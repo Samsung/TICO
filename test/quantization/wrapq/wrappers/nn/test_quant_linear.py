@@ -57,15 +57,15 @@ class TestQuantLinear(unittest.TestCase):
 
     def test_weight_stats_survive(self):
         self.q_lin.enable_calibration()
-        self.q_lin.weight_obs.compute_qparams()
-        assert hasattr(self.q_lin.weight_obs, "_cached_scale")
-        pre_scale = self.q_lin.weight_obs._cached_scale.clone()
+        self.q_lin.obs_weight.compute_qparams()
+        assert hasattr(self.q_lin.obs_weight, "_cached_scale")
+        pre_scale = self.q_lin.obs_weight._cached_scale.clone()
 
         # calibration cycle
         self.q_lin.enable_calibration()
         self.q_lin.freeze_qparams()
 
-        post_scale = self.q_lin.weight_obs._cached_scale
+        post_scale = self.q_lin.obs_weight._cached_scale
         self.assertTrue(torch.allclose(pre_scale, post_scale))
 
     def test_dtype_override(self):
@@ -77,5 +77,5 @@ class TestQuantLinear(unittest.TestCase):
             },
         )
         qcustom = QuantLinear(self.fp32, qcfg=cfg)
-        self.assertEqual(qcustom.act_in_obs.dtype, DType.uint(4))
-        self.assertEqual(qcustom.act_out_obs.dtype, DType.uint(4))
+        self.assertEqual(qcustom.obs_act_in.dtype, DType.uint(4))
+        self.assertEqual(qcustom.obs_act_out.dtype, DType.uint(4))

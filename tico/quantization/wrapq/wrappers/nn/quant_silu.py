@@ -40,21 +40,21 @@ class QuantSiLU(QuantModuleBase):
         fp_name: Optional[str] = None
     ):
         super().__init__(qcfg, fp_name=fp_name)
-        self.act_in_obs = self._make_obs("act_in")
-        self.sig_obs = self._make_obs("sigmoid")
-        self.mul_obs = self._make_obs("mul")
+        self.obs_act_in = self._make_obs("act_in")
+        self.obs_sig = self._make_obs("sigmoid")
+        self.obs_mul = self._make_obs("mul")
         self.module = fp
 
     def forward(self, x: torch.Tensor):
-        x_q = self._fq(x, self.act_in_obs)
+        x_q = self._fq(x, self.obs_act_in)
 
         s = torch.sigmoid(x_q)
-        s = self._fq(s, self.sig_obs)
+        s = self._fq(s, self.obs_sig)
 
         y = x * s
-        y = self._fq(y, self.mul_obs)
+        y = self._fq(y, self.obs_mul)
 
         return y
 
     def _all_observers(self):
-        return (self.act_in_obs, self.sig_obs, self.mul_obs)
+        return (self.obs_act_in, self.obs_sig, self.obs_mul)

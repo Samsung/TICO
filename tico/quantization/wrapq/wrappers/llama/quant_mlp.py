@@ -67,12 +67,12 @@ class QuantLlamaMLP(QuantModuleBase):
         )
 
         # ----- local observers ----------------------------------------
-        self.act_in_obs = self._make_obs("act_in")
-        self.mul_obs = self._make_obs("mul")
+        self.obs_act_in = self._make_obs("act_in")
+        self.obs_mul = self._make_obs("mul")
 
     def forward(self, x: torch.Tensor):
         # 1) quantize input once
-        x_q = self._fq(x, self.act_in_obs)
+        x_q = self._fq(x, self.obs_act_in)
 
         # 2) parallel projections
         g = self.gate_proj(x_q)
@@ -82,15 +82,15 @@ class QuantLlamaMLP(QuantModuleBase):
         a = self.act_fn(g)
 
         # 4) element-wise product
-        h = self._fq(a * u, self.mul_obs)
+        h = self._fq(a * u, self.obs_mul)
 
         # 5) final projection
         return self.down_proj(h)
 
     def _all_observers(self):
         # local first
-        yield self.act_in_obs
-        yield self.mul_obs
+        yield self.obs_act_in
+        yield self.obs_mul
         # recurse into children that are QuantModuleBase
         for m in (self.gate_proj, self.up_proj, self.down_proj, self.act_fn):
             yield from m._all_observers()

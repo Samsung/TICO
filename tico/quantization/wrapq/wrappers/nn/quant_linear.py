@@ -37,29 +37,29 @@ class QuantLinear(QuantModuleBase):
         fp_name: Optional[str] = None
     ):
         super().__init__(qcfg, fp_name=fp_name)
-        self.weight_obs = self._make_obs(
+        self.obs_weight = self._make_obs(
             "weight", qscheme=QScheme.PER_CHANNEL_ASYMM, channel_axis=0
         )
-        self.act_in_obs = self._make_obs("act_in")
-        self.act_out_obs = self._make_obs("act_out")
+        self.obs_act_in = self._make_obs("act_in")
+        self.obs_act_out = self._make_obs("act_out")
         self.module = fp
 
     def enable_calibration(self) -> None:
         super().enable_calibration()
         # immediately capture the fixed weight range
-        self.weight_obs.collect(self.module.weight)
+        self.obs_weight.collect(self.module.weight)
 
     def forward(self, x):
-        x_q = self._fq(x, self.act_in_obs)
+        x_q = self._fq(x, self.obs_act_in)
 
         w = self.module.weight
         if self._mode is Mode.QUANT:
-            w = self.weight_obs.fake_quant(w)
+            w = self.obs_weight.fake_quant(w)
         b = self.module.bias
 
         out = F.linear(x_q, w, b)
 
-        return self._fq(out, self.act_out_obs)
+        return self._fq(out, self.obs_act_out)
 
     def _all_observers(self):
-        return (self.weight_obs, self.act_in_obs, self.act_out_obs)
+        return (self.obs_weight, self.obs_act_in, self.obs_act_out)

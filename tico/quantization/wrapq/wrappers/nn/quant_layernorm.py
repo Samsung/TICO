@@ -56,30 +56,30 @@ class QuantLayerNorm(QuantModuleBase):
         self._norm_ndim: int = len(fp.normalized_shape)  # safe for int→tuple
 
         # Activation / intermediate observers
-        self.act_in_obs = self._make_obs("act_in")
-        self.mean_obs = self._make_obs("mean")
-        self.centered_obs = self._make_obs("centered")
-        self.square_obs = self._make_obs("square")
-        self.var_obs = self._make_obs("var")
-        self.eps_obs = self._make_obs("eps")
-        self.add_eps_obs = self._make_obs("add_eps")
-        self.inv_std_obs = self._make_obs("inv_std")
-        self.norm_obs = self._make_obs("norm")
-        self.act_out_obs = self._make_obs("act_out")
+        self.obs_act_in = self._make_obs("act_in")
+        self.obs_mean = self._make_obs("mean")
+        self.obs_centered = self._make_obs("centered")
+        self.obs_square = self._make_obs("square")
+        self.obs_var = self._make_obs("var")
+        self.obs_eps = self._make_obs("eps")
+        self.obs_add_eps = self._make_obs("add_eps")
+        self.obs_inv_std = self._make_obs("inv_std")
+        self.obs_norm = self._make_obs("norm")
+        self.obs_act_outs = self._make_obs("act_out")
 
         # Optional affine parameter observers (γ, β)
-        self.weight_obs = None
-        self.bias_obs = None
-        self.affine_mul_obs = None
-        self.affine_add_obs = None
+        self.obs_weight = None
+        self.obs_bias = None
+        self.obs_affine_mul = None
+        self.obs_affine_add = None
         if self.module.elementwise_affine:
             if self.module.weight is not None:
-                self.weight_obs = self._make_obs("weight")
+                self.obs_weight = self._make_obs("weight")
             if self.module.bias is not None:
-                self.bias_obs = self._make_obs("bias")
+                self.obs_bias = self._make_obs("bias")
             # Per-op observers for (n * w) and (+ b)
-            self.affine_mul_obs = self._make_obs("affine_mul")
-            self.affine_add_obs = self._make_obs("affine_add")
+            self.obs_affine_mul = self._make_obs("affine_mul")
+            self.obs_affine_add = self._make_obs("affine_add")
 
     def enable_calibration(self) -> None:
         """
@@ -88,10 +88,10 @@ class QuantLayerNorm(QuantModuleBase):
         """
         super().enable_calibration()
         if self.module.elementwise_affine:
-            if self.weight_obs is not None and self.module.weight is not None:
-                self.weight_obs.collect(self.module.weight)
-            if self.bias_obs is not None and self.module.bias is not None:
-                self.bias_obs.collect(self.module.bias)
+            if self.obs_weight is not None and self.module.weight is not None:
+                self.obs_weight.collect(self.module.weight)
+            if self.obs_bias is not None and self.module.bias is not None:
+                self.obs_bias.collect(self.module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Determine reduction dims (last self._norm_ndim axes)
@@ -99,85 +99,85 @@ class QuantLayerNorm(QuantModuleBase):
         dims = tuple(range(x.dim() - self._norm_ndim, x.dim()))
 
         # 0) input
-        x_q = self._fq(x, self.act_in_obs)
+        x_q = self._fq(x, self.obs_act_in)
 
         # 1) mean
         mu = x_q.mean(dim=dims, keepdim=True)
-        mu_q = self._fq(mu, self.mean_obs)
+        mu_q = self._fq(mu, self.obs_mean)
 
         # 2) center
         c = x_q - mu_q
-        c_q = self._fq(c, self.centered_obs)
+        c_q = self._fq(c, self.obs_centered)
 
         # 3) square (elementwise mul)
         s = c_q * c_q
-        s_q = self._fq(s, self.square_obs)
+        s_q = self._fq(s, self.obs_square)
 
         # 4) variance (via squared mean)
         v = s_q.mean(dim=dims, keepdim=True)
-        v_q = self._fq(v, self.var_obs)
+        v_q = self._fq(v, self.obs_var)
 
         # 5) add eps
-        eps_q = self._fq(self.eps, self.eps_obs)
+        eps_q = self._fq(self.eps, self.obs_eps)
         e = v_q + eps_q
-        e_q = self._fq(e, self.add_eps_obs)
+        e_q = self._fq(e, self.obs_add_eps)
 
         # 6) inverse std
         r = torch.rsqrt(e_q)
-        r_q = self._fq(r, self.inv_std_obs)
+        r_q = self._fq(r, self.obs_inv_std)
 
         # 7) normalize
         n = c_q * r_q
-        n_q = self._fq(n, self.norm_obs)
+        n_q = self._fq(n, self.obs_norm)
 
         # 8) optional affine
         if self.module.elementwise_affine:
             w = self.module.weight
             b = self.module.bias
             if self._mode is Mode.QUANT:
-                if self.weight_obs is not None and w is not None:
-                    w = self.weight_obs.fake_quant(w)  # type: ignore[assignment]
-                if self.bias_obs is not None and b is not None:
-                    b = self.bias_obs.fake_quant(b)  # type: ignore[assignment]
+                if self.obs_weight is not None and w is not None:
+                    w = self.obs_weight.fake_quant(w)  # type: ignore[assignment]
+                if self.obs_bias is not None and b is not None:
+                    b = self.obs_bias.fake_quant(b)  # type: ignore[assignment]
             y = n_q
             # 8a) n * w  (fake-quant the result of the mul)
             if w is not None:
                 y = y * w
-                if self.affine_mul_obs is not None:
-                    y = self._fq(y, self.affine_mul_obs)
+                if self.obs_affine_mul is not None:
+                    y = self._fq(y, self.obs_affine_mul)
 
             # 8b) (+ b)  (fake-quant the result of the add)
             if b is not None:
                 y = y + b
-                if self.affine_add_obs is not None:
-                    y = self._fq(y, self.affine_add_obs)
+                if self.obs_affine_add is not None:
+                    y = self._fq(y, self.obs_affine_add)
         else:
             y = n_q
 
         # 9) output activation
-        return self._fq(y, self.act_out_obs)
+        return self._fq(y, self.obs_act_outs)
 
     def _all_observers(self) -> Iterable:
         obs: Tuple = (
-            self.act_in_obs,
-            self.mean_obs,
-            self.centered_obs,
-            self.square_obs,
-            self.var_obs,
-            self.eps_obs,
-            self.add_eps_obs,
-            self.inv_std_obs,
-            self.norm_obs,
-            self.act_out_obs,
+            self.obs_act_in,
+            self.obs_mean,
+            self.obs_centered,
+            self.obs_square,
+            self.obs_var,
+            self.obs_eps,
+            self.obs_add_eps,
+            self.obs_inv_std,
+            self.obs_norm,
+            self.obs_act_outs,
         )
         # Insert affine param observers if present
         if self.module.elementwise_affine:
-            if self.weight_obs is not None:
-                obs = (self.weight_obs,) + obs
-            if self.bias_obs is not None:
-                obs = obs + (self.bias_obs,)
-            if self.affine_mul_obs is not None:
-                obs = obs + (self.affine_mul_obs,)
-            if self.affine_add_obs is not None:
-                obs = obs + (self.affine_add_obs,)
+            if self.obs_weight is not None:
+                obs = (self.obs_weight,) + obs
+            if self.obs_bias is not None:
+                obs = obs + (self.obs_bias,)
+            if self.obs_affine_mul is not None:
+                obs = obs + (self.obs_affine_mul,)
+            if self.obs_affine_add is not None:
+                obs = obs + (self.obs_affine_add,)
         return obs

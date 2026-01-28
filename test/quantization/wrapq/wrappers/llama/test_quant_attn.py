@@ -110,8 +110,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
         q_lin = qattn.q_proj.wrapped  # PTQWrapper → LinearQuant
 
         self.assertIsInstance(q_lin, QuantLinear)
-        self.assertEqual(q_lin.act_in_obs.dtype, DType.uint(4))
-        self.assertEqual(q_lin.act_out_obs.dtype, DType.uint(4))
+        self.assertEqual(q_lin.obs_act_in.dtype, DType.uint(4))
+        self.assertEqual(q_lin.obs_act_out.dtype, DType.uint(4))
 
     def test_forward_with_float_attention_mask(self):
         torch.manual_seed(123)

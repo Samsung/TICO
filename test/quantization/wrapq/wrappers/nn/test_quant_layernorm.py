@@ -76,21 +76,21 @@ class TestQuantLayerNorm(unittest.TestCase):
         # Pre-compute once
         self.q_ln.enable_calibration()
         # Collect the fixed params immediately (QuantLayerNorm does this in enable_calibration)
-        if self.q_ln.weight_obs is None:
+        if self.q_ln.obs_weight is None:
             self.skipTest("No weight observer (elementwise_affine=False)")
 
         # Force a compute now and snapshot scale
-        self.q_ln.weight_obs.compute_qparams()
-        self.assertTrue(hasattr(self.q_ln.weight_obs, "_cached_scale"))
-        assert isinstance(self.q_ln.weight_obs, AffineObserverBase)
-        pre_scale = self.q_ln.weight_obs._cached_scale.clone()
+        self.q_ln.obs_weight.compute_qparams()
+        self.assertTrue(hasattr(self.q_ln.obs_weight, "_cached_scale"))
+        assert isinstance(self.q_ln.obs_weight, AffineObserverBase)
+        pre_scale = self.q_ln.obs_weight._cached_scale.clone()
 
         # Full calibration cycle again
         self.q_ln.enable_calibration()
         _ = self.q_ln(self.x)
         self.q_ln.freeze_qparams()
 
-        post_scale = self.q_ln.weight_obs._cached_scale
+        post_scale = self.q_ln.obs_weight._cached_scale
         self.assertTrue(torch.allclose(pre_scale, post_scale))
 
     def test_dtype_override(self):
@@ -107,12 +107,12 @@ class TestQuantLayerNorm(unittest.TestCase):
         qcustom = QuantLayerNorm(
             nn.LayerNorm(list(self.shape), elementwise_affine=True), qcfg=cfg
         )
-        assert isinstance(qcustom.square_obs, AffineObserverBase)
-        assert isinstance(qcustom.affine_mul_obs, AffineObserverBase)
-        assert isinstance(qcustom.affine_add_obs, AffineObserverBase)
-        self.assertEqual(qcustom.square_obs.dtype, DType.uint(4))
-        self.assertEqual(qcustom.affine_mul_obs.dtype, DType.uint(4))
-        self.assertEqual(qcustom.affine_add_obs.dtype, DType.uint(4))
+        assert isinstance(qcustom.obs_square, AffineObserverBase)
+        assert isinstance(qcustom.obs_affine_mul, AffineObserverBase)
+        assert isinstance(qcustom.obs_affine_add, AffineObserverBase)
+        self.assertEqual(qcustom.obs_square.dtype, DType.uint(4))
+        self.assertEqual(qcustom.obs_affine_mul.dtype, DType.uint(4))
+        self.assertEqual(qcustom.obs_affine_add.dtype, DType.uint(4))
 
     def test_no_quant_matches_reference_various_shapes(self):
         """

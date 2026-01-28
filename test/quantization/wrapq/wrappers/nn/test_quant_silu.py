@@ -59,5 +59,5 @@ class TestQuantSiLU(unittest.TestCase):
             },
         )
         qsilu = QuantSiLU(self.fp_silu, qcfg=cfg)
-        self.assertEqual(qsilu.sig_obs.dtype, DType.uint(4))
-        self.assertEqual(qsilu.mul_obs.dtype, DType.uint(4))
+        self.assertEqual(qsilu.obs_sig.dtype, DType.uint(4))
+        self.assertEqual(qsilu.obs_mul.dtype, DType.uint(4))
