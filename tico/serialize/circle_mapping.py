@@ -37,6 +37,7 @@ def to_circle_dtype(
         torch.int: circle.TensorType.TensorType.INT32,
         torch.int64: circle.TensorType.TensorType.INT64,
         torch.bool: circle.TensorType.TensorType.BOOL,
+        torch.float64: circle.TensorType.TensorType.FLOAT32, # ADDED
     }
 
     if torch_dtype not in dmap:
