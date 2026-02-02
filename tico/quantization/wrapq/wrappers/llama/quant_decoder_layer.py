@@ -86,7 +86,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
 
         input_norm = qcfg.child("input_norm") if qcfg else None
         post_attn_norm = qcfg.child("post_attn_norm") if qcfg else None
-        # LayerNorms remain FP (copied from fp_layer to keep weights)
+
         assert hasattr(fp_layer, "input_layernorm") and isinstance(
             fp_layer.input_layernorm, torch.nn.Module
         )
