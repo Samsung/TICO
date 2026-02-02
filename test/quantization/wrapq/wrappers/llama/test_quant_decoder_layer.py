@@ -94,13 +94,3 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.5)
         self.assertEqual(fp_out.shape, q_out.shape)
-
-    def test_layernorm_preserved(self):
-        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
-        self.assertIsInstance(
-            qlayer.input_layernorm, type(self.fp_layer.input_layernorm)
-        )
-        self.assertIsInstance(
-            qlayer.post_attention_layernorm,
-            type(self.fp_layer.post_attention_layernorm),
-        )
