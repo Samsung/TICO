@@ -200,7 +200,7 @@ class CircleRMSNormArgs:
 
     input: torch.fx.Node
     weight: torch.fx.Node
-    eps: float
+    eps: float = 1e-6
 
 
 @enforce_type

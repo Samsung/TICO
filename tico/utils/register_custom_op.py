@@ -710,7 +710,7 @@ def CircleRMSNorm():
     def rms_norm(
         hidden_states: torch.Tensor,
         weight: torch.Tensor,
-        eps: float = 1e-05,
+        eps: float = 1e-06,
     ) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
@@ -722,7 +722,7 @@ def CircleRMSNorm():
     def _(
         hidden_states: torch.Tensor,
         weight: torch.Tensor,
-        eps: float = 1e-05,
+        eps: float = 1e-06,
     ) -> torch.Tensor:
         return hidden_states.new_empty(hidden_states.size())
 
