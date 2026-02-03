@@ -179,7 +179,7 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
             self.assertLessEqual(
                 metric_dict["diff"],
                 3.0,
-                msg=f"{name}: diff={metric_dict['diff']:.3e} > 1.0",
+                msg=f"{name}: diff={metric_dict['diff']:.3e} > 3.0",
             )
 
     # ------------------------------------------------------------------ #
