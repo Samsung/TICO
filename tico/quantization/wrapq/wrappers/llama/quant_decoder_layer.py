@@ -84,8 +84,10 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         )
         self.mlp = PTQWrapper(fp_layer.mlp, qcfg=mlp_cfg, fp_name=f"{fp_name}.mlp")
 
-        input_norm = qcfg.child("input_norm") if qcfg else None
-        post_attn_norm = qcfg.child("post_attn_norm") if qcfg else None
+        input_layernorm = qcfg.child("input_layernorm") if qcfg else None
+        post_attention_layernorm = (
+            qcfg.child("post_attention_layernorm") if qcfg else None
+        )
 
         assert hasattr(fp_layer, "input_layernorm") and isinstance(
             fp_layer.input_layernorm, torch.nn.Module
@@ -97,12 +99,14 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         self.obs_mlp_residual_out = self._make_obs("mlp_residual_out")
 
         self.input_layernorm = PTQWrapper(
-            fp_layer.input_layernorm, qcfg=input_norm, fp_name=f"{fp_name}.input_norm"
+            fp_layer.input_layernorm,
+            qcfg=input_layernorm,
+            fp_name=f"{fp_name}.input_layernorm",
         )
         self.post_attention_layernorm = PTQWrapper(
             fp_layer.post_attention_layernorm,
-            qcfg=post_attn_norm,
-            fp_name=f"{fp_name}.post_attn_norm",
+            qcfg=post_attention_layernorm,
+            fp_name=f"{fp_name}.post_attention_layernorm",
         )
 
         # Static causal mask template ---------------------------------------
