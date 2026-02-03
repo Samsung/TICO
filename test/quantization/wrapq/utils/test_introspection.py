@@ -95,6 +95,8 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        torch.manual_seed(0)
+
         from datasets import load_dataset
         from transformers import AutoModelForCausalLM, AutoTokenizer
 

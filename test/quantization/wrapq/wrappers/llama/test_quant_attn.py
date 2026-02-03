@@ -40,6 +40,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        torch.manual_seed(0)
+
         from transformers.models.llama.configuration_llama import LlamaConfig
         from transformers.models.llama.modeling_llama import LlamaAttention
 
