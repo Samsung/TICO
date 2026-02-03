@@ -93,6 +93,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         assert hasattr(fp_layer, "post_attention_layernorm") and isinstance(
             fp_layer.post_attention_layernorm, torch.nn.Module
         )
+
+        self.obs_mlp_residual_out = self._make_obs("mlp_residual_out")
+
         self.input_layernorm = PTQWrapper(
             fp_layer.input_layernorm, qcfg=input_norm, fp_name=f"{fp_name}.input_norm"
         )
@@ -163,7 +166,11 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+
+        hidden_states = (
+            residual + hidden_states
+        )  # residual/hidden_states are assumed to be quantized
+        hidden_states = self._fq(hidden_states, self.obs_mlp_residual_out)
 
         # Return type policy:
         # - If use_cache: always return (hidden_states, present_key_value)
@@ -182,3 +189,4 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
     def _all_observers(self):
         yield from self.self_attn._all_observers()
         yield from self.mlp._all_observers()
+        yield self.obs_mlp_residual_out

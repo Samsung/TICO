@@ -16,7 +16,9 @@ import importlib.util
 import unittest
 
 import torch
+from tico.quantization.config.ptq import PTQConfig
 
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
@@ -94,3 +96,16 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.5)
         self.assertEqual(fp_out.shape, q_out.shape)
+
+    def test_dtype_override(self):
+        # mlp_residual_out is the only observer currently created in QuantLlamaDecoderLayer
+        # if more observers will be added to QuantLlamaDecoderLayer,
+        # overrides of cfg will also need to be expanded
+        cfg = PTQConfig(
+            default_dtype=DType.int(16),
+            overrides={
+                "mlp_residual_out": {"dtype": DType.uint(8)},
+            },
+        )
+        qcustom = QuantLlamaDecoderLayer(self.fp_layer, qcfg=cfg)
+        self.assertEqual(qcustom.obs_mlp_residual_out.dtype, DType.uint(8))
