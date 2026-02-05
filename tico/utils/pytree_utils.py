@@ -144,21 +144,6 @@ def register_static_cache():
         logger = logging.getLogger(__name__)
         logger.warning(f"StaticCache is already registered as pytree flattenable. {e}")
 
-# def _flatten_static_layer(cache: StaticLayer):
-#     nodes = {
-#         "keys": cache.keys,
-#         "values": cache.values,
-#     }
-#     return torch.utils._pytree._dict_flatten(nodes)
-
-# def _unflatten_static_layer(values, context: torch.utils._pytree.Context):
-#     data = torch.utils._pytree._dict_unflatten(values, context)
-    
-#     instance = StaticLayer.__new__(StaticLayer)
-#     for k, v in data.items():
-#         setattr(instance, k, v)
-        
-#     return instance
 from typing import Tuple, Any, Dict
 def _flatten_static_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
         """
@@ -191,15 +176,12 @@ def _unflatten_static_layer(children: Tuple[Any, ...], aux_data: Dict[str, Any])
         flatten된 데이터로부터 새로운 객체를 복구합니다.
         """
         keys, values = children
-        # 1. 새 인스턴스 생성
         obj = StaticLayer(max_cache_len=aux_data["max_cache_len"])
         
-        # 2. 상태 복구
         obj.is_initialized = aux_data["is_initialized"]
         obj.keys = keys
         obj.values = values
         
-        # 3. 초기화되었던 상태라면 나머지 속성들도 복구
         if obj.is_initialized:
             obj.dtype = aux_data["dtype"]
             obj.device = aux_data["device"]
@@ -231,7 +213,6 @@ def register_static_layer():
     except ValueError as e:
         logger = logging.getLogger(__name__)
         logger.warning(f"StaticLayer is already registered as pytree flattenable. {e}")
-
 
 
 from typing import Tuple, Any, Dict
@@ -271,17 +252,13 @@ def _unflatten_dynamic_layer(children: Tuple[Any, ...], aux_data: Dict[str, Any]
 import torch.utils._pytree as pytree
 
 def _flatten_with_keys_dynamic_layer(layer: DynamicLayer):
-    breakpoint()
     children = [
         (pytree.MappingKeyPath("keys"), layer.keys),
         (pytree.MappingKeyPath("values"), layer.values),
     ]
     
-    # 2. 텐서가 아닌 고정 정보(metadata)
     aux_data = {
         "is_initialized": layer.is_initialized,
-        "dtype": layer.keys.dtype,
-        "device": layer.keys.device,
     }
     
     return children, aux_data
@@ -289,25 +266,18 @@ def _flatten_with_keys_dynamic_layer(layer: DynamicLayer):
 import torch.fx._pytree as fx_pytree
 
 def _flatten_with_keys_dynamic_layer(layer: DynamicLayer, spec):
-    # DynamicLayer의 핵심 데이터를 딕셔너리 형태로 추출
-    breakpoint()
-    # spec에 정의된 필드들과 일치해야 합니다.
     layer_dict = {
         "keys": layer.keys,
         "values": layer.values,
         "is_initialized": layer.is_initialized,
-        "dtype": layer.keys.dtype,
-        "device": layer.keys.device,
     }
-    # FX의 dict_flatten_spec을 사용하여 spec 구조에 맞게 flatten
     return fx_pytree._dict_flatten_spec(layer_dict, spec)
 
 
-# def _flatten_with_keys_dynamic_layer(layer: DynamicLayer):
-#     return torch.utils._pytree._dict_flatten_with_keys(layer.__dict__)
+def _flatten_with_keys_dynamic_layer(layer: DynamicLayer):
+    return torch.utils._pytree._dict_flatten_with_keys(layer.__dict__)
 
 def _flatten_dynamic_layer_for_fx(layer, spec):
-    breakpoint()
     return torch.fx._pytree._dict_flatten_spec(layer.__dict__, spec)
 
 
