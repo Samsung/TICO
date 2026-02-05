@@ -42,11 +42,17 @@ from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
 from tico.utils.utils import SuppressWarning
 
 MODEL_NAME = "Maykeye/TinyLLama-v0"
+MAX_S = 256
+
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
+# Make sure pad token exists (Llama often uses eos as pad)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+model.config.max_position_embeddings = MAX_S
 model.eval()  # disable dropout, etc.
-rotary = model.model.rotary_emb  # RoPE helper
 
 # -------------------------------------------------------------------------
 # 1. Swap in the quant wrapper
@@ -57,6 +63,23 @@ model.eval()
 
 qlayer = model.model.layers[0]  # alias for brevity
 assert isinstance(qlayer.wrapped, QuantLlamaDecoderLayer)
+
+# -------------------------------------------------------------------------
+# Helpers: fixed-length tokenize + embed
+# -------------------------------------------------------------------------
+def make_fixed_inputs(prompt: str):
+    batch = tokenizer(
+        prompt,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=MAX_S,
+    )
+    input_ids = batch["input_ids"]  # [1,MAX_S]
+
+    hidden = model.model.embed_tokens(input_ids)  # [1,MAX_S,D]
+    return hidden
+
 
 # -------------------------------------------------------------------------
 # 2. Single-pass calibration (gather activation ranges)
@@ -72,30 +95,28 @@ PROMPTS = [
 
 with torch.no_grad():
     for prompt in PROMPTS:
-        ids = tokenizer(prompt, return_tensors="pt")
-        hidden = model.model.embed_tokens(ids["input_ids"])
-        pos = rotary(hidden, ids["input_ids"])  # (cos, sin) tuple
-        S = pos[0].shape[1]
-        attn_mask = torch.zeros(1, 1, S, S)  # causal-mask placeholder
-        _ = qlayer(hidden, attention_mask=attn_mask, position_embeddings=pos)
+        hidden = make_fixed_inputs(prompt)
+        # IMPORTANT:
+        # - Do NOT pass position_embeddings; layer will use its static templates
+        _ = qlayer(hidden)
 
 convert(qlayer)
-
 assert qlayer._mode is Mode.QUANT, "Quantization mode should be active now."
 
 # -------------------------------------------------------------------------
 # 3. Quick INT-sim vs FP32 sanity check
 # -------------------------------------------------------------------------
-ids = tokenizer("check", return_tensors="pt")
-hidden = model.model.embed_tokens(ids["input_ids"])
-pos = rotary(hidden, ids["input_ids"])
-S = pos[0].shape[1]
-attn_mask = torch.zeros(1, 1, S, S)
+hidden = make_fixed_inputs("check")
 
 with torch.no_grad():
-    int8_out = qlayer(hidden, attention_mask=attn_mask, position_embeddings=pos)
+    int8_out = qlayer(hidden)
     int8 = int8_out[0] if isinstance(int8_out, tuple) else int8_out
-    fp32_out = fp32_layer(hidden, attention_mask=attn_mask, position_embeddings=pos)
+
+    rotary = model.model.rotary_emb
+    position_ids = torch.arange(MAX_S).unsqueeze(0)
+    pos = rotary(hidden, position_ids)
+
+    fp32_out = fp32_layer(hidden, position_embeddings=pos)
     fp32 = fp32_out[0] if isinstance(fp32_out, tuple) else fp32_out
 
 print("┌───────────── Quantization Error Summary ─────────────")
@@ -110,14 +131,13 @@ print(plot_two_outputs(fp32, int8))
 import tico
 
 save_path = pathlib.Path("decoder_layer.q.circle")
-B, S, D = 1, 4, model.config.hidden_size
+B, S, D = 1, MAX_S, model.config.hidden_size
 example_hidden = torch.randn(B, S, D)
-example_pos = rotary(example_hidden, torch.arange(S)[None, :])
-attn_mask = torch.zeros(1, 1, S, S)
 
 with SuppressWarning(UserWarning, ".*"):
     cm = tico.convert(
-        qlayer, (example_hidden, attn_mask), {"position_embeddings": example_pos}
+        qlayer,
+        (example_hidden,),
     )
 # Note that the model is not fully quantized.
 cm.save(save_path)

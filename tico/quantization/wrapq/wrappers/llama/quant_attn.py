@@ -129,6 +129,8 @@ class QuantLlamaAttention(QuantModuleBase):
         self.obs_mask_add = mk("mask_add")
         self.obs_softmax = mk("softmax")
         self.obs_attn_out = mk("attn_out")
+        self.obs_attn_weights = mk("attn_weights")
+        self.obs_attn_out_h = mk("attn_out_h")
 
         # Static causal mask template
         assert hasattr(cfg, "max_position_embeddings")
@@ -141,7 +143,7 @@ class QuantLlamaAttention(QuantModuleBase):
         x1, x2 = torch.chunk(t, 2, dim=-1)
         x1 = self._fq(x1, o_x1)
         x2 = self._fq(x2, o_x2)
-        x2n = self._fq(-x2, o_neg)
+        x2n = x2
         return self._fq(torch.cat((x2n, x1), -1), o_cat)
 
     @staticmethod
@@ -226,34 +228,57 @@ class QuantLlamaAttention(QuantModuleBase):
             k_for_attn, v_for_attn = self._concat_kv(pkv_tuple, k_rot, v)
             present_key_value = (k_for_attn, v_for_attn)
 
-        # Repeat kv heads to match query heads (GQA)
-        k_rep = k_for_attn.repeat_interleave(self.kv_rep, dim=1)  # (B, n_h, K, H)
-        v_rep = v_for_attn.repeat_interleave(self.kv_rep, dim=1)  # (B, n_h, K, H)
-
-        # Attention logits: q @ k^T
-        logits = self._fq(q_rot @ k_rep.transpose(-2, -1), self.obs_logits)
-
         # Build causal mask if needed
         if attention_mask is None or attention_mask.dtype == torch.bool:
-            _, _, q_len, _ = logits.shape
+            q_len = q_rot.size(2)
             k_len = k_for_attn.size(2)
             assert isinstance(self.causal_mask_template, torch.Tensor)
             attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
                 hidden_states.device
             )
         attention_mask = self._fq(attention_mask, self.obs_causal_mask)
-        logits = self._fq(logits + attention_mask, self.obs_mask_add)
 
-        # Softmax
-        attn_weights = torch.softmax(logits, -1, dtype=torch.float32).to(q.dtype)
-        attn_weights = self._fq(attn_weights, self.obs_softmax)
+        attn_weights_parts = []
+        attn_out_parts = []
+
+        n_kv = k_for_attn.size(1)  # num_key_value_heads
+        kv_rep = self.kv_rep  # num_key_value_groups
+
+        # TODO Consider attaching a separate observer to each computation.
+        for i in range(n_kv):
+            # (B, 1, K, H)
+            k_i = k_for_attn[:, i : i + 1, :, :]
+            v_i = v_for_attn[:, i : i + 1, :, :]
+
+            # (B, G, S, H) where G=kv_rep
+            h0 = i * kv_rep
+            h1 = (i + 1) * kv_rep
+            q_i = q_rot[:, h0:h1, :, :]
+
+            # logits: (B, G, S, K)
+            logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
+
+            # mask add: broadcast on head axis (1 -> G).
+            logits_i = self._fq(logits_i + attention_mask, self.obs_mask_add)
+
+            # softmax
+            attn_i = torch.softmax(logits_i, -1, dtype=torch.float32).to(q_i.dtype)
+            attn_i = self._fq(attn_i, self.obs_softmax)
+
+            # out: (B, G, S, H)
+            out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
+
+            attn_weights_parts.append(attn_i)
+            attn_out_parts.append(out_i)
+
+        # concat heads back: (B, n_h, S, K) / (B, n_h, S, H)
+        attn_weights = self._fq(
+            torch.cat(attn_weights_parts, dim=1), self.obs_attn_weights
+        )
+        attn_out_h = self._fq(torch.cat(attn_out_parts, dim=1), self.obs_attn_out_h)
 
         # Attention output
-        attn_out = (
-            self._fq(attn_weights @ v_rep, self.obs_attn_out)
-            .transpose(1, 2)
-            .reshape(B, S, -1)
-        )  # (B, S, n_h * H)
+        attn_out = attn_out_h.transpose(1, 2).reshape(B, S, -1)  # (B, S, n_h * H)
 
         # Final projection
         out = self.o_proj(attn_out)
@@ -289,6 +314,8 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_mask_add,
             self.obs_softmax,
             self.obs_attn_out,
+            self.obs_attn_weights,
+            self.obs_attn_out_h,
         )
         # recurse into children that are QuantModuleBase
         for m in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):

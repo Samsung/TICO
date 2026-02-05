@@ -119,6 +119,48 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
+        # Static RoPE (position_embeddings) templates ------------------------
+        cfg = fp_layer.self_attn.config
+        head_dim = getattr(cfg, "head_dim", None) or (
+            cfg.hidden_size // cfg.num_attention_heads
+        )
+
+        # 1) inv_freq, scaling
+        rotary = getattr(fp_layer, "rotary_emb", None)
+        # `rotray_emb` is normally inside `LlamaModel`.
+        # We can set `model.rotary_emb` to `decoder.rotary_emb` if we want to use original one.
+        if rotary is not None and hasattr(rotary, "inv_freq"):
+            inv_freq = rotary.inv_freq.detach().float()
+            attn_scaling = float(getattr(rotary, "attention_scaling", 1.0))
+        else:
+            rope_params = getattr(cfg, "rope_parameters", None)
+            if (
+                rope_params is not None
+                and isinstance(rope_params, dict)
+                and "rope_theta" in rope_params
+            ):
+                base = float(rope_params["rope_theta"])
+            else:
+                base = float(getattr(cfg, "rope_theta", 10000.0))
+            inv_freq = 1.0 / (
+                base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
+            )
+            attn_scaling = 1.0
+
+        # 2) Create cos/sin: [max_seq, head_dim]
+        pos = torch.arange(max_seq, dtype=torch.float32)  # [max_seq]
+        freqs = torch.outer(pos, inv_freq)  # [max_seq, head_dim/2]
+        emb = torch.cat([freqs, freqs], dim=-1)  # [max_seq, head_dim]
+        cos_t = emb.cos() * attn_scaling
+        sin_t = emb.sin() * attn_scaling
+        half_dim = head_dim // 2
+        sin_t[..., :half_dim] = -sin_t[..., :half_dim]
+        cos_t = cos_t.unsqueeze(0)  # [1, max_seq, head_dim]
+        sin_t = sin_t.unsqueeze(0)  # [1, max_seq, head_dim]
+
+        self.register_buffer("rope_cos_template", cos_t, persistent=False)
+        self.register_buffer("rope_sin_template", sin_t, persistent=False)
+
     def _slice_causal(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """Return `[1,1,L,L]` causal mask slice on *device*."""
         assert isinstance(self.causal_mask_template, torch.Tensor)
@@ -146,6 +188,15 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         if attention_mask is None or attention_mask.dtype == torch.bool:
             L = hidden_states.size(1)
             attention_mask = self._slice_causal(L, hidden_states.device)
+
+        position_embeddings = (
+            self.rope_cos_template.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            ),
+            self.rope_sin_template.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            ),
+        )
 
         attn_out = self.self_attn(
             hidden_states=hidden_states,
