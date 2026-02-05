@@ -41,6 +41,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
 
         cls.cfg = LlamaConfig(  # type: ignore[attr-defined]
             hidden_size=16,
+            max_position_embeddings=256,
             intermediate_size=32,
             num_attention_heads=2,
             num_key_value_heads=1,
@@ -64,10 +65,10 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         qlayer.enable_calibration()
         self.assertIs(qlayer._mode, Mode.CALIB)
 
-        hidden = torch.randn(2, 6, 16)
-        pos = self._rand_rope(2, 6)
-        attn_mask = torch.ones(2, 1, 6, 6, dtype=torch.bool)
-        _ = qlayer(hidden, attention_mask=attn_mask, position_embeddings=pos)
+        SEQ_LEN = 256
+        hidden = torch.randn(2, SEQ_LEN, 16)
+        attn_mask = torch.ones(2, 1, SEQ_LEN, SEQ_LEN, dtype=torch.bool)
+        _ = qlayer(hidden, attention_mask=attn_mask)
 
         qlayer.freeze_qparams()
         self.assertIs(qlayer._mode, Mode.QUANT)
@@ -75,19 +76,20 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
     def test_forward_diff(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
         qlayer.enable_calibration()
+        SEQ_LEN = 256
         for _ in range(4):
-            hidden = torch.randn(2, 6, 16)
-            pos = self._rand_rope(2, 6)
-            attn_mask = torch.ones(2, 1, 6, 6, dtype=torch.bool)
-            _ = qlayer(hidden, attention_mask=attn_mask, position_embeddings=pos)
+            hidden = torch.randn(2, SEQ_LEN, 16)
+            pos = self._rand_rope(2, SEQ_LEN)
+            attn_mask = torch.ones(2, 1, SEQ_LEN, SEQ_LEN, dtype=torch.bool)
+            _ = qlayer(hidden, attention_mask=attn_mask)
         qlayer.freeze_qparams()
 
-        hidden = torch.randn(2, 6, 16)
-        pos = self._rand_rope(2, 6)
-        attn_mask = torch.ones(2, 1, 6, 6, dtype=torch.bool)
+        hidden = torch.randn(2, SEQ_LEN, 16)
+        pos = self._rand_rope(2, SEQ_LEN)
+        attn_mask = torch.ones(2, 1, SEQ_LEN, SEQ_LEN, dtype=torch.bool)
 
         with torch.no_grad():
-            q_out = qlayer(hidden, attention_mask=attn_mask, position_embeddings=pos)
+            q_out = qlayer(hidden, attention_mask=attn_mask)
             q_out = q_out[0] if isinstance(q_out, tuple) else q_out
             fp_out = self.fp_layer(
                 hidden, attention_mask=attn_mask, position_embeddings=pos
