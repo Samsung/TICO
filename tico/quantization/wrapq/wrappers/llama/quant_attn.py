@@ -211,17 +211,9 @@ class QuantLlamaAttention(QuantModuleBase):
         # TODO Revisit cache logic
         # HF Cache path (if available)
         if use_cache and hasattr(past_key_value, "update"):
-            # Many HF Cache impls use update(k, v) and return (k_total, v_total)
-            try:
-                k_total, v_total = past_key_value.update(k_rot, v)
-                present_key_value = (k_total, v_total)
-                k_for_attn, v_for_attn = k_total, v_total
-            except Exception:
-                # Fallback to tuple concat if Cache signature mismatches
-                k_for_attn, v_for_attn = self._concat_kv(
-                    getattr(past_key_value, "kv", None), k_rot, v
-                )
-                present_key_value = (k_for_attn, v_for_attn)
+            k_total, v_total = past_key_value.update(k_rot, v)
+            present_key_value = (k_total, v_total)
+            k_for_attn, v_for_attn = k_total, v_total
         else:
             # Tuple or None path
             pkv_tuple = past_key_value if isinstance(past_key_value, tuple) else None
