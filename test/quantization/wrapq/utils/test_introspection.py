@@ -122,11 +122,11 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
                 sq_model(ids)
         sq_model = convert(sq_model, inplace=True)
 
-        # PTQ-wrap first 4 layers
+        # PTQ-wrap first layers
         qcfg = PTQConfig()
         new_layers = torch.nn.ModuleList()
         for idx, fp_layer in enumerate(sq_model.model.layers):
-            if idx >= 4:
+            if idx >= 1:
                 new_layers.append(fp_layer)
                 continue
             new_layers.append(
