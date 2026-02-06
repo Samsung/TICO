@@ -33,7 +33,11 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.utils.utils import SuppressWarning
 
@@ -62,7 +66,14 @@ fp32_layer = model.fc
 # -------------------------------------------------------------------------
 # 1. Replace the Linear with QuantLinear wrapper
 # -------------------------------------------------------------------------
-model.fc = prepare(fp32_layer, PTQConfig())  # type: ignore[assignment]
+cfg = PTQConfig(
+    default_dtype=DType.uint(8),
+    default_qscheme=QScheme.PER_TENSOR_ASYMM,
+    default_observer=MXObserver,  # MinMaxObserver,
+    overrides={"weight": {"dtype": DType.uint(4), "observer": MinMaxObserver}},
+)
+
+model.fc = prepare(fp32_layer, cfg)  # type: ignore[assignment]
 qlayer = model.fc  # alias for brevity
 
 # -------------------------------------------------------------------------

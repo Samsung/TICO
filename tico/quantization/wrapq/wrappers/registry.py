@@ -24,8 +24,11 @@ _IMPORT_ONCE = False
 _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.quant_elementwise",
     ## nn ##
+    "tico.quantization.wrapq.wrappers.nn.quant_embedding",
     "tico.quantization.wrapq.wrappers.nn.quant_layernorm",
     "tico.quantization.wrapq.wrappers.nn.quant_linear",
+    ## ops ##
+    "tico.quantization.wrapq.wrappers.ops.quant_rmsnorm",
     # This includes not only `nn.SiLU` but also `SiLUActivation` from transformers
     # as they are same operation.
     "tico.quantization.wrapq.wrappers.nn.quant_silu",

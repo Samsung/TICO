@@ -22,8 +22,10 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
-from tico.quantization.wrapq.dtypes import INT16
+from tico.quantization.wrapq.dtypes import DType, INT16
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.llama.quant_mlp import QuantLlamaMLP
 from tico.utils.utils import SuppressWarning
@@ -37,8 +39,20 @@ model.eval()
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 fp32_mlp = model.model.layers[0].mlp
+cfg = PTQConfig(
+    default_dtype=DType.int(16),
+    default_qscheme=QScheme.PER_TENSOR_SYMM,
+    default_observer=MXObserver,  # MinMaxObserver,
+    overrides={
+        "gate_proj": {"weight": {"dtype": DType.uint(4), "observer": MinMaxObserver}},
+        "up_proj": {"weight": {"dtype": DType.uint(4), "observer": MinMaxObserver}},
+        "down_proj": {"weight": {"dtype": DType.uint(4), "observer": MinMaxObserver}},
+    },
+)
+
 model.model.layers[0].mlp = prepare(
-    fp32_mlp, PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM)
+    fp32_mlp,
+    cfg,  # PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM)
 )
 model.eval()
 
