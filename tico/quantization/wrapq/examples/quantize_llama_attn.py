@@ -21,7 +21,11 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.llama.quant_attn import QuantLlamaAttention
 from tico.utils.utils import SuppressWarning
 
@@ -33,6 +37,37 @@ tokenizer = AutoTokenizer.from_pretrained(name)
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 orig_attn = model.model.layers[0].self_attn
+# cfg = PTQConfig(
+#    default_dtype=DType.int(16),  # DType.uint(8),
+#    default_qscheme=QScheme.PER_TENSOR_SYMM,  # QScheme.PER_TENSOR_ASYMM,
+#    default_observer=MinMaxObserver,  # MXObserver
+#    overrides={
+#        "q_proj": {
+#            "weight": {"dtype": DType.uint(4), "observer": MinMaxObserver},
+#            "act_in": {"observer": MXObserver},
+#            "act_out": {"observer": MXObserver},
+#        },
+#        "k_proj": {
+#            "weight": {"dtype": DType.uint(4), "observer": MinMaxObserver},
+#            "act_in": {"observer": MXObserver},
+#            "act_out": {"observer": MXObserver},
+#        },
+#        "v_proj": {
+#            "weight": {"dtype": DType.uint(4), "observer": MinMaxObserver},
+#            "act_in": {"observer": MXObserver},
+#            "act_out": {"observer": MXObserver},
+#        },
+#        "o_proj": {
+#            "weight": {"dtype": DType.uint(4), "observer": MinMaxObserver},
+#            "act_in": {"observer": MXObserver},
+#            "act_out": {"observer": MXObserver},
+#        },
+#        "scale": {"observer": MinMaxObserver},
+#        "mask_add": {"observer": MinMaxObserver},
+#        "softmax": {"observer": MinMaxObserver},
+#    },
+# )
+
 model.model.layers[0].self_attn = prepare(orig_attn, PTQConfig())
 model.eval()
 
@@ -95,7 +130,7 @@ example_pos = rotary(example, torch.arange(S)[None, :])
 float_mask = torch.zeros(1, 1, S, S)
 
 with SuppressWarning(UserWarning, ".*"):
-    cm = tico.convert(attn_q, (example, example_pos))
+    cm = tico.convert(attn_q, (example, example_pos, float_mask))
 cm.save(save_path)
 
 print(f"Quantized Circle model saved to {save_path.resolve()}")

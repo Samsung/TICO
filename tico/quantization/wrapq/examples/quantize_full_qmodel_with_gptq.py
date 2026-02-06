@@ -1,0 +1,713 @@
+# Copyright (c) 2025 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# =============================================================================
+# PTQ + GPTQ HYBRID QUANTIZATION PIPELINE
+# -----------------------------------------------------------------------------
+# This script shows how to:
+#   1. Load a pretrained FP Llama-3 model.
+#   2. Run GPTQ to quantize weights only.
+#   3. Wrap every Transformer layer with a PTQWrapper to quantize activations.
+#   4. Calibrate UINT-8 observers in a single pass over a text corpus.
+#   5. Inject GPTQ’s per-tensor weight scales / zero-points into the PTQ graph.
+#   6. Freeze all Q-params and compute Wikitext-2 perplexity.
+# =============================================================================
+
+import argparse
+import pathlib
+import random
+import sys
+from typing import Any
+
+import torch
+import tqdm
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+import tico
+
+from tico.quantization import convert, prepare
+from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.utils.introspection import build_fqn_map
+from tico.quantization.wrapq.utils.metrics import perplexity
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+
+from tico.utils.utils import SuppressWarning
+from tico.quantization.evaluation.script.lm_eval_tasks import evaluate_llm_on_tasks
+
+# Token-budget presets for activation calibration
+TOKENS: dict[str, int] = {
+    # Smoke test (<1 min turnaround on CPU/GPU)
+    "debug": 2_000,  # ≈16 × 128-seq batches
+    # Good default for 1-7B models (≲3 % ppl delta)
+    "baseline": 50_000,
+    # Production / 4-bit observer smoothing
+    "production": 200_000,
+}
+
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}
+
+# Hardcoded dataset settings
+DATASET_NAME = "wikitext"
+DATASET_CONFIG = "wikitext-2-raw-v1"
+TRAIN_SPLIT = "train"
+TEST_SPLIT = "test"
+
+# -------------------------------------------------------------------------
+# 1. Helper — copy GPTQ (scale, zp) into PTQ observers
+# -------------------------------------------------------------------------
+def inject_gptq_qparams(
+    root: torch.nn.Module,
+    gptq_quantizers: dict[str, Any],  # {fp_name: quantizer}
+    weight_obs_name: str = "weight",
+):
+    """
+    For every `QuantModuleBase` whose `fp_name` matches a GPTQ key,
+    locate the observer called `weight_obs_name` and overwrite its
+    (scale, zero-point), then lock them against further updates.
+    """
+    for m in root.modules():
+        if not isinstance(m, QuantModuleBase):
+            continue
+        if m.fp_name is None:
+            continue
+        quantizer = gptq_quantizers.get(m.fp_name)
+        if quantizer is None:
+            continue
+        obs = m.get_observer(weight_obs_name)
+        if obs is None:
+            continue
+        assert isinstance(obs, AffineObserverBase)
+        # GPTQ quantizer attributes
+        obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
+
+
+import numpy as np
+
+
+def evaluate_ppl_of_exported_module_on_dataset(model, dataset, device: str = "cuda"):
+    if hasattr(model, "to"):
+        model.to(device)
+    nlls = []
+    for batch in tqdm.tqdm(dataset):
+        if isinstance(batch, torch.Tensor):
+            batch = batch.to(device)
+            attn_mask = torch.ones_like(batch)
+            output = model(
+                batch.to(device), attn_mask.to(device)
+            )
+        else:
+            raise RuntimeError("Unknown input in ppl_eval_on_dataset")
+
+        if hasattr(output, "logits"):
+            lm_logits = output.logits
+        elif len(output) > 1:
+            lm_logits = torch.tensor(output[0])
+        else:
+            lm_logits = torch.tensor(output)
+
+        if torch.isfinite(lm_logits).all():
+            shift_logits = lm_logits[:, :-1, :].contiguous()
+            if isinstance(batch, torch.Tensor):
+                shift_labels = batch[:, 1:].contiguous()
+            else:
+                assert isinstance(batch, tuple)
+                shift_labels = batch[0][:, 1:].contiguous()
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            loss = loss_fct(
+                shift_logits.reshape(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            )
+            nlls.append(loss)
+            del shift_logits, shift_labels
+            shift_logits = shift_labels = None  # type: ignore[assignment]
+
+        del batch, lm_logits, output
+        lm_logits = output = batch = None  # noqa: F841
+        torch.cuda.empty_cache()
+
+    ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
+    return ppl
+
+
+def save_circles_to(q_m, calib_inputs, save_circle_to_folder, use_cache):
+    q_m.eval()
+    q_m.cpu()
+    save_path = pathlib.Path(save_circle_to_folder, "embedding.q.circle")
+    pathlib.Path()
+    print(f"saving input embedding to {save_path.resolve()}")
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            cm = tico.convert(
+                q_m.model.embed_tokens,
+                (calib_inputs[0],),
+                strict=False,
+            )
+            cm.save(save_path)
+
+    save_path = pathlib.Path(save_circle_to_folder, "lm_head.q.circle")
+    print(f"saving lm_head to {save_path.resolve()}")
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            B, S, D = 1, q_m.config.max_position_embeddings, q_m.config.hidden_size
+            example_hidden = torch.randn(B, S, D)
+            cm = tico.convert(
+                q_m.lm_head,
+                (example_hidden,),
+                strict=False,
+            )
+            cm.save(save_path)
+
+    print("saving layers")
+    for i in range(len(q_m.model.layers)):
+        save_path = pathlib.Path(save_circle_to_folder, f"decoder_layer_{i}.q.circle")
+        print(f"saving model layer_{i} to {save_path.resolve()}")
+        B, S, D = 1, q_m.config.max_position_embeddings, q_m.config.hidden_size
+        example_hidden = torch.randn(B, S, D)
+        attn_mask = torch.zeros(1, 1, S, S)
+        # to mimick use_cache setting without adding explicir parameter (use_cache) the hack below is needed
+        if hasattr(q_m.model.layers[i], "wrapped"):
+            q_m.model.layers[i].wrapped.return_kv_cache = use_cache  # TODO remove
+            q_m.model.layers[
+                i
+            ].wrapped.self_attn.wrapped.return_kv_cache = use_cache  # TODO remove`
+
+        with torch.no_grad():
+            with SuppressWarning(UserWarning, ".*"):
+                cm = tico.convert(
+                    q_m.model.layers[i],
+                    (example_hidden, attn_mask),
+                    strict=False,
+                )
+                # Note that the model is not fully quantized.
+        cm.save(save_path)
+
+        if hasattr(q_m.model.layers[i], "wrapped"):
+            q_m.model.layers[i].wrapped.return_kv_cache = False  # TODO remove
+            q_m.model.layers[
+                i
+            ].wrapped.self_attn.wrapped.return_kv_cache = False  # TODO remove
+
+    save_path = pathlib.Path(save_circle_to_folder, "model.model.q.circle")
+    print(f"saving model.model to {save_path.resolve()}")
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            attn_mask = torch.ones_like(calib_inputs[0])
+            cm = tico.convert(
+                q_m.model, (calib_inputs[0], attn_mask), strict=False
+            )
+
+            cm.save(save_path)
+
+    save_path = pathlib.Path(save_circle_to_folder, "model.q.circle")
+    print(f"saving the whole model to {save_path.resolve()}")
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            attn_mask = torch.ones_like(calib_inputs[0])
+            cm = tico.convert(
+                q_m, (calib_inputs[0], attn_mask), strict=False
+            )
+
+            cm.save(save_path)
+
+from typing import Callable, List, Optional, Tuple, Union
+from transformers.cache_utils import Cache
+from transformers.processing_utils import Unpack
+from transformers.models.llama.modeling_llama import KwargsForCausalLM, LlamaForCausalLM
+from transformers.modeling_outputs import CausalLMOutputWithPast
+    
+def fix_inputs(model, tokenizer, input_ids):
+    if tokenizer.pad_token_id is not None:
+        pads = torch.full((input_ids.shape[0], model.config.max_position_embeddings - input_ids.shape[1]), fill_value=tokenizer.pad_token_id, device=input_ids.device)
+    elif tokenizer.eos_token_id is not None:
+        pads = torch.full((input_ids.shape[0], model.config.max_position_embeddings - input_ids.shape[1]), fill_value=tokenizer.eos_token_id, device=input_ids.device)
+    else:
+        raise RuntimeError("failed to pad sequence - tokenizer doesn't have pad_token_id/eos_token_id")
+    
+    return torch.cat((input_ids, pads), dim = 1)
+
+import types
+class LLamaWithFixedInput(LlamaForCausalLM):
+    
+    def __init__(self, parent: LlamaForCausalLM, tokenizer):
+        assert parent.config is not None, "config is a must have"
+        super(LlamaForCausalLM, self).__init__(parent.config)
+        self.__dict__.update(parent.__dict__)
+        def forward(
+            self,
+            input_ids: torch.LongTensor = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+            inputs_embeds: Optional[torch.FloatTensor] = None,
+            labels: Optional[torch.LongTensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+            cache_position: Optional[torch.LongTensor] = None,
+            logits_to_keep: Union[int, torch.Tensor] = 0,
+            **kwargs: Unpack[KwargsForCausalLM],
+        ) -> Union[Tuple, CausalLMOutputWithPast]:
+            # fixed input size, due to position_ids fixed
+            orig_len = input_ids.shape[-1]
+            input_ids = fix_inputs(self, self.tokenizer, input_ids)
+            if labels is not None:
+                labels = fix_inputs(self, self.tokenizer, labels)
+            res = super().forward(input_ids, attention_mask, position_ids, past_key_values, inputs_embeds, labels, use_cache, output_attentions, output_hidden_states, return_dict, cache_position, logits_to_keep, **kwargs)
+            #we need to trim to the original size
+            res.logits = res.logits[..., :orig_len, :]
+            return res
+
+        self.forward = types.MethodType(forward, self)
+        self.tokenizer = tokenizer
+        
+    
+def quantize_using_PTQ(q_m, calib_inputs, args):
+    print("Wrapping layers with PTQWrapper …")
+
+    matmul_observer = (
+        MinMaxObserver
+        if args.matmul_io_qdtype == "int16"
+        else MXObserver
+        if args.matmul_io_qdtype == "mxint8"
+        else None
+    )
+    w_cfg = {
+        "mlp": {
+            "gate_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+            "up_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+            "down_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+        },
+        "self_attn": {
+            "q_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+            "k_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+            "v_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+            "o_proj": {
+                "weight": {
+                    "dtype": DType.uint(args.gptq_weight_bits),
+                    "observer": MinMaxObserver,
+                },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
+            },
+            "scale": {"observer": MinMaxObserver},
+            "mask_add": {"observer": MinMaxObserver},
+            "softmax": {"observer": MinMaxObserver},
+            "logits_raw": {"observer": matmul_observer},
+        },
+        "self_attn_residual_act_out": {"observer": MinMaxObserver},
+        # "act_last_residual_out" : {"observer":MinMaxObserver},
+        "input_layernorm": {
+            "dtype": DType.int(16),
+            "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+            "act_in": {"observer": MinMaxObserver},
+            "act_out": {"observer": MinMaxObserver},
+        },
+        "post_attention_layernorm": {
+            "dtype": DType.int(16),
+            "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+            "act_in": {"observer": MinMaxObserver},
+            "act_out": {"observer": MinMaxObserver},
+        },
+    }
+
+    default_observer = (
+        MinMaxObserver
+        if args.default_io_qdtype == "int16"
+        else MXObserver
+        if args.matmul_io_qdtype == "mxint8"
+        else None
+    )
+    cfg = PTQConfig(
+        default_dtype=DType.int(16),
+        default_qscheme=QScheme.PER_TENSOR_SYMM,
+        default_observer=default_observer,  # type: ignore[arg-type]
+        overrides={
+            "model.embeddings": {
+                "weight": {"dtype": DType.uint(8), "observer": MinMaxObserver},
+                "act_out": {"observer": MinMaxObserver},
+            },  # embeddings to 8-bits
+            "lm_head": {
+                "weight": {"dtype": DType.uint(4), "observer": MinMaxObserver},
+                "act_in": {"observer": MinMaxObserver},
+                "act_out": {"observer": MinMaxObserver},
+            },  # lm_head to 4-bits
+            "model.norm": {
+                "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+                "act_in": {"observer": MinMaxObserver},
+                "act_out": {"observer": MinMaxObserver},
+            },
+        },
+    )
+    for i in range(len(q_m.model.layers)):
+        child_scope = f"layer{i}"
+        cfg.overrides[child_scope] = w_cfg  # type: ignore[index]
+
+    if args.default_io_qdtype != "float32":
+        # hack to keep model.norm in `int16`
+        cfg.overrides[f"layer{len(q_m.model.layers) - 1}"]["act_mlp_residual_out"] = {  # type: ignore[index]
+            "observer": default_observer
+        }
+    qcfg = cfg
+    prepare(q_m, qcfg)
+
+    # -------------------------------------------------------------------------
+    # Single-pass activation calibration
+    # -------------------------------------------------------------------------
+    print("Calibrating PTQ obeservers…")
+
+    # Overwrite weight observers with GPTQ statistics
+    if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
+        inject_gptq_qparams(q_m, q_m.quantizers)
+    else:
+        print(
+            "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
+        )
+
+    device = torch.device(args.device)
+    with torch.no_grad():
+        for inp in tqdm.tqdm(calib_inputs):
+            q_m(inp.to(device))
+
+    # Freeze all Q-params (scale, zero-point)
+    q_m = convert(q_m)
+
+    return q_m
+
+
+def evaluate(q_m, tokenizer, dataset_test, args):
+
+    # -------------------------------------------------------------------------
+    # Evaluate perplexity on Wikitext-2
+    # -------------------------------------------------------------------------
+    print("\nCalculating perplexities …")
+    enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
+    ppl_uint8 = perplexity(
+        q_m, enc, args.device, stride=q_m.config.max_position_embeddings
+    )
+
+    print("\n┌── Wikitext-2 test perplexity ─────────────")
+    print(f"│ {args.default_io_qdtype} : {ppl_uint8:8.2f}")
+    print("└───────────────────────────────────────────")
+    
+    if args.eval_tasks is not None:
+        results = evaluate_llm_on_tasks(q_m, tokenizer, args.eval_tasks)
+        print("Quantized RESULTS ARE:")
+        print(results["results"])
+        
+    # to prevent export errors let's evaluate ppl on exported fake_quantized model
+    with torch.no_grad():
+        q_m.eval()
+        q_m.cpu()
+        test_ids = enc.input_ids[0]
+        test_ids_batch = []
+        nsamples = test_ids.numel() // q_m.config.max_position_embeddings
+
+        for i in range(nsamples):
+            batch = test_ids[
+                (i * q_m.config.max_position_embeddings) : (
+                    (i + 1) * q_m.config.max_position_embeddings
+                )
+            ]  # noqa E203
+            test_ids_batch.append(batch.unsqueeze(0))
+
+        rnd_input = torch.randint_like(
+            test_ids_batch[0], 0, tokenizer.vocab_size - 1
+        )  # just random ids
+        attn_mask = torch.ones_like(rnd_input)
+        device = "cuda"
+        exported_program = torch.export.export(
+            q_m.to(device),
+            (rnd_input.to(device), attn_mask.to(device)),
+            kwargs=None,
+            dynamic_shapes=None,
+            strict=False,
+        )
+        ppl = evaluate_ppl_of_exported_module_on_dataset(
+            exported_program.module(), test_ids_batch, device=device
+        )
+        print("\n┌── Wikitext-2 test perplexity ─────────────")
+        print(f"│ exported_{args.default_io_qdtype} : {ppl:8.2f}")
+        print("└───────────────────────────────────────────")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="GPTQ+PTQ pipeline (weight-only + activation)"
+    )
+    parser.add_argument(
+        "--model", type=str, required=True, help="HF repo name or local path."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (cuda|cpu|mps).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=list(DTYPE_MAP.keys()),
+        default="float32",
+        help="Model dtype for load.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Optional HF token for gated/private repos.",
+    )
+    parser.add_argument(
+        "--use-cache",
+        dest="use_cache",
+        action="store_true",
+        default=False,
+        help="Use model KV cache if enabled (off by default).",
+    )
+    parser.add_argument(
+        "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
+    )
+    parser.add_argument(
+        "--no_GPTQ",
+        action="store_true",
+        default=False,
+        help="Don't use GPTQ",
+    )
+    parser.add_argument(
+        "--no_PTQ",
+        action="store_true",
+        default=False,
+        help="Leave model float",
+    )
+    parser.add_argument(
+        "--save_circle_to_folder",
+        type=str,
+        default=None,
+        help="Save embedding/lm_head/all_layers/model.model/the_whole_model to the folder specified",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="cache_dir for using model/datasets loading",
+    )
+    parser.add_argument(
+        "--default_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed as default for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--matmul_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for matmuls for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--nsamples_for_qcalibration",
+        type=int,
+        default="128",  # almost standard
+        help="number of samples to be used in GPTQ/PTQ calibration",
+    )
+    parser.add_argument(
+        "--gptq_weight_bits",
+        type=int,
+        default=4,
+        help="Number of bits to be used in GPTQ quantizer for weight quantization",
+    )
+    parser.add_argument(
+        "--gptq_mse",
+        action="store_true",
+        default=False,
+        help="Whether to use mse in gptq",
+    )
+    parser.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=None,
+        help="constraint for max_position_embeddings",
+    )
+    parser.add_argument(
+        "--eval_tasks", 
+        type=str,
+        default=None,
+        help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`")
+    args = parser.parse_args()
+    print(args)
+
+    # Basic setup
+    torch.manual_seed(args.seed)
+    device = torch.device(args.device)
+    dtype = DTYPE_MAP[args.dtype]
+
+    print("=== Config ===")
+    print(f"Model            : {args.model}")
+    print(f"Device           : {device.type}")
+    print(f"DType            : {args.dtype}")
+    print(f"Use HF cache?    : {args.use_cache}")
+    print()
+
+    # -------------------------------------------------------------------------
+    # 2. Load the FP backbone and tokenizer
+    # -------------------------------------------------------------------------
+    print("Loading FP model …")
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+        cache_dir=args.cache_dir,
+    )
+    model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=dtype,
+            trust_remote_code=args.trust_remote_code,
+            token=args.hf_token,
+            cache_dir=args.cache_dir,
+        )
+        .to(device)
+        .eval()
+    )
+
+    model.config.use_cache = args.use_cache
+    if args.max_seq_len is not None:
+        model.config.max_position_embeddings = min(
+            model.config.max_position_embeddings, args.max_seq_len
+        )
+
+    dataset_test = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT)
+
+    print("\nCalculating original perplexities …")
+    enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
+    ppl_fp32 = perplexity(
+        model, enc, device, stride=model.config.max_position_embeddings
+    )
+
+    print("\n┌── Wikitext-2 original test perplexity ─────────────")
+    print(f"│ FP32 : {ppl_fp32:8.2f}")
+    print("└───────────────────────────────────────────")
+
+    if args.eval_tasks is not None:
+        results = evaluate_llm_on_tasks(model, tokenizer, args.eval_tasks)
+        print("Original RESULTS ARE:")
+        print(results["results"])
+        
+    # -------------------------------------------------------------------------
+    # Run GPTQ (weight-only) pass
+    # -------------------------------------------------------------------------
+    if not args.no_GPTQ:
+        print("Applying GPTQ …")
+
+    dataset_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
+    calib_txt = " ".join(dataset_train["text"])
+    train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
+    gptq_config = GPTQConfig(
+        weight_bits=args.gptq_weight_bits, perchannel=True, mse=args.gptq_mse
+    )
+    if not args.no_GPTQ:
+        q_m = prepare(model, gptq_config, inplace=True)
+    nsamples = args.nsamples_for_qcalibration
+    seqlen = model.config.max_position_embeddings
+    calib_inputs = []
+    random.seed(args.seed)
+    for _ in range(nsamples):
+        i = random.randint(0, train_ids.shape[1] - seqlen - 1)
+        j = i + seqlen
+        inp = train_ids[:, i:j]
+        calib_inputs.append(inp.cpu())
+        if not args.no_GPTQ:
+            with torch.no_grad():
+                q_m(inp)
+
+    if not args.no_GPTQ:
+        q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
+    else:
+        q_m = model
+
+    # -------------------------------------------------------------------------
+    # Wrap every layer with PTQWrapper
+    # -------------------------------------------------------------------------
+    if not args.no_PTQ:
+        #after PTQ quantizer only fixed-length input sequences are valid
+        q_m = LLamaWithFixedInput(quantize_using_PTQ(q_m, calib_inputs, args), tokenizer)
+
+    evaluate(q_m, tokenizer, dataset_test, args)
+
+    if args.save_circle_to_folder is not None:
+        save_circles_to(q_m, calib_inputs, args.save_circle_to_folder, args.use_cache)
+
+
+if __name__ == "__main__":
+    # try:
+    main()
+#     sys.exit(1)
