@@ -375,29 +375,36 @@ class ConvertConv3dToConv2d(PassBase):
 
                 temporal_outputs.append(acc)
 
-            # Step 4: Stack temporal outputs using cat instead of stack
-            # First, unsqueeze each temporal output to add the time dimension
-            unsqueezed_outputs = []
-            for i, temp_output in enumerate(temporal_outputs):
-                # Add time dimension: [N, C_out, H_out, W_out] -> [N, C_out, 1, H_out, W_out]
-                unsqueezed = create_node(
-                    graph,
-                    torch.ops.aten.unsqueeze.default,
-                    args=(temp_output, 2),
-                    origin=temp_output,
-                )
-                unsqueezed_outputs.append(unsqueezed)
+            final_output = None
 
-            # Cat along time dimension: [N, C_out, T_out, H_out, W_out]
-            stacked_output = create_node(
-                graph,
-                torch.ops.aten.cat.default,
-                args=(unsqueezed_outputs, 2),
-                origin=node,
-            )
+            if len(temporal_outputs) == 1:
+                final_output = temporal_outputs[0]
+            else:
+                # Step 4: Stack temporal outputs using cat instead of stack
+                # First, unsqueeze each temporal output to add the time dimension
+                unsqueezed_outputs = []
+                for i, temp_output in enumerate(temporal_outputs):
+                    # Add time dimension: [N, C_out, H_out, W_out] -> [N, C_out, 1, H_out, W_out]
+                    unsqueezed = create_node(
+                        graph,
+                        torch.ops.aten.unsqueeze.default,
+                        args=(temp_output, 2),
+                        origin=temp_output,
+                    )
+                    unsqueezed_outputs.append(unsqueezed)
+
+                # Cat along time dimension: [N, C_out, T_out, H_out, W_out]
+                stacked_output = create_node(
+                    graph,
+                    torch.ops.aten.cat.default,
+                    args=(unsqueezed_outputs, 2),
+                    origin=node,
+                )
+
+                final_output = stacked_output
 
         # Replace the original node
-        node.replace_all_uses_with(stacked_output, propagate_meta=False)
+        node.replace_all_uses_with(final_output, propagate_meta=False)
         logger.debug(f"{node.name} is replaced with conv2d decomposition")
         modified = True
 
