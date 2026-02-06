@@ -298,16 +298,37 @@ def register_dynamic_layer():
         logger.warning(f"DynamicLayer is already registered as pytree flattenable. {e}")
 
 
-def _flatten_dynamic_cache(cache: DynamicCache):
-    return torch.utils._pytree._dict_flatten(cache.__dict__)
 
-def _unflatten_dynamic_cache(values, context: torch.utils._pytree.Context):
-    data = torch.utils._pytree._dict_unflatten(values, context)
-    
+def _flatten_dynamic_cache(cache):
+    children = (cache.layers,)
+    aux_data = {
+        "layer_class_to_replicate": getattr(cache, "layer_class_to_replicate", None),
+        "offloading": getattr(cache, "offloading", False),
+    }
+    return children, aux_data
+
+def _unflatten_dynamic_cache(children, aux_data):
     instance = DynamicCache.__new__(DynamicCache)
+    layers, = children
+    instance.layers = layers
     
-    instance.__dict__.update(data)
+    for key, value in aux_data.items():
+        setattr(instance, key, value)
+        
     return instance
+
+
+
+# def _flatten_dynamic_cache(cache: DynamicCache):
+#     return torch.utils._pytree._dict_flatten(cache.__dict__)
+
+# def _unflatten_dynamic_cache(values, context: torch.utils._pytree.Context):
+#     data = torch.utils._pytree._dict_unflatten(values, context)
+    
+#     instance = DynamicCache.__new__(DynamicCache)
+    
+#     instance.__dict__.update(data)
+#     return instance
 
 def _flatten_with_keys_dynamic_cache(cache: DynamicCache):
     return torch.utils._pytree._dict_flatten_with_keys(cache.__dict__)
