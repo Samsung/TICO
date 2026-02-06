@@ -269,43 +269,13 @@ class ConvertConv3dToConv2d(PassBase):
             # Step 3: Process each temporal output position
             temporal_outputs = []
             for t_out in range(T_out):
-                # Calculate input time position
                 t_in = t_out * stride[0]
-
-                # Initialize accumulator for this temporal position
                 acc = None
 
                 for i, weight_2d in enumerate(weight_2d_layers):
-                    # Calculate actual time index with dilation
                     t_idx = t_in + i * dilation[0]
 
-                    # Create constant for time index
-                    t_idx_const = create_node(
-                        graph,
-                        torch.ops.aten.scalar_tensor.default,
-                        args=(t_idx,),
-                        kwargs={"dtype": torch.int64},
-                        origin=node,
-                    )
-
-                    # Create constant for T_padded
-                    t_padded_const = create_node(
-                        graph,
-                        torch.ops.aten.scalar_tensor.default,
-                        args=(T_padded,),
-                        kwargs={"dtype": torch.int64},
-                        origin=node,
-                    )
-
-                    # Check if t_idx < T_padded
-                    valid_mask = create_node(
-                        graph,
-                        torch.ops.aten.lt.Tensor,
-                        args=(t_idx_const, t_padded_const),
-                        origin=node,
-                    )
-
-                    # Slice input at time t_idx: [N, C_in, T_padded, H_in, W_in] -> [N, C_in, H_in, W_in]
+                    # Slice input at time t_idx: [N, C_in, T_padded, H_in, W_in] -> [N, C_in, 1, H_in, W_in]
                     input_slice = create_node(
                         graph,
                         torch.ops.aten.slice.Tensor,
@@ -321,12 +291,12 @@ class ConvertConv3dToConv2d(PassBase):
                         origin=input_slice,
                     )
 
-                    # Create conv2d operation with proper input
+                    # Create conv2d operation
                     conv2d = create_node(
                         graph,
                         torch.ops.aten.conv2d.default,
                         args=(
-                            input_2d,  # input is now available
+                            input_2d,
                             weight_2d,
                             None,  # bias = False
                             [stride[1], stride[2]],
@@ -337,36 +307,54 @@ class ConvertConv3dToConv2d(PassBase):
                         origin=node,
                     )
 
-                    # Create zero tensor with calculated shape
-                    # conv2d output shape: [N, C_out, H_out, W_out]
-                    zero_tensor = create_node(
-                        graph,
-                        torch.ops.aten.zeros.default,
-                        args=([N, C_out, H_out, W_out],),
-                        kwargs={
-                            "dtype": input.meta.get("dtype", torch.float32),
-                            "device": input.meta.get("device", "cpu"),
-                        },
-                        origin=conv2d,
-                    )
-
-                    # Apply conditional execution
-                    conv2d_masked = create_node(
-                        graph,
-                        torch.ops.aten.where.self,
-                        args=(valid_mask, conv2d, zero_tensor),
-                        origin=conv2d,
-                    )
+                    if dilation[0] == 1:
+                        conv2d_result = conv2d
+                    else:
+                        # Check boundary to fill pad values only if dilation > 1
+                        t_idx_const = create_node(
+                            graph,
+                            torch.ops.aten.scalar_tensor.default,
+                            args=(t_idx,),
+                            kwargs={"dtype": torch.int64},
+                            origin=node,
+                        )
+                        t_padded_const = create_node(
+                            graph,
+                            torch.ops.aten.scalar_tensor.default,
+                            args=(T_padded,),
+                            kwargs={"dtype": torch.int64},
+                            origin=node,
+                        )
+                        valid_mask = create_node(
+                            graph,
+                            torch.ops.aten.lt.Tensor,
+                            args=(t_idx_const, t_padded_const),
+                            origin=node,
+                        )
+                        zero_tensor = create_node(
+                            graph,
+                            torch.ops.aten.zeros.default,
+                            args=([N, C_out, H_out, W_out],),
+                            kwargs={
+                                "dtype": input.meta.get("dtype", torch.float32),
+                                "device": input.meta.get("device", "cpu"),
+                            },
+                            origin=conv2d,
+                        )
+                        conv2d_result = create_node(
+                            graph,
+                            torch.ops.aten.where.self,
+                            args=(valid_mask, conv2d, zero_tensor),
+                            origin=conv2d,
+                        )
 
                     if acc is None:
-                        # First temporal slice
-                        acc = conv2d_masked
+                        acc = conv2d_result
                     else:
-                        # Add subsequent temporal slices
                         acc = create_node(
                             graph,
                             torch.ops.aten.add.Tensor,
-                            args=(acc, conv2d_masked),
+                            args=(acc, conv2d_result),
                             origin=acc,
                         )
 
