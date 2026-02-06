@@ -29,6 +29,19 @@ from tico.quantization.wrapq.utils.introspection import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+MAX_SEQ = 256
+
+
+def make_fixed_inputs(tokenizer, prompt: str):
+    batch = tokenizer(
+        prompt,
+        return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=MAX_SEQ,
+    )
+    input_ids = batch["input_ids"]  # [1,MAX_SEQ]
+    return input_ids
 
 
 class DummyModel(nn.Module):
@@ -108,7 +121,11 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
         fp_model = (
             AutoModelForCausalLM.from_pretrained(cls.model_name).to(cls.device).eval()
         )
+        # Make sure pad token exists (Llama often uses eos as pad)
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token = tokenizer.eos_token
         fp_model.config.use_cache = False
+        fp_model.config.max_position_embeddings = MAX_SEQ
         fqn_map = build_fqn_map(fp_model)
 
         # SmoothQuant calibration
@@ -140,9 +157,7 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
         cls.model = sq_model
 
         # prepare static input & capture FP refs
-        cls.input_ids = tokenizer(
-            "Unit-test input sequence.", return_tensors="pt"
-        ).input_ids.to(cls.device)
+        cls.input_ids = make_fixed_inputs(tokenizer, "Unit-test input sequence.")
 
         sq_model.model.layers.apply(
             lambda m: getattr(m, "enable_calibration", lambda: None)()
