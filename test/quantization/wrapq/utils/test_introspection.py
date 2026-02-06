@@ -122,7 +122,7 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
                 sq_model(ids)
         sq_model = convert(sq_model, inplace=True)
 
-        # PTQ-wrap first layers
+        # PTQ-wrap first layer
         qcfg = PTQConfig()
         new_layers = torch.nn.ModuleList()
         for idx, fp_layer in enumerate(sq_model.model.layers):
