@@ -193,6 +193,28 @@ class Qwen2VLConv3dBasic(TestModuleBase):
         return (torch.randn(1, 3, 4, 28, 28),), {}
 
 
+class Qwen3VLConv3dBasic(TestModuleBase):
+    """
+    Conv3D module similar to Qwen3-VL video processing components.
+    """
+    def __init__(self):
+        super().__init__()
+        
+        self.conv3d = torch.nn.Conv3d(
+            in_channels=3,
+            out_channels=1024,
+            kernel_size=(2, 16, 16),
+            stride=(2, 16, 16),
+            padding=(0, 0, 0),
+            bias=True,
+        )
+    def forward(self, input):
+        return self.conv3d(input).view(-1, 1024)
+
+    def get_example_inputs(self):
+        return (torch.randn(123, 3, 2, 16, 16),), {}
+
+
 class MultiLayerConv3d(TestModuleBase):
     def __init__(self):
         super().__init__()

@@ -26,6 +26,7 @@ from tico.passes.cast_mixed_type_args import CastMixedTypeArgs
 from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.convert_conv1d_to_conv2d import ConvertConv1dToConv2d
 from tico.passes.convert_conv3d_to_conv2d import ConvertConv3dToConv2d
+from tico.passes.convert_conv2d_to_linear import ConvertConv2dToLinear
 from tico.passes.convert_expand_to_slice_cat import ConvertExpandToSliceCat
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.convert_matmul_to_linear import ConvertMatmulToLinear
@@ -266,6 +267,7 @@ def convert_exported_module_to_circle(
                 ),
             ),
             LowerToResizeNearestNeighbor(),
+            ConvertConv2dToLinear(),
             LegalizePreDefinedLayoutOperators(),
             LowerPow2ToMul(),
             ConvertConv1dToConv2d(),
