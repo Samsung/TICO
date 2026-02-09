@@ -41,6 +41,20 @@ assert isinstance(attn_q.wrapped, QuantLlamaAttention)
 rotary = model.model.rotary_emb
 
 # -------------------------------------------------------------------------
+# Helpers: tokenize + embed
+# -------------------------------------------------------------------------
+def make_inputs(prompt: str):
+    batch = tokenizer(
+        prompt,
+        return_tensors="pt",
+    )
+    input_ids = batch["input_ids"]
+
+    hidden = model.model.embed_tokens(input_ids)
+    return hidden
+
+
+# -------------------------------------------------------------------------
 # 2. Single-pass calibration
 # -------------------------------------------------------------------------
 PROMPTS = [
@@ -54,12 +68,10 @@ PROMPTS = [
 
 with torch.no_grad():
     for prompt in PROMPTS:
-        ids = tokenizer(prompt, return_tensors="pt")
-        embeds = model.model.embed_tokens(ids["input_ids"])
-        cos_sin = rotary(embeds, ids["input_ids"])
-        S = cos_sin[0].shape[1]
-        float_mask = torch.zeros(1, 1, S, S)
-        _ = attn_q(embeds, cos_sin)  # observers collect
+        embeds = make_inputs(prompt)
+        position_ids = torch.arange(embeds.size(1)).unsqueeze(0)
+        pos = rotary(embeds, position_ids)
+        _ = attn_q(embeds, pos)  # observers collect
 
 convert(attn_q)
 
@@ -68,9 +80,9 @@ assert attn_q._mode is Mode.QUANT, "Quantization mode should be active now."
 # -------------------------------------------------------------------------
 # 3. Quick diff check (INT-sim vs FP32)
 # -------------------------------------------------------------------------
-ids = tokenizer("check", return_tensors="pt")
-emb = model.model.embed_tokens(ids["input_ids"])
-pos = rotary(emb, ids["input_ids"])
+emb = make_inputs("check")
+position_ids = torch.arange(emb.size(1)).unsqueeze(0)
+pos = rotary(embeds, position_ids)
 S = pos[0].shape[1]
 float_mask = torch.zeros(1, 1, S, S)
 with torch.no_grad():
