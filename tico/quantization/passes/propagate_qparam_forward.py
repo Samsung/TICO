@@ -27,6 +27,7 @@ from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.validate_args_kwargs import (
     CatArgs,
+    ExpandArgs,
     NegArgs,
     PermuteArgs,
     ReshapeArgs,
@@ -130,7 +131,9 @@ class PropagateQParamForward(PassBase):
 
                 assert max_scale_node is not None
                 _propagate_qparam_if_possible(max_scale_node, node)
-
+            elif node.target == torch.ops.aten.expand.default:
+                expand_args = ExpandArgs(*node.args, **node.kwargs)
+                _propagate_qparam_if_possible(expand_args.input, node)
             # TODO Support more ops.
 
         graph.eliminate_dead_code()
