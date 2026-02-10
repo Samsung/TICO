@@ -120,6 +120,13 @@ def main():
         help="Sliding-window stride used for calibration and eval.",
     )
     parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="Cap the max sequence length fed to the model (calib + eval). "
+        "If not set, uses full available length.",
+    )
+    parser.add_argument(
         "--calib-preset",
         choices=list(TOKENS.keys()),
         default="debug",
@@ -160,6 +167,7 @@ def main():
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
     print(f"Stride           : {args.stride}")
+    print(f"Max seq len cap  : {args.max_seq_len}")
     print(
         f"Calib preset     : {args.calib_preset} ({TOKENS[args.calib_preset]:,} tokens)"
     )
@@ -250,7 +258,9 @@ def main():
     # -------------------------------------------------------------------------
     print("\nCalculating perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
-    ppl_uint8 = perplexity(q_m, enc, device, stride=args.stride)
+    ppl_uint8 = perplexity(
+        q_m, enc, device, max_length=args.max_seq_len, stride=args.stride
+    )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
     print(f"│ UINT-8 : {ppl_uint8:8.2f}")

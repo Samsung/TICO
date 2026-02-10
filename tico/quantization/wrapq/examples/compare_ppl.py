@@ -81,6 +81,13 @@ def main():
     parser.add_argument(
         "--stride", type=int, default=512, help="Sliding-window stride for perplexity."
     )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="Cap the max sequence length fed to the model (calib + eval). "
+        "If not set, uses full available length.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument(
         "--trust-remote-code",
@@ -124,6 +131,7 @@ def main():
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
     print(f"Stride           : {args.stride}")
+    print(f"Max seq len cap  : {args.max_seq_len}")
     print(f"Use HF cache?    : {args.use_cache}")
     print(
         f"Calib preset     : {args.calib_preset} ({TOKENS[args.calib_preset]:,} tokens)"
@@ -199,6 +207,7 @@ def main():
             fp_model,
             enc,
             args.device,
+            max_length=args.max_seq_len,
             stride=args.stride,
             show_progress=not args.no_tqdm,
         )
@@ -207,6 +216,7 @@ def main():
             uint8_model,
             enc,
             args.device,
+            max_length=args.max_seq_len,
             stride=args.stride,
             show_progress=not args.no_tqdm,
         )
