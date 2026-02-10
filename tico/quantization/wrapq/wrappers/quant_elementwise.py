@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
-from tico.quantization.wrapq.wrappers.registry import register
+from tico.quantization.wrapq.wrappers.registry import register, try_register
 
 
 class QuantElementwise(QuantModuleBase):
@@ -119,8 +119,8 @@ def _sigmoid(x: torch.Tensor) -> torch.Tensor:
     return torch.sigmoid(x)
 
 
-def _gelu(x: torch.Tensor) -> torch.Tensor:
-    return torch.nn.functional.gelu(x)
+def _gelu(x: torch.Tensor, approximate="none") -> torch.Tensor:
+    return torch.nn.functional.gelu(x, approximate=approximate)
 
 
 @register(nn.Sigmoid)
@@ -149,3 +149,10 @@ class QuantGELU(QuantElementwise):
     @staticmethod
     def FUNC(x: torch.Tensor) -> torch.Tensor:
         return _gelu(x)
+
+
+@try_register("transformers.activations.GELUTanh")
+class QuantGELUTanh(QuantElementwise):
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _gelu(x, approximate="tanh")

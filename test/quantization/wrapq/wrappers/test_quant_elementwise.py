@@ -22,8 +22,10 @@ We verify for each wrapper:
   4.  PTQConfig overrides propagate to observers
 """
 
+import importlib.util
 import inspect
 import unittest
+from functools import partial
 from typing import Callable, List, Tuple, Type
 
 import torch
@@ -34,6 +36,7 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_elementwise import (
     QuantElementwise,
     QuantGELU,
+    QuantGELUTanh,
     QuantReLU,
     QuantSigmoid,
     QuantTanh,
@@ -51,6 +54,19 @@ ACTIVATIONS: List[
     (torch.nn.ReLU(), torch.relu, QuantReLU),
     (torch.nn.GELU(), torch.nn.functional.gelu, QuantGELU),
 ]
+
+if importlib.util.find_spec("transformers") is not None:
+    import transformers
+
+    ACTIVATIONS.append(
+        (
+            transformers.activations.GELUTanh(),
+            partial(torch.nn.functional.gelu, approximate="tanh"),
+            QuantGELUTanh,
+        )
+    )
+else:
+    print(f"\ntransformers not installed — skipping GELUTanh tests")
 
 
 class TestElementwiseWrappers(unittest.TestCase):
