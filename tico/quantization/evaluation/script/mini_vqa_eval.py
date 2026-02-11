@@ -231,6 +231,8 @@ def main():
         default="bfloat16",
         choices=["float16", "bfloat16", "float32"],
     )
+    ap.add_argument("--cache_dir", type=str, default="cpu")
+    
     args = ap.parse_args()
 
     # Reproducibility
@@ -270,11 +272,12 @@ def main():
     torch_dtype = dtype_map[args.dtype]
 
     # Load model and processor
-    processor = AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True, cache_dir=args.cache_dir)
     model = AutoModelForVision2Seq.from_pretrained(
         args.model_id,
         torch_dtype=torch_dtype,
         trust_remote_code=True,
+        cache_dir=args.cache_dir,
     ).to(args.device)
     model.eval()
 
