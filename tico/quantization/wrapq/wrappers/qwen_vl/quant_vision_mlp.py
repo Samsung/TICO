@@ -39,7 +39,7 @@ class QuantQwen3VLVisionMLP(QuantModuleBase):
         linear_fc1_cfg = qcfg.child("linear_fc1") if qcfg else None
         linear_fc2_cfg = qcfg.child("linear_fc2") if qcfg else None
         act_cfg = qcfg.child("act_fn") if qcfg else None
-        
+
         # ----- wrap three Linear layers -------------------------------
         assert hasattr(mlp_fp, "linear_fc1") and isinstance(
             mlp_fp.linear_fc1, torch.nn.Module
@@ -47,28 +47,26 @@ class QuantQwen3VLVisionMLP(QuantModuleBase):
         assert hasattr(mlp_fp, "linear_fc2") and isinstance(
             mlp_fp.linear_fc2, torch.nn.Module
         )
-        
+
         self.linear_fc1 = PTQWrapper(
             mlp_fp.linear_fc1, qcfg=linear_fc1_cfg, fp_name=f"{fp_name}.linear_fc1"
         )
         self.linear_fc2 = PTQWrapper(
             mlp_fp.linear_fc2, qcfg=linear_fc2_cfg, fp_name=f"{fp_name}.linear_fc2"
         )
-        
+
         # ----- activation ---------------------------------------------
         assert hasattr(mlp_fp, "act_fn") and isinstance(mlp_fp.act_fn, torch.nn.Module)
-       # self.act_fn = PTQWrapper(
-       #     mlp_fp.act_fn, qcfg=act_cfg, fp_name=f"{fp_name}.act_fn"
-       # )
-        self.act_fn = mlp_fp.act_fn
+        self.act_fn = PTQWrapper(
+            mlp_fp.act_fn, qcfg=act_cfg, fp_name=f"{fp_name}.act_fn"
+        )
 
         # ----- local observers ----------------------------------------
         self.obs_act_in = self._make_obs("act_in")
         self.obs_act_out = self._make_obs("act_out")
-        
 
     def forward(self, hidden_state):
-        
+
         # self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
 
         # 1) quantize input once
@@ -89,5 +87,5 @@ class QuantQwen3VLVisionMLP(QuantModuleBase):
         yield self.obs_act_in
         yield self.obs_act_out
         # recurse into children that are QuantModuleBase
-        for m in (self.linear_fc1, self.linear_fc2):#, self.act_fn):
+        for m in (self.linear_fc1, self.linear_fc2, self.act_fn):
             yield from m._all_observers()

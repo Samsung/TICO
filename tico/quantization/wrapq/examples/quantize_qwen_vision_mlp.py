@@ -35,7 +35,7 @@ model = AutoModelForVision2Seq.from_pretrained(
     name,
     device_map="cpu",
     trust_remote_code=True,
-    cache_dir="/mnt/storage/transformers_cache"
+    cache_dir="/mnt/storage/transformers_cache",
 )
 model.eval()
 
@@ -44,7 +44,7 @@ model.eval()
 # -------------------------------------------------------------------------
 orig_mlp = model.model.visual.blocks[0].mlp
 mlp_q = prepare(orig_mlp, PTQConfig())
-
+mlp_q.eval()
 assert isinstance(mlp_q.wrapped, QuantQwen3VLVisionMLP)
 
 inp_shape = (orig_mlp.intermediate_size, orig_mlp.hidden_size)
@@ -89,7 +89,7 @@ save_path = pathlib.Path("qwen3vl_vision_mlp.q.circle")
 example = torch.randn(inp_shape)
 
 with SuppressWarning(UserWarning, ".*"):
-    cm = tico.convert(mlp_q, (example, ))
+    cm = tico.convert(mlp_q, (example,))
 cm.save(save_path)
 
 print(f"Quantized Circle model saved to {save_path.resolve()}")

@@ -21,8 +21,11 @@ import tico
 
 import torch
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_mlp import QuantQwen3VLVisionMLP
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_mlp import (
+    QuantQwen3VLVisionMLP,
+)
 from transformers.activations import GELUTanh
+
 
 class DummyMLP(torch.nn.Module):
     """Tiny stand-in for HF LlamaMLP (hidden=4, inter=8)."""
@@ -31,7 +34,7 @@ class DummyMLP(torch.nn.Module):
         super().__init__()
         self.linear_fc1 = torch.nn.Linear(4, 8)
         self.linear_fc2 = torch.nn.Linear(8, 4)
-        self.act_fn = GELUTanh() #torch.nn.SiLU()
+        self.act_fn = GELUTanh()
 
     def forward(self, x):
         return self.linear_fc2(self.act_fn(self.linear_fc1(x)))
