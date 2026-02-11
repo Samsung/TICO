@@ -260,3 +260,21 @@ class CatTest(SingleOpPropagateQParamForwardTest):
 
         # The test will check cat's scale is 1.0, the larger one
         self.run_test()
+
+
+class ExpandModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return x.expand(5, 3)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 3),), {}
+
+
+class ExpandTest(SingleOpPropagateQParamForwardTest):
+    # TODO Support u8
+    def test_s16(self):
+        self.setup(ExpandModule(), torch.ops.aten.expand.default, dtype="int16")
+        self.run_test()
