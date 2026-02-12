@@ -43,6 +43,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.fairseq.quant_mha",
     ## qwen_vl ##
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attn",
+    "tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_mlp",
     # add future core wrappers here
 )
 
