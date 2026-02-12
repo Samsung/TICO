@@ -35,7 +35,7 @@ model = AutoModelForImageTextToText.from_pretrained(
     name,
     device_map="cpu",
     trust_remote_code=True,
-    cache_dir="/mnt/storage/transformers_cache",
+    dtype = torch.float32,
 )
 model.eval()
 
