@@ -298,6 +298,7 @@ def convert_exported_module_to_circle(
                 PropagateQParamBackward(),
                 QuantizeBias(),
                 InsertQuantizeOnDtypeMismatch(),
+                ConstPropPass(),
             ]
         )
         quantize_graph.run(exported_program)
