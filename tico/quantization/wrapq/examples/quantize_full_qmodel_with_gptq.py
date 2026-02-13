@@ -169,39 +169,39 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         "mlp": {
             "gate_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
             "up_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
             "down_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
         },
         "self_attn": {
             "q_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
             "k_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
             "v_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
             "o_proj": {
                 "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
+                    "dtype": DType.uint(args.gptq_weight_bits),
                 },
             },
         },
@@ -301,14 +301,15 @@ def fix_inputs(model, tokenizer, input_ids):
 
 
 class LLamaWithFixedInput(LlamaForCausalLM):
+
     def __init__(self, parent: LlamaForCausalLM, tokenizer):
         assert parent.config is not None, "config is a must have"
-        super().__init__(parent.config)
+        super(LlamaForCausalLM, self).__init__(parent.config)
         self.__dict__.update(parent.__dict__)
 
         def forward(
             self,
-            input_ids: torch.LongTensor = None,  # type: ignore[assignment]
+            input_ids: torch.LongTensor = None,
             attention_mask: Optional[torch.Tensor] = None,
             position_ids: Optional[torch.LongTensor] = None,
             past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
@@ -430,10 +431,10 @@ def main():
         help="number of samples to be used in GPTQ/PTQ calibration",
     )
     parser.add_argument(
-        "--linear_weight_bits",
+        "--gptq_weight_bits",
         type=int,
         default=4,
-        help="Number of bits to be used in quantizer for matmul weight quantization",
+        help="Number of bits to be used in GPTQ quantizer for weight quantization",
     )
     parser.add_argument(
         "--gptq_mse",
@@ -545,7 +546,7 @@ def main():
             print("Applying GPTQ …")
 
         gptq_config = GPTQConfig(
-            weight_bits=args.linear_weight_bits, perchannel=True, mse=args.gptq_mse
+            weight_bits=args.gptq_weight_bits, perchannel=True, mse=args.gptq_mse
         )
         q_m = prepare(model, gptq_config, inplace=True)
         with torch.no_grad():
