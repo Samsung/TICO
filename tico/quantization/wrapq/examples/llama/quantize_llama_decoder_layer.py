@@ -44,7 +44,7 @@ from tico.utils.utils import SuppressWarning
 MODEL_NAME = "Maykeye/TinyLLama-v0"
 MAX_S = 256
 
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype="float32")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
 # Make sure pad token exists (Llama often uses eos as pad)
