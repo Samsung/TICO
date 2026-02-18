@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import copy
 import importlib.util
 import sys
 
@@ -23,6 +23,8 @@ import torch.nn as nn
 import tico
 import tico.quantization
 import tico.quantization.config.ptq
+from tico.quantization.evaluation.metric import compute_peir
+from tico.quantization.evaluation.utils import plot_two_outputs
 
 # Check if transformers is available
 trans_spec = importlib.util.find_spec("transformers")
@@ -54,6 +56,7 @@ def main():
         patch_size=16,
     )
     model = Qwen3VLVisionPatchEmbed(cfg)
+    orig_model = copy.deepcopy(model)
     model.eval()
 
     # Qwen3VLVisionPatchEmbed(
@@ -86,6 +89,17 @@ def main():
 
     # Convert to quantized model
     quantized_model = tico.quantization.convert(prepared_model, inplace=True)
+
+    # Compute PEIR (Peak Error-to-Input Ratio) between quantized model and original model
+    with torch.no_grad():
+        quant_out = quantized_model(calibration_data[0])
+        fp_out = orig_model(calibration_data[0])
+
+    print(f"┌───────────── Quantization Error Summary ─────────────")
+    print(f"│ Mean |diff|: {(quant_out - fp_out).abs().mean().item():.6f}")
+    print(f"│ PEIR       : {compute_peir(fp_out, quant_out) * 100:.6f} %")
+    print(f"└──────────────────────────────────────────────────────")
+    print(plot_two_outputs(fp_out, quant_out))
 
     # Convert to Circle format
     # example_inputs shape: (batch_size, in_channels, depth, height, width)

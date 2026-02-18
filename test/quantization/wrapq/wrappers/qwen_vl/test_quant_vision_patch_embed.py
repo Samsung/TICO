@@ -119,7 +119,6 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
     def test_activation_stats_collected(self):
         """
         Test that activation statistics are properly collected during calibration.
-        Both local observers and wrapped Conv3d observers should collect stats.
         """
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
         q_patch.enable_calibration()
@@ -127,10 +126,6 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
         # Run forward pass to collect stats
         x = torch.randn(2, 3, 4, 32, 32)
         _ = q_patch(x)
-
-        # Check that local observers have collected stats
-        self.assertTrue(q_patch.obs_hidden.min_val.numel() > 0)
-        self.assertTrue(q_patch.obs_output.min_val.numel() > 0)
 
         # Check that wrapped Conv3d observers have collected stats
         q_conv3d = q_patch.proj.wrapped
@@ -140,8 +135,6 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
 
         # Freeze and check qparams exist
         q_patch.freeze_qparams()
-        self.assertTrue(q_patch.obs_hidden.has_qparams)
-        self.assertTrue(q_patch.obs_output.has_qparams)
         self.assertTrue(q_conv3d.obs_act_in.has_qparams)
         self.assertTrue(q_conv3d.obs_act_out.has_qparams)
         self.assertTrue(q_conv3d.obs_weight.has_qparams)
@@ -155,7 +148,7 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
 
         observers = list(q_patch._all_observers())
-        self.assertEqual(len(observers), 5)  # 2 local + 3 from Conv3d
+        self.assertEqual(len(observers), 3)  # 3 from Conv3d
 
     def test_registration_in_registry(self):
         """
@@ -205,8 +198,6 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
         q_patch.freeze_qparams()
 
         # Verify that all observers have quantization parameters
-        self.assertTrue(q_patch.obs_hidden.has_qparams)
-        self.assertTrue(q_patch.obs_output.has_qparams)
         self.assertTrue(q_patch.proj.wrapped.obs_act_in.has_qparams)
         self.assertTrue(q_patch.proj.wrapped.obs_act_out.has_qparams)
         self.assertTrue(q_patch.proj.wrapped.obs_weight.has_qparams)
