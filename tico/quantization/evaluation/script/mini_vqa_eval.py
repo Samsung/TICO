@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from datasets import load_dataset
-from transformers import AutoModelForVision2Seq, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor
 
 
 # ============================================================
@@ -271,10 +271,11 @@ def main():
 
     # Load model and processor
     processor = AutoProcessor.from_pretrained(args.model_id, trust_remote_code=True)
-    model = AutoModelForVision2Seq.from_pretrained(
+    model = AutoModelForImageTextToText.from_pretrained(
         args.model_id,
         torch_dtype=torch_dtype,
         trust_remote_code=True,
+        cache_dir="/mnt/storage/transformers_cache",
     ).to(args.device)
     model.eval()
 
