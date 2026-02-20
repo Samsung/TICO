@@ -104,13 +104,30 @@ def inject_gptq_qparams(
 def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
     q_m.eval()
     q_m.cpu()
+
+    save_path = pathlib.Path(save_circle_to_folder, "model.q.circle")
+    print(f"saving the whole model to {save_path.resolve()}")
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            cm = tico.convert(q_m.wrapped, (calib_inputs[0],), strict=False)
+
+            cm.save(save_path)
+
+    save_path = pathlib.Path(save_circle_to_folder, "model.model.q.circle")
+    print(f"saving model.model to {save_path.resolve()}")
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            cm = tico.convert(q_m.wrapped.model, (calib_inputs[0],), strict=False)
+
+            cm.save(save_path)
+
     save_path = pathlib.Path(save_circle_to_folder, "embedding.q.circle")
     pathlib.Path()
     print(f"saving input embedding to {save_path.resolve()}")
     with torch.no_grad():
         with SuppressWarning(UserWarning, ".*"):
             cm = tico.convert(
-                q_m.model.embed_tokens,
+                q_m.wrapped.model.wrapped.embed_tokens,
                 (calib_inputs[0],),
                 strict=False,
             )
@@ -120,46 +137,41 @@ def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
     print(f"saving lm_head to {save_path.resolve()}")
     with torch.no_grad():
         with SuppressWarning(UserWarning, ".*"):
-            B, S, D = 1, q_m.config.max_position_embeddings, q_m.config.hidden_size
+            B, S, D = (
+                1,
+                q_m.wrapped.config.max_position_embeddings,
+                q_m.wrapped.config.hidden_size,
+            )
             example_hidden = torch.randn(B, S, D)
             cm = tico.convert(
-                q_m.lm_head,
+                q_m.wrapped.lm_head,
                 (example_hidden,),
                 strict=False,
             )
             cm.save(save_path)
 
     print("saving layers")
-    for i in range(len(q_m.model.layers)):
+    for i in range(len(q_m.wrapped.model.wrapped.layers)):
         save_path = pathlib.Path(save_circle_to_folder, f"decoder_layer_{i}.q.circle")
         print(f"saving model layer_{i} to {save_path.resolve()}")
-        B, S, D = 1, q_m.config.max_position_embeddings, q_m.config.hidden_size
+        B, S, D = (
+            1,
+            q_m.wrapped.config.max_position_embeddings,
+            q_m.wrapped.config.hidden_size,
+        )
         example_hidden = torch.randn(B, S, D)
+        cur_layer = q_m.wrapped.model.wrapped.layers[i].wrapped
+        if hasattr(cur_layer, "copy_quantizers"):
+            cur_layer.copy_quantizers(q_m.wrapped.model.wrapped)
 
         with torch.no_grad():
             with SuppressWarning(UserWarning, ".*"):
                 cm = tico.convert(
-                    q_m.model.layers[i],
+                    q_m.wrapped.model.wrapped.layers[i],
                     (example_hidden,),
                     strict=False,
                 )
         cm.save(save_path)
-
-    save_path = pathlib.Path(save_circle_to_folder, "model.model.q.circle")
-    print(f"saving model.model to {save_path.resolve()}")
-    with torch.no_grad():
-        with SuppressWarning(UserWarning, ".*"):
-            cm = tico.convert(q_m.model, (calib_inputs[0],), strict=False)
-
-            cm.save(save_path)
-
-    save_path = pathlib.Path(save_circle_to_folder, "model.q.circle")
-    print(f"saving the whole model to {save_path.resolve()}")
-    with torch.no_grad():
-        with SuppressWarning(UserWarning, ".*"):
-            cm = tico.convert(q_m, (calib_inputs[0],), strict=False)
-
-            cm.save(save_path)
 
 
 def quantize_using_PTQ(q_m, calib_inputs, args):
@@ -219,13 +231,19 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         default_dtype=DType.int(16),
         default_qscheme=QScheme.PER_TENSOR_SYMM,
         overrides={
-            "model.embeddings": {
-                "weight": {
-                    "dtype": (
-                        DType.uint(args.embedding_weight_bits)
-                        if args.embedding_weight_bits < 16
-                        else DType.int(args.embedding_weight_bits)
-                    ),
+            "model": {
+                "embed_tokens": {
+                    "weight": {
+                        "dtype": (
+                            DType.uint(args.embedding_weight_bits)
+                            if args.embedding_weight_bits < 16
+                            else DType.int(args.embedding_weight_bits)
+                        ),
+                    },
+                },
+                "layers": {},
+                "norm": {
+                    "weight": {"dtype": DType.int(16)},
                 },
             },
             "lm_head": {
@@ -237,17 +255,14 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
                     ),
                 },
             },
-            "model.norm": {
-                "weight": {"dtype": DType.int(16)},
-            },
         },
     )
     for i in range(len(q_m.model.layers)):
-        child_scope = f"layer{i}"
-        cfg.overrides[child_scope] = w_cfg  # type: ignore[index]
+        child_scope = f"{i}"
+        cfg.overrides["model"]["layers"][child_scope] = w_cfg  # type: ignore[index]
 
     qcfg = cfg
-    prepare(q_m, qcfg)
+    q_m = prepare(q_m, qcfg)
 
     # -------------------------------------------------------------------------
     # Single-pass activation calibration
@@ -257,6 +272,12 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     # Overwrite weight observers with GPTQ statistics
     if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
         inject_gptq_qparams(q_m, q_m.quantizers)
+    elif (
+        hasattr(q_m, "wrapped")
+        and hasattr(q_m.wrapped, "quantizers")
+        and isinstance(q_m.wrapped.quantizers, dict)
+    ):
+        inject_gptq_qparams(q_m.wrapped, q_m.wrapped.quantizers)
     else:
         print(
             "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
@@ -300,57 +321,6 @@ def fix_inputs(model, tokenizer, input_ids):
     return torch.cat((input_ids, pads), dim=1)
 
 
-class LLamaWithFixedInput(LlamaForCausalLM):
-
-    def __init__(self, parent: LlamaForCausalLM, tokenizer):
-        assert parent.config is not None, "config is a must have"
-        super(LlamaForCausalLM, self).__init__(parent.config)
-        self.__dict__.update(parent.__dict__)
-
-        def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
-            cache_position: Optional[torch.LongTensor] = None,
-            logits_to_keep: Union[int, torch.Tensor] = 0,
-            **kwargs: Unpack[KwargsForCausalLM],
-        ) -> Union[Tuple, CausalLMOutputWithPast]:
-            # fixed input size, due to position_ids fixed
-            orig_len = input_ids.shape[-1]
-            input_ids = fix_inputs(self, self.tokenizer, input_ids)
-            if labels is not None:
-                labels = fix_inputs(self, self.tokenizer, labels)
-            res = super().forward(
-                input_ids,
-                attention_mask,
-                position_ids,
-                past_key_values,
-                inputs_embeds,
-                labels,
-                use_cache,
-                output_attentions,
-                output_hidden_states,
-                return_dict,
-                cache_position,
-                logits_to_keep,
-                **kwargs,
-            )
-            # we need to trim to the original size
-            res.logits = res.logits[..., :orig_len, :]
-            return res
-
-        self.forward = types.MethodType(forward, self)
-        self.tokenizer = tokenizer
-
-
 def evaluate(q_m, tokenizer, dataset_test, args):
     # -------------------------------------------------------------------------
     # Evaluate perplexity on Wikitext-2
@@ -358,7 +328,7 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     print("\nCalculating perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
     ppl_uint8 = perplexity(
-        q_m, enc, args.device, stride=q_m.config.max_position_embeddings
+        q_m, enc, args.device, stride=q_m.wrapped.config.max_position_embeddings
     )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
@@ -564,7 +534,7 @@ def main():
         q_m = quantize_using_PTQ(q_m, calib_inputs, args)
 
     # after PTQ quantizer only fixed-length input sequences are valid
-    evaluate(LLamaWithFixedInput(q_m, tokenizer), tokenizer, dataset_test, args)
+    evaluate(q_m, tokenizer, dataset_test, args)
 
     if args.save_circle_to_folder is not None:
         save_circles_to(q_m, calib_inputs, args.save_circle_to_folder)

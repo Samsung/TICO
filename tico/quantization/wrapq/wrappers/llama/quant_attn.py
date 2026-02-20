@@ -161,8 +161,7 @@ class QuantLlamaAttention(QuantModuleBase):
         return k, v
 
     def _apply_rope(self, q, k, cos, sin, unsqueeze_dim: int = 1):
-        cos_u = cos.unsqueeze(unsqueeze_dim)
-        sin_u = sin.unsqueeze(unsqueeze_dim)
+        cos_u, sin_u = cos, sin
 
         q_half = self._rot(
             q, self.obs_q_x1, self.obs_q_x2, self.obs_q_neg, self.obs_q_cat
@@ -201,8 +200,6 @@ class QuantLlamaAttention(QuantModuleBase):
 
         # Rope tables
         cos, sin = position_embeddings
-        cos = self._fq(cos, self.obs_cos)
-        sin = self._fq(sin, self.obs_sin)
         q_rot, k_rot = self._apply_rope(q, k, cos, sin, unsqueeze_dim=1)
 
         # --- build/update KV for attention & present_key_value -------------
@@ -228,7 +225,7 @@ class QuantLlamaAttention(QuantModuleBase):
             attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
                 hidden_states.device
             )
-        attention_mask = self._fq(attention_mask, self.obs_causal_mask)
+            attention_mask = self._fq(attention_mask, self.obs_causal_mask)
 
         attn_weights_parts = []
         attn_out_parts = []
