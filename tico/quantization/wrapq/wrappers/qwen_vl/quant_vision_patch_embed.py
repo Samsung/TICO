@@ -61,12 +61,6 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
             fp_name=f"{fp_name}.proj",
         )
 
-        # Observer for input activation (raw video frames)
-        self.obs_hidden = self._make_obs("hidden")
-
-        # Observer for output activation (patch embeddings)
-        self.obs_output = self._make_obs("output")
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with fake quantization.
@@ -79,12 +73,9 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
             Patch embeddings of shape (batch_size * T' * H' * W', embed_dim)
             Flattened 2D tensor
         """
-        # Quantize input activation
-        hidden = self._fq(hidden_states, self.obs_hidden)
-
         # Reshape input to (B*T*H*W, C, temporal_patch_size, patch_size, patch_size)
         # This flattens batch and spatial dimensions into a single sequence dimension
-        hidden = hidden.view(
+        hidden = hidden_states.view(
             -1,
             self.in_channels,
             self.temporal_patch_size,
@@ -96,9 +87,6 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
         # Output: (B*T*H*W, embed_dim, 1, 1, 1)
         hidden = self.proj(hidden)
 
-        # Quantize intermediate output (after Conv3d, before reshape)
-        hidden = self._fq(hidden, self.obs_output)
-
         # Reshape output to (B*T*H*W, embed_dim)
         hidden = hidden.view(-1, self.embed_dim)
 
@@ -106,8 +94,5 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
 
     def _all_observers(self) -> Iterable:
         """Yield all observers from this module and wrapped submodules."""
-        # Local observers
-        yield from (self.obs_hidden, self.obs_output)
-
         # Observers from wrapped Conv3d layer
         yield from self.proj.wrapped._all_observers()
