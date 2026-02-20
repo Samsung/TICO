@@ -8,7 +8,7 @@ astroid==3.3.10 # for pylint
 
 # Formatter
 black==22.12.0
-ufmt==2.0.1
+ufmt==2.9.1
 usort==1.0.5
 
 # Type checker
