@@ -24,6 +24,7 @@ _IMPORT_ONCE = False
 _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.quant_elementwise",
     ## nn ##
+    "tico.quantization.wrapq.wrappers.nn.quant_embedding",
     "tico.quantization.wrapq.wrappers.nn.quant_layernorm",
     "tico.quantization.wrapq.wrappers.nn.quant_linear",
     "tico.quantization.wrapq.wrappers.nn.quant_conv3d",

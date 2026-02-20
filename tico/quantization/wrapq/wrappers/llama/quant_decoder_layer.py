@@ -185,9 +185,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        if attention_mask is None or attention_mask.dtype == torch.bool:
-            L = hidden_states.size(1)
-            attention_mask = self._slice_causal(L, hidden_states.device)
+        # to prevent introduction of attention_mask as a parameter let's use preset attention_mask
+        L = hidden_states.size(1)
+        attention_mask = self._slice_causal(L, hidden_states.device)
 
         position_embeddings = (
             self.rope_cos_template.to(

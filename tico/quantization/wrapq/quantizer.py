@@ -84,6 +84,45 @@ class PTQQuantizer(BaseQuantizer):
 
         # Case A: HuggingFace-style transformers: model.model.layers
         lm = getattr(root, "model", None)
+
+        embeddings = (
+            getattr(lm, "embed_tokens", None) if isinstance(lm, nn.Module) else None
+        )
+        if isinstance(embeddings, nn.Module):
+            child_scope = "model.embeddings"
+            child_cfg = qcfg.child(child_scope)
+            wrapped = self._try_wrap(
+                embeddings,
+                child_cfg,
+                fp_name=child_scope,
+                raise_on_fail=self.strict_wrap,
+            )
+            lm.embed_tokens = wrapped  # type: ignore[union-attr]
+
+        model_norm = getattr(lm, "norm", None) if isinstance(lm, nn.Module) else None
+        if isinstance(model_norm, nn.Module):
+            child_scope = "model.norm"
+            child_cfg = qcfg.child(child_scope)
+            wrapped = self._try_wrap(
+                model_norm,
+                child_cfg,
+                fp_name=child_scope,
+                raise_on_fail=self.strict_wrap,
+            )
+            lm.norm = wrapped  # type: ignore[union-attr]
+
+        lm_head = getattr(root, "lm_head", None) if isinstance(lm, nn.Module) else None
+        if isinstance(lm_head, nn.Module):
+            child_scope = "lm_head"
+            child_cfg = qcfg.child(child_scope)
+            wrapped = self._try_wrap(
+                lm_head,
+                child_cfg,
+                fp_name=child_scope,
+                raise_on_fail=self.strict_wrap,
+            )
+            root.lm_head = wrapped
+
         layers = getattr(lm, "layers", None) if isinstance(lm, nn.Module) else None
         if isinstance(layers, nn.ModuleList):
             new_list = nn.ModuleList()
