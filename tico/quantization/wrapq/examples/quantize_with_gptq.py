@@ -42,7 +42,6 @@ from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
-
 # Token-budget presets for activation calibration
 TOKENS: dict[str, int] = {
     # Smoke test (<1 min turnaround on CPU/GPU)
@@ -64,6 +63,7 @@ DATASET_NAME = "wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
 TRAIN_SPLIT = "train"
 TEST_SPLIT = "test"
+
 
 # -------------------------------------------------------------------------
 # 1. Helper — copy GPTQ (scale, zp) into PTQ observers
