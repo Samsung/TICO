@@ -58,7 +58,7 @@ def get_cu_seqlens(grid_thw: torch.Tensor):
 # -------------------------------------------------------------------------
 # 0. Load a Qwen3-VL model (text tower) + tokenizer
 # -------------------------------------------------------------------------
-name = "Qwen/Qwen3-VL-4B-Instruct"
+name = "Qwen/Qwen3-VL-2B-Instruct"
 model = AutoModelForImageTextToText.from_pretrained(
     name,
     device_map="cpu",
