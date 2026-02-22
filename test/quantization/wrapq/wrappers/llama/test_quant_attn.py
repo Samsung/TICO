@@ -200,7 +200,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
                 self.k = None
                 self.v = None
 
-            def update(self, k, v):
+            def update(self, k, v, layer_idx = 0):
                 # k, v: (B, n_kv, S, H)
                 if self.k is None:
                     self.k = k

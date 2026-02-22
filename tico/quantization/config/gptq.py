@@ -31,7 +31,8 @@ class GPTQConfig(BaseConfig):
     weight_bits: int = 8
     perchannel: bool = True
     symmetric: bool = False
-    mse: bool = False
+    mse: str = False
+    sensitivity: str = None
 
     # GPTQ.fasterquant params (algorithm hyperparams)
     percdamp: float = 0.01

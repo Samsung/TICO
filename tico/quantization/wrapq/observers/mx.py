@@ -26,7 +26,7 @@ class MXObserver(ObserverBase):
         *,
         name: str,
         elem_format: str = "int8",
-        axis: int = 0,
+        axis: int = -1,  # channel is the last dimension
         shared_exp_method: str = "max",
         round: str = "nearest",
         **base_kwargs,

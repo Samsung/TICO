@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch.fx
 import copy
+import operator
 
 from collections import defaultdict
 from typing import Any
@@ -35,11 +36,15 @@ from tico.utils.validate_args_kwargs import (
     AddTensorArgs,
     BmmArgs,
     CatArgs,
+    CircleRMSNormArgs,
     LinearArgs,
     MulTensorArgs,
     PermuteArgs,
     ReluArgs,
     ReshapeArgs,
+    RMSNormArgs,
+    SigmoidArgs,
+    SplitWithSizesArgs,
 )
 
 
@@ -95,9 +100,10 @@ def _u8_to_i16(qparam: QuantParam) -> QuantParam:
     return new_qparam
 
 
-def _insert_quantize_op_before(node, inp):
+def _insert_quantize_op_before(node, inp, qparam: QuantParam | None = None):
     graph = node.graph
-    qparam: QuantParam = node.meta[QPARAM_KEY]
+    if qparam is None:
+        qparam = node.meta[QPARAM_KEY]
     assert qparam.scale is not None
     assert qparam.zero_point is not None
     scale = qparam.scale[0]
@@ -146,6 +152,29 @@ def _insert_quantize_op_after(node):
     return quantize
 
 
+def _insert_mx_quantize_op_after(node, qparam: QuantParam):
+    graph = node.graph
+    if qparam is None:
+        qparam = node.meta[QPARAM_KEY]
+    assert qparam.quantized_dimension is not None
+    assert qparam.dtype is not None
+
+    with graph.inserting_after(node):
+        q_args = (node, qparam.dtype, qparam.quantized_dimension)
+        quantize = create_node(
+            graph,
+            torch.ops.circle_custom.quantize_mx_decomposed.default,
+            args=q_args,
+        )
+
+    node.replace_all_uses_with(quantize, propagate_meta=True)
+    quantize.replace_input_with(quantize, node)
+
+    quantize.meta[QPARAM_KEY] = copy.deepcopy(qparam)
+
+    return quantize
+
+
 def _linear_handler(node, logger):
     lin_args = LinearArgs(*node.args, **node.kwargs)
     inp = lin_args.input
@@ -168,6 +197,13 @@ def _linear_handler(node, logger):
         # NOTE This would severely degrade accuracy. It is
         # important to mitigate this accuracy drop in backend.
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "mxint8" and qparam_dtype(node) == "int16":
+        quantize = _insert_quantize_op_after(node)
+
+        node.meta[QPARAM_KEY] = copy.deepcopy(
+            inp.meta[QPARAM_KEY]
+        )  # _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
         raise NotYetSupportedError(
@@ -192,11 +228,11 @@ def _add_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node):
+    if qparam_dtype(x) == qparam_dtype(node) and qparam_dtype(y) == qparam_dtype(node):
         return
 
-    if qparam_dtype(x) != qparam_dtype(y):
-        return
+    # if qparam_dtype(x) != qparam_dtype(y):
+    #    return
 
     if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
         quantize = _insert_quantize_op_after(node)
@@ -204,6 +240,40 @@ def _add_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (qparam_dtype(x) == "mxint8" or qparam_dtype(y) == "mxint8") and qparam_dtype(
+        node
+    ) == "int16":
+        mx_node = x
+        if qparam_dtype(y) != qparam_dtype(x):
+            if qparam_dtype(x) == "int16":
+                quantize = _insert_mx_quantize_op_after(x, y.meta[QPARAM_KEY])
+                mx_node = y
+                logger.debug(
+                    f"_insert_mx_quantize_op_after.default is inserted after {x.name}."
+                )
+            if qparam_dtype(y) == "int16":
+                quantize = _insert_mx_quantize_op_after(y, x.meta[QPARAM_KEY])
+                logger.debug(
+                    f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
+                )
+        quantize = _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
+        logger.debug(
+            f"_insert_quantize_op_after.default is inserted after {node.name}."
+        )
+    elif (qparam_dtype(x) == "int16" or qparam_dtype(y) == "int16") and qparam_dtype(
+        node
+    ) == "mxint8":
+        if qparam_dtype(y) == "int16":
+            quantize = _insert_mx_quantize_op_after(y, node.meta[QPARAM_KEY])
+            logger.debug(
+                f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
+            )
+        if qparam_dtype(x) == "int16":
+            quantize = _insert_mx_quantize_op_after(x, node.meta[QPARAM_KEY])
+            logger.debug(
+                f"_insert_mx_quantize_op_after.default is inserted after {x.name}."
+            )
     else:
         raise NotYetSupportedError("Unsupported dtype")
 
@@ -225,7 +295,7 @@ def _mul_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node):
+    if qparam_dtype(x) == qparam_dtype(node) and qparam_dtype(y) == qparam_dtype(node):
         return
 
     if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
@@ -234,6 +304,41 @@ def _mul_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (qparam_dtype(x) == "mxint8" or qparam_dtype(y) == "mxint8") and qparam_dtype(
+        node
+    ) == "int16":
+        mx_node = x
+        if qparam_dtype(y) != qparam_dtype(x):
+            if qparam_dtype(x) == "int16":
+                quantize = _insert_mx_quantize_op_after(x, y.meta[QPARAM_KEY])
+                mx_node = y
+                logger.debug(
+                    f"_insert_mx_quantize_op_after.default is inserted after {x.name}."
+                )
+            if qparam_dtype(y) == "int16":
+                quantize = _insert_mx_quantize_op_after(y, x.meta[QPARAM_KEY])
+                logger.debug(
+                    f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
+                )
+
+        quantize = _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
+        logger.debug(
+            f"_insert_quantize_op_after.default is inserted after {node.name}."
+        )
+    elif (qparam_dtype(x) == "int16" or qparam_dtype(y) == "int16") and qparam_dtype(
+        node
+    ) == "mxint8":
+        if qparam_dtype(y) == "int16":
+            quantize = _insert_mx_quantize_op_after(y, node.meta[QPARAM_KEY])
+            logger.debug(
+                f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
+            )
+        if qparam_dtype(x) == "int16":
+            quantize = _insert_mx_quantize_op_after(x, node.meta[QPARAM_KEY])
+            logger.debug(
+                f"_insert_mx_quantize_op_after.default is inserted after {x.name}."
+            )
     else:
         raise NotYetSupportedError("Unsupported dtype")
 
@@ -278,7 +383,7 @@ def _bmm_handler(node, logger):
     if QPARAM_KEY not in node.meta:
         return
 
-    if qparam_dtype(x) == qparam_dtype(node):
+    if qparam_dtype(x) == qparam_dtype(node) and qparam_dtype(y) == qparam_dtype(node):
         return
 
     if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
@@ -293,6 +398,40 @@ def _bmm_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif (qparam_dtype(x) == "mxint8" or qparam_dtype(y) == "mxint8") and qparam_dtype(
+        node
+    ) == "int16":
+        mx_node = x
+        if qparam_dtype(y) != qparam_dtype(x):
+            if qparam_dtype(x) == "int16":
+                quantize = _insert_mx_quantize_op_after(x, y.meta[QPARAM_KEY])
+                mx_node = y
+                logger.debug(
+                    f"_insert_mx_quantize_op_after.default is inserted after {x.name}."
+                )
+            if qparam_dtype(y) == "int16":
+                quantize = _insert_mx_quantize_op_after(y, x.meta[QPARAM_KEY])
+                logger.debug(
+                    f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
+                )
+        quantize = _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(mx_node.meta[QPARAM_KEY])
+        logger.debug(
+            f"_insert_quantize_op_after.default is inserted after {node.name}."
+        )
+    elif (qparam_dtype(x) == "int16" or qparam_dtype(y) == "int16") and qparam_dtype(
+        node
+    ) == "mxint8":
+        if qparam_dtype(y) == "int16":
+            quantize = _insert_mx_quantize_op_after(y, node.meta[QPARAM_KEY])
+            logger.debug(
+                f"_insert_mx_quantize_op_after.default is inserted after {y.name}."
+            )
+        if qparam_dtype(x) == "int16":
+            quantize = _insert_mx_quantize_op_after(x, node.meta[QPARAM_KEY])
+            logger.debug(
+                f"_insert_mx_quantize_op_after.default is inserted after {x.name}."
+            )
     else:
         raise NotYetSupportedError("Unsupported dtype")
 
@@ -353,6 +492,155 @@ def _reshape_handler(node, logger):
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
         node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "int16" and qparam_dtype(node) == "mxint8":
+        quantize = _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {inp.name}.")
+    else:
+        raise NotYetSupportedError("Unsupported dtype")
+
+
+def _split_handler(node, logger):
+    reshape_args = SplitWithSizesArgs(*node.args, **node.kwargs)
+    inp = reshape_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "mxint8":
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {inp.name}.")
+    else:
+        raise NotYetSupportedError("Unsupported dtype")
+
+
+def _sigmoid_handler(node, logger):
+    sigmoid_args = SigmoidArgs(*node.args, **node.kwargs)
+    inp = sigmoid_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "mxint8":
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {inp.name}.")
+    elif qparam_dtype(inp) == "mxint8" and qparam_dtype(node) == "int16":
+        # no way to calibrate for "int16"
+        assert False  # please consider changing quantization parameters
+
+        _insert_quantize_op_before(node, inp)
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    else:
+        raise NotYetSupportedError("Unsupported dtype")
+
+
+def _rmsnorm_handler(node, logger):
+    rms_args = RMSNormArgs(*node.args, **node.kwargs)
+    inp = rms_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "mxint8":
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {inp.name}.")
+    elif qparam_dtype(inp) == "mxint8" and qparam_dtype(node) == "int16":
+        # no way to calibrate for "int16"
+        assert False  # please consider changing quantization parameters
+        #   #TODO scale of rmsnorm is (0..1) for every input (we need recalibration here)
+        _insert_quantize_op_before(node, inp)
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    else:
+        raise NotYetSupportedError("Unsupported dtype")
+
+
+def _circle_rmsnorm_handler(node, logger):
+    rms_args = CircleRMSNormArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+    inp = rms_args.input
+
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "mxint8":
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(f"quantize_per_tensor.default is inserted after {inp.name}.")
+    elif qparam_dtype(inp) == "mxint8" and qparam_dtype(node) == "int16":
+        inp_args = getattr(inp, "all_input_nodes", None)
+        if inp_args is not None and len(inp_args) == 1:
+            inp_inp = inp_args[0]
+            if QPARAM_KEY not in inp.meta:
+                return
+            if qparam_dtype(inp_inp) == "int16":
+                # TODO copy qparam from single ancestor,
+                # so that all ops between ancestor and
+                # node does not modify scale (Quantization/Layout/...)
+                _insert_quantize_op_before(node, inp, inp_inp.meta[QPARAM_KEY])
+                logger.debug(
+                    f"quantize_per_tensor.default is inserted after {node.name}."
+                )
+            else:
+                assert False
+        else:
+            assert False
+            # no way to calibrate for "int16"
+
+            # TODO scale of rmsnorm is (0..1) for every input (we need recalibration here)
+
+    else:
+        raise NotYetSupportedError("Unsupported dtype")
+
+
+def _get_item_handler(node, logger):
+    inp = node.args[0]
+    if QPARAM_KEY not in inp.meta:
+        return
+
+    if QPARAM_KEY not in node.meta:
+        return
+
+    if qparam_dtype(inp) == qparam_dtype(node):
+        return
+
+    if qparam_dtype(inp) == "int16" and qparam_dtype(node) == "mxint8":
+        _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
+
+        logger.debug(
+            f"_insert_mx_quantize_op_after.default is inserted after {inp.name}."
+        )
+    elif qparam_dtype(inp) == "mxint8" and qparam_dtype(node) == "int16":
+        _insert_quantize_op_after(node)
+        node.meta[QPARAM_KEY] = copy.deepcopy(inp.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
         raise NotYetSupportedError("Unsupported dtype")
 
@@ -395,6 +683,10 @@ _op_handler[torch.ops.aten.bmm.default] = _bmm_handler
 _op_handler[torch.ops.aten.permute.default] = _permute_handler
 _op_handler[torch.ops.aten.reshape.default] = _reshape_handler
 _op_handler[torch.ops.aten.relu.default] = _relu_handler
+_op_handler[torch.ops.aten.split_with_sizes.default] = _split_handler
+_op_handler[torch.ops.aten.sigmoid.default] = _sigmoid_handler
+_op_handler[torch.ops.aten.rms_norm.default] = _rmsnorm_handler
+_op_handler[operator.getitem] = _get_item_handler
 
 
 @trace_graph_diff_on_pass
@@ -440,20 +732,23 @@ class InsertQuantizeOnDtypeMismatch(PassBase):
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
 
+        # hack to remove dependecy on initialiazation order
+        _op_handler[torch.ops.circle_custom.rms_norm.default] = _circle_rmsnorm_handler
+
         graph_module = exported_program.graph_module
         graph: torch.fx.Graph = graph_module.graph
+        for _ in range(5):  # TODO (wihtout additional passes?)
+            for node in graph.nodes:
+                if node.op != "call_function":
+                    continue
 
-        for node in graph.nodes:
-            if node.op != "call_function":
-                continue
+                handler = _op_handler[node.target]
+                if handler is not None:
+                    handler(node, logger)
 
-            handler = _op_handler[node.target]
-            if handler is not None:
-                handler(node, logger)
-
-        graph.eliminate_dead_code()
-        graph.lint()
-        graph_module.recompile()
+            graph.eliminate_dead_code()
+            graph.lint()
+            graph_module.recompile()
 
         # Run only once.
         return PassResult(False)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+from inspect import signature
 from typing import Optional, Tuple
 
 import torch
@@ -37,9 +38,10 @@ class QuantLlamaAttention(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
-
         cfg = fp_attn.config
         self.config = cfg
+        self.layer_idx = fp_attn.layer_idx
+        self.return_kv_cache = False
 
         # head shapes
         assert hasattr(cfg, "hidden_size") and hasattr(cfg, "num_attention_heads")
@@ -86,9 +88,7 @@ class QuantLlamaAttention(QuantModuleBase):
         )
 
         # Constant scale (1/√d)
-        scale_t = torch.tensor(
-            float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
-        )
+        scale_t = torch.tensor(float(getattr(fp_attn, "scaling", self.head_dim**-0.5)))
         # merge scale_t to k_proj, (otherwise merge it to q_proj)
         with torch.no_grad():
             lin = self.k_proj.wrapped.module
@@ -211,7 +211,7 @@ class QuantLlamaAttention(QuantModuleBase):
         # TODO Revisit cache logic
         # HF Cache path (if available)
         if use_cache and hasattr(past_key_value, "update"):
-            k_total, v_total = past_key_value.update(k_rot, v)
+            k_total, v_total = past_key_value.update(k_rot, v, self.layer_idx)
             present_key_value = (k_total, v_total)
             k_for_attn, v_for_attn = k_total, v_total
         else:
@@ -275,7 +275,7 @@ class QuantLlamaAttention(QuantModuleBase):
         out = self.o_proj(attn_out)
 
         # return with/without cache
-        if use_cache:
+        if use_cache or self.return_kv_cache:
             return out, attn_weights, present_key_value
         else:
             return out, attn_weights
