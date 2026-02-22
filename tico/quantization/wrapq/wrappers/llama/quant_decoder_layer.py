@@ -69,6 +69,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             self.return_type = "tensor" if v >= (4, 54) else "tuple"
         assert self.return_type is not None
         super().__init__(qcfg, fp_name=fp_name)
+        self.return_kv_cache = False
 
         # Child QuantConfigs -------------------------------------------------
         attn_cfg = qcfg.child("self_attn") if qcfg else None
@@ -209,7 +210,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             position_embeddings=position_embeddings,
             **kwargs,
         )
-        if use_cache:
+        if use_cache or self.return_kv_cache:
             hidden_states_attn, _attn_weights, present_key_value = attn_out
         else:
             hidden_states_attn, _attn_weights = attn_out
@@ -230,7 +231,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         # Return type policy:
         # - If use_cache: always return (hidden_states, present_key_value)
         # - Else: return as configured (tuple/tensor) for HF compatibility
-        if use_cache:
+        if use_cache or self.return_kv_cache:
             return hidden_states, present_key_value  # type: ignore[return-value]
 
         if self.return_type == "tuple":

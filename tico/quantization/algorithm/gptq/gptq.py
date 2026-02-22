@@ -309,7 +309,9 @@ class GPTQ:
         H = torch.cholesky_inverse(H)
         H = torch.linalg.cholesky(H, upper=True)
         Hinv = H
-
+        
+        self.quantizer.update(W, Hinv, perm)
+    
         assert isinstance(Hinv, torch.Tensor)
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)

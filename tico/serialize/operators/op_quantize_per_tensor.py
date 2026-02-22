@@ -78,3 +78,37 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
         operator.builtinOptions = option
 
         return operator
+
+
+@register_node_visitor
+class QuantizePerTensorMXDefaultVisitor(NodeVisitor):
+    target: List[torch._ops.OpOverload] = [
+        torch.ops.circle_custom.quantize_mx_decomposed.default,
+    ]
+
+    def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
+        super().__init__(op_codes, graph)
+
+    def define_node(
+        self,
+        node: torch.fx.Node,
+    ) -> circle.Operator.OperatorT:
+        args = node.args
+        tensor = args[0]
+
+        inputs = [tensor]
+        outputs = [node]
+
+        op_index = get_op_index(
+            circle.BuiltinOperator.BuiltinOperator.QUANTIZE, self._op_codes
+        )
+        operator = create_builtin_operator(self.graph, op_index, inputs, outputs)
+
+        # Op-specific option
+        operator.builtinOptionsType = (
+            circle.BuiltinOptions.BuiltinOptions.QuantizeOptions
+        )
+        option = circle.MXQuantization.MXQuantizationT()
+        operator.builtinOptions = option
+
+        return operator
