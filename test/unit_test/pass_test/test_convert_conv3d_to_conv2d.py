@@ -44,7 +44,7 @@ class ConvertConv3dBasicTest(SinglePassValueTest):
         self.setup(Conv3dBasic())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.conv3d), 1)
         self.run_value_test(ConvertConv3dToConv2d())
-        # Conv3D가 제거되고 Conv2D로 변환되었는지 확인
+        # Check whether Conv3D is transformed to Conv2D after removal
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.conv3d), 0)
         self.assertGreaterEqual(num_of_ops(self.exported_program(), ops.aten.conv2d), 1)
 
