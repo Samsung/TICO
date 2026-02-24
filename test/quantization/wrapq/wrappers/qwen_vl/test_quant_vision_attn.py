@@ -79,9 +79,12 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         qattn.enable_calibration()
         self.assertIs(qattn._mode, Mode.CALIB)
         seq_len = 12
+        cu_seqlens = torch.tensor([0, seq_len])
         x = torch.randn(seq_len, self.hidden_size)
         pos = self._rand_rope(seq_len)
-        _ = qattn(x, cu_seqlens=None, rotary_pos_emb=None, position_embeddings=pos)
+        _ = qattn(
+            x, cu_seqlens=cu_seqlens, rotary_pos_emb=None, position_embeddings=pos
+        )
 
         qattn.freeze_qparams()
         self.assertIs(qattn._mode, Mode.QUANT)
@@ -101,11 +104,11 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         pos = self._rand_rope(seq_len)
         with torch.no_grad():
             q_out = qattn(x, cu_seqlens=cu_seqlens, position_embeddings=pos)
-            fp_out = self.fp_attn(inp, cu_seqlens=cu_seqlens, position_embeddings=pos)
+            fp_out = self.fp_attn(x, cu_seqlens=cu_seqlens, position_embeddings=pos)
 
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0)
-        self.assertLess(diff, 0.4)
+        self.assertLess(diff, 0.1)
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_per_projection_override(self):
