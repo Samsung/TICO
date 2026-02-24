@@ -126,6 +126,12 @@ jobs:
           TORCH_VERSION=${{ matrix.torch-version }}
           ./ccex configure test --torch_ver $TORCH_VERSION
 
+      - name: "Install python dependencies for tests"
+        run: |
+          pip install transformers==4.57.3
+          pip install datasets
+        shell: bash
+
       - name: "Show torch package versions"
         shell: bash
         run: |
