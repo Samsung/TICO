@@ -38,7 +38,9 @@ class SmoothQuantTest(unittest.TestCase):
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained("Maykeye/TinyLLama-v0")
-        model = AutoModelForCausalLM.from_pretrained("Maykeye/TinyLLama-v0")
+        model = AutoModelForCausalLM.from_pretrained(
+            "Maykeye/TinyLLama-v0", dtype=torch.float32
+        )
 
         # Load data
         dataset = load_dataset("wikiText", "wikitext-2-raw-v1", split="train")

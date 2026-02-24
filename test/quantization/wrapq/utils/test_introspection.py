@@ -119,7 +119,9 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
         # tiny model + tokenizer
         tokenizer = AutoTokenizer.from_pretrained(cls.model_name)
         fp_model = (
-            AutoModelForCausalLM.from_pretrained(cls.model_name).to(cls.device).eval()
+            AutoModelForCausalLM.from_pretrained(cls.model_name, dtype=torch.float32)
+            .to(cls.device)
+            .eval()
         )
         # Make sure pad token exists (Llama often uses eos as pad)
         if tokenizer.pad_token_id is None:
