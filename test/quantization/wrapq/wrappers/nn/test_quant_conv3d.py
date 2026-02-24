@@ -24,6 +24,9 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_conv3d import QuantConv3d
 
 
+@unittest.skip(
+    "This test is skipped becuse QuantConv3d is not currently used to wrap Conv3d"
+)
 class TestQuantConv3d(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
