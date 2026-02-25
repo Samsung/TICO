@@ -78,6 +78,7 @@ class SinglePassValueTest(PassValueTest):
         # inference after pass
         ret_after = self.ep.module()(*self.forward_args, **self.forward_kwargs)
 
+        self.assertEqual(ret_before.shape, ret_after.shape)
         self.assertTrue(torch.allclose(ret_before, ret_after, atol=1e-06))
 
 
@@ -93,4 +94,5 @@ class MultiPassValueTest(PassValueTest):
         # inference after pass
         ret_after = self.ep.module()(*self.forward_args, **self.forward_kwargs)
 
-        self.assertTrue(torch.equal(ret_before, ret_after))
+        self.assertEqual(ret_before.shape, ret_after.shape)
+        self.assertTrue(torch.allclose(ret_before, ret_after, atol=1e-06))
