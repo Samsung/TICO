@@ -37,6 +37,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.llama.quant_attn",
     "tico.quantization.wrapq.wrappers.llama.quant_decoder_layer",
     "tico.quantization.wrapq.wrappers.llama.quant_mlp",
+    "tico.quantization.wrapq.wrappers.llama.quant_model",
     ## fairseq ##
     "tico.quantization.wrapq.wrappers.fairseq.quant_decoder_layer",
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder",
