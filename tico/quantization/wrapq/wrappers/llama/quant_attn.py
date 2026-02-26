@@ -107,13 +107,11 @@ class QuantLlamaAttention(QuantModuleBase):
         # rotate_half sub-steps (q)
         self.obs_q_x1 = mk("q_x1")
         self.obs_q_x2 = mk("q_x2")
-        self.obs_q_neg = mk("q_neg")
         self.obs_q_cat = mk("q_cat")
 
         # rotate_half sub-steps (k)
         self.obs_k_x1 = mk("k_x1")
         self.obs_k_x2 = mk("k_x2")
-        self.obs_k_neg = mk("k_neg")
         self.obs_k_cat = mk("k_cat")
 
         # RoPE combine
@@ -302,11 +300,9 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_causal_mask,
             self.obs_q_x1,
             self.obs_q_x2,
-            self.obs_q_neg,
             self.obs_q_cat,
             self.obs_k_x1,
             self.obs_k_x2,
-            self.obs_k_neg,
             self.obs_k_cat,
             self.obs_q_cos,
             self.obs_q_sin,
