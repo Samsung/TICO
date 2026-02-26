@@ -55,8 +55,9 @@ TOKENS: dict[str, int] = {
 
 DTYPE_MAP = {
     "float32": torch.float32,
-    "bfloat16": torch.bfloat16,
-    "float16": torch.float16,
+    # TODO Support more dtypes
+    # "bfloat16": torch.bfloat16,
+    # "float16": torch.float16,
 }
 
 # Hardcoded dataset settings

@@ -35,6 +35,7 @@ model = AutoModelForVision2Seq.from_pretrained(
     name,
     device_map="cpu",
     trust_remote_code=True,
+    dtype=torch.float32,
 )
 tokenizer = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
 

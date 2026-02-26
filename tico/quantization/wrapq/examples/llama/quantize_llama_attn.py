@@ -26,7 +26,7 @@ from tico.quantization.wrapq.wrappers.llama.quant_attn import QuantLlamaAttentio
 from tico.utils.utils import SuppressWarning
 
 name = "Maykeye/TinyLLama-v0"
-model = AutoModelForCausalLM.from_pretrained(name)
+model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
 tokenizer = AutoTokenizer.from_pretrained(name)
 
 # -------------------------------------------------------------------------
