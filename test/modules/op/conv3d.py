@@ -307,6 +307,7 @@ class GroupedConv3dWithTensorWeightNoBias(TestModuleBase):
             torch.randn(OC, IC // groups, 3, 3, 3),
         ), {}
 
+
 class Conv3dWithPerfectFitKernel(torch.nn.Module):
     """Conv3D with perfect fitting kernel"""
 
