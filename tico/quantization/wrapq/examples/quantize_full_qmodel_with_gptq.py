@@ -431,10 +431,16 @@ def main():
         help="cache_dir for using model/datasets loading",
     )
     parser.add_argument(
-        "--nsamples_for_qcalibration",
+        "--qcalibration_tokens",
         type=int,
-        default="128",  # almost standard
-        help="number of samples to be used in GPTQ/PTQ calibration",
+        default="262144",  # 128 * 2048
+        help="number of tokens samples to be used in GPTQ/PTQ calibration (default 128 * 2048). More the better",
+    )
+    parser.add_argument(
+        "--gptq_seq_len",
+        type=int,
+        default="2048",  # More the better
+        help="seq_len to be used in GPTQ calibration. More the better",
     )
     parser.add_argument(
         "--linear_weight_bits",
@@ -540,8 +546,8 @@ def main():
     calib_txt = " ".join(dataset_train["text"])
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
     calib_inputs = []
-    nsamples = args.nsamples_for_qcalibration
     seqlen = model.config.max_position_embeddings
+    nsamples = args.qcalibration_tokens // seqlen
     random.seed(args.seed)
     for _ in range(nsamples):
         i = random.randint(0, train_ids.shape[1] - seqlen - 1)
@@ -556,12 +562,22 @@ def main():
         if not args.no_GPTQ:
             print("Applying GPTQ …")
 
+        gptq_calib_inputs = []
+        seqlen = args.gptq_seq_len
+        nsamples = args.qcalibration_tokens // seqlen
+        random.seed(args.seed)
+        for _ in range(nsamples):
+            i = random.randint(0, train_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            inp = train_ids[:, i:j]
+            gptq_calib_inputs.append(inp.cpu())
+
         gptq_config = GPTQConfig(
             weight_bits=args.linear_weight_bits, perchannel=True, mse=args.gptq_mse
         )
         q_m = prepare(model, gptq_config, inplace=True)
         with torch.no_grad():
-            for inp in calib_inputs:
+            for inp in gptq_calib_inputs:
                 q_m(inp.to(args.device))
 
         q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
