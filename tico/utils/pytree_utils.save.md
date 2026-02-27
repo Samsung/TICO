@@ -13,7 +13,7 @@ from transformers.cache_utils import StaticCache, StaticLayer, DynamicCache, Dyn
 __all__ = [
     "register_dynamic_cache", 
     "register_static_cache",
-    "register_dynamic_layer",
+    # "register_dynamic_layer",
     "register_static_layer",
     "register_encoder_decoder_cache",
 
@@ -144,44 +144,61 @@ def register_static_cache():
         logger = logging.getLogger(__name__)
         logger.warning(f"StaticCache is already registered as pytree flattenable. {e}")
 
+# def _flatten_static_layer(cache: StaticLayer):
+#     nodes = {
+#         "keys": cache.keys,
+#         "values": cache.values,
+#     }
+#     return torch.utils._pytree._dict_flatten(nodes)
+
+# def _unflatten_static_layer(values, context: torch.utils._pytree.Context):
+#     data = torch.utils._pytree._dict_unflatten(values, context)
+    
+#     instance = StaticLayer.__new__(StaticLayer)
+#     for k, v in data.items():
+#         setattr(instance, k, v)
+        
+#     return instance
 from typing import Tuple, Any, Dict
-def _flatten_static_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+def _flatten_static_layer(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
         """
         객체를 (변경 가능한 텐서들, 정적인 메타데이터)로 분리합니다.
         """
         # 1. Children: 모델 최적화나 자동 미분 시 추적해야 할 텐서 데이터
-        children = (layer.keys, layer.values)
+        children = (cache.keys, cache.values)
         
         # 2. Aux Data: 객체를 재구성할 때 필요한 정적 정보 (해시 가능해야 함)
         aux_data = {
-            "max_cache_len": layer.max_cache_len,
-            "is_initialized": layer.is_initialized,
+            "max_cache_len": cache.max_cache_len,
+            "is_initialized": cache.is_initialized,
         }
         # 초기화된 경우라면 메타데이터(dtype, device 등)를 추가로 저장할 수 있습니다.
-        if layer.is_initialized:
+        if cache.is_initialized:
             aux_data.update({
-                "dtype": layer.keys.dtype,
-                "device": layer.keys.device,
-                "max_batch_size": layer.max_batch_size,
-                "num_heads": layer.num_heads,
-                "k_head_dim": layer.k_head_dim,
-                "v_head_dim": layer.v_head_dim,
+                "dtype": cache.keys.dtype,
+                "device": cache.keys.device,
+                "max_batch_size": cache.max_batch_size,
+                "num_heads": cache.num_heads,
+                "k_head_dim": cache.k_head_dim,
+                "v_head_dim": cache.v_head_dim,
             })
             
         return children, aux_data
-
 
 def _unflatten_static_layer(children: Tuple[Any, ...], aux_data: Dict[str, Any]) -> "StaticLayer":
         """
         flatten된 데이터로부터 새로운 객체를 복구합니다.
         """
         keys, values = children
+        # 1. 새 인스턴스 생성
         obj = StaticLayer(max_cache_len=aux_data["max_cache_len"])
         
+        # 2. 상태 복구
         obj.is_initialized = aux_data["is_initialized"]
         obj.keys = keys
         obj.values = values
         
+        # 3. 초기화되었던 상태라면 나머지 속성들도 복구
         if obj.is_initialized:
             obj.dtype = aux_data["dtype"]
             obj.device = aux_data["device"]
@@ -214,121 +231,16 @@ def register_static_layer():
         logger = logging.getLogger(__name__)
         logger.warning(f"StaticLayer is already registered as pytree flattenable. {e}")
 
+def _flatten_dynamic_cache(cache: DynamicCache):
+    return torch.utils._pytree._dict_flatten(cache.__dict__)
 
-from typing import Tuple, Any, Dict
-def _flatten_dynamic_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-        if not layer.is_initialized:
-            raise ValueError(f"{layer} cannot be flattened. DynamicLayer must be initialized with tensor with specific shape to be used as input for torch.export")
-
-        children = (layer.keys, layer.values)
-        
-        aux_data = {}
-        aux_data.update({
-                "is_initialized": layer.is_initialized,
-                "dtype": layer.keys.dtype,
-                "device": layer.keys.device,
-                # "get_mask_sizes": layer.get_mask_sizes,
-                # "get_max_layer_shape": layer.get_max_layer_shape,
-                # "get_seq_length": layer.get_seq_length,
-                # "is_sliding": layer.is_sliding,
-            })
-            
-        return children, aux_data
-
-def _unflatten_dynamic_layer(children: Tuple[Any, ...], aux_data: Dict[str, Any]) -> "DynamicLayer":
-        keys, values = children
-        obj = DynamicLayer()
-        
-        obj.keys = keys
-        obj.values = values
-
-        obj.is_initialized = aux_data["is_initialized"]
-        obj.dtype = aux_data["dtype"]
-        obj.device = aux_data["device"]
-        # ADD OTHERS?
-            
-        return obj
-
-import torch.utils._pytree as pytree
-
-def _flatten_with_keys_dynamic_layer(layer: DynamicLayer):
-    children = [
-        (pytree.MappingKeyPath("keys"), layer.keys),
-        (pytree.MappingKeyPath("values"), layer.values),
-    ]
+def _unflatten_dynamic_cache(values, context: torch.utils._pytree.Context):
+    data = torch.utils._pytree._dict_unflatten(values, context)
     
-    aux_data = {
-        "is_initialized": layer.is_initialized,
-    }
-    
-    return children, aux_data
-
-import torch.fx._pytree as fx_pytree
-
-def _flatten_with_keys_dynamic_layer(layer: DynamicLayer, spec):
-    layer_dict = {
-        "keys": layer.keys,
-        "values": layer.values,
-        "is_initialized": layer.is_initialized,
-    }
-    return fx_pytree._dict_flatten_spec(layer_dict, spec)
-
-
-def _flatten_with_keys_dynamic_layer(layer: DynamicLayer):
-    return torch.utils._pytree._dict_flatten_with_keys(layer.__dict__)
-
-def _flatten_dynamic_layer_for_fx(layer, spec):
-    return torch.fx._pytree._dict_flatten_spec(layer.__dict__, spec)
-
-
-def register_dynamic_layer():
-    try:
-        torch.utils._pytree.register_pytree_node(
-            DynamicLayer,
-            _flatten_dynamic_layer,
-            _unflatten_dynamic_layer,
-            serialized_type_name=f"{DynamicLayer.__module__}.{DynamicLayer.__name__}",
-            flatten_with_keys_fn=_flatten_with_keys_dynamic_layer,
-        )
-        torch.fx._pytree.register_pytree_flatten_spec(
-            DynamicLayer, _flatten_dynamic_layer_for_fx
-        )
-    except ValueError as e:
-        logger = logging.getLogger(__name__)
-        logger.warning(f"DynamicLayer is already registered as pytree flattenable. {e}")
-
-
-
-def _flatten_dynamic_cache(cache):
-    children = (cache.layers,)
-    aux_data = {
-        "layer_class_to_replicate": getattr(cache, "layer_class_to_replicate", None),
-        "offloading": getattr(cache, "offloading", False),
-    }
-    return children, aux_data
-
-def _unflatten_dynamic_cache(children, aux_data):
     instance = DynamicCache.__new__(DynamicCache)
-    layers, = children
-    instance.layers = layers
     
-    for key, value in aux_data.items():
-        setattr(instance, key, value)
-        
+    instance.__dict__.update(data)
     return instance
-
-
-
-# def _flatten_dynamic_cache(cache: DynamicCache):
-#     return torch.utils._pytree._dict_flatten(cache.__dict__)
-
-# def _unflatten_dynamic_cache(values, context: torch.utils._pytree.Context):
-#     data = torch.utils._pytree._dict_unflatten(values, context)
-    
-#     instance = DynamicCache.__new__(DynamicCache)
-    
-#     instance.__dict__.update(data)
-#     return instance
 
 def _flatten_with_keys_dynamic_cache(cache: DynamicCache):
     return torch.utils._pytree._dict_flatten_with_keys(cache.__dict__)
