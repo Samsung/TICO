@@ -22,7 +22,9 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.llama.quant_attn import QuantLlamaAttention
+from tico.quantization.wrapq.wrappers.llama.quant_attn_prefill import (
+    QuantLlamaAttentionPrefill,
+)
 from tico.utils.utils import SuppressWarning
 
 name = "Maykeye/TinyLLama-v0"
@@ -37,7 +39,7 @@ model.model.layers[0].self_attn = prepare(orig_attn, PTQConfig())
 model.eval()
 
 attn_q = model.model.layers[0].self_attn  # quant wrapper
-assert isinstance(attn_q.wrapped, QuantLlamaAttention)
+assert isinstance(attn_q.wrapped, QuantLlamaAttentionPrefill)
 rotary = model.model.rotary_emb
 
 # -------------------------------------------------------------------------

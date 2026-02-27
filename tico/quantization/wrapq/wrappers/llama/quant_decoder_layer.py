@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.wrappers.llama.quant_attn import QuantLlamaAttention
 from tico.quantization.wrapq.wrappers.llama.quant_mlp import QuantLlamaMLP
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase

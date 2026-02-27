@@ -28,7 +28,7 @@ from tico.quantization.wrapq.wrappers.registry import try_register
     "transformers.models.llama.modeling_llama.LlamaAttention",
     "transformers.models.llama.modeling_llama.LlamaSdpaAttention",
 )
-class QuantLlamaAttention(QuantModuleBase):
+class QuantLlamaAttentionPrefill(QuantModuleBase):
     def __init__(
         self,
         fp_attn: nn.Module,

@@ -34,7 +34,7 @@ _CORE_MODULES = (
     ## ops ##
     "tico.quantization.wrapq.wrappers.ops.quant_rmsnorm",
     ## llama ##
-    "tico.quantization.wrapq.wrappers.llama.quant_attn",
+    "tico.quantization.wrapq.wrappers.llama.quant_attn_prefill",
     "tico.quantization.wrapq.wrappers.llama.quant_decoder_layer",
     "tico.quantization.wrapq.wrappers.llama.quant_mlp",
     "tico.quantization.wrapq.wrappers.llama.quant_model",

@@ -25,7 +25,9 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
-from tico.quantization.wrapq.wrappers.llama.quant_attn import QuantLlamaAttention
+from tico.quantization.wrapq.wrappers.llama.quant_attn_prefill import (
+    QuantLlamaAttentionPrefill,
+)
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
 
@@ -33,7 +35,7 @@ skip_msg = "required transformers not installed — skipping LlamaAttention test
 
 
 @unittest.skipUnless(has_transformers_for("llama"), skip_msg)
-class TestQuantLlamaAttention(unittest.TestCase):
+class TestQuantLlamaAttentionPrefill(unittest.TestCase):
     fp_attn: torch.nn.Module
     head_dim: int
 
@@ -63,7 +65,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         return emb.cos(), emb.sin()
 
     def test_mode_transitions(self):
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qattn = QuantLlamaAttentionPrefill(self.fp_attn)
         self.assertIs(qattn._mode, Mode.NO_QUANT)
 
         qattn.enable_calibration()
@@ -77,7 +79,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertIs(qattn._mode, Mode.QUANT)
 
     def test_forward_diff(self):
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qattn = QuantLlamaAttentionPrefill(self.fp_attn)
         qattn.enable_calibration()
         for _ in range(4):
             inp = torch.randn(2, 6, 8)
@@ -107,7 +109,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
                 }
             },
         )
-        qattn = QuantLlamaAttention(self.fp_attn, qcfg=cfg)
+        qattn = QuantLlamaAttentionPrefill(self.fp_attn, qcfg=cfg)
         q_lin = qattn.q_proj.wrapped  # PTQWrapper → LinearQuant
 
         self.assertIsInstance(q_lin, QuantLinear)
@@ -118,7 +120,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         torch.manual_seed(123)
 
         # fresh wrapper
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qattn = QuantLlamaAttentionPrefill(self.fp_attn)
 
         # build a float mask (all-zero here, but could include −1e4 etc.)
         B, S = 2, 4
@@ -150,7 +152,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
     def test_cache_tuple_concat_prefill(self):
         torch.manual_seed(0)
 
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qattn = QuantLlamaAttentionPrefill(self.fp_attn)
         # Quick calibration on a couple of random batches so fake-quant params lock-in
         qattn.enable_calibration()
         for _ in range(2):
