@@ -81,12 +81,18 @@ class PTQQuantizer(BaseQuantizer):
         Recursively attempt to wrap boundaries. Strictness is applied at every boundary.
         """
         assert not isinstance(root, QuantModuleBase), "The module is already wrapped."
+        try:
+            return PTQWrapper(root, qcfg=qcfg, fp_name="model")
+        except NotImplementedError as e:
+            print("no special wrapper for model, wrappig using general case")
 
         # Case A: HuggingFace-style transformers: model.model.layers
         lm = getattr(root, "model", None)
 
         embeddings = (
-            getattr(lm, "embed_tokens", None) if isinstance(lm, nn.Module) else None
+            getattr(lm, "embed_tokens", None)
+            if isinstance(lm.embed_tokens, nn.Module)  # type: ignore[union-attr]
+            else None
         )
         if isinstance(embeddings, nn.Module):
             child_scope = "model.embeddings"
@@ -99,7 +105,11 @@ class PTQQuantizer(BaseQuantizer):
             )
             lm.embed_tokens = wrapped  # type: ignore[union-attr]
 
-        model_norm = getattr(lm, "norm", None) if isinstance(lm, nn.Module) else None
+        model_norm = (
+            getattr(lm, "norm", None)
+            if isinstance(lm.norm, nn.Module)  # type: ignore[union-attr]
+            else None
+        )
         if isinstance(model_norm, nn.Module):
             child_scope = "model.norm"
             child_cfg = qcfg.child(child_scope)

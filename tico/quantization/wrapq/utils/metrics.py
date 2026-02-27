@@ -90,10 +90,15 @@ def perplexity(
     input_ids_full = input_ids_full.to(device)
 
     if max_length is None:
-        assert hasattr(model, "config")
-        model_config = model.config
-        if hasattr(model.config, "text_config"):
-            model_config = model.config.text_config
+        if hasattr(model, "config"):
+            assert hasattr(model, "config")
+            model_config = model.config
+        else:
+            assert hasattr(model.wrapped, "config")
+            model_config = model.wrapped.config
+
+        if hasattr(model_config, "text_config"):
+            model_config = model_config.text_config
         assert hasattr(model_config, "max_position_embeddings")
         assert isinstance(model_config.max_position_embeddings, int)
         max_length = model_config.max_position_embeddings
