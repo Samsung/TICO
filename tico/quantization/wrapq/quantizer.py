@@ -81,6 +81,10 @@ class PTQQuantizer(BaseQuantizer):
         Recursively attempt to wrap boundaries. Strictness is applied at every boundary.
         """
         assert not isinstance(root, QuantModuleBase), "The module is already wrapped."
+        try:
+            return PTQWrapper(root, qcfg=qcfg, fp_name="model")
+        except NotImplementedError as e:
+            print("no special wrapper for model, wrappig using general case")
 
         # Case A: HuggingFace-style transformers: model.model.layers
         lm = getattr(root, "model", None)

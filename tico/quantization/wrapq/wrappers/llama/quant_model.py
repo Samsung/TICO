@@ -203,6 +203,7 @@ class QuantLlamaModel(QuantModuleBase):
         hidden_states = inputs_embeds
         # create position_embeddings and causal_mask to be shared across all the decoder layers
         causal_mask = self.get_attention_mask_for(hidden_states)
+        causal_mask = causal_mask.squeeze(0)
         causal_mask = self._fq(causal_mask, self.obs_causal_mask)
 
         position_embeddings = self.get_position_embeddings_for(hidden_states)

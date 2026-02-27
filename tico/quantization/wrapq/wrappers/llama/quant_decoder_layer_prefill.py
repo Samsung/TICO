@@ -107,6 +107,9 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
             qcfg=post_attention_layernorm,
             fp_name=f"{fp_name}.post_attention_layernorm",
         )
+        self.obs_causal_mask = self._make_obs("causal_mask")
+        self.obs_cos = self._make_obs("cos")
+        self.obs_sin = self._make_obs("sin")
 
         # Static causal mask template ---------------------------------------
         assert hasattr(fp_layer.self_attn, "config") and hasattr(
@@ -184,18 +187,28 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
-        # to prevent introduction of attention_mask as a parameter let's use preset attention_mask
-        L = hidden_states.size(1)
-        attention_mask = self._slice_causal(L, hidden_states.device)
+        if attention_mask is None or attention_mask.dtype == torch.bool:
+            L = hidden_states.size(1)
+            attention_mask = self._slice_causal(L, hidden_states.device)
+            attention_mask = attention_mask.squeeze(0)
+            attention_mask = self._fq(
+                attention_mask, self.obs_causal_mask
+            )  # let it be quantized immediately
 
-        position_embeddings = (
-            self.rope_cos_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            ),
-            self.rope_sin_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            ),
-        )
+        if position_embeddings is None:
+            position_embeddings = (
+                self.rope_cos_template.to(
+                    dtype=hidden_states.dtype, device=hidden_states.device
+                ),
+                self.rope_sin_template.to(
+                    dtype=hidden_states.dtype, device=hidden_states.device
+                ),
+            )
+            cos, sin = position_embeddings
+            position_embeddings = (
+                self._fq(cos, self.obs_cos),
+                self._fq(sin, self.obs_sin),
+            )
 
         attn_out = self.self_attn(
             hidden_states=hidden_states,
@@ -241,6 +254,7 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
 
     # No local observers; just recurse into children
     def _all_observers(self):
+        yield from (self.obs_causal_mask, self.obs_cos, self.obs_sin)
         yield from self.self_attn._all_observers()
         yield from self.mlp._all_observers()
         yield self.obs_mlp_residual_out

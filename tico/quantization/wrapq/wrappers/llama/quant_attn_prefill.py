@@ -191,8 +191,6 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
 
         # Rope tables
         cos, sin = position_embeddings
-        cos = self._fq(cos, self.obs_cos)
-        sin = self._fq(sin, self.obs_sin)
 
         # --- KV for attention & present_key_value -------------
         present_key_value: Tuple[torch.Tensor, torch.Tensor]
@@ -205,7 +203,8 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
             attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
                 hidden_states.device
             )
-        attention_mask = self._fq(attention_mask, self.obs_causal_mask)
+            attention_mask = attention_mask.squeeze(0)
+            attention_mask = self._fq(attention_mask, self.obs_causal_mask)
 
         attn_weights_parts = []
         attn_out_parts = []
@@ -251,8 +250,12 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
                 logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
 
                 # mask add
+                assert (
+                    attention_mask.shape[-2:] == logits_i.shape[-2:]
+                    and attention_mask.shape[0] == 1
+                )  # check for compatiblity
                 logits_i = self._fq(
-                    logits_i + attention_mask.view(1, q_i.size(1), k_i.size(1)),
+                    logits_i + attention_mask,
                     self.obs_mask_add,
                 )
 

@@ -130,14 +130,14 @@ class TestQuantLlamaAttentionPrefill(unittest.TestCase):
         for _ in range(2):
             x = torch.randn(2, 4, 8)
             pos = self._rand_rope(2, 4)
-            qattn(x, pos, float_mask)
+            qattn(x, pos, float_mask.squeeze(0))
         qattn.freeze_qparams()
 
         # run forward — should not raise
         x = torch.randn(B, S, 8)
         pos = self._rand_rope(B, S)
         with torch.no_grad():
-            q_out, attn_w = qattn(x, pos, attention_mask=float_mask)
+            q_out, attn_w = qattn(x, pos, attention_mask=float_mask.squeeze(0))
             fp_outs = self.fp_attn(
                 x, position_embeddings=pos, attention_mask=float_mask
             )
