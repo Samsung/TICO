@@ -20,8 +20,8 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
-from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
-    QuantLlamaDecoderLayer,
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer_prefill import (
+    QuantLlamaDecoderLayerPrefill,
 )
 
 
@@ -29,7 +29,7 @@ skip_msg = "required transformers not installed — skipping LlamaDecoderLayer t
 
 
 @unittest.skipUnless(has_transformers_for("llama"), skip_msg)
-class TestQuantLlamaDecoderLayer(unittest.TestCase):
+class TestQuantLlamaDecoderLayerPrefill(unittest.TestCase):
     fp_layer: torch.nn.Module
 
     @classmethod
@@ -59,7 +59,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         return emb.cos(), emb.sin()
 
     def test_mode_transitions(self):
-        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        qlayer = QuantLlamaDecoderLayerPrefill(self.fp_layer)
         self.assertIs(qlayer._mode, Mode.NO_QUANT)
 
         qlayer.enable_calibration()
@@ -74,7 +74,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertIs(qlayer._mode, Mode.QUANT)
 
     def test_forward_diff(self):
-        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        qlayer = QuantLlamaDecoderLayerPrefill(self.fp_layer)
         qlayer.enable_calibration()
         SEQ_LEN = 256
         for _ in range(4):
@@ -102,8 +102,8 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_dtype_override(self):
-        # mlp_residual_out is the only observer currently created in QuantLlamaDecoderLayer
-        # if more observers will be added to QuantLlamaDecoderLayer,
+        # mlp_residual_out is the only observer currently created in QuantLlamaDecoderLayerPrefill
+        # if more observers will be added to QuantLlamaDecoderLayerPrefill,
         # overrides of cfg will also need to be expanded
         cfg = PTQConfig(
             default_dtype=DType.int(16),
@@ -111,5 +111,5 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
                 "mlp_residual_out": {"dtype": DType.uint(8)},
             },
         )
-        qcustom = QuantLlamaDecoderLayer(self.fp_layer, qcfg=cfg)
+        qcustom = QuantLlamaDecoderLayerPrefill(self.fp_layer, qcfg=cfg)
         self.assertEqual(qcustom.obs_mlp_residual_out.dtype, DType.uint(8))

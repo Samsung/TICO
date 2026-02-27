@@ -25,7 +25,7 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 
 
 @try_register("transformers.models.llama.modeling_llama.LlamaDecoderLayer")
-class QuantLlamaDecoderLayer(QuantModuleBase):
+class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
     """
     Quant-aware drop-in replacement for HF `LlamaDecoderLayer`.
     Signature and return-value are identical to the original.
@@ -179,7 +179,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
     ) -> Tuple[torch.Tensor] | torch.Tensor:
         if output_attentions:
             raise NotImplementedError(
-                "QuantLlamaDecoderLayer does not support output attention yet."
+                "QuantLlamaDecoderLayerPrefill does not support output attention yet."
             )
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
