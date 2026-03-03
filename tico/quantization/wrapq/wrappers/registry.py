@@ -47,6 +47,8 @@ _CORE_MODULES = (
     ## qwen_vl ##
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attn",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_text_mlp",
+    "tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer",
+    "tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_attn",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_mlp",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_patch_embed",
