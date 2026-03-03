@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -25,9 +25,30 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 
 @try_register(
     "transformers.models.llama.modeling_llama.LlamaRMSNorm",
-    "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextRMSNorm",
 )
-class QuantRMSNorm(QuantModuleBase):
+class QuantLlamaRMSNorm(QuantModuleBase):
+    """
+    Quant wrapper for LlamaRMSNorm (T5LayerNorm-style RMSNorm).
+
+    Reference forward:
+        input_dtype = x.dtype
+        x = x.float()
+        v = mean(x^2, dim=-1, keepdim=True)
+        y = x * rsqrt(v + eps)
+        out = weight * y.to(input_dtype)
+
+    We quantize the elementary steps:
+        0) x_q = fq(x)                          (act_in)
+        1) x_fp32 = x_q.float()
+        2) s = x_fp32 * x_fp32                 (square)
+        3) v = mean(s, dim=-1)                 (var)
+        4) e = v + eps                         (add_eps)
+        5) r = rsqrt(e)                        (inv_std)
+        6) n = x_fp32 * r                      (norm)
+        7) y = (n.to(dtype) * w)               (affine_mul)
+        8) out_q = fq(y)                       (act_out)
+    """
+
     def __init__(
         self,
         fp: nn.Module,
@@ -37,35 +58,76 @@ class QuantRMSNorm(QuantModuleBase):
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
-        self.eps = float(self.module.variance_epsilon)
+        self.eps = torch.tensor(self.module.variance_epsilon)
 
-        self.obs_weight = self._make_obs("weight")
+        # Observers
         self.obs_act_in = self._make_obs("act_in")
+        self.obs_square = self._make_obs("square")
+        self.obs_var = self._make_obs("var")
+        self.obs_eps = self._make_obs("eps")
+        self.obs_add_eps = self._make_obs("add_eps")
+        self.obs_inv_std = self._make_obs("inv_std")
+        self.obs_norm = self._make_obs("norm")
+
+        # Affine (weight only)
+        self.obs_weight = self._make_obs("weight")
+        self.obs_affine_mul = self._make_obs("affine_mul")
         self.obs_act_out = self._make_obs("act_out")
 
     def enable_calibration(self) -> None:
+        """
+        Switch to CALIB mode and immediately collect fixed range for weight.
+        """
         super().enable_calibration()
-        # immediately capture the fixed weight range
+        assert self.module.weight is not None
         self.obs_weight.collect(self.module.weight)
 
-    def forward(self, x: torch.Tensor):
-        # 1) quantize input once
-        x_q = self._fq(x, self.obs_act_in)
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # 0) input
+        x_q = self._fq(hidden_states, self.obs_act_in)
 
-        # 2) quantize weights
+        # 1-3) variance = mean(x^2)
+        s = x_q * x_q
+        s_q = self._fq(s, self.obs_square)
+
+        v = s_q.mean(dim=-1, keepdim=True)
+        v_q = self._fq(v, self.obs_var)
+
+        # 4) add eps
+        eps_q = self._fq(self.eps, self.obs_eps)
+        e = v_q + eps_q
+        e_q = self._fq(e, self.obs_add_eps)
+
+        # 5) inv std
+        r = torch.rsqrt(e_q)
+        r_q = self._fq(r, self.obs_inv_std)
+
+        # 6) normalize
+        n = x_q * r_q
+        n_q = self._fq(n, self.obs_norm)
+
+        # 7) affine: weight * n.to(input_dtype)
         w = self.module.weight
         if self._mode is Mode.QUANT:
-            w = self.obs_weight.fake_quant(w)
+            w = self.obs_weight.fake_quant(w)  # type: ignore[assignment]
 
-        # 3) rms
-        rms = torch.ops.circle_custom.rms_norm(
-            x_q,
-            weight=w,
-            eps=self.eps,
-        )
-        rms_q = self._fq(rms, self.obs_act_out)
+        y = n_q * w
+        y = self._fq(y, self.obs_affine_mul)
 
-        return rms_q
+        # 8) output
+        return self._fq(y, self.obs_act_out)
 
     def _all_observers(self) -> Iterable:
-        return (self.obs_weight, self.obs_act_in, self.obs_act_out)
+        obs: Tuple = (
+            self.obs_weight,
+            self.obs_act_in,
+            self.obs_square,
+            self.obs_var,
+            self.obs_eps,
+            self.obs_add_eps,
+            self.obs_inv_std,
+            self.obs_norm,
+            self.obs_affine_mul,
+            self.obs_act_out,
+        )
+        return obs
