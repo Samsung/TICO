@@ -238,9 +238,7 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     # -------------------------------------------------------------------------
     print("\nCalculating perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
-    ppl_uint8 = perplexity(
-        q_m, enc, args.device, stride=q_m.wrapped.config.max_position_embeddings
-    )
+    ppl_uint8 = perplexity(q_m, enc, args.device, stride=args.max_seq_len)
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
     print(f"│ int16 : {ppl_uint8:8.2f}")

@@ -23,8 +23,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 def evaluate_llm_on_tasks(
-    model: AutoModelForCausalLM, tokenizer: AutoTokenizer, tasks: str
+    model, tokenizer: AutoTokenizer, tasks: str
 ) -> dict[str, Any]:
+    if hasattr(model, "wrapped"):
+        model = model.wrapped
     model_to_evaluate = HFLM(model, "causal", tokenizer=tokenizer)
     tasks_list: list[str] = tasks.split(",")
     return evaluator.simple_evaluate(model_to_evaluate, tasks=tasks_list)

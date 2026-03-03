@@ -72,6 +72,10 @@ class QuantLlamaForCausalLM(QuantModuleBase):
         )
         self.config = model_fp.config
         self.loss_function = model_fp.loss_function
+        self.device = model_fp.device
+
+    def tie_weights(self):
+        pass
 
     def forward(
         self,
