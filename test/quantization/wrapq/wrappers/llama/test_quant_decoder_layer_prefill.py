@@ -59,7 +59,9 @@ class TestQuantLlamaDecoderLayerPrefill(unittest.TestCase):
         return emb.cos(), emb.sin()
 
     def test_mode_transitions(self):
-        qlayer = QuantLlamaDecoderLayerPrefill(self.fp_layer)
+        qlayer = QuantLlamaDecoderLayerPrefill(
+            self.fp_layer, qcfg=PTQConfig(wrapper_variant="prefill")
+        )
         self.assertIs(qlayer._mode, Mode.NO_QUANT)
 
         qlayer.enable_calibration()
@@ -74,7 +76,9 @@ class TestQuantLlamaDecoderLayerPrefill(unittest.TestCase):
         self.assertIs(qlayer._mode, Mode.QUANT)
 
     def test_forward_diff(self):
-        qlayer = QuantLlamaDecoderLayerPrefill(self.fp_layer)
+        qlayer = QuantLlamaDecoderLayerPrefill(
+            self.fp_layer, qcfg=PTQConfig(wrapper_variant="prefill")
+        )
         qlayer.enable_calibration()
         SEQ_LEN = 256
         for _ in range(4):
@@ -107,6 +111,7 @@ class TestQuantLlamaDecoderLayerPrefill(unittest.TestCase):
         # overrides of cfg will also need to be expanded
         cfg = PTQConfig(
             default_dtype=DType.int(16),
+            wrapper_variant="prefill",
             overrides={
                 "mlp_residual_out": {"dtype": DType.uint(8)},
             },

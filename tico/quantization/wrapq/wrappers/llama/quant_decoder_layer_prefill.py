@@ -24,7 +24,9 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
-@try_register("transformers.models.llama.modeling_llama.LlamaDecoderLayer")
+@try_register(
+    "transformers.models.llama.modeling_llama.LlamaDecoderLayer", variant="prefill"
+)
 class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
     """
     Quant-aware drop-in replacement for HF `LlamaDecoderLayer`.

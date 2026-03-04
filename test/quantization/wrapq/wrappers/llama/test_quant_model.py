@@ -61,7 +61,9 @@ class TestQuantLlamaModel(unittest.TestCase):
         cls.fp_model = LlamaModel(cfg)
 
     def test_mode_transitions(self):
-        qmodel = QuantLlamaModel(self.fp_model)
+        qmodel = QuantLlamaModel(
+            self.fp_model, qcfg=PTQConfig(wrapper_variant="prefill")
+        )
         self.assertIs(qmodel._mode, Mode.NO_QUANT)
 
         qmodel.enable_calibration()
@@ -81,7 +83,9 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertIs(qmodel._mode, Mode.QUANT)
 
     def test_forward_diff(self):
-        qmodel = QuantLlamaModel(self.fp_model)
+        qmodel = QuantLlamaModel(
+            self.fp_model, qcfg=PTQConfig(wrapper_variant="prefill")
+        )
         qmodel.enable_calibration()
         calib_set = []
         for _ in range(4):

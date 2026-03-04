@@ -20,6 +20,10 @@ What is verified
 1. `register` decorator adds the mapping and lookup returns it.
 2. `try_register` succeeds when the target class exists.
 3. `try_register` is a NO-OP when the module / class is absent.
+4. Variant support:
+   - multiple variants can coexist for a single fp class
+   - lookup resolves exact variant
+   - lookup falls back to "common" when exact variant is missing
 """
 
 import sys
@@ -46,15 +50,26 @@ class DummyQuant(QuantModuleBase):
         return ()
 
 
+@register(DummyFP, variant="prefill")
+class QPrefill(DummyQuant):
+    ...
+
+
+@register(DummyFP, variant="decode")
+class QDecode(DummyQuant):
+    ...
+
+
+@register(DummyFP)
+class QCommon(DummyQuant):
+    ...
+
+
 class TestRegistry(unittest.TestCase):
 
     # 1) plain @register ------------------------------------------------
     def test_register_and_lookup(self):
-        @register(DummyFP)  # decorator under test
-        class _Q(DummyQuant):
-            ...
-
-        self.assertIs(lookup(DummyFP), _Q)
+        self.assertIs(lookup(DummyFP), QCommon)
 
     # 2) try_register when path exists ---------------------------------
     def test_try_register_success(self):
@@ -86,3 +101,40 @@ class TestRegistry(unittest.TestCase):
 
         # lookup should fail (module missing) without raising
         self.assertIsNone(lookup(type("Fake", (), {})))
+
+    # 4-1) Variant: exact match across multiple variants -------------------
+    def test_variant_exact_match(self):
+        self.assertIs(lookup(DummyFP, variant="prefill"), QPrefill)
+        self.assertIs(lookup(DummyFP, variant="decode"), QDecode)
+        self.assertIs(lookup(DummyFP, variant="common"), QCommon)
+
+    # 4-2) Variant: fallback to common when requested variant missing -------
+    def test_variant_fallback_to_common(self):
+        # No decode/prefill registered: should still resolve to common
+        self.assertIs(lookup(DummyFP, variant="dummy_1"), QCommon)
+        self.assertIs(lookup(DummyFP, variant="dummy_2"), QCommon)
+
+    # 4-3) try_register also supports variants -----------------------------
+    def test_try_register_with_variant(self):
+        mod = types.ModuleType("tmp_mod2")
+
+        class TmpFP2(nn.Linear):
+            def __init__(self):
+                super().__init__(3, 3)
+
+        mod.TmpFP2 = TmpFP2  # type: ignore[attr-defined]
+        sys.modules["tmp_mod2"] = mod
+
+        @try_register("tmp_mod2.TmpFP2", variant="decode")
+        class TmpQuantDecode(DummyQuant):
+            ...
+
+        @try_register("tmp_mod2.TmpFP2", variant="common")
+        class TmpQuantCommon(DummyQuant):
+            ...
+
+        self.assertIs(lookup(TmpFP2, variant="decode"), TmpQuantDecode)
+        # asking for prefill should fall back to common if decode-only doesn't match
+        self.assertIs(lookup(TmpFP2, variant="prefill"), TmpQuantCommon)
+
+        del sys.modules["tmp_mod2"]

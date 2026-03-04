@@ -27,6 +27,25 @@ class PTQWrapper(QuantModuleBase):
 
     It is itself a QuantModuleBase so composite wrappers can treat
      it exactly like any other quant module.
+
+    Variant-Aware Wrapping
+    ----------------------
+    Wrapper selection depends on the execution "variant" specified in PTQConfig:
+
+        - "prefill": full-sequence execution
+        - "decode" : single-token decoding specialization
+        - "common" : variant-independent implementation (default)
+
+    Design rule:
+    - Modules that do NOT depend on execution mode should register under
+      variant="common" (e.g., Linear, LayerNorm, MLP).
+    - Execution-specialized modules (e.g., decode-only attention) should
+      register under their explicit variant.
+
+    Resolution behavior:
+    - PTQWrapper requests the configured variant.
+    - If not found, the registry prefers "common" if available.
+    - If still not found, wrapping fails.
     """
 
     def __init__(
@@ -37,9 +56,12 @@ class PTQWrapper(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg)
-        wrapped_cls = lookup(type(module))
+        variant = getattr(qcfg, "wrapper_variant", "common") if qcfg else "common"
+        wrapped_cls = lookup(type(module), variant=variant)
         if wrapped_cls is None:
-            raise NotImplementedError(f"No quant wrapper for {type(module).__name__}")
+            raise NotImplementedError(
+                f"No quant wrapper for {type(module).__name__} (variant={variant})"
+            )
         self.wrapped: QuantModuleBase = wrapped_cls(module, qcfg=qcfg, fp_name=fp_name)  # type: ignore[arg-type, misc]
 
     def forward(self, *args, **kwargs):
