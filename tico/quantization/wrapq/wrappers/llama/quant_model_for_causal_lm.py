@@ -26,19 +26,6 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
-def fix_inputs(config, pad_token_id, input_ids):
-    pads = torch.full(
-        (
-            input_ids.shape[0],
-            config.max_position_embeddings - input_ids.shape[1],
-        ),
-        fill_value=pad_token_id,
-        device=input_ids.device,
-    )
-
-    return torch.cat((input_ids, pads), dim=1)
-
-
 @try_register("transformers.models.llama.modeling_llama.LlamaForCausalLM")
 class QuantLlamaForCausalLM(QuantModuleBase):
     def __init__(
@@ -90,16 +77,6 @@ class QuantLlamaForCausalLM(QuantModuleBase):
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
     ) -> CausalLMOutputWithPast:
-        orig_len = input_ids.shape[-1]  # type: ignore[union-attr]
-        pad_id = (
-            self.config.pad_token_id
-            if getattr(self.config, "pad_token_id", None) is not None
-            else self.config.eos_token_id
-        )
-
-        input_ids = fix_inputs(self.config, pad_id, input_ids)
-        if labels is not None:
-            labels = fix_inputs(self.config, pad_id, labels)
 
         output_attentions = self.config.output_attentions
         output_hidden_states = self.config.output_hidden_states
@@ -128,9 +105,6 @@ class QuantLlamaForCausalLM(QuantModuleBase):
             else logits_to_keep
         )
         logits = self.lm_head(hidden_states[:, slice_indices, :])
-        logits = logits[..., :orig_len, :]
-        if labels is not None:
-            labels = labels[..., :orig_len]
 
         loss = None
         if labels is not None:

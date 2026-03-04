@@ -209,8 +209,8 @@ class QuantLlamaModel(QuantModuleBase):
         position_embeddings = self.get_position_embeddings_for(hidden_states)
         cos, sin = position_embeddings
         position_embeddings = (
-            self._fq(cos, self.obs_cos),
-            self._fq(sin, self.obs_sin),
+            self._fq(cos[:, : hidden_states.size(1), :], self.obs_cos),
+            self._fq(sin[:, : hidden_states.size(1), :], self.obs_sin),
         )
 
         # decoder layers

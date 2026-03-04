@@ -107,7 +107,7 @@ def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
     print(f"saving the whole model to {save_path.resolve()}")
     with torch.no_grad():
         with SuppressWarning(UserWarning, ".*"):
-            cm = tico.convert(q_m.wrapped, (calib_inputs[0],), strict=False)
+            cm = tico.convert(q_m, (calib_inputs[0],), strict=False)
 
             cm.save(save_path)
 
@@ -238,14 +238,18 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     # -------------------------------------------------------------------------
     print("\nCalculating perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
-    ppl_uint8 = perplexity(q_m, enc, args.device, stride=args.max_seq_len)
+    ppl_uint8 = perplexity(
+        q_m, enc, args.device, max_length=args.max_seq_len, stride=args.max_seq_len
+    )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
     print(f"│ int16 : {ppl_uint8:8.2f}")
     print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
-        results = evaluate_llm_on_tasks(q_m, tokenizer, args.eval_tasks)
+        results = evaluate_llm_on_tasks(
+            q_m, tokenizer, args.eval_tasks, max_length=args.max_seq_len
+        )
         print("Quantized RESULTS ARE:")
         print(make_table(results))
 
@@ -330,7 +334,13 @@ def main():
         "--max_seq_len",
         type=int,
         default=None,
-        help="constraint for max_position_embeddings",
+        help="seq_len to use in model evaluation and conversion to circle",
+    )
+    parser.add_argument(
+        "--calibrate_seq_len",
+        type=int,
+        default=2048,
+        help="seq_len to use in quantized model calibration. More the better",
     )
     parser.add_argument(
         "--embedding_weight_bits",
@@ -387,9 +397,9 @@ def main():
     )
 
     model.config.use_cache = False  # TODO use args for it
-    if args.max_seq_len is not None:
+    if args.calibrate_seq_len is not None:
         model.config.max_position_embeddings = min(
-            model.config.max_position_embeddings, args.max_seq_len
+            model.config.max_position_embeddings, args.calibrate_seq_len
         )
 
     dataset_test = load_dataset(
@@ -399,7 +409,7 @@ def main():
     print("\nCalculating original perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
     ppl_fp32 = perplexity(
-        model, enc, device, stride=model.config.max_position_embeddings
+        model, enc, device, max_length=args.max_seq_len, stride=args.max_seq_len
     )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
@@ -407,7 +417,9 @@ def main():
     print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
-        results = evaluate_llm_on_tasks(model, tokenizer, args.eval_tasks)
+        results = evaluate_llm_on_tasks(
+            model, tokenizer, args.eval_tasks, max_length=args.max_seq_len
+        )
         print("Original RESULTS ARE:")
         print(make_table(results))
 
@@ -456,6 +468,7 @@ def main():
     evaluate(q_m, tokenizer, dataset_test, args)
 
     if args.save_circle_to_folder is not None:
+        calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
         save_circles_to(q_m, calib_inputs, args.save_circle_to_folder)
 
 
