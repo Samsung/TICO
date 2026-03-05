@@ -58,7 +58,7 @@ model.eval()  # disable dropout, etc.
 # 1. Swap in the quant wrapper
 # -------------------------------------------------------------------------
 fp32_layer = model.model.layers[0]  # keep a reference for diff check
-model.model.layers[0] = prepare(fp32_layer, PTQConfig())
+model.model.layers[0] = prepare(fp32_layer, PTQConfig(wrapper_variant="prefill"))
 model.eval()
 
 qlayer = model.model.layers[0]  # alias for brevity
