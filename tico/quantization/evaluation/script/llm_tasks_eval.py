@@ -30,6 +30,12 @@ def evaluate_llm_on_tasks(
 ) -> dict[str, Any]:
     if hasattr(model, "wrapped"):
         model = model.wrapped
+
+    # use acclerated version for evaluation
+    for module in model.modules():
+        if hasattr(module, "use_cuda_accelerated_version_for_evaluation"):
+            module.use_cuda_accelerated_version_for_evaluation = True
+
     model_to_evaluate = HFLM(
         model,
         "causal",
@@ -38,7 +44,14 @@ def evaluate_llm_on_tasks(
         truncation=True,
     )
     tasks_list: list[str] = tasks.split(",")
-    return evaluator.simple_evaluate(model_to_evaluate, tasks=tasks_list)
+    result = evaluator.simple_evaluate(model_to_evaluate, tasks=tasks_list)
+
+    # cancel usage of accelerated version for evaluation
+    for module in model.modules():
+        if hasattr(module, "use_cuda_accelerated_version_for_evaluation"):
+            module.use_cuda_accelerated_version_for_evaluation = False
+
+    return result
 
 
 def main():
