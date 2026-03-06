@@ -41,6 +41,8 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
 
         cfg = fp_attn.config
         self.config = cfg
+        self.layer_idx = fp_attn.layer_idx
+        self.return_kv_cache = False
 
         # head shapes
         assert hasattr(cfg, "hidden_size") and hasattr(cfg, "num_attention_heads")
@@ -88,9 +90,7 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
         )
 
         # Constant scale (1/√d)
-        scale_t = torch.tensor(
-            float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
-        )
+        scale_t = torch.tensor(float(getattr(fp_attn, "scaling", self.head_dim**-0.5)))
         # merge scale_t to k_proj, (otherwise merge it to q_proj)
         with torch.no_grad():
             lin = self.k_proj.wrapped.module
@@ -196,6 +196,19 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
         # --- KV for attention & present_key_value -------------
         present_key_value: Tuple[torch.Tensor, torch.Tensor]
 
+        # TODO Revisit cache logic
+        # HF Cache path (if available)
+        # Revisit cache logic
+       #if use_cache and hasattr(past_key_value, "update"):
+       #    k_total, v_total = past_key_value.update(k_rot, v, self.layer_idx)
+       #    present_key_value = (k_total, v_total)
+       #    k_for_attn, v_for_attn = k_total, v_total
+       #else:
+       #    # Tuple or None path
+       #    pkv_tuple = past_key_value if isinstance(past_key_value, tuple) else None
+       #    k_for_attn, v_for_attn = self._concat_kv(pkv_tuple, k_rot, v)
+       #    present_key_value = (k_for_attn, v_for_attn)
+
         # Build causal mask if needed
         if attention_mask is None or attention_mask.dtype == torch.bool:
             q_len = q.size(1)
@@ -290,7 +303,7 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
         present_key_value = (present_k, present_v)
 
         # return with/without cache
-        if use_cache:
+        if use_cache or self.return_kv_cache:
             return out, attn_weights, present_key_value
         else:
             return out, attn_weights
