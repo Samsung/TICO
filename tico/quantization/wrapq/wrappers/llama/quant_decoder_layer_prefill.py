@@ -164,6 +164,8 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
 
         self.register_buffer("rope_cos_template", cos_t, persistent=False)
         self.register_buffer("rope_sin_template", sin_t, persistent=False)
+        self.quantize_attention_mask = False
+        self.quantize_position_embeddings = False
 
     def _slice_causal(self, seq_len: int, device: torch.device) -> torch.Tensor:
         """Return `[1,1,L,L]` causal mask slice on *device*."""
@@ -196,6 +198,8 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
             attention_mask = self._fq(
                 attention_mask, self.obs_causal_mask
             )  # let it be quantized immediately
+        elif self.quantize_attention_mask is True:
+            attention_mask = self._fq(attention_mask, self.obs_causal_mask)
 
         if position_embeddings is None:
             position_embeddings = (
@@ -206,6 +210,12 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
                     dtype=hidden_states.dtype, device=hidden_states.device
                 ),
             )
+            cos, sin = position_embeddings
+            position_embeddings = (
+                self._fq(cos, self.obs_cos),
+                self._fq(sin, self.obs_sin),
+            )
+        elif self.quantize_position_embeddings is True:
             cos, sin = position_embeddings
             position_embeddings = (
                 self._fq(cos, self.obs_cos),
