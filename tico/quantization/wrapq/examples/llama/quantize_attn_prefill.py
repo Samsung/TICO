@@ -102,7 +102,7 @@ print(plot_two_outputs(fp32, int8))
 # -------------------------------------------------------------------------
 import tico
 
-save_path = pathlib.Path("attn.q.circle")
+save_path = pathlib.Path("attn_prefill.q.circle")
 B, S, D = 1, 4, model.config.hidden_size
 example = torch.randn(B, S, D)
 example_pos = rotary(example, torch.arange(S)[None, :])

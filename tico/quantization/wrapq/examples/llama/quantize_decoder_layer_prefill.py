@@ -130,7 +130,7 @@ print(plot_two_outputs(fp32, int8))
 # -------------------------------------------------------------------------
 import tico
 
-save_path = pathlib.Path("decoder_layer.q.circle")
+save_path = pathlib.Path("decoder_layer_prefill.q.circle")
 B, S, D = 1, MAX_S, model.config.hidden_size
 example_hidden = torch.randn(B, S, D)
 
