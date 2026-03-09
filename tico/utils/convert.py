@@ -71,6 +71,7 @@ from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBa
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.quantization.passes.quantize_bias import QuantizeBias
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
+from tico.quantization.wrapq.utils.check_missing_qparam import check_missing_qparam
 from tico.serialize.circle_serializer import build_circle
 from tico.serialize.operators.node_visitor import get_support_targets
 from tico.utils import logging
@@ -308,6 +309,13 @@ def convert_exported_module_to_circle(
             ]
         )
         quantize_graph.run(exported_program)
+
+        # For `torch.ops.aten.split_with_sizes`, the qparam is attached to the corresponding `getitem` nodes.
+        check_missing_qparam(
+            exported_program,
+            strict=False,
+            ignore_targets={torch.ops.aten.split_with_sizes.default},
+        )
 
     if os.environ.get("TICO_GRAPH_DUMP"):
         save_fx_graph_as_png(exported_program, file_name="3_after_quantfold")
