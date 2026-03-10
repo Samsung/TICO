@@ -15,7 +15,7 @@
 import pathlib
 
 import torch
-from transformers import AutoModelForVision2Seq, AutoTokenizer
+from transformers import AutoModelForImageTextToText, AutoTokenizer
 
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
@@ -27,11 +27,14 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attn import (
 )
 from tico.utils.utils import SuppressWarning
 
+torch.manual_seed(123)
+
+
 # -------------------------------------------------------------------------
 # 0. Load a Qwen3-VL model (text tower) + tokenizer
 # -------------------------------------------------------------------------
 name = "Qwen/Qwen3-VL-2B-Instruct"
-model = AutoModelForVision2Seq.from_pretrained(
+model = AutoModelForImageTextToText.from_pretrained(
     name,
     device_map="cpu",
     trust_remote_code=True,

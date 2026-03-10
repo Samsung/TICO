@@ -24,8 +24,8 @@
 # - The decode wrapper expects:
 #     hidden_states:        (B, 1, D)
 #     position_embeddings:  (cos, sin) each (B, 1, head_dim)
-#     attention_mask:       (B, 1, MAX_S) additive (0 or -120)
-#     past_key_value:       (past_k, past_v) each (B, n_kv, MAX_S-1, head_dim)
+#     attention_mask:       (B, 1, MAX_SEQ) additive (0 or -120)
+#     past_key_value:       (past_k, past_v) each (B, n_kv, MAX_SEQ-1, head_dim)
 # - It returns:
 #     out:                 (B, 1, D)
 #     new_kv_delta:        (new_k, new_v) each (B, n_kv, 1, head_dim)   when use_cache=True
@@ -48,22 +48,22 @@ from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer_decode import (
 from tico.utils.utils import SuppressWarning
 
 MODEL_NAME = "Maykeye/TinyLLama-v0"
-MAX_S = 256
+MAX_SEQ = 256
 B = 1
 N_CALIB = 16  # number of random calibration batches
 DEVICE = "cpu"
 
 torch.set_grad_enabled(False)
+torch.manual_seed(123)
 
 
 # -----------------------------------------------------------------------------
 # Build model + replace one decoder layer with quant wrapper (decode variant)
 # -----------------------------------------------------------------------------
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32).to(DEVICE)
-model.eval()
 
 # Make config consistent with static decode length if wrappers read it.
-model.config.max_position_embeddings = MAX_S
+model.config.max_position_embeddings = MAX_SEQ
 
 layer0 = model.model.layers[0]
 orig_layer = layer0
@@ -71,6 +71,7 @@ orig_layer = layer0
 # Replace the entire decoder layer (decode variant).
 layer0_q = prepare(orig_layer, PTQConfig(wrapper_variant="decode"))
 model.model.layers[0] = layer0_q
+model.eval()
 
 assert hasattr(layer0_q, "wrapped"), "prepare() should return a PTQWrapper"
 assert isinstance(layer0_q.wrapped, QuantLlamaDecoderLayerDecode), type(
@@ -94,16 +95,16 @@ def make_random_decode_batch():
     sin = torch.randn(B, 1, head_dim, device=DEVICE)
     pos = (cos, sin)
 
-    # Additive mask of final static width: (B, 1, MAX_S)
+    # Additive mask of final static width: (B, 1, MAX_SEQ)
     # Simulate that only the first L_eff positions are valid and the rest are padding.
-    L_eff = torch.randint(low=1, high=MAX_S + 1, size=(1,)).item()
-    mask = torch.zeros(B, 1, MAX_S, device=DEVICE, dtype=torch.float32)
-    if L_eff < MAX_S:
+    L_eff = torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item()
+    mask = torch.zeros(B, 1, MAX_SEQ, device=DEVICE, dtype=torch.float32)
+    if L_eff < MAX_SEQ:
         mask[:, :, L_eff:] = float("-120")
 
     # Static-sized past KV (already RoPE-applied for past tokens).
-    past_k = torch.randn(B, n_kv, MAX_S - 1, head_dim, device=DEVICE)
-    past_v = torch.randn(B, n_kv, MAX_S - 1, head_dim, device=DEVICE)
+    past_k = torch.randn(B, n_kv, MAX_SEQ - 1, head_dim, device=DEVICE)
+    past_v = torch.randn(B, n_kv, MAX_SEQ - 1, head_dim, device=DEVICE)
     past = (past_k, past_v)
 
     return x, pos, mask, past
@@ -178,7 +179,7 @@ past_k_ex, past_v_ex = past_ex
 
 with SuppressWarning(UserWarning, ".*"):
     cm = tico.convert(
-        layer0_q.eval(),
+        layer0_q,
         (
             x_ex,  # hidden_states
             mask_ex,  # attention_mask

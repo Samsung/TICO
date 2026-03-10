@@ -18,13 +18,15 @@ import importlib.util
 import sys
 
 import torch
-import torch.nn as nn
 
 import tico
 import tico.quantization
 import tico.quantization.config.ptq
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
+
+torch.manual_seed(123)
+
 
 # Check if transformers is available
 trans_spec = importlib.util.find_spec("transformers")
@@ -117,10 +119,10 @@ def main():
     # Convert to Circle format
     # example_inputs: tuple containing (hidden_states, cu_seqlens)
     example_input = (calibration_data[0], cu_seqlens, None, pos_emb)
-    circle_model = tico.convert(quantized_model, example_input)
+    circle_model = tico.convert(quantized_model.eval(), example_input)
 
     # Save the Circle model
-    filename = "quantized_vision_block.circle"
+    filename = "qwen3vl_vision_block.q.circle"
     circle_model.save(filename)
     print(f"Circle model saved as '{filename}'")
 

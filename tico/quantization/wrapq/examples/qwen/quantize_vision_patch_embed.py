@@ -26,6 +26,9 @@ from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.utils.version import has_transformers_for
 
+torch.manual_seed(123)
+
+
 # Check if transformers is available
 
 if not has_transformers_for("qwen3-vl"):
@@ -104,10 +107,10 @@ def main():
     # Convert to Circle format
     # example_inputs shape: (batch_size, in_channels, depth, height, width)
     example_inputs = (torch.randn(2, 3, 8, 224, 224),)
-    circle_model = tico.convert(quantized_model, example_inputs)
+    circle_model = tico.convert(quantized_model.eval(), example_inputs)
 
     # Save the Circle model
-    filename = "quantized_vision_patch_embed.circle"
+    filename = "qwen3vl_vision_patch_embed.q.circle"
     circle_model.save(filename)
     print(f"Circle model saved as '{filename}'")
 
