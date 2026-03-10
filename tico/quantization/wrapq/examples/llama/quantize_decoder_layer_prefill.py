@@ -43,6 +43,7 @@ from tico.utils.utils import SuppressWarning
 
 MODEL_NAME = "Maykeye/TinyLLama-v0"
 MAX_SEQ = 256
+static_data_inside_the_layer = True
 
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype="float32")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, legacy=False)
@@ -139,10 +140,26 @@ B, S, D = 1, MAX_SEQ, model.config.hidden_size
 example_hidden = torch.randn(B, S, D)
 
 with SuppressWarning(UserWarning, ".*"):
-    cm = tico.convert(
-        qlayer,
-        (example_hidden,),
-    )
+    if static_data_inside_the_layer is True:
+        cm = tico.convert(
+            qlayer,
+            (example_hidden,),
+        )
+    else:
+        qattn = qlayer.wrapped
+        attn_mask = qattn._slice_causal(S, "cpu").squeeze(0)
+        dtype = example_hidden.dtype
+        pos_embeds = (
+            qattn.rope_cos_template.cpu().to(dtype),
+            qattn.rope_sin_template.cpu().to(dtype),
+        )
+
+        cm = tico.convert(
+            qlayer,
+            (example_hidden,),
+            kwargs={"attention_mask": attn_mask, "position_embeddings": pos_embeds},
+        )
+
 # Note that the model is not fully quantized.
 cm.save(save_path)
 

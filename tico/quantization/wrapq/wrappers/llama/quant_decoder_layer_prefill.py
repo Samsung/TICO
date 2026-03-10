@@ -193,9 +193,9 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
             L = hidden_states.size(1)
             attention_mask = self._slice_causal(L, hidden_states.device)
             attention_mask = attention_mask.squeeze(0)
-            attention_mask = self._fq(
-                attention_mask, self.obs_causal_mask
-            )  # let it be quantized immediately
+        attention_mask = self._fq(
+            attention_mask, self.obs_causal_mask
+        )  # let it be quantized immediately
 
         if position_embeddings is None:
             position_embeddings = (
@@ -206,11 +206,11 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
                     dtype=hidden_states.dtype, device=hidden_states.device
                 ),
             )
-            cos, sin = position_embeddings
-            position_embeddings = (
-                self._fq(cos, self.obs_cos),
-                self._fq(sin, self.obs_sin),
-            )
+        cos, sin = position_embeddings
+        position_embeddings = (
+            self._fq(cos, self.obs_cos),
+            self._fq(sin, self.obs_sin),
+        )
 
         attn_out = self.self_attn(
             hidden_states=hidden_states,
