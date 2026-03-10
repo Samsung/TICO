@@ -28,9 +28,9 @@ from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.llama.quant_mlp import QuantLlamaMLP
 from tico.utils.utils import SuppressWarning
 
-name = "Maykeye/TinyLLama-v0"
+name = "meta-llama/Llama-3.2-1B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
-tokenizer = AutoTokenizer.from_pretrained(name)
+tokenizer = AutoTokenizer.from_pretrained(name, legacy=False)
 model.eval()
 
 # -------------------------------------------------------------------------

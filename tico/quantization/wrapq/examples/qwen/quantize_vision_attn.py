@@ -27,6 +27,8 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_attn import (
 )
 from tico.utils.utils import SuppressWarning
 
+torch.manual_seed(123)
+
 
 def get_position_embeddings(model, grid_thw: torch.Tensor):
     pos_embeds = model.fast_pos_embed_interpolate(grid_thw)

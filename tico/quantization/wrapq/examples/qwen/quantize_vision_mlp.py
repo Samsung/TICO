@@ -27,6 +27,9 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_mlp import (
 )
 from tico.utils.utils import SuppressWarning
 
+torch.manual_seed(123)
+
+
 # -------------------------------------------------------------------------
 # 0. Load a Qwen3-VL model (text tower) + tokenizer
 # -------------------------------------------------------------------------

@@ -28,14 +28,23 @@ from tico.quantization.wrapq.wrappers.llama.quant_attn_prefill import (
 from tico.utils.utils import SuppressWarning
 
 name = "Maykeye/TinyLLama-v0"
+MAX_SEQ = 256
 model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
 tokenizer = AutoTokenizer.from_pretrained(name)
+
+# Make sure pad token exists (Llama often uses eos as pad)
+if tokenizer.pad_token_id is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+model.config.max_position_embeddings = MAX_SEQ
 
 # -------------------------------------------------------------------------
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 orig_attn = model.model.layers[0].self_attn
-model.model.layers[0].self_attn = prepare(orig_attn, PTQConfig())
+model.model.layers[0].self_attn = prepare(
+    orig_attn, PTQConfig(wrapper_variant="prefill")
+)
 model.eval()
 
 attn_q = model.model.layers[0].self_attn  # quant wrapper
@@ -49,6 +58,9 @@ def make_inputs(prompt: str):
     batch = tokenizer(
         prompt,
         return_tensors="pt",
+        padding="max_length",
+        truncation=True,
+        max_length=MAX_SEQ,
     )
     input_ids = batch["input_ids"]
 
@@ -84,9 +96,7 @@ assert attn_q._mode is Mode.QUANT, "Quantization mode should be active now."
 # -------------------------------------------------------------------------
 emb = make_inputs("check")
 position_ids = torch.arange(emb.size(1)).unsqueeze(0)
-pos = rotary(embeds, position_ids)
-S = pos[0].shape[1]
-float_mask = torch.zeros(1, 1, S, S)
+pos = rotary(emb, position_ids)
 with torch.no_grad():
     int8 = attn_q(emb, pos)[0]
     fp32 = orig_attn(emb, position_embeddings=pos, attention_mask=None)[0]
@@ -103,10 +113,9 @@ print(plot_two_outputs(fp32, int8))
 import tico
 
 save_path = pathlib.Path("attn_prefill.q.circle")
-B, S, D = 1, 4, model.config.hidden_size
+B, S, D = 1, MAX_SEQ, model.config.hidden_size
 example = torch.randn(B, S, D)
 example_pos = rotary(example, torch.arange(S)[None, :])
-float_mask = torch.zeros(1, 1, S, S)
 
 with SuppressWarning(UserWarning, ".*"):
     cm = tico.convert(attn_q, (example, example_pos))

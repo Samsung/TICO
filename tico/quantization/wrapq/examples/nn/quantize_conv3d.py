@@ -16,14 +16,17 @@
 import copy
 import sys
 
+import torch
+import torch.nn as nn
+
 import tico
 import tico.quantization
 import tico.quantization.config.ptq
-
-import torch
-import torch.nn as nn
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
+
+
+torch.manual_seed(123)
 
 
 def generate_calibration_data(
