@@ -168,6 +168,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     cfg = PTQConfig(
         default_dtype=DType.int(16),
         default_qscheme=QScheme.PER_TENSOR_SYMM,
+        wrapper_variant="prefill",
         overrides={
             "model": {
                 "embed_tokens": {
@@ -387,7 +388,7 @@ def main():
     model = (
         AutoModelForCausalLM.from_pretrained(
             args.model,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=args.trust_remote_code,
             token=args.hf_token,
             cache_dir=args.cache_dir,
