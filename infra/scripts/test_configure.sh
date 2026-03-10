@@ -25,8 +25,8 @@
 SCRIPTS_DIR="${CCEX_PROJECT_PATH}/infra/scripts"
 TEST_DIR="${CCEX_PROJECT_PATH}/test"
 
-SUPPORTED_FAMILIES=("2.5" "2.6" "2.7" "2.8")
-DEFAULT_FAMILY="2.6"
+SUPPORTED_FAMILIES=("2.5" "2.6" "2.7" "2.8" "2.9" "2.10")
+DEFAULT_FAMILY="2.7"
 
 show_help() {
 cat <<EOF
@@ -34,7 +34,7 @@ Usage: ./ccex configure test [OPTIONS]
 
 --torch_ver VER       Torch version or family to install.
                       Accepts:
-                        • 2.5  | 2.6  | 2.7 | 2.8  (family, installs latest)
+                        • 2.5 ~ 2.10                 (family, installs latest)
                         • 2.6.3, 2.7.0+cu118 ...   (exact)
                         • nightly
                       Default: ${DEFAULT_FAMILY}
@@ -116,6 +116,8 @@ declare -A TORCHVISION_FAMILY=(
   ["2.6"]="0.21.*"
   ["2.7"]="0.22.*"
   ["2.8"]="0.23.*"
+  ["2.9"]="0.24.*"
+  ["2.10"]="0.25.*"
 )
 
 ###############################################################################
