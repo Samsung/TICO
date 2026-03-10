@@ -264,3 +264,32 @@ class ConvertConv3dMultipleLayersTest(SinglePassValueTest):
         self.run_value_test(ConvertConv3dToConv2d())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.conv3d), 0)
         self.assertGreaterEqual(num_of_ops(self.exported_program(), ops.aten.conv2d), 2)
+
+
+class Conv3dPerfectFitKernel(torch.nn.Module):
+    """Conv3D with perfect fitting kernel"""
+
+    def __init__(self):
+        super().__init__()
+        self.conv3d = torch.nn.Conv3d(
+            in_channels=3,
+            out_channels=1024,
+            kernel_size=(2, 16, 16),
+            stride=(2, 16, 16),
+            padding=(0, 0, 0),
+        )
+
+    def forward(self, input):
+        return self.conv3d(input)
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 3, 2, 16, 16),), {}
+
+
+class ConvertConv3dPerfectFitKernelTest(SinglePassValueTest):
+    def test_pass(self):
+        self.setup(Conv3dPerfectFitKernel())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.conv3d), 1)
+        self.run_value_test(ConvertConv3dToConv2d())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.conv3d), 0)
+        self.assertGreaterEqual(num_of_ops(self.exported_program(), ops.aten.conv2d), 1)
