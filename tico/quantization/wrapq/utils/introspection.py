@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -26,6 +26,44 @@ def build_fqn_map(root: torch.nn.Module) -> dict[torch.nn.Module, str]:
     Return {module_object: full_qualified_name} without touching the modules.
     """
     return {m: n for n, m in root.named_modules()}
+
+
+def extract_tensor(output: Any) -> Optional[torch.Tensor]:
+    """
+    Extract the first tensor found inside an arbitrary output structure.
+
+    Supports:
+    - torch.Tensor
+    - tuple / list
+    - dict
+    - dataclass / HF ModelOutput-like objects
+    """
+    if isinstance(output, torch.Tensor):
+        return output
+
+    if isinstance(output, (tuple, list)):
+        for item in output:
+            t = extract_tensor(item)
+            if t is not None:
+                return t
+        return None
+
+    if isinstance(output, dict):
+        for v in output.values():
+            t = extract_tensor(v)
+            if t is not None:
+                return t
+        return None
+
+    # dataclass / ModelOutput-like objects
+    if hasattr(output, "__dict__"):
+        for v in vars(output).values():
+            t = extract_tensor(v)
+            if t is not None:
+                return t
+        return None
+
+    return None
 
 
 def save_fp_outputs(
@@ -54,11 +92,12 @@ def save_fp_outputs(
     handles: List[torch.utils.hooks.RemovableHandle] = []
 
     def _save(name: str):
-        def hook(_, __, out: torch.Tensor | Tuple):
-            if isinstance(out, tuple):
-                out = out[0]
-            assert isinstance(out, torch.Tensor)
-            cache[name] = out.detach()
+        def hook(_, __, out):
+            tensor = extract_tensor(out)
+            if tensor is None:
+                print(f"[{name}] no tensor found in output type {type(out)}")
+                return
+            cache[name] = tensor.detach()
 
         return hook
 
@@ -130,9 +169,10 @@ def compare_layer_outputs(
                 if not collect:
                     print(f"[{name}]  no cached reference")
                 return
-            if isinstance(out, tuple):
-                out = out[0]
-            assert isinstance(out, torch.Tensor)
+            out = extract_tensor(out)
+            if out is None:
+                print(f"[{name}] no tensor found in output type {type(out)}")
+                return
 
             # Compute all requested metrics
             res = calc.compute([ref], [out], metrics)  # lists with length-1 tensors

@@ -183,11 +183,12 @@ def main():
         args.model,
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
+        legacy=False,
     )
     model = (
         AutoModelForCausalLM.from_pretrained(
             args.model,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=args.trust_remote_code,
             token=args.hf_token,
         )
@@ -222,8 +223,8 @@ def main():
     # 4. Wrap every layer with PTQWrapper (activation UINT-8)
     # -------------------------------------------------------------------------
     print("Wrapping layers with PTQWrapper …")
-    qcfg = PTQConfig()  # default: per-tensor UINT8
-    prepare(q_m, qcfg)
+    qcfg = PTQConfig(wrapper_variant="prefill")  # default: per-tensor UINT8
+    q_m = prepare(q_m, qcfg)
 
     # -------------------------------------------------------------------------
     # 5. Single-pass activation calibration

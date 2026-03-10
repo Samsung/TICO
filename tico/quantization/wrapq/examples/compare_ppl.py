@@ -145,12 +145,13 @@ def main():
         args.model,
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
+        legacy=False,
     )
 
     model = (
         AutoModelForCausalLM.from_pretrained(
             args.model,
-            torch_dtype=dtype,
+            dtype=dtype,
             trust_remote_code=args.trust_remote_code,
             token=args.hf_token,
         )
@@ -172,8 +173,8 @@ def main():
         # ---------------------------------------------------------------------
         # 2. Wrap every Transformer layer with PTQWrapper
         # ---------------------------------------------------------------------
-        qcfg = PTQConfig()  # all-uint8 defaults
-        prepare(uint8_model, qcfg)
+        qcfg = PTQConfig(wrapper_variant="prefill")  # all-uint8 defaults
+        uint8_model = prepare(uint8_model, qcfg)
 
         # ---------------------------------------------------------------------
         # 3. Single-pass activation calibration
