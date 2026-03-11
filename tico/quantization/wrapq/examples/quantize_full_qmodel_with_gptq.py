@@ -26,12 +26,15 @@
 # =============================================================================
 
 import argparse
+
+import copy
 import pathlib
 import random
-
 import types
 
 from typing import Any, List, Optional, Tuple, Union
+
+import numpy as np
 
 import torch
 import tqdm
@@ -44,9 +47,12 @@ import tico
 from tico.quantization import convert, prepare
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.smoothquant import SmoothQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -96,13 +102,115 @@ def inject_gptq_qparams(
         obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
 
 
-# -------------------------------------------------------------------------
-# Save model/layers in circle format
-# -------------------------------------------------------------------------
+def evaluate_ppl_of_exported_module_on_dataset(model, dataset, device: str = "cuda"):
+    if hasattr(model, "to"):
+        model.to(device)
+    nlls = []
+    for batch in tqdm.tqdm(dataset):
+        if isinstance(batch, torch.Tensor):
+            batch = batch.to(device)
+            output = model(
+                batch.to(device),
+            )
+        else:
+            raise RuntimeError("Unknown input in ppl_eval_on_dataset")
+
+        if hasattr(output, "logits"):
+            lm_logits = output.logits
+        elif len(output) > 1:
+            lm_logits = torch.tensor(output[0])
+        else:
+            lm_logits = torch.tensor(output)
+
+        if torch.isfinite(lm_logits).all():
+            shift_logits = lm_logits[:, :-1, :].contiguous()
+            if isinstance(batch, torch.Tensor):
+                shift_labels = batch[:, 1:].contiguous()
+            else:
+                assert isinstance(batch, tuple)
+                shift_labels = batch[0][:, 1:].contiguous()
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+            loss = loss_fct(
+                shift_logits.reshape(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            )
+            nlls.append(loss)
+            del shift_logits, shift_labels
+            shift_logits = shift_labels = None  # type: ignore[assignment]
+
+        del batch, lm_logits, output
+        lm_logits = output = batch = None  # noqa: F841
+        torch.cuda.empty_cache()
+
+    ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
+    return ppl
+
+
 def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
     q_m.eval()
     q_m.cpu()
-
+    #  save_path = pathlib.Path(save_circle_to_folder, "embedding.q.circle")
+    #  pathlib.Path()
+    #  print(f"saving input embedding to {save_path.resolve()}")
+    #  with torch.no_grad():
+    #      with SuppressWarning(UserWarning, ".*"):
+    #          cm = tico.convert(
+    #              q_m.model.embed_tokens,
+    #              (calib_inputs[0],),
+    #              strict=False,
+    #          )
+    #          cm.save(save_path)
+    #
+    #  save_path = pathlib.Path(save_circle_to_folder, "lm_head.q.circle")
+    #  print(f"saving lm_head to {save_path.resolve()}")
+    #  with torch.no_grad():
+    #      with SuppressWarning(UserWarning, ".*"):
+    #          B, S, D = 1, q_m.config.max_position_embeddings, q_m.config.hidden_size
+    #          example_hidden = torch.randn(B, S, D)
+    #          cm = tico.convert(
+    #              q_m.lm_head,
+    #              (example_hidden,),
+    #              strict=False,
+    #          )
+    #          cm.save(save_path)
+    #
+    #  print("saving layers")
+    #  for i in range(len(q_m.model.layers)):
+    #      save_path = pathlib.Path(save_circle_to_folder, f"decoder_layer_{i}.q.circle")
+    #      print(f"saving model layer_{i} to {save_path.resolve()}")
+    #      B, S, D = 1, q_m.config.max_position_embeddings, q_m.config.hidden_size
+    #      example_hidden = torch.randn(B, S, D)
+    #      # to mimick use_cache setting without adding explicir parameter (use_cache) the hack below is needed
+    #      if hasattr(q_m.model.layers[i], "wrapped"):
+    #          q_m.model.layers[i].wrapped.return_kv_cache = use_cache  # TODO remove
+    #          q_m.model.layers[i].wrapped.self_attn.wrapped.return_kv_cache = (
+    #              use_cache  # TODO remove`
+    #          )
+    #
+    #      with torch.no_grad():
+    #          with SuppressWarning(UserWarning, ".*"):
+    #              cm = tico.convert(
+    #                  q_m.model.layers[i],
+    #                  (example_hidden,),
+    #                  strict=False,
+    #              )
+    #              # Note that the model is not fully quantized.
+    #      cm.save(save_path)
+    #
+    #      if hasattr(q_m.model.layers[i], "wrapped"):
+    #          q_m.model.layers[i].wrapped.return_kv_cache = False  # TODO remove
+    #          q_m.model.layers[i].wrapped.self_attn.wrapped.return_kv_cache = (
+    #              False  # TODO remove
+    #          )
+    #
+    #  save_path = pathlib.Path(save_circle_to_folder, "model.model.q.circle")
+    #  print(f"saving model.model to {save_path.resolve()}")
+    #  with torch.no_grad():
+    #      with SuppressWarning(UserWarning, ".*"):
+    #          cm = tico.convert(q_m.model, (calib_inputs[0],), strict=False)
+    #
+    #          cm.save(save_path)
+    #
     save_path = pathlib.Path(save_circle_to_folder, "model.q.circle")
     print(f"saving the whole model to {save_path.resolve()}")
     with torch.no_grad():
@@ -115,59 +223,101 @@ def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
 def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
 
+    matmul_observer = (
+        MinMaxObserver
+        if args.matmul_io_qdtype == "int16"
+        else MXObserver if args.matmul_io_qdtype == "mxint8" else None
+    )
     w_cfg = {
         "mlp": {
             "gate_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
             "up_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
             "down_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
         },
         "self_attn": {
             "q_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
             "k_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
             "v_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
             "o_proj": {
                 "weight": {
                     "dtype": DType.uint(args.linear_weight_bits),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": matmul_observer},
+                "act_out": {"observer": matmul_observer},
             },
+            "scale": {"observer": MinMaxObserver},
+            "mask_add": {"observer": MinMaxObserver},
+            "softmax": {"observer": MinMaxObserver},
+            "logits_raw": {"observer": matmul_observer},
         },
+        "self_attn_residual_act_out": {"observer": MinMaxObserver},
+        # "act_last_residual_out" : {"observer":MinMaxObserver},
         "input_layernorm": {
             "dtype": DType.int(16),
-            "weight": {"dtype": DType.int(16)},
+            "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+            "act_in": {"observer": MinMaxObserver},
+            "act_out": {"observer": MinMaxObserver},
         },
         "post_attention_layernorm": {
             "dtype": DType.int(16),
-            "weight": {"dtype": DType.int(16)},
+            "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+            "act_in": {"observer": MinMaxObserver},
+            "act_out": {"observer": MinMaxObserver},
         },
     }
 
+    default_observer = (
+        MinMaxObserver
+        if args.default_io_qdtype == "int16"
+        else MXObserver if args.matmul_io_qdtype == "mxint8" else None
+    )
     cfg = PTQConfig(
         default_dtype=DType.int(16),
         default_qscheme=QScheme.PER_TENSOR_SYMM,
+        default_observer=default_observer,  # type: ignore[arg-type]
         wrapper_variant="prefill",
         overrides={
             "model": {
@@ -178,13 +328,15 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
                             if args.embedding_weight_bits < 16
                             else DType.int(args.embedding_weight_bits)
                         ),
+                        "observer": MinMaxObserver,
                     },
                 },
                 "layers": {},
                 "norm": {
                     "weight": {"dtype": DType.int(16)},
                 },
-            },
+                "act_out": {"observer": MinMaxObserver},
+            },  # embeddings to 8-bits
             "lm_head": {
                 "weight": {
                     "dtype": (
@@ -192,7 +344,15 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
                         if args.lm_head_weight_bits < 16
                         else DType.int(args.lm_head_weight_bits)
                     ),
+                    "observer": MinMaxObserver,
                 },
+                "act_in": {"observer": MinMaxObserver},
+                "act_out": {"observer": MinMaxObserver},
+            },
+            "model.norm": {
+                "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+                "act_in": {"observer": MinMaxObserver},
+                "act_out": {"observer": MinMaxObserver},
             },
         },
     )
@@ -200,6 +360,11 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         child_scope = f"{i}"
         cfg.overrides["model"]["layers"][child_scope] = w_cfg  # type: ignore[index]
 
+    if args.default_io_qdtype != "float32":
+        # hack to keep model.norm in `int16`
+        cfg.overrides["model"]["layers"][f"{len(q_m.model.layers) - 1}"]["act_mlp_residual_out"] = {  # type: ignore[index]
+            "observer": default_observer
+        }
     qcfg = cfg
     q_m = prepare(q_m, qcfg)
 
@@ -244,7 +409,7 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
-    print(f"│ int16 : {ppl_uint8:8.2f}")
+    print(f"│ {args.default_io_qdtype} : {ppl_uint8:8.2f}")
     print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
@@ -253,6 +418,189 @@ def evaluate(q_m, tokenizer, dataset_test, args):
         )
         print("Quantized RESULTS ARE:")
         print(make_table(results))
+
+    # to prevent export errors let's evaluate ppl on exported fake_quantized model
+    with torch.no_grad():
+        q_m.eval()
+        q_m.cpu()
+        test_ids = enc.input_ids[0]
+        test_ids_batch = []
+        if hasattr(q_m, "config"):
+            assert hasattr(q_m, "config")
+            model_config = q_m.config
+        else:
+            assert hasattr(q_m.wrapped, "config")
+            model_config = q_m.wrapped.config
+        if hasattr(model_config, "text_config"):
+            model_config = model_config.text_config
+        assert hasattr(model_config, "max_position_embeddings")
+        assert isinstance(model_config.max_position_embeddings, int)
+        max_length = model_config.max_position_embeddings
+        nsamples = test_ids.numel() // max_length
+
+        for i in range(nsamples):
+            batch = test_ids[(i * max_length) : ((i + 1) * max_length)]  # noqa E203
+            test_ids_batch.append(batch.unsqueeze(0))
+
+        rnd_input = torch.randint_like(
+            test_ids_batch[0], 0, tokenizer.vocab_size - 1
+        )  # just random ids
+        device = "cuda"
+        exported_program = torch.export.export(
+            q_m.to(device),
+            (rnd_input.to(device),),
+            kwargs=None,
+            dynamic_shapes=None,
+            strict=False,
+        )
+        ppl = evaluate_ppl_of_exported_module_on_dataset(
+            exported_program.module(), test_ids_batch, device=device
+        )
+        print("\n┌── Wikitext-2 test perplexity ─────────────")
+        print(f"│ exported_{args.default_io_qdtype} : {ppl:8.2f}")
+        print("└───────────────────────────────────────────")
+
+
+def get_dataset_for_calibration(model, dataset):
+
+    class ReducedDataSet(torch.utils.data.Dataset):
+        def __init__(self, inputs, targets, transform=None):
+            self.n_inputs = len(inputs)
+            self.inputs = inputs
+            self.labels = targets
+            self.transform = transform
+
+        def __len__(self):
+            return self.n_inputs
+
+        def __getitem__(self, idx):
+            if torch.is_tensor(idx):
+                idx = idx.tolist()
+            sample = self.inputs[idx]
+            if self.transform:
+                sample = self.transform(sample)
+
+            return (sample, self.labels[idx])
+
+    targets = []
+
+    cur_num = 0
+    with torch.no_grad():
+        print("compute calibrate set")
+        for prompt in tqdm.tqdm(dataset):
+            results = model(prompt.to(model.device)).logits.detach()
+            results = torch.argmax(results.detach(), dim=-1).cpu()
+
+            targets.append(results)
+
+    red_data = ReducedDataSet(dataset, targets)
+    reduced_dataloader = torch.utils.data.DataLoader(
+        red_data, batch_size=1, shuffle=False
+    )
+    return reduced_dataloader
+
+
+class SensitivityCalibrator:
+    """
+    Sensitivity calibrator - compute sensitivies using empirical Fisher information
+    """
+
+    def __init__(self, model, tokenizer, dataset):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.dataset = dataset
+
+    def compute_sensitivity_info(self):
+
+        data_loader = get_dataset_for_calibration(self.model, self.dataset)
+
+        dtype = self.model.dtype
+        model = self.model.float()
+
+        diag_Fisher_info = {}
+        activations_info = {}
+        modules_to_process = {}
+        name_of_module: dict[torch.nn.Linear, str] = {}
+
+        def back_hook(module, grad_input, grad_output):
+            if module in name_of_module:
+                name = name_of_module[module]
+
+                mean_grad = torch.mean(torch.square(grad_input[0]), dim=(0, 1))
+                activations_info[name] += torch.sum(mean_grad).detach().cpu().item()
+
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                diag_Fisher_info[name] = torch.zeros_like(module.weight).cpu()
+                activations_info[name] = 0.0
+                modules_to_process[name] = module
+                name_of_module[module] = name
+                module.register_full_backward_hook(back_hook)
+
+        print("Computing sensitivity info for ", len(data_loader.dataset), "samples")
+        num_of_backwards = 0
+        backwards_computed = False
+        for inputs, targets in tqdm.tqdm(data_loader):
+            model.zero_grad()
+            inp_ids = inputs
+            logits = model(inp_ids.to(model.device)).logits
+
+            outputs = logits.squeeze()
+            targets = targets.squeeze()
+
+            b_indices = [outputs.shape[0] - 1]  # priority to the last token
+            for token_index, b_index in enumerate(b_indices):
+                outputs_el = outputs[b_index : b_index + 1, :]  # noqa E203
+                targets_el = targets[b_index : b_index + 1]  # noqa E203
+
+                model.zero_grad()
+                loss = torch.nn.CrossEntropyLoss()(
+                    outputs_el, targets_el.to(model.device)
+                )  # for Fisher this must be CrossEntropy
+
+                # last retain_graph should be set to False to delete intermediate activations
+                retain_graph = False if token_index == len(b_indices) - 1 else True
+
+                loss.backward(retain_graph=retain_graph)
+
+                # update second order information as current weights gradients are ready
+                for name in modules_to_process:
+                    cur_module = modules_to_process[name]
+                    cur_grad = copy.deepcopy(cur_module.weight.grad.detach())  # type: ignore[union-attr]
+                    if torch.isnan(cur_grad).any().item():
+                        print("WARNING NaN detected")
+
+                    diag_Fisher_info[name] += torch.mul(cur_grad, cur_grad).cpu()
+
+                    cur_grad = None
+                    del cur_grad
+
+                    if model.device.type != "cpu":
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+
+                loss.detach()
+
+                loss = None
+                del loss
+
+                num_of_backwards += 1
+
+            del logits, outputs, targets
+
+            if model.device.type != "cpu":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+            if backwards_computed:
+                break
+
+        for name in modules_to_process:
+            diag_Fisher_info[name] /= num_of_backwards
+
+        model = model.to(dtype)
+
+        return diag_Fisher_info
 
 
 def main():
@@ -287,6 +635,13 @@ def main():
         help="Optional HF token for gated/private repos.",
     )
     parser.add_argument(
+        "--use-cache",
+        dest="use_cache",
+        action="store_true",
+        default=False,
+        help="Use model KV cache if enabled (off by default).",
+    )
+    parser.add_argument(
         "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
     )
     parser.add_argument(
@@ -302,6 +657,12 @@ def main():
         help="Leave model float",
     )
     parser.add_argument(
+        "--no_SMOOTHQUANT",
+        action="store_true",
+        default=False,
+        help="Don't use smoothquant",
+    )
+    parser.add_argument(
         "--save_circle_to_folder",
         type=str,
         default=None,
@@ -314,6 +675,18 @@ def main():
         help="cache_dir for using model/datasets loading",
     )
     parser.add_argument(
+        "--default_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed as default for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--matmul_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for matmuls for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
         "--nsamples_for_qcalibration",
         type=int,
         default="128",  # almost standard
@@ -323,13 +696,19 @@ def main():
         "--linear_weight_bits",
         type=int,
         default=4,
-        help="Number of bits to be used in quantizer for matmul weight quantization",
+        help="Number of bits to be used in GPTQ quantizer for weight quantization",
     )
     parser.add_argument(
         "--gptq_mse",
-        action="store_true",
-        default=False,
-        help="Whether to use mse in gptq",
+        type=str,
+        default=None,
+        help="Whether and how to use mse in gptq (none/mse/smse/mse_for_gptq/smse_for_gptq)",
+    )
+    parser.add_argument(
+        "--smoothquant_alpha",
+        type=float,
+        default=0.5,
+        help="alpha to be used in smoothquant",
     )
     parser.add_argument(
         "--max_seq_len",
@@ -361,6 +740,11 @@ def main():
         default=None,
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
     )
+    parser.add_argument(
+        "--sensitivity_path",
+        type=str,
+        default=None,
+    )
     args = parser.parse_args()
     print(args)
 
@@ -373,6 +757,7 @@ def main():
     print(f"Model            : {args.model}")
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
+    print(f"Use HF cache?    : {args.use_cache}")
     print()
 
     # -------------------------------------------------------------------------
@@ -403,9 +788,7 @@ def main():
             model.config.max_position_embeddings, args.calibrate_seq_len
         )
 
-    dataset_test = load_dataset(
-        DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT, cache_dir=args.cache_dir
-    )
+    dataset_test = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT)
 
     print("\nCalculating original perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
@@ -440,15 +823,39 @@ def main():
         inp = train_ids[:, i:j]
         calib_inputs.append(inp.cpu())
 
-    # -------------------------------------------------------------------------
-    # Run GPTQ (weight-only) pass
-    # -------------------------------------------------------------------------
+    if not args.no_SMOOTHQUANT:
+        print("Applying SmoothQuant …")
+        # attach observers
+        model = prepare(model, SmoothQuantConfig(alpha=args.smoothquant_alpha))
+
+        # run calibration
+        for inp in calib_inputs:
+            model(inp.to(args.device))
+
+        # apply smoothing
+        q_m = convert(model)
+    else:
+        q_m = model
+
     if not args.no_GPTQ:
         if not args.no_GPTQ:
             print("Applying GPTQ …")
 
+        sens = None
+        if args.gptq_mse is not None and (
+            args.gptq_mse == "smse" or args.gptq_mse == "smse_for_gptq"
+        ):
+            if args.sensitivity_path is not None:
+                sens = torch.load(args.sensitivity_path)
+            else:
+                calibrator = SensitivityCalibrator(model, tokenizer, calib_inputs)
+                sens = calibrator.compute_sensitivity_info()
+
         gptq_config = GPTQConfig(
-            weight_bits=args.linear_weight_bits, perchannel=True, mse=args.gptq_mse
+            weight_bits=args.linear_weight_bits,
+            perchannel=True,
+            mse=args.gptq_mse,
+            sensitivity=sens,
         )
         q_m = prepare(model, gptq_config, inplace=True)
         with torch.no_grad():

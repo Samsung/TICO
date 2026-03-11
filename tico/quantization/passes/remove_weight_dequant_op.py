@@ -68,7 +68,12 @@ def infer_dtype(weight: torch.Tensor, zerop: List[int], dtype: torch.dtype) -> s
     weight_val = ValRange(weight)
     zp_val = ValRange(zerop)
 
-    if weight_val.within(0, 15) and zp_val.within(0, 15) and dtype == torch.uint8:
+    if (
+        weight_val.within(0, 15)
+        and zp_val.within(0, 15)
+        and dtype == torch.uint8
+        and weight.numel() > 1
+    ):
         return "uint4"
     else:
         return to_qparam_dtype(dtype)
