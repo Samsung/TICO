@@ -192,6 +192,8 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
 
         # Rope tables
         cos, sin = position_embeddings
+        cos = self._fq(cos, self.obs_cos)
+        sin = self._fq(sin, self.obs_sin)
 
         # --- KV for attention & present_key_value -------------
         present_key_value: Tuple[torch.Tensor, torch.Tensor]
