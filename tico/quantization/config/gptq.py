@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+import torch
 
 from tico.quantization.config.base import BaseConfig
 
@@ -31,7 +32,8 @@ class GPTQConfig(BaseConfig):
     weight_bits: int = 8
     perchannel: bool = True
     symmetric: bool = False
-    mse: bool = False
+    mse: str | None = None
+    sensitivity: torch.Tensor | None = None
 
     # GPTQ.fasterquant params (algorithm hyperparams)
     percdamp: float = 0.01

@@ -268,6 +268,8 @@ def has_quantization_ops(graph: torch.fx.Graph):
         torch.ops.quantized_decomposed.quantize_per_channel.default,
         torch.ops.quantized_decomposed.dequantize_per_tensor.default,
         torch.ops.quantized_decomposed.dequantize_per_channel.default,
+        torch.ops.circle_custom.quantize_mx_decomposed.default,
+        torch.ops.circle_custom.dequantize_mx_decomposed.default,
     ]
     for node in graph.nodes:
         if node.op != "call_function":
