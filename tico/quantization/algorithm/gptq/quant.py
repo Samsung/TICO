@@ -41,11 +41,12 @@ class Quantizer(nn.Module):
         bits,
         perchannel=False,
         sym=True,
-        mse=False,
+        mse=None,
         norm=2.4,
         grid=100,
         maxshrink=0.8,
         trits=False,
+        sensitivity=None,
     ):
         self.maxq = torch.tensor(2**bits - 1)
         self.perchannel = perchannel
@@ -54,6 +55,7 @@ class Quantizer(nn.Module):
         self.norm = norm
         self.grid = grid
         self.maxshrink = maxshrink
+        self.sensitivity = sensitivity
         if trits:
             self.maxq = torch.tensor(-1)
 
@@ -99,7 +101,7 @@ class Quantizer(nn.Module):
             else:
                 self.zero = torch.round(-xmin / self.scale)
 
-        if self.mse:
+        if self.mse is not None:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
@@ -110,7 +112,13 @@ class Quantizer(nn.Module):
                 q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
                 q -= x
                 q.abs_()
-                q.pow_(self.norm)
+                if self.mse == "smse":
+                    q = (q**2) * self.sensitivity.to(
+                        q.device
+                    )  # sensitivity weighted `mse`
+                else:
+                    assert self.mse == "mse"
+                    q.pow_(self.norm)
                 err = torch.sum(q, 1)
                 tmp = err < best
                 if torch.any(tmp):
