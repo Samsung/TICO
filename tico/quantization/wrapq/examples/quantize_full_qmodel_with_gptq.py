@@ -27,7 +27,6 @@
 
 import argparse
 
-import copy
 import pathlib
 import random
 
@@ -44,6 +43,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import tico
 
 from tico.quantization import convert, prepare
+from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
@@ -257,130 +257,6 @@ def evaluate(q_m, tokenizer, dataset_test, args):
         print(make_table(results))
 
 
-def get_dataset_for_calibration(model, dataset):
-    class DataSetWithLabels(torch.utils.data.Dataset):
-        def __init__(self, inputs, targets, transform=None):
-            self.n_inputs = len(inputs)
-            self.inputs = inputs
-            self.labels = targets
-            self.transform = transform
-
-        def __len__(self):
-            return self.n_inputs
-
-        def __getitem__(self, idx):
-            if torch.is_tensor(idx):
-                idx = idx.tolist()
-            sample = self.inputs[idx]
-            if self.transform:
-                sample = self.transform(sample)
-
-            return (sample, self.labels[idx])
-
-    targets = []
-
-    with torch.no_grad():
-        print("Computing calibration set")
-        for prompt in tqdm.tqdm(dataset):
-            results = model(prompt.to(model.device)).logits.detach()
-            results = torch.argmax(results.detach(), dim=-1).cpu()
-
-            targets.append(results)
-
-    labeled_data = DataSetWithLabels(dataset, targets)
-    dataloader = torch.utils.data.DataLoader(labeled_data, batch_size=1, shuffle=False)
-    return dataloader
-
-
-class SensitivityCalibrator:
-    """
-    Sensitivity calibrator - compute sensitivies using empirical Fisher information
-    """
-
-    def __init__(self, model, tokenizer, dataset):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.dataset = dataset
-
-    def compute_sensitivity_info(self):
-
-        data_loader = get_dataset_for_calibration(self.model, self.dataset)
-
-        dtype = self.model.dtype
-        model = self.model.float()
-
-        sensitivity = {}
-        modules_to_process = {}
-        name_of_module: dict[torch.nn.Linear, str] = {}
-
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                modules_to_process[name] = module
-                name_of_module[module] = name
-                sensitivity[name] = torch.zeros_like(module.weight).cpu()
-
-        print("Calibrating sensitivity")
-        num_of_backwards = 0
-        for inputs, targets in tqdm.tqdm(data_loader):
-            model.zero_grad()
-            inp_ids = inputs.view(-1, inputs.shape[-1])
-            logits = model(inp_ids.to(model.device)).logits
-
-            outputs = logits.squeeze()
-            targets = targets.squeeze()
-
-            b_indices = [outputs.shape[0] - 1]  # priority to the last token
-            for token_index, b_index in enumerate(b_indices):
-                outputs_el = outputs[b_index : b_index + 1, :]  # noqa E203
-                targets_el = targets[b_index : b_index + 1]  # noqa E203
-
-                model.zero_grad()
-                loss = torch.nn.CrossEntropyLoss()(
-                    outputs_el, targets_el.to(model.device)
-                )  # for Fisher this must be CrossEntropy
-
-                # last retain_graph should be set to False to delete intermediate activations
-                retain_graph = False if token_index == len(b_indices) - 1 else True
-
-                loss.backward(retain_graph=retain_graph)
-
-                # update second order information as current weights gradients are ready
-                for name in modules_to_process:
-                    cur_module = modules_to_process[name]
-                    cur_grad = copy.deepcopy(cur_module.weight.grad.detach())  # type: ignore[union-attr]
-                    if torch.isnan(cur_grad).any().item():
-                        print("WARNING NaN detected")
-
-                    sensitivity[name] += torch.mul(cur_grad, cur_grad).cpu()
-
-                    cur_grad = None
-                    del cur_grad
-
-                    if model.device.type != "cpu":
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-
-                loss.detach()
-
-                loss = None
-                del loss
-
-                num_of_backwards += 1
-
-            del logits, outputs, targets
-
-            if model.device.type != "cpu":
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
-        for name in modules_to_process:
-            sensitivity[name] /= num_of_backwards
-
-        model = model.to(dtype)
-
-        return sensitivity
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="GPTQ+PTQ pipeline (weight-only + activation)"
@@ -455,6 +331,7 @@ def main():
         "--gptq_mse",
         type=str,
         default=None,
+        choices=["mse", "smse"],
         help="Whether and how to use mse in gptq (none/mse/smse/)",
     )
     parser.add_argument(
@@ -579,9 +456,7 @@ def main():
             print("Applying GPTQ …")
 
         sens = None
-        if args.gptq_mse is not None and (
-            args.gptq_mse == "smse" or args.gptq_mse == "smse_for_gptq"
-        ):
+        if args.gptq_mse is not None and args.gptq_mse == "smse":
             if args.sensitivity_path is not None:
                 sens = torch.load(args.sensitivity_path)
             else:

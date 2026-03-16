@@ -112,10 +112,12 @@ class Quantizer(nn.Module):
                 q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
                 q -= x
                 q.abs_()
-                if self.mse == "smse":
+                if self.mse == "smse":  # senstitivity weighted mse
+                    # in case senstitivity is a second order derivatives of some global loss
+                    # (q**2) * self.sensitivity is just a global loss change due to quantization.
                     q = (q**2) * self.sensitivity.to(
                         q.device
-                    )  # sensitivity weighted `mse`
+                    )  # estimate global target change
                 else:
                     assert self.mse == "mse"
                     q.pow_(self.norm)
