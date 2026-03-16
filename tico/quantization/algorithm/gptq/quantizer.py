@@ -184,6 +184,10 @@ class GPTQQuantizer(BaseQuantizer):
         else:
             target_layers = [model]
 
+        module_name = {}
+        for name, module in model.named_modules():
+            module_name[module] = name
+
         quantizers: Dict[str, Any] = {}
         for l_idx, layer in enumerate(
             tqdm(
@@ -212,11 +216,22 @@ class GPTQQuantizer(BaseQuantizer):
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
                     gptq[name] = GPTQ(subset[name])
+                    if (
+                        gptq_conf.sensitivity is not None
+                        and isinstance(gptq_conf.sensitivity, dict)
+                        and module_name[subset[name]] in gptq_conf.sensitivity
+                    ):
+                        cur_sensitivity = gptq_conf.sensitivity[
+                            module_name[subset[name]]
+                        ]
+                    else:
+                        cur_sensitivity = None
                     gptq[name].quantizer.configure(
                         bits=gptq_conf.weight_bits,
                         perchannel=gptq_conf.perchannel,
                         sym=gptq_conf.symmetric,
                         mse=gptq_conf.mse,
+                        sensitivity=cur_sensitivity,
                     )
 
                 # Hook to collect (inp, out) for GPTQ

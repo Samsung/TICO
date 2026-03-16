@@ -26,6 +26,7 @@
 # =============================================================================
 
 import argparse
+
 import pathlib
 import random
 
@@ -42,6 +43,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import tico
 
 from tico.quantization import convert, prepare
+from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
@@ -327,9 +329,10 @@ def main():
     )
     parser.add_argument(
         "--gptq_mse",
-        action="store_true",
-        default=False,
-        help="Whether to use mse in gptq",
+        type=str,
+        default=None,
+        choices=["mse", "smse"],
+        help="Whether and how to use mse in gptq (none/mse/smse/)",
     )
     parser.add_argument(
         "--max_seq_len",
@@ -360,6 +363,11 @@ def main():
         type=str,
         default=None,
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
+    )
+    parser.add_argument(
+        "--sensitivity_path",
+        type=str,
+        default=None,
     )
     args = parser.parse_args()
     print(args)
@@ -447,8 +455,19 @@ def main():
         if not args.no_GPTQ:
             print("Applying GPTQ …")
 
+        sens = None
+        if args.gptq_mse is not None and args.gptq_mse == "smse":
+            if args.sensitivity_path is not None:
+                sens = torch.load(args.sensitivity_path)
+            else:
+                calibrator = SensitivityCalibrator(model, tokenizer, calib_inputs)
+                sens = calibrator.compute_sensitivity_info()
+
         gptq_config = GPTQConfig(
-            weight_bits=args.linear_weight_bits, perchannel=True, mse=args.gptq_mse
+            weight_bits=args.linear_weight_bits,
+            perchannel=True,
+            mse=args.gptq_mse,
+            sensitivity=sens,
         )
         q_m = prepare(model, gptq_config, inplace=True)
         with torch.no_grad():
