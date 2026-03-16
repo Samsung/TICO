@@ -50,7 +50,15 @@ class QuantLayerNorm(QuantModuleBase):
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
-        self.eps = torch.tensor(self.module.eps)
+
+        # self.eps = torch.tensor(self.module.eps)
+        # Without registering eps as a buffer (above line) a bunch of warnings is emitted during torch.export.export, e.g.
+        # UserWarning: Node wrapped_visual_wrapped_blocks_0_wrapped_norm1_wrapped_eps target
+        # wrapped.visual.wrapped.blocks.0.wrapped.norm1.wrapped.eps eps of
+        # wrapped.visual.wrapped.blocks.0.wrapped.norm1.wrapped does not reference
+        # an nn.Module, nn.Parameter, or buffer, which is what 'get_attr' Nodes typically target
+        self.register_buffer("eps", torch.tensor(self.module.eps))
+
         # Number of trailing dims participating in normalization
         # (PyTorch stores normalized_shape as a tuple even if an int was passed)
         self._norm_ndim: int = len(fp.normalized_shape)  # safe for int→tuple

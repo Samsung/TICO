@@ -301,7 +301,8 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             #    past_key_values=past_key_values,
             #    position_ids=text_position_ids,
             # )
-        attention_mask = self._fq(attention_mask, self.obs_attention_mask)
+        if torch.is_floating_point(attention_mask):
+            attention_mask = self._fq(attention_mask, self.obs_attention_mask)
 
         hidden_states = inputs_embeds
 
