@@ -183,13 +183,11 @@ with SuppressWarning(UserWarning, ".*"):
         (
             x_ex,  # hidden_states
             mask_ex,  # attention_mask
-            None,  # position_ids (unused)
-            (past_k_ex, past_v_ex),  # past_key_value
-            False,  # output_attentions
-            True,  # use_cache
-            None,  # cache_position (unused)
-            (cos_ex, sin_ex),  # position_embeddings
         ),
+        {
+            "past_key_value": (past_k_ex, past_v_ex),
+            "position_embeddings": (cos_ex, sin_ex),
+        },
     )
 cm.save(save_path)
 
