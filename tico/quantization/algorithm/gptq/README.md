@@ -50,8 +50,8 @@ applied after _convert()_, the effectiveness of GPTQ may be diminished.
 ### `MSE`
 `mse` parameter of `GPTQConfig` is supposed to tune quantizer for using in GPTQ.
 There are two options :
-1. `mse`- vanilla `mse`. Produce quantization parameters for GPTQ quantizer (`min`\`max`) which minimize mean squared error of quantization. $MSE\_MIN\_MAX\_FOR\_W = argmin_{min, max}||W-Q_{min, max}(W)||^2$.
-2. `smse` - sensitivity-based `mse`. Use sensitivity of some global feature (e.g. float model logits) to parameters change to minimize global effect of quantization. $SMSE\_MIN\_MAX\_FOR\_W = argmin_{min, max}|(W-Q_{min, max}(W))^2*Sensitivity(W)|$. So we try to keep `important` parameters unchanged, while quantizing `unimportant` parameters more aggressively.
+1. `mse`- vanilla `mse`. Produce quantization parameters for GPTQ quantizer (`min`\`max`) which minimize mean squared error of quantization. $MSE_{MIN, MAX}(W) = argmin_{min, max}||W-Q_{min, max}(W)||^2$.
+2. `smse` - sensitivity-based `mse`. Use sensitivity of some global feature (e.g. float model logits) to parameters change to minimize global effect of quantization. $SMSE_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W))^2*Sensitivity(W)|$. So we try to keep `important` parameters unchanged, while quantizing `unimportant` parameters more aggressively.
 
 You can turn this feature `on`/`off` by using `mse` parameter of `GPTQConfig`:
 ```
