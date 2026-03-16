@@ -95,7 +95,7 @@ class FPIGPTQQuantizer(GPTQQuantizer):
                 for name in subset:
                     gptq[name] = FPI_GPTQ(subset[name])
                     gptq[name].quantizer.configure(
-                        bits=8, perchannel=True, sym=False, mse=False
+                        bits=8, perchannel=True, sym=False, mse=None
                     )
 
                 # Hook to collect (inp, out) for GPTQ
