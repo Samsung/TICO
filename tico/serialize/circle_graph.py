@@ -28,6 +28,7 @@ from tico.serialize.circle_mapping import (
     str_to_circle_dtype,
     to_circle_dtype,
     to_circle_shape,
+    to_flat_contiguous_numpy,
 )
 from tico.serialize.pack import pack_buffer
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
@@ -160,7 +161,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
 
         buffer = circle.Buffer.BufferT()
         if data is not None and isinstance(data, np.ndarray):
-            data = data.flatten()
+            data = to_flat_contiguous_numpy(data)
 
             if QPARAM_KEY in node.meta:
                 if node.meta[QPARAM_KEY].dtype == "uint4":
@@ -190,7 +191,8 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         tensor.shape, tensor.shapeSignature = to_circle_shape(torch_t_shape)
 
         buffer = circle.Buffer.BufferT()
-        buffer.data = torch_t.flatten().cpu().numpy().view(np.uint8)  # type: ignore[assignment]
+        flat_data = to_flat_contiguous_numpy(torch_t)
+        buffer.data = flat_data.view(np.uint8)  # type: ignore[assignment]
         bid = self.model.add_buffer(buffer)
         tensor.buffer = bid
         self._add_tensor(tensor)
@@ -278,8 +280,8 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         assert op_tensor.shape == data_shape
 
         buffer = circle.Buffer.BufferT()
-        # Packing np.ndarray is faster than packing bytes
-        buffer.data = data_tensor.flatten().cpu().numpy().view(np.uint8)  # type: ignore[assignment]
+        flat_data = to_flat_contiguous_numpy(data_tensor)
+        buffer.data = flat_data.view(np.uint8)  # type: ignore[assignment]
         bid = self.model.add_buffer(buffer)
         op_tensor.buffer = bid
 

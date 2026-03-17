@@ -16,20 +16,34 @@ import numpy as np
 
 
 def pack_buffer(flat_data: np.ndarray, dtype: str) -> np.ndarray:
-    assert len(flat_data.shape) == 1
+    assert flat_data.ndim == 1
 
     if dtype == "uint4":
         if flat_data.dtype != np.uint8:
             raise RuntimeError("uint4 data should be saved in uint8.")
 
-        numel = flat_data.shape[0]
-        packed = np.zeros((numel + 1) // 2, dtype=np.uint8)
-        for i in range(numel):
-            assert flat_data[i] >= 0 and flat_data[i] <= 15
-            if i % 2 == 0:
-                packed[i // 2] = flat_data[i]
-            else:
-                packed[i // 2] |= flat_data[i] << 4
+        if flat_data.size == 0:
+            return np.empty(0, dtype=np.uint8)
+
+        if np.any(flat_data > 15):
+            raise RuntimeError("uint4 data must be in [0, 15].")
+
+        """
+        NumPy vectorized operations are faster than Python-level loops:
+
+          - flat_data[0::2] and flat_data[1::2] use strided views (no data copy)
+          - Bitwise operations (<<, |=) are executed in optimized C
+          
+        As a result, packing runs in bulk over the entire array, which is significantly
+        faster than iterating element-by-element in Python.
+        """
+        packed = np.empty((flat_data.size + 1) // 2, dtype=np.uint8)
+        packed[:] = flat_data[0::2]
+        # For odd-sized inputs, the last packed element has no corresponding
+        # upper 4-bit value, so we restrict the operation to packed[: n//2]
+        # to avoid shape mismatch.
+        upper = (flat_data[1::2] << 4).astype(np.uint8, copy=False)
+        packed[: flat_data.size // 2] |= upper
         return packed
-    else:
-        raise NotImplementedError(f"NYI dtype: {dtype}")
+
+    raise NotImplementedError(f"NYI dtype: {dtype}")

@@ -249,3 +249,41 @@ def circle_legalize_dtype_to(values, *, dtype: torch.dtype) -> torch.Tensor:
     if not check_if_i32_range(values):
         raise RuntimeError("'size' cannot be converted from int64 to int32.")
     return torch.as_tensor(values, dtype=dtype)
+
+
+def to_flat_contiguous_numpy(data) -> np.ndarray:
+    """
+    Convert input data to a 1D contiguous NumPy array.
+
+    This utility ensures that the returned array:
+    - resides on CPU
+    - has a contiguous (C-order) memory layout
+    - is flattened to shape (N,)
+
+    Behavior:
+    - If `data` is a torch.Tensor:
+        - Detaches from autograd
+        - Moves to CPU (if necessary)
+        - Ensures contiguous layout via `.contiguous()`
+        - Converts to NumPy and flattens
+    - If `data` is already array-like (e.g., np.ndarray, list):
+        - Converts to a contiguous NumPy array via `np.ascontiguousarray`
+        - Flattens to 1D
+
+    This function is designed to minimize unnecessary copies:
+    both `.contiguous()` and `np.ascontiguousarray()` only copy data
+    when the input is not already contiguous.
+
+    Parameters
+    ----------
+    data : Union[torch.Tensor, np.ndarray, array-like]
+        Input data to be converted.
+
+    Returns
+    -------
+    np.ndarray
+        A contiguous 1D NumPy array.
+    """
+    if isinstance(data, torch.Tensor):
+        return data.detach().cpu().contiguous().numpy().reshape(-1)
+    return np.ascontiguousarray(data).reshape(-1)
