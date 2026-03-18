@@ -44,8 +44,8 @@ import tico
 
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
+from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.gptq import GPTQConfig
-from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -117,92 +117,18 @@ def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
 def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
 
-    w_cfg = {
-        "mlp": {
-            "gate_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-            "up_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-            "down_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-        },
-        "self_attn": {
-            "q_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-            "k_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-            "v_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-            "o_proj": {
-                "weight": {
-                    "dtype": DType.uint(args.linear_weight_bits),
-                },
-            },
-        },
-        "input_layernorm": {
-            "dtype": DType.int(16),
-            "weight": {"dtype": DType.int(16)},
-        },
-        "post_attention_layernorm": {
-            "dtype": DType.int(16),
-            "weight": {"dtype": DType.int(16)},
-        },
-    }
-
-    cfg = PTQConfig(
-        default_dtype=DType.int(16),
-        default_qscheme=QScheme.PER_TENSOR_SYMM,
+    qcfg = build_llm_ptq_config(
+        model_type="llama",
+        num_hidden_layers=len(q_m.model.layers),
         wrapper_variant="prefill",
-        overrides={
-            "model": {
-                "embed_tokens": {
-                    "weight": {
-                        "dtype": (
-                            DType.uint(args.embedding_weight_bits)
-                            if args.embedding_weight_bits < 16
-                            else DType.int(args.embedding_weight_bits)
-                        ),
-                    },
-                },
-                "layers": {},
-                "norm": {
-                    "weight": {"dtype": DType.int(16)},
-                },
-            },
-            "lm_head": {
-                "weight": {
-                    "dtype": (
-                        DType.uint(args.lm_head_weight_bits)
-                        if args.lm_head_weight_bits < 16
-                        else DType.int(args.lm_head_weight_bits)
-                    ),
-                },
-            },
-        },
+        activation_dtype=DType.int(16),
+        default_qscheme=QScheme.PER_TENSOR_SYMM,
+        linear_weight_bits=args.linear_weight_bits,
+        embedding_weight_bits=args.embedding_weight_bits,
+        lm_head_weight_bits=args.lm_head_weight_bits,
+        norm_weight_dtype=DType.int(16),
+        strict_wrap=True,
     )
-    for i in range(len(q_m.model.layers)):
-        child_scope = f"{i}"
-        cfg.overrides["model"]["layers"][child_scope] = w_cfg  # type: ignore[index]
-
-    qcfg = cfg
     q_m = prepare(q_m, qcfg)
 
     # -------------------------------------------------------------------------
