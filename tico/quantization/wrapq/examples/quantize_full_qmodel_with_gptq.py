@@ -99,9 +99,9 @@ def inject_gptq_qparams(
 
 
 # -------------------------------------------------------------------------
-# Save model/layers in circle format
+# Save model in circle format
 # -------------------------------------------------------------------------
-def save_circles_to(q_m, calib_inputs, save_circle_to_folder):
+def save_model_to(q_m, calib_inputs, save_circle_to_folder):
     q_m.eval()
     q_m.cpu()
 
@@ -233,7 +233,7 @@ def main():
         "--save_circle_to_folder",
         type=str,
         default=None,
-        help="Save embedding/lm_head/all_layers/model.model/the_whole_model to the folder specified",
+        help="Save the whole model to the folder specified",
     )
     parser.add_argument(
         "--cache_dir",
@@ -415,7 +415,7 @@ def main():
 
     if args.save_circle_to_folder is not None:
         calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
-        save_circles_to(q_m, calib_inputs, args.save_circle_to_folder)
+        save_model_to(q_m, calib_inputs, args.save_circle_to_folder)
 
 
 if __name__ == "__main__":
