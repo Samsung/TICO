@@ -70,6 +70,22 @@ class PTQConfig(BaseConfig):
 
         • "Observer-kwargs" is forwarded verbatim to the observer constructor
           (`dtype`, `qscheme`, `channel_axis`, `observer`, …).
+    model_args : Mapping[str, Any]
+        Additional model-specific metadata required by certain wrappers.
+
+        This is intended for inputs that are not part of quantization policy
+        but are still needed to construct or run a wrapper correctly.
+
+        Typical examples include:
+            - vision grid metadata for VLMs
+              (e.g. `{"vision": {"grid_thw": (T, H, W)}}`)
+            - model-specific shape hints
+            - execution metadata required for static export paths
+
+        Unlike `overrides`, `model_args` is not scope-filtered by observer name.
+        It is propagated as-is to child configurations.
+    strict_wrap : bool
+        If ``True``, any module that cannot be wrapped will raise an error.
 
     Example
     -------
@@ -87,6 +103,11 @@ class PTQConfig(BaseConfig):
                        "dtype":    DType.uint(4),
                        "qscheme":  QScheme.PER_CHANNEL_ASYMM},
         },
+        model_args={
+            "vision": {
+                "grid_thw": (8, 24, 24),
+            },
+        },
     )
     ```
     """
@@ -96,6 +117,7 @@ class PTQConfig(BaseConfig):
     default_qscheme: QScheme = QScheme.PER_TENSOR_ASYMM
     wrapper_variant: WrapperVariant = "common"
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    model_args: Mapping[str, Any] = field(default_factory=dict)
     # If True, any module that cannot be wrapped will raise.
     strict_wrap: bool = True
 
@@ -115,6 +137,15 @@ class PTQConfig(BaseConfig):
         """
         return dict(self.overrides.get(obs_name, {}))
 
+    def get_model_arg(self, key: str, default: Any = None) -> Any:
+        """
+        Return model-specific metadata stored under *key*.
+
+        This is intended for wrapper-level inputs that are not observer
+        configuration, such as vision grid information or static shape hints.
+        """
+        return self.model_args.get(key, default)
+
     def child(self, scope: str) -> "PTQConfig":
         """
         Produce a *view* for a child wrapper.
@@ -123,6 +154,8 @@ class PTQConfig(BaseConfig):
           • same `default_dtype`
           • same `default_observer`
           • same `default_qscheme`
+          • same `wrapper_variant`
+          • same `model_args`
           • overrides under `self.overrides.get(scope, {})`
 
         Other scopes remain invisible to the child.
@@ -134,8 +167,17 @@ class PTQConfig(BaseConfig):
             default_qscheme=self.default_qscheme,
             wrapper_variant=self.wrapper_variant,
             overrides=sub_overrides,
+            model_args=self.model_args,
             strict_wrap=self.strict_wrap,
         )
 
     def __repr__(self):
-        return f"PTQConfig(default_dtype={self.default_dtype}, default_observer={self.default_observer}, default_qscheme={self.default_qscheme}, overrides={dict(self.overrides)}, strict_wrap={self.strict_wrap})"
+        return (
+            "PTQConfig("
+            f"default_dtype={self.default_dtype}, "
+            f"default_observer={self.default_observer}, "
+            f"default_qscheme={self.default_qscheme}, "
+            f"overrides={dict(self.overrides)}, "
+            f"model_args={dict(self.model_args)}, "
+            f"strict_wrap={self.strict_wrap})"
+        )

@@ -59,12 +59,10 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self.deepstack_visual_indexes = cfg.deepstack_visual_indexes
 
         # Extract vision_grid_thw from config for precomputing RoPE embeddings
-        self.vision_grid_thw = QuantQwen3VLVisionModel._get_vision_grid_thw(qcfg)
+        self.vision_grid_thw = self._get_vision_grid_thw(qcfg)
 
         # Precompute cumulative sequence lengths
-        cu_seqlens = QuantQwen3VLVisionModel._precompute_cu_seqlens(
-            self.vision_grid_thw
-        )
+        cu_seqlens = self._precompute_cu_seqlens(self.vision_grid_thw)
         self.register_buffer("cu_seqlens_template", cu_seqlens, persistent=False)
 
         # Precompute fast position embeddings
@@ -87,9 +85,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             if hasattr(fp_model.rotary_pos_emb, "theta")
             else 10000.0
         )
-        inv_freq = QuantQwen3VLVisionModel._precompute_rope_inv_freq(
-            dim=dim, theta=theta
-        )
+        inv_freq = self._precompute_rope_inv_freq(dim=dim, theta=theta)
         self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
 
         # Precompute RoPE position embeddings for fixed vision_grid_thw
@@ -154,16 +150,53 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
 
     @staticmethod
     def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> torch.Tensor:
-        """Extract vision_grid_thw from config for precomputing RoPE embeddings"""
-        if qcfg and hasattr(qcfg, "vision_grid_thw"):
-            grid_thw = torch.tensor([getattr(qcfg, "vision_grid_thw")])
-        else:
-            raise ValueError(
-                "vision_grid_thw must be specified in PTQConfig overrides for "
-                "QuantQwen3VLVisionModel. Example: ptq_cfg = PTQConfig(); ptq_cfg.vision_grid_thw = [8, 24, 24]"
+        """
+        Extract vision grid shape from PTQConfig.model_args.
+
+        Expected format:
+            PTQConfig(
+                model_args={
+                    "vision": {
+                        "grid_thw": (T, H, W),
+                    }
+                }
             )
-        assert grid_thw.shape == (1, 3)  # 1 row, 3 columns (T, H, W)
-        return grid_thw
+        """
+        if qcfg is None:
+            raise ValueError(
+                "PTQConfig is required for QuantQwen3VLVisionModel because "
+                "vision.grid_thw must be provided via PTQConfig.model_args."
+            )
+
+        vision_args = qcfg.get_model_arg("vision", {})
+        if not isinstance(vision_args, dict):
+            raise ValueError(
+                "PTQConfig.model_args['vision'] must be a mapping containing "
+                "'grid_thw'."
+            )
+
+        grid_thw = vision_args.get("grid_thw")
+        if grid_thw is None:
+            raise ValueError(
+                "vision.grid_thw must be specified in PTQConfig.model_args for "
+                "QuantQwen3VLVisionModel.\n"
+                "Example:\n"
+                "PTQConfig(\n"
+                "    model_args={\n"
+                "        'vision': {\n"
+                "            'grid_thw': (8, 24, 24),\n"
+                "        }\n"
+                "    }\n"
+                ")"
+            )
+
+        grid_thw_tensor = torch.tensor([grid_thw], dtype=torch.long)
+        if grid_thw_tensor.shape != (1, 3):
+            raise ValueError(
+                f"vision.grid_thw must have shape (3,), but got {tuple(grid_thw_tensor.shape)} "
+                f"after normalization."
+            )
+        return grid_thw_tensor
 
     @staticmethod
     def _precompute_rope_inv_freq(dim: int, theta: float) -> torch.Tensor:

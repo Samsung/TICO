@@ -71,6 +71,16 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
             else 10000.0
         )
 
+    @staticmethod
+    def _make_ptq_config(grid_thw: Tuple[int, int, int]) -> PTQConfig:
+        return PTQConfig(
+            model_args={
+                "vision": {
+                    "grid_thw": grid_thw,
+                }
+            }
+        )
+
     def _create_test_inputs(
         self, grid_thw: Tuple[int, int, int] = (1, 8, 8)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -86,9 +96,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
     def test_get_vision_grid_thw_from_config(self):
         """Test _get_vision_grid_thw static method with valid config."""
-        # Test with valid config
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
 
         grid_thw = QuantQwen3VLVisionModel._get_vision_grid_thw(ptq_config)
         expected = torch.tensor([[1, 8, 8]])
@@ -100,13 +108,13 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         # Test with None config
         with self.assertRaises(ValueError) as context:
             QuantQwen3VLVisionModel._get_vision_grid_thw(None)
-        self.assertIn("vision_grid_thw must be specified", str(context.exception))
+        self.assertIn("model_args", str(context.exception))
 
         # Test with config without vision_grid_thw
         ptq_config = PTQConfig()
         with self.assertRaises(ValueError) as context:
             QuantQwen3VLVisionModel._get_vision_grid_thw(ptq_config)
-        self.assertIn("vision_grid_thw must be specified", str(context.exception))
+        self.assertIn("vision.grid_thw", str(context.exception))
 
     def test_precompute_rope_inv_freq(self):
         """Test _precompute_rope_inv_freq static method."""
@@ -188,8 +196,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
     def test_init_with_valid_config(self):
         """Test successful initialization with valid config."""
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
 
         q_model = QuantQwen3VLVisionModel(
             self.fp_model, qcfg=ptq_config, fp_name="test_model"
@@ -218,12 +225,11 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
             QuantQwen3VLVisionModel(
                 self.fp_model, qcfg=ptq_config, fp_name="test_model"
             )
-        self.assertIn("vision_grid_thw must be specified", str(context.exception))
+        self.assertIn("vision.grid_thw", str(context.exception))
 
     def test_mode_transitions(self):
         """Test quantization mode transitions: NO_QUANT → CALIB → QUANT"""
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
         q_model = QuantQwen3VLVisionModel(
             self.fp_model, qcfg=ptq_config, fp_name="test_model"
         )
@@ -241,8 +247,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
     def test_forward_grid_mismatch_during_calibration(self):
         """Test forward pass fails with mismatched grid_thw during calibration."""
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
         q_model = QuantQwen3VLVisionModel(
             self.fp_model, qcfg=ptq_config, fp_name="test_model"
         )
@@ -257,8 +262,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
     def test_observer_count(self):
         """Test that the wrapper has the correct number of observers."""
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
         q_model = QuantQwen3VLVisionModel(
             self.fp_model, qcfg=ptq_config, fp_name="test_model"
         )
@@ -269,14 +273,13 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
     def test_precomputed_embeddings_shape(self):
         """Test that precomputed embeddings have correct shapes."""
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
         q_model = QuantQwen3VLVisionModel(
             self.fp_model, qcfg=ptq_config, fp_name="test_model"
         )
 
         expected_patches = math.prod(
-            getattr(ptq_config, "vision_grid_thw")
+            ptq_config.get_model_arg("vision")["grid_thw"]
         )  # t * h * w = 1 * 8 * 8 = 64
 
         # Check position embeddings
@@ -307,8 +310,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
     def test_output_structure(self):
         """Test that output has correct structure."""
-        ptq_config = PTQConfig()
-        setattr(ptq_config, "vision_grid_thw", [1, 8, 8])
+        ptq_config = self._make_ptq_config((1, 8, 8))
         q_model = QuantQwen3VLVisionModel(
             self.fp_model, qcfg=ptq_config, fp_name="test_model"
         )
@@ -324,7 +326,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
         # Check shapes
         expected_patches = math.prod(
-            getattr(ptq_config, "vision_grid_thw")
+            ptq_config.get_model_arg("vision")["grid_thw"]
         )  # t * h * w = 1 * 8 * 8
 
         # The structure of q_out depends on transformers version
@@ -346,8 +348,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         description: str
         for grid_thw_list, description in test_cases:
             with self.subTest(description=description):
-                ptq_config = PTQConfig()
-                setattr(ptq_config, "vision_grid_thw", grid_thw_list)
+                ptq_config = self._make_ptq_config(grid_thw_list)
                 q_model = QuantQwen3VLVisionModel(
                     self.fp_model, qcfg=ptq_config, fp_name=f"test_model_{description}"
                 )

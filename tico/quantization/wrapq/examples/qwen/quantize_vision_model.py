@@ -103,8 +103,13 @@ def main():
 
     # Configure PTQ with vision_grid_thw override
     # This is required for QuantQwen3VLVisionModel to precompute RoPE embeddings
-    ptq_config = tico.quantization.config.ptq.PTQConfig()
-    setattr(ptq_config, "vision_grid_thw", vision_grid_thw)
+    ptq_config = tico.quantization.config.ptq.PTQConfig(
+        model_args={
+            "vision": {
+                "grid_thw": tuple(vision_grid_thw),
+            }
+        }
+    )
 
     # Prepare the model for quantization
     prepared_model = tico.quantization.prepare(
