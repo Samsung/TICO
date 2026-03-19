@@ -18,13 +18,11 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.utils.transformers_compat import (
-    qwen3_vl_has_deepstack_model_output,
-)
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+from tico.utils.compat.transformers import qwen3_vl_has_deepstack_model_output
 
 
 @try_register("transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLVisionModel")
