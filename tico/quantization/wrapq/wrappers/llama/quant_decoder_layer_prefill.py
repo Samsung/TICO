@@ -170,6 +170,15 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
         assert isinstance(self.causal_mask_template, torch.Tensor)
         return self.causal_mask_template[..., :seq_len, :seq_len].to(device)
 
+    def _slice_rope(
+        self, seq_len: int, device: torch.device, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert isinstance(self.rope_cos_template, torch.Tensor)
+        assert isinstance(self.rope_sin_template, torch.Tensor)
+        cos = self.rope_cos_template[:, :seq_len, :].to(device=device, dtype=dtype)
+        sin = self.rope_sin_template[:, :seq_len, :].to(device=device, dtype=dtype)
+        return cos, sin
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -198,13 +207,8 @@ class QuantLlamaDecoderLayerPrefill(QuantModuleBase):
         )  # let it be quantized immediately
 
         if position_embeddings is None:
-            position_embeddings = (
-                self.rope_cos_template.to(
-                    dtype=hidden_states.dtype, device=hidden_states.device
-                ),
-                self.rope_sin_template.to(
-                    dtype=hidden_states.dtype, device=hidden_states.device
-                ),
+            position_embeddings = self._slice_rope(
+                hidden_states.size(1), hidden_states.device, hidden_states.dtype
             )
         cos, sin = position_embeddings
         position_embeddings = (
