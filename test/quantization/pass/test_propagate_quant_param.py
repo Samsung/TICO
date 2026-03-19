@@ -24,7 +24,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
-from tico.utils.torch_compat import export_produces_slice
+from tico.utils.compat.torch import export_produces_slice
 
 
 class LinearPermuteModule(torch.nn.Module):
