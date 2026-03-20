@@ -114,6 +114,39 @@ def save_model_to(q_m, calib_inputs, save_circle_to_folder):
             cm.save(save_path)
 
 
+def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
+    q_m.eval()
+    q_m.cpu()
+
+    if not hasattr(q_m, "wrapped"):
+        print("Saving layers currently is supported only for PTQ quantized model")
+        return
+
+    layers = q_m.wrapped.model.wrapped.layers
+    config = q_m.wrapped.config
+    for i, qlayer in enumerate(layers):
+        save_path = pathlib.Path(save_layers_to_folder, f"decoder_layer_{i}.q.circle")
+        B, S, D = 1, max_seq_len, config.hidden_size
+        example_hidden = torch.randn(B, S, D)
+
+        attention_mask = qlayer.wrapped._slice_causal(S, "cpu").squeeze(0)
+        dtype = example_hidden.dtype
+        pos_embeds = qlayer.wrapped._slice_rope(S, "cpu", dtype)
+
+        print(f"Saving model layer_{i} to {save_path.resolve()}")
+        with torch.no_grad():
+            with SuppressWarning(UserWarning, ".*"):
+                cm = tico.convert(
+                    qlayer,
+                    (example_hidden,),
+                    kwargs={
+                        "attention_mask": attention_mask,
+                        "position_embeddings": pos_embeds,
+                    },
+                )
+        cm.save(save_path)
+
+
 def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
 
@@ -234,6 +267,12 @@ def main():
         type=str,
         default=None,
         help="Save the whole model to the folder specified",
+    )
+    parser.add_argument(
+        "--save_layers_to_folder",
+        type=str,
+        default=None,
+        help="Save all layers to the folder specified",
     )
     parser.add_argument(
         "--cache_dir",
@@ -412,6 +451,9 @@ def main():
 
     # after PTQ quantizer only fixed-length input sequences are valid
     evaluate(q_m, tokenizer, dataset_test, args)
+
+    if args.save_layers_to_folder is not None:
+        save_layers_to(q_m, args.max_seq_len, args.save_layers_to_folder)
 
     if args.save_circle_to_folder is not None:
         calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
