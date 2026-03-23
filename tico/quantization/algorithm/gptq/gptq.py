@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
+from tico.quantization.algorithm.gptq.utils import get_numerical_padding
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -189,10 +190,11 @@ class GPTQ:
                 inp = inp.reshape((-1, inp.shape[-1]))
             inp = inp.t()
         if isinstance(self.layer, nn.Conv2d):
+            padding = get_numerical_padding(self.layer)
             unfold = nn.Unfold(
                 self.layer.kernel_size,
                 dilation=self.layer.dilation,
-                padding=self.layer.padding,
+                padding=padding,
                 stride=self.layer.stride,
             )
 
