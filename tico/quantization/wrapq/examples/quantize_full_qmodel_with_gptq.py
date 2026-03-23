@@ -417,8 +417,7 @@ def main():
     # Run GPTQ (weight-only) pass
     # -------------------------------------------------------------------------
     if not args.no_GPTQ:
-        if not args.no_GPTQ:
-            print("Applying GPTQ …")
+        print("Applying GPTQ …")
 
         sens = None
         if args.gptq_mse is not None and args.gptq_mse == "smse":
