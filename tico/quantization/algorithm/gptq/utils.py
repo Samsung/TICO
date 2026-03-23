@@ -113,9 +113,8 @@ class SensitivityCalibrator:
     Please see https://arxiv.org/abs/1905.12558?ref=inference.vc for a discussion.
     """
 
-    def __init__(self, model, tokenizer, dataset):
+    def __init__(self, model, dataset):
         self.model = model
-        self.tokenizer = tokenizer
         self.dataset = dataset
 
     def compute_sensitivity_info(self):

@@ -425,7 +425,7 @@ def main():
             if args.sensitivity_path is not None:
                 sens = torch.load(args.sensitivity_path)
             else:
-                calibrator = SensitivityCalibrator(model, tokenizer, calib_inputs)
+                calibrator = SensitivityCalibrator(model, calib_inputs)
                 sens = calibrator.compute_sensitivity_info()
 
         gptq_config = GPTQConfig(
