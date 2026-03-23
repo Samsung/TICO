@@ -66,6 +66,15 @@ def gather_single_batch_from_list(data_list, idx):
     return single_batch
 
 
+def get_numerical_padding(layer: torch.nn.Module):
+    padding = layer.padding
+    if isinstance(padding, str):
+        assert padding == "valid"  # TODO add support for the `same` padding
+        if padding == "valid":
+            padding = 0
+    return padding
+
+
 def get_dataset_for_calibration(model, dataset):
     """Enrich dataset with model ouputs to be used as targets"""
 

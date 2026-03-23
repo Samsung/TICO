@@ -66,6 +66,20 @@ class NormConv2D(torch.nn.Module):
         return (torch.zeros(1, 128, 32, 32),), {}
 
 
+class PaddedNormConv2D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.m = torch.nn.ModuleList()
+        self.m.append(torch.nn.Conv2d(128, 256, (3, 3), stride=1, padding="valid"))
+
+    def forward(self, x):
+        z = self.m[0](x)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 128, 32, 32),), {}
+
+
 class GroupwiseConv2D(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -258,6 +272,27 @@ class GPTQTest(unittest.TestCase):
             assert (
                 results["peir"][0] < tolerance
             ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_paddednormconv2d(self):
+        q_m = PaddedNormConv2D()
+        q_m.eval()
+        ori_m = q_m
+        args, kwargs = ori_m.get_example_inputs()
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_example_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
 
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
