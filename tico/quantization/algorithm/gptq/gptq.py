@@ -254,7 +254,7 @@ class GPTQ:
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
-        self.H += inp.matmul(inp.t())
+        self.H += inp.matmul(inp.t()).to(self.H.device)
 
     def fasterquant(
         self,
