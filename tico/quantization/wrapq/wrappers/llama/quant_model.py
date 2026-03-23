@@ -185,12 +185,15 @@ class QuantLlamaModel(QuantModuleBase):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            past_key_values = []
 
         if cache_position is None:
             past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
+                0
+                if (past_key_values is None or len(past_key_values) == 0)
+                else past_key_values[0][0].shape[-2]
             )
+
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
@@ -217,7 +220,9 @@ class QuantLlamaModel(QuantModuleBase):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for idx, decoder_layer in enumerate(
+            self.layers[: self.config.num_hidden_layers]
+        ):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)  # type: ignore[operator]
 
@@ -225,7 +230,11 @@ class QuantLlamaModel(QuantModuleBase):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_value=(
+                    past_key_values[idx]
+                    if past_key_values is not None and len(past_key_values) > idx
+                    else None
+                ),
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -235,6 +244,15 @@ class QuantLlamaModel(QuantModuleBase):
 
             if decoder_layer.wrapped.return_type == "tuple":
                 hidden_states = layer_outputs[0]
+            elif use_cache:
+                hidden_states = layer_outputs[0]
+                assert isinstance(layer_outputs[1], tuple)
+                if len(past_key_values) >= idx:  # type: ignore[arg-type]
+                    # prefill mode
+                    past_key_values += (layer_outputs[1],)  # type: ignore[operator]
+                else:
+                    # decode mode
+                    past_key_values[idx] = (layer_outputs[1],)  # type: ignore[index]
             else:
                 hidden_states = layer_outputs
 
