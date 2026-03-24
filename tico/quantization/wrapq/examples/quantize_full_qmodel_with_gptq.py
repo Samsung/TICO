@@ -352,23 +352,21 @@ def main():
     # 2. Load the FP backbone and tokenizer
     # -------------------------------------------------------------------------
     print("Loading FP model …")
+    dev_map = "balanced" if args.device != "cpu" else "cpu"
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
         cache_dir=args.cache_dir,
     )
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            args.model,
-            dtype=dtype,
-            trust_remote_code=args.trust_remote_code,
-            token=args.hf_token,
-            cache_dir=args.cache_dir,
-        )
-        .to(device)
-        .eval()
-    )
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        dtype=dtype,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+        cache_dir=args.cache_dir,
+        device_map=dev_map,
+    ).eval()
 
     model.config.use_cache = False  # TODO use args for it
     if args.calibrate_seq_len is not None:
