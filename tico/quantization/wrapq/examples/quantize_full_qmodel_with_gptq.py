@@ -26,13 +26,9 @@
 # =============================================================================
 
 import argparse
-
 import pathlib
 import random
-
-import types
-
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any
 
 import torch
 import tqdm
@@ -41,11 +37,11 @@ from lm_eval.utils import make_table
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import tico
-
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -358,6 +354,7 @@ def main():
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
         cache_dir=args.cache_dir,
+        legacy=False,
     )
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
@@ -367,6 +364,9 @@ def main():
         cache_dir=args.cache_dir,
         device_map=dev_map,
     ).eval()
+
+    model = prepare(model, SpinQuantConfig())
+    model = convert(model)
 
     model.config.use_cache = False  # TODO use args for it
     if args.calibrate_seq_len is not None:
