@@ -56,23 +56,14 @@ jobs:
           ./ccex format --no-apply-patches
 
   build-and-test:
-    runs-on: tico-linux
-    container:
-      image: samsungonedev.azurecr.io/ubuntu:22.04
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         torch-version: ["2.5", "2.6", "2.7", "2.8", "nightly"]
     steps:
-      - name: Install dependencies
-        run: |
-          apt-get update
-          apt-get install -y curl git lsb-release unzip jq
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Import all commit history and tag
-      - name: Install python dependencies
-        run: |
-          apt-get install -y python3-venv python3-pip
 
       - name: Get Ubuntu codename
         id: os
@@ -99,8 +90,8 @@ jobs:
       - name: "Install one-compiler"
         working-directory: ./.github/actions/download-release-asset
         run: |
-          dpkg -i ${{ steps.one.outputs.filename }}
-          apt-get install -f -y
+          sudo dpkg -i ${{ steps.one.outputs.filename }}
+          sudo apt-get install -f -y
           onecc --version || echo "Installation failed."
 
       - name: Trust all directories for Git
