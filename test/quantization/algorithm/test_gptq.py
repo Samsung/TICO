@@ -151,6 +151,39 @@ class TransposedConv2DGeneral(torch.nn.Module):
         return (torch.randn(1, 16, 7, 7),), {}
 
 
+class NormConv3D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.m = torch.nn.ModuleList()
+        self.m.append(torch.nn.Conv3d(16, 8, (2, 3, 5), stride=1))
+        self.m.append(torch.nn.Conv3d(8, 32, (3, 5, 2), stride=2))
+
+    def forward(self, x):
+        z = self.m[0](x)
+        z = self.m[1](z)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 16, 17, 19, 35),), {}
+
+    def get_zero_inputs(self):
+        return (torch.zeros(5, 16, 17, 19, 35),), {}
+
+
+class PaddedNormConv3D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.m = torch.nn.ModuleList()
+        self.m.append(torch.nn.Conv3d(16, 8, (2, 3, 5), stride=1, padding="valid"))
+
+    def forward(self, x):
+        z = self.m[0](x)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 16, 17, 19, 35),), {}
+
+
 class GPTQTest(unittest.TestCase):
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
@@ -430,3 +463,64 @@ class GPTQTest(unittest.TestCase):
         ), "second conv node is not quantized"
 
         # TODO add quantization
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv3d(self):
+        q_m = NormConv3D()
+        q_m.eval()
+        ori_m = q_m
+        args, kwargs = ori_m.get_example_inputs()
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_example_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv3d_on_zero_inputs(self):
+        q_m = NormConv3D()
+        q_m.eval()
+        ori_m = q_m
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_zero_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        assert torch.sum(q_m.m[0].weight != 0) > 0, "weights should not be all zeros"  # type: ignore[arg-type]
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_paddednormconv3d(self):
+        q_m = PaddedNormConv3D()
+        q_m.eval()
+        ori_m = q_m
+        args, kwargs = ori_m.get_example_inputs()
+
+        # Apply GPTQ
+        q_m = prepare(q_m, GPTQConfig(show_progress=False))
+        for _ in range(30):
+            args, kwargs = ori_m.get_example_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
