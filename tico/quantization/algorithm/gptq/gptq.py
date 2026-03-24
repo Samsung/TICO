@@ -24,6 +24,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 from tico.quantization.algorithm.gptq.utils import get_numerical_padding
@@ -167,7 +168,7 @@ class GPTQ:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
             W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
         elif isinstance(self.layer, nn.ConvTranspose2d):
             W = convtranspose2d_weights_to_conv2d_weights(self.layer, W)
@@ -251,6 +252,48 @@ class GPTQ:
         if isinstance(self.layer, nn.ConvTranspose2d):
             inp = get_matmul_input_for_convtranspose2d(self.layer, inp)
 
+        if isinstance(self.layer, nn.Conv3d):
+            # adapted from https://discuss.pytorch.org/t/manual-implementation-of-unrolled-3d-convolutions/91021
+            assert (
+                self.layer.groups == 1
+            )  # depthwise/groupwise are not supported currently
+            assert all(dilation == 1 for dilation in self.layer.dilation)
+
+            # inp is assumed to be (N, C_in, H, W, D)
+            padding = get_numerical_padding(self.layer)
+            if isinstance(padding, int):
+                padding = (padding, padding, padding)
+            if not all(item == 0 for item in padding):
+                inp = F.pad(
+                    inp,
+                    pad=(
+                        padding[2],
+                        padding[2],
+                        padding[1],
+                        padding[1],
+                        padding[0],
+                        padding[0],
+                    ),
+                    mode="constant",
+                    value=0,
+                )
+            krn_size = self.layer.kernel_size
+            stride = self.layer.stride
+            inp = (
+                inp.unfold(2, krn_size[0], stride[0])
+                .unfold(3, krn_size[1], stride[1])
+                .unfold(4, krn_size[2], stride[2])
+            )  # inp.shape = (N, C_in, ..patches... , krn_size[0], krn_size[1], krn_size[2])
+            inp = inp.reshape(
+                inp.shape[0], inp.shape[1], -1, krn_size[0] * krn_size[1] * krn_size[2]
+            )  # inp.shape = (N, C_in, num_patches, krn_size[0] * krn_size[1] * krn_size[2])
+            inp = inp.permute(
+                [0, 2, 1, 3]
+            )  # inp.shape = (N, num_patches, C_in, krn_size[0] * krn_size[1] * krn_size[2])
+            inp = inp.reshape(
+                inp.shape[0] * inp.shape[1], inp.shape[2] * inp.shape[3]
+            ).T  # inp.shape =(C_in * krn_size[0] * krn_size[1] * krn_size[2], N * num_patches)
+
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()
@@ -266,12 +309,19 @@ class GPTQ:
         verbose=False,
     ):
         W = self.layer.weight.data.clone()
-        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
             W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
+            if self.quantizer.sensitivity is not None:
+                self.quantizer.sensitivity = self.quantizer.sensitivity.flatten(1)
         elif isinstance(self.layer, nn.ConvTranspose2d):
             W = convtranspose2d_weights_to_conv2d_weights(self.layer, W)
             conv2d_shape = W.shape
             W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
+            if self.quantizer.sensitivity is not None:
+                self.quantizer.sensitivity = convtranspose2d_weights_to_conv2d_weights(
+                    self.layer, self.quantizer.sensitivity
+                )
+                self.quantizer.sensitivity = self.quantizer.sensitivity.flatten(1)
 
         W = W.float()
         tick = time.time()
@@ -366,7 +416,7 @@ class GPTQ:
         if actorder:
             Q = Q[:, invperm]
 
-        if isinstance(self.layer, nn.Conv2d) or isinstance(self.layer, nn.Conv1d):
+        if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
             if groupsize == -1:  # TODO support groupsize != -1
                 Q[:, dead] = quantize(
                     self.layer.weight.flatten(1)[:, dead],

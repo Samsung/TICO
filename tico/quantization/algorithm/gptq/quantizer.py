@@ -204,6 +204,7 @@ class GPTQQuantizer(BaseQuantizer):
                     torch.nn.Linear,
                     torch.nn.Conv2d,
                     torch.nn.Conv1d,
+                    torch.nn.Conv3d,
                     torch.nn.ConvTranspose2d,
                 ],
             )
