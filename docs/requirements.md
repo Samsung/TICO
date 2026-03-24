@@ -59,7 +59,7 @@ This project focuses on:
 |--------|--------------------------------|-------------|
 | RNF-1  | Performance: Conversion Speed  | Conversion of a baseline model (**Llama-3.2-1B**) must complete within **1 minute** (**3 minutes for Llama-3.2-3B**) on a standard Linux desktop environment (Ubuntu 22.04, Python 3.10). |
 | RNF-2  | Performance: File Size         | The size of the converted baseline models (**Llama-3.2-1B, Llama-3.2-3B**) must not increase by more than 1% compared to the serialized PyTorch model size saved via (`torch.save(model.state_dict())`). |
-| RNF-3  | Reliability                    | Converted model outputs should remain close to the PyTorch reference outputs. The similarity is measured using **PEIR (Peak Error Interval Ratio)** defined as `max(\|a - b\|) / (max(a) - min(a))`. The PEIR must not exceed **3% (0.03)** for any output tensor. |
+| RNF-3  | Reliability                    | Converted model outputs should remain close to the PyTorch reference outputs. The similarity is measured using **PEIR (Peak Error-to-Interval Ratio)** defined as `max(\|a - b\|) / (max(a) - min(a))`. The PEIR must not exceed **3% (0.03)** for any output tensor. |
 | RNF-4  | Maintainability: Operator Support | The library should support operator coverage sufficient for modern Transformer and LLM architectures. |
 | RNF-5  | Maintainability: Schema & Framework Updates | Must remain compatible with recent PyTorch versions (2.5 ~ latest stable) and the Circle schema specification. |
 | RNF-6  | Usability: API Design          | Provide an intuitive API that enables transformation, optimization, and quantization with minimal code. |
