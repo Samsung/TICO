@@ -304,21 +304,21 @@ def main() -> None:
 
     # Qwen3-VL GPTQ-specific switches
     parser.add_argument(
-        "--quantize_vision",
-        action="store_true",
-        default=True,
+        "--no_quantize_vision",
+        action="store_false",
+        dest="quantize_vision",
         help="Quantize the vision tower.",
     )
     parser.add_argument(
-        "--quantize_text",
-        action="store_true",
-        default=True,
+        "--no_quantize_text",
+        action="store_false",
+        dest="quantize_text",
         help="Quantize the text tower.",
     )
     parser.add_argument(
-        "--quantize_lm_head",
-        action="store_true",
-        default=True,
+        "--no_quantize_lm_head",
+        action="store_false",
+        dest="quantize_lm_head",
         help="Quantize lm_head.",
     )
     parser.add_argument(
