@@ -75,7 +75,7 @@ def get_numerical_padding(layer: torch.nn.Module):
     return padding
 
 
-def get_dataset_for_calibration(model, dataset):
+def get_dataset_for_calibration(model, dataset, show_progress=True):
     """Enrich dataset with model ouputs to be used as targets"""
 
     class DataSetWithLabels(torch.utils.data.Dataset):
@@ -100,9 +100,16 @@ def get_dataset_for_calibration(model, dataset):
     targets = []
 
     with torch.no_grad():
-        print("Computing calibration set")
-        for prompt in tqdm.tqdm(dataset):
-            results = model(prompt.to(model.device)).logits.detach()
+        if show_progress is True:
+            print("Computing calibration set")
+        for prompt in tqdm.tqdm(dataset, disable=not show_progress):
+            if isinstance(prompt, torch.Tensor):
+                results = model(prompt.to(model.device)).logits.detach()
+            else:
+                for item in prompt:
+                    prompt[item] = prompt[item].to(model.device)
+                results = model(**prompt).logits.detach()
+
             results = torch.argmax(results.detach(), dim=-1).cpu()
 
             targets.append(results)
@@ -122,32 +129,51 @@ class SensitivityCalibrator:
     Please see https://arxiv.org/abs/1905.12558?ref=inference.vc for a discussion.
     """
 
-    def __init__(self, model, dataset):
+    def __init__(self, model, dataset, show_progress: bool = True):
         self.model = model
         self.dataset = dataset
+        self.show_progress = show_progress
+        self.calibrated_types = [
+            torch.nn.Linear,
+            torch.nn.Conv2d,
+            torch.nn.Conv1d,
+            torch.nn.Conv3d,
+            torch.nn.ConvTranspose2d,
+        ]
 
     def compute_sensitivity_info(self):
 
-        data_loader = get_dataset_for_calibration(self.model, self.dataset)
+        data_loader = get_dataset_for_calibration(
+            self.model, self.dataset, self.show_progress
+        )
 
         dtype = self.model.dtype
         model = self.model.float()
 
         sensitivity = {}
         modules_to_process = {}
-        name_of_module: dict[torch.nn.Linear, str] = {}
+        name_of_module: dict[torch.nn.Module, str] = {}
 
         for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                modules_to_process[name] = module
-                name_of_module[module] = name
-                sensitivity[name] = torch.zeros_like(module.weight).cpu()
+            for type in self.calibrated_types:
+                if isinstance(module, type):
+                    modules_to_process[name] = module
+                    name_of_module[module] = name
+                    sensitivity[name] = torch.zeros_like(module.weight).cpu()
+                    break
 
-        print("Calibrating sensitivity")
-        for inputs, targets in tqdm.tqdm(data_loader):
+        if self.show_progress is True:
+            print("Calibrating sensitivity")
+        for inputs, targets in tqdm.tqdm(data_loader, disable=not self.show_progress):
             model.zero_grad()
-            inp_ids = inputs.view(-1, inputs.shape[-1])
-            logits = model(inp_ids.to(model.device)).logits
+            if isinstance(inputs, torch.Tensor):
+                inp_ids = inputs.squeeze(0)  # remove redundant batch dimension
+                logits = model(inp_ids.to(model.device)).logits
+            else:
+                for item in inputs:
+                    inputs[item] = inputs[item].to(model.device).squeeze(0)
+
+                logits = model(**inputs).logits
 
             outputs = logits.squeeze()
             targets = targets.squeeze()
