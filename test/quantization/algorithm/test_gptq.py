@@ -19,6 +19,7 @@ import tico
 import torch
 
 from tico.quantization import convert, prepare
+from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.evaluate import BACKEND, evaluate
@@ -100,6 +101,29 @@ class GroupwiseConv2D(torch.nn.Module):
         return (torch.randn(1, 32, 16, 16),), {}
 
 
+class NormConv2DWithLogits(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self.dtype = torch.float32
+        self.m = torch.nn.ModuleList()
+        self.m.append(torch.nn.Conv2d(128, 256, (3, 3), stride=1))
+        self.m.append(torch.nn.Conv2d(256, 512, (5, 5), stride=2))
+
+    def forward(self, x):
+        class OutputWithLogits:
+            def __init__(self, logits):
+                self.logits = logits
+
+        z = self.m[0](x)
+        z = self.m[1](z)
+        z = z.reshape((-1, 64)).unsqueeze(0)
+        return OutputWithLogits(z)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 128, 32, 32),), {}
+
+
 class NormConv1D(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -133,6 +157,28 @@ class GroupwiseConv1D(torch.nn.Module):
         return (torch.randn(1, 32, 16),), {}
 
 
+class NormConv1DWithLogits(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self.dtype = torch.float32
+        self.conv = torch.nn.Conv1d(128, 256, 3, stride=1)
+        self.conv2 = torch.nn.Conv1d(256, 512, 5, stride=2)
+
+    def forward(self, x):
+        class OutputWithLogits:
+            def __init__(self, logits):
+                self.logits = logits
+
+        z = self.conv(x)
+        z = self.conv2(z)
+        z = z.reshape((-1, 64)).unsqueeze(0)
+        return OutputWithLogits(z)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 128, 32),), {}
+
+
 class TransposedConv2DGeneral(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -146,6 +192,30 @@ class TransposedConv2DGeneral(torch.nn.Module):
         z = self.tconv(x)
         z = self.tconv2(z)
         return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 16, 7, 7),), {}
+
+
+class TransposedConv2DGeneralWithLogits(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self.dtype = torch.float32
+        self.tconv = torch.nn.ConvTranspose2d(16, 32, (2, 2), stride=2, groups=1)
+        self.tconv2 = torch.nn.ConvTranspose2d(
+            32, 16, (3, 3), stride=4, groups=2
+        )  # general groupwise
+
+    def forward(self, x):
+        class OutputWithLogits:
+            def __init__(self, logits):
+                self.logits = logits
+
+        z = self.tconv(x)
+        z = self.tconv2(z)
+        z = z.reshape((-1, 8)).unsqueeze(0)
+        return OutputWithLogits(z)
 
     def get_example_inputs(self):
         return (torch.randn(1, 16, 7, 7),), {}
@@ -179,6 +249,29 @@ class PaddedNormConv3D(torch.nn.Module):
     def forward(self, x):
         z = self.m[0](x)
         return z
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 16, 17, 19, 35),), {}
+
+
+class NormConv3DWithLogits(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.device = torch.device("cpu")
+        self.dtype = torch.float32
+        self.m = torch.nn.ModuleList()
+        self.m.append(torch.nn.Conv3d(16, 8, (2, 3, 5), stride=1))
+        self.m.append(torch.nn.Conv3d(8, 32, (3, 5, 2), stride=2))
+
+    def forward(self, x):
+        class OutputWithLogits:
+            def __init__(self, logits):
+                self.logits = logits
+
+        z = self.m[0](x)
+        z = self.m[1](z)
+        z = z.reshape((-1, 8)).unsqueeze(0)
+        return OutputWithLogits(z)
 
     def get_example_inputs(self):
         return (torch.randn(5, 16, 17, 19, 35),), {}
@@ -305,6 +398,44 @@ class GPTQTest(unittest.TestCase):
             assert (
                 results["peir"][0] < tolerance
             ), f"PEIR exceeds tolerance. PEIR:{results['peir'][0]}%, tolerance: {tolerance}%"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv2d_with_logits(self):
+        q_m = NormConv2DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
 
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
@@ -441,6 +572,46 @@ class GPTQTest(unittest.TestCase):
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )
+    def test_normconv1d_with_logits(self):
+        q_m = NormConv1DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.conv" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.conv2" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+        # TODO add quantization
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
     def test_transposed_conv2d(self):
         q_m = TransposedConv2DGeneral()
         q_m.eval()
@@ -452,6 +623,46 @@ class GPTQTest(unittest.TestCase):
         for _ in range(30):
             args, kwargs = ori_m.get_example_inputs()
             q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.tconv" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.tconv2" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+        # TODO add quantization
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_transposed_conv2d_with_logits(self):
+        q_m = TransposedConv2DGeneralWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
         convert(q_m, inplace=True)
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
@@ -524,3 +735,41 @@ class GPTQTest(unittest.TestCase):
         assert (
             "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv3d_with_logits(self):
+        q_m = NormConv3DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
