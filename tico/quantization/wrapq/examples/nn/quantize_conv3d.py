@@ -105,7 +105,7 @@ def main():
     # Convert to quantized model
     quantized_model = tico.quantization.convert(prepared_model, inplace=True)
 
-    # Compute PEIR (Peak Error-to-Input Ratio) between quantized model and original model
+    # Compute PEIR (Peak Error-to-Interval Ratio) between quantized model and original model
     with torch.no_grad():
         quant_out = quantized_model(example_input)
         fp_out = orig_model(example_input)
