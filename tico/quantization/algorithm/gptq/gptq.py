@@ -259,6 +259,41 @@ class GPTQ:
             )  # depthwise/groupwise are not supported currently
             assert all(dilation == 1 for dilation in self.layer.dilation)
 
+            # test
+            #  input_dim = [22, 59, 114]
+            #  in_channels = 10
+            #  out_channels = 5
+            #  kernel_size = (4, 2, 3)
+            #  padding = (1, 4, 3)
+            #  stride = (1, 1, 1)
+            #  N = 51
+            #  input_tensor = torch.zeros(N, in_channels, input_dim[0], input_dim[1], input_dim[2]).uniform_(-1, 1)
+            #  conv = nn.Conv3d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, padding=padding, stride=stride, bias=False)
+            #  output_tensor = conv(input_tensor)
+            #  output_dim = [0, 0, 0]
+            #  output_dim[0] = int((input_tensor.shape[2] - kernel_size[0] + 2 * padding[0]) / stride[0]) + 1
+            #  output_dim[1] = int((input_tensor.shape[3] - kernel_size[1] + 2 * padding[1]) / stride[1]) + 1
+            #  output_dim[2] = int((input_tensor.shape[4] - kernel_size[2] + 2 * padding[2]) / stride[2]) + 1
+            #  if not all(item == 0 for item in padding):
+            #      input_tensor = F.pad(input_tensor, pad=(padding[2], padding[2], padding[1], padding[1], padding[0], padding[0]), mode="constant", value=0)
+            #
+            #  unfolded_input_tensor = input_tensor.unfold(2, kernel_size[0], stride[0]).unfold(3, kernel_size[1], stride[1]).unfold(4, kernel_size[2], stride[2])
+            #  unfolded_input_tensor = unfolded_input_tensor.reshape(N, in_channels, -1, kernel_size[0] * kernel_size[1] * kernel_size[2])
+            #  unfolded_input_tensor = unfolded_input_tensor.permute([0, 2, 1, 3])
+            #  #unfolded_input_tensor = unfolded_input_tensor.reshape(-1, unfolded_input_tensor.shape[2] *  unfolded_input_tensor.shape[3])
+            #  #unfolded_input_tensor = unfolded_input_tensor.reshape( unfolded_input_tensor.shape[0],  unfolded_input_tensor.shape[1], unfolded_input_tensor.shape[2] *  unfolded_input_tensor.shape[3])
+            #  #unfolded_input_tensor = unfolded_input_tensor.permute([2, 0, 1])
+            #  #unfolded_input_tensor = unfolded_input_tensor.flatten(1).T #(N * NPatches, inner_dim)
+            #  unfolded_input_tensor = unfolded_input_tensor.reshape(unfolded_input_tensor.shape[0] *  unfolded_input_tensor.shape[1], unfolded_input_tensor.shape[2] *  unfolded_input_tensor.shape[3])
+            #
+            #  kernels_flat = conv.weight.detach().clone().flatten(1)#view(out_channels, -1)
+            #  alt_output_tensor = torch.matmul(kernels_flat, unfolded_input_tensor.T) #(out_channels, N * NPatches)
+            #  alt_output_tensor = alt_output_tensor.view(out_channels, N, output_dim[0], output_dim[1], output_dim[2])
+            #  alt_output_tensor = alt_output_tensor.permute([1, 0, 2, 3, 4])
+            #  eps_max = torch.max(torch.abs(output_tensor - alt_output_tensor))
+            #  eps_mean = torch.mean(torch.abs(output_tensor - alt_output_tensor))
+            #  assert( eps_max < 1.e-04 or eps_mean < 1.e-06)
+
             # inp is assumed to be (N, C_in, H, W, D)
             padding = get_numerical_padding(self.layer)
             if isinstance(padding, int):
@@ -363,49 +398,58 @@ class GPTQ:
         Hinv = H
 
         assert isinstance(Hinv, torch.Tensor)
-        for i1 in range(0, self.columns, blocksize):
-            i2 = min(i1 + blocksize, self.columns)
-            count = i2 - i1
+        just_quantize = False
+        if just_quantize:
+            Q = quantize(
+                W,
+                self.quantizer.scale,
+                self.quantizer.zero,
+                self.quantizer.maxq,
+            )
+        else:
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+                Hinv1 = Hinv[i1:i2, i1:i2]
 
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
+                for i in range(count):
+                    w = W1[:, i]
+                    d = Hinv1[i, i]
 
-                if groupsize != -1:
-                    if not static_groups:
-                        if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(
-                                W[:, (i1 + i) : (i1 + i + groupsize)], weight=True
-                            )
-                    else:
-                        idx: torch.Tensor | int = i1 + i
-                        if actorder:
-                            idx = perm[idx]
-                        self.quantizer = groups[idx // groupsize]
+                    if groupsize != -1:
+                        if not static_groups:
+                            if (i1 + i) % groupsize == 0:
+                                self.quantizer.find_params(
+                                    W[:, (i1 + i) : (i1 + i + groupsize)], weight=True
+                                )
+                        else:
+                            idx: torch.Tensor | int = i1 + i
+                            if actorder:
+                                idx = perm[idx]
+                            self.quantizer = groups[idx // groupsize]
 
-                q = quantize(
-                    w.unsqueeze(1),
-                    self.quantizer.scale,
-                    self.quantizer.zero,
-                    self.quantizer.maxq,
-                ).flatten()
-                Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d**2
+                    q = quantize(
+                        w.unsqueeze(1),
+                        self.quantizer.scale,
+                        self.quantizer.zero,
+                        self.quantizer.maxq,
+                    ).flatten()
+                    Q1[:, i] = q
+                    Losses1[:, i] = (w - q) ** 2 / d**2
 
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    Err1[:, i] = err1
 
-            Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+                Q[:, i1:i2] = Q1
+                Losses[:, i1:i2] = Losses1 / 2
 
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
