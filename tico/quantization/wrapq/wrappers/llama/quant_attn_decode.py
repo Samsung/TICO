@@ -156,6 +156,10 @@ class QuantLlamaAttentionDecode(QuantModuleBase):
         self.obs_attn_weights = mk("attn_weights")
         self.obs_attn_out_h = mk("attn_out_h")
 
+        # kv cache
+        self.obs_past_key = mk("past_key")
+        self.obs_past_value = mk("past_value")
+
         # New kv delta
         self.obs_new_k = mk("new_k")  # (B, n_kv, 1, H)
         self.obs_new_v = mk("new_v")  # (B, n_kv, 1, H)
@@ -210,6 +214,8 @@ class QuantLlamaAttentionDecode(QuantModuleBase):
         # Past KV must be static-sized and already RoPE-applied.
         assert past_k.shape == (B, self.n_kv, max_seq - 1, H), past_k.shape
         assert past_v.shape == (B, self.n_kv, max_seq - 1, H), past_v.shape
+        past_k = self._fq(past_k, self.obs_past_key)
+        past_v = self._fq(past_v, self.obs_past_value)
 
         # attention_mask: (0 for keep, -120 for mask)
         assert attention_mask is not None, "Decode expects attention_mask input"
@@ -344,6 +350,8 @@ class QuantLlamaAttentionDecode(QuantModuleBase):
             self.obs_attn_out,
             self.obs_attn_weights,
             self.obs_attn_out_h,
+            self.obs_past_key,
+            self.obs_past_value,
             self.obs_new_k,
             self.obs_new_v,
             self.obs_k_total,
