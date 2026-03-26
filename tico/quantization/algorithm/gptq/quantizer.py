@@ -110,8 +110,8 @@ class GPTQQuantizer(BaseQuantizer):
             ):
                 self._first_layer_ref = model.model.layers[0]
             else:
-                raise RuntimeError(
-                    "GPTQ Quantizer assumes the model has a nested structure like `model.model.layers`, commonly found in LLaMA and other Hugging Face transformer models."
+                self._first_layer_ref = (
+                    model  # let's treat it as a single layer (fallback)
                 )
         else:
             # fallback if the model is not LLaMA-like; treat whole model as single layer
@@ -180,7 +180,10 @@ class GPTQQuantizer(BaseQuantizer):
 
         # Identify layers
         if hasattr(model, "model"):
-            target_layers = model.model.layers
+            if hasattr(model.model, "layers"):
+                target_layers = model.model.layers
+            else:
+                target_layers = [model]
         else:
             target_layers = [model]
 
@@ -301,7 +304,8 @@ class GPTQQuantizer(BaseQuantizer):
                 # This line ensures we always take the first element when it's a tuple.
                 outs = outs[0] if isinstance(outs, tuple) else outs
                 # Update inputs for next iteration.
-                self.cache_args[0][batch_idx] = outs
+                if len(self.cache_args) > 0:
+                    self.cache_args[0][batch_idx] = outs
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
