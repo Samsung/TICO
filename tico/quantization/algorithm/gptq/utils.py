@@ -152,13 +152,11 @@ class SensitivityCalibrator:
 
         sensitivity = {}
         modules_to_process = {}
-        name_of_module: dict[torch.nn.Module, str] = {}
 
         for name, module in model.named_modules():
             for type in self.calibrated_types:
                 if isinstance(module, type):
                     modules_to_process[name] = module
-                    name_of_module[module] = name
                     sensitivity[name] = torch.zeros_like(module.weight).cpu()
                     break
 
