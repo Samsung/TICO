@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Any, Dict, Optional, Tuple
 
 from tico.quantization.config.ptq import PTQConfig, WrapperVariant
@@ -113,7 +114,7 @@ def _set_nested_override(
     current = root
     for key in path[:-1]:
         current = current.setdefault(key, {})
-    current[path[-1]] = value
+    current[path[-1]] = copy.deepcopy(value)
 
 
 def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
