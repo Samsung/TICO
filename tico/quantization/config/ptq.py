@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, Literal, Mapping, Type
+from typing import Any, Dict, Iterable, Literal, Mapping, MutableMapping, Optional, Type
 
 from tico.quantization.config.base import BaseConfig
 from tico.quantization.wrapq.dtypes import DType
@@ -22,6 +23,115 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 WrapperVariant = Literal["common", "prefill", "decode"]
+
+
+def _dtype_is_unsigned(dtype: DType) -> bool:
+    """
+    Return True when the dtype is unsigned.
+    """
+    return not dtype.signed
+
+
+def _auto_qscheme_for(dtype: DType, obs_name: Optional[str] = None) -> QScheme:
+    """
+    Choose a default qscheme from the effective dtype and observer name.
+
+    Default policy:
+      - signed dtype    -> symmetric per-tensor
+      - unsigned dtype  -> asymmetric per-tensor
+      - unsigned weight -> asymmetric per-channel
+    """
+    if _dtype_is_unsigned(dtype):
+        if obs_name == "weight":
+            return QScheme.PER_CHANNEL_ASYMM
+        return QScheme.PER_TENSOR_ASYMM
+    return QScheme.PER_TENSOR_SYMM
+
+
+def _resolve_qscheme(
+    *,
+    dtype: DType,
+    qscheme: Optional[QScheme],
+    context: str,
+    obs_name: Optional[str] = None,
+) -> QScheme:
+    """
+    Resolve a dtype/qscheme pair using the option-C policy.
+
+    Resolution policy:
+      1. If `qscheme` is None, infer it from `dtype` and `obs_name`.
+      2. If the caller explicitly provides an incompatible pair, raise.
+    """
+    resolved_qscheme = qscheme or _auto_qscheme_for(dtype, obs_name)
+
+    if _dtype_is_unsigned(dtype) and resolved_qscheme.is_symmetric():
+        raise ValueError(
+            f"Invalid quantization config at {context}: unsigned dtype "
+            f"{dtype!r} cannot be paired with symmetric qscheme "
+            f"{resolved_qscheme!r}."
+        )
+
+    return resolved_qscheme
+
+
+def _normalize_overrides(
+    mapping: Mapping[str, Any],
+    *,
+    inherited_dtype: DType,
+    inherited_qscheme: QScheme,
+    context: str,
+    current_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Recursively normalize and validate nested override mappings.
+
+    Any node that provides `dtype` but omits `qscheme` receives an inferred
+    qscheme derived from that dtype. Explicit incompatible pairs are rejected
+    immediately.
+
+    The current mapping key is tracked as `current_name` so that special
+    observer names such as `weight` can receive a more suitable automatic
+    default qscheme.
+    """
+    normalized: Dict[str, Any] = dict(mapping)
+
+    local_dtype = normalized.get("dtype", inherited_dtype)
+    local_qscheme = normalized.get("qscheme", inherited_qscheme)
+
+    if "dtype" in normalized:
+        normalized["qscheme"] = _resolve_qscheme(
+            dtype=local_dtype,
+            qscheme=normalized.get("qscheme"),
+            context=context,
+            obs_name=current_name,
+        )
+        local_qscheme = normalized["qscheme"]
+    elif "qscheme" in normalized:
+        local_qscheme = _resolve_qscheme(
+            dtype=local_dtype,
+            qscheme=normalized["qscheme"],
+            context=context,
+            obs_name=current_name,
+        )
+    else:
+        _resolve_qscheme(
+            dtype=local_dtype,
+            qscheme=local_qscheme,
+            context=context,
+            obs_name=current_name,
+        )
+
+    for key, value in list(normalized.items()):
+        if isinstance(value, Mapping):
+            normalized[key] = _normalize_overrides(
+                value,
+                inherited_dtype=local_dtype,
+                inherited_qscheme=local_qscheme,
+                context=f"{context}.{key}",
+                current_name=key,
+            )
+
+    return normalized
 
 
 @dataclass
@@ -38,10 +148,19 @@ class PTQConfig(BaseConfig):
     default_observer : Type[ObserverBase], optional
         Observer class to instantiate when the caller (or an override) does
          not provide a `observer` key.
-    default_qscheme : QScheme
-        Fallback quantization scheme (per-tensor / per-channel,
-        asymmetric / symmetric) for observers that DO NOT receive an explicit
-        override.
+    default_qscheme : Optional[QScheme]
+        Fallback quantization scheme for observers that do not receive an
+        explicit override.
+
+        When set to `None`, the qscheme is inferred automatically from the
+        effective dtype and, for special observer names such as `weight`,
+        from the observer role:
+            - unsigned activation-like dtype -> `QScheme.PER_TENSOR_ASYMM`
+            - unsigned weight dtype          -> `QScheme.PER_CHANNEL_ASYMM`
+            - signed dtype                   -> `QScheme.PER_TENSOR_SYMM`
+
+        When explicitly provided, the pair is validated. Incompatible pairs,
+        such as unsigned dtype with symmetric qscheme, raise immediately.
     wrapper_variant : str
         Execution specialization used when resolving quantization wrappers.
 
@@ -114,16 +233,110 @@ class PTQConfig(BaseConfig):
 
     default_dtype: DType = DType.uint(8)
     default_observer: Type[ObserverBase] = MinMaxObserver  # type: ignore[type-abstract]
-    default_qscheme: QScheme = QScheme.PER_TENSOR_ASYMM
+    default_qscheme: Optional[QScheme] = None
     wrapper_variant: WrapperVariant = "common"
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     model_args: Mapping[str, Any] = field(default_factory=dict)
     # If True, any module that cannot be wrapped will raise.
     strict_wrap: bool = True
 
+    def __post_init__(self) -> None:
+        """
+        Resolve automatic qscheme defaults and validate nested overrides.
+        """
+        self.default_qscheme = _resolve_qscheme(
+            dtype=self.default_dtype,
+            qscheme=self.default_qscheme,
+            context="PTQConfig.default_qscheme",
+        )
+        self.normalize_overrides()
+
     @property
     def name(self) -> str:
         return "ptq"
+
+    def normalize_overrides(self) -> None:
+        """
+        Normalize and validate the entire override tree in-place.
+
+        This method is useful when callers directly mutate `self.overrides`
+        after construction and want to retroactively apply automatic qscheme
+        inference and compatibility checks.
+        """
+        assert self.default_qscheme is not None
+        self.overrides = _normalize_overrides(
+            self.overrides,
+            inherited_dtype=self.default_dtype,
+            inherited_qscheme=self.default_qscheme,
+            context="PTQConfig.overrides",
+        )
+
+    def set_override(
+        self,
+        path: Iterable[str],
+        value: Mapping[str, Any],
+    ) -> None:
+        """
+        Set a nested override and normalize only the affected subtree.
+
+        Parameters
+        ----------
+        path : Iterable[str]
+            Hierarchical path inside `self.overrides`.
+            Example: `("model", "layers", "0", "self_attn", "o_proj", "weight")`
+        value : Mapping[str, Any]
+            Override payload to assign at the target path.
+
+        Notes
+        -----
+        The inserted subtree is normalized immediately, so callers may provide
+        only `dtype` and rely on automatic qscheme inference.
+        """
+        keys = tuple(path)
+        if not keys:
+            raise ValueError("Override path must not be empty.")
+
+        root: MutableMapping[str, Any] = dict(self.overrides)
+        current: MutableMapping[str, Any] = root
+        parent_dtype = self.default_dtype
+        parent_qscheme = self.default_qscheme
+        context = "PTQConfig.overrides"
+
+        for key in keys[:-1]:
+            context = f"{context}.{key}"
+            next_value = current.get(key)
+            if isinstance(next_value, Mapping):
+                child = dict(next_value)
+            elif next_value is None:
+                child = {}
+            else:
+                raise ValueError(
+                    f"Cannot create nested override under non-mapping node at {context}."
+                )
+
+            current[key] = child
+            current = child
+
+            local_dtype = current.get("dtype", parent_dtype)
+            parent_qscheme = _resolve_qscheme(
+                dtype=local_dtype,
+                qscheme=current.get("qscheme", parent_qscheme),
+                context=context,
+                obs_name=key,
+            )
+            parent_dtype = local_dtype
+
+        assert parent_qscheme is not None
+        leaf_key = keys[-1]
+        leaf_context = f"{context}.{leaf_key}"
+        current[leaf_key] = _normalize_overrides(
+            deepcopy(value),
+            inherited_dtype=parent_dtype,
+            inherited_qscheme=parent_qscheme,
+            context=leaf_context,
+            current_name=leaf_key,
+        )
+        self.overrides = root
 
     def get_kwargs(self, obs_name: str) -> Dict[str, Any]:
         """
