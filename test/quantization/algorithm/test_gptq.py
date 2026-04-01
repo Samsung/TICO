@@ -19,6 +19,7 @@ import tico
 import torch
 
 from tico.quantization import convert, prepare
+from tico.quantization.algorithm.gptq.quantizer import GPTQQuantizer
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
@@ -46,6 +47,23 @@ class BigLinear(torch.nn.Module):
 
     def get_zero_inputs(self):
         return (torch.zeros(1, 2048),), {}
+
+
+class SmallLinear(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.m = torch.nn.ModuleList()
+        for _ in range(3):
+            self.m.append(torch.nn.Linear(16, 16))
+
+    def forward(self, x):
+        z = self.m[0](x)
+        z = self.m[1](z)
+        z = self.m[2](z)
+        return z
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 16),), {}
 
 
 class NormConv2D(torch.nn.Module):
@@ -278,6 +296,87 @@ class NormConv3DWithLogits(torch.nn.Module):
 
 
 class GPTQTest(unittest.TestCase):
+    def test_gptq_config_validate_weight_bits_overrides(self):
+        conf = GPTQConfig(weight_bits=4, weight_bits_overrides={"m.1": 8})
+        conf.validate()
+
+    def test_gptq_config_validate_rejects_non_positive_weight_bits_override(self):
+        conf = GPTQConfig(weight_bits=4, weight_bits_overrides={"m.1": 0})
+        with self.assertRaises(ValueError):
+            conf.validate()
+
+    def test_resolve_weight_bits_priority(self):
+        quantizer = GPTQQuantizer(
+            GPTQConfig(
+                weight_bits=4,
+                weight_bits_overrides={
+                    "proj": 5,
+                    "layer.proj": 6,
+                    "model.layers.0.layer.proj": 8,
+                },
+            )
+        )
+
+        assert isinstance(quantizer.config, GPTQConfig)
+        self.assertEqual(
+            quantizer._resolve_weight_bits(
+                quantizer.config,
+                full_module_name="model.layers.0.layer.proj",
+                local_module_name="layer.proj",
+            ),
+            8,
+        )
+        self.assertEqual(
+            quantizer._resolve_weight_bits(
+                quantizer.config,
+                full_module_name="model.layers.1.layer.proj",
+                local_module_name="layer.proj",
+            ),
+            6,
+        )
+        self.assertEqual(
+            quantizer._resolve_weight_bits(
+                quantizer.config,
+                full_module_name="model.layers.2.other.proj",
+                local_module_name="other.proj",
+            ),
+            5,
+        )
+        self.assertEqual(
+            quantizer._resolve_weight_bits(
+                quantizer.config,
+                full_module_name="model.layers.2.other.up_proj",
+                local_module_name="other.up_proj",
+            ),
+            4,
+        )
+
+    @torch.inference_mode()
+    def test_weight_bits_overrides_are_applied_per_module(self):
+        q_m = SmallLinear()
+        q_m.eval()
+        ori_m = q_m
+
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                weight_bits=4,
+                weight_bits_overrides={
+                    "m.1": 8,
+                },
+            ),
+        )
+        for _ in range(8):
+            args, kwargs = ori_m.get_example_inputs()
+            q_m(*args, **kwargs)
+        convert(q_m, inplace=True)
+
+        self.assertTrue(hasattr(q_m, "quantizers"))
+        self.assertEqual(q_m.quantizers["model.layers.0.m.0"].maxq.item(), 15)
+        self.assertEqual(q_m.quantizers["model.layers.0.m.1"].maxq.item(), 255)
+        self.assertEqual(q_m.quantizers["model.layers.0.m.2"].maxq.item(), 15)
+
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
     )

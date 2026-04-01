@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -23,6 +23,21 @@ from tico.quantization.config.base import BaseConfig
 class GPTQConfig(BaseConfig):
     """
     Configuration for GPTQ weight quantization.
+
+    Attributes
+    ----------
+    weight_bits : int
+        Default bit-width applied to quantized weights.
+    weight_bits_overrides : dict[str, int]
+        Optional per-module bit-width overrides.
+
+        Supported keys are matched in the following order:
+          1) Full module name, for example `model.layers.0.self_attn.o_proj`
+          2) Layer-local module name, for example `self_attn.o_proj`
+          3) Full-name suffix, for example `self_attn.o_proj` or `down_proj`
+
+        This makes it possible to keep a default bit-width for most modules
+        while selectively increasing precision for specific projections.
     """
 
     # general
@@ -31,6 +46,7 @@ class GPTQConfig(BaseConfig):
 
     # quantizer.configure params (weight quantization spec)
     weight_bits: int = 8
+    weight_bits_overrides: dict[str, int] = field(default_factory=dict)
     perchannel: bool = True
     symmetric: bool = False
     mse: str | None = None
@@ -49,6 +65,11 @@ class GPTQConfig(BaseConfig):
     def validate(self) -> None:
         if self.weight_bits <= 0:
             raise ValueError(f"weight_bits must be positive. got {self.weight_bits}")
+        for module_name, bits in self.weight_bits_overrides.items():
+            if bits <= 0:
+                raise ValueError(
+                    f"weight_bits_overrides[{module_name!r}] must be positive. got {bits}"
+                )
         if self.groupsize != -1 and self.groupsize <= 0:
             raise ValueError(f"groupsize must be -1 or positive. got {self.groupsize}")
         if not (0.0 < self.percdamp <= 1.0):
