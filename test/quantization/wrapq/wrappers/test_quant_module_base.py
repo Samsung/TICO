@@ -184,7 +184,9 @@ class DummyQMWrapperDefault(QuantModuleBase):
 
 class TestQuantModuleQScheme(unittest.TestCase):
     def test_config_default_qscheme(self):
-        cfg = PTQConfig(default_qscheme=QScheme.PER_CHANNEL_SYMM)
+        cfg = PTQConfig(
+            default_dtype=DType.int(16), default_qscheme=QScheme.PER_CHANNEL_SYMM
+        )
         qm = DummyQM(cfg)
         self.assertEqual(qm.obs.qscheme, QScheme.PER_CHANNEL_SYMM)
 
@@ -199,6 +201,7 @@ class TestQuantModuleQScheme(unittest.TestCase):
             default_qscheme=QScheme.PER_TENSOR_ASYMM,
             overrides={
                 "act": {
+                    "dtype": DType.int(16),
                     "qscheme": QScheme.PER_CHANNEL_SYMM,
                     "channel_axis": 0,
                 }

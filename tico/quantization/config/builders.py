@@ -20,6 +20,22 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
 
+def _auto_qscheme_for(dtype: DType, obs_name: Optional[str] = None) -> QScheme:
+    """
+    Choose the default qscheme associated with a dtype and observer name.
+
+    Default policy:
+      - signed dtype   -> symmetric per-tensor
+      - unsigned dtype -> asymmetric per-tensor
+      - unsigned weight -> asymmetric per-channel
+    """
+    if not dtype.signed:
+        if obs_name == "weight":
+            return QScheme.PER_CHANNEL_ASYMM
+        return QScheme.PER_TENSOR_ASYMM
+    return QScheme.PER_TENSOR_SYMM
+
+
 def _weight_dtype_from_bits(bits: int) -> DType:
     """
     Convert a commonly used bit-width into a corresponding quantized dtype.
@@ -121,6 +137,10 @@ def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
     """
     Build a weight override dictionary.
 
+    The override explicitly carries both dtype and qscheme so that local dtype
+    changes do not accidentally inherit an incompatible or less suitable
+    qscheme from an outer scope.
+
     Parameters
     ----------
     weight_dtype : Optional[DType]
@@ -134,7 +154,12 @@ def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
     """
     if weight_dtype is None:
         return {}
-    return {"weight": {"dtype": weight_dtype}}
+    return {
+        "weight": {
+            "dtype": weight_dtype,
+            "qscheme": _auto_qscheme_for(weight_dtype, "weight"),
+        }
+    }
 
 
 def _build_norm_override(
@@ -162,9 +187,13 @@ def _build_norm_override(
 
     if norm_dtype is not None:
         override["dtype"] = norm_dtype
+        override["qscheme"] = _auto_qscheme_for(norm_dtype)
 
     if norm_weight_dtype is not None:
-        override["weight"] = {"dtype": norm_weight_dtype}
+        override["weight"] = {
+            "dtype": norm_weight_dtype,
+            "qscheme": _auto_qscheme_for(norm_weight_dtype, "weight"),
+        }
 
     return override
 
