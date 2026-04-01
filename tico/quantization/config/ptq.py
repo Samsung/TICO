@@ -17,35 +17,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Literal, Mapping, MutableMapping, Optional, Type
 
 from tico.quantization.config.base import BaseConfig
+from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 WrapperVariant = Literal["common", "prefill", "decode"]
-
-
-def _dtype_is_unsigned(dtype: DType) -> bool:
-    """
-    Return True when the dtype is unsigned.
-    """
-    return not dtype.signed
-
-
-def _auto_qscheme_for(dtype: DType, obs_name: Optional[str] = None) -> QScheme:
-    """
-    Choose a default qscheme from the effective dtype and observer name.
-
-    Default policy:
-      - signed dtype    -> symmetric per-tensor
-      - unsigned dtype  -> asymmetric per-tensor
-      - unsigned weight -> asymmetric per-channel
-    """
-    if _dtype_is_unsigned(dtype):
-        if obs_name == "weight":
-            return QScheme.PER_CHANNEL_ASYMM
-        return QScheme.PER_TENSOR_ASYMM
-    return QScheme.PER_TENSOR_SYMM
 
 
 def _resolve_qscheme(
@@ -62,9 +40,9 @@ def _resolve_qscheme(
       1. If `qscheme` is None, infer it from `dtype` and `obs_name`.
       2. If the caller explicitly provides an incompatible pair, raise.
     """
-    resolved_qscheme = qscheme or _auto_qscheme_for(dtype, obs_name)
+    resolved_qscheme = qscheme or auto_qscheme_for(dtype, obs_name)
 
-    if _dtype_is_unsigned(dtype) and resolved_qscheme.is_symmetric():
+    if dtype_is_unsigned(dtype) and resolved_qscheme.is_symmetric():
         raise ValueError(
             f"Invalid quantization config at {context}: unsigned dtype "
             f"{dtype!r} cannot be paired with symmetric qscheme "

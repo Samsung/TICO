@@ -15,7 +15,6 @@
 import unittest
 
 from tico.quantization.config.builders import (
-    _auto_qscheme_for,
     _build_llama_layer_overrides,
     _build_llama_overrides,
     _build_norm_override,
@@ -25,6 +24,7 @@ from tico.quantization.config.builders import (
     build_llm_ptq_config,
 )
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.utils import auto_qscheme_for
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.qscheme import QScheme
@@ -33,19 +33,19 @@ from tico.quantization.wrapq.qscheme import QScheme
 class TestBuilderHelpers(unittest.TestCase):
     def test_auto_qscheme_for_unsigned_activation(self):
         self.assertEqual(
-            _auto_qscheme_for(DType.uint(8), "act_in"),
+            auto_qscheme_for(DType.uint(8), "act_in"),
             QScheme.PER_TENSOR_ASYMM,
         )
 
     def test_auto_qscheme_for_unsigned_weight(self):
         self.assertEqual(
-            _auto_qscheme_for(DType.uint(8), "weight"),
+            auto_qscheme_for(DType.uint(8), "weight"),
             QScheme.PER_CHANNEL_ASYMM,
         )
 
     def test_auto_qscheme_for_signed_dtype(self):
         self.assertEqual(
-            _auto_qscheme_for(DType.int(8), "weight"),
+            auto_qscheme_for(DType.int(8), "weight"),
             QScheme.PER_TENSOR_SYMM,
         )
 
