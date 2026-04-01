@@ -60,6 +60,31 @@ class GPTQQuantizer(BaseQuantizer):
         self._orig_layer_forward: Optional[Callable[..., Any]] = None
         self._first_layer_ref: Optional[torch.nn.Module] = None
 
+    def _resolve_weight_bits(
+        self,
+        gptq_conf: GPTQConfig,
+        *,
+        full_module_name: str,
+        local_module_name: str,
+    ) -> int:
+        """Resolve the effective bit-width for a quantized submodule."""
+        if full_module_name in gptq_conf.weight_bits_overrides:
+            return gptq_conf.weight_bits_overrides[full_module_name]
+
+        if local_module_name in gptq_conf.weight_bits_overrides:
+            return gptq_conf.weight_bits_overrides[local_module_name]
+
+        suffix_matches = [
+            bits
+            for pattern, bits in gptq_conf.weight_bits_overrides.items()
+            if full_module_name.endswith(f".{pattern}")
+        ]
+
+        if suffix_matches:
+            return suffix_matches[-1]
+
+        return gptq_conf.weight_bits
+
     @torch.no_grad()
     def prepare(
         self,
@@ -220,18 +245,22 @@ class GPTQQuantizer(BaseQuantizer):
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
                     gptq[name] = GPTQ(subset[name])
+                    full_module_name = module_name[subset[name]]
+                    weight_bits = self._resolve_weight_bits(
+                        gptq_conf,
+                        full_module_name=full_module_name,
+                        local_module_name=name,
+                    )
                     if (
                         gptq_conf.sensitivity is not None
                         and isinstance(gptq_conf.sensitivity, dict)
-                        and module_name[subset[name]] in gptq_conf.sensitivity
+                        and full_module_name in gptq_conf.sensitivity
                     ):
-                        cur_sensitivity = gptq_conf.sensitivity[
-                            module_name[subset[name]]
-                        ]
+                        cur_sensitivity = gptq_conf.sensitivity[full_module_name]
                     else:
                         cur_sensitivity = None
                     gptq[name].quantizer.configure(
-                        bits=gptq_conf.weight_bits,
+                        bits=weight_bits,
                         perchannel=gptq_conf.perchannel,
                         sym=gptq_conf.symmetric,
                         mse=gptq_conf.mse,
