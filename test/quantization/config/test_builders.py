@@ -26,6 +26,7 @@ from tico.quantization.config.builders import (
 )
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -224,3 +225,12 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
                 model_type="mistral",
                 num_hidden_layers=1,
             )
+
+    def test_build_llm_ptq_config_accepts_default_observer(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            default_observer=EMAObserver,
+        )
+
+        self.assertIs(cfg.default_observer, EMAObserver)

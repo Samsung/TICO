@@ -13,10 +13,12 @@
 # limitations under the License.
 
 import copy
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Type
 
 from tico.quantization.config.ptq import PTQConfig, WrapperVariant
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -338,6 +340,7 @@ def build_llm_ptq_config(
     wrapper_variant: WrapperVariant = "prefill",
     activation_dtype: DType = DType.int(16),
     default_qscheme: QScheme = QScheme.PER_TENSOR_SYMM,
+    default_observer: Type[ObserverBase] = MinMaxObserver,
     linear_weight_bits: Optional[int] = None,
     linear_weight_dtype: Optional[DType] = None,
     embedding_weight_bits: Optional[int] = None,
@@ -375,6 +378,11 @@ def build_llm_ptq_config(
     default_qscheme : QScheme, default=QScheme.PER_TENSOR_SYMM
         Default quantization scheme for observers that do not receive an
         explicit override.
+    default_observer : Type[ObserverBase], default=MinMaxObserver
+        Observer class to instantiate when no explicit observer is provided
+        via overrides.
+        This should be a subclass of `ObserverBase` (e.g., MinMaxObserver,
+        EMAObserver). The class itself (not an instance) must be passed.
     linear_weight_bits : Optional[int], default=None
         Convenience bit-width for decoder-layer linear projection weights.
         Used only when `linear_weight_dtype` is not provided.
@@ -445,6 +453,7 @@ def build_llm_ptq_config(
     return PTQConfig(
         default_dtype=activation_dtype,
         default_qscheme=default_qscheme,
+        default_observer=default_observer,
         wrapper_variant=wrapper_variant,
         overrides=overrides,
         strict_wrap=strict_wrap,
