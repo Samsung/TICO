@@ -32,30 +32,7 @@ from tico.quantization.algorithm.gptq.gptq import (
 )
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
-
-
-def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
-
-    cur_weights = W.clone()
-    mults = torch.pow(torch.diag(Hinv), -1)
-    Hinv_U = torch.triu(Hinv, diagonal=1)
-
-    init_weights = W.clone()
-    for _ in range(max_num_of_iters):
-        cur_Q = quantize(cur_weights, scale, zero, maxq)
-
-        d_W = torch.mul((cur_weights - cur_Q), mults)
-        cur_weights = init_weights - torch.matmul(d_W, Hinv_U)
-        del d_W, cur_Q
-        d_W = cur_Q = None
-
-    del init_weights
-    init_weights = None
-
-    cur_Q = quantize(cur_weights, scale, zero, maxq)
-
-    return cur_Q, cur_weights
-
+from tico.quantization.algorithm.fpi_gptq.util import quantize, iterate_GPTQ
 
 class FPI_GPTQ:
     def __init__(self, layer):
