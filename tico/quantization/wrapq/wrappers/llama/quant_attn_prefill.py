@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 from typing import List, Optional, Tuple
 
 import torch
@@ -78,7 +77,7 @@ class QuantLlamaAttentionPrefill(QuantModuleBase):
             fp_attn.q_proj, qcfg=q_cfg, fp_name=f"{fp_name}.q_proj"
         )
         self.k_proj = PTQWrapper(
-            copy.deepcopy(fp_attn.k_proj), qcfg=k_cfg, fp_name=f"{fp_name}.k_proj"
+            fp_attn.k_proj, qcfg=k_cfg, fp_name=f"{fp_name}.k_proj"
         )
         self.v_proj = PTQWrapper(
             fp_attn.v_proj, qcfg=v_cfg, fp_name=f"{fp_name}.v_proj"
