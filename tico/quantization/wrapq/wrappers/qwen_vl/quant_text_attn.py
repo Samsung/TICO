@@ -203,7 +203,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
                 hidden.device
             )
-        attention_mask = self._fq(attention_mask, self.obs_causal_mask)
+        if torch.is_floating_point(attention_mask):
+            attention_mask = self._fq(attention_mask, self.obs_causal_mask)
 
         attn_weights_parts = []
         attn_out_parts = []
