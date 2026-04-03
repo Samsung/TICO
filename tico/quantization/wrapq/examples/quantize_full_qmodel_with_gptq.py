@@ -253,6 +253,12 @@ def main():
         help="Don't use GPTQ",
     )
     parser.add_argument(
+        "--no_spinquant",
+        action="store_true",
+        default=False,
+        help="Disable SpinQuant preprocessing.",
+    )
+    parser.add_argument(
         "--no_PTQ",
         action="store_true",
         default=False,
@@ -365,8 +371,12 @@ def main():
         device_map=dev_map,
     ).eval()
 
-    model = prepare(model, SpinQuantConfig())
-    model = convert(model)
+    if not args.no_spinquant:
+        print("Applying SpinQuant preprocessing …")
+        model = prepare(model, SpinQuantConfig())
+        model = convert(model)
+    else:
+        print("Skipping SpinQuant preprocessing …")
 
     model.config.use_cache = False  # TODO use args for it
     if args.calibrate_seq_len is not None:

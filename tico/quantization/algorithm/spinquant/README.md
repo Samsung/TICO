@@ -4,6 +4,9 @@ SpinQuant is a rotation-based pre-quantization algorithm for large language mode
 Its goal is to make a model more quantization-friendly by applying offline orthogonal
 transformations to the weight space before downstream quantization.
 
+> **Reference**: Liu et al., *"SpinQuant: LLM Quantization with Learned Rotations"*,
+> arXiv:2405.16406, 2024. — R1 and R2 follow the rotation notation used in this paper.
+
 In this implementation, SpinQuant is used as a **preprocessing / fusion step** rather
 than as a standalone quantizer that directly emits low-bit weights. The quantizer
 rewrites the model with SpinQuant-style rotations such that a later quantization stage
@@ -33,30 +36,27 @@ class SpinQuantConfig(
 )
 ```
 
-**Parameters**
+#### Parameters
 
-- init_method
+- **init_method**  
+  Strategy used to resolve rotation matrices.
 
-Strategy used to resolve rotation matrices.
+  Supported values:
+  - "random": generate random orthogonal matrices
+  - "hadamard": generate randomized Hadamard-structured orthogonal matrices
+  - "external": use user-provided matrices
 
-Supported values:
-- "random": generate random orthogonal matrices
-- "hadamard": generate randomized Hadamard-structured orthogonal matrices
-- "external": use user-provided matrices
+- **r1**  
+  Global hidden-dimension rotation matrix. Required when init_method="external".
 
-- r1
+- **r2_map**  
+  Optional mapping from module keys to per-layer head-dimension rotation matrices.
 
-Global hidden-dimension rotation matrix. Required when init_method="external".
+  Example key:
 
-- r2_map
-
-Optional mapping from module keys to per-layer head-dimension rotation matrices.
-
-Example key:
-
-```python
-"model.layers.0.self_attn.R2"
-```
+  ```python
+  "model.layers.0.self_attn.R2"
+  ```
 
 ### How to use SpinQuantQuantizer
 

@@ -125,6 +125,12 @@ def right_multiply_linear_weight_(module: nn.Linear, rotation: torch.Tensor) -> 
     Parameters:
         module: Target linear module with weight shape [out_features, in_features].
         rotation: Square rotation matrix of shape [in_features, in_features].
+
+    Notes:
+            PyTorch linear computes y = x @ W.T (row-vector convention).
+            Right-multiplying W by R gives W_new = W @ R, so:
+                y = x @ W_new.T = x @ R.T @ W.T
+            This is equivalent to rotating the input by R.T before the original weight.
     """
     weight = module.weight.data
     rotation = rotation.to(device=weight.device, dtype=torch.float64)
@@ -142,6 +148,12 @@ def left_multiply_linear_weight_(module: nn.Linear, rotation_t: torch.Tensor) ->
     Parameters:
         module: Target linear module with weight shape [out_features, in_features].
         rotation_t: Transposed square rotation matrix of shape [out_features, out_features].
+
+     Notes:
+            The caller passes r1.T (i.e., rotation_t = R^T).
+            This stores W_new = R^T @ W, so:
+                y = x @ W_new.T = x @ W.T @ R
+            Equivalent to rotating the output by R after the original weight.
     """
     weight = module.weight.data
     rotation_t = rotation_t.to(device=weight.device, dtype=torch.float64)
