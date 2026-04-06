@@ -28,7 +28,10 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
-@try_register("transformers.models.llama.modeling_llama.LlamaModel")
+@try_register(
+    "transformers.models.llama.modeling_llama.LlamaModel",
+    "tico.quantization.algorithm.spinquant.spin_llama.SpinLlamaModel",
+)
 class QuantLlamaModel(QuantModuleBase):
     def __init__(
         self,
@@ -41,6 +44,7 @@ class QuantLlamaModel(QuantModuleBase):
 
         # ----- child configs (hierarchical override) -------------------
         embed_cfg = qcfg.child("embed_tokens") if qcfg else None
+        rotate_embed_cfg = qcfg.child("rotate_embedding") if qcfg else None
         norm_cfg = qcfg.child("norm") if qcfg else None
         layers_cfg = qcfg.child("layers") if qcfg else None
 
@@ -58,6 +62,19 @@ class QuantLlamaModel(QuantModuleBase):
         )
 
         self.norm = PTQWrapper(model_fp.norm, norm_cfg, fp_name=f"{fp_name}.norm")
+
+        # `rotate_embedding` exists only for SpinQuant-style custom models.
+        # For a standard LlamaModel, skip creating the wrapper and bypass it
+        # during forward.
+        self.rotate_embedding = None
+        if hasattr(model_fp, "rotate_embedding") and isinstance(
+            model_fp.rotate_embedding, torch.nn.Module
+        ):
+            self.rotate_embedding = PTQWrapper(
+                model_fp.rotate_embedding,
+                rotate_embed_cfg,
+                fp_name=f"{fp_name}.rotate_embedding",
+            )
 
         new_list = nn.ModuleList()
         for idx, layer in enumerate(model_fp.layers):
@@ -201,6 +218,11 @@ class QuantLlamaModel(QuantModuleBase):
             position_ids = cache_position.unsqueeze(0)
 
         hidden_states = inputs_embeds
+
+        # Apply the SpinQuant rotation only when the source model provides it.
+        if self.rotate_embedding is not None:
+            hidden_states = self.rotate_embedding(hidden_states)
+
         # create position_embeddings and causal_mask to be shared across all the decoder layers
         causal_mask = self.get_attention_mask_for(hidden_states)
         causal_mask = causal_mask.squeeze(0)
@@ -256,10 +278,14 @@ class QuantLlamaModel(QuantModuleBase):
         return output if return_dict else output.to_tuple()
 
     def _all_observers(self):
-        # recurse into children that are QuantModuleBase
+        # Recurse into children that are QuantModuleBase
         yield from (self.obs_causal_mask, self.obs_cos, self.obs_sin)
 
         for m in (self.embed_tokens, self.norm):
             yield from m._all_observers()
+
+        if self.rotate_embedding is not None:
+            yield from self.rotate_embedding._all_observers()
+
         for m in self.layers:
             yield from m._all_observers()
