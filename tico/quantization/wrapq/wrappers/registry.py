@@ -78,6 +78,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_block",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_model",
+    "tico.quantization.wrapq.wrappers.qwen_vl.quant_for_conditional_generation",
     # add future core wrappers here
 )
 
