@@ -173,7 +173,7 @@ def main():
         # ---------------------------------------------------------------------
         # 2. Wrap every Transformer layer with PTQWrapper
         # ---------------------------------------------------------------------
-        qcfg = PTQConfig(wrapper_variant="prefill")  # all-uint8 defaults
+        qcfg = PTQConfig()  # all-uint8 defaults
         uint8_model = prepare(uint8_model, qcfg)
 
         # ---------------------------------------------------------------------

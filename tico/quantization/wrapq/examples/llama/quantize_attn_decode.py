@@ -22,9 +22,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.llama.quant_attn_decode import (
-    QuantLlamaAttentionDecode,
-)
+from tico.quantization.wrapq.wrappers.llama.quant_attention import QuantLlamaAttention
 from tico.utils.utils import SuppressWarning
 
 MODEL_NAME = "Maykeye/TinyLLama-v0"
@@ -37,7 +35,7 @@ torch.set_grad_enabled(False)
 torch.manual_seed(123)
 
 # -----------------------------------------------------------------------------
-# Build model + replace attention with quant wrapper (decode variant)
+# Build model + replace attention with quant wrapper
 # -----------------------------------------------------------------------------
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32).to(DEVICE)
 model.eval()
@@ -47,9 +45,9 @@ model.config.max_position_embeddings = MAX_SEQ
 layer0 = model.model.layers[0]
 orig_attn = layer0.self_attn
 
-layer0.self_attn = prepare(orig_attn, PTQConfig(wrapper_variant="decode"))
+layer0.self_attn = prepare(orig_attn, PTQConfig())
 attn_q = layer0.self_attn
-assert isinstance(attn_q.wrapped, QuantLlamaAttentionDecode), type(attn_q.wrapped)
+assert isinstance(attn_q.wrapped, QuantLlamaAttention), type(attn_q.wrapped)
 
 # -----------------------------------------------------------------------------
 # Random input generator
@@ -135,7 +133,7 @@ past_k_ex, past_v_ex = past_ex
 
 with SuppressWarning(UserWarning, ".*"):
     cm = tico.convert(
-        attn_q.eval(),
+        attn_q.wrapped.as_export_module("decode").eval(),
         (x_ex, (cos_ex, sin_ex), mask_ex, (past_k_ex, past_v_ex)),
     )
 cm.save(save_path)

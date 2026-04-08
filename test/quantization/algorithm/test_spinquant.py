@@ -182,7 +182,7 @@ class SpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_changes_decoder_weights(self):
         model = self._build_llama_model()
-        q_m = prepare(model, SpinQuantConfig(init_method="random"))
+        q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
 
         before_q = q_m.model.layers[0].self_attn.q_proj.weight.detach().clone()
         before_o = q_m.model.layers[0].self_attn.o_proj.weight.detach().clone()
@@ -204,7 +204,7 @@ class SpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_updates_rotation_side_layers(self):
         model = self._build_llama_model()
-        q_m = prepare(model, SpinQuantConfig(init_method="random"))
+        q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
 
         before_embed_rot = q_m.model.rotate_embedding.weight.detach().clone()
         before_lm_head_rot = q_m.rotate_lm_head.weight.detach().clone()
@@ -220,7 +220,7 @@ class SpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_resets_folded_layer_norms_to_identity(self):
         model = self._build_llama_model()
-        q_m = prepare(model, SpinQuantConfig(init_method="random"))
+        q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
         q_m = convert(q_m)
 
         for layer in q_m.model.layers:
@@ -262,6 +262,7 @@ class SpinQuantTest(unittest.TestCase):
                 init_method="external",
                 r1=r1,
                 r2_map=r2_map,
+                show_progress=False,
             )
         )
 
@@ -310,7 +311,7 @@ class SpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_forward_runs_after_spinquant_prepare_and_convert(self):
         model = self._build_llama_model()
-        q_m = prepare(model, SpinQuantConfig(init_method="random"))
+        q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
         q_m = convert(q_m)
 
         input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)

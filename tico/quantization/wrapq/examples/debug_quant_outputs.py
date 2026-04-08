@@ -179,7 +179,7 @@ def main():
     # 2. Wrap every layer with PTQWrapper (UINT-8 activations)
     # -------------------------------------------------------------------------
     print("Wrapping layers with PTQWrapper …")
-    qcfg = PTQConfig(wrapper_variant="prefill")  # default: per-tensor UINT8
+    qcfg = PTQConfig()  # default: per-tensor UINT8
     model = prepare(model, qcfg)
 
     # -------------------------------------------------------------------------

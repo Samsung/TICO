@@ -15,7 +15,7 @@
 import copy
 from typing import Any, Dict, Optional, Tuple, Type
 
-from tico.quantization.config.ptq import PTQConfig, WrapperVariant
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.utils import auto_qscheme_for
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
@@ -322,7 +322,6 @@ def build_llm_ptq_config(
     *,
     model_type: str,
     num_hidden_layers: int,
-    wrapper_variant: WrapperVariant = "prefill",
     activation_dtype: DType = DType.int(16),
     default_qscheme: QScheme = QScheme.PER_TENSOR_SYMM,
     default_observer: Type[ObserverBase] = MinMaxObserver,
@@ -356,8 +355,6 @@ def build_llm_ptq_config(
         Model family used to select the internal override mapping logic.
     num_hidden_layers : int
         Number of decoder layers in the model.
-    wrapper_variant : WrapperVariant, default="prefill"
-        Wrapper specialization to request when resolving quantized wrappers.
     activation_dtype : DType, default=DType.int(16)
         Default dtype for observers that do not receive an explicit override.
     default_qscheme : QScheme, default=QScheme.PER_TENSOR_SYMM
@@ -439,7 +436,6 @@ def build_llm_ptq_config(
         default_dtype=activation_dtype,
         default_qscheme=default_qscheme,
         default_observer=default_observer,
-        wrapper_variant=wrapper_variant,
         overrides=overrides,
         strict_wrap=strict_wrap,
     )

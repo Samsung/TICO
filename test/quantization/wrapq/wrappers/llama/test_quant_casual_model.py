@@ -61,9 +61,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         cls.fp_model = LlamaForCausalLM(cfg)
 
     def test_mode_transitions(self):
-        qmodel = QuantLlamaForCausalLM(
-            self.fp_model, qcfg=PTQConfig(wrapper_variant="prefill")
-        )
+        qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
         self.assertIs(qmodel._mode, Mode.NO_QUANT)
 
         qmodel.enable_calibration()
@@ -84,9 +82,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         ndf = 0
 
     def test_forward_diff(self):
-        qmodel = QuantLlamaForCausalLM(
-            self.fp_model, qcfg=PTQConfig(wrapper_variant="prefill")
-        )
+        qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
         qmodel.enable_calibration()
         calib_set = []
         for index in range(4):

@@ -25,7 +25,7 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import register
 
 
-@register(nn.Conv3d)
+# @register(nn.Conv3d)
 class QuantConv3d(QuantModuleBase):
     """
     Quantization wrapper for nn.Conv3d with:
