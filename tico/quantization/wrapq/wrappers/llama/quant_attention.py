@@ -362,7 +362,7 @@ class QuantLlamaAttention(QuantModuleBase):
             new_v = torch.stack(new_v_parts, dim=1)
             new_k = self._fq(new_k, self.obs_new_k)
             new_v = self._fq(new_v, self.obs_new_v)
-            outputs += ((new_k, new_v),)
+            outputs += ((new_k, new_v),)  # type: ignore[assignment]
 
         return outputs
 

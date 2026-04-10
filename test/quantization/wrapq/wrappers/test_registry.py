@@ -76,7 +76,7 @@ class TestRegistry(unittest.TestCase):
             def __init__(self):
                 super().__init__(2, 2)
 
-        mod.TmpFP = TmpFP
+        mod.TmpFP = TmpFP  # type: ignore[attr-defined]
         sys.modules["tmp_mod"] = mod
 
         @registry.try_register("tmp_mod.TmpFP")
@@ -120,7 +120,7 @@ class TestRegistry(unittest.TestCase):
             def __init__(self):
                 super().__init__(5, 5)
 
-        mod.TmpFP2 = TmpFP2
+        mod.TmpFP2 = TmpFP2  # type: ignore[attr-defined]
         sys.modules["tmp_mod2"] = mod
 
         @registry.try_register("tmp_mod2.TmpFP2")
@@ -142,7 +142,7 @@ class TestRegistry(unittest.TestCase):
             def __init__(self):
                 super().__init__(6, 6)
 
-        mod.TmpFP3 = TmpFP3
+        mod.TmpFP3 = TmpFP3  # type: ignore[attr-defined]
         sys.modules["tmp_mod3"] = mod
 
         @registry.try_register(

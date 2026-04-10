@@ -22,7 +22,7 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 _WRAPPERS: Dict[
     Type[nn.Module],
-    Dict[str, Type[QuantModuleBase]],
+    Type[QuantModuleBase],
 ] = {}
 _IMPORT_ONCE = False
 _CORE_MODULES = (

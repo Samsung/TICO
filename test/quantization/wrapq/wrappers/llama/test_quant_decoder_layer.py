@@ -57,9 +57,9 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
             attn_implementation="eager",
         )
         cls.fp_layer = LlamaDecoderLayer(cls.cfg, layer_idx=0)
-        cls.head_dim = cls.cfg.head_dim
-        cls.n_kv = cls.cfg.num_key_value_heads
-        cls.hidden_size = cls.cfg.hidden_size
+        cls.head_dim = cls.cfg.head_dim  # type: ignore[attr-defined]
+        cls.n_kv = cls.cfg.num_key_value_heads  # type: ignore[attr-defined]
+        cls.hidden_size = cls.cfg.hidden_size  # type: ignore[attr-defined]
 
     def _rand_rope(self, batch_size: int, seq_len: int):
         emb = torch.randn(batch_size, seq_len, self.head_dim)

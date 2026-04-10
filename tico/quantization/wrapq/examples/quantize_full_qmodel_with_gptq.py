@@ -136,7 +136,7 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
         print(f"Saving model layer_{i} to {save_path.resolve()}")
         with torch.no_grad():
             with SuppressWarning(UserWarning, ".*"):
-                # Pass attention_mask and position_embeddings as inputs to avoid 
+                # Pass attention_mask and position_embeddings as inputs to avoid
                 # storing them per layer and increasing model size.
                 cm = tico.convert(
                     qlayer.wrapped.as_export_module("prefill").eval(),
