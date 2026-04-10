@@ -98,6 +98,12 @@ class TestBuilderHelpers(unittest.TestCase):
             QScheme.PER_CHANNEL_ASYMM,
         )
 
+    def test_build_norm_override_empty_when_no_overrides_requested(self):
+        self.assertEqual(
+            _build_norm_override(norm_dtype=None, norm_weight_dtype=None),
+            {},
+        )
+
 
 class TestLlamaOverrideBuilders(unittest.TestCase):
     def test_build_llama_layer_overrides(self):
@@ -156,13 +162,30 @@ class TestLlamaOverrideBuilders(unittest.TestCase):
             QScheme.PER_CHANNEL_ASYMM,
         )
 
+    def test_build_llama_overrides_without_optional_weights(self):
+        overrides = _build_llama_overrides(
+            num_hidden_layers=1,
+            linear_weight_dtype=None,
+            embedding_weight_dtype=None,
+            lm_head_weight_dtype=None,
+            norm_dtype=None,
+            norm_weight_dtype=None,
+        )
+
+        self.assertIn("model", overrides)
+        self.assertIn("layers", overrides["model"])
+        self.assertEqual(len(overrides["model"]["layers"]), 1)
+        self.assertNotIn("embed_tokens", overrides["model"])
+        self.assertNotIn("norm", overrides["model"])
+        self.assertNotIn("lm_head", overrides)
+        self.assertEqual(overrides["model"]["layers"]["0"], {})
+
 
 class TestBuildLlmPtqConfig(unittest.TestCase):
     def test_build_llm_ptq_config_llama(self):
         cfg = build_llm_ptq_config(
             model_type="llama",
             num_hidden_layers=2,
-            wrapper_variant="decode",
             activation_dtype=DType.uint(8),
             default_qscheme=QScheme.PER_TENSOR_ASYMM,
             linear_weight_dtype=DType.uint(8),
@@ -176,7 +199,6 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
         self.assertIsInstance(cfg, PTQConfig)
         self.assertEqual(cfg.default_dtype, DType.uint(8))
         self.assertEqual(cfg.default_qscheme, QScheme.PER_TENSOR_ASYMM)
-        self.assertEqual(cfg.wrapper_variant, "decode")
         self.assertFalse(cfg.strict_wrap)
 
         self.assertEqual(
@@ -234,3 +256,47 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
         )
 
         self.assertIs(cfg.default_observer, EMAObserver)
+
+    def test_build_llm_ptq_config_bits_fallbacks(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            linear_weight_bits=8,
+            embedding_weight_bits=4,
+            lm_head_weight_bits=8,
+            norm_weight_bits=4,
+            norm_dtype=DType.uint(8),
+        )
+
+        self.assertEqual(
+            cfg.overrides["model"]["layers"]["0"]["self_attn"]["k_proj"]["weight"][
+                "dtype"
+            ],
+            DType.uint(8),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["embed_tokens"]["weight"]["dtype"],
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["lm_head"]["weight"]["dtype"],
+            DType.uint(8),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["norm"]["weight"]["dtype"],
+            DType.uint(4),
+        )
+
+    def test_build_llm_ptq_config_without_optional_weight_overrides(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+        )
+
+        self.assertIsInstance(cfg, PTQConfig)
+        self.assertEqual(cfg.default_dtype, DType.int(16))
+        self.assertEqual(cfg.default_qscheme, QScheme.PER_TENSOR_SYMM)
+        self.assertTrue(cfg.strict_wrap)
+        self.assertIn("model", cfg.overrides)
+        self.assertIn("layers", cfg.overrides["model"])
+        self.assertEqual(cfg.overrides["model"]["layers"]["0"], {})

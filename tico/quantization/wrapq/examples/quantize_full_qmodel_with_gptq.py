@@ -125,15 +125,19 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
         B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D)
 
-        attention_mask = qlayer.wrapped._slice_causal(S, "cpu").squeeze(0)
+        attention_mask = (
+            qlayer.wrapped.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
+        )
         dtype = example_hidden.dtype
-        pos_embeds = qlayer.wrapped._slice_rope(S, "cpu", dtype)
+        pos_embeds = qlayer.wrapped._slice_rope(
+            start=0, seq_len=S, device="cpu", dtype=dtype
+        )
 
         print(f"Saving model layer_{i} to {save_path.resolve()}")
         with torch.no_grad():
             with SuppressWarning(UserWarning, ".*"):
                 cm = tico.convert(
-                    qlayer,
+                    qlayer.wrapped.as_export_module("prefill").eval(),
                     (example_hidden,),
                     kwargs={
                         "attention_mask": attention_mask,
@@ -149,7 +153,6 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     qcfg = build_llm_ptq_config(
         model_type="llama",
         num_hidden_layers=len(q_m.model.layers),
-        wrapper_variant="prefill",
         activation_dtype=DType.int(16),
         default_qscheme=QScheme.PER_TENSOR_SYMM,
         linear_weight_bits=args.linear_weight_bits,

@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Samsung Electronics Co., Ltd. All Rights Reserved
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,33 +13,25 @@
 # limitations under the License.
 
 """
-Unit-tests for the lightweight wrapper registry.
+Unit tests for the simplified wrapper registry.
 
 What is verified
 ----------------
-1. `register` decorator adds the mapping and lookup returns it.
+1. `register` adds a direct fp-module -> quant-wrapper mapping.
 2. `try_register` succeeds when the target class exists.
-3. `try_register` is a NO-OP when the module / class is absent.
-4. Variant support:
-   - multiple variants can coexist for a single fp class
-   - lookup resolves exact variant
-   - lookup falls back to "common" when exact variant is missing
+3. `try_register` is a no-op when the target module or class is absent.
+4. Duplicate registration is rejected for both `register` and `try_register`.
 """
 
 import sys
 import types
 import unittest
 
+import tico.quantization.wrapq.wrappers.registry as registry
+
 import torch.nn as nn
 
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
-from tico.quantization.wrapq.wrappers.registry import lookup, register, try_register
-
-
-# Dummy fp32 & quant modules for tests
-class DummyFP(nn.Linear):  # inherit nn.Module for type-compat
-    def __init__(self):
-        super().__init__(4, 4)
 
 
 class DummyQuant(QuantModuleBase):
@@ -50,91 +42,119 @@ class DummyQuant(QuantModuleBase):
         return ()
 
 
-@register(DummyFP, variant="prefill")
-class QPrefill(DummyQuant):
-    ...
-
-
-@register(DummyFP, variant="decode")
-class QDecode(DummyQuant):
-    ...
-
-
-@register(DummyFP)
-class QCommon(DummyQuant):
-    ...
-
-
 class TestRegistry(unittest.TestCase):
+    def setUp(self):
+        self._wrappers_backup = dict(registry._WRAPPERS)
+        self._import_once_backup = registry._IMPORT_ONCE
 
-    # 1) plain @register ------------------------------------------------
+        registry._WRAPPERS.clear()
+        registry._IMPORT_ONCE = True
+
+    def tearDown(self):
+        registry._WRAPPERS.clear()
+        registry._WRAPPERS.update(self._wrappers_backup)
+        registry._IMPORT_ONCE = self._import_once_backup
+
+        for mod_name in ("tmp_mod", "tmp_mod2", "tmp_mod3"):
+            sys.modules.pop(mod_name, None)
+
     def test_register_and_lookup(self):
-        self.assertIs(lookup(DummyFP), QCommon)
+        class DummyFP(nn.Linear):
+            def __init__(self):
+                super().__init__(4, 4)
 
-    # 2) try_register when path exists ---------------------------------
+        @registry.register(DummyFP)
+        class DummyQuantImpl(DummyQuant):
+            pass
+
+        self.assertIs(registry.lookup(DummyFP), DummyQuantImpl)
+
     def test_try_register_success(self):
-        # create a throw-away module with a class inside
         mod = types.ModuleType("tmp_mod")
 
-        class TmpFP(nn.Linear):  # noqa: D401
+        class TmpFP(nn.Linear):
             def __init__(self):
                 super().__init__(2, 2)
 
-        mod.TmpFP = TmpFP  # type: ignore[attr-defined]
-        sys.modules["tmp_mod"] = mod  # inject into sys.modules
+        mod.TmpFP = TmpFP
+        sys.modules["tmp_mod"] = mod
 
-        @try_register("tmp_mod.TmpFP")
+        @registry.try_register("tmp_mod.TmpFP")
         class TmpQuant(DummyQuant):
-            ...
+            pass
 
-        self.assertIs(lookup(TmpFP), TmpQuant)
+        self.assertIs(registry.lookup(TmpFP), TmpQuant)
 
-        del sys.modules["tmp_mod"]  # clean up
-
-    # 3) try_register when target missing --------------------------------
     def test_try_register_graceful_skip(self):
-        path = "nonexistent.module.Foo"
-
-        @try_register(path)
+        @registry.try_register("nonexistent.module.Foo", "tmp_mod.DoesNotExist")
         class SkipQuant(DummyQuant):
-            ...
+            pass
 
-        # lookup should fail (module missing) without raising
-        self.assertIsNone(lookup(type("Fake", (), {})))
+        class UnregisteredFP(nn.Linear):
+            def __init__(self):
+                super().__init__(3, 3)
 
-    # 4-1) Variant: exact match across multiple variants -------------------
-    def test_variant_exact_match(self):
-        self.assertIs(lookup(DummyFP, variant="prefill"), QPrefill)
-        self.assertIs(lookup(DummyFP, variant="decode"), QDecode)
-        self.assertIs(lookup(DummyFP, variant="common"), QCommon)
+        self.assertIsNone(registry.lookup(UnregisteredFP))
 
-    # 4-2) Variant: fallback to common when requested variant missing -------
-    def test_variant_fallback_to_common(self):
-        # No decode/prefill registered: should still resolve to common
-        self.assertIs(lookup(DummyFP, variant="dummy_1"), QCommon)
-        self.assertIs(lookup(DummyFP, variant="dummy_2"), QCommon)
+    def test_register_duplicate_raises(self):
+        class DummyFP(nn.Linear):
+            def __init__(self):
+                super().__init__(4, 4)
 
-    # 4-3) try_register also supports variants -----------------------------
-    def test_try_register_with_variant(self):
+        @registry.register(DummyFP)
+        class FirstQuant(DummyQuant):
+            pass
+
+        with self.assertRaises(ValueError):
+
+            @registry.register(DummyFP)
+            class SecondQuant(DummyQuant):
+                pass
+
+        self.assertIs(registry.lookup(DummyFP), FirstQuant)
+
+    def test_try_register_duplicate_raises(self):
         mod = types.ModuleType("tmp_mod2")
 
         class TmpFP2(nn.Linear):
             def __init__(self):
-                super().__init__(3, 3)
+                super().__init__(5, 5)
 
-        mod.TmpFP2 = TmpFP2  # type: ignore[attr-defined]
+        mod.TmpFP2 = TmpFP2
         sys.modules["tmp_mod2"] = mod
 
-        @try_register("tmp_mod2.TmpFP2", variant="decode")
-        class TmpQuantDecode(DummyQuant):
-            ...
+        @registry.try_register("tmp_mod2.TmpFP2")
+        class FirstQuant(DummyQuant):
+            pass
 
-        @try_register("tmp_mod2.TmpFP2", variant="common")
-        class TmpQuantCommon(DummyQuant):
-            ...
+        with self.assertRaises(ValueError):
 
-        self.assertIs(lookup(TmpFP2, variant="decode"), TmpQuantDecode)
-        # asking for prefill should fall back to common if decode-only doesn't match
-        self.assertIs(lookup(TmpFP2, variant="prefill"), TmpQuantCommon)
+            @registry.try_register("tmp_mod2.TmpFP2")
+            class SecondQuant(DummyQuant):
+                pass
 
-        del sys.modules["tmp_mod2"]
+        self.assertIs(registry.lookup(TmpFP2), FirstQuant)
+
+    def test_try_register_multiple_paths_registers_existing_target(self):
+        mod = types.ModuleType("tmp_mod3")
+
+        class TmpFP3(nn.Linear):
+            def __init__(self):
+                super().__init__(6, 6)
+
+        mod.TmpFP3 = TmpFP3
+        sys.modules["tmp_mod3"] = mod
+
+        @registry.try_register(
+            "nonexistent.module.Foo",
+            "tmp_mod3.MissingClass",
+            "tmp_mod3.TmpFP3",
+        )
+        class TmpQuant3(DummyQuant):
+            pass
+
+        self.assertIs(registry.lookup(TmpFP3), TmpQuant3)
+
+
+if __name__ == "__main__":
+    unittest.main()

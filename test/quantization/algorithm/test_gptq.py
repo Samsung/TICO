@@ -385,7 +385,7 @@ class GPTQTest(unittest.TestCase):
         from datasets import load_dataset
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained("Maykeye/TinyLLama-v0")
+        tokenizer = AutoTokenizer.from_pretrained("Maykeye/TinyLLama-v0", legacy=False)
         model = AutoModelForCausalLM.from_pretrained(
             "Maykeye/TinyLLama-v0", dtype=torch.float32
         )

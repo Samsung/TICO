@@ -15,10 +15,6 @@
 # Example script to calibrate + convert + export a *decode-only* LlamaDecoderLayer wrapper
 # with fully static shapes and external KV-cache delta updates.
 #
-# Expected wrapper stack:
-#   QuantLlamaDecoderLayerDecode (variant="decode")
-#     └─ self_attn -> QuantLlamaAttentionDecode (variant="decode")
-#
 # Notes
 # -----
 # - The decode wrapper expects:
@@ -42,8 +38,8 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer_decode import (
-    QuantLlamaDecoderLayerDecode,
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+    QuantLlamaDecoderLayer,
 )
 from tico.utils.utils import SuppressWarning
 
@@ -58,7 +54,7 @@ torch.manual_seed(123)
 
 
 # -----------------------------------------------------------------------------
-# Build model + replace one decoder layer with quant wrapper (decode variant)
+# Build model + replace one decoder layer with quant wrapper
 # -----------------------------------------------------------------------------
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32).to(DEVICE)
 
@@ -68,15 +64,14 @@ model.config.max_position_embeddings = MAX_SEQ
 layer0 = model.model.layers[0]
 orig_layer = layer0
 
-# Replace the entire decoder layer (decode variant).
-layer0_q = prepare(orig_layer, PTQConfig(wrapper_variant="decode"))
+# Replace the entire decoder layer
+layer0_q = prepare(orig_layer, PTQConfig())
+layer0_q.wrapped.return_type = "tuple"
 model.model.layers[0] = layer0_q
 model.eval()
 
 assert hasattr(layer0_q, "wrapped"), "prepare() should return a PTQWrapper"
-assert isinstance(layer0_q.wrapped, QuantLlamaDecoderLayerDecode), type(
-    layer0_q.wrapped
-)
+assert isinstance(layer0_q.wrapped, QuantLlamaDecoderLayer), type(layer0_q.wrapped)
 
 
 # -----------------------------------------------------------------------------
@@ -179,7 +174,7 @@ past_k_ex, past_v_ex = past_ex
 
 with SuppressWarning(UserWarning, ".*"):
     cm = tico.convert(
-        layer0_q,
+        layer0_q.as_export_module("decode").eval(),
         (
             x_ex,  # hidden_states
             mask_ex,  # attention_mask

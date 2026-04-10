@@ -110,13 +110,11 @@ class TestPTQConfigChild(unittest.TestCase):
         parent = PTQConfig(
             default_dtype=DType.uint(8),
             default_qscheme=None,
-            wrapper_variant="decode",
         )
         child = parent.child("gate_proj")
 
         self.assertEqual(child.default_dtype, DType.uint(8))
         self.assertEqual(child.default_qscheme, QScheme.PER_TENSOR_ASYMM)
-        self.assertEqual(child.wrapper_variant, "decode")
 
     def test_child_override_applied_and_normalized(self):
         parent = PTQConfig(

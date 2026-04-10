@@ -22,15 +22,13 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.llama.quant_attn_prefill import (
-    QuantLlamaAttentionPrefill,
-)
+from tico.quantization.wrapq.wrappers.llama.quant_attention import QuantLlamaAttention
 from tico.utils.utils import SuppressWarning
 
 name = "Maykeye/TinyLLama-v0"
 MAX_SEQ = 256
 model = AutoModelForCausalLM.from_pretrained(name, dtype=torch.float32)
-tokenizer = AutoTokenizer.from_pretrained(name)
+tokenizer = AutoTokenizer.from_pretrained(name, legacy=False)
 
 # Make sure pad token exists (Llama often uses eos as pad)
 if tokenizer.pad_token_id is None:
@@ -42,13 +40,11 @@ model.config.max_position_embeddings = MAX_SEQ
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 orig_attn = model.model.layers[0].self_attn
-model.model.layers[0].self_attn = prepare(
-    orig_attn, PTQConfig(wrapper_variant="prefill")
-)
+model.model.layers[0].self_attn = prepare(orig_attn, PTQConfig())
 model.eval()
 
 attn_q = model.model.layers[0].self_attn  # quant wrapper
-assert isinstance(attn_q.wrapped, QuantLlamaAttentionPrefill)
+assert isinstance(attn_q.wrapped, QuantLlamaAttention)
 rotary = model.model.rotary_emb
 
 # -------------------------------------------------------------------------
@@ -118,7 +114,9 @@ example = torch.randn(B, S, D)
 example_pos = rotary(example, torch.arange(S)[None, :])
 
 with SuppressWarning(UserWarning, ".*"):
-    cm = tico.convert(attn_q, (example, example_pos))
+    cm = tico.convert(
+        attn_q.wrapped.as_export_module("prefill").eval(), (example, example_pos)
+    )
 cm.save(save_path)
 
 print(f"Quantized Circle model saved to {save_path.resolve()}")

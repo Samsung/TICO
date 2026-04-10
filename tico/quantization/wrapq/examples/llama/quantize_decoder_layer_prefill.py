@@ -16,7 +16,7 @@
 # POST-TRAINING QUANTIZATION EXAMPLE — Llama Decoder Layer (Self-Attn + MLP)
 # -----------------------------------------------------------------------------
 # This demo shows how to:
-#   1. Replace a single FP32 `LlamaDecoderLayer` with `QuantLlamaDecoderLayerPrefill`.
+#   1. Replace a single FP32 `LlamaDecoderLayer` with `QuantLlamaDecoderLayer`.
 #   2. Collect activation statistics in one calibration sweep.
 #   3. Freeze scales / zero-points and switch to INT-simulation mode.
 #   4. Compare INT-8 vs FP32 outputs with a quick mean-absolute-diff check.
@@ -36,8 +36,8 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer_prefill import (
-    QuantLlamaDecoderLayerPrefill,
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+    QuantLlamaDecoderLayer,
 )
 from tico.utils.utils import SuppressWarning
 
@@ -58,11 +58,11 @@ model.config.max_position_embeddings = MAX_SEQ
 # 1. Swap in the quant wrapper
 # -------------------------------------------------------------------------
 fp32_layer = model.model.layers[0]  # keep a reference for diff check
-model.model.layers[0] = prepare(fp32_layer, PTQConfig(wrapper_variant="prefill"))
+model.model.layers[0] = prepare(fp32_layer, PTQConfig())
 model.eval()
 
 qlayer = model.model.layers[0]  # alias for brevity
-assert isinstance(qlayer.wrapped, QuantLlamaDecoderLayerPrefill)
+assert isinstance(qlayer.wrapped, QuantLlamaDecoderLayer)
 
 # -------------------------------------------------------------------------
 # Helpers: fixed-length tokenize + embed
@@ -155,7 +155,7 @@ with SuppressWarning(UserWarning, ".*"):
         )
 
         cm = tico.convert(
-            qlayer,
+            qlayer.wrapped.as_export_module("prefill").eval(),
             (example_hidden,),
             kwargs={"attention_mask": attn_mask, "position_embeddings": pos_embeds},
         )

@@ -24,11 +24,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tico.quantization import prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
-from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer_decode import (
-    QuantLlamaDecoderLayerDecode,
-)
-from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer_prefill import (
-    QuantLlamaDecoderLayerPrefill,
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+    QuantLlamaDecoderLayer,
 )
 
 
@@ -81,20 +78,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def _clone_layer_with_variant(
-    layer: nn.Module, variant: Literal["common", "prefill", "decode"]
-) -> nn.Module:
+def _clone_quant_layer(layer: nn.Module) -> nn.Module:
     """
-    Build a wrapped decoder layer for a specific runtime phase.
+    Build a wrapped decoder layer using the wrapper.
 
-    The returned module is expected to be a PTQWrapper whose `.wrapped`
-    is either QuantLlamaDecoderLayerPrefill or QuantLlamaDecoderLayerDecode.
+    The wrapper keeps a single HF-compatible forward for both prefill and decode.
+    Export-specific specialization is handled later through export adapters.
     """
-    qlayer = prepare(
-        layer,
-        PTQConfig(wrapper_variant=variant),
-    )
-    return qlayer
+    return prepare(layer, PTQConfig())
 
 
 def _build_rope_templates_from_config(
@@ -221,8 +212,7 @@ class StaticLlamaLayerRuntime:
         tokenizer: AutoTokenizer,
         max_seq: int,
         device: str = "cpu",
-        prefill_layers: Optional[Sequence[nn.Module]] = None,
-        decode_layers: Optional[Sequence[nn.Module]] = None,
+        layers: Optional[Sequence[nn.Module]] = None,
     ):
         self.model = model.eval().to(device)
         self.tokenizer = tokenizer
@@ -234,33 +224,18 @@ class StaticLlamaLayerRuntime:
         self.lm_head = self.model.lm_head
         self.layers_ref = self.model.model.layers
 
-        if prefill_layers is None:
-            self.prefill_layers = nn.ModuleList(
-                [
-                    _clone_layer_with_variant(layer, "prefill")
-                    for i, layer in enumerate(self.layers_ref)
-                ]
+        if layers is None:
+            self.layers = nn.ModuleList(
+                [_clone_quant_layer(layer) for layer in self.layers_ref]
             ).to(self.device)
+            for layer in self.layers:
+                layer.wrapped.return_type = "tuple"
         else:
-            self.prefill_layers = nn.ModuleList(prefill_layers).to(self.device)
+            self.layers = nn.ModuleList(layers).to(self.device)
 
-        if decode_layers is None:
-            self.decode_layers = nn.ModuleList(
-                [
-                    _clone_layer_with_variant(layer, "decode")
-                    for i, layer in enumerate(self.layers_ref)
-                ]
-            ).to(self.device)
-        else:
-            self.decode_layers = nn.ModuleList(decode_layers).to(self.device)
-
-        for layer in self.prefill_layers:
+        for layer in self.layers:
             assert hasattr(layer, "wrapped")
-            assert isinstance(layer.wrapped, QuantLlamaDecoderLayerPrefill)
-
-        for layer in self.decode_layers:
-            assert hasattr(layer, "wrapped")
-            assert isinstance(layer.wrapped, QuantLlamaDecoderLayerDecode)
+            assert isinstance(layer.wrapped, QuantLlamaDecoderLayer)
 
         self.config = self.model.config
         self.hidden_size = self.config.hidden_size
@@ -335,13 +310,20 @@ class StaticLlamaLayerRuntime:
 
         self.layer_caches = self._allocate_empty_cache(batch_size, runtime_dtype)
 
-        for layer_idx, layer in enumerate(self.prefill_layers):
+        for layer_idx, layer in enumerate(self.layers):
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=None,
                 position_embeddings=None,
+                past_key_value=None,
                 use_cache=True,
             )
+
+            if not isinstance(out, tuple) or len(out) != 2:
+                raise RuntimeError(
+                    f"Expected unified decoder layer output as "
+                    f"(hidden_states, present_key_value) when use_cache=True. Got len(out) = {len(out)}."
+                )
 
             hidden_states, present_key_value = out
             present_k, present_v = present_key_value
@@ -400,7 +382,7 @@ class StaticLlamaLayerRuntime:
             dtype=hidden_states.dtype,
         )
 
-        for layer_idx, layer in enumerate(self.decode_layers):
+        for layer_idx, layer in enumerate(self.layers):
             cache = self.layer_caches[layer_idx]
 
             out = layer(
@@ -410,6 +392,12 @@ class StaticLlamaLayerRuntime:
                 position_embeddings=position_embeddings,
                 use_cache=True,
             )
+
+            if not isinstance(out, tuple) or len(out) != 2:
+                raise RuntimeError(
+                    "Expected unified decoder layer output as "
+                    "(hidden_states, present_key_value) when use_cache=True."
+                )
 
             hidden_states, present_key_value = out
             new_k, new_v = present_key_value

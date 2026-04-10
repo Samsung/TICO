@@ -23,7 +23,8 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
-WrapperVariant = Literal["common", "prefill", "decode"]
+
+ExportMode = Literal["prefill", "decode"]
 
 
 def _resolve_qscheme(
@@ -139,23 +140,6 @@ class PTQConfig(BaseConfig):
 
         When explicitly provided, the pair is validated. Incompatible pairs,
         such as unsigned dtype with symmetric qscheme, raise immediately.
-    wrapper_variant : str
-        Execution specialization used when resolving quantization wrappers.
-
-        Typical values:
-            - "prefill" : full-sequence execution (prompt processing).
-            - "decode"  : single-token autoregressive decoding.
-            - "common"  : variant-independent implementation shared by
-                          multiple execution modes
-
-        The "common" variant is used for modules whose computation does not
-        depend on the execution mode (e.g., Linear, LayerNorm, or MLP blocks).
-        When a wrapper for the requested variant is not available, the registry
-        will prefer a "common" implementation before falling back to other
-        variants.
-
-        The selected variant propagates automatically to child configurations,
-        allowing entire model subgraphs to switch execution mode consistently.
     overrides : Mapping[str, Mapping[str, Any]]
         Two-level mapping of scopes → observer-kwargs.
 
@@ -193,7 +177,6 @@ class PTQConfig(BaseConfig):
         default_dtype   = DType.uint(8),
         default_qscheme  = QScheme.PER_TENSOR_SYMM,        # <- global scheme
         default_observer = PercentileObserver,             # <- global algorithm
-        wrapper_variant = "prefill",
         overrides={
             # local override: input observer now MinMax & 4-bit, per-channel asymmetric
             "act_in": {"observer": MinMaxObserver,
@@ -212,7 +195,6 @@ class PTQConfig(BaseConfig):
     default_dtype: DType = DType.uint(8)
     default_observer: Type[ObserverBase] = MinMaxObserver  # type: ignore[type-abstract]
     default_qscheme: Optional[QScheme] = None
-    wrapper_variant: WrapperVariant = "common"
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     model_args: Mapping[str, Any] = field(default_factory=dict)
     # If True, any module that cannot be wrapped will raise.
@@ -345,7 +327,6 @@ class PTQConfig(BaseConfig):
           • same `default_dtype`
           • same `default_observer`
           • same `default_qscheme`
-          • same `wrapper_variant`
           • same `model_args`
           • overrides under `self.overrides.get(scope, {})`
 
@@ -356,7 +337,6 @@ class PTQConfig(BaseConfig):
             self.default_dtype,
             self.default_observer,
             default_qscheme=self.default_qscheme,
-            wrapper_variant=self.wrapper_variant,
             overrides=sub_overrides,
             model_args=self.model_args,
             strict_wrap=self.strict_wrap,
