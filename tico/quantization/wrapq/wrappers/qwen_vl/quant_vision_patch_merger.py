@@ -100,7 +100,7 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
             # Reshape to (N, hidden_size) before norm
             x = self.norm(x.view(-1, self.hidden_size)).view(-1, self.hidden_size)
         else:
-            x = x.view(-1, self.hidden_size)
+            x = self.norm(x).view(-1, self.hidden_size)
 
         # Apply first linear layer
         x = self.linear_fc1(x)
