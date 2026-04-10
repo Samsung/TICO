@@ -125,12 +125,24 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
         B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D)
 
+        attention_mask = (
+            qlayer.wrapped.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
+        )
+        dtype = example_hidden.dtype
+        pos_embeds = qlayer.wrapped._slice_rope(
+            start=0, seq_len=S, device="cpu", dtype=dtype
+        )
+
         print(f"Saving model layer_{i} to {save_path.resolve()}")
         with torch.no_grad():
             with SuppressWarning(UserWarning, ".*"):
                 cm = tico.convert(
                     qlayer.wrapped.as_export_module("prefill").eval(),
                     (example_hidden,),
+                    kwargs={
+                        "attention_mask": attention_mask,
+                        "position_embeddings": pos_embeds,
+                    },
                 )
         cm.save(save_path)
 
