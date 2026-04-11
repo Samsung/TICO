@@ -301,9 +301,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
 
         outputs = (hidden_states,)
         if output_attentions:
-            outputs += (attn_weights,)
+            outputs += (attn_weights,)  # type: ignore[assignment]
         if use_cache:
-            outputs += (present_key_value,)
+            outputs += (present_key_value,)  # type: ignore[assignment]
 
         if self.return_type == "tuple":
             return outputs
