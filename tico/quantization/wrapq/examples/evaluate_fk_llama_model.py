@@ -120,7 +120,7 @@ def main():
     fk_model = fk_model.cpu()
     config = fk_model.wrapped.config
     max_seq_len = config.max_position_embeddings
-    if torch.cuda.is_available():
+    if device.type == "cuda" and torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     if args.eval_tasks is not None:
