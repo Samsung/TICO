@@ -97,6 +97,7 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
             model_args={
                 "vision": {
                     "grid_thw": grid_thw,
+                    "visual_start_idx": 0,
                 }
             }
         )

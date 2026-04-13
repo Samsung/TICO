@@ -53,6 +53,10 @@ class QuantQwen3VLModel(QuantModuleBase):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
 
+        # Extract visual_start_idx from config for the insertion
+        # of visual embddings into the embedded input prompt
+        self.visual_start_idx = self._get_visual_start_idx(qcfg)
+
         self.image_token_id = fp_model.config.image_token_id
         self.video_token_id = fp_model.config.video_token_id
 
@@ -158,9 +162,11 @@ class QuantQwen3VLModel(QuantModuleBase):
             # Replace image placeholders with actual visual features
             if torch.compiler.is_compiling() or self.force_export:
                 # If we are exporting the model as a static graph.
-                # This assumes visual tokens are placed strictly in the beginning of the prompt
+                # This assumes visual tokens are starting at visual_start_idx in the prompt
                 # Violating this requirement will lead to a corrupted prompt
-                inputs_embeds = self._fuse_text_n_image(inputs_embeds, image_embeds)
+                inputs_embeds = self._fuse_text_n_image(
+                    inputs_embeds, image_embeds, visual_start_idx=self.visual_start_idx
+                )
             else:
                 # This operation cannot be converted to Circle because it produces data-dependent dynamic shapes
                 inputs_embeds = self._masked_scatter(
@@ -194,9 +200,11 @@ class QuantQwen3VLModel(QuantModuleBase):
             # Replace video placeholders with actual visual features
             if torch.compiler.is_compiling() or self.force_export:
                 # If we are exporting the model as a static graph
-                # This assumes visual tokens are placed strictly in the beginning of the prompt
+                # This assumes visual tokens are starting at visual_start_idx in the prompt
                 # Violating this requirement will lead to a corrupted prompt
-                inputs_embeds = self._fuse_text_n_image(inputs_embeds, video_embeds)
+                inputs_embeds = self._fuse_text_n_image(
+                    inputs_embeds, video_embeds, visual_start_idx=self.visual_start_idx
+                )
             else:
                 # This operation cannot be converted to Circle because it produces data-dependent dynamic shapes
                 inputs_embeds = self._masked_scatter(
@@ -273,10 +281,62 @@ class QuantQwen3VLModel(QuantModuleBase):
         )
 
     @staticmethod
-    def _fuse_text_n_image(inputs_embeds, visual_embeds):
+    def _get_visual_start_idx(qcfg: Optional[PTQConfig]) -> int:
+        """
+        Extract vision tokens starting index in the input prompt
+        from PTQConfig.model_args.
+
+        Expected format:
+            PTQConfig(
+                model_args={
+                    "vision": {
+                        "visual_start_idx": img_start_idx,
+                    }
+                }
+            )
+        """
+        if qcfg is None:
+            raise ValueError(
+                "PTQConfig is required for QuantQwen3VLModel because "
+                "vision.visual_start_idx must be provided via PTQConfig.model_args."
+            )
+
+        vision_args = qcfg.get_model_arg("vision", {})
+        if not isinstance(vision_args, dict):
+            raise ValueError(
+                "PTQConfig.model_args['vision'] must be a mapping containing "
+                "'visual_start_idx'."
+            )
+
+        visual_start_idx = vision_args.get("visual_start_idx")
+        if visual_start_idx is None:
+            raise ValueError(
+                "vision.visual_start_idx must be specified in PTQConfig.model_args for "
+                "QuantQwen3VLVisionModel.\n"
+                "Example:\n"
+                "PTQConfig(\n"
+                "    model_args={\n"
+                "        'vision': {\n"
+                "            'visual_start_idx': 4,\n"
+                "        }\n"
+                "    }\n"
+                ")"
+            )
+
+        visual_start_idx = int(visual_start_idx)
+        if visual_start_idx < 0:
+            raise ValueError(
+                f"vision.visual_start_idx must be greater than zero, but got {visual_start_idx}."
+            )
+        return visual_start_idx
+
+    @staticmethod
+    def _fuse_text_n_image(inputs_embeds, visual_embeds, visual_start_idx):
         num_visual_tokens = visual_embeds.shape[0]
         flat_inputs = inputs_embeds.view(-1, inputs_embeds.shape[-1])
-        flat_inputs[:num_visual_tokens] = visual_embeds
+        flat_inputs[
+            visual_start_idx : visual_start_idx + num_visual_tokens
+        ] = visual_embeds
         inputs_embeds = flat_inputs.view_as(inputs_embeds)
         return inputs_embeds
 
