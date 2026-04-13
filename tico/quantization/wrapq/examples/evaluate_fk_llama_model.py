@@ -69,19 +69,25 @@ def main():
     parser.add_argument(
         "--fk_model_path", type=str, required=True, help="Path to fake_quantized model"
     )
-
     parser.add_argument(
         "--eval_tasks",
         type=str,
         default=None,
+        required=True,  # TODO revisit this option as this script can also be used for sample generation
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
+    )
+    parser.add_argument(
+        "--skip_fp_eval",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
     )
 
     args = parser.parse_args()
     print(args)
 
+    # -------------------------------------------------------------------------
     # Basic setup
-
+    # -------------------------------------------------------------------------
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
 
@@ -92,50 +98,54 @@ def main():
     print(f"fk_model_path    : {args.fk_model_path}")
     print()
 
-    # -------------------------------------------------------------------------
-    # 2. Load the FP backbone and tokenizer
-    # -------------------------------------------------------------------------
-    print("Loading FP model …")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
         cache_dir=args.cache_dir,
     )
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            args.model,
-            dtype=dtype,
-            trust_remote_code=args.trust_remote_code,
-            token=args.hf_token,
-            cache_dir=args.cache_dir,
+
+    if not args.skip_fp_eval:
+
+        # -------------------------------------------------------------------------
+        # FP model evaluation
+        # -------------------------------------------------------------------------
+        print("Loading FP model …")
+        model = (
+            AutoModelForCausalLM.from_pretrained(
+                args.model,
+                dtype=dtype,
+                trust_remote_code=args.trust_remote_code,
+                token=args.hf_token,
+                cache_dir=args.cache_dir,
+            )
+            .cpu()
+            .eval()
         )
-        .cpu()
-        .eval()
-    )
 
-    fk_model = torch.load(args.fk_model_path, weights_only=False)
+        if args.eval_tasks is not None:
+            config = model.config
+            max_seq_len = config.max_position_embeddings
+            results = evaluate_llm_on_tasks(
+                model, tokenizer, args.eval_tasks, max_length=max_seq_len
+            )
+            print("Original RESULTS ARE:")
+            print(make_table(results))
 
-    fk_model.eval()
-    fk_model = fk_model.cpu()
-    config = fk_model.wrapped.config
-    max_seq_len = config.max_position_embeddings
-    if device.type == "cuda" and torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        model = model.cpu()
+        if device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # -------------------------------------------------------------------------
+    # FK model evaluation
+    # -------------------------------------------------------------------------
+    print("Loading fake quantized model …")
+    fk_model = torch.load(args.fk_model_path, weights_only=False).eval().to(args.device)
 
     if args.eval_tasks is not None:
-        results = evaluate_llm_on_tasks(
-            model, tokenizer, args.eval_tasks, max_length=max_seq_len
-        )
-        print("Original RESULTS ARE:")
-        print(make_table(results))
+        config = fk_model.wrapped.config
+        max_seq_len = config.max_position_embeddings
 
-    model = model.cpu()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    fk_model = fk_model.to(args.device)
-    if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
             fk_model, tokenizer, args.eval_tasks, max_length=max_seq_len
         )
