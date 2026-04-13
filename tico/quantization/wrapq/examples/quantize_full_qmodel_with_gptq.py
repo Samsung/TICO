@@ -30,6 +30,8 @@ import pathlib
 import random
 from typing import Any
 
+import numpy as np
+
 import torch
 import tqdm
 from datasets import load_dataset
@@ -93,6 +95,51 @@ def inject_gptq_qparams(
         # GPTQ quantizer attributes
         obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
 
+
+def evaluate_ppl_of_model_on_dataset(model, dataset, device: str = "cuda"):
+    if hasattr(model, "device") and model.device.type != device.type:
+        if hasattr(model, "to"):
+            model.to(device)
+    nlls = []
+    with torch.no_grad():
+        for batch in tqdm.tqdm(dataset):
+            if isinstance(batch, torch.Tensor):
+                batch = batch.to(device)
+                output = model(
+                    batch.to(device),
+                )
+            else:
+                raise RuntimeError("Unknown input in ppl_eval_on_dataset")
+
+            if hasattr(output, "logits"):
+                lm_logits = output.logits
+            elif len(output) > 1:
+                lm_logits = torch.tensor(output[0])
+            else:
+                lm_logits = torch.tensor(output)
+
+            if torch.isfinite(lm_logits).all():
+                shift_logits = lm_logits[:, :-1, :].contiguous()
+                if isinstance(batch, torch.Tensor):
+                    shift_labels = batch[:, 1:].contiguous()
+                else:
+                    assert isinstance(batch, tuple)
+                    shift_labels = batch[0][:, 1:].contiguous()
+                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                loss = loss_fct(
+                    shift_logits.reshape(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                )
+                nlls.append(loss)
+                del shift_logits, shift_labels
+                shift_logits = shift_labels = None  # type: ignore[assignment]
+
+            del batch, lm_logits, output
+            lm_logits = output = batch = None  # noqa: F841
+            torch.cuda.empty_cache()
+
+    ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
+    return ppl
 
 # -------------------------------------------------------------------------
 # Save model in circle format
@@ -216,6 +263,24 @@ def evaluate(q_m, tokenizer, dataset_test, args):
         print("Quantized RESULTS ARE:")
         print(make_table(results))
 
+def get_sensitivities_info_path(model, save_folder, dataset, seed, n_samples):
+    model_name = model.config.name_or_path.replace("/", "_")
+    if save_folder is None:
+       save_folder = "." 
+    cache_path = (
+        "."
+        + "/sensitivities_for_"
+        + model_name
+        + "_"
+        + dataset
+        + "_"
+        + str(n_samples)
+        + "_"
+        + str(seed)
+        + ".pt"
+    )
+    return cache_path
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -303,7 +368,7 @@ def main():
         "--gptq_mse",
         type=str,
         default=None,
-        choices=["mse", "smse"],
+        choices=["mse", "smse", "smse_for_gptq"],
         help="Whether and how to use mse in gptq (none/mse/smse/)",
     )
     parser.add_argument(
@@ -425,6 +490,13 @@ def main():
         j = i + seqlen
         inp = train_ids[:, i:j]
         calib_inputs.append(inp.cpu())
+        
+    train_ppl_fp32 = evaluate_ppl_of_model_on_dataset(
+            model, calib_inputs, device=device
+        )
+    print("\n┌── Wikitext-2 train perplexity ─────────────")
+    print(f"│ FP32 : {train_ppl_fp32:8.2f}")
+    print("└───────────────────────────────────────────")
 
     # -------------------------------------------------------------------------
     # Run GPTQ (weight-only) pass
@@ -433,13 +505,24 @@ def main():
         print("Applying GPTQ …")
 
         sens = None
-        if args.gptq_mse is not None and args.gptq_mse == "smse":
+        if args.gptq_mse is not None and (
+            args.gptq_mse == "smse" or args.gptq_mse == "smse_for_gptq"
+        ):
             if args.sensitivity_path is not None:
                 sens = torch.load(args.sensitivity_path)
             else:
                 calibrator = SensitivityCalibrator(model, calib_inputs)
                 sens = calibrator.compute_sensitivity_info()
+                save_folder = args.save_circle_to_folder if args.save_circle_to_folder is not None else args.save_layers_to_folder
+                save_path = get_sensitivities_info_path(model, save_folder, "wikitext", args.seed, len(calib_inputs))
+                print(f"Saving calibrated_sensitivities to {save_path}")
+                torch.save(sens, save_path)
 
+        model = model.cpu()
+        model = model.to(args.device)
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
         gptq_config = GPTQConfig(
             weight_bits=args.linear_weight_bits,
             perchannel=True,
@@ -455,12 +538,24 @@ def main():
     else:
         q_m = model
 
+    q_m = q_m.cpu()
+    q_m = q_m.to(args.device)
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    
     # -------------------------------------------------------------------------
     # Wrap every layer with PTQWrapper
     # -------------------------------------------------------------------------
     if not args.no_PTQ:
         q_m = quantize_using_PTQ(q_m, calib_inputs, args)
 
+    train_ppl_ioqdtype = evaluate_ppl_of_model_on_dataset(
+            q_m, calib_inputs, device=device
+        )
+    print("\n┌── Wikitext-2 train perplexity ─────────────")
+    print(f"│ int16 : {train_ppl_ioqdtype:8.2f}")
+    print("└───────────────────────────────────────────")
+    
     # after PTQ quantizer only fixed-length input sequences are valid
     evaluate(q_m, tokenizer, dataset_test, args)
 
