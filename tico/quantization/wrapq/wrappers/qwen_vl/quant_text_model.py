@@ -287,22 +287,11 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         else:
             text_position_ids = position_ids[0]
 
-        # Build causal mask if not provided (or provided as bool)
-        if attention_mask is None or attention_mask.dtype == torch.bool:
-            attention_mask = self._slice_causal(
-                inputs_embeds.shape[1], inputs_embeds.device
-            )
-            # from transformers.masking_utils import create_causal_mask
-            # attention_mask = create_causal_mask(
-            #    config=self.config,
-            #    input_embeds=inputs_embeds,
-            #    attention_mask=attention_mask,
-            #    cache_position=cache_position,
-            #    past_key_values=past_key_values,
-            #    position_ids=text_position_ids,
-            # )
-        if torch.is_floating_point(attention_mask):
-            attention_mask = self._fq(attention_mask, self.obs_attention_mask)
+        # Build causal mask
+        attention_mask = self._slice_causal(
+            inputs_embeds.shape[1], inputs_embeds.device
+        )
+        attention_mask = self._fq(attention_mask, self.obs_attention_mask)
 
         hidden_states = inputs_embeds
 
