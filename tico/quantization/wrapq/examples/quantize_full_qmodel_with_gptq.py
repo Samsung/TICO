@@ -217,9 +217,43 @@ def evaluate(q_m, tokenizer, dataset_test, args):
         print(make_table(results))
 
 
+def get_sensitivities_info_name(model, dataset, seed, n_samples):
+    model_name = model.config.name_or_path.replace("/", "_")
+
+    name = (
+        "."
+        + "/sensitivities_for_"
+        + model_name
+        + "_"
+        + dataset
+        + "_"
+        + str(n_samples)
+        + "_"
+        + str(seed)
+        + ".pt"
+    )
+    return name
+
+
+def get_ptq_model_name(model, args):
+    model_name = model.config.name_or_path.replace("/", "_")
+
+    name = (
+        f"PTQ_{model_name}_"
+        + ("SpinQuant_" if args.no_spinquant is False else "")
+        + ("GPTQ_" if args.no_GPTQ is False else "")
+        + (f"{args.gptq_mse}_" if args.no_GPTQ is False else "")
+        + str(args.nsamples_for_qcalibration)
+        + "_"
+        + str(args.seed)
+        + ".pt"
+    )
+    return name
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="GPTQ+PTQ pipeline (weight-only + activation)"
+        description="GPTQ+PTQ pipeline (weight-only + activation)",
     )
     parser.add_argument(
         "--model", type=str, required=True, help="HF repo name or local path."
@@ -270,16 +304,17 @@ def main():
         help="Leave model float",
     )
     parser.add_argument(
-        "--save_circle_to_folder",
+        "--output_dir",
         type=str,
         default=None,
-        help="Save the whole model to the folder specified",
+        help="Save specified artifacts to output_dir",
     )
     parser.add_argument(
-        "--save_layers_to_folder",
+        "--save",
+        nargs="*",
         type=str,
-        default=None,
-        help="Save all layers to the folder specified",
+        choices=["model_circle", "model_layers", "ptq_checkpoint", "sensitivity"],
+        help="which artifacts should be saved to output_dir",
     )
     parser.add_argument(
         "--cache_dir",
@@ -439,6 +474,13 @@ def main():
             else:
                 calibrator = SensitivityCalibrator(model, calib_inputs)
                 sens = calibrator.compute_sensitivity_info()
+                if args.output_dir is not None and "sensitivity" in args.save:
+                    save_name = get_sensitivities_info_name(
+                        model, "wikitext", args.seed, len(calib_inputs)
+                    )
+                    save_path = pathlib.Path(args.output_dir, save_name)
+                    print(f"Saving calibrated_sensitivities to {save_path}")
+                    torch.save(sens, save_path)
 
         gptq_config = GPTQConfig(
             weight_bits=args.linear_weight_bits,
@@ -461,15 +503,21 @@ def main():
     if not args.no_PTQ:
         q_m = quantize_using_PTQ(q_m, calib_inputs, args)
 
+        if args.output_dir is not None and "ptq_checkpoint" in args.save:
+            save_name = get_ptq_model_name(model, args)
+            save_path = pathlib.Path(args.output_dir, save_name)
+            print(f"Saving PTQ model to {save_path}")
+            torch.save(q_m, save_path)
+
     # after PTQ quantizer only fixed-length input sequences are valid
     evaluate(q_m, tokenizer, dataset_test, args)
 
-    if args.save_layers_to_folder is not None:
-        save_layers_to(q_m, args.max_seq_len, args.save_layers_to_folder)
+    if args.output_dir is not None and "model_layers" in args.save:
+        save_layers_to(q_m, args.max_seq_len, args.output_dir)
 
-    if args.save_circle_to_folder is not None:
+    if args.output_dir is not None and "model_circle" in args.save:
         calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
-        save_model_to(q_m, calib_inputs, args.save_circle_to_folder)
+        save_model_to(q_m, calib_inputs, args.output_dir)
 
 
 if __name__ == "__main__":
