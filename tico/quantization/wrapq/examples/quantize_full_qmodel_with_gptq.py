@@ -184,7 +184,6 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
 
 def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
-
     qcfg = build_llm_ptq_config(
         model_type="llama",
         num_hidden_layers=len(q_m.model.layers),
@@ -220,7 +219,16 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     device = torch.device(args.device)
     with torch.no_grad():
         for inp in tqdm.tqdm(calib_inputs):
-            q_m(inp.to(device))
+            if args.calibrate_use_cache:
+                outputs = q_m(inp[..., :-1].to(device), use_cache=True)
+                # TODO add padding?
+                q_m(
+                    inp[..., -1:].to(device),
+                    past_key_values=outputs.past_key_values,
+                    use_cache=True,
+                )
+            else:
+                q_m(inp.to(device))
 
     # Freeze all Q-params (scale, zero-point)
     q_m = convert(q_m)
@@ -414,6 +422,12 @@ def main():
         action="store_true",
         help="Verbose logging for debugging (e.g., GPTQ injection coverage)",
     )
+    parser.add_argument(
+        "--calibrate_use_cache",
+        action="store_true",
+        default=False,
+        help="Calibrate using cache (e.g. for PTQ-model evaluation on `truthfulqa` benchmark)",
+    )
     args = parser.parse_args()
     print(args)
 
@@ -456,7 +470,7 @@ def main():
     else:
         print("Skipping SpinQuant preprocessing …")
 
-    model.config.use_cache = False  # TODO use args for it
+    model.config.use_cache = False
     if args.calibrate_seq_len is not None:
         model.config.max_position_embeddings = min(
             model.config.max_position_embeddings, args.calibrate_seq_len

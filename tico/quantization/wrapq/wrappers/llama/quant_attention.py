@@ -205,10 +205,16 @@ class QuantLlamaAttention(QuantModuleBase):
         if past is None:
             return k_new, v_new
         past_k, past_v = past
-        past_k = self._fq(past_k, self.obs_past_key)
-        past_v = self._fq(past_v, self.obs_past_value)
-        k = torch.cat([past_k[:, kv_idx, :, :], k_new], dim=1)
-        v = torch.cat([past_v[:, kv_idx, :, :], v_new], dim=1)
+        if past_k is not None:
+            past_k = self._fq(past_k, self.obs_past_key)
+            k = torch.cat([past_k[:, kv_idx, :, :], k_new], dim=1)
+        else:
+            k = k_new
+        if past_v is not None:
+            past_v = self._fq(past_v, self.obs_past_value)
+            v = torch.cat([past_v[:, kv_idx, :, :], v_new], dim=1)
+        else:
+            v = v_new
         return k, v
 
     def _build_attention_mask(
@@ -228,7 +234,11 @@ class QuantLlamaAttention(QuantModuleBase):
         - additive mask: use as-is.
         """
         q_len = hidden_states.size(1)
-        past_len = 0 if past_key_value is None else int(past_key_value[0].shape[2])
+        past_len = (
+            0
+            if (past_key_value is None or past_key_value[0] is None)
+            else int(past_key_value[0].shape[2])
+        )
         k_len = past_len + q_len
 
         if attention_mask is None:
@@ -267,7 +277,11 @@ class QuantLlamaAttention(QuantModuleBase):
         cos = self._fq(cos, self.obs_cos)
         sin = self._fq(sin, self.obs_sin)
 
-        past_len = 0 if past_key_value is None else int(past_key_value[0].shape[2])
+        past_len = (
+            0
+            if (past_key_value is None or past_key_value[0] is None)
+            else int(past_key_value[0].shape[2])
+        )
         key_len = past_len + S
 
         attn_mask = self._build_attention_mask(

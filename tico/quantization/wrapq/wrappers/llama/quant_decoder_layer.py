@@ -204,7 +204,11 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         - additive mask: use as-is.
         """
         q_len = hidden_states.size(1)
-        past_len = 0 if past_key_value is None else int(past_key_value[0].shape[2])
+        past_len = (
+            0
+            if (past_key_value is None or past_key_value[0] is None)
+            else int(past_key_value[0].shape[2])
+        )
         k_len = past_len + q_len
 
         if attention_mask is None:
@@ -305,7 +309,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         if use_cache:
             outputs += (present_key_value,)  # type: ignore[assignment]
 
-        if self.return_type == "tuple":
+        if self.return_type == "tuple" or use_cache:
             return outputs
         if self.return_type == "tensor":
             return hidden_states

@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache
+from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from tico.quantization.config.ptq import PTQConfig
@@ -30,7 +31,9 @@ from tico.quantization.wrapq.wrappers.registry import try_register
     "transformers.models.llama.modeling_llama.LlamaForCausalLM",
     "tico.quantization.algorithm.spinquant.spin_llama.SpinLlamaForCausalLM",
 )
-class QuantLlamaForCausalLM(QuantModuleBase):
+class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
+    _is_stateful = False
+
     def __init__(
         self,
         model_fp: nn.Module,
@@ -76,9 +79,14 @@ class QuantLlamaForCausalLM(QuantModuleBase):
         self.config = model_fp.config
         self.loss_function = model_fp.loss_function
         self.device = model_fp.device
+        self.generation_config = model_fp.generation_config
+        self.main_input_name = model_fp.main_input_name
 
     def tie_weights(self):
         pass
+
+    def is_remote_code(self):
+        return False
 
     def forward(
         self,
@@ -97,6 +105,9 @@ class QuantLlamaForCausalLM(QuantModuleBase):
         output_attentions = self.config.output_attentions
         output_hidden_states = self.config.output_hidden_states
         return_dict = self.config.use_return_dict
+        if "return_dict" in kwargs:
+            # lm_eval set return_dict explicitely in kwargs
+            return_dict = kwargs.pop("return_dict")
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
