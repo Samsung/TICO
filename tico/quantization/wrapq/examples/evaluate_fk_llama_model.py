@@ -73,13 +73,12 @@ def main():
         "--eval_tasks",
         type=str,
         default=None,
-        required=True,  # TODO revisit this option as this script can also be used for sample generation
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
     )
     parser.add_argument(
         "--skip_fp_eval",
         action="store_true",
-        help="Enable only if you trust the model repo code.",
+        help="Skip original model evaluation.",
     )
 
     args = parser.parse_args()
