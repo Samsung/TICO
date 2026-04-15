@@ -313,7 +313,7 @@ def main():
         "--save",
         nargs="*",
         type=str,
-        choices=["model_circle", "model_layers", "ptq_checkpoint", "sensitivity"],
+        choices=["circle_full", "circle_per_layer", "ptq_checkpoint", "sensitivity"],
         help="which artifacts should be saved to output_dir",
     )
     parser.add_argument(
@@ -512,10 +512,10 @@ def main():
     # after PTQ quantizer only fixed-length input sequences are valid
     evaluate(q_m, tokenizer, dataset_test, args)
 
-    if args.output_dir is not None and "model_layers" in args.save:
+    if args.output_dir is not None and "circle_per_layer" in args.save:
         save_layers_to(q_m, args.max_seq_len, args.output_dir)
 
-    if args.output_dir is not None and "model_circle" in args.save:
+    if args.output_dir is not None and "circle_full" in args.save:
         calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
         save_model_to(q_m, calib_inputs, args.output_dir)
 
