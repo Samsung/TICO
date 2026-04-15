@@ -396,3 +396,24 @@ def is_target_node(
         return False
 
     return True
+
+
+def move_to_device(obj, device):
+    """
+    Recursively move tensors inside a nested structure to the given device.
+    Non-tensor objects are preserved as-is.
+    """
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device)
+
+    elif isinstance(obj, tuple):
+        return tuple(move_to_device(x, device) for x in obj)
+
+    elif isinstance(obj, list):
+        return [move_to_device(x, device) for x in obj]
+
+    elif isinstance(obj, dict):
+        return {k: move_to_device(v, device) for k, v in obj.items()}
+
+    # preserve everything else (bool, int, None, custom objects, etc.)
+    return obj
