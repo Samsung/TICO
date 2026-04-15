@@ -28,6 +28,11 @@ from tico.quantization.algorithm.gptq.utils import (
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
+from tico.utils.utils import move_to_device
+
+
+def move_to_cpu(obj):
+    return move_to_device(obj, "cpu")
 
 
 class StopForward(Exception):
@@ -118,12 +123,12 @@ class GPTQQuantizer(BaseQuantizer):
             for idx, item in enumerate(args):
                 if (idx + 1) > len(self.cache_args):
                     self.cache_args.append([])
-                self.cache_args[idx].append(item)
+                self.cache_args[idx].append(move_to_cpu(item))
             # Store keyword args
             for k, v in kwargs.items():
                 if self.cache_kwargs.get(k, None) is None:
                     self.cache_kwargs[k] = []
-                self.cache_kwargs[k].append(v)
+                self.cache_kwargs[k].append(move_to_cpu(v))
 
             self.num_batches += 1
             raise StopForward  # stop after the first layer
@@ -280,6 +285,7 @@ class GPTQQuantizer(BaseQuantizer):
 
                 # Run layer forward over all cached batches to build Hessian/statistics
                 batch_num = self.num_batches
+                device = next(model.parameters()).device
                 for batch_idx in tqdm(
                     range(batch_num),
                     desc=f"[L{l_idx}] collecting",
@@ -290,9 +296,13 @@ class GPTQQuantizer(BaseQuantizer):
                     cache_args_batch = gather_single_batch_from_list(
                         self.cache_args, batch_idx
                     )
+                    cache_args_batch = move_to_device(cache_args_batch, device)
+
                     cache_kwargs_batch = gather_single_batch_from_dict(
                         self.cache_kwargs, batch_idx
                     )
+                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+
                     layer(*cache_args_batch, **cache_kwargs_batch)
 
                 # Remove handles
@@ -314,6 +324,7 @@ class GPTQQuantizer(BaseQuantizer):
                     gptq[name].free()
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer
+            device = next(model.parameters()).device
             for batch_idx in tqdm(
                 range(batch_num),
                 desc=f"[L{l_idx}] re-forward",
@@ -324,9 +335,13 @@ class GPTQQuantizer(BaseQuantizer):
                 cache_args_batch = gather_single_batch_from_list(
                     self.cache_args, batch_idx
                 )
+                cache_args_batch = move_to_device(cache_args_batch, device)
+
                 cache_kwargs_batch = gather_single_batch_from_dict(
                     self.cache_kwargs, batch_idx
                 )
+                cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+
                 outs = layer(*cache_args_batch, **cache_kwargs_batch)
                 # LLaMA's decoder layer return type differs across Transformers versions:
                 # some return a tuple (hidden_states, ...), others return just a tensor.
@@ -334,7 +349,14 @@ class GPTQQuantizer(BaseQuantizer):
                 outs = outs[0] if isinstance(outs, tuple) else outs
                 # Update inputs for next iteration.
                 if len(self.cache_args) > 0:
-                    self.cache_args[0][batch_idx] = outs
+                    if hasattr(outs, "to") and hasattr(
+                        self.cache_args[0][batch_idx], "device"
+                    ):
+                        self.cache_args[0][batch_idx] = outs.to(
+                            self.cache_args[0][batch_idx].device
+                        )
+                    else:
+                        self.cache_args[0][batch_idx] = outs
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
