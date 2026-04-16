@@ -202,7 +202,8 @@ class QuantLlamaModel(QuantModuleBase):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+            past_key_values = []
+            
 
         if cache_position is None:
             past_seen_tokens = (
@@ -239,15 +240,16 @@ class QuantLlamaModel(QuantModuleBase):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for idx, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)  # type: ignore[operator]
-
+            
+            past_key_value = None if past_key_values is None or use_cache == False else (past_key_values.layers[idx].keys, past_key_values.layers[idx].values)
             layer_outputs = decoder_layer(
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_value=past_key_value,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -257,6 +259,9 @@ class QuantLlamaModel(QuantModuleBase):
 
             if decoder_layer.wrapped.return_type == "tuple":
                 hidden_states = layer_outputs[0]
+            elif use_cache is True:
+                hidden_states = layer_outputs[0]
+                past_key_values.update(layer_outputs[1][0], layer_outputs[1][1], layer_idx=idx)
             else:
                 hidden_states = layer_outputs
 

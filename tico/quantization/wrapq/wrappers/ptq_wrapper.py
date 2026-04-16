@@ -41,6 +41,8 @@ class PTQWrapper(QuantModuleBase):
         if wrapped_cls is None:
             raise NotImplementedError(f"No quant wrapper for {type(module).__name__}")
         self.wrapped: QuantModuleBase = wrapped_cls(module, qcfg=qcfg, fp_name=fp_name)  # type: ignore[arg-type, misc]
+        if hasattr(module, "weight"):
+            self.weight = module.weight
 
     def forward(self, *args, **kwargs):
         return self.wrapped(*args, **kwargs)

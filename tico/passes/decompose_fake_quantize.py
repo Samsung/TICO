@@ -124,6 +124,27 @@ class DecomposeFakeQuantize(PassBase):
                     node.replace_all_uses_with(dequnt, propagate_meta=True)
                 modified = True
 
+            if node.target in [torch.ops.circle_custom.quantize_mx.default]:
+                # tensor, elem_format, axis
+                assert len(node.args) == 3
+                _, elem_format, axis = node.args
+
+                with gm.graph.inserting_before(node):
+                    quant = create_node(
+                        g,
+                        torch.ops.circle_custom.quantize_mx_decomposed.default,
+                        args=node.args,
+                        origin=node,
+                    )
+                    dequnt = create_node(
+                        g,
+                        torch.ops.circle_custom.dequantize_mx_decomposed.default,
+                        args=(quant, *quant.args[1:]),
+                        kwargs=quant.kwargs,
+                    )
+                    node.replace_all_uses_with(dequnt, propagate_meta=True)
+                modified = True
+
         gm.graph.eliminate_dead_code()
         gm.graph.lint()
         gm.recompile()
