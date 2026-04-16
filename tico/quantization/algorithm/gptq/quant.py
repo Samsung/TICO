@@ -21,6 +21,7 @@
 import torch
 import torch.nn as nn
 
+from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ
 
 def quantize(x, scale, zero, maxq):
     if maxq < 0:
@@ -101,7 +102,7 @@ class Quantizer(nn.Module):
             else:
                 self.zero = torch.round(-xmin / self.scale)
 
-        if self.mse is not None:
+        if self.mse is not None and self.mse != "smse_for_gptq" and self.mse != "mse_for_gptq":
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
@@ -112,12 +113,10 @@ class Quantizer(nn.Module):
                 q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
                 q -= x
                 q.abs_()
-                if self.mse == "smse":  # senstitivity weighted mse
-                    # in case senstitivity is a second order derivatives of some global loss
-                    # (q**2) * self.sensitivity is just a global loss change due to quantization.
+                if self.mse == "smse":
                     q = (q**2) * self.sensitivity.to(
                         q.device
-                    )  # estimate global target change
+                    )  # sensitivity weighted `mse`
                 else:
                     assert self.mse == "mse"
                     q.pow_(self.norm)
@@ -127,6 +126,7 @@ class Quantizer(nn.Module):
                     best[tmp] = err[tmp]
                     self.scale[tmp] = scale1[tmp]
                     self.zero[tmp] = zero1[tmp]
+
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -150,6 +150,85 @@ class Quantizer(nn.Module):
         if len(shape) == 2:
             self.scale = self.scale.unsqueeze(0)
             self.zero = self.zero.unsqueeze(0)
+
+    def update(self, x, Hinv, perm):
+        if self.mse is None or (
+            self.mse != "smse_for_gptq" and self.mse != "mse_for_gptq"
+        ):
+            return
+
+        shape = x.shape
+        if self.perchannel:
+            x = x.flatten(1)
+        else:
+            x = x.flatten().unsqueeze(0)
+
+        dev = x.device
+        tmp = torch.zeros(x.shape[0], device=dev)
+        xmin = torch.minimum(x.min(1)[0], tmp)
+        xmax = torch.maximum(x.max(1)[0], tmp)
+
+        if self.sym:
+            xmax = torch.maximum(torch.abs(xmin), xmax)
+            tmp = xmin < 0
+            if torch.any(tmp):
+                xmin[tmp] = -xmax[tmp]
+        tmp = (xmin == 0) & (xmax == 0)
+        xmin[tmp] = -1
+        xmax[tmp] = +1
+        if self.maxq < 0:
+            self.scale = xmax
+            self.zero = xmin
+        else:
+            self.scale = (xmax - xmin) / self.maxq
+            if self.sym:
+                self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)  # type: ignore[arg-type]
+            else:
+                self.zero = torch.round(-xmin / self.scale)
+
+        sensitivity = None
+        if self.sensitivity is not None:
+            sensitivity = self.sensitivity.to(Hinv.dtype).to(dev)
+            if perm is not None:
+                sensitivity = sensitivity[:, perm.to(dev)]
+
+        num_of_iters = 50
+        best = torch.full([x.shape[0]], float("inf"), device=dev)
+        for i in range(int(self.maxshrink * self.grid)):
+            p = 1 - i / self.grid
+            xmin1 = p * xmin
+            xmax1 = p * xmax
+            scale1 = (xmax1 - xmin1) / self.maxq
+            zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
+            q, pre_q = iterate_GPTQ(
+                scale1.unsqueeze(1),
+                zero1.unsqueeze(1),
+                self.maxq,
+                x,
+                Hinv,
+                max_num_of_iters=num_of_iters,
+            )
+            if sensitivity is not None:
+                assert self.mse == "smse_for_gptq"
+                err = ((q - x) ** 2) * sensitivity.to(q.device)
+            else:
+                assert self.mse == "mse_for_gptq"
+                #err = ((q - x)).pow(self.norm)# ** 2)
+                #err = ((q - x) ** 2)
+                # err = torch.abs((q - pre_q)).pow_(self.norm)
+                err = ((q - pre_q) / torch.diag(Hinv)) ** 2
+                
+            err = err
+            err = torch.sum(err, 1)
+            tmp = err < best
+            if torch.any(tmp):
+                best[tmp] = err[tmp]
+                self.scale[tmp] = scale1[tmp]
+                self.zero[tmp] = zero1[tmp]
+
+        shape = [-1] + [1] * (len(shape) - 1)
+        self.scale = self.scale.reshape(shape)
+        self.zero = self.zero.reshape(shape)
 
     def quantize(self, x):
         if self.ready():

@@ -63,6 +63,8 @@ def str_to_circle_dtype(
         "int64": circle.TensorType.TensorType.INT64,
         "bool": circle.TensorType.TensorType.BOOL,
         "uint4": circle.TensorType.TensorType.UINT4,
+        "mxint8": circle.TensorType.TensorType.MXINT8,
+        "mxfp4": circle.TensorType.TensorType.MXFP4,
         # TODO Add more dtypes
     }
 

@@ -261,6 +261,21 @@ class CatTest(SingleOpPropagateQParamForwardTest):
         # The test will check cat's scale is 1.0, the larger one
         self.run_test()
 
+class SplitWithSizesModule(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        return torch.split_with_sizes(x, split_sizes=[1, 2])
+
+    def get_example_inputs(self):
+        return (torch.randn(3, 4),), {}
+    
+class SplitWithSizesTest(SingleOpPropagateQParamForwardTest):
+    # TODO Support u8
+    def test_s16(self):
+        self.setup(SplitWithSizesModule(), torch.ops.aten.split_with_sizes.default, dtype="int16")
+        self.run_test()
 
 class ExpandModule(torch.nn.Module):
     def __init__(self):
