@@ -180,3 +180,85 @@ class TestAffineObserverBase(unittest.TestCase):
         _check_scalar(0.5, DType.uint(8))
         _check_scalar(-0.3, DType.uint(8))
         _check_scalar(0.0, DType.uint(8))
+
+    def test_per_tensor_asymm_qparams_positive_range(self):
+        # Test per-tensor asymmetric quantization with positive-only range
+        obs = _MinMaxLikeObserver(name="pt_asymm_pos", dtype=DType.uint(4))
+        obs.collect(torch.tensor([1.0, 2.0, 3.0]))
+        obs.collect(torch.tensor([4.0]))
+
+        self.assertEqual(obs.min_val.item(), 1.0)
+        self.assertEqual(obs.max_val.item(), 4.0)
+
+        scale, zp = obs.compute_qparams()
+        qmin, qmax = obs.dtype.qmin, obs.dtype.qmax
+        expected_scale = 4.0 / (qmax - qmin)
+        expected_zp = 0
+
+        self.assertAlmostEqual(scale.item(), expected_scale, places=6)
+        self.assertEqual(zp.item(), int(expected_zp))
+
+    def test_per_tensor_asymm_qparams_negative_range(self):
+        # Test per-tensor asymmetric quantization with negative-only range
+        obs = _MinMaxLikeObserver(name="pt_asymm_neg", dtype=DType.uint(4))
+        obs.collect(torch.tensor([-4.0, -3.0, -2.0]))
+        obs.collect(torch.tensor([-1.0]))
+
+        self.assertEqual(obs.min_val.item(), -4.0)
+        self.assertEqual(obs.max_val.item(), -1.0)
+
+        scale, zp = obs.compute_qparams()
+        qmin, qmax = obs.dtype.qmin, obs.dtype.qmax
+        expected_scale = 4.0 / (qmax - qmin)
+        expected_zp = qmax
+
+        self.assertAlmostEqual(scale.item(), expected_scale, places=6)
+        self.assertEqual(zp.item(), int(expected_zp))
+
+    def test_per_channel_asymm_stats_and_qparams_positive_range(self):
+        # Test per-channel asymmetric quantization with positive-only ranges
+        # shape (C=2, N=3)
+        x = torch.tensor([[1.0, 3.0, 2.0], [4.0, 5.0, 0.5]])
+
+        obs = _MinMaxLikeObserver(
+            name="pc_asymm_pos",
+            dtype=DType.int(5),  # 5-bit signed
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+        obs.collect(x)
+
+        self.assertTrue(torch.equal(obs.min_val, torch.tensor([1.0, 0.5])))
+        self.assertTrue(torch.equal(obs.max_val, torch.tensor([3.0, 5.0])))
+
+        scale, zp = obs.compute_qparams()
+        qmin, qmax = obs.dtype.qmin, obs.dtype.qmax
+        expected_scale = obs.max_val / (qmax - qmin)
+        expected_zp = torch.full(size=(x.shape[0],), fill_value=qmin)
+
+        self.assertTrue(torch.allclose(scale, expected_scale, atol=1e-6))
+        self.assertTrue(torch.equal(zp, expected_zp))
+
+    def test_per_channel_asymm_stats_and_qparams_negative_range(self):
+        # Test per-channel asymmetric quantization with negative-only ranges
+        # shape (C=2, N=3)
+        x = torch.tensor([[-1.0, -3.0, -2.0], [-4.0, -5.0, -0.5]])
+
+        obs = _MinMaxLikeObserver(
+            name="pc_asymm_neg",
+            dtype=DType.int(5),  # 5-bit signed
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+        obs.collect(x)
+
+        self.assertTrue(torch.equal(obs.min_val, torch.tensor([-3.0, -5.0])))
+        self.assertTrue(torch.equal(obs.max_val, torch.tensor([-1.0, -0.5])))
+
+        scale, zp = obs.compute_qparams()
+        qmin, qmax = obs.dtype.qmin, obs.dtype.qmax
+        expected_scale = (-obs.min_val) / (qmax - qmin)
+        expected_zp = torch.full(size=(x.shape[0],), fill_value=qmax)
+
+        self.assertTrue(torch.allclose(scale, expected_scale, atol=1e-6))
+        self.assertTrue(torch.equal(zp, expected_zp))

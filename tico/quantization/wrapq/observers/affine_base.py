@@ -106,26 +106,22 @@ class AffineObserverBase(ObserverBase):
             self._cached_scale, self._cached_zp = scale, zp
             return scale, zp
 
-        if self.channel_axis is None:
-            if torch.all(rng.abs() < 1e-8):
-                C = self.min_val
-                if torch.allclose(C, torch.zeros_like(C)):
-                    scale = torch.ones_like(C)
-                    zp = torch.zeros_like(C, dtype=torch.int)
-                elif (C > 0).all():
-                    scale = torch.clamp(C, min=eps)
-                    zp = torch.zeros_like(C, dtype=torch.int)
-                else:
-                    scale = torch.clamp(C.abs(), min=eps)
-                    zp = torch.full_like(C, qmax, dtype=torch.int)
+        if (self.channel_axis is None) and torch.all(rng.abs() < 1e-8):
+            C = self.min_val
+            if torch.allclose(C, torch.zeros_like(C)):
+                scale = torch.ones_like(C)
+                zp = torch.zeros_like(C, dtype=torch.int)
+            elif (C > 0).all():
+                scale = torch.clamp(C, min=eps)
+                zp = torch.zeros_like(C, dtype=torch.int)
             else:
-                scale = torch.clamp(rng, min=eps) / (qmax - qmin)
-                zp = (
-                    torch.round(qmin - self.min_val / scale)
-                    .clamp(qmin, qmax)
-                    .to(torch.int)
-                )
+                scale = torch.clamp(C.abs(), min=eps)
+                zp = torch.full_like(C, qmax, dtype=torch.int)
         else:
+            # Force the range to include 0
+            rng = torch.where(0 < self.min_val, self.max_val, rng)
+            rng = torch.where(0 > self.max_val, -self.min_val, rng)
+
             scale = torch.clamp(rng, min=eps) / (qmax - qmin)
             zp = (
                 torch.round(qmin - self.min_val / scale).clamp(qmin, qmax).to(torch.int)
