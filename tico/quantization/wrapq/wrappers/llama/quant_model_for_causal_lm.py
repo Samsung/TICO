@@ -93,6 +93,7 @@ class QuantLlamaForCausalLM(QuantModuleBase):
         use_cache: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
+        position_embeddings: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
 
@@ -112,6 +113,7 @@ class QuantLlamaForCausalLM(QuantModuleBase):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            position_embeddings=position_embeddings,
             **kwargs,
         )
 

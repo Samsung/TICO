@@ -27,6 +27,7 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
+Q_INF = float(-120) #quantization friendly negative infinity
 
 @try_register(
     "transformers.models.llama.modeling_llama.LlamaModel",
@@ -96,7 +97,7 @@ class QuantLlamaModel(QuantModuleBase):
         # Static causal mask template ---------------------------------------
         assert isinstance(self.config.max_position_embeddings, int)
         max_seq = self.config.max_position_embeddings
-        mask = torch.full((1, 1, max_seq, max_seq), float("-120"))
+        mask = torch.full((1, 1, max_seq, max_seq), Q_INF)
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
@@ -143,23 +144,23 @@ class QuantLlamaModel(QuantModuleBase):
         self.register_buffer("rope_cos_template", cos_t, persistent=False)
         self.register_buffer("rope_sin_template", sin_t, persistent=False)
 
-    def _slice_causal(self, seq_len: int, device: torch.device) -> torch.Tensor:
+    def _slice_causal(self, seq_len: int, device: torch.device, offset: int = 0) -> torch.Tensor:
         """Return `[1,1,L,L]` causal mask slice on *device*."""
         assert isinstance(self.causal_mask_template, torch.Tensor)
-        return self.causal_mask_template[..., :seq_len, :seq_len].to(device)
+        return self.causal_mask_template[..., offset : offset + seq_len, : offset + seq_len].to(device)
 
-    def get_attention_mask_for(self, x):
+    def get_attention_mask_for(self, x, offset: int = 0):
         L = x.size(1)
-        attention_mask = self._slice_causal(L, x.device)
+        attention_mask = self._slice_causal(L, x.device, offset)
         return attention_mask
 
-    def get_position_embeddings_for(self, hidden_states):
+    def get_position_embeddings_for(self, dtype, device):
         return (
             self.rope_cos_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
+                dtype=dtype, device=device
             ),
             self.rope_sin_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
+                dtype=dtype, device=device
             ),
         )
 
@@ -175,6 +176,7 @@ class QuantLlamaModel(QuantModuleBase):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
@@ -202,12 +204,16 @@ class QuantLlamaModel(QuantModuleBase):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
-
+            past_key_values = []
+        
+        present_key_values = []
         if cache_position is None:
             past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
+                0
+                if (past_key_values is None or len(past_key_values) == 0)
+                else past_key_values[0][0].shape[-2]
             )
+
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
@@ -223,23 +229,45 @@ class QuantLlamaModel(QuantModuleBase):
         if self.rotate_embedding is not None:
             hidden_states = self.rotate_embedding(hidden_states)
 
-        # create position_embeddings and causal_mask to be shared across all the decoder layers
-        causal_mask = self.get_attention_mask_for(hidden_states)
-        causal_mask = causal_mask.squeeze(0)
+           
+        offset = past_key_values[0][0].shape[-2] if past_key_values is not None and len(past_key_values) > 0 else 0
+        
+        if attention_mask is not None and len(attention_mask.shape) >= 3:
+            causal_mask = attention_mask # set externally
+        else:
+            if attention_mask is not None: # assuming it's boolean matrix 0 - False, 1- True (e.g. padding)
+                # convert it to float, so that True(1) maps to 0, False(0) maps to Q_INF
+                attention_mask = (torch.ones_like(attention_mask) - attention_mask) * Q_INF
+     
+            # create causal_mask to be shared across all the decoder layers
+            causal_mask = self.get_attention_mask_for(hidden_states, offset)
+            if attention_mask is not None:
+                # in case external mask was set just `and` it with causal_mask
+                causal_mask = torch.max(Q_INF, causal_mask + attention_mask)
+            causal_mask = causal_mask.squeeze(0)
         causal_mask = self._fq(causal_mask, self.obs_causal_mask)
 
-        position_embeddings = self.get_position_embeddings_for(hidden_states)
-        cos, sin = position_embeddings
-        position_embeddings = (
-            self._fq(cos[:, : hidden_states.size(1), :], self.obs_cos),
-            self._fq(sin[:, : hidden_states.size(1), :], self.obs_sin),
-        )
-
+        if position_embeddings is None:
+            position_embeddings = self.get_position_embeddings_for(hidden_states.dtype, hidden_states.device)
+            cos, sin = position_embeddings
+            
+            position_embeddings = (
+                self._fq(cos[:, offset : offset + hidden_states.size(1), :], self.obs_cos),
+                self._fq(sin[:, offset : offset + hidden_states.size(1), :], self.obs_sin),
+            )
+        else:
+            cos, sin = position_embeddings
+            position_embeddings = (
+                self._fq(cos, self.obs_cos),
+                self._fq(sin, self.obs_sin),
+            )
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for idx, decoder_layer in enumerate(
+            self.layers[: self.config.num_hidden_layers]
+        ):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)  # type: ignore[operator]
 
@@ -247,7 +275,11 @@ class QuantLlamaModel(QuantModuleBase):
                 hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_value=(
+                    past_key_values[idx]
+                    if past_key_values is not None and idx < len(past_key_values)
+                    else None
+                ),
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -257,6 +289,10 @@ class QuantLlamaModel(QuantModuleBase):
 
             if decoder_layer.wrapped.return_type == "tuple":
                 hidden_states = layer_outputs[0]
+            elif use_cache:
+                hidden_states = layer_outputs[0]
+                assert isinstance(layer_outputs[1], tuple)
+                present_key_values.append(layer_outputs[1])
             else:
                 hidden_states = layer_outputs
 
@@ -271,7 +307,7 @@ class QuantLlamaModel(QuantModuleBase):
 
         output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values if use_cache else None,
+            past_key_values=present_key_values if use_cache else None,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )

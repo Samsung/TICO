@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import argparse
-
 import torch
 
 from lm_eval.utils import make_table
@@ -27,14 +26,29 @@ from tico.quantization.wrapq.examples.static_llama_layer_runtime import (
     _slice_rope,
 )
 
-from tico.quantization.wrapq.examples.quantize_full_qmodel_with_gptq import pad_input, PrefillDecodeUtils, left_pad
-
 DTYPE_MAP = {
     "float32": torch.float32,
     # TODO Support more dtypes
     # "bfloat16": torch.bfloat16,
     # "float16": torch.float16,
 }
+
+#import os
+#os.environ["CUDA_VISIBLE_DEVICES"]= "0"
+
+def pad_input(input, pad_token, max_seq_len, right: bool = True):
+    """Pad a tensor to a maximum sequence length using the specified pad token."""
+    pads = torch.full(
+        (input.shape[0], max_seq_len - input.shape[1]),
+        fill_value=pad_token,
+        device=input.device,
+    )
+    if right is True:
+        res = torch.cat((input, pads), dim=1)
+    else:
+        res = torch.cat((pads, input), dim=1)
+
+    return res
 
 @torch.no_grad()
 class GreedyDecoder:
@@ -57,17 +71,26 @@ class GreedyDecoder:
             inputs = torch.cat([inputs, next_token], dim=1)
         
         return inputs
+    
+def pad_input_to_left(input, pad_token, max_seq_len):
+    """Pad a tensor to a maximum sequence length using the specified pad token."""
+    pads = torch.full(
+        (input.shape[0], max_seq_len - input.shape[1]),
+        fill_value=pad_token,
+        device=input.device,
+    )
+    return torch.cat((pads, input), dim=1)
 
 class PrefillDecodeGreedyDecoder:
     def __init__(self, model, orig_model, tokenizer, max_seq_len, config, device):
-        self.prefill_model = model
-        self.decode_model = model
+        prefill_model, decode_model = model
+        self.prefill_model = prefill_model
+        self.decode_model = decode_model
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.device = device
-        self.helper = PrefillDecodeUtils(max_seq_len, config, self.device)
         self.orig_model = orig_model
-        self.pos_embeds = _build_rope_templates_from_config(
+        self.rope_cos, self.rope_sin = _build_rope_templates_from_config(
             config, max_seq=max_seq_len, device=device, dtype=torch.float32
         )
     
@@ -75,25 +98,25 @@ class PrefillDecodeGreedyDecoder:
     def generate_left_padding(self, prompt, max_new_tokens):
         inputs = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
         assert isinstance(inputs, torch.Tensor)
-
+        
         eos_token_id = self.tokenizer.eos_token_id
-
+        
         generated = inputs.clone()
         cur_seq_len = inputs.shape[-1]
         prefill_max_seq_len = self.max_seq_len - 1
-        prefill_input = pad_input(inputs, self.tokenizer.pad_token_id, prefill_max_seq_len, right = False)
-        attn_mask = self.helper.build_attention_mask_for_padded_input(cur_seq_len, right_padding=False)
-        position_embeddings = self.helper.build_position_embeddings_for_padded_input(self.pos_embeds, cur_seq_len, right_padding=False)
+        prefill_input = pad_input_to_left(inputs, self.tokenizer.pad_token_id, prefill_max_seq_len)
+        attn_mask = self.build_prefill_padded_attention_mask(cur_seq_len, prefill_max_seq_len, self.device, right_padding=False)
+        position_embeddings = self.build_prefill_position_embeddings(cur_seq_len, prefill_max_seq_len, self.device, right_padding=False)
         
         with torch.no_grad():
             outputs = self.prefill_model(prefill_input, attention_mask = attn_mask, position_embeddings=position_embeddings, use_cache = True)
             
-        #  orig_inputs = self.tokenizer(prompt, return_tensors="pt", max_length=prefill_max_seq_len, padding='max_length', padding_side="left").to(self.device)
-        #  orig_attn_mask = orig_inputs["attention_mask"]
-        #  orig_position_ids = orig_attn_mask.long().cumsum(-1) - 1
-        #  orig_position_ids.masked_fill_(orig_attn_mask == 0, 0)
-        #  orig_inputs["position_ids"] = orig_position_ids
-        #  #orig_outs = self.orig_model.to(self.device)(**orig_inputs)
+          #  orig_inputs = self.tokenizer(prompt, return_tensors="pt", max_length=prefill_max_seq_len, padding='max_length', padding_side="left").to(self.device)
+          #  orig_attn_mask = orig_inputs["attention_mask"]
+          #  orig_position_ids = orig_attn_mask.long().cumsum(-1) - 1
+          #  orig_position_ids.masked_fill_(orig_attn_mask == 0, 0)
+          #  orig_inputs["position_ids"] = orig_position_ids
+          #  #orig_outs = self.orig_model.to(self.device)(**orig_inputs)
         
         logits = outputs.logits
         past_key_values = outputs.past_key_values
@@ -113,7 +136,7 @@ class PrefillDecodeGreedyDecoder:
             cur_seq_len += 1
             produced_tokens += 1
         
-            dec_inputs = self.helper.get_input_for_decode_model(next_token, past_key_values=past_key_values, cur_seq_len = cur_seq_len, right_padding=False)
+            dec_inputs = self.get_input_for_decode_model(next_token, past_key_values=past_key_values, cur_seq_len = cur_seq_len, right_padding=False)
             outputs = self.decode_model(**dec_inputs)
             logits = outputs.logits
             new_key_values = outputs.past_key_values
@@ -144,9 +167,9 @@ class PrefillDecodeGreedyDecoder:
         generated = inputs.clone()
         cur_seq_len = inputs.shape[-1]
         prefill_max_seq_len = self.max_seq_len - 1
-        prefill_input = pad_input(inputs, self.tokenizer.pad_token_id, prefill_max_seq_len, right=True)
-        attn_mask = self.helper.build_attention_mask_for_padded_input(cur_seq_len, right_padding=True)
-        position_embeddings = self.helper.build_position_embeddings_for_padded_input(self.pos_embeds, cur_seq_len, right_padding=True)
+        prefill_input = pad_input(inputs, self.tokenizer.pad_token_id, prefill_max_seq_len)
+        attn_mask = self.build_prefill_padded_attention_mask(cur_seq_len, prefill_max_seq_len, self.device, right_padding=True)
+        position_embeddings = self.build_prefill_position_embeddings(cur_seq_len, prefill_max_seq_len, self.device, right_padding=True)
         
         with torch.no_grad():
             outputs = self.prefill_model(prefill_input, attention_mask = attn_mask, position_embeddings=position_embeddings, use_cache = True)
@@ -177,7 +200,7 @@ class PrefillDecodeGreedyDecoder:
             cur_seq_len += 1
             produced_tokens += 1
 
-            dec_inputs = self.helper.get_input_for_decode_model(next_token, past_key_values=past_key_values, cur_seq_len = cur_seq_len-1, right_padding=True)
+            dec_inputs = self.get_input_for_decode_model(next_token, past_key_values=past_key_values, cur_seq_len = cur_seq_len-1, right_padding=True)
             outputs = self.decode_model(**dec_inputs)
             logits = outputs.logits
             new_key_values = outputs.past_key_values
@@ -196,17 +219,89 @@ class PrefillDecodeGreedyDecoder:
                 past_key_values[idx][1][:, :, -1 :, :] = new_key_values[idx][1]
                 
 
+        
         return generated
     
     def generate(self, prompt, max_new_tokens):
-        if left_pad:
-            return self.generate_left_padding(prompt, max_new_tokens) 
+        return self.generate_left_padding(prompt, max_new_tokens) 
+        #return self.generate_right_padding(prompt, max_new_tokens)
         
-        return self.generate_right_padding(prompt, max_new_tokens)
+    def build_prefill_padded_attention_mask(self, cur_seq_len, max_seq_len, device, right_padding = False, mask_value:float = -120.0):
+        dtype = torch.float32
+        mask = torch.full((1, max_seq_len, max_seq_len), mask_value, device=device, dtype=dtype)
+        
+        if right_padding:
+            for i in range(max_seq_len):
+                for j in range(max_seq_len):
+                    if i >= j and j < cur_seq_len:
+                        mask[..., i, j] = 0
+        else:
+            for i in range(max_seq_len):
+                for j in range(max_seq_len):
+                    if i >= j and j >= max_seq_len - cur_seq_len:
+                        mask[..., i, j] = 0
+                        
+        return mask
+    
+    def build_prefill_position_embeddings(self, cur_seq_len, max_seq_len, device, right_padding = False):
+        dtype = torch.float32
+        position_embeddings = self.prefill_model.wrapped.model.wrapped.get_position_embeddings_for(dtype, device)
+        cos = torch.ones_like(position_embeddings[0][:, : max_seq_len, :])
+        sin = torch.zeros_like(position_embeddings[1][:, : max_seq_len, :])
+        
+        sl_cos, sl_sin = position_embeddings    
+        sl_cos = sl_cos[:, : cur_seq_len, :]
+        sl_sin = sl_sin[:, : cur_seq_len, :]
+        if right_padding is True:
+            cos[..., :cur_seq_len, :] = sl_cos
+            sin[..., :cur_seq_len, :] = sl_sin
+        else:
+            # left padding
+            cos[..., max_seq_len - cur_seq_len : max_seq_len, :] = sl_cos
+            sin[..., max_seq_len - cur_seq_len : max_seq_len, :] = sl_sin
+            
+        return (cos, sin)
+    
+    def get_input_for_decode_model(self, next_token, past_key_values, cur_seq_len, right_padding=False):
+        dtype = torch.float32
+        if right_padding:
+            attention_mask = _build_decode_attention_mask(
+                batch_size=1,
+                past_len=cur_seq_len,
+                max_seq=self.max_seq_len,
+                device=self.device,
+                dtype=dtype,
+            )
 
+            
+            position_embeddings = _slice_rope(
+                self.rope_cos,
+                self.rope_sin,
+                position=cur_seq_len,
+                batch_size=1,
+                device=self.device,
+                dtype=dtype,
+            )
+        else:
+            attention_mask = self.build_prefill_padded_attention_mask(cur_seq_len, self.max_seq_len, self.device)
+            attention_mask = attention_mask[..., -1, :].unsqueeze(0)
+            position_embeddings = self.build_prefill_position_embeddings(cur_seq_len, self.max_seq_len, self.device)
+            (cos, sin) = position_embeddings
+            cos = cos[..., -1, :].unsqueeze(0)
+            sin = sin[..., -1, :].unsqueeze(0)
+            position_embeddings = (cos, sin)
+
+        # fill in input
+        inputs = {}
+        inputs["input_ids"] = next_token
+        inputs["attention_mask"] = attention_mask
+        inputs["position_embeddings"] = position_embeddings
+        inputs["past_key_values"] = past_key_values
+        return inputs
+                
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate a fake-quantized Llama model"
+        description="Try a fake-quantized models"
     )
     parser.add_argument(
         "--model", type=str, required=True, help="HF repo name or local path."
@@ -222,7 +317,7 @@ def main():
         choices=list(DTYPE_MAP.keys()),
         default="float32",
         help="Model dtype for load.",
-    )
+    )   
     parser.add_argument(
         "--hf-token",
         type=str,
@@ -244,34 +339,23 @@ def main():
         "--fk_model_path", type=str, required=True, help="Path to fake_quantized model"
     )
     parser.add_argument(
+        "--prompt", type=str, default="The capital of France is", help="Prompt to decode"
+    )
+    parser.add_argument(
         "--eval_tasks",
         type=str,
         default=None,
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
     )
     parser.add_argument(
-        "--skip_fp_eval",
-        action="store_true",
-        help="Skip original model evaluation.",
+        "--max_new_tokens", type=int, default=128, help="Maximum new okens to produce"
     )
-    parser.add_argument(
-        "--prefill_decode",
-        action="store_true",
-        help="Model is calibrated for prefill_decode pipeline.",
-    )
-    parser.add_argument(
-        "--prompt", type=str, default="The capital of France is", help="Prompt to decode"
-    )
-    parser.add_argument(
-        "--max_new_tokens", type=int, default=128, help="Maximum new tokens to produce"
-    )
-
+    
     args = parser.parse_args()
     print(args)
 
-    # -------------------------------------------------------------------------
     # Basic setup
-    # -------------------------------------------------------------------------
+    
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
 
@@ -279,79 +363,81 @@ def main():
     print(f"Model            : {args.model}")
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
-    print(f"fk_model_path    : {args.fk_model_path}")
+    print(f"Prompt           : {args.prompt}")
     print()
 
+    # -------------------------------------------------------------------------
+    # 2. Load the FP backbone and tokenizer
+    # -------------------------------------------------------------------------
+    print("Loading FP model …")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
         cache_dir=args.cache_dir,
     )
-
-    if not args.skip_fp_eval:
-        # -------------------------------------------------------------------------
-        # FP model evaluation
-        # -------------------------------------------------------------------------
-        print("Loading FP model …")
-        model = (
-            AutoModelForCausalLM.from_pretrained(
-                args.model,
-                dtype=dtype,
-                trust_remote_code=args.trust_remote_code,
-                token=args.hf_token,
-                cache_dir=args.cache_dir,
-            )
-            .cpu()
-            .eval()
-        )
-
-        if args.eval_tasks is not None:
-            config = model.config
-            max_seq_len = config.max_position_embeddings
-            results = evaluate_llm_on_tasks(
-                model, tokenizer, args.eval_tasks, max_length=max_seq_len
-            )
-            print("Original RESULTS ARE:")
-            print(make_table(results))
-
-        if args.prompt is not None:
-            max_seq_len = model.config.max_position_embeddings
-            inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left").to(device) #just try with right padding below
-            #inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="right", device=args.device).to(device)
-            out_ids = model.to(args.device).generate(**inputs, max_length=max_seq_len + args.max_new_tokens, do_sample = False)
-            output = tokenizer.decode(out_ids.squeeze(), skip_special_tokens=True)
-            print(f"Original model prompt: {output}")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        dtype=dtype,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+        cache_dir=args.cache_dir,
+    ).cpu().eval()
     
-        model = model.cpu()
-        if device.type == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+    if tokenizer.pad_token is None:
+        print(
+            "Warning: tokenizer doesn't have pad_token. Prefill-decoding scheme may fail."
+        )
+        tokenizer.pad_token = tokenizer.eos_token
+            
+    fk_model = torch.load(args.fk_model_path, weights_only=False)
+    
+    if isinstance(fk_model, tuple):
+        fk_model = (fk_model[0].eval().cpu(), fk_model[1].eval().cpu())
+        config = fk_model[0].wrapped.config
+    else:
+        fk_model.eval()
+        fk_model = fk_model.cpu()
+        config = fk_model.wrapped.config
 
-    # -------------------------------------------------------------------------
-    # FK model evaluation
-    # -------------------------------------------------------------------------
-    print("Loading fake quantized model …")
-    fk_model = torch.load(args.fk_model_path, weights_only=False).eval().to(args.device)
-    config = fk_model.wrapped.config
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     max_seq_len = config.max_position_embeddings
+    inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left").to(device) #just try with right padding below
+    #inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="right", device=args.device).to(device)
         
+    model.config.use_cache = True
+    if args.eval_tasks is not None:
+        results = evaluate_llm_on_tasks(
+            model, tokenizer, args.eval_tasks, max_length=args.max_seq_len
+        )
+        print("Original RESULTS ARE:")
+        print(make_table(results))
+        
+    out_ids = model.to(args.device).generate(**inputs, max_length=max_seq_len + args.max_new_tokens, do_sample = False)
+    output = tokenizer.decode(out_ids.squeeze(), skip_special_tokens=True)
+    print(f"Original model prompt: {output}")
+    model = model.cpu()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    fk_model = fk_model.to(args.device) if not isinstance(fk_model, tuple) else (fk_model[0].to(args.device), fk_model[1].cpu())
     if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
             fk_model, tokenizer, args.eval_tasks, max_length=max_seq_len
         )
         print("Quantized RESULTS ARE:")
         print(make_table(results))
-
-    fk_decoder = GreedyDecoder(fk_model, tokenizer, args.device) if not args.prefill_decode else PrefillDecodeGreedyDecoder(fk_model, model, tokenizer, max_seq_len, config, args.device)
-    max_seq_len = model.config.max_position_embeddings
-    inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left").to(device) #just try with right padding below
-    #inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="right", device=args.device).to(device)
+      
+    fk_decoder = GreedyDecoder(fk_model, tokenizer, args.device) if not isinstance(fk_model, tuple) else PrefillDecodeGreedyDecoder(fk_model, model, tokenizer, max_seq_len, config, args.device)
+    
     out_ids = fk_decoder.generate(args.prompt, max_new_tokens=args.max_new_tokens)
     output = tokenizer.decode(out_ids.squeeze(), skip_special_tokens=True)
     print(f"Fake quantized model prompt: {output}")
     fk_model = fk_model.cpu() if not isinstance(fk_model, tuple) else (fk_model[0].cpu(), fk_model[1].cpu())
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
+        
 if __name__ == "__main__":
     main()

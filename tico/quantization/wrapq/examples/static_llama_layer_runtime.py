@@ -556,8 +556,9 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
         dtype=torch.float32,
+        cache_dir = "/mnt/storage/transformers_cache"
     ).to(args.device)
-    tokenizer = AutoTokenizer.from_pretrained(args.model, legacy=False)
+    tokenizer = AutoTokenizer.from_pretrained(args.model, legacy=False, cache_dir = "/mnt/storage/transformers_cache")
 
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
