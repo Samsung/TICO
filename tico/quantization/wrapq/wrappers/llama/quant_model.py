@@ -31,6 +31,8 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 LegacyCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
+
+
 @try_register(
     "transformers.models.llama.modeling_llama.LlamaModel",
     "tico.quantization.algorithm.spinquant.spin_llama.SpinLlamaModel",
@@ -115,7 +117,7 @@ class QuantLlamaModel(QuantModuleBase):
         # Static causal mask template ---------------------------------------
         assert isinstance(self.config.max_position_embeddings, int)
         max_seq = self.config.max_position_embeddings
-        mask = torch.full((1, 1, max_seq, max_seq), float("-120"))
+        mask = torch.full((1, 1, max_seq, max_seq), Q_INF)
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
@@ -493,6 +495,7 @@ class QuantLlamaModel(QuantModuleBase):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
@@ -557,7 +560,9 @@ class QuantLlamaModel(QuantModuleBase):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers[: self.config.num_hidden_layers]:
+        for idx, decoder_layer in enumerate(
+            self.layers[: self.config.num_hidden_layers]
+        ):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)  # type: ignore[operator]
 
