@@ -54,12 +54,10 @@ class QuantLlamaForCausalLM(QuantModuleBase):
             model_fp.lm_head, torch.nn.Module
         )
 
-        self.model = PTQWrapper(
-            model_fp.model, qcfg=model_cfg, fp_name=f"{fp_name}.model"
-        )
+        self.model = PTQWrapper(model_fp.model, qcfg=model_cfg, fp_name=f"model")
 
         self.lm_head = PTQWrapper(
-            model_fp.lm_head, qcfg=lm_head_cfg, fp_name=f"{fp_name}.lm_head"
+            model_fp.lm_head, qcfg=lm_head_cfg, fp_name=f"lm_head"
         )
 
         # `rotate_lm_head` exists only for SpinQuant-style custom models.
