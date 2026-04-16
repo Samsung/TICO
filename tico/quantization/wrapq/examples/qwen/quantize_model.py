@@ -82,6 +82,7 @@ def create_visual_input(
     spatial_patch_size: int,
     vocab_size: int,
     image_token_id: int,
+    visual_start_idx: int,
 ):
     """Helper to create input with videos or images."""
     assert (
@@ -109,7 +110,9 @@ def create_visual_input(
     # Replace first tokens with video placeholder tokens
     # This marks where the video features should be inserted
     for i in range(batch_size):
-        input_ids[i, :num_video_tokens] = image_token_id
+        input_ids[
+            i, visual_start_idx : visual_start_idx + num_video_tokens
+        ] = image_token_id
 
     num_temporal_patches, num_spatial_patches_h, num_spatial_patches_w = thw
 
@@ -244,6 +247,7 @@ def generate_calibration_data(
     spatial_patch_size: int,
     vocab_size: int,
     image_token_id: int,
+    visual_start_idx: int,
 ):
     calibration_data = []
     for i in range(batch_size):
@@ -255,6 +259,7 @@ def generate_calibration_data(
             spatial_patch_size,
             vocab_size,
             image_token_id,
+            visual_start_idx=visual_start_idx,
         )
         calibration_data.append(x)
     return calibration_data
@@ -289,12 +294,14 @@ def main():
         video_token_id=999,
     )
     thw = (1, 8, 8)
+    visual_start_idx = 0
 
     # Configure PTQ
     ptq_config = tico.quantization.config.ptq.PTQConfig(
         model_args={
             "vision": {
                 "grid_thw": thw,
+                "visual_start_idx": visual_start_idx,
             }
         }
     )
@@ -319,6 +326,7 @@ def main():
         spatial_patch_size=cfg.vision_config.patch_size,
         vocab_size=cfg.text_config.vocab_size,
         image_token_id=cfg.image_token_id,
+        visual_start_idx=visual_start_idx,
     )
 
     # Calibrate the model (collect statistics)
