@@ -76,17 +76,17 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self.register_buffer("pos_embed_template", pos_embeds, persistent=False)
 
         # Precompute rotary frequency table for RoPE
-        dim = (
+        self.dim = (
             fp_model.rotary_pos_emb.dim
             if hasattr(fp_model.rotary_pos_emb, "dim")
             else (cfg.hidden_size // cfg.num_heads) // 2
         )
-        theta = (
+        self.theta = (
             fp_model.rotary_pos_emb.theta
             if hasattr(fp_model.rotary_pos_emb, "theta")
             else 10000.0
         )
-        inv_freq = self._precompute_rope_inv_freq(dim=dim, theta=theta)
+        inv_freq = self._precompute_rope_inv_freq(dim=self.dim, theta=self.theta)
         self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
 
         # Precompute RoPE position embeddings for fixed vision_grid_thw
@@ -358,20 +358,27 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         Returns:
             BaseModelOutputWithDeepstackFeatures or similar
         """
-        # Assert that grid_thw matches the precomputed vision_grid_thw
-        if self._mode is Mode.CALIB:
-            assert torch.equal(grid_thw, self.vision_grid_thw.to(grid_thw.device)), (
-                f"grid_thw {grid_thw.tolist()} does not match the precomputed "
-                f"vision_grid_thw {self.vision_grid_thw.tolist()}"
-            )
-
         # Patch embedding (already quantized by wrapper)
         hidden_states = self.patch_embed(hidden_states)
 
+        # Model export mode (torch.export.export) requires the use of fixed `grid_thw` and precomputed values (`position_embeddings`,`cu_seqlens').
+        # `torch.compiler.is_compiling()` controls the conditional behavior of the model:
+        # - precomputed values are used in export mode
+        # - otherwise, the calculation is performed dynamically(e.g. benchmarks evaluation)
+
         # Position embedding
-        pos_embeds = self.pos_embed_template.to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        if torch.compiler.is_compiling():
+            # Use precomputed position embedding
+            pos_embeds = self.pos_embed_template.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            )
+        else:
+            pos_embeds = QuantQwen3VLVisionModel._fast_pos_embed_interpolate(
+                merge_size=self.spatial_merge_size,
+                num_grid_per_side=self.num_grid_per_side,
+                pos_embedder=self.module.pos_embed,
+                grid_thw=grid_thw,
+            )
         pos_embeds = self._fq(pos_embeds, self.obs_pos_embeds)
         hidden_states = hidden_states + pos_embeds
         hidden_states = self._fq(hidden_states, self.obs_pos_add)
@@ -380,19 +387,32 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(seq_len, -1)
 
-        # Use precomputed RoPE position embeddings (cos, sin) and quantize
-        cos = self.rope_cos_template.to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
-        sin = self.rope_sin_template.to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        # RoPE position embeddings (cos, sin)
+        if torch.compiler.is_compiling():
+            # Use precomputed RoPE position embeddings (cos, sin) and quantize
+            cos = self.rope_cos_template.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            )
+            sin = self.rope_sin_template.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            )
+        else:
+            inv_freq = self.rope_inv_freq.to(hidden_states.device)
+            cos, sin = QuantQwen3VLVisionModel._precompute_rope_position_embeddings(
+                merge_size=self.spatial_merge_size,
+                rope_inv_freq=inv_freq,
+                grid_thw=grid_thw,
+            )
+
         position_embeddings = (
             self._fq(cos, self.obs_rope_cos),
             self._fq(sin, self.obs_rope_sin),
         )
 
-        cu_seqlens = self.cu_seqlens_template
+        if torch.compiler.is_compiling():
+            cu_seqlens = self.cu_seqlens_template
+        else:
+            cu_seqlens = QuantQwen3VLVisionModel._precompute_cu_seqlens(grid_thw)
 
         # Process through transformer blocks
         deepstack_feature_lists = []
