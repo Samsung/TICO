@@ -26,8 +26,6 @@ from tico.quantization.wrapq.examples.static_llama_layer_runtime import (
     _slice_rope,
 )
 
-from tico.quantization.wrapq.examples.quantize_full_qmodel_with_gptq import pad_input
-
 DTYPE_MAP = {
     "float32": torch.float32,
     # TODO Support more dtypes
@@ -37,6 +35,20 @@ DTYPE_MAP = {
 
 #import os
 #os.environ["CUDA_VISIBLE_DEVICES"]= "0"
+
+def pad_input(input, pad_token, max_seq_len, right: bool = True):
+    """Pad a tensor to a maximum sequence length using the specified pad token."""
+    pads = torch.full(
+        (input.shape[0], max_seq_len - input.shape[1]),
+        fill_value=pad_token,
+        device=input.device,
+    )
+    if right is True:
+        res = torch.cat((input, pads), dim=1)
+    else:
+        res = torch.cat((pads, input), dim=1)
+
+    return res
 
 @torch.no_grad()
 class GreedyDecoder:

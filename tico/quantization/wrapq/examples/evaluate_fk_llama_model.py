@@ -21,6 +21,13 @@ from lm_eval.utils import make_table
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
+from tico.quantization.wrapq.examples.static_llama_layer_runtime import (
+    _build_decode_attention_mask,
+    _build_rope_templates_from_config,
+    _slice_rope,
+)
+
+from tico.quantization.wrapq.examples.quantize_full_qmodel_with_gptq import pad_input, PrefillDecodeUtils, left_pad
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -29,6 +36,173 @@ DTYPE_MAP = {
     # "float16": torch.float16,
 }
 
+@torch.no_grad()
+class GreedyDecoder:
+    def __init__(self, model, tokenizer, device):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+    
+    def generate(self, prompt, max_length):
+        inputs = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        
+        eos_token_id = self.tokenizer.eos_token_id
+
+        with torch.no_grad():
+         while inputs.shape[-1] < max_length:
+            logits = self.model(inputs).logits
+            next_token = torch.tensor([[torch.argmax(logits[..., -1, :])]], device=inputs.device)
+            if eos_token_id is not None and torch.all(next_token == eos_token_id):
+                break
+            inputs = torch.cat([inputs, next_token], dim=1)
+        
+        return inputs
+
+class PrefillDecodeGreedyDecoder:
+    def __init__(self, model, orig_model, tokenizer, max_seq_len, config, device):
+        self.prefill_model = model
+        self.decode_model = model
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.device = device
+        self.helper = PrefillDecodeUtils(max_seq_len, config, self.device)
+        self.orig_model = orig_model
+        self.pos_embeds = _build_rope_templates_from_config(
+            config, max_seq=max_seq_len, device=device, dtype=torch.float32
+        )
+    
+    
+    def generate_left_padding(self, prompt, max_new_tokens):
+        inputs = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        assert isinstance(inputs, torch.Tensor)
+
+        eos_token_id = self.tokenizer.eos_token_id
+
+        generated = inputs.clone()
+        cur_seq_len = inputs.shape[-1]
+        prefill_max_seq_len = self.max_seq_len - 1
+        prefill_input = pad_input(inputs, self.tokenizer.pad_token_id, prefill_max_seq_len, right = False)
+        attn_mask = self.helper.build_attention_mask_for_padded_input(cur_seq_len, right_padding=False)
+        position_embeddings = self.helper.build_position_embeddings_for_padded_input(self.pos_embeds, cur_seq_len, right_padding=False)
+        
+        with torch.no_grad():
+            outputs = self.prefill_model(prefill_input, attention_mask = attn_mask, position_embeddings=position_embeddings, use_cache = True)
+            
+        #  orig_inputs = self.tokenizer(prompt, return_tensors="pt", max_length=prefill_max_seq_len, padding='max_length', padding_side="left").to(self.device)
+        #  orig_attn_mask = orig_inputs["attention_mask"]
+        #  orig_position_ids = orig_attn_mask.long().cumsum(-1) - 1
+        #  orig_position_ids.masked_fill_(orig_attn_mask == 0, 0)
+        #  orig_inputs["position_ids"] = orig_position_ids
+        #  #orig_outs = self.orig_model.to(self.device)(**orig_inputs)
+        
+        logits = outputs.logits
+        past_key_values = outputs.past_key_values
+        
+        self.prefill_model = self.prefill_model.cpu()
+        self.decode_model = self.decode_model.to(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        produced_tokens = 0
+        with torch.no_grad():
+         while produced_tokens < max_new_tokens:
+            next_token = torch.tensor([[torch.argmax(logits[..., -1, :])]], device=self.device)
+            if eos_token_id is not None and torch.all(next_token == eos_token_id):
+                break
+            generated = torch.cat([generated, next_token], dim=1)
+            cur_seq_len += 1
+            produced_tokens += 1
+        
+            dec_inputs = self.helper.get_input_for_decode_model(next_token, past_key_values=past_key_values, cur_seq_len = cur_seq_len, right_padding=False)
+            outputs = self.decode_model(**dec_inputs)
+            logits = outputs.logits
+            new_key_values = outputs.past_key_values
+            # shift past_key_values
+            for i in range(prefill_max_seq_len - 1):
+                #cur_seq_idx = prefill_max_seq_len - cur_seq_len + i - 1
+                for idx in range(len(new_key_values)):
+                    past_key_values[idx][0][:, :, i : i + 1, :] =\
+                        past_key_values[idx][0][:, :, i + 1: i + 2, :]
+                    past_key_values[idx][1][:, :, i : i + 1, :] =\
+                        past_key_values[idx][1][:, :, i + 1 : i + 2, :]
+                
+            # update past_key_values
+            for idx in range(len(new_key_values)):
+                past_key_values[idx][0][:, :, -1 :, :] = new_key_values[idx][0]
+                past_key_values[idx][1][:, :, -1 :, :] = new_key_values[idx][1]
+                
+        
+        return generated
+        
+    def generate_right_padding(self, prompt, max_new_tokens):
+        
+        inputs = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        assert isinstance(inputs, torch.Tensor)
+        
+        eos_token_id = self.tokenizer.eos_token_id
+        
+        generated = inputs.clone()
+        cur_seq_len = inputs.shape[-1]
+        prefill_max_seq_len = self.max_seq_len - 1
+        prefill_input = pad_input(inputs, self.tokenizer.pad_token_id, prefill_max_seq_len, right=True)
+        attn_mask = self.helper.build_attention_mask_for_padded_input(cur_seq_len, right_padding=True)
+        position_embeddings = self.helper.build_position_embeddings_for_padded_input(self.pos_embeds, cur_seq_len, right_padding=True)
+        
+        with torch.no_grad():
+            outputs = self.prefill_model(prefill_input, attention_mask = attn_mask, position_embeddings=position_embeddings, use_cache = True)
+            
+           # orig_inputs = self.tokenizer(prompt, return_tensors="pt", max_length=prefill_max_seq_len, padding='max_length', padding_side="right").to(self.device)
+           # orig_attn_mask = orig_inputs["attention_mask"]
+           # orig_position_ids = orig_attn_mask.long().cumsum(-1) - 1
+           # orig_position_ids.masked_fill_(orig_attn_mask == 0, 0)
+           # orig_inputs["position_ids"] = orig_position_ids
+           # orig_outs = self.orig_model.to(self.device)(**orig_inputs)
+          
+       
+        logits = outputs.logits
+        past_key_values = outputs.past_key_values
+        
+        self.prefill_model = self.prefill_model.cpu()
+        self.decode_model = self.decode_model.to(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        produced_tokens = 0
+        with torch.no_grad():
+         while produced_tokens < max_new_tokens:
+            next_token = torch.tensor([[torch.argmax(logits[..., -1, :])]], device=self.device)
+            if eos_token_id is not None and torch.all(next_token == eos_token_id):
+                break
+            generated = torch.cat([generated, next_token], dim=1)
+            cur_seq_len += 1
+            produced_tokens += 1
+
+            dec_inputs = self.helper.get_input_for_decode_model(next_token, past_key_values=past_key_values, cur_seq_len = cur_seq_len-1, right_padding=True)
+            outputs = self.decode_model(**dec_inputs)
+            logits = outputs.logits
+            new_key_values = outputs.past_key_values
+            # shift past_key_values
+            for i in range(prefill_max_seq_len - 1):
+                #cur_seq_idx = prefill_max_seq_len - cur_seq_len + i - 1
+                for idx in range(len(new_key_values)):
+                    past_key_values[idx][0][:, :, i : i + 1, :] =\
+                        past_key_values[idx][0][:, :, i + 1: i + 2, :]
+                    past_key_values[idx][1][:, :, i : i + 1, :] =\
+                        past_key_values[idx][1][:, :, i + 1 : i + 2, :]
+                
+            # update past_key_values to be the last added 
+            for idx in range(len(new_key_values)):
+                past_key_values[idx][0][:, :, -1 :, :] = new_key_values[idx][0]
+                past_key_values[idx][1][:, :, -1 :, :] = new_key_values[idx][1]
+                
+
+        return generated
+    
+    def generate(self, prompt, max_new_tokens):
+        if left_pad:
+            return self.generate_left_padding(prompt, max_new_tokens) 
+        
+        return self.generate_right_padding(prompt, max_new_tokens)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -80,6 +254,17 @@ def main():
         action="store_true",
         help="Skip original model evaluation.",
     )
+    parser.add_argument(
+        "--prefill_decode",
+        action="store_true",
+        help="Model is calibrated for prefill_decode pipeline.",
+    )
+    parser.add_argument(
+        "--prompt", type=str, default="The capital of France is", help="Prompt to decode"
+    )
+    parser.add_argument(
+        "--max_new_tokens", type=int, default=128, help="Maximum new tokens to produce"
+    )
 
     args = parser.parse_args()
     print(args)
@@ -105,7 +290,6 @@ def main():
     )
 
     if not args.skip_fp_eval:
-
         # -------------------------------------------------------------------------
         # FP model evaluation
         # -------------------------------------------------------------------------
@@ -131,6 +315,14 @@ def main():
             print("Original RESULTS ARE:")
             print(make_table(results))
 
+        if args.prompt is not None:
+            max_seq_len = model.config.max_position_embeddings
+            inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left").to(device) #just try with right padding below
+            #inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="right", device=args.device).to(device)
+            out_ids = model.to(args.device).generate(**inputs, max_length=max_seq_len + args.max_new_tokens, do_sample = False)
+            output = tokenizer.decode(out_ids.squeeze(), skip_special_tokens=True)
+            print(f"Original model prompt: {output}")
+    
         model = model.cpu()
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -140,17 +332,26 @@ def main():
     # -------------------------------------------------------------------------
     print("Loading fake quantized model …")
     fk_model = torch.load(args.fk_model_path, weights_only=False).eval().to(args.device)
-
+    config = fk_model.wrapped.config
+    max_seq_len = config.max_position_embeddings
+        
     if args.eval_tasks is not None:
-        config = fk_model.wrapped.config
-        max_seq_len = config.max_position_embeddings
-
         results = evaluate_llm_on_tasks(
             fk_model, tokenizer, args.eval_tasks, max_length=max_seq_len
         )
         print("Quantized RESULTS ARE:")
         print(make_table(results))
 
+    fk_decoder = GreedyDecoder(fk_model, tokenizer, args.device) if not args.prefill_decode else PrefillDecodeGreedyDecoder(fk_model, model, tokenizer, max_seq_len, config, args.device)
+    max_seq_len = model.config.max_position_embeddings
+    inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left").to(device) #just try with right padding below
+    #inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="right", device=args.device).to(device)
+    out_ids = fk_decoder.generate(args.prompt, max_new_tokens=args.max_new_tokens)
+    output = tokenizer.decode(out_ids.squeeze(), skip_special_tokens=True)
+    print(f"Fake quantized model prompt: {output}")
+    fk_model = fk_model.cpu() if not isinstance(fk_model, tuple) else (fk_model[0].cpu(), fk_model[1].cpu())
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     main()
