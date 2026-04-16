@@ -72,26 +72,59 @@ def inject_gptq_qparams(
     root: torch.nn.Module,
     gptq_quantizers: dict[str, Any],  # {fp_name: quantizer}
     weight_obs_name: str = "weight",
+    *,
+    verbose: bool = False,
 ):
     """
-    For every `QuantModuleBase` whose `fp_name` matches a GPTQ key,
-    locate the observer called `weight_obs_name` and overwrite its
-    (scale, zero-point), then lock them against further updates.
+    Inject GPTQ (scale, zero-point) into PTQ observers.
+
+    When verbose=True, prints a summary of matched / missed / unused entries.
     """
+    seen = set()
+    missed_modules = []
+
     for m in root.modules():
         if not isinstance(m, QuantModuleBase):
             continue
         if m.fp_name is None:
             continue
+
         quantizer = gptq_quantizers.get(m.fp_name)
-        if quantizer is None:
-            continue
         obs = m.get_observer(weight_obs_name)
+
+        # Only care about modules that should have weight observers
         if obs is None:
             continue
+
+        if quantizer is None:
+            missed_modules.append(m.fp_name)
+            continue
+
         assert isinstance(obs, AffineObserverBase)
-        # GPTQ quantizer attributes
         obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
+        seen.add(m.fp_name)
+
+    unused = set(gptq_quantizers.keys()) - seen
+
+    if verbose:
+        print("\n[GPTQ → PTQ injection summary]")
+        print(f"  matched : {len(seen)}")
+        print(f"  missed  : {len(missed_modules)}")
+        print(f"  unused  : {len(unused)}")
+
+        # Print samples (not all, to avoid spam)
+        def _print_sample(title, items):
+            items = list(items)
+            if not items:
+                return
+            print(f"\n  {title}:")
+            for name in items[:10]:
+                print(f"    - {name}")
+            if len(items) > 10:
+                print(f"    ... and {len(items) - 10} more")
+
+        _print_sample("missed modules", missed_modules)
+        _print_sample("unused GPTQ entries", unused)
 
 
 # -------------------------------------------------------------------------
@@ -172,13 +205,13 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
 
     # Overwrite weight observers with GPTQ statistics
     if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
-        inject_gptq_qparams(q_m, q_m.quantizers)
+        inject_gptq_qparams(q_m, q_m.quantizers, verbose=args.verbose)
     elif (
         hasattr(q_m, "wrapped")
         and hasattr(q_m.wrapped, "quantizers")
         and isinstance(q_m.wrapped.quantizers, dict)
     ):
-        inject_gptq_qparams(q_m.wrapped, q_m.wrapped.quantizers)
+        inject_gptq_qparams(q_m.wrapped, q_m.wrapped.quantizers, verbose=args.verbose)
     else:
         print(
             "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
@@ -375,6 +408,11 @@ def main():
         "--sensitivity_path",
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose logging for debugging (e.g., GPTQ injection coverage)",
     )
     args = parser.parse_args()
     print(args)

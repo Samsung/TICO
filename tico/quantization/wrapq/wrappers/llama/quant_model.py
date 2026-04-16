@@ -78,7 +78,7 @@ class QuantLlamaModel(QuantModuleBase):
 
         new_list = nn.ModuleList()
         for idx, layer in enumerate(model_fp.layers):
-            child_scope = f"{idx}"
+            child_scope = f"{fp_name}.layers.{idx}"
             child_cfg = layers_cfg.child(child_scope) if layers_cfg is not None else None  # type: ignore[union-attr]
             new_list.append(
                 PTQWrapper(
