@@ -361,6 +361,13 @@ class GPTQQuantizer(BaseQuantizer):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        if (
+            hasattr(model, "model")
+            and hasattr(model.model, "norm")
+            and hasattr(model, "lm_head")
+        ):  # quantize lm_head
+            self._quantize_lm_head(model, quantizers)
+
         # Restore the original cache configuration.
         if orig_use_cache is not None:
             model.config.use_cache = orig_use_cache
@@ -373,3 +380,89 @@ class GPTQQuantizer(BaseQuantizer):
         model.quantizers = quantizers
 
         return model
+
+    def _quantize_lm_head(self, model, quantizers):
+        gptq_conf = self.config
+        assert isinstance(gptq_conf, GPTQConfig)
+        # TODO reduce code duplication with layer-wise quantization
+
+        # prepare data for lm_head
+        batch_num = self.num_batches
+        device = next(model.parameters()).device
+        for batch_idx in tqdm(
+            range(batch_num),
+            desc=f"[model.norm] re-forward",
+            leave=False,
+            unit="batch",
+            disable=not gptq_conf.show_progress,
+        ):
+            hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
+            hidden_states = move_to_device(hidden_states, device)
+
+            hidden_states = model.model.norm(hidden_states)
+            if len(self.cache_args) > 0:
+                self.cache_args[0][batch_idx] = move_to_cpu(hidden_states)
+
+        layer = model.lm_head
+        gptq = GPTQ(layer)
+        full_module_name = "lm_head"
+        weight_bits = self._resolve_weight_bits(
+            gptq_conf,
+            full_module_name=full_module_name,
+            local_module_name="lm_head",
+        )
+        if (
+            gptq_conf.sensitivity is not None
+            and isinstance(gptq_conf.sensitivity, dict)
+            and full_module_name in gptq_conf.sensitivity
+        ):
+            cur_sensitivity = gptq_conf.sensitivity[full_module_name]
+        else:
+            cur_sensitivity = None
+        gptq.quantizer.configure(
+            bits=weight_bits,
+            perchannel=gptq_conf.perchannel,
+            sym=gptq_conf.symmetric,
+            mse=gptq_conf.mse,
+            sensitivity=cur_sensitivity,
+        )
+
+        # Hook to collect (inp, out) for GPTQ
+        def add_batch():
+            def _hook(_, inp, out):
+                gptq.add_batch(inp[0].data, out.data)
+
+            return _hook
+
+        handles = [layer.register_forward_hook(add_batch())]
+
+        # Run layer forward over all cached batches to build Hessian/statistics
+        device = next(layer.parameters()).device  # in case lm_head is located on cpu
+        for batch_idx in tqdm(
+            range(batch_num),
+            desc=f"[lm_head] collecting",
+            leave=False,
+            unit="batch",
+            disable=not gptq_conf.show_progress,
+        ):
+            hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
+            hidden_states = move_to_device(hidden_states, device)
+
+            layer(hidden_states)
+
+        # Remove handles
+        for h in handles:
+            h.remove()
+
+        # Quantize
+        if gptq_conf.verbose:
+            print(f"[lm_head] -> Quantizing ...")
+        gptq.fasterquant(
+            percdamp=gptq_conf.percdamp,
+            groupsize=gptq_conf.groupsize,
+            actorder=gptq_conf.actorder,
+            static_groups=gptq_conf.static_groups,
+            verbose=gptq_conf.verbose,
+        )
+        quantizers[f"lm_head"] = gptq.quantizer
+        gptq.free()
