@@ -340,7 +340,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         if use_cache:
             outputs += (present_key_value,)  # type: ignore[assignment]
 
-        if self.return_type == "tuple":
+        if self.return_type == "tuple" or use_cache is True:
             return outputs
         if self.return_type == "tensor":
             return hidden_states
