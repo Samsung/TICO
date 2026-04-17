@@ -464,5 +464,5 @@ class GPTQQuantizer(BaseQuantizer):
             static_groups=gptq_conf.static_groups,
             verbose=gptq_conf.verbose,
         )
-        quantizers[f"model.lm_head"] = gptq.quantizer
+        quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()
