@@ -99,15 +99,15 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
         use_cache: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
+        return_dict: bool | None = None,
         **kwargs,
     ) -> CausalLMOutputWithPast:
 
         output_attentions = self.config.output_attentions
         output_hidden_states = self.config.output_hidden_states
-        return_dict = self.config.use_return_dict
-        if "return_dict" in kwargs:
-            # lm_eval set return_dict explicitely in kwargs
-            return_dict = kwargs.pop("return_dict")
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
