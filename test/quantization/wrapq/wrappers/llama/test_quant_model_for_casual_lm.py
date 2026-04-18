@@ -46,6 +46,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
 
         cls.seq_len = 16
         cls.vocab_size = 10000
+
         cfg = LlamaConfig(
             hidden_size=8,
             num_attention_heads=2,
@@ -57,7 +58,9 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             num_hidden_layers=2,
             max_position_embeddings=cls.seq_len,
             use_cache=False,
+            return_dict=True,  # 명시적으로 설정
         )
+
         cls.fp_model = LlamaForCausalLM(cfg)
 
     def test_mode_transitions(self):
@@ -67,42 +70,43 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         qmodel.enable_calibration()
         self.assertIs(qmodel._mode, Mode.CALIB)
 
-        x = torch.randint(
-            0,
-            self.vocab_size,
-            (
-                1,
-                self.seq_len // 2,
-            ),
-        )
-        _ = qmodel(x)  # gather stats
+        x = torch.randint(0, self.vocab_size, (1, self.seq_len // 2))
+        _ = qmodel(x, return_dict=True, use_cache=False)
 
         qmodel.freeze_qparams()
         self.assertIs(qmodel._mode, Mode.QUANT)
-        ndf = 0
 
     def test_forward_diff(self):
         qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
         qmodel.enable_calibration()
+
         calib_set = []
         for index in range(4):
             inp = torch.randint(
                 0,
                 self.vocab_size,
-                (
-                    1,
-                    self.seq_len // (index + 1),
-                ),
+                (1, self.seq_len // (index + 1)),
             )
-            _ = qmodel(inp)
+            _ = qmodel(inp, return_dict=True, use_cache=False)
             calib_set.append(inp)
+
         qmodel.freeze_qparams()
 
         with torch.no_grad():
-            q_out = qmodel(calib_set[0])["logits"]
-            fp_out = self.fp_model(calib_set[0])["logits"]
+            q_out = qmodel(
+                calib_set[0],
+                return_dict=True,
+                use_cache=False,
+            ).logits
+
+            fp_out = self.fp_model(
+                calib_set[0],
+                return_dict=True,
+                use_cache=False,
+            ).logits
 
         diff = (fp_out - q_out).abs().mean().item()
+
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.4)
         self.assertEqual(fp_out.shape, q_out.shape)

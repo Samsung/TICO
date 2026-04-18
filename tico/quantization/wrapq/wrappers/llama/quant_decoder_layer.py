@@ -17,6 +17,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
+from transformers.cache_utils import Cache
+
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
@@ -46,6 +48,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
         return_type: Optional[str] = None,
+        layer_idx: Optional[int] = None,
     ):
         """
         Q) Why do we need `return_type`?
@@ -61,6 +64,8 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         assert self.return_type is not None
 
         super().__init__(qcfg, fp_name=fp_name)
+
+        self.layer_idx = layer_idx
 
         attn_cfg = qcfg.child("self_attn") if qcfg else None
         mlp_cfg = qcfg.child("mlp") if qcfg else None
@@ -83,6 +88,10 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             qcfg=attn_cfg,
             fp_name=f"{fp_name}.self_attn" if fp_name else None,
         )
+        if hasattr(self.self_attn, "wrapped") and hasattr(
+            self.self_attn.wrapped, "layer_idx"
+        ):
+            self.self_attn.wrapped.layer_idx = layer_idx
         self.mlp = PTQWrapper(
             fp_layer.mlp,
             qcfg=mlp_cfg,
@@ -167,16 +176,31 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         sin = self.rope_sin_template[:, start:end, :].to(device=device, dtype=dtype)
         return cos, sin
 
+    def _get_past_len(
+        self,
+        past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
+    ) -> int:
+        if past_key_value is None:
+            return 0
+        if isinstance(past_key_value, Cache):
+            return past_key_value.get_seq_length()
+
+        past_k, past_v = past_key_value
+        if past_k is None or past_v is None:
+            return 0
+
+        return int(past_k.shape[2])
+
     def _normalize_position_embeddings(
         self,
         *,
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]],
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if position_embeddings is None:
             q_len = hidden_states.size(1)
-            past_len = 0 if past_key_value is None else int(past_key_value[0].shape[2])
+            past_len = self._get_past_len(past_key_value)
             cos, sin = self._slice_rope(
                 start=past_len,
                 seq_len=q_len,
@@ -192,7 +216,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         *,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
         device: torch.device,
     ) -> torch.Tensor:
         """
@@ -204,19 +228,30 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         - additive mask: use as-is.
         """
         q_len = hidden_states.size(1)
-        past_len = 0 if past_key_value is None else int(past_key_value[0].shape[2])
+        past_len = self._get_past_len(past_key_value)
         k_len = past_len + q_len
 
         if attention_mask is None:
             assert isinstance(self.causal_mask_template, torch.Tensor)
-            mask = self.causal_mask_template[..., :q_len, :k_len].to(device)
-            mask = mask.squeeze(0)
-            return self._fq(mask, self.obs_attn_mask)
+            mask = self.causal_mask_template[
+                ..., past_len : past_len + q_len, :k_len
+            ].to(device)
+            return self._fq(mask.squeeze(0), self.obs_attn_mask)
 
-        if attention_mask.dtype == torch.bool:
+        if attention_mask.dtype in (torch.bool, torch.int64):
+            if attention_mask.dtype == torch.int64:
+                attention_mask = attention_mask != 0
+
+            assert isinstance(self.causal_mask_template, torch.Tensor)
+            causal_mask = self.causal_mask_template[
+                ..., past_len : past_len + q_len, :k_len
+            ].to(device)
+
             additive = torch.zeros_like(attention_mask, dtype=torch.float32)
             additive = additive.masked_fill(~attention_mask, float("-120"))
-            return self._fq(additive, self.obs_attn_mask)
+
+            mask = torch.clamp(causal_mask + additive, min=-120.0)
+            return self._fq(mask.squeeze(0), self.obs_attn_mask)
 
         return self._fq(attention_mask, self.obs_attn_mask)
 
@@ -229,7 +264,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
     ) -> tuple[
         torch.Tensor,
         Optional[torch.Tensor],
-        Optional[Tuple[torch.Tensor, torch.Tensor]],
+        Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
     ]:
         if not isinstance(attn_out, tuple):
             return attn_out, None, None
@@ -254,7 +289,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.LongTensor] = None,

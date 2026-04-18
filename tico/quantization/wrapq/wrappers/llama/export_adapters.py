@@ -17,19 +17,10 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-
-class _AttentionExportAdapterBase(nn.Module):
-    """Base class for thin export adapters around a unified Llama attention wrapper."""
-
-    def __init__(self, attn: nn.Module):
-        super().__init__()
-        self.attn = attn
-
-    def extra_repr(self) -> str:
-        return f"attn={self.attn.__class__.__name__}"
+from transformers.cache_utils import Cache
 
 
-class LlamaAttentionPrefillExportAdapter(_AttentionExportAdapterBase):
+class LlamaAttentionPrefillExportAdapter(nn.Module):
     """
     Export adapter for prefill attention.
 
@@ -37,38 +28,44 @@ class LlamaAttentionPrefillExportAdapter(_AttentionExportAdapterBase):
     wrapper unchanged.
     """
 
-    def __init__(self, attn: nn.Module, *, return_kv: bool = True):
-        super().__init__(attn)
+    def __init__(self, wrapped, *, return_kv: bool = True):
+        super().__init__()
+        self.wrapped = wrapped
         self.return_kv = return_kv
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        out = self.attn(
+        **kwargs,
+    ):
+        """
+        Run prefill attention with export-friendly cache semantics.
+
+        When `return_kv=True`, the wrapped attention module is asked to return
+        only the newly produced K/V tensors instead of the full present cache.
+        """
+        outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             past_key_value=None,
-            output_attentions=False,
             use_cache=self.return_kv,
+            cache_output_mode="delta",
+            **kwargs,
         )
 
-        if self.return_kv:
-            assert len(out) == 3
-            if not isinstance(out, tuple) or len(out) != 3:
-                raise RuntimeError(
-                    "Expected attention output as (hidden_states, attn_weights, (new_k, new_v))."
-                )
-            return (out[0], out[2])
+        hidden = outputs[0]
 
-        assert len(out) == 2
-        return out[0]
+        if not self.return_kv:
+            return hidden
+
+        new_k, new_v = outputs[2]
+        return hidden, new_k, new_v
 
 
-class LlamaAttentionDecodeExportAdapter(_AttentionExportAdapterBase):
+class LlamaAttentionDecodeExportAdapter(nn.Module):
     """
     Export adapter for decode attention.
 
@@ -90,50 +87,46 @@ class LlamaAttentionDecodeExportAdapter(_AttentionExportAdapterBase):
         hidden_states
     """
 
-    def __init__(self, attn: nn.Module, *, return_kv: bool = True):
-        super().__init__(attn)
+    def __init__(self, wrapped, *, return_kv: bool = True):
+        super().__init__()
+        self.wrapped = wrapped
         self.return_kv = return_kv
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: torch.Tensor,
-        past_key_value: Tuple[torch.Tensor, torch.Tensor],
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
     ):
-        out = self.attn(
+        """
+        Run decode attention with delta-only cache output.
+
+        The wrapped attention module still builds the full present K/V for
+        attention computation, but only the newly produced K/V tensors are
+        returned to the caller.
+        """
+        outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             past_key_value=past_key_value,
             use_cache=self.return_kv,
+            cache_output_mode="delta",
+            **kwargs,
         )
 
-        if self.return_kv:
-            assert len(out) == 3
-            if not isinstance(out, tuple) or len(out) != 3:
-                raise RuntimeError(
-                    "Expected attention output as (hidden_states, attn_weights, (new_k, new_v))."
-                )
-            return (out[0], out[2])
+        hidden = outputs[0]
 
-        assert len(out) == 2
-        return out[0]
+        if not self.return_kv:
+            return hidden
+
+        new_k, new_v = outputs[2]
+        return hidden, new_k, new_v
 
 
-class _DecoderLayerExportAdapterBase(nn.Module):
-    """Base class for thin export adapters around a unified decoder layer."""
-
-    def __init__(self, layer: nn.Module):
-        super().__init__()
-        self.layer = layer
-        self.layer.return_type = "tuple"
-
-    def extra_repr(self) -> str:
-        return f"layer={self.layer.__class__.__name__}"
-
-
-class LlamaDecoderLayerPrefillExportAdapter(_DecoderLayerExportAdapterBase):
+class LlamaDecoderLayerPrefillExportAdapter(nn.Module):
     """
     Export adapter for prefill.
 
@@ -141,31 +134,43 @@ class LlamaDecoderLayerPrefillExportAdapter(_DecoderLayerExportAdapterBase):
     wrapper unchanged.
     """
 
-    def __init__(self, layer: nn.Module, *, return_kv: bool = True):
-        super().__init__(layer)
+    def __init__(self, wrapped, *, return_kv: bool = True):
+        super().__init__()
+        self.wrapped = wrapped
+        self.wrapped.return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> torch.Tensor:
-        out = self.layer(
-            hidden_states=hidden_states,
+        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        **kwargs,
+    ):
+        """
+        Run the decoder layer prefill path and return delta-only K/V tensors
+        when caching is enabled.
+        """
+        outputs = self.wrapped(
+            hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
-            output_attentions=False,
+            past_key_value=None,
             use_cache=self.return_kv,
+            cache_output_mode="delta",
+            **kwargs,
         )
 
-        if self.return_kv:
-            assert len(out) == 2
-            return out
-        return out[0] if isinstance(out, tuple) else out
+        hidden = outputs[0]
+
+        if not self.return_kv:
+            return hidden
+
+        new_k, new_v = outputs[1]
+        return hidden, new_k, new_v
 
 
-class LlamaDecoderLayerDecodeExportAdapter(_DecoderLayerExportAdapterBase):
+class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
     """
     Export adapter for decode.
 
@@ -187,27 +192,38 @@ class LlamaDecoderLayerDecodeExportAdapter(_DecoderLayerExportAdapterBase):
         hidden_states
     """
 
-    def __init__(self, layer: nn.Module, *, return_kv: bool = True):
-        super().__init__(layer)
+    def __init__(self, wrapped, *, return_kv: bool = True):
+        super().__init__()
+        self.wrapped = wrapped
+        self.wrapped.return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
-        past_key_value: Tuple[torch.Tensor, torch.Tensor],
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        **kwargs,
     ):
-        out = self.layer(
-            hidden_states=hidden_states,
+        """
+        Run the decoder layer decode path and return delta-only K/V tensors
+        when caching is enabled.
+        """
+        outputs = self.wrapped(
+            hidden_states,
             attention_mask=attention_mask,
-            past_key_value=past_key_value,
             position_embeddings=position_embeddings,
-            output_attentions=False,
+            past_key_value=past_key_value,
             use_cache=self.return_kv,
+            cache_output_mode="delta",
+            **kwargs,
         )
 
-        if self.return_kv:
-            assert len(out) == 2
-            return out
-        return out[0] if isinstance(out, tuple) else out
+        hidden = outputs[0]
+
+        if not self.return_kv:
+            return hidden
+
+        new_k, new_v = outputs[1]
+        return hidden, new_k, new_v

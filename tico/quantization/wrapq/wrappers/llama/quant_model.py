@@ -28,6 +28,9 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
+LegacyCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+
+
 @try_register(
     "transformers.models.llama.modeling_llama.LlamaModel",
     "tico.quantization.algorithm.spinquant.spin_llama.SpinLlamaModel",
@@ -80,13 +83,29 @@ class QuantLlamaModel(QuantModuleBase):
         for idx, layer in enumerate(model_fp.layers):
             child_scope = f"{fp_name}.layers.{idx}"
             child_cfg = layers_cfg.child(child_scope) if layers_cfg is not None else None  # type: ignore[union-attr]
-            new_list.append(
-                PTQWrapper(
-                    layer,
-                    child_cfg,
-                    fp_name=child_scope,
-                )
+            wrapped_layer = PTQWrapper(
+                layer,
+                child_cfg,
+                fp_name=child_scope,
             )
+
+            # Generation/cache path needs tuple outputs from decoder layers.
+            if hasattr(wrapped_layer.wrapped, "return_type"):
+                wrapped_layer.wrapped.return_type = "tuple"
+
+            # Pass layer index down so QuantLlamaAttention can update the
+            # correct slot in Cache / DynamicCache.
+            if hasattr(wrapped_layer.wrapped, "layer_idx"):
+                wrapped_layer.wrapped.layer_idx = idx
+            if (
+                hasattr(wrapped_layer.wrapped, "self_attn")
+                and hasattr(wrapped_layer.wrapped.self_attn, "wrapped")
+                and hasattr(wrapped_layer.wrapped.self_attn.wrapped, "layer_idx")
+            ):
+                wrapped_layer.wrapped.self_attn.wrapped.layer_idx = idx
+
+            new_list.append(wrapped_layer)
+
         self.obs_causal_mask = self._make_obs("causal_mask")
         self.obs_cos = self._make_obs("cos")
         self.obs_sin = self._make_obs("sin")
@@ -143,24 +162,112 @@ class QuantLlamaModel(QuantModuleBase):
         self.register_buffer("rope_cos_template", cos_t, persistent=False)
         self.register_buffer("rope_sin_template", sin_t, persistent=False)
 
-    def _slice_causal(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        """Return `[1,1,L,L]` causal mask slice on *device*."""
+    def _normalize_past_key_values(
+        self,
+        past_key_values: Optional[Cache | LegacyCache],
+        *,
+        use_cache: bool,
+    ) -> tuple[Optional[Cache], bool]:
+        """
+        Returns:
+            normalized_cache: Cache | None
+            return_legacy_cache: whether output should be converted back to legacy tuple
+        """
+        if past_key_values is None:
+            if use_cache:
+                return DynamicCache(config=self.config), False
+            return None, False
+
+        if isinstance(past_key_values, Cache):
+            return past_key_values, False
+
+        # legacy tuple path
+        return DynamicCache.from_legacy_cache(past_key_values), True
+
+    def _format_output_cache(
+        self,
+        cache: Optional[Cache],
+        *,
+        use_cache: bool,
+        return_legacy_cache: bool,
+    ):
+        if not use_cache or cache is None:
+            return None
+        if return_legacy_cache:
+            if hasattr(cache, "to_legacy_cache"):
+                return cache.to_legacy_cache()
+            raise RuntimeError(
+                "Cache does not support to_legacy_cache(), but legacy cache output was requested."
+            )
+        return cache
+
+    def _slice_causal(
+        self,
+        *,
+        q_len: int,
+        k_len: int,
+        past_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
         assert isinstance(self.causal_mask_template, torch.Tensor)
-        return self.causal_mask_template[..., :seq_len, :seq_len].to(device)
+        return self.causal_mask_template[..., past_len : past_len + q_len, :k_len].to(
+            device
+        )
 
-    def get_attention_mask_for(self, x):
-        L = x.size(1)
-        attention_mask = self._slice_causal(L, x.device)
-        return attention_mask
+    def get_attention_mask_for(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        *,
+        past_len: int,
+    ) -> torch.Tensor:
+        q_len = hidden_states.size(1)
+        k_len = past_len + q_len
+        device = hidden_states.device
 
-    def get_position_embeddings_for(self, hidden_states):
+        if attention_mask is None:
+            causal_mask = self._slice_causal(
+                q_len=q_len,
+                k_len=k_len,
+                past_len=past_len,
+                device=device,
+            )
+            return self._fq(causal_mask.squeeze(0), self.obs_causal_mask)
+
+        if attention_mask.dtype in (torch.bool, torch.int64):
+            if attention_mask.dtype == torch.int64:
+                attention_mask = attention_mask != 0
+
+            causal_mask = self._slice_causal(
+                q_len=q_len,
+                k_len=k_len,
+                past_len=past_len,
+                device=device,
+            )
+
+            additive = torch.zeros_like(attention_mask, dtype=torch.float32)
+            additive = additive.masked_fill(~attention_mask, float("-120"))
+            mask = torch.clamp(causal_mask + additive, min=-120.0)
+            return self._fq(mask.squeeze(0), self.obs_causal_mask)
+
+        return self._fq(attention_mask, self.obs_causal_mask)
+
+    def get_position_embeddings_for(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        start: int,
+    ):
+        end = start + hidden_states.size(1)
+        cos = self.rope_cos_template[:, start:end, :].to(
+            dtype=hidden_states.dtype, device=hidden_states.device
+        )
+        sin = self.rope_sin_template[:, start:end, :].to(
+            dtype=hidden_states.dtype, device=hidden_states.device
+        )
         return (
-            self.rope_cos_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            ),
-            self.rope_sin_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            ),
+            self._fq(cos, self.obs_cos),
+            self._fq(sin, self.obs_sin),
         )
 
     def forward(
@@ -168,7 +275,7 @@ class QuantLlamaModel(QuantModuleBase):
         input_ids: torch.LongTensor = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[Cache] = None,
+        past_key_values: Optional[Cache | LegacyCache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
@@ -201,13 +308,14 @@ class QuantLlamaModel(QuantModuleBase):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if use_cache and past_key_values is None:
-            past_key_values = DynamicCache()
+        cache, return_legacy_cache = self._normalize_past_key_values(
+            past_key_values,
+            use_cache=bool(use_cache),
+        )
+
+        past_seen_tokens = cache.get_seq_length() if cache is not None else 0
 
         if cache_position is None:
-            past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
-            )
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
@@ -224,15 +332,14 @@ class QuantLlamaModel(QuantModuleBase):
             hidden_states = self.rotate_embedding(hidden_states)
 
         # create position_embeddings and causal_mask to be shared across all the decoder layers
-        causal_mask = self.get_attention_mask_for(hidden_states)
-        causal_mask = causal_mask.squeeze(0)
-        causal_mask = self._fq(causal_mask, self.obs_causal_mask)
-
-        position_embeddings = self.get_position_embeddings_for(hidden_states)
-        cos, sin = position_embeddings
-        position_embeddings = (
-            self._fq(cos[:, : hidden_states.size(1), :], self.obs_cos),
-            self._fq(sin[:, : hidden_states.size(1), :], self.obs_sin),
+        model_attention_mask = self.get_attention_mask_for(
+            hidden_states,
+            attention_mask,
+            past_len=past_seen_tokens,
+        )
+        position_embeddings = self.get_position_embeddings_for(
+            hidden_states,
+            start=past_seen_tokens,
         )
 
         # decoder layers
@@ -245,9 +352,9 @@ class QuantLlamaModel(QuantModuleBase):
 
             layer_outputs = decoder_layer(
                 hidden_states,
-                attention_mask=causal_mask,
+                attention_mask=model_attention_mask,
                 position_ids=position_ids,
-                past_key_value=past_key_values,
+                past_key_value=cache,
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
@@ -255,10 +362,7 @@ class QuantLlamaModel(QuantModuleBase):
                 **flash_attn_kwargs,
             )
 
-            if decoder_layer.wrapped.return_type == "tuple":
-                hidden_states = layer_outputs[0]
-            else:
-                hidden_states = layer_outputs
+            hidden_states = layer_outputs[0]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)  # type: ignore[operator]
@@ -269,9 +373,15 @@ class QuantLlamaModel(QuantModuleBase):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)  # type: ignore[operator]
 
+        formatted_cache = self._format_output_cache(
+            cache,
+            use_cache=bool(use_cache),
+            return_legacy_cache=return_legacy_cache,
+        )
+
         output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
-            past_key_values=past_key_values if use_cache else None,
+            past_key_values=formatted_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attns,
         )

@@ -20,8 +20,8 @@ The tests run only if *transformers* is available (they depend on the genuine
 import unittest
 
 import torch
-from tico.quantization.config.ptq import PTQConfig
 
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
@@ -44,6 +44,7 @@ class TestQuantLlamaModel(unittest.TestCase):
 
         cls.seq_len = 16
         cls.vocab_size = 10000
+
         cfg = LlamaConfig(
             hidden_size=8,
             num_attention_heads=2,
@@ -57,6 +58,7 @@ class TestQuantLlamaModel(unittest.TestCase):
             use_cache=False,
             return_dict=False,
         )
+
         cls.fp_model = LlamaModel(cfg)
 
     def test_mode_transitions(self):
@@ -66,15 +68,8 @@ class TestQuantLlamaModel(unittest.TestCase):
         qmodel.enable_calibration()
         self.assertIs(qmodel._mode, Mode.CALIB)
 
-        x = torch.randint(
-            0,
-            self.vocab_size,
-            (
-                1,
-                self.seq_len,
-            ),
-        )
-        _ = qmodel(x)  # gather stats
+        x = torch.randint(0, self.vocab_size, (1, self.seq_len))
+        _ = qmodel(x, use_cache=False, return_dict=False)
 
         qmodel.freeze_qparams()
         self.assertIs(qmodel._mode, Mode.QUANT)
@@ -82,25 +77,30 @@ class TestQuantLlamaModel(unittest.TestCase):
     def test_forward_diff(self):
         qmodel = QuantLlamaModel(self.fp_model, qcfg=PTQConfig())
         qmodel.enable_calibration()
+
         calib_set = []
         for _ in range(4):
-            inp = torch.randint(
-                0,
-                self.vocab_size,
-                (
-                    1,
-                    self.seq_len,
-                ),
-            )
-            _ = qmodel(inp)
+            inp = torch.randint(0, self.vocab_size, (1, self.seq_len))
+            _ = qmodel(inp, use_cache=False, return_dict=False)
             calib_set.append(inp)
+
         qmodel.freeze_qparams()
 
         with torch.no_grad():
-            q_out = qmodel(calib_set[0])[0]
-            fp_out = self.fp_model(calib_set[0])[0]
+            q_out = qmodel(
+                calib_set[0],
+                use_cache=False,
+                return_dict=False,
+            )[0]
+
+            fp_out = self.fp_model(
+                calib_set[0],
+                use_cache=False,
+                return_dict=False,
+            )[0]
 
         diff = (fp_out - q_out).abs().mean().item()
+
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.4)
         self.assertEqual(fp_out.shape, q_out.shape)

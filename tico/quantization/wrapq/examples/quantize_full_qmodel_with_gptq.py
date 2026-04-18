@@ -127,10 +127,10 @@ def inject_gptq_qparams(
         _print_sample("unused GPTQ entries", unused)
 
 
-# -------------------------------------------------------------------------
-# Save model in circle format
-# -------------------------------------------------------------------------
 def save_model_to(q_m, calib_inputs, save_circle_to_folder):
+    """
+    Export and save the whole quantized model in circle format.
+    """
     q_m.eval()
     q_m.cpu()
 
@@ -144,6 +144,9 @@ def save_model_to(q_m, calib_inputs, save_circle_to_folder):
 
 
 def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
+    """
+    Export and save quantized decoder layers one by one in circle format.
+    """
     q_m.eval()
     q_m.cpu()
 
@@ -182,7 +185,71 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
         cm.save(save_path)
 
 
+def calibrate_ptq_observers(
+    q_m: torch.nn.Module,
+    calib_inputs: list[torch.Tensor],
+    *,
+    device: torch.device,
+    decode_calibration_steps: int = 0,
+    no_tqdm: bool = False,
+):
+    """
+    Calibrate PTQ observers on prefill and optional decode paths.
+
+    The prefill phase uses full-sequence inputs. The optional decode
+    phase runs a short manual autoregressive loop with `use_cache=True`
+    so cache-related observers can see realistic decode-time values as well.
+
+    Args:
+        q_m: PTQ-prepared model.
+        calib_inputs: List of token tensors with shape [1, seq_len].
+        device: Device used for calibration.
+        decode_calibration_steps: Number of decode steps to run after each
+            prefill pass. Set to 0 to disable decode calibration.
+        no_tqdm: If True, disable progress bars.
+    """
+    q_m.eval()
+
+    iterator = calib_inputs
+    if not no_tqdm:
+        iterator = tqdm.tqdm(calib_inputs, desc="PTQ calibration")
+
+    with torch.no_grad():
+        for inp in iterator:
+            inp = inp.to(device)
+
+            # Prefill calibration
+            if decode_calibration_steps <= 0:
+                q_m(inp)
+                continue
+
+            # Prefill with cache enabled so decode can continue from it.
+            outputs = q_m(
+                input_ids=inp,
+                use_cache=True,
+                return_dict=True,
+            )
+            past_key_values = outputs.past_key_values
+            next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+            # Short decode calibration for cache-related observers.
+            for _ in range(decode_calibration_steps):
+                outputs = q_m(
+                    input_ids=next_input_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                past_key_values = outputs.past_key_values
+
+                # Greedy next token is enough for calibration purposes.
+                next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+
 def quantize_using_PTQ(q_m, calib_inputs, args):
+    """
+    Wrap the model with PTQ wrappers, calibrate observers, and convert it.
+    """
     print("Wrapping layers with PTQWrapper …")
 
     qcfg = build_llm_ptq_config(
@@ -198,12 +265,8 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     )
     q_m = prepare(q_m, qcfg)
 
-    # -------------------------------------------------------------------------
-    # Single-pass activation calibration
-    # -------------------------------------------------------------------------
-    print("Calibrating PTQ obeservers…")
+    print("Calibrating PTQ observers…")
 
-    # Overwrite weight observers with GPTQ statistics
     if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
         inject_gptq_qparams(q_m, q_m.quantizers, verbose=args.verbose)
     elif (
@@ -218,20 +281,22 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         )
 
     device = torch.device(args.device)
-    with torch.no_grad():
-        for inp in tqdm.tqdm(calib_inputs):
-            q_m(inp.to(device))
+    calibrate_ptq_observers(
+        q_m,
+        calib_inputs,
+        device=device,
+        decode_calibration_steps=args.decode_calibration_steps,
+        no_tqdm=args.no_tqdm,
+    )
 
-    # Freeze all Q-params (scale, zero-point)
     q_m = convert(q_m)
-
     return q_m
 
 
 def evaluate(q_m, tokenizer, dataset_test, args):
-    # -------------------------------------------------------------------------
-    # Evaluate perplexity on Wikitext-2
-    # -------------------------------------------------------------------------
+    """
+    Evaluate the quantized model with perplexity and optional lm-eval tasks.
+    """
     print("\nCalculating perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
     ppl_uint8 = perplexity(
@@ -251,6 +316,9 @@ def evaluate(q_m, tokenizer, dataset_test, args):
 
 
 def get_sensitivities_info_name(model, dataset, seed, n_samples):
+    """
+    Build a filename for stored sensitivity calibration results.
+    """
     model_name = model.config.name_or_path.replace("/", "_")
 
     name = (
@@ -269,6 +337,9 @@ def get_sensitivities_info_name(model, dataset, seed, n_samples):
 
 
 def get_ptq_model_name(model, args):
+    """
+    Build a filename for a saved PTQ checkpoint.
+    """
     model_name = model.config.name_or_path.replace("/", "_")
 
     name = (
@@ -387,6 +458,15 @@ def main():
         help="seq_len to use in quantized model calibration. More the better",
     )
     parser.add_argument(
+        "--decode_calibration_steps",
+        type=int,
+        default=0,
+        help=(
+            "Number of short decode steps to run after each prefill calibration pass. "
+            "Set to 0 to disable decode-path calibration."
+        ),
+    )
+    parser.add_argument(
         "--embedding_weight_bits",
         type=int,
         default=8,
@@ -456,7 +536,6 @@ def main():
     else:
         print("Skipping SpinQuant preprocessing …")
 
-    model.config.use_cache = False  # TODO use args for it
     if args.calibrate_seq_len is not None:
         model.config.max_position_embeddings = min(
             model.config.max_position_embeddings, args.calibrate_seq_len
@@ -491,7 +570,12 @@ def main():
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
     calib_inputs = []
     nsamples = args.nsamples_for_qcalibration
-    seqlen = model.config.max_position_embeddings
+    seqlen = model.config.max_position_embeddings - args.decode_calibration_steps
+    if seqlen <= 0:
+        raise ValueError(
+            "decode_calibration_steps must be smaller than max_position_embeddings"
+        )
+
     random.seed(args.seed)
     for _ in range(nsamples):
         i = random.randint(0, train_ids.shape[1] - seqlen - 1)
