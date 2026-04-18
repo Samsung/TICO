@@ -135,7 +135,10 @@ class AffineObserverBase(ObserverBase):
             raise RuntimeError(
                 "Call compute_qparams()/freeze_qparams() or load_qparams() first."
             )
-        scale, zp = self._cached_scale, self._cached_zp
+
+        scale = self._cached_scale.to(x.device)
+        zp = self._cached_zp.to(x.device, dtype=torch.int)
+
         if self.channel_axis is None:
             return torch.fake_quantize_per_tensor_affine(
                 x,
