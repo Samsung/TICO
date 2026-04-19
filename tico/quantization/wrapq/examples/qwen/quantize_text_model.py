@@ -126,7 +126,9 @@ def main():
     # Convert to Circle format
     example_input = (calibration_data[0],)
     circle_model = tico.convert(
-        quantized_model.eval(), example_input, kwargs={"use_cache": False}
+        quantized_model.eval(),
+        example_input,
+        kwargs={"use_cache": False, "return_dict": False},
     )
 
     # Save the Circle model

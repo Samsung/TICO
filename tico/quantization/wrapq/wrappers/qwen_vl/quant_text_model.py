@@ -206,9 +206,187 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             self.obs_deepstack_visual_embeds.append(obs)
             self.add_module(obs_name, obs)
 
-    def _slice_causal(self, seq_len: int, device: torch.device) -> torch.Tensor:
+    def _get_past_seen_tokens(self, past_key_values: Cache | None) -> int:
+        """
+        Return the number of cached tokens already stored in the KV cache.
+
+        Args:
+            past_key_values: Cache object or None.
+
+        Returns:
+            The cached sequence length. Returns 0 when no cache is present.
+        """
+        if past_key_values is None:
+            return 0
+        return int(past_key_values.get_seq_length())
+
+    def _slice_causal(
+        self,
+        q_len: int,
+        kv_len: int,
+        *,
+        past_seen_tokens: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """
+        Slice the static causal mask template for the current query/key sizes.
+
+        The row offset is shifted by `past_seen_tokens` so that decode steps
+        produce the correct `q_len x kv_len` causal region.
+
+        Args:
+            q_len: Query length for the current step.
+            kv_len: Total key/value length visible to the query.
+            past_seen_tokens: Number of cached tokens before the current step.
+            device: Target device.
+            dtype: Target floating-point dtype.
+
+        Returns:
+            A 4D additive causal mask with shape `(1, 1, q_len, kv_len)`.
+        """
         assert isinstance(self.causal_mask_template, torch.Tensor)
-        return self.causal_mask_template[..., :seq_len, :seq_len].to(device)
+
+        row_start = past_seen_tokens
+        row_end = past_seen_tokens + q_len
+
+        return self.causal_mask_template[..., row_start:row_end, :kv_len].to(
+            device=device, dtype=dtype
+        )
+
+    def _normalize_attention_mask(
+        self,
+        attention_mask: torch.Tensor | None,
+        *,
+        input_embeds: torch.Tensor,
+        past_key_values: Cache | None,
+    ) -> torch.Tensor:
+        """
+        Normalize the input attention mask into a 4D additive causal mask.
+
+        Supported inputs:
+        - None
+        - 2D padding masks of shape `(batch, kv_len)`
+        - 4D masks of shape `(batch, 1, q_len, kv_len)` in bool or float form
+
+        For 2D masks, padding semantics are preserved and combined with the
+        causal mask. For 4D floating-point masks, the input is assumed to
+        already be additive and is returned as-is.
+
+        Args:
+            attention_mask: User-provided attention mask.
+            input_embeds: Input embeddings for dtype/device/shape reference.
+            past_key_values: Cache object used to infer past length.
+
+        Returns:
+            A 4D floating-point additive mask with shape
+            `(batch, 1, q_len, kv_len)`.
+
+        Raises:
+            ValueError: If the provided mask shape is unsupported.
+        """
+        batch_size, q_len = input_embeds.shape[:2]
+        past_seen_tokens = self._get_past_seen_tokens(past_key_values)
+        kv_len = past_seen_tokens + q_len
+
+        causal_mask = self._slice_causal(
+            q_len,
+            kv_len,
+            past_seen_tokens=past_seen_tokens,
+            device=input_embeds.device,
+            dtype=input_embeds.dtype,
+        )
+
+        if attention_mask is None:
+            return causal_mask
+
+        if attention_mask.ndim == 2:
+            if attention_mask.shape[0] != batch_size:
+                raise ValueError(
+                    "2D attention_mask batch size does not match inputs_embeds batch size. "
+                    f"Got mask batch={attention_mask.shape[0]}, input batch={batch_size}."
+                )
+
+            mask_len = attention_mask.shape[1]
+            if mask_len == q_len and past_seen_tokens > 0:
+                past_prefix = torch.ones(
+                    batch_size,
+                    past_seen_tokens,
+                    device=attention_mask.device,
+                    dtype=attention_mask.dtype,
+                )
+                attention_mask = torch.cat((past_prefix, attention_mask), dim=-1)
+                mask_len = attention_mask.shape[1]
+
+            if mask_len != kv_len:
+                raise ValueError(
+                    "2D attention_mask length does not match the expected KV length. "
+                    f"Got mask length={mask_len}, expected kv_len={kv_len}."
+                )
+
+            if attention_mask.dtype == torch.bool:
+                padding_keep = attention_mask
+            elif torch.is_floating_point(attention_mask):
+                padding_keep = attention_mask != 0
+            else:
+                padding_keep = attention_mask.to(torch.long) != 0
+
+            padding_mask = torch.zeros(
+                batch_size,
+                1,
+                1,
+                kv_len,
+                device=input_embeds.device,
+                dtype=input_embeds.dtype,
+            )
+            padding_mask = padding_mask.masked_fill(
+                ~padding_keep[:, None, None, :].to(device=input_embeds.device),
+                float("-120"),
+            )
+
+            return causal_mask + padding_mask
+
+        if attention_mask.ndim == 4:
+            if attention_mask.shape[-2] != q_len or attention_mask.shape[-1] != kv_len:
+                raise ValueError(
+                    "4D attention_mask shape does not match the expected query/KV lengths. "
+                    f"Got shape={tuple(attention_mask.shape)}, expected (*, *, {q_len}, {kv_len})."
+                )
+
+            if torch.is_floating_point(attention_mask):
+                return attention_mask.to(
+                    device=input_embeds.device,
+                    dtype=input_embeds.dtype,
+                )
+
+            if attention_mask.dtype == torch.bool:
+                additive_mask = torch.zeros_like(
+                    attention_mask,
+                    device=input_embeds.device,
+                    dtype=input_embeds.dtype,
+                )
+                additive_mask = additive_mask.masked_fill(
+                    ~attention_mask.to(device=input_embeds.device),
+                    float("-120"),
+                )
+                return additive_mask
+
+            bool_mask = attention_mask.to(torch.long) != 0
+            additive_mask = torch.zeros_like(
+                bool_mask,
+                device=input_embeds.device,
+                dtype=input_embeds.dtype,
+            )
+            additive_mask = additive_mask.masked_fill(
+                ~bool_mask.to(device=input_embeds.device),
+                float("-120"),
+            )
+            return additive_mask
+
+        raise ValueError(
+            "Unsupported attention_mask rank. "
+            f"Expected None, 2D, or 4D mask, but got ndim={attention_mask.ndim}."
+        )
 
     def forward(
         self,
@@ -219,9 +397,9 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
         cache_position: torch.LongTensor | None = None,
-        # args for deepstack
         visual_pos_masks: torch.Tensor | None = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
+        return_dict: bool = True,
         **kwargs,
     ):
         """
@@ -237,6 +415,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             cache_position: Cache position indices (LongTensor, not quantized)
             visual_pos_masks: Mask indicating visual positions (may be int/bool, not quantized)
             deepstack_visual_embeds: Visual feature embeddings to inject (list of float tensors)
+            return_dict: Whether to return a Hugging Face-style output object.
             **kwargs: Additional keyword arguments
 
         Returns:
@@ -263,9 +442,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
         # Handle cache_position (integer tensor, not quantized)
         if cache_position is None:
-            past_seen_tokens = (
-                past_key_values.get_seq_length() if past_key_values is not None else 0
-            )
+            past_seen_tokens = self._get_past_seen_tokens(past_key_values)
             cache_position = torch.arange(
                 past_seen_tokens,
                 past_seen_tokens + inputs_embeds.shape[1],
@@ -287,22 +464,12 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         else:
             text_position_ids = position_ids[0]
 
-        # Build causal mask if not provided (or provided as bool)
-        if attention_mask is None or attention_mask.dtype == torch.bool:
-            attention_mask = self._slice_causal(
-                inputs_embeds.shape[1], inputs_embeds.device
-            )
-            # from transformers.masking_utils import create_causal_mask
-            # attention_mask = create_causal_mask(
-            #    config=self.config,
-            #    input_embeds=inputs_embeds,
-            #    attention_mask=attention_mask,
-            #    cache_position=cache_position,
-            #    past_key_values=past_key_values,
-            #    position_ids=text_position_ids,
-            # )
-        if torch.is_floating_point(attention_mask):
-            attention_mask = self._fq(attention_mask, self.obs_attention_mask)
+        attention_mask = self._normalize_attention_mask(
+            attention_mask,
+            input_embeds=inputs_embeds,
+            past_key_values=past_key_values,
+        )
+        attention_mask = self._fq(attention_mask, self.obs_attention_mask)
 
         hidden_states = inputs_embeds
 
@@ -323,6 +490,8 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                 position_ids=text_position_ids,
                 past_key_values=past_key_values,
                 position_embeddings=position_embeddings,
+                cache_position=cache_position,
+                use_cache=use_cache,
                 **kwargs,
             )
             hidden_states = layer_outputs
@@ -344,6 +513,11 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
         # Final normalization
         hidden_states = self.norm(hidden_states)
+
+        if not return_dict:
+            if use_cache:
+                return hidden_states, past_key_values
+            return (hidden_states,)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,

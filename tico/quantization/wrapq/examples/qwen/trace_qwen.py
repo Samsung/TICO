@@ -385,6 +385,7 @@ def prepare_quantized_model(
         model_args={
             "vision": {
                 "grid_thw": thw,
+                "visual_start_idx": 0,
             }
         },
     )
