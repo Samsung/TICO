@@ -344,7 +344,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                 float("-120"),
             )
 
-            return causal_mask + padding_mask
+            return torch.clamp(causal_mask + padding_mask, min=-120.0, max=0.0)
 
         if attention_mask.ndim == 4:
             if attention_mask.shape[-2] != q_len or attention_mask.shape[-1] != kv_len:
