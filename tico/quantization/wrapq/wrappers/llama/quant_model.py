@@ -162,6 +162,202 @@ class QuantLlamaModel(QuantModuleBase):
         self.register_buffer("rope_cos_template", cos_t, persistent=False)
         self.register_buffer("rope_sin_template", sin_t, persistent=False)
 
+    def _make_empty_cache(self) -> Cache:
+        """
+        Create an empty HF cache object in a version-tolerant way.
+
+        Returns:
+            An empty cache instance.
+
+        Raises:
+            RuntimeError: If no compatible cache constructor is available.
+        """
+        try:
+            return DynamicCache(config=self.config)
+        except TypeError:
+            pass
+        except Exception:
+            pass
+
+        try:
+            return DynamicCache()
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to create an empty DynamicCache for type={DynamicCache}: {e}"
+            ) from e
+
+    def _legacy_cache_seq_length(self, past_key_values: LegacyCache) -> int:
+        """
+        Infer sequence length from a legacy tuple cache.
+
+        Args:
+            past_key_values: Legacy tuple of per-layer key/value tensors.
+
+        Returns:
+            Cached sequence length inferred from the first layer.
+        """
+        if len(past_key_values) == 0:
+            return 0
+
+        first_layer = past_key_values[0]
+        if first_layer is None or len(first_layer) < 2:
+            return 0
+
+        past_k, past_v = first_layer
+        if past_k is None or past_v is None:
+            return 0
+
+        return int(past_k.shape[2])
+
+    def _cache_seq_length(self, cache: Optional[Cache | LegacyCache]) -> int:
+        """
+        Return cached sequence length for either HF Cache or legacy tuple cache.
+
+        Args:
+            cache: Cache object or legacy tuple cache.
+
+        Returns:
+            Cached sequence length. Returns zero when no cache is available.
+        """
+        if cache is None:
+            return 0
+
+        if isinstance(cache, tuple):
+            return self._legacy_cache_seq_length(cache)
+
+        get_seq_length = getattr(cache, "get_seq_length", None)
+        if callable(get_seq_length):
+            try:
+                return int(get_seq_length())
+            except TypeError:
+                try:
+                    return int(get_seq_length(0))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        key_cache = getattr(cache, "key_cache", None)
+        if key_cache is not None and len(key_cache) > 0 and key_cache[0] is not None:
+            return int(key_cache[0].shape[2])
+
+        layers = getattr(cache, "layers", None)
+        if layers is not None and len(layers) > 0 and layers[0] is not None:
+            layer0 = layers[0]
+
+            if isinstance(layer0, tuple) and len(layer0) >= 2 and layer0[0] is not None:
+                return int(layer0[0].shape[2])
+
+            for name in ("keys", "key", "k"):
+                t = getattr(layer0, name, None)
+                if t is not None:
+                    return int(t.shape[2])
+
+        return 0
+
+    def _legacy_to_cache(self, past_key_values: LegacyCache) -> Cache:
+        """
+        Convert a legacy tuple cache into an HF cache object.
+
+        Args:
+            past_key_values: Legacy tuple of per-layer key/value tensors.
+
+        Returns:
+            Cache object containing the same cached tensors.
+
+        Raises:
+            RuntimeError: If no compatible conversion or update path exists.
+        """
+        from_legacy_cache = getattr(DynamicCache, "from_legacy_cache", None)
+        if callable(from_legacy_cache):
+            return from_legacy_cache(past_key_values)
+
+        cache = self._make_empty_cache()
+
+        for layer_idx, layer_kv in enumerate(past_key_values):
+            if layer_kv is None or len(layer_kv) < 2:
+                continue
+
+            past_k, past_v = layer_kv
+            if past_k is None or past_v is None:
+                continue
+
+            update = getattr(cache, "update", None)
+            if not callable(update):
+                raise RuntimeError(
+                    "Cache does not support update(), so legacy cache cannot be converted."
+                )
+
+            update(past_k, past_v, layer_idx, cache_kwargs=None)
+
+        return cache
+
+    def _cache_to_legacy(self, cache: Cache) -> LegacyCache:
+        """
+        Convert an HF cache object into a legacy tuple cache.
+
+        Args:
+            cache: HF cache object.
+
+        Returns:
+            Legacy tuple cache.
+
+        Raises:
+            RuntimeError: If the cache layout cannot be converted.
+        """
+        to_legacy_cache = getattr(cache, "to_legacy_cache", None)
+        if callable(to_legacy_cache):
+            return to_legacy_cache()
+
+        key_cache = getattr(cache, "key_cache", None)
+        value_cache = getattr(cache, "value_cache", None)
+        if key_cache is not None and value_cache is not None:
+            out = []
+            n = min(len(key_cache), len(value_cache))
+            for i in range(n):
+                k = key_cache[i]
+                v = value_cache[i]
+                if k is None or v is None:
+                    break
+                out.append((k, v))
+            return tuple(out)
+
+        layers = getattr(cache, "layers", None)
+        if layers is not None:
+            out = []
+            for layer in layers:
+                if layer is None:
+                    break
+
+                if isinstance(layer, tuple) and len(layer) >= 2:
+                    k, v = layer[0], layer[1]
+                    if k is None or v is None:
+                        break
+                    out.append((k, v))
+                    continue
+
+                found = False
+                for k_name, v_name in (
+                    ("keys", "values"),
+                    ("key", "value"),
+                    ("k", "v"),
+                ):
+                    k = getattr(layer, k_name, None)
+                    v = getattr(layer, v_name, None)
+                    if k is not None and v is not None:
+                        out.append((k, v))
+                        found = True
+                        break
+
+                if not found:
+                    break
+
+            return tuple(out)
+
+        raise RuntimeError(
+            f"Cache does not support legacy conversion: type={type(cache)}"
+        )
+
     def _normalize_past_key_values(
         self,
         past_key_values: Optional[Cache | LegacyCache],
@@ -169,20 +365,26 @@ class QuantLlamaModel(QuantModuleBase):
         use_cache: bool,
     ) -> tuple[Optional[Cache], bool]:
         """
+        Normalize cache input into an HF cache object.
+
+        Args:
+            past_key_values: Input cache in HF or legacy tuple form.
+            use_cache: Whether cache should be used in the current forward pass.
+
         Returns:
-            normalized_cache: Cache | None
-            return_legacy_cache: whether output should be converted back to legacy tuple
+            A tuple of:
+                - normalized cache object or None
+                - whether the output cache should be converted back to legacy form
         """
         if past_key_values is None:
             if use_cache:
-                return DynamicCache(config=self.config), False
+                return self._make_empty_cache(), False
             return None, False
 
         if isinstance(past_key_values, Cache):
             return past_key_values, False
 
-        # legacy tuple path
-        return DynamicCache.from_legacy_cache(past_key_values), True
+        return self._legacy_to_cache(past_key_values), True
 
     def _format_output_cache(
         self,
@@ -191,14 +393,23 @@ class QuantLlamaModel(QuantModuleBase):
         use_cache: bool,
         return_legacy_cache: bool,
     ):
+        """
+        Format cache output to match the caller's expected cache representation.
+
+        Args:
+            cache: Cache object produced during forward.
+            use_cache: Whether cache output is enabled.
+            return_legacy_cache: Whether output should be converted to legacy form.
+
+        Returns:
+            Cache output in HF or legacy form, or None when caching is disabled.
+        """
         if not use_cache or cache is None:
             return None
+
         if return_legacy_cache:
-            if hasattr(cache, "to_legacy_cache"):
-                return cache.to_legacy_cache()
-            raise RuntimeError(
-                "Cache does not support to_legacy_cache(), but legacy cache output was requested."
-            )
+            return self._cache_to_legacy(cache)
+
         return cache
 
     def _slice_causal(
@@ -313,7 +524,7 @@ class QuantLlamaModel(QuantModuleBase):
             use_cache=bool(use_cache),
         )
 
-        past_seen_tokens = cache.get_seq_length() if cache is not None else 0
+        past_seen_tokens = self._cache_seq_length(cache)
 
         if cache_position is None:
             cache_position = torch.arange(

@@ -204,6 +204,118 @@ class QuantLlamaAttention(QuantModuleBase):
         t_sin = self._fq(t_half * sin, obs_sin)
         return self._fq(t_cos + t_sin, obs_rot)
 
+    def _extract_layer_kv_from_cache(self, cache: Cache) -> Optional[LayerKV]:
+        """
+        Extract per-layer KV tensors from an HF Cache object across multiple
+        transformers cache layouts.
+
+        Returns:
+            A tuple `(past_k, past_v)` with shape `(B, n_kv, K, H)` if available,
+            otherwise None.
+        """
+        if self.layer_idx is None:
+            raise RuntimeError(
+                "layer_idx must be set to extract per-layer KV from an HF Cache."
+            )
+
+        layer_idx = self.layer_idx
+
+        # Empty cache should behave like no past KV.
+        get_seq_length = getattr(cache, "get_seq_length", None)
+        if callable(get_seq_length):
+            try:
+                if int(get_seq_length()) == 0:
+                    return None
+            except TypeError:
+                try:
+                    if int(get_seq_length(layer_idx)) == 0:
+                        return None
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # 1) key_cache / value_cache layout
+        key_cache = getattr(cache, "key_cache", None)
+        value_cache = getattr(cache, "value_cache", None)
+        if key_cache is not None and value_cache is not None:
+            if layer_idx >= len(key_cache) or layer_idx >= len(value_cache):
+                return None
+            past_k = key_cache[layer_idx]
+            past_v = value_cache[layer_idx]
+            if past_k is None or past_v is None:
+                return None
+            return past_k, past_v
+
+        # 2) layers[layer_idx] layout
+        layers = getattr(cache, "layers", None)
+        if layers is not None:
+            if layer_idx >= len(layers):
+                return None
+
+            layer_cache = layers[layer_idx]
+            if layer_cache is None:
+                return None
+
+            if isinstance(layer_cache, tuple):
+                if len(layer_cache) >= 2:
+                    past_k, past_v = layer_cache[0], layer_cache[1]
+                    if past_k is not None and past_v is not None:
+                        return past_k, past_v
+
+            for k_name, v_name in (
+                ("keys", "values"),
+                ("key", "value"),
+                ("k", "v"),
+            ):
+                past_k = getattr(layer_cache, k_name, None)
+                past_v = getattr(layer_cache, v_name, None)
+                if past_k is not None and past_v is not None:
+                    return past_k, past_v
+
+        # 3) tuple-like indexing
+        try:
+            layer_cache = cache[layer_idx]  # type: ignore[index]
+        except Exception:
+            layer_cache = None
+
+        if layer_cache is not None:
+            if isinstance(layer_cache, tuple) and len(layer_cache) >= 2:
+                past_k, past_v = layer_cache[0], layer_cache[1]
+                if past_k is not None and past_v is not None:
+                    return past_k, past_v
+
+        # 4) fallback: convert whole cache to legacy cache if supported
+        to_legacy_cache = getattr(cache, "to_legacy_cache", None)
+        if callable(to_legacy_cache):
+            try:
+                legacy_cache = to_legacy_cache()
+                if legacy_cache is None:
+                    return None
+                if layer_idx >= len(legacy_cache):
+                    return None
+
+                layer_cache = legacy_cache[layer_idx]
+                if layer_cache is None:
+                    return None
+
+                if isinstance(layer_cache, tuple) and len(layer_cache) >= 2:
+                    past_k, past_v = layer_cache[0], layer_cache[1]
+                    if past_k is None or past_v is None:
+                        return None
+                    return past_k, past_v
+            except Exception:
+                pass
+
+        raise RuntimeError(
+            "Unsupported Cache layout. "
+            f"type={type(cache)}, layer_idx={layer_idx}, "
+            f"has_key_cache={hasattr(cache, 'key_cache')}, "
+            f"has_value_cache={hasattr(cache, 'value_cache')}, "
+            f"has_layers={hasattr(cache, 'layers')}, "
+            f"has_to_legacy_cache={hasattr(cache, 'to_legacy_cache')}"
+        )
+
     def _normalize_past_key_value(
         self,
         past_key_value: Optional[Cache | LayerKV],
@@ -230,31 +342,7 @@ class QuantLlamaAttention(QuantModuleBase):
                 return None
             return past_key_value
 
-        if self.layer_idx is None:
-            raise RuntimeError(
-                "layer_idx must be set to convert a Cache object into per-layer KV."
-            )
-
-        if not hasattr(past_key_value, "to_legacy_cache"):
-            raise RuntimeError(
-                f"Unsupported Cache type without to_legacy_cache(): {type(past_key_value)}"
-            )
-
-        legacy_cache = past_key_value.to_legacy_cache()
-        if legacy_cache is None:
-            return None
-
-        if self.layer_idx >= len(legacy_cache):
-            return None
-
-        layer_cache = legacy_cache[self.layer_idx]
-        if layer_cache is None:
-            return None
-
-        past_k, past_v = layer_cache
-        if past_k is None or past_v is None:
-            return None
-        return past_k, past_v
+        return self._extract_layer_kv_from_cache(past_key_value)
 
     def _get_past_len(
         self,

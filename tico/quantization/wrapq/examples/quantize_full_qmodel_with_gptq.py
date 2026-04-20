@@ -547,13 +547,13 @@ def main():
 
     print("\nCalculating original perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
-    ppl_fp32 = perplexity(
-        model, enc, device, max_length=args.max_seq_len, stride=args.max_seq_len
-    )
+    # ppl_fp32 = perplexity(
+    #     model, enc, device, max_length=args.max_seq_len, stride=args.max_seq_len
+    # )
 
-    print("\n┌── Wikitext-2 test perplexity ─────────────")
-    print(f"│ FP32 : {ppl_fp32:8.2f}")
-    print("└───────────────────────────────────────────")
+    # print("\n┌── Wikitext-2 test perplexity ─────────────")
+    # print(f"│ FP32 : {ppl_fp32:8.2f}")
+    # print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
