@@ -94,6 +94,10 @@ def get_constant_from_tensor(
     if node.target.__name__ == "_to_copy.default":
         assert len(node.args) == 1
         return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
+    if node.target.__name__ == "to.dtype_layout":
+        return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
+    if node.target.__name__ == "to.device":
+        return get_constant_from_tensor(node.args[0], ep)  # type: ignore[arg-type]
     if node.target.__name__ == "lift_fresh_copy.default":
         assert len(node.args) == 1
         assert isinstance(node.args[0], torch.fx.Node)
