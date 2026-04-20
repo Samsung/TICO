@@ -272,6 +272,9 @@ class QuantLlamaAttention(QuantModuleBase):
                 past_v = getattr(layer_cache, v_name, None)
                 if past_k is not None and past_v is not None:
                     return past_k, past_v
+                # The layer object may exist but still empty, with keys/values=None
+                if hasattr(layer_cache, k_name) and hasattr(layer_cache, v_name):
+                    return None
 
         # 3) tuple-like indexing
         try:
