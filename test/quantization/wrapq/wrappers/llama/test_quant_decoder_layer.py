@@ -20,6 +20,10 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    LlamaDecoderLayerDecodeExportAdapter,
+    LlamaDecoderLayerPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
 )
@@ -95,6 +99,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
 
     def test_mode_transitions_decode(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        qlayer.return_type = "tuple"
         self.assertIs(qlayer._mode, Mode.NO_QUANT)
 
         qlayer.enable_calibration()
@@ -146,7 +151,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertLess(diff, 0.5)
         self.assertEqual(fp_out.shape, q_out.shape)
 
-    def test_forward_shapes_and_cache_decode(self):
+    def test_forward_shapes_and_full_present_cache_decode(self):
         torch.manual_seed(1)
 
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
@@ -173,7 +178,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         past_k, past_v = self._rand_past(batch_size, self.max_seq - 1)
 
         with torch.no_grad():
-            out = qlayer(
+            hidden_out, present = qlayer(
                 hidden_states=x,
                 attention_mask=mask,
                 past_key_value=(past_k, past_v),
@@ -181,14 +186,14 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
                 use_cache=True,
             )
 
-        self.assertIsInstance(out, tuple)
-        hidden_out, present = out
         self.assertEqual(hidden_out.shape, (batch_size, 1, self.hidden_size))
-
-        # The unified layer returns the attention wrapper's current K/V delta.
-        new_k, new_v = present
-        self.assertEqual(new_k.shape, (batch_size, self.n_kv, 1, self.head_dim))
-        self.assertEqual(new_v.shape, (batch_size, self.n_kv, 1, self.head_dim))
+        present_k, present_v = present
+        self.assertEqual(
+            present_k.shape, (batch_size, self.n_kv, self.max_seq, self.head_dim)
+        )
+        self.assertEqual(
+            present_v.shape, (batch_size, self.n_kv, self.max_seq, self.head_dim)
+        )
 
     def test_none_attention_mask_is_supported_in_decode_path(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
@@ -210,6 +215,13 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
 
         self.assertIsInstance(out, tuple)
         self.assertEqual(out[0].shape, (batch_size, 1, self.hidden_size))
+        present_k, present_v = out[1]
+        self.assertEqual(
+            present_k.shape, (batch_size, self.n_kv, self.max_seq, self.head_dim)
+        )
+        self.assertEqual(
+            present_v.shape, (batch_size, self.n_kv, self.max_seq, self.head_dim)
+        )
 
     def test_bool_attention_mask_is_supported_in_decode_path(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
@@ -232,6 +244,13 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
 
         self.assertIsInstance(out, tuple)
         self.assertEqual(out[0].shape, (batch_size, 1, self.hidden_size))
+        present_k, present_v = out[1]
+        self.assertEqual(
+            present_k.shape, (batch_size, self.n_kv, self.max_seq, self.head_dim)
+        )
+        self.assertEqual(
+            present_v.shape, (batch_size, self.n_kv, self.max_seq, self.head_dim)
+        )
 
     def test_dtype_override(self):
         cfg = PTQConfig(
@@ -269,7 +288,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         past = self._rand_past(1, self.max_seq - 1)
 
         with torch.no_grad():
-            cal_hidden, (cal_new_k, cal_new_v) = qlayer(
+            cal_hidden, (cal_present_k, cal_present_v) = qlayer(
                 hidden_states=x,
                 attention_mask=mask,
                 past_key_value=past,
@@ -281,7 +300,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertIs(qlayer._mode, Mode.QUANT)
 
         with torch.no_grad():
-            q_hidden, (q_new_k, q_new_v) = qlayer(
+            q_hidden, (q_present_k, q_present_v) = qlayer(
                 hidden_states=x,
                 attention_mask=mask,
                 past_key_value=past,
@@ -294,14 +313,79 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertLess(diff_h, 2.0)
         self.assertEqual(cal_hidden.shape, q_hidden.shape)
 
-        diff_k = (cal_new_k - q_new_k).abs().mean().item()
-        diff_v = (cal_new_v - q_new_v).abs().mean().item()
+        diff_k = (cal_present_k - q_present_k).abs().mean().item()
+        diff_v = (cal_present_v - q_present_v).abs().mean().item()
         self.assertGreater(diff_k, 0.0)
         self.assertGreater(diff_v, 0.0)
         self.assertLess(diff_k, 2.0)
         self.assertLess(diff_v, 2.0)
-        self.assertEqual(cal_new_k.shape, q_new_k.shape)
-        self.assertEqual(cal_new_v.shape, q_new_v.shape)
+        self.assertEqual(cal_present_k.shape, q_present_k.shape)
+        self.assertEqual(cal_present_v.shape, q_present_v.shape)
+
+    def test_export_prefill_adapter_returns_delta_kv(self):
+        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        adapter = qlayer.as_export_module(mode="prefill", return_kv=True)
+        self.assertIsInstance(adapter, LlamaDecoderLayerPrefillExportAdapter)
+
+        batch_size = 2
+        seq_len = 4
+        hidden = torch.randn(batch_size, seq_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, seq_len)
+        mask = self._rand_additive_mask(batch_size, seq_len, seq_len)
+
+        with torch.no_grad():
+            hidden_out, new_k, new_v = adapter(
+                hidden_states=hidden,
+                attention_mask=mask,
+                position_embeddings=pos,
+            )
+
+        self.assertEqual(hidden_out.shape, (batch_size, seq_len, self.hidden_size))
+        self.assertEqual(new_k.shape, (batch_size, self.n_kv, seq_len, self.head_dim))
+        self.assertEqual(new_v.shape, (batch_size, self.n_kv, seq_len, self.head_dim))
+
+    def test_export_decode_adapter_returns_delta_kv(self):
+        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        adapter = qlayer.as_export_module(mode="decode", return_kv=True)
+        self.assertIsInstance(adapter, LlamaDecoderLayerDecodeExportAdapter)
+
+        batch_size = 1
+        x = torch.randn(batch_size, 1, self.hidden_size)
+        pos = self._rand_rope(batch_size, 1)
+        mask = self._rand_additive_mask(batch_size, 1, self.max_seq)
+        past = self._rand_past(batch_size, self.max_seq - 1)
+
+        with torch.no_grad():
+            hidden_out, new_k, new_v = adapter(
+                hidden_states=x,
+                attention_mask=mask,
+                position_embeddings=pos,
+                past_key_value=past,
+            )
+
+        self.assertEqual(hidden_out.shape, (batch_size, 1, self.hidden_size))
+        self.assertEqual(new_k.shape, (batch_size, self.n_kv, 1, self.head_dim))
+        self.assertEqual(new_v.shape, (batch_size, self.n_kv, 1, self.head_dim))
+
+    def test_export_adapter_without_kv_returns_hidden_only(self):
+        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        adapter = qlayer.as_export_module(mode="decode", return_kv=False)
+
+        batch_size = 1
+        x = torch.randn(batch_size, 1, self.hidden_size)
+        pos = self._rand_rope(batch_size, 1)
+        mask = self._rand_additive_mask(batch_size, 1, self.max_seq)
+        past = self._rand_past(batch_size, self.max_seq - 1)
+
+        with torch.no_grad():
+            hidden_out = adapter(
+                hidden_states=x,
+                attention_mask=mask,
+                position_embeddings=pos,
+                past_key_value=past,
+            )
+
+        self.assertEqual(hidden_out.shape, (batch_size, 1, self.hidden_size))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,10 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    LlamaAttentionDecodeExportAdapter,
+    LlamaAttentionPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.llama.quant_attention import QuantLlamaAttention
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
@@ -60,6 +64,18 @@ class TestQuantLlamaAttention(unittest.TestCase):
         cls.n_h = cfg.num_attention_heads
         cls.hidden_size = cfg.hidden_size
 
+    def _make_qattn(self) -> QuantLlamaAttention:
+        qattn = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+        qattn.enable_calibration()
+
+        for _ in range(3):
+            x = torch.randn(2, 4, self.hidden_size)
+            pos = self._rand_rope(2, 4)
+            _ = qattn(x, pos)
+
+        qattn.freeze_qparams()
+        return qattn
+
     def _rand_rope(self, batch_size: int, seq_len: int):
         emb = torch.randn(batch_size, seq_len, self.head_dim)
         return emb.cos(), emb.sin()
@@ -70,6 +86,14 @@ class TestQuantLlamaAttention(unittest.TestCase):
             valid_len = torch.randint(low=1, high=k_len + 1, size=(1,)).item()
             if valid_len < k_len:
                 mask[:, :, valid_len:] = float("-120")
+        return mask
+
+    def _rand_bool_mask(self, batch_size: int, q_len: int, k_len: int):
+        mask = torch.ones(batch_size, q_len, k_len, dtype=torch.bool)
+        if k_len > 1:
+            valid_len = torch.randint(low=1, high=k_len + 1, size=(1,)).item()
+            if valid_len < k_len:
+                mask[:, :, valid_len:] = False
         return mask
 
     def _rand_past(self, batch_size: int, past_len: int):
@@ -92,7 +116,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertIs(qattn._mode, Mode.QUANT)
 
     def test_mode_transitions_decode(self):
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qattn = QuantLlamaAttention(self.fp_attn, layer_idx=0)
         self.assertIs(qattn._mode, Mode.NO_QUANT)
 
         qattn.enable_calibration()
@@ -165,16 +189,25 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertEqual(q_out.shape, (batch_size, seq_len, self.hidden_size))
         self.assertEqual(attn_w.shape, (batch_size, self.n_h, seq_len, seq_len))
 
-    def test_cache_tuple_concat_prefill(self):
+    def test_forward_with_bool_attention_mask_prefill(self):
+        qattn = self._make_qattn()
+
+        batch_size = 2
+        seq_len = 4
+        x = torch.randn(batch_size, seq_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, seq_len)
+        bool_mask = self._rand_bool_mask(batch_size, seq_len, seq_len)
+
+        with torch.no_grad():
+            out, attn_w = qattn(x, pos, attention_mask=bool_mask)
+
+        self.assertEqual(out.shape, (batch_size, seq_len, self.hidden_size))
+        self.assertEqual(attn_w.shape, (batch_size, self.n_h, seq_len, seq_len))
+
+    def test_cache_tuple_concat_prefill_and_present_decode(self):
         torch.manual_seed(0)
 
-        qattn = QuantLlamaAttention(self.fp_attn)
-        qattn.enable_calibration()
-        for _ in range(2):
-            x = torch.randn(2, 4, self.hidden_size)
-            pos = self._rand_rope(2, 4)
-            _ = qattn(x, pos)
-        qattn.freeze_qparams()
+        qattn = self._make_qattn()
 
         batch_size = 2
         seq_prefill = 4
@@ -219,23 +252,22 @@ class TestQuantLlamaAttention(unittest.TestCase):
             attn_w1.shape, (batch_size, self.n_h, seq_decode, seq_prefill + seq_decode)
         )
         k1, v1 = present1
-
-        # The unified wrapper returns the current K/V delta, not the fully concatenated cache.
-        self.assertEqual(k1.shape, (batch_size, self.n_kv, seq_decode, self.head_dim))
-        self.assertEqual(v1.shape, (batch_size, self.n_kv, seq_decode, self.head_dim))
+        self.assertEqual(
+            k1.shape, (batch_size, self.n_kv, seq_prefill + seq_decode, self.head_dim)
+        )
+        self.assertEqual(
+            v1.shape, (batch_size, self.n_kv, seq_prefill + seq_decode, self.head_dim)
+        )
+        # Decode with a legacy tuple past may requantize the cached prefix through
+        # obs_past_key/obs_past_value and obs_present_key/obs_present_value before
+        # returning the full present cache, so exact prefix equality is not guaranteed.
+        self.assertEqual(k1[:, :, :seq_prefill, :].shape, k0.shape)
+        self.assertEqual(v1[:, :, :seq_prefill, :].shape, v0.shape)
 
     def test_forward_shapes_and_cache_delta_decode(self):
         torch.manual_seed(1)
 
-        qattn = QuantLlamaAttention(self.fp_attn)
-        qattn.enable_calibration()
-        for _ in range(3):
-            x = torch.randn(1, 1, self.hidden_size)
-            pos = self._rand_rope(1, 1)
-            mask = self._rand_additive_mask(1, 1, self.max_seq)
-            past = self._rand_past(1, self.max_seq - 1)
-            _ = qattn(x, pos, mask, past, use_cache=True)
-        qattn.freeze_qparams()
+        qattn = self._make_qattn()
 
         batch_size = 1
         x = torch.randn(batch_size, 1, self.hidden_size)
@@ -250,12 +282,100 @@ class TestQuantLlamaAttention(unittest.TestCase):
                 attention_mask=mask,
                 past_key_value=(past_k, past_v),
                 use_cache=True,
+                cache_output_mode="delta",
             )
 
         self.assertEqual(out.shape, (batch_size, 1, self.hidden_size))
         new_k, new_v = new_kv
         self.assertEqual(new_k.shape, (batch_size, self.n_kv, 1, self.head_dim))
         self.assertEqual(new_v.shape, (batch_size, self.n_kv, 1, self.head_dim))
+
+    def test_invalid_cache_output_mode_raises(self):
+        qattn = self._make_qattn()
+
+        x = torch.randn(1, 1, self.hidden_size)
+        pos = self._rand_rope(1, 1)
+
+        with self.assertRaises(ValueError):
+            _ = qattn(
+                x,
+                pos,
+                use_cache=True,
+                cache_output_mode="invalid",
+            )
+
+    def test_prefill_export_adapter_returns_delta_kv(self):
+        qattn = self._make_qattn()
+        adapter = LlamaAttentionPrefillExportAdapter(qattn, return_kv=True)
+
+        batch_size = 2
+        seq_len = 4
+        x = torch.randn(batch_size, seq_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, seq_len)
+
+        with torch.no_grad():
+            hidden, new_k, new_v = adapter(
+                hidden_states=x,
+                position_embeddings=pos,
+                attention_mask=None,
+            )
+
+        self.assertEqual(hidden.shape, (batch_size, seq_len, self.hidden_size))
+        self.assertEqual(new_k.shape, (batch_size, self.n_kv, seq_len, self.head_dim))
+        self.assertEqual(new_v.shape, (batch_size, self.n_kv, seq_len, self.head_dim))
+
+    def test_decode_export_adapter_returns_delta_kv(self):
+        qattn = self._make_qattn()
+        adapter = LlamaAttentionDecodeExportAdapter(qattn, return_kv=True)
+
+        batch_size = 1
+        q_len = 1
+        past_len = self.max_seq - 1
+        x = torch.randn(batch_size, q_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, q_len)
+        past = self._rand_past(batch_size, past_len)
+        mask = self._rand_additive_mask(batch_size, q_len, past_len + q_len)
+
+        with torch.no_grad():
+            hidden, new_k, new_v = adapter(
+                hidden_states=x,
+                position_embeddings=pos,
+                attention_mask=mask,
+                past_key_value=past,
+            )
+
+        self.assertEqual(hidden.shape, (batch_size, q_len, self.hidden_size))
+        self.assertEqual(new_k.shape, (batch_size, self.n_kv, q_len, self.head_dim))
+        self.assertEqual(new_v.shape, (batch_size, self.n_kv, q_len, self.head_dim))
+
+    def test_export_adapters_without_cache_return_hidden_only(self):
+        qattn = self._make_qattn()
+
+        prefill_adapter = LlamaAttentionPrefillExportAdapter(qattn, return_kv=False)
+        decode_adapter = LlamaAttentionDecodeExportAdapter(qattn, return_kv=False)
+
+        batch_size = 1
+        q_len = 1
+        x = torch.randn(batch_size, q_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, q_len)
+        past = self._rand_past(batch_size, self.max_seq - 1)
+        mask = self._rand_additive_mask(batch_size, q_len, self.max_seq)
+
+        with torch.no_grad():
+            prefill_hidden = prefill_adapter(
+                hidden_states=x,
+                position_embeddings=pos,
+                attention_mask=None,
+            )
+            decode_hidden = decode_adapter(
+                hidden_states=x,
+                position_embeddings=pos,
+                attention_mask=mask,
+                past_key_value=past,
+            )
+
+        self.assertEqual(prefill_hidden.shape, (batch_size, q_len, self.hidden_size))
+        self.assertEqual(decode_hidden.shape, (batch_size, q_len, self.hidden_size))
 
     def test_per_projection_override(self):
         cfg = PTQConfig(
@@ -277,7 +397,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
     def test_forward_diff_vs_self_consistency_decode(self):
         torch.manual_seed(7)
 
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qattn = QuantLlamaAttention(self.fp_attn, layer_idx=0)
         qattn.enable_calibration()
 
         for _ in range(4):

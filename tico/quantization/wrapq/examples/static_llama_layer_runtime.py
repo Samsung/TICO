@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import argparse
-import copy
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Sequence, Tuple
 
@@ -80,10 +79,10 @@ def parse_args():
 
 def _clone_quant_layer(layer: nn.Module) -> nn.Module:
     """
-    Build a wrapped decoder layer using the wrapper.
+    Build a quantized decoder layer wrapper.
 
-    The wrapper keeps a single HF-compatible forward for both prefill and decode.
-    Export-specific specialization is handled later through export adapters.
+    Export-specific specialization is handled through export adapters built
+    from the wrapped layer.
     """
     return prepare(layer, PTQConfig())
 
@@ -160,6 +159,31 @@ def _slice_rope(
     return cos, sin
 
 
+def _slice_prefill_rope(
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    seq_len: int,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Slice prefill RoPE tensors starting from position 0.
+
+    Returns:
+        cos: Tensor with shape (B, seq_len, head_dim).
+        sin: Tensor with shape (B, seq_len, head_dim).
+    """
+    cos = rope_cos[:, :seq_len, :].to(device=device, dtype=dtype)
+    sin = rope_sin[:, :seq_len, :].to(device=device, dtype=dtype)
+
+    if batch_size != 1:
+        cos = cos.expand(batch_size, -1, -1).contiguous()
+        sin = sin.expand(batch_size, -1, -1).contiguous()
+
+    return cos, sin
+
+
 def _build_decode_attention_mask(
     batch_size: int,
     past_len: int,
@@ -190,6 +214,24 @@ def _build_decode_attention_mask(
         mask[:, :, :past_len] = 0.0
 
     mask[:, :, max_seq - 1] = 0.0
+    return mask
+
+
+def _build_prefill_attention_mask(
+    seq_len: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    mask_value: float = -120.0,
+) -> torch.Tensor:
+    """
+    Build a standard additive causal mask for prefill.
+
+    Returns:
+        Tensor with shape (1, seq_len, seq_len).
+    """
+    mask = torch.full((1, seq_len, seq_len), mask_value, device=device, dtype=dtype)
+    mask = torch.triu(mask, diagonal=1)
+    mask = mask.masked_fill(mask == 0, 0.0)
     return mask
 
 
@@ -228,14 +270,25 @@ class StaticLlamaLayerRuntime:
             self.layers = nn.ModuleList(
                 [_clone_quant_layer(layer) for layer in self.layers_ref]
             ).to(self.device)
-            for layer in self.layers:
-                layer.wrapped.return_type = "tuple"
         else:
             self.layers = nn.ModuleList(layers).to(self.device)
 
         for layer in self.layers:
             assert hasattr(layer, "wrapped")
             assert isinstance(layer.wrapped, QuantLlamaDecoderLayer)
+
+        self.prefill_layers = nn.ModuleList(
+            [
+                layer.wrapped.as_export_module("prefill", return_kv=True)
+                for layer in self.layers
+            ]
+        ).to(self.device)
+        self.decode_layers = nn.ModuleList(
+            [
+                layer.wrapped.as_export_module("decode", return_kv=True)
+                for layer in self.layers
+            ]
+        ).to(self.device)
 
         self.config = self.model.config
         self.hidden_size = self.config.hidden_size
@@ -310,29 +363,39 @@ class StaticLlamaLayerRuntime:
 
         self.layer_caches = self._allocate_empty_cache(batch_size, runtime_dtype)
 
-        for layer_idx, layer in enumerate(self.layers):
+        attention_mask = _build_prefill_attention_mask(
+            seq_len=prompt_len,
+            device=self.device,
+            dtype=hidden_states.dtype,
+        )
+        position_embeddings = _slice_prefill_rope(
+            self.rope_cos,
+            self.rope_sin,
+            seq_len=prompt_len,
+            batch_size=batch_size,
+            device=self.device,
+            dtype=hidden_states.dtype,
+        )
+
+        for layer_idx, layer in enumerate(self.prefill_layers):
             out = layer(
                 hidden_states=hidden_states,
-                attention_mask=None,
-                position_embeddings=None,
-                past_key_value=None,
-                use_cache=True,
+                attention_mask=attention_mask,
+                position_embeddings=position_embeddings,
             )
 
-            if not isinstance(out, tuple) or len(out) != 2:
+            if not isinstance(out, tuple) or len(out) != 3:
                 raise RuntimeError(
-                    f"Expected unified decoder layer output as "
-                    f"(hidden_states, present_key_value) when use_cache=True. Got len(out) = {len(out)}."
+                    "Expected prefill adapter output as (hidden_states, new_k, new_v)."
                 )
 
-            hidden_states, present_key_value = out
-            present_k, present_v = present_key_value
+            hidden_states, new_k, new_v = out
 
-            assert present_k.size(2) == prompt_len
-            assert present_v.size(2) == prompt_len
+            assert new_k.size(2) == prompt_len
+            assert new_v.size(2) == prompt_len
 
-            self.layer_caches[layer_idx].past_k[:, :, :prompt_len, :] = present_k
-            self.layer_caches[layer_idx].past_v[:, :, :prompt_len, :] = present_v
+            self.layer_caches[layer_idx].past_k[:, :, :prompt_len, :] = new_k
+            self.layer_caches[layer_idx].past_v[:, :, :prompt_len, :] = new_v
 
         self.past_len = prompt_len
 
@@ -382,7 +445,7 @@ class StaticLlamaLayerRuntime:
             dtype=hidden_states.dtype,
         )
 
-        for layer_idx, layer in enumerate(self.layers):
+        for layer_idx, layer in enumerate(self.decode_layers):
             cache = self.layer_caches[layer_idx]
 
             out = layer(
@@ -390,17 +453,14 @@ class StaticLlamaLayerRuntime:
                 attention_mask=attention_mask,
                 past_key_value=(cache.past_k, cache.past_v),
                 position_embeddings=position_embeddings,
-                use_cache=True,
             )
 
-            if not isinstance(out, tuple) or len(out) != 2:
+            if not isinstance(out, tuple) or len(out) != 3:
                 raise RuntimeError(
-                    "Expected unified decoder layer output as "
-                    "(hidden_states, present_key_value) when use_cache=True."
+                    "Expected decode adapter output as (hidden_states, new_k, new_v)."
                 )
 
-            hidden_states, present_key_value = out
-            new_k, new_v = present_key_value
+            hidden_states, new_k, new_v = out
 
             cache.past_k[:, :, self.past_len : self.past_len + 1, :] = new_k
             cache.past_v[:, :, self.past_len : self.past_len + 1, :] = new_v
@@ -539,6 +599,35 @@ class StaticLlamaLayerRuntime:
             self.rope_sin,
             position=self.past_len,
             batch_size=1,
+            device=self.device,
+            dtype=hidden_states.dtype,
+        )
+
+        return hidden_states, attention_mask, position_embeddings
+
+    @torch.no_grad()
+    def dump_prefill_inputs(
+        self,
+        input_ids: torch.LongTensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """
+        Prepare prefill inputs without running the layers.
+
+        This is useful when debugging export/runtime parity.
+        """
+        hidden_states = self.embed_tokens(input_ids.to(self.device))
+        batch_size, seq_len = input_ids.shape
+
+        attention_mask = _build_prefill_attention_mask(
+            seq_len=seq_len,
+            device=self.device,
+            dtype=hidden_states.dtype,
+        )
+        position_embeddings = _slice_prefill_rope(
+            self.rope_cos,
+            self.rope_sin,
+            seq_len=seq_len,
+            batch_size=batch_size,
             device=self.device,
             dtype=hidden_states.dtype,
         )
