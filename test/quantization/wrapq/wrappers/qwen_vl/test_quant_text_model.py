@@ -51,6 +51,7 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
             head_dim=16,
             max_position_embeddings=1024,
             rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
+            use_cache=True,
         )
 
         # Ensure eager attention implementation so outputs are deterministic
@@ -70,6 +71,14 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         """Helper to create test inputs for TextModel."""
         input_ids = torch.randint(0, self.vocab_size, (batch_size, seq_len))
         return input_ids
+
+    def _create_padding_mask(self, batch_size=2, seq_len=16, valid_len=12):
+        """
+        Create a 2D padding mask with trailing padded positions.
+        """
+        attention_mask = torch.zeros(batch_size, seq_len, dtype=torch.long)
+        attention_mask[:, :valid_len] = 1
+        return attention_mask
 
     def test_mode_transitions(self):
         """Test quantization mode transitions: NO_QUANT → CALIB → QUANT"""
@@ -399,3 +408,421 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         # past_key_values should be None when use_cache=False
         self.assertIsNone(q_out.past_key_values)
         self.assertIsNone(fp_out.past_key_values)
+
+    def test_return_dict_false_with_cache(self):
+        """
+        Test that the wrapper returns a tuple of hidden states and cache when
+        return_dict=False and use_cache=True.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        q_model.enable_calibration()
+
+        input_ids = self._create_test_inputs(batch_size=1, seq_len=8)
+        _ = q_model(input_ids=input_ids, use_cache=False)
+
+        q_model.freeze_qparams()
+
+        with torch.no_grad():
+            q_out = q_model(
+                input_ids=input_ids,
+                use_cache=True,
+                return_dict=False,
+            )
+
+        self.assertIsInstance(q_out, tuple)
+        self.assertEqual(len(q_out), 2)
+        self.assertEqual(q_out[0].shape, (1, 8, self.hidden_size))
+        self.assertIsNotNone(q_out[1])
+
+    def test_attention_mask_2d_prefill(self):
+        """
+        Test that a 2D padding mask is accepted and produces the expected output
+        shape during prefill.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        q_model.enable_calibration()
+
+        input_ids = self._create_test_inputs(batch_size=2, seq_len=16)
+        attention_mask = self._create_padding_mask(
+            batch_size=2,
+            seq_len=16,
+            valid_len=12,
+        )
+
+        _ = q_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        )
+        q_model.freeze_qparams()
+
+        with torch.no_grad():
+            q_out = q_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+            fp_out = self.fp_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+
+        self.assertEqual(q_out.last_hidden_state.shape, fp_out.last_hidden_state.shape)
+        diff = (fp_out.last_hidden_state - q_out.last_hidden_state).abs().mean().item()
+        self.assertLess(diff, 0.8)
+
+    def test_attention_mask_bool_prefill(self):
+        """
+        Test that a 2D boolean padding mask is normalized correctly.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        q_model.enable_calibration()
+
+        input_ids = self._create_test_inputs(batch_size=2, seq_len=16)
+        attention_mask = self._create_padding_mask(
+            batch_size=2,
+            seq_len=16,
+            valid_len=10,
+        ).bool()
+
+        _ = q_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=False,
+        )
+        q_model.freeze_qparams()
+
+        with torch.no_grad():
+            q_out = q_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+
+        self.assertEqual(
+            q_out.last_hidden_state.shape,
+            (2, 16, self.hidden_size),
+        )
+
+    def test_attention_mask_4d_additive_passthrough(self):
+        """
+        Test that a 4D additive mask is accepted directly.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        q_model.enable_calibration()
+
+        input_ids = self._create_test_inputs(batch_size=1, seq_len=8)
+        additive_mask = torch.zeros(1, 1, 8, 8)
+        additive_mask[..., :, 6:] = -120.0
+
+        _ = q_model(
+            input_ids=input_ids,
+            attention_mask=additive_mask,
+            use_cache=False,
+        )
+        q_model.freeze_qparams()
+
+        with torch.no_grad():
+            q_out = q_model(
+                input_ids=input_ids,
+                attention_mask=additive_mask,
+                use_cache=False,
+            )
+
+        self.assertEqual(q_out.last_hidden_state.shape, (1, 8, self.hidden_size))
+
+    def test_attention_mask_decode_with_cache(self):
+        """
+        Test that decoding with cache and a 2D attention mask works correctly.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        q_model.enable_calibration()
+
+        prefill_ids = self._create_test_inputs(batch_size=1, seq_len=8)
+        _ = q_model(input_ids=prefill_ids, use_cache=False)
+        q_model.freeze_qparams()
+
+        with torch.no_grad():
+            prefill_out = q_model(
+                input_ids=prefill_ids,
+                use_cache=True,
+            )
+
+        decode_ids = self._create_test_inputs(batch_size=1, seq_len=1)
+        decode_attention_mask = torch.ones(1, 9, dtype=torch.long)
+
+        with torch.no_grad():
+            decode_out = q_model(
+                input_ids=decode_ids,
+                attention_mask=decode_attention_mask,
+                past_key_values=prefill_out.past_key_values,
+                use_cache=True,
+            )
+
+        self.assertEqual(decode_out.last_hidden_state.shape, (1, 1, self.hidden_size))
+        self.assertIsNotNone(decode_out.past_key_values)
+
+    def test_normalize_attention_mask_shapes(self):
+        """
+        Test that the normalized additive mask has the expected shape for
+        prefill and decode.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+
+        prefill_embeds = torch.randn(2, 6, self.hidden_size)
+
+        mask_prefill = q_model._normalize_attention_mask(
+            attention_mask=None,
+            input_embeds=prefill_embeds,
+            past_key_values=None,
+        )
+        self.assertEqual(mask_prefill.shape, (1, 1, 6, 6))
+
+        from transformers.cache_utils import DynamicCache
+
+        cache = DynamicCache(config=q_model.config)
+        dummy_k = torch.randn(
+            2,
+            q_model.config.num_key_value_heads,
+            4,
+            q_model.config.head_dim,
+        )
+        dummy_v = torch.randn(
+            2,
+            q_model.config.num_key_value_heads,
+            4,
+            q_model.config.head_dim,
+        )
+        cache.update(dummy_k, dummy_v, 0)
+
+        decode_embeds = torch.randn(2, 1, self.hidden_size)
+        mask_decode = q_model._normalize_attention_mask(
+            attention_mask=torch.ones(2, 5, dtype=torch.long),
+            input_embeds=decode_embeds,
+            past_key_values=cache,
+        )
+        self.assertEqual(mask_decode.shape, (2, 1, 1, 5))
+
+    def test_attention_mask_2d_batch_size_mismatch_raises(self):
+        """
+        Test that a 2D attention mask with mismatched batch size raises ValueError.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        input_embeds = torch.randn(2, 6, self.hidden_size)
+        bad_mask = torch.ones(3, 6, dtype=torch.long)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "2D attention_mask batch size does not match inputs_embeds batch size",
+        ):
+            q_model._normalize_attention_mask(
+                attention_mask=bad_mask,
+                input_embeds=input_embeds,
+                past_key_values=None,
+            )
+
+    def test_attention_mask_2d_decode_short_mask_gets_past_prefix(self):
+        """
+        Test that a decode-time 2D mask with length equal to q_len is automatically
+        extended with a prefix for past cached tokens.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+
+        from transformers.cache_utils import DynamicCache
+
+        cache = DynamicCache(config=q_model.config)
+        dummy_k = torch.randn(
+            2,
+            q_model.config.num_key_value_heads,
+            4,
+            q_model.config.head_dim,
+        )
+        dummy_v = torch.randn(
+            2,
+            q_model.config.num_key_value_heads,
+            4,
+            q_model.config.head_dim,
+        )
+        cache.update(dummy_k, dummy_v, 0)
+
+        decode_embeds = torch.randn(2, 1, self.hidden_size)
+        short_mask = torch.ones(2, 1, dtype=torch.long)
+
+        mask = q_model._normalize_attention_mask(
+            attention_mask=short_mask,
+            input_embeds=decode_embeds,
+            past_key_values=cache,
+        )
+
+        self.assertEqual(mask.shape, (2, 1, 1, 5))
+
+    def test_attention_mask_2d_invalid_length_raises(self):
+        """
+        Test that a 2D attention mask with invalid length raises ValueError.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+
+        from transformers.cache_utils import DynamicCache
+
+        cache = DynamicCache(config=q_model.config)
+        dummy_k = torch.randn(
+            2,
+            q_model.config.num_key_value_heads,
+            4,
+            q_model.config.head_dim,
+        )
+        dummy_v = torch.randn(
+            2,
+            q_model.config.num_key_value_heads,
+            4,
+            q_model.config.head_dim,
+        )
+        cache.update(dummy_k, dummy_v, 0)
+
+        decode_embeds = torch.randn(2, 1, self.hidden_size)
+        bad_mask = torch.ones(2, 3, dtype=torch.long)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "2D attention_mask length does not match the expected KV length",
+        ):
+            q_model._normalize_attention_mask(
+                attention_mask=bad_mask,
+                input_embeds=decode_embeds,
+                past_key_values=cache,
+            )
+
+    def test_attention_mask_2d_float_prefill(self):
+        """
+        Test that a 2D floating-point mask is treated as a keep-mask via `!= 0`.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        input_embeds = torch.randn(2, 4, self.hidden_size)
+        float_mask = torch.tensor(
+            [
+                [1.0, 1.0, 0.0, 0.0],
+                [1.0, 0.5, 0.0, 0.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        mask = q_model._normalize_attention_mask(
+            attention_mask=float_mask,
+            input_embeds=input_embeds,
+            past_key_values=None,
+        )
+
+        self.assertEqual(mask.shape, (2, 1, 4, 4))
+        self.assertTrue(torch.all(mask[0, 0, :, 2:] <= -120))
+        self.assertTrue(torch.all(mask[1, 0, :, 2:] <= -120))
+
+    def test_attention_mask_4d_shape_mismatch_raises(self):
+        """
+        Test that a 4D attention mask with mismatched q_len/kv_len raises ValueError.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        input_embeds = torch.randn(2, 4, self.hidden_size)
+        bad_mask = torch.zeros(2, 1, 3, 4)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "4D attention_mask shape does not match the expected query/KV lengths",
+        ):
+            q_model._normalize_attention_mask(
+                attention_mask=bad_mask,
+                input_embeds=input_embeds,
+                past_key_values=None,
+            )
+
+    def test_attention_mask_4d_bool_converts_to_additive(self):
+        """
+        Test that a 4D boolean mask is converted to an additive floating-point mask.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        input_embeds = torch.randn(1, 4, self.hidden_size)
+        bool_mask = torch.tensor(
+            [
+                [
+                    [
+                        [True, True, False, False],
+                        [True, True, False, False],
+                        [True, True, True, False],
+                        [True, True, True, True],
+                    ]
+                ]
+            ],
+            dtype=torch.bool,
+        )
+
+        mask = q_model._normalize_attention_mask(
+            attention_mask=bool_mask,
+            input_embeds=input_embeds,
+            past_key_values=None,
+        )
+
+        self.assertTrue(mask.dtype.is_floating_point)
+        self.assertEqual(mask.shape, (1, 1, 4, 4))
+        self.assertLess(mask[0, 0, 0, 2].item(), 0.0)
+
+    def test_attention_mask_4d_int_converts_to_additive(self):
+        """
+        Test that a 4D integer mask is converted to an additive floating-point mask.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        input_embeds = torch.randn(1, 4, self.hidden_size)
+        int_mask = torch.tensor(
+            [[[[1, 1, 0, 0], [1, 1, 0, 0], [1, 1, 1, 0], [1, 1, 1, 1]]]],
+            dtype=torch.long,
+        )
+
+        mask = q_model._normalize_attention_mask(
+            attention_mask=int_mask,
+            input_embeds=input_embeds,
+            past_key_values=None,
+        )
+
+        self.assertTrue(mask.dtype.is_floating_point)
+        self.assertEqual(mask.shape, (1, 1, 4, 4))
+        self.assertLess(mask[0, 0, 0, 2].item(), 0.0)
+
+    def test_attention_mask_invalid_rank_raises(self):
+        """
+        Test that an unsupported attention mask rank raises ValueError.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        input_embeds = torch.randn(2, 4, self.hidden_size)
+        bad_mask = torch.ones(2, 1, 1, 1, 4)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Unsupported attention_mask rank",
+        ):
+            q_model._normalize_attention_mask(
+                attention_mask=bad_mask,
+                input_embeds=input_embeds,
+                past_key_values=None,
+            )
+
+    def test_return_dict_false_without_cache(self):
+        """
+        Test that the wrapper returns a single-element tuple when
+        return_dict=False and use_cache=False.
+        """
+        q_model = QuantQwen3VLTextModel(self.fp_model)
+        q_model.enable_calibration()
+
+        input_ids = self._create_test_inputs(batch_size=1, seq_len=8)
+        _ = q_model(input_ids=input_ids, use_cache=False)
+        q_model.freeze_qparams()
+
+        with torch.no_grad():
+            q_out = q_model(
+                input_ids=input_ids,
+                use_cache=False,
+                return_dict=False,
+            )
+
+        self.assertIsInstance(q_out, tuple)
+        self.assertEqual(len(q_out), 1)
+        self.assertEqual(q_out[0].shape, (1, 8, self.hidden_size))
