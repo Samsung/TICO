@@ -41,6 +41,7 @@ from tico.passes.decompose_fake_quantize_tensor_qparams import (
 from tico.passes.decompose_group_norm import DecomposeGroupNorm
 from tico.passes.decompose_grouped_conv2d import DecomposeGroupedConv2d
 from tico.passes.decompose_slice_scatter import DecomposeSliceScatter
+from tico.passes.eliminate_rank_round_trip_region import EliminateRankRoundTripRegion
 from tico.passes.extract_dtype_kwargs import ExtractDtypeKwargsPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.fuse_leading_unsqueeze_reshape import FuseLeadingUnsqueezeReshape
@@ -279,6 +280,9 @@ def convert_exported_module_to_circle(
             *LowerToSlicePasses(),
             FuseLeadingUnsqueezeReshape(),
             CastClampMixedTypeArgs(),
+            EliminateRankRoundTripRegion(
+                enabled=config.get("eliminate_rank_round_trip")
+            ),
         ]
     )
     circle_legalize.run(exported_program)
@@ -320,6 +324,9 @@ def convert_exported_module_to_circle(
 
     if os.environ.get("TICO_GRAPH_DUMP"):
         save_fx_graph_as_png(exported_program, file_name="3_after_quantfold")
+
+    logger.debug("Output ExportedProgram")
+    logger.debug(exported_program)
 
     check_unsupported_target(exported_program)
     check_training_ops(exported_program)
