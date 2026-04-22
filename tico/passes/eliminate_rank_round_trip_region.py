@@ -47,21 +47,21 @@ class RankMapping:
     axis_3d_to_4d: dict[int, int]
     inserted_axis_4d: int
 
-    def remap_axis(self, axis: int, rank_3d: int = 3) -> int:
+    def remap_axis(self, axis: int) -> int:
         """
         Remap one 3D axis into the corresponding 4D axis.
         """
         if axis < 0:
-            axis += rank_3d
+            axis += 3
         if axis not in self.axis_3d_to_4d:
             raise ValueError(f"Cannot remap 3D axis {axis}")
         return self.axis_3d_to_4d[axis]
 
-    def remap_axes(self, axes: list[int], rank_3d: int = 3) -> list[int]:
+    def remap_axes(self, axes: list[int]) -> list[int]:
         """
         Remap a list of 3D axes into 4D axes.
         """
-        return [self.remap_axis(axis, rank_3d=rank_3d) for axis in axes]
+        return [self.remap_axis(axis) for axis in axes]
 
     def remap_permute(self, perm_3d: list[int]) -> list[int]:
         """
@@ -81,15 +81,11 @@ class RankMapping:
 
         return perm_4d
 
-    def remap_transpose(
-        self, dim0: int, dim1: int, rank_3d: int = 3
-    ) -> tuple[int, int]:
+    def remap_transpose(self, dim0: int, dim1: int) -> tuple[int, int]:
         """
         Convert a 3D transpose pair into the equivalent 4D transpose pair.
         """
-        return self.remap_axis(dim0, rank_3d=rank_3d), self.remap_axis(
-            dim1, rank_3d=rank_3d
-        )
+        return self.remap_axis(dim0), self.remap_axis(dim1)
 
 
 @dataclass
@@ -357,20 +353,22 @@ class EliminateRankRoundTripRegion(PassBase):
 
         return len(src_shape) == 3 and len(dst_shape) == 4
 
-    def _is_allowed_external_input(
+    def _is_allowed_input_dependency(
         self,
         arg,
         region_nodes: set[torch.fx.Node],
         source_reshape: torch.fx.Node,
     ) -> bool:
         """
-        Check whether an external input is allowed for a region internal node.
+        Check whether an input argument is allowed for a region internal node.
 
-        Allowed external inputs:
-          - non-node constants
-          - the source reshape itself
-          - nodes already inside the region
-          - get_attr / placeholder nodes
+        Allowed inputs include:
+        - the source reshape (region entry)
+        - nodes already collected inside the region
+        - non-node constants
+        - external immutable inputs such as get_attr / placeholder
+
+        Any other dependency is considered invalid and breaks region closure.
         """
         if not isinstance(arg, torch.fx.Node):
             return True
@@ -406,14 +404,14 @@ class EliminateRankRoundTripRegion(PassBase):
         Weak sink reshapes are treated as region boundaries and are not required
         to be the exact inverse of the source reshape.
         """
-        region_nodes: set[torch.fx.Node] = {source_reshape}
+        visited: set[torch.fx.Node] = {source_reshape}
         internal_nodes: list[torch.fx.Node] = []
         sink_reshapes: list[torch.fx.Node] = []
 
         q = deque([source_reshape])
 
         # Phase 1: collect candidates without requiring all inputs to already be
-        # present in region_nodes.
+        # present in region (visited).
         while q:
             producer = q.popleft()
 
@@ -426,8 +424,8 @@ class EliminateRankRoundTripRegion(PassBase):
                 if not self._is_supported_internal_node(user):
                     continue
 
-                if user not in region_nodes:
-                    region_nodes.add(user)
+                if user not in visited:
+                    visited.add(user)
                     internal_nodes.append(user)
                     q.append(user)
 
@@ -444,7 +442,7 @@ class EliminateRankRoundTripRegion(PassBase):
                     continue
                 if arg in internal_set:
                     continue
-                if self._is_allowed_external_input(
+                if self._is_allowed_input_dependency(
                     arg, internal_set | {source_reshape}, source_reshape
                 ):
                     continue

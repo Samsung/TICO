@@ -280,9 +280,7 @@ def convert_exported_module_to_circle(
             *LowerToSlicePasses(),
             FuseLeadingUnsqueezeReshape(),
             CastClampMixedTypeArgs(),
-            EliminateRankRoundTripRegion(
-                enabled=config.get("eliminate_rank_round_trip")
-            ),
+            EliminateRankRoundTripRegion(enabled=True),
         ]
     )
     circle_legalize.run(exported_program)
