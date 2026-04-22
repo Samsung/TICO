@@ -25,6 +25,7 @@ class CompileConfigV1(CompileConfigBase):
     convert_rhs_const_mm_to_fc: bool = True
     convert_single_batch_lhs_const_bmm_to_fc: bool = False
     convert_expand_to_slice_cat: bool = False
+    eliminate_rank_round_trip: bool = False
 
     def get(self, name: str):
         return super().get(name)

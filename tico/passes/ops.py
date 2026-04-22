@@ -56,12 +56,15 @@ class AtenOps:
         self.mul_tensor = [torch.ops.aten.mul.Tensor]
         self.permute = [torch.ops.aten.permute.default]
         self.reshape = [torch.ops.aten.reshape.default]
+        self.rsqrt = [torch.ops.aten.rsqrt.default]
         self.select = [torch.ops.aten.select_copy.int, torch.ops.aten.select.int]
+        self.sigmoid = [torch.ops.aten.sigmoid.default]
         self.slice = [torch.ops.aten.slice.Tensor, torch.ops.aten.slice_copy.Tensor]
         self.softmax = [
             torch.ops.aten._softmax.default,
             torch.ops.aten._safe_softmax.default,
         ]
+        self.split_with_sizes = [torch.ops.aten.split_with_sizes.default]
         self.squeeze = [torch.ops.aten.squeeze.dims, torch.ops.aten.squeeze_copy.dims]
         self.to_copy = [
             torch.ops.aten._to_copy.default,
