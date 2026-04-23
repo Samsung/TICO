@@ -25,98 +25,6 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 from transformers.cache_utils import Cache
 
 
-def apply_interleaved_mrope(self, freqs, mrope_section):
-    """
-    Apply interleaved MRoPE to 3D rotary embeddings.
-    Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-    interleaved [THWTHWTHW...TT], preserving frequency continuity.
-
-    Args:
-        freqs: (3, bs, seq_len, head_dim // 2)
-        mrope_section: (3,)
-
-    Returns:
-        freqs_t: (bs, seq_len, head_dim // 2)
-
-    Design Note:
-        This implementation is using slice_copy, index_select, and cat
-        to avoid yet unsupported slice_scatter with step=3 operation and
-        to avoid unsupported in-place operator index_put.default.
-    """
-    # Start with T dimension (will keep some, replace some)
-    freqs_t_base = freqs[0]
-
-    # For each dimension (H, W), extract frequency bands to be interleaved
-    h_w_bands = []
-
-    for dim, offset in enumerate((1, 2), start=1):  # H, W dimensions
-        length = mrope_section[dim] * 3
-        indices = torch.arange(offset, length, 3, device=freqs.device)
-
-        # Select frequency bands from H/W dimensions
-        # freqs[dim] has shape (bs, seq_len, head_dim//2)
-        # index_select on last dim: (bs, seq_len, num_selected)
-        freqs_bands = freqs[dim].index_select(dim=-1, index=indices)
-        h_w_bands.append(freqs_bands)
-
-    # Now we need to build the interleaved output
-    # Original T dimension indices range from 0 to (head_dim // 2 - 1)
-    # We want to replace specific indices with H/W bands
-
-    # The interleaving pattern: T0, H1, W2, T3, H4, W5, T6, H7, W8, ...
-    # - Positions where i % 3 == 0: T dimension (unchanged from freqs[0])
-    # - Positions where i % 3 == 1: H dimension (overwritten from freqs[1])
-    # - Positions where i % 3 == 2: W dimension (overwritten from freqs[2])
-    # After mrope_section[dim] * 3 positions, H/W bands are exhausted and
-    # fallback to T values for all remaining mod 1 and mod 2 positions.
-
-    # Build the output by slicing and concatenating
-    # Strategy: Slice T dimension into chunks, insert H/W bands, concatenate
-
-    chunks = []
-    pos = 0
-
-    # Total length in the last dimension
-    total_len = freqs_t_base.shape[-1]
-
-    for i in range(total_len):
-        # Determine which dimension this position belongs to
-        # Pattern: T, H, W, T, H, W, T, H, W, ... (repeating cycle)
-        mod = i % 3
-
-        if mod == 0:
-            # T dimension position - take from T
-            # Slice just this index from T
-            chunk = freqs_t_base[..., i : i + 1]
-            chunks.append(chunk)
-        elif mod == 1:
-            # H dimension position - take from H
-            # Calculate which band this is
-            band_idx = (i - 1) // 3
-            if band_idx < h_w_bands[0].shape[-1]:
-                chunk = h_w_bands[0][..., band_idx : band_idx + 1]
-                chunks.append(chunk)
-            else:
-                # Fallback to T if out of bounds
-                chunk = freqs_t_base[..., i : i + 1]
-                chunks.append(chunk)
-        else:  # mod == 2
-            # W dimension position - take from W
-            band_idx = (i - 2) // 3
-            if band_idx < h_w_bands[1].shape[-1]:
-                chunk = h_w_bands[1][..., band_idx : band_idx + 1]
-                chunks.append(chunk)
-            else:
-                # Fallback to T if out of bounds
-                chunk = freqs_t_base[..., i : i + 1]
-                chunks.append(chunk)
-
-    # Concatenate all chunks
-    freqs_t = torch.cat(chunks, dim=-1)
-
-    return freqs_t
-
-
 @try_register(
     "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextModel",
 )
@@ -130,6 +38,10 @@ class QuantQwen3VLTextModel(QuantModuleBase):
     - Final normalization layer (norm)
     - Rotary position embedding (rotary_emb) - NOT wrapped
     """
+
+    # This boolean flag enforces model behavior that is only activated during model graph tracing (torch.export.export).
+    # This flag is used in unit tests only in order to check the behavior without actually exporting the model.
+    force_export: bool = False
 
     def __init__(
         self,
@@ -178,11 +90,8 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
         # rotary_emb
         self.rotary_emb = fp_model.rotary_emb
-        # The original Qwen3VLTextRotaryEmbedding.apply_interleaved_mrope emits `slice_scatter with step > 1`.
-        # Replace it with pure functional implementation using basic tensor slicing, index_select, and cat.
-        self.rotary_emb.apply_interleaved_mrope = types.MethodType(
-            apply_interleaved_mrope, self.rotary_emb
-        )
+
+        device = next(fp_model.parameters()).device
 
         # ----- static buffers: causal mask template ---------------------------
         assert isinstance(self.config.max_position_embeddings, int)
@@ -190,6 +99,27 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         mask = torch.full((1, 1, max_seq, max_seq), float("-120"))
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
+
+        # ----- static buffers: position_ids -----------------------------------
+        visual_start_idx = self._get_visual_start_idx(qcfg)
+        grid_thw = self._get_vision_grid_thw(qcfg)
+        position_ids = self._compute_3d_position_ids(
+            device=device,
+            visual_start_idx=visual_start_idx,
+            seq_len=max_seq,
+            thw=grid_thw,
+            spatial_merge_size=2,  # WARNING: hard-coded value
+        )
+        self.register_buffer("position_ids_template", position_ids, persistent=False)
+
+        # ----- static buffers: position_embeddings -----------------------------------
+        _ = torch.empty(0, device=device)
+        # tuple of 2 tensors with shape (batch_size, seq_len, head_dim // 2)
+        cos, sin = self.rotary_emb(_, position_ids)
+        assert cos.shape[:-1] == (1, max_seq)
+        assert sin.shape[:-1] == (1, max_seq)
+        self.register_buffer("cos_template", cos, persistent=False)
+        self.register_buffer("sin_template", sin, persistent=False)
 
         # --- Observers for floating-point tensors -----------------------------
         mk = self._make_obs
@@ -388,6 +318,169 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             f"Expected None, 2D, or 4D mask, but got ndim={attention_mask.ndim}."
         )
 
+    @staticmethod
+    def _compute_3d_position_ids(
+        device: torch.device,
+        visual_start_idx: int | None,
+        seq_len: int,
+        thw: tuple[int, int, int] | None,
+        spatial_merge_size: int,
+    ) -> torch.Tensor:
+        """
+        Compute 3D position IDs for multimodal RoPE with simplified constraints.
+
+        This function assumes:
+        - Single sample in batch (batch_size = 1)
+        - Image tokens always begin at a fixed visual_start_idx position
+        - Fixed sequence length
+
+        Parameters:
+        - device: The device to create tensors on
+        - visual_start_idx: The fixed position where image tokens begin
+        - seq_len: The fixed sequence length
+        - thw: Tuple of (temporal, height, width) dimensions for vision tokens
+        - spatial_merge_size: Spatial merge size for vision tokens
+
+        Returns:
+        - position_ids: Tensor of shape (3, 1, seq_len) with 3D position IDs
+        """
+        if thw is None:
+            # Generate simple 1D position IDs for text-only input
+            position_ids = torch.arange(seq_len, device=device).expand(3, 1, seq_len)
+            return position_ids
+
+        assert visual_start_idx is not None
+
+        # Initialize position_ids tensor
+        position_ids = torch.ones(3, 1, seq_len, dtype=torch.long, device=device)
+
+        # List to store position ID segments
+        pos_ids_list: list[torch.Tensor] = []
+
+        # Text position IDs (before visual tokens)
+        if visual_start_idx > 0:
+            text_len = visual_start_idx
+            text_pos_ids = (
+                torch.arange(text_len, device=device).view(1, -1).expand(3, -1)
+            )
+            pos_ids_list.append(text_pos_ids)
+
+        # Vision position IDs (3D)
+        llm_grid_t = thw[0]
+        llm_grid_h = thw[1] // spatial_merge_size or 1
+        llm_grid_w = thw[2] // spatial_merge_size or 1
+
+        # Create 3D position indices
+        t_index = (
+            torch.arange(llm_grid_t, device=device)
+            .view(-1, 1)
+            .expand(-1, llm_grid_h * llm_grid_w)
+            .flatten()
+        )
+        h_index = (
+            torch.arange(llm_grid_h, device=device)
+            .view(1, -1, 1)
+            .expand(llm_grid_t, -1, llm_grid_w)
+            .flatten()
+        )
+        w_index = (
+            torch.arange(llm_grid_w, device=device)
+            .view(1, 1, -1)
+            .expand(llm_grid_t, llm_grid_h, -1)
+            .flatten()
+        )
+
+        # Starting index for vision tokens
+        st_idx = visual_start_idx
+        vision_pos_ids = torch.stack([t_index, h_index, w_index]) + st_idx
+        pos_ids_list.append(vision_pos_ids)
+
+        # Trailing text position IDs (after visual tokens)
+        num_visual_tokens = llm_grid_t * llm_grid_h * llm_grid_w
+        visual_end_idx = visual_start_idx + num_visual_tokens
+
+        if visual_end_idx < seq_len:
+            st_idx = pos_ids_list[-1].max() + 1 if len(pos_ids_list) > 0 else 0
+            trailing_text_len = seq_len - visual_end_idx
+            trailing_pos_ids = (
+                torch.arange(trailing_text_len, device=device).view(1, -1).expand(3, -1)
+                + st_idx
+            )
+            pos_ids_list.append(trailing_pos_ids)
+
+        # Concatenate all position ID segments
+        if pos_ids_list:
+            final_pos_ids = torch.cat(pos_ids_list, dim=1).reshape(3, -1)
+            position_ids[..., 0, :] = final_pos_ids
+
+        return position_ids  # shape = (3, 1, seq_len) where 3=THW, 1=batch_size
+
+    @staticmethod
+    def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> torch.Tensor | None:
+        """
+        Extract vision grid shape from PTQConfig.model_args.
+
+        Expected format:
+            PTQConfig(
+                model_args={
+                    "vision": {
+                        "grid_thw": (T, H, W),
+                    }
+                }
+            )
+        """
+        if qcfg is None:
+            return None
+
+        vision_args = qcfg.get_model_arg("vision", {})
+        if not isinstance(vision_args, dict):
+            raise ValueError(
+                "PTQConfig.model_args['vision'] must be a mapping containing "
+                "'grid_thw'."
+            )
+
+        grid_thw = vision_args.get("grid_thw")
+        if grid_thw is not None:
+            assert type(grid_thw) is tuple
+            assert len(grid_thw) == 3
+
+        return grid_thw
+
+    @staticmethod
+    def _get_visual_start_idx(qcfg: Optional[PTQConfig]) -> int | None:
+        """
+        Extract vision tokens starting index in the input prompt
+        from PTQConfig.model_args.
+
+        Expected format:
+            PTQConfig(
+                model_args={
+                    "vision": {
+                        "visual_start_idx": img_start_idx,
+                    }
+                }
+            )
+        """
+        if qcfg is None:
+            return None
+
+        vision_args = qcfg.get_model_arg("vision", {})
+        if not isinstance(vision_args, dict):
+            raise ValueError(
+                "PTQConfig.model_args['vision'] must be a mapping containing "
+                "'visual_start_idx'."
+            )
+
+        visual_start_idx = vision_args.get("visual_start_idx")
+        if visual_start_idx is not None:
+            visual_start_idx = int(visual_start_idx)
+            if visual_start_idx < 0:
+                raise ValueError(
+                    f"vision.visual_start_idx must be greater than zero, but got {visual_start_idx}."
+                )
+
+        return visual_start_idx
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -440,21 +533,32 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         else:
             inputs_embeds = self._fq(inputs_embeds, self.obs_inputs_embeds)
 
+        batch_size, seq_len, _ = inputs_embeds.shape
+        past_seen_tokens = (
+            past_key_values.get_seq_length() if past_key_values is not None else 0
+        )
+
         # Handle cache_position (integer tensor, not quantized)
         if cache_position is None:
-            past_seen_tokens = self._get_past_seen_tokens(past_key_values)
             cache_position = torch.arange(
                 past_seen_tokens,
-                past_seen_tokens + inputs_embeds.shape[1],
+                past_seen_tokens + seq_len,
                 device=inputs_embeds.device,
             )
 
-        # Handle position_ids (integer tensor, not quantized)
-        # the hard coded `3` is for temporal, height and width.
         if position_ids is None:
-            position_ids = cache_position.view(1, 1, -1).expand(
-                3, inputs_embeds.shape[0], -1
-            )
+            if torch.compiler.is_compiling() or self.force_export:
+                # Use precomputed position IDs at export time only
+                # Get position_ids from precomputed position_ids_template buffer.
+                # Take first seq_len positions. We obtain a tensor of shape (3, 1, seq_len).
+                position_ids = self.position_ids_template[
+                    ..., past_seen_tokens : past_seen_tokens + seq_len
+                ]
+            else:
+                position_ids = cache_position.view(1, 1, -1)
+            # Replicate position_ids across batch dimension
+            position_ids = position_ids.expand(3, batch_size, -1)
+            assert position_ids.shape == (3, batch_size, seq_len)
         elif position_ids.ndim == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
 
@@ -462,6 +566,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             text_position_ids = position_ids[0]
             position_ids = position_ids[1:]
         else:
+            # Take 0-th dimension (T - Temporal) from THW (Temporal, Height, Width)
             text_position_ids = position_ids[0]
 
         attention_mask = self._normalize_attention_mask(
@@ -475,8 +580,21 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
         # create position embeddings to be shared across the decoder layers
         # rotary_emb returns (cos, sin) which are float tensors and need quantization
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        cos, sin = position_embeddings
+
+        if torch.compiler.is_compiling() or self.force_export:
+            # Use precomputed position embeddings at export time only
+            # Get position embeddings from precomputed position_embeddings_template.
+            # Take seq_len positions starting from past_seen_tokens.
+            # We obtain a tensor of shape (1, seq_len, head_dim // 2)
+            cos = self.cos_template[:, past_seen_tokens : past_seen_tokens + seq_len, :]
+            sin = self.sin_template[:, past_seen_tokens : past_seen_tokens + seq_len, :]
+            # Replicate position_embeddings across batch dimension
+            cos = cos.expand(batch_size, -1, -1)
+            sin = sin.expand(batch_size, -1, -1)
+        else:
+            cos, sin = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings = (cos, sin)
+
         position_embeddings = (
             self._fq(cos, self.obs_cos),
             self._fq(sin, self.obs_sin),

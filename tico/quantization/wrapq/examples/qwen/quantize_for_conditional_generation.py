@@ -301,6 +301,7 @@ def main():
         model_args={
             "vision": {
                 "grid_thw": thw,
+                "visual_start_idx": 0,
             }
         }
     )

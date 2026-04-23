@@ -228,6 +228,7 @@ def build_vlm_inputs(
 
 def prepare_inputs(
     image_token_id: int,
+    vision_start_token_id: int,
     vocab_size: int,
     model_name: ModelNameOrPath,
     cache_dir: DirPath | None = None,
@@ -278,9 +279,11 @@ def prepare_inputs(
     )
 
     # Normalize input_ids to be consistent with our image_token_id
-    image_pad_token_id = 151655
+    old_image_pad_token_id = 151655
+    old_vision_start_token_id = 151652
     input_ids: torch.Tensor = model_inputs["input_ids"]
-    input_ids[input_ids == image_pad_token_id] = image_token_id
+    input_ids[input_ids == old_image_pad_token_id] = image_token_id
+    input_ids[input_ids == old_vision_start_token_id] = vision_start_token_id
 
     # Make sure that our input IDs don't go beyond vocabulary size
     input_ids = input_ids % vocab_size
@@ -318,6 +321,7 @@ def prepare_config() -> Qwen3VLConfig:
     Returns:
         Qwen3VLConfig with reduced sizes suitable for quick testing.
     """
+    vocab_size = 1000
 
     cfg = Qwen3VLConfig(
         vision_config={
@@ -339,15 +343,17 @@ def prepare_config() -> Qwen3VLConfig:
             "attention_bias": False,
             "attention_dropout": 0.0,
             "max_position_embeddings": 1024,
-            "vocab_size": 1000,
+            "vocab_size": vocab_size,
             "use_cache": False,
             "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
         },
-        image_token_id=998,
-        video_token_id=999,
+        image_token_id=vocab_size - 2,
+        video_token_id=vocab_size - 1,
+        vision_start_token_id=vocab_size - 3,
     )
     assert cfg.image_token_id < cfg.text_config.vocab_size
     assert cfg.video_token_id < cfg.text_config.vocab_size
+    assert cfg.vision_start_token_id < cfg.text_config.vocab_size
 
     # Ensure eager attention implementation so outputs are deterministic
     # and do not require GPU flash attention kernels.
@@ -385,7 +391,7 @@ def prepare_quantized_model(
         model_args={
             "vision": {
                 "grid_thw": thw,
-                "visual_start_idx": 0,
+                "visual_start_idx": 4,
             }
         },
     )
@@ -1092,6 +1098,7 @@ def main():
         model_name=args.model,
         cache_dir=args.cache_dir,
         image_token_id=cfg.image_token_id,
+        vision_start_token_id=cfg.vision_start_token_id,
         vocab_size=cfg.text_config.vocab_size,
         image_width=128,
         image_height=96,

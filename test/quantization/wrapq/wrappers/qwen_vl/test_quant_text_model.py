@@ -67,6 +67,41 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         cls.hidden_size = cfg.hidden_size
         cls.num_hidden_layers = cfg.num_hidden_layers
 
+    @staticmethod
+    def _create_visual_inputs(
+        vocab_size: int,
+        visual_start_idx: int,
+        grid_thw: tuple[int, int, int],
+        image_token_id: int,
+        vision_start_token_id: int,
+        batch_size: int = 1,
+        patch_size: int = 16,
+        image_width: int = 128,
+        image_height: int = 96,
+    ):
+        num_visual_tokens = image_width * image_height // (patch_size**2)
+        num_tokens = visual_start_idx + num_visual_tokens + 10
+
+        input_ids = torch.randint(
+            low=0, high=vocab_size - 3, size=(batch_size, num_tokens)
+        )
+        input_ids[:, visual_start_idx - 1] = vision_start_token_id
+        input_ids[
+            :, visual_start_idx : visual_start_idx + num_visual_tokens
+        ] = image_token_id
+        attention_mask = torch.ones(batch_size, num_tokens, dtype=torch.int64)
+        pixel_values = torch.full(
+            size=(batch_size, 3, image_height, image_width), fill_value=-1.0
+        )
+        image_grid_thw = torch.tensor(grid_thw)
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+        }
+
     def _create_test_inputs(self, batch_size=2, seq_len=16):
         """Helper to create test inputs for TextModel."""
         input_ids = torch.randint(0, self.vocab_size, (batch_size, seq_len))
@@ -826,3 +861,51 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         self.assertIsInstance(q_out, tuple)
         self.assertEqual(len(q_out), 1)
         self.assertEqual(q_out[0].shape, (1, 8, self.hidden_size))
+
+    def test_forward_diff_export_time(self):
+        """
+        Test that quantized output is acceptably close to FP32 reference at export time.
+        """
+        torch.manual_seed(42)
+        grid_thw = (1, 8, 8)
+        visual_start_idx = 4
+        vocab_size = self.fp_model.config.vocab_size
+
+        ptq_config = PTQConfig(
+            model_args={
+                "vision": {
+                    "grid_thw": grid_thw,
+                    "visual_start_idx": visual_start_idx,
+                }
+            }
+        )
+        q_model = QuantQwen3VLTextModel(self.fp_model, qcfg=ptq_config)
+        q_model.enable_calibration()
+
+        model_inputs: dict = self._create_visual_inputs(
+            vocab_size=vocab_size,
+            visual_start_idx=visual_start_idx,
+            image_token_id=vocab_size - 2,
+            vision_start_token_id=vocab_size - 3,
+            grid_thw=grid_thw,
+            batch_size=1,
+        )
+
+        # Calibrate the model
+        _ = q_model(**model_inputs)
+
+        q_model.freeze_qparams()
+        q_model.force_export = True
+
+        with torch.no_grad():
+            q_out = q_model(**model_inputs)
+            fp_out = self.fp_model(**model_inputs)
+
+        # Extract last_hidden_state
+        q_hidden = q_out.last_hidden_state
+        fp_hidden = fp_out.last_hidden_state
+
+        self.assertEqual(fp_hidden.shape, q_hidden.shape)
+        diff = (fp_hidden - q_hidden).abs().mean().item()
+        self.assertGreater(diff, 0.0)  # not identical
+        self.assertLess(diff, 0.7)  # acceptably close
