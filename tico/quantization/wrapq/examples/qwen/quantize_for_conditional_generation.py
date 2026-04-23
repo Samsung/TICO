@@ -302,6 +302,7 @@ def main():
             "vision": {
                 "grid_thw": thw,
                 "visual_start_idx": 0,
+                "spatial_merge_size": 2,
             }
         }
     )
@@ -340,7 +341,7 @@ def main():
     with torch.no_grad():
         test_input = calibration_data[0]._asdict()
         test_input["position_ids"] = None
-        quant_out = quantized_model(**test_input).logits
+        quant_out = quantized_model(**test_input, return_dict=False)[0]
         fp_out = orig_model(**test_input).logits
 
     print(f"┌───────────── Quantization Error Summary ─────────────")
@@ -352,6 +353,7 @@ def main():
     # Convert to Circle format
 
     example_input = calibration_data[0]
+    quantized_model.wrapped.config.return_dict = False
     circle_model = tico.convert(quantized_model.eval(), example_input)
 
     # Save the Circle model
