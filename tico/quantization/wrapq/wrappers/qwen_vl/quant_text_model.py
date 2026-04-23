@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import get_model_arg
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -103,16 +104,18 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         # ----- static buffers: position_ids -----------------------------------
         visual_start_idx = self._get_visual_start_idx(qcfg)
         grid_thw = self._get_vision_grid_thw(qcfg)
+        spatial_merge_size = self._get_spatial_merge_size(qcfg)
         position_ids = self._compute_3d_position_ids(
             device=device,
             visual_start_idx=visual_start_idx,
             seq_len=max_seq,
             thw=grid_thw,
-            spatial_merge_size=2,  # WARNING: hard-coded value
+            spatial_merge_size=spatial_merge_size,  # type: ignore[arg-type]
         )
         self.register_buffer("position_ids_template", position_ids, persistent=False)
 
         # ----- static buffers: position_embeddings -----------------------------------
+        # Dummy tensor: rotary_emb uses `x` only for device/dtype (shape is unused)
         _ = torch.empty(0, device=device)
         # tuple of 2 tensors with shape (batch_size, seq_len, head_dim // 2)
         cos, sin = self.rotary_emb(_, position_ids)
@@ -366,9 +369,18 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             pos_ids_list.append(text_pos_ids)
 
         # Vision position IDs (3D)
+        if thw[1] < spatial_merge_size:
+            raise ValueError(
+                f"Invalid grid_thw: height {thw[1]} is smaller than spatial_merge_size {spatial_merge_size}."
+            )
+        if thw[2] < spatial_merge_size:
+            raise ValueError(
+                f"Invalid grid_thw: width {thw[2]} is smaller than spatial_merge_size {spatial_merge_size}."
+            )
+
         llm_grid_t = thw[0]
-        llm_grid_h = thw[1] // spatial_merge_size or 1
-        llm_grid_w = thw[2] // spatial_merge_size or 1
+        llm_grid_h = thw[1] // spatial_merge_size
+        llm_grid_w = thw[2] // spatial_merge_size
 
         # Create 3D position indices
         t_index = (
@@ -417,69 +429,44 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
     @staticmethod
     def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> torch.Tensor | None:
-        """
-        Extract vision grid shape from PTQConfig.model_args.
-
-        Expected format:
-            PTQConfig(
-                model_args={
-                    "vision": {
-                        "grid_thw": (T, H, W),
-                    }
-                }
-            )
-        """
-        if qcfg is None:
-            return None
-
-        vision_args = qcfg.get_model_arg("vision", {})
-        if not isinstance(vision_args, dict):
-            raise ValueError(
-                "PTQConfig.model_args['vision'] must be a mapping containing "
-                "'grid_thw'."
-            )
-
-        grid_thw = vision_args.get("grid_thw")
+        grid_thw = get_model_arg(qcfg, "vision", "grid_thw", default=None)
         if grid_thw is not None:
-            assert type(grid_thw) is tuple
-            assert len(grid_thw) == 3
+            if type(grid_thw) is not tuple or len(grid_thw) != 3:
+                raise ValueError(
+                    f"vision.grid_thw must be a tuple of length 3, but got {grid_thw}."
+                )
 
         return grid_thw
 
     @staticmethod
     def _get_visual_start_idx(qcfg: Optional[PTQConfig]) -> int | None:
-        """
-        Extract vision tokens starting index in the input prompt
-        from PTQConfig.model_args.
-
-        Expected format:
-            PTQConfig(
-                model_args={
-                    "vision": {
-                        "visual_start_idx": img_start_idx,
-                    }
-                }
-            )
-        """
-        if qcfg is None:
-            return None
-
-        vision_args = qcfg.get_model_arg("vision", {})
-        if not isinstance(vision_args, dict):
-            raise ValueError(
-                "PTQConfig.model_args['vision'] must be a mapping containing "
-                "'visual_start_idx'."
-            )
-
-        visual_start_idx = vision_args.get("visual_start_idx")
+        visual_start_idx = get_model_arg(
+            qcfg, "vision", "visual_start_idx", default=None
+        )
         if visual_start_idx is not None:
             visual_start_idx = int(visual_start_idx)
             if visual_start_idx < 0:
                 raise ValueError(
-                    f"vision.visual_start_idx must be greater than zero, but got {visual_start_idx}."
+                    f"vision.visual_start_idx must be greater than or equal to zero, "
+                    f"but got {visual_start_idx}."
                 )
 
         return visual_start_idx
+
+    @staticmethod
+    def _get_spatial_merge_size(qcfg: Optional[PTQConfig]) -> int | None:
+        spatial_merge_size = get_model_arg(
+            qcfg, "vision", "spatial_merge_size", default=None
+        )
+        if spatial_merge_size is not None:
+            spatial_merge_size = int(spatial_merge_size)
+            if spatial_merge_size <= 0:
+                raise ValueError(
+                    f"vision.spatial_merge_size must be greater than zero, "
+                    f"but got {spatial_merge_size}."
+                )
+
+        return spatial_merge_size
 
     def forward(
         self,

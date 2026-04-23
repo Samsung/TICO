@@ -94,6 +94,7 @@ class TestQuantQwen3VLModel(unittest.TestCase):
                 "vision": {
                     "grid_thw": grid_thw,
                     "visual_start_idx": 0,
+                    "spatial_merge_size": 2,
                 }
             }
         )

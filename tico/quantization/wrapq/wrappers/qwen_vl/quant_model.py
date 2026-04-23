@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import get_model_arg
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -52,6 +53,7 @@ class QuantQwen3VLModel(QuantModuleBase):
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
+        self.config = fp_model.config
 
         # Extract visual_start_idx from config for the insertion
         # of visual embddings into the embedded input prompt
@@ -93,6 +95,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         image_grid_thw: torch.Tensor | None = None,
         video_grid_thw: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
+        return_dict: bool | None = None,
         **kwargs,
     ) -> Union[torch.Tensor, tuple]:
         """
@@ -114,6 +117,9 @@ class QuantQwen3VLModel(QuantModuleBase):
         Returns:
             Model output containing last hidden state, past key values, etc.
         """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.return_dict
+        )
         if torch.compiler.is_compiling() or self.force_export:
             assert (
                 position_ids is not None
@@ -274,41 +280,18 @@ class QuantQwen3VLModel(QuantModuleBase):
             Qwen3VLModelOutputWithPast,
         )
 
-        return Qwen3VLModelOutputWithPast(
+        output = Qwen3VLModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,
             past_key_values=outputs.past_key_values,
             rope_deltas=self.rope_deltas,
         )
+        return output if return_dict else output.to_tuple()
 
     @staticmethod
-    def _get_visual_start_idx(qcfg: Optional[PTQConfig]) -> int:
-        """
-        Extract vision tokens starting index in the input prompt
-        from PTQConfig.model_args.
-
-        Expected format:
-            PTQConfig(
-                model_args={
-                    "vision": {
-                        "visual_start_idx": img_start_idx,
-                    }
-                }
-            )
-        """
-        if qcfg is None:
-            raise ValueError(
-                "PTQConfig is required for QuantQwen3VLModel because "
-                "vision.visual_start_idx must be provided via PTQConfig.model_args."
-            )
-
-        vision_args = qcfg.get_model_arg("vision", {})
-        if not isinstance(vision_args, dict):
-            raise ValueError(
-                "PTQConfig.model_args['vision'] must be a mapping containing "
-                "'visual_start_idx'."
-            )
-
-        visual_start_idx = vision_args.get("visual_start_idx")
+    def _get_visual_start_idx(qcfg: Optional[PTQConfig]) -> int | None:
+        visual_start_idx = get_model_arg(
+            qcfg, "vision", "visual_start_idx", default=None
+        )
         if visual_start_idx is None:
             raise ValueError(
                 "vision.visual_start_idx must be specified in PTQConfig.model_args for "

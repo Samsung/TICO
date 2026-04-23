@@ -275,6 +275,7 @@ def main():
             "temporal_patch_size": 2,
             "patch_size": 16,
             "out_hidden_size": 64,
+            "spatial_merge_size": 2,
         },
         text_config={
             "hidden_size": 64,
@@ -302,6 +303,8 @@ def main():
             "vision": {
                 "grid_thw": thw,
                 "visual_start_idx": visual_start_idx,
+                # It is provided for the text model
+                "spatial_merge_size": cfg.vision_config.spatial_merge_size,
             }
         }
     )
@@ -341,7 +344,7 @@ def main():
     with torch.no_grad():
         test_input = calibration_data[0]._asdict()
         test_input["position_ids"] = None
-        quant_out = quantized_model(**test_input).last_hidden_state
+        quant_out = quantized_model(**test_input, return_dict=False)[0]
         fp_out = orig_model(**test_input).last_hidden_state
 
     print(f"┌───────────── Quantization Error Summary ─────────────")
@@ -353,6 +356,7 @@ def main():
     # Convert to Circle format
 
     example_input = calibration_data[0]
+    quantized_model.wrapped.config.return_dict = False
     circle_model = tico.convert(quantized_model.eval(), example_input)
 
     # Save the Circle model

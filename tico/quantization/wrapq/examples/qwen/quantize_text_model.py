@@ -63,6 +63,14 @@ def main():
         head_dim=128,
         max_position_embeddings=2048,
         use_cache=False,
+        rope_scaling={
+            "mrope_section": [
+                1,
+                1,
+                2,
+            ],
+            "rope_type": "default",
+        },
     )
 
     # Ensure eager attention implementation so outputs are deterministic

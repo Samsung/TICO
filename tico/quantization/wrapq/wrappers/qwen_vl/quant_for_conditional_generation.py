@@ -47,6 +47,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
+        self.config = fp_model.config
 
         # Wrap the vision-language model
         self.model = PTQWrapper(
@@ -76,6 +77,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
         video_grid_thw: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
+        return_dict: bool | None = None,
         **kwargs,
     ) -> Union[torch.Tensor, tuple]:
         """
@@ -99,6 +101,9 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
         Returns:
             Model output containing logits, past key values, etc.
         """
+        return_dict = (
+            return_dict if return_dict is not None else self.config.return_dict
+        )
         # Get hidden states from the vision-language model
         outputs = self.model(
             input_ids=input_ids,
@@ -111,6 +116,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             cache_position=cache_position,
+            return_dict=return_dict,
             **kwargs,
         )
 
@@ -129,14 +135,19 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
             Qwen3VLCausalLMOutputWithPast,
         )
 
-        return Qwen3VLCausalLMOutputWithPast(
-            loss=None,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-            rope_deltas=outputs.rope_deltas,
-        )
+        if return_dict:
+            output = Qwen3VLCausalLMOutputWithPast(
+                loss=None,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+                rope_deltas=outputs.rope_deltas,
+            )
+        else:
+            # (logits, past_key_values)
+            output = (logits,) if len(outputs) == 1 else (logits, outputs[1])
+        return output
 
     def _all_observers(self) -> Iterable:
         """Yield all observers from this module and wrapped submodules."""

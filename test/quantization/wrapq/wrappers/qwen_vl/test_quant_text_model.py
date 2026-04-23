@@ -870,12 +870,14 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         grid_thw = (1, 8, 8)
         visual_start_idx = 4
         vocab_size = self.fp_model.config.vocab_size
+        spatial_merge_size = 2
 
         ptq_config = PTQConfig(
             model_args={
                 "vision": {
                     "grid_thw": grid_thw,
                     "visual_start_idx": visual_start_idx,
+                    "spatial_merge_size": spatial_merge_size,
                 }
             }
         )

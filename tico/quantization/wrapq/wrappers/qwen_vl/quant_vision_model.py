@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.utils.utils import get_model_arg
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -150,32 +151,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
 
     @staticmethod
     def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> torch.Tensor:
-        """
-        Extract vision grid shape from PTQConfig.model_args.
-
-        Expected format:
-            PTQConfig(
-                model_args={
-                    "vision": {
-                        "grid_thw": (T, H, W),
-                    }
-                }
-            )
-        """
-        if qcfg is None:
-            raise ValueError(
-                "PTQConfig is required for QuantQwen3VLVisionModel because "
-                "vision.grid_thw must be provided via PTQConfig.model_args."
-            )
-
-        vision_args = qcfg.get_model_arg("vision", {})
-        if not isinstance(vision_args, dict):
-            raise ValueError(
-                "PTQConfig.model_args['vision'] must be a mapping containing "
-                "'grid_thw'."
-            )
-
-        grid_thw = vision_args.get("grid_thw")
+        grid_thw = get_model_arg(qcfg, "vision", "grid_thw", default=None)
         if grid_thw is None:
             raise ValueError(
                 "vision.grid_thw must be specified in PTQConfig.model_args for "
@@ -190,13 +166,12 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
                 ")"
             )
 
-        grid_thw_tensor = torch.tensor([grid_thw], dtype=torch.long)
-        if grid_thw_tensor.shape != (1, 3):
+        if type(grid_thw) is not tuple or len(grid_thw) != 3:
             raise ValueError(
-                f"vision.grid_thw must have shape (3,), but got {tuple(grid_thw_tensor.shape)} "
-                f"after normalization."
+                f"vision.grid_thw must be a tuple of length 3, but got {grid_thw}."
             )
-        return grid_thw_tensor
+
+        return torch.tensor([grid_thw], dtype=torch.long)
 
     @staticmethod
     def _precompute_rope_inv_freq(dim: int, theta: float) -> torch.Tensor:
