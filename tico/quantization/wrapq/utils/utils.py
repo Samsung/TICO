@@ -25,6 +25,17 @@ def get_model_arg(
     """
     Retrieve a nested value from PTQConfig.model_args.
 
+    Args:
+        qcfg: PTQ configuration object or None
+        *path: Path components to navigate nested dictionary
+        default: Default value to return if path is not found
+
+    Returns:
+        The value at the specified path or default if not found
+
+    Raises:
+        ValueError: If path components are accessed from non-dict
+
     Example:
         get_model_arg(qcfg, "vision", "grid_thw")
         get_model_arg(qcfg, "vision", "spatial_merge_size", default=2)
