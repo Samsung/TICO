@@ -320,7 +320,7 @@ class GPTQQuantizer(BaseQuantizer):
                         static_groups=gptq_conf.static_groups,
                         verbose=gptq_conf.verbose,
                     )
-                    quantizers[f"model.layers.{l_idx}.{name}"] = gptq[name].quantizer
+                    quantizers[f"{l_idx}.{name}"] = gptq[name].quantizer
                     gptq[name].free()
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer

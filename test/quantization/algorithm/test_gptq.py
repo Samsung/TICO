@@ -373,9 +373,9 @@ class GPTQTest(unittest.TestCase):
         convert(q_m, inplace=True)
 
         self.assertTrue(hasattr(q_m, "quantizers"))
-        self.assertEqual(q_m.quantizers["model.layers.0.m.0"].maxq.item(), 15)
-        self.assertEqual(q_m.quantizers["model.layers.0.m.1"].maxq.item(), 255)
-        self.assertEqual(q_m.quantizers["model.layers.0.m.2"].maxq.item(), 15)
+        self.assertEqual(q_m.quantizers["0.m.0"].maxq.item(), 15)
+        self.assertEqual(q_m.quantizers["0.m.1"].maxq.item(), 255)
+        self.assertEqual(q_m.quantizers["0.m.2"].maxq.item(), 15)
 
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
@@ -467,10 +467,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+            "0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+            "0.m.1" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # Enable after Conv2D quantization support
@@ -530,10 +530,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+            "0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+            "0.m.1" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
@@ -554,7 +554,7 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+            "0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
 
     @unittest.skipIf(
@@ -608,10 +608,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.conv" in q_m.quantizers  # type: ignore[operator]
+            "0.conv" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.conv2" in q_m.quantizers  # type: ignore[operator]
+            "0.conv2" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # TODO add quantization (right now it can't be evaluated on backend)
@@ -634,10 +634,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.conv" in q_m.quantizers  # type: ignore[operator]
+            "0.conv" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.conv2" in q_m.quantizers  # type: ignore[operator]
+            "0.conv2" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # TODO add quantization
@@ -660,10 +660,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.conv" in q_m.quantizers  # type: ignore[operator]
+            "0.conv" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.conv2" in q_m.quantizers  # type: ignore[operator]
+            "0.conv2" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # TODO add quantization (right now it can't be evaluated on backend)
@@ -700,10 +700,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.conv" in q_m.quantizers  # type: ignore[operator]
+            "0.conv" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.conv2" in q_m.quantizers  # type: ignore[operator]
+            "0.conv2" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # TODO add quantization
@@ -726,10 +726,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.tconv" in q_m.quantizers  # type: ignore[operator]
+            "0.tconv" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.tconv2" in q_m.quantizers  # type: ignore[operator]
+            "0.tconv2" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # TODO add quantization
@@ -766,10 +766,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.tconv" in q_m.quantizers  # type: ignore[operator]
+            "0.tconv" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.tconv2" in q_m.quantizers  # type: ignore[operator]
+            "0.tconv2" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
         # TODO add quantization
@@ -792,10 +792,10 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+            "0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+            "0.m.1" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
     @unittest.skipIf(
@@ -832,7 +832,7 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+            "0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
 
     @unittest.skipIf(
@@ -867,8 +867,8 @@ class GPTQTest(unittest.TestCase):
         # check that all convolution nodes are quantized
         assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
         assert (
-            "model.layers.0.m.0" in q_m.quantizers  # type: ignore[operator]
+            "0.m.0" in q_m.quantizers  # type: ignore[operator]
         ), "first conv node is not quantized"
         assert (
-            "model.layers.0.m.1" in q_m.quantizers  # type: ignore[operator]
+            "0.m.1" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"

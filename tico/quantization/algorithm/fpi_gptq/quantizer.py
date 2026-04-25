@@ -138,7 +138,7 @@ class FPIGPTQQuantizer(GPTQQuantizer):
                         percdamp=0.01,
                         verbose=gptq_conf.verbose,
                     )
-                    quantizers[f"model.layers.{l_idx}.{name}"] = gptq[name].quantizer
+                    quantizers[f"{l_idx}.{name}"] = gptq[name].quantizer
                     gptq[name].free()
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer
