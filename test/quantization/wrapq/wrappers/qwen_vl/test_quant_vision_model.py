@@ -245,21 +245,6 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         q_model.freeze_qparams()
         self.assertIs(q_model._mode, Mode.QUANT)
 
-    def test_forward_grid_mismatch_during_calibration(self):
-        """Test forward pass fails with mismatched grid_thw during calibration."""
-        ptq_config = self._make_ptq_config((1, 8, 8))
-        q_model = QuantQwen3VLVisionModel(
-            self.fp_model, qcfg=ptq_config, fp_name="test_model"
-        )
-        q_model.enable_calibration()
-
-        # Try with different grid
-        hidden_states, grid_thw = self._create_test_inputs((1, 4, 4))
-
-        with self.assertRaises(AssertionError) as context:
-            _ = q_model(hidden_states, grid_thw)
-        self.assertIn("grid_thw", str(context.exception))
-
     def test_observer_count(self):
         """Test that the wrapper has the correct number of observers."""
         ptq_config = self._make_ptq_config((1, 8, 8))

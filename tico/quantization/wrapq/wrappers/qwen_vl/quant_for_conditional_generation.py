@@ -22,11 +22,13 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
+from transformers.generation.utils import GenerationMixin
+
 
 @try_register(
     "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLForConditionalGeneration",
 )
-class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
+class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
     """
     Quantization wrapper for Qwen3VLForConditionalGeneration module.
 
@@ -37,6 +39,10 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
     The forward pass simply delegates to the wrapped model and lm_head,
     with no additional quantization operations needed at this level.
     """
+
+    main_input_name = "input_ids"
+    _is_stateful = True
+    _supports_cache_class = True
 
     def __init__(
         self,
@@ -154,3 +160,44 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase):
         # No local observers - all observers are in wrapped submodules
         # This method is required by QuantModuleBase but yields nothing
         return iter([])
+
+    @property
+    def device(self):
+        """Return the device for generation."""
+        return self.module.device
+
+    @property
+    def generation_config(self):
+        """Return the generation config."""
+        return self.module.generation_config
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        **kwargs,
+    ):
+        """Prepare inputs for generation step."""
+        return self.module.prepare_inputs_for_generation(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            position_ids=position_ids,
+            use_cache=use_cache,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            **kwargs,
+        )

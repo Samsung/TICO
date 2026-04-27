@@ -74,3 +74,13 @@ class PTQWrapper(QuantModuleBase):
 
     def extra_repr(self) -> str:
         return self.wrapped.extra_repr()
+
+    def generate(self, *args, **kwargs):
+        """
+        Delegate generate calls to the wrapped module.
+
+        This method allows the quantized wrapper to support the same generation
+        interface as the original Hugging Face model, which is required for
+        evaluation and inference workflows.
+        """
+        return self.wrapped.generate(*args, **kwargs)
