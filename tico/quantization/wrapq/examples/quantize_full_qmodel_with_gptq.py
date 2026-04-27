@@ -600,7 +600,11 @@ def main():
             else:
                 calibrator = SensitivityCalibrator(model, calib_inputs)
                 sens = calibrator.compute_sensitivity_info()
-                if args.output_dir is not None and "sensitivity" in args.save:
+                if (
+                    args.output_dir is not None
+                    and args.save is not None
+                    and "sensitivity" in args.save
+                ):
                     save_name = get_sensitivities_info_name(
                         model, "wikitext", args.seed, len(calib_inputs)
                     )
@@ -631,7 +635,11 @@ def main():
     if not args.no_PTQ:
         q_m = quantize_using_PTQ(q_m, calib_inputs, args)
 
-        if args.output_dir is not None and "ptq_checkpoint" in args.save:
+        if (
+            args.output_dir is not None
+            and args.save is not None
+            and "ptq_checkpoint" in args.save
+        ):
             save_name = get_ptq_model_name(model, args)
             save_path = pathlib.Path(args.output_dir, save_name)
             print(f"Saving PTQ model to {save_path}")
@@ -640,10 +648,18 @@ def main():
     # after PTQ quantizer only fixed-length input sequences are valid
     evaluate(q_m, tokenizer, dataset_test, args)
 
-    if args.output_dir is not None and "circle_per_layer" in args.save:
+    if (
+        args.output_dir is not None
+        and args.save is not None
+        and "circle_per_layer" in args.save
+    ):
         save_layers_to(q_m, args.max_seq_len, args.output_dir)
 
-    if args.output_dir is not None and "circle_full" in args.save:
+    if (
+        args.output_dir is not None
+        and args.save is not None
+        and "circle_full" in args.save
+    ):
         calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
         save_model_to(q_m, calib_inputs, args.output_dir)
 
