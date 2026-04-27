@@ -44,6 +44,221 @@ DTYPE_MAP = {
 }
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Qwen3-VL GPTQ+PTQ pipeline (architecture-aware, stagewise)"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        required=True,
+        help="HF repo name or local path.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (cuda|cpu|mps).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=list(DTYPE_MAP.keys()),
+        default="float32",
+        help="Model dtype for load.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed.",
+    )
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Optional HF token for gated/private repos.",
+    )
+    parser.add_argument(
+        "--no_GPTQ",
+        action="store_true",
+        default=False,
+        help="Skip GPTQ and keep the model in floating-point.",
+    )
+    parser.add_argument(
+        "--no_PTQ",
+        action="store_true",
+        default=False,
+        help="Skip PTQ activation quantization.",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="Cache dir for model/dataset loading.",
+    )
+    parser.add_argument(
+        "--nsamples_for_qcalibration",
+        type=int,
+        default=128,
+        help="Number of samples to be used in GPTQ calibration.",
+    )
+    parser.add_argument(
+        "--nsamples_for_evaluation",
+        type=int,
+        default=50,
+        help="Number of samples for evaluation. -1 means full dataset.",
+    )
+    parser.add_argument(
+        "--calib_seq_len",
+        type=int,
+        default=2048,
+        help=(
+            "Maximum text sequence length for calibration inputs. "
+            "If not set, processor default behavior is used."
+        ),
+    )
+    parser.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=2048,
+        help=(
+            "Maximum text sequence length for evaluation and export. "
+            "If not set, processor default behavior is used."
+        ),
+    )
+    parser.add_argument(
+        "--linear_weight_bits",
+        type=int,
+        default=4,
+        help="Weight bit-width for GPTQ quantization.",
+    )
+    parser.add_argument(
+        "--vision_patch_embed_weight_bits",
+        type=int,
+        default=8,
+        help="Number of bits for vision patch embedding (Conv3d) quantization.",
+    )
+    parser.add_argument(
+        "--embedding_weight_bits",
+        type=int,
+        default=8,
+        help="Number of bits for input Embedding quantization.",
+    )
+    parser.add_argument(
+        "--lm_head_weight_bits",
+        type=int,
+        default=4,
+        help="Number of bits for lm_head quantization.",
+    )
+    parser.add_argument(
+        "--gptq_mse",
+        type=str,
+        default=None,
+        choices=["mse", "smse"],
+        help="Whether and how to use mse in GPTQ.",
+    )
+    parser.add_argument(
+        "--eval_tasks",
+        type=str,
+        default=None,
+        help="Tasks to evaluate, e.g. `vqav2,textvqa`.",
+    )
+    parser.add_argument(
+        "--sensitivity_path",
+        type=str,
+        default=None,
+        help="Optional path to precomputed sensitivity tensors.",
+    )
+
+    # Qwen3-VL GPTQ-specific switches
+    parser.add_argument(
+        "--no_quantize_vision",
+        action="store_false",
+        dest="quantize_vision",
+        help="Quantize the vision tower.",
+    )
+    parser.add_argument(
+        "--no_quantize_text",
+        action="store_false",
+        dest="quantize_text",
+        help="Quantize the text tower.",
+    )
+    parser.add_argument(
+        "--no_quantize_lm_head",
+        action="store_false",
+        dest="quantize_lm_head",
+        help="Quantize lm_head.",
+    )
+    parser.add_argument(
+        "--move_cache_to_cpu",
+        action="store_true",
+        default=False,
+        help="Move cached stage inputs to CPU between stages to save device memory.",
+    )
+    parser.add_argument(
+        "--groupsize",
+        type=int,
+        default=-1,
+        help="GPTQ group size. -1 disables grouping.",
+    )
+    parser.add_argument(
+        "--percdamp",
+        type=float,
+        default=0.01,
+        help="GPTQ percdamp value.",
+    )
+    parser.add_argument(
+        "--actorder",
+        action="store_true",
+        default=True,
+        help="Enable activation-order column permutation.",
+    )
+    parser.add_argument(
+        "--static_groups",
+        action="store_true",
+        default=False,
+        help="Enable static group quantizers.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Verbose GPTQ logging.",
+    )
+    parser.add_argument(
+        "--hide_progress",
+        action="store_true",
+        default=False,
+        help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--grid_thw",
+        type=int,
+        nargs=3,
+        default=[8, 24, 24],
+        help="Grid temporal-height-width for vision model (e.g. 8 24 24).",
+    )
+    parser.add_argument(
+        "--visual_start_idx",
+        type=int,
+        default=0,
+        help="Starting index for visual tokens in the input sequence.",
+    )
+    parser.add_argument(
+        "--spatial_merge_size",
+        type=int,
+        default=2,
+        help="Spatial merge size for vision tokens.",
+    )
+
+    return parser.parse_args()
+
+
 def build_processor_inputs(
     processor: Any,
     image: Any,
@@ -398,218 +613,7 @@ def get_num_deepstack_mergers(q_m) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Qwen3-VL GPTQ+PTQ pipeline (architecture-aware, stagewise)"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        required=True,
-        help="HF repo name or local path.",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to run on (cuda|cpu|mps).",
-    )
-    parser.add_argument(
-        "--dtype",
-        choices=list(DTYPE_MAP.keys()),
-        default="float32",
-        help="Model dtype for load.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed.",
-    )
-    parser.add_argument(
-        "--trust-remote-code",
-        action="store_true",
-        help="Enable only if you trust the model repo code.",
-    )
-    parser.add_argument(
-        "--hf-token",
-        type=str,
-        default=None,
-        help="Optional HF token for gated/private repos.",
-    )
-    parser.add_argument(
-        "--no_GPTQ",
-        action="store_true",
-        default=False,
-        help="Skip GPTQ and keep the model in floating-point.",
-    )
-    parser.add_argument(
-        "--no_PTQ",
-        action="store_true",
-        default=False,
-        help="Skip PTQ activation quantization.",
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="Cache dir for model/dataset loading.",
-    )
-    parser.add_argument(
-        "--nsamples_for_qcalibration",
-        type=int,
-        default=128,
-        help="Number of samples to be used in GPTQ calibration.",
-    )
-    parser.add_argument(
-        "--nsamples_for_evaluation",
-        type=int,
-        default=50,
-        help="Number of samples for evaluation. -1 means full dataset.",
-    )
-    parser.add_argument(
-        "--calib_seq_len",
-        type=int,
-        default=2048,
-        help=(
-            "Maximum text sequence length for calibration inputs. "
-            "If not set, processor default behavior is used."
-        ),
-    )
-    parser.add_argument(
-        "--max_seq_len",
-        type=int,
-        default=2048,
-        help=(
-            "Maximum text sequence length for evaluation and export. "
-            "If not set, processor default behavior is used."
-        ),
-    )
-    parser.add_argument(
-        "--linear_weight_bits",
-        type=int,
-        default=4,
-        help="Weight bit-width for GPTQ quantization.",
-    )
-    parser.add_argument(
-        "--vision_patch_embed_weight_bits",
-        type=int,
-        default=8,
-        help="Number of bits for vision patch embedding (Conv3d) quantization.",
-    )
-    parser.add_argument(
-        "--embedding_weight_bits",
-        type=int,
-        default=8,
-        help="Number of bits for input Embedding quantization.",
-    )
-    parser.add_argument(
-        "--lm_head_weight_bits",
-        type=int,
-        default=4,
-        help="Number of bits for lm_head quantization.",
-    )
-    parser.add_argument(
-        "--gptq_mse",
-        type=str,
-        default=None,
-        choices=["mse", "smse"],
-        help="Whether and how to use mse in GPTQ.",
-    )
-    parser.add_argument(
-        "--eval_tasks",
-        type=str,
-        default=None,
-        help="Tasks to evaluate, e.g. `vqav2,textvqa`.",
-    )
-    parser.add_argument(
-        "--sensitivity_path",
-        type=str,
-        default=None,
-        help="Optional path to precomputed sensitivity tensors.",
-    )
-
-    # Qwen3-VL GPTQ-specific switches
-    parser.add_argument(
-        "--no_quantize_vision",
-        action="store_false",
-        dest="quantize_vision",
-        help="Quantize the vision tower.",
-    )
-    parser.add_argument(
-        "--no_quantize_text",
-        action="store_false",
-        dest="quantize_text",
-        help="Quantize the text tower.",
-    )
-    parser.add_argument(
-        "--no_quantize_lm_head",
-        action="store_false",
-        dest="quantize_lm_head",
-        help="Quantize lm_head.",
-    )
-    parser.add_argument(
-        "--move_cache_to_cpu",
-        action="store_true",
-        default=False,
-        help="Move cached stage inputs to CPU between stages to save device memory.",
-    )
-    parser.add_argument(
-        "--groupsize",
-        type=int,
-        default=-1,
-        help="GPTQ group size. -1 disables grouping.",
-    )
-    parser.add_argument(
-        "--percdamp",
-        type=float,
-        default=0.01,
-        help="GPTQ percdamp value.",
-    )
-    parser.add_argument(
-        "--actorder",
-        action="store_true",
-        default=True,
-        help="Enable activation-order column permutation.",
-    )
-    parser.add_argument(
-        "--static_groups",
-        action="store_true",
-        default=False,
-        help="Enable static group quantizers.",
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        default=False,
-        help="Verbose GPTQ logging.",
-    )
-    parser.add_argument(
-        "--hide_progress",
-        action="store_true",
-        default=False,
-        help="Disable tqdm progress bars.",
-    )
-    parser.add_argument(
-        "--grid_thw",
-        type=int,
-        nargs=3,
-        default=[8, 24, 24],
-        help="Grid temporal-height-width for vision model (e.g. 8 24 24).",
-    )
-    parser.add_argument(
-        "--visual_start_idx",
-        type=int,
-        default=0,
-        help="Starting index for visual tokens in the input sequence.",
-    )
-    parser.add_argument(
-        "--spatial_merge_size",
-        type=int,
-        default=2,
-        help="Spatial merge size for vision tokens.",
-    )
-
-    args = parser.parse_args()
+    args = parse_args()
     print(args)
 
     torch.manual_seed(args.seed)
