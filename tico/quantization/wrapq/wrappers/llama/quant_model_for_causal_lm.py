@@ -21,7 +21,10 @@ from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    QuantLlamaForCausalLMPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -283,3 +286,8 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
             yield from m._all_observers()
         if self.rotate_lm_head is not None:
             yield from self.rotate_lm_head._all_observers()
+
+    def as_export_module(self, mode: ExportMode = "prefill") -> nn.Module:
+        if mode == "prefill":
+            return QuantLlamaForCausalLMPrefillExportAdapter(self)
+        raise ValueError(f"Unsupported export mode: {mode!r}")

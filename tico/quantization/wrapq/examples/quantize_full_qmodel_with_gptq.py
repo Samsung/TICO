@@ -138,8 +138,9 @@ def save_model_to(q_m, calib_inputs, save_circle_to_folder):
     print(f"saving the whole model to {save_path.resolve()}")
     with torch.no_grad():
         with SuppressWarning(UserWarning, ".*"):
-            cm = tico.convert(q_m, (calib_inputs[0],), strict=False)
-
+            cm = tico.convert(
+                q_m.wrapped.as_export_module().eval(), (calib_inputs[0],), strict=False
+            )
             cm.save(save_path)
 
 

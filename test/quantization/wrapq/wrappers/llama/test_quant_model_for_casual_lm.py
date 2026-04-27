@@ -24,6 +24,9 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    QuantLlamaForCausalLMPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (
     QuantLlamaForCausalLM,
 )
@@ -58,6 +61,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             num_hidden_layers=2,
             max_position_embeddings=cls.seq_len,
             use_cache=False,
+            vocab_size=cls.vocab_size,
             return_dict=True,  # 명시적으로 설정
         )
 
@@ -110,3 +114,21 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.4)
         self.assertEqual(fp_out.shape, q_out.shape)
+
+    def test_export_adapter_without_cache_return_logits_only(self):
+        qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
+        prefill_adapter = QuantLlamaForCausalLMPrefillExportAdapter(qmodel)
+
+        batch_size = 1
+        inp = torch.randint(
+            0,
+            self.vocab_size,
+            (1, self.seq_len),
+        )
+
+        with torch.no_grad():
+            logits = prefill_adapter(
+                input_ids=inp,
+            )
+
+        self.assertEqual(logits.shape, (batch_size, self.seq_len, self.vocab_size))
