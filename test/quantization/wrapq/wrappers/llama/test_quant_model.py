@@ -22,7 +22,9 @@ import unittest
 import torch
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
 
@@ -104,3 +106,37 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.4)
         self.assertEqual(fp_out.shape, q_out.shape)
+
+    def test_layer_qscheme_override_propagates_to_projection_weight_observer(self):
+        """
+        Ensure layer-local qscheme overrides are propagated through
+        QuantLlamaModel -> QuantLlamaDecoderLayer -> QuantLlamaAttention -> q_proj.
+
+        This catches naming mismatches such as looking up `model.layers.0`
+        after the config has already been narrowed to `layers`.
+        """
+        qcfg = PTQConfig(
+            default_dtype=DType.int(16),
+            default_qscheme=QScheme.PER_TENSOR_SYMM,
+            overrides={
+                "layers": {
+                    "0": {
+                        "self_attn": {
+                            "q_proj": {
+                                "weight": {
+                                    "dtype": DType.uint(4),
+                                    "qscheme": QScheme.PER_TENSOR_ASYMM,
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+
+        qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg, fp_name="model")
+
+        obs = qmodel.layers[0].wrapped.self_attn.wrapped.q_proj.get_observer("weight")
+
+        self.assertEqual(obs.dtype, DType.uint(4))
+        self.assertEqual(obs.qscheme, QScheme.PER_TENSOR_ASYMM)
