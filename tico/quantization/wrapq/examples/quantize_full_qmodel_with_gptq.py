@@ -65,6 +65,149 @@ TRAIN_SPLIT = "train"
 TEST_SPLIT = "test"
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="GPTQ+PTQ pipeline (weight-only + activation)",
+    )
+    parser.add_argument(
+        "--model", type=str, required=True, help="HF repo name or local path."
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda" if torch.cuda.is_available() else "cpu",
+        help="Device to run on (cuda|cpu|mps).",
+    )
+    parser.add_argument(
+        "--dtype",
+        choices=list(DTYPE_MAP.keys()),
+        default="float32",
+        help="Model dtype for load.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Enable only if you trust the model repo code.",
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Optional HF token for gated/private repos.",
+    )
+    parser.add_argument(
+        "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
+    )
+    parser.add_argument(
+        "--no_GPTQ",
+        action="store_true",
+        default=False,
+        help="Don't use GPTQ",
+    )
+    parser.add_argument(
+        "--no_spinquant",
+        action="store_true",
+        default=False,
+        help="Disable SpinQuant preprocessing.",
+    )
+    parser.add_argument(
+        "--no_PTQ",
+        action="store_true",
+        default=False,
+        help="Leave model float",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Save specified artifacts to output_dir",
+    )
+    parser.add_argument(
+        "--save",
+        nargs="*",
+        type=str,
+        choices=["circle_full", "circle_per_layer", "ptq_checkpoint", "sensitivity"],
+        help="which artifacts should be saved to output_dir",
+    )
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="cache_dir for using model/datasets loading",
+    )
+    parser.add_argument(
+        "--nsamples_for_qcalibration",
+        type=int,
+        default="128",  # almost standard
+        help="number of samples to be used in GPTQ/PTQ calibration",
+    )
+    parser.add_argument(
+        "--linear_weight_bits",
+        type=int,
+        default=4,
+        help="Number of bits to be used in quantizer for matmul weight quantization",
+    )
+    parser.add_argument(
+        "--gptq_mse",
+        type=str,
+        default=None,
+        choices=["mse", "smse"],
+        help="Whether and how to use mse in gptq (none/mse/smse/)",
+    )
+    parser.add_argument(
+        "--max_seq_len",
+        type=int,
+        default=None,
+        help="seq_len to use in model evaluation and conversion to circle",
+    )
+    parser.add_argument(
+        "--calibrate_seq_len",
+        type=int,
+        default=2048,
+        help="seq_len to use in quantized model calibration. More the better",
+    )
+    parser.add_argument(
+        "--decode_calibration_steps",
+        type=int,
+        default=0,
+        help=(
+            "Number of short decode steps to run after each prefill calibration pass. "
+            "Set to 0 to disable decode-path calibration."
+        ),
+    )
+    parser.add_argument(
+        "--embedding_weight_bits",
+        type=int,
+        default=8,
+        help="Number of bits to be used to quantize input Embedding",
+    )
+    parser.add_argument(
+        "--lm_head_weight_bits",
+        type=int,
+        default=4,
+        help="Number of bits to be used to quantize lm_head",
+    )
+    parser.add_argument(
+        "--eval_tasks",
+        type=str,
+        default=None,
+        help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
+    )
+    parser.add_argument(
+        "--sensitivity_path",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose logging for debugging (e.g., GPTQ injection coverage)",
+    )
+
+    return parser.parse_args()
+
+
 # -------------------------------------------------------------------------
 # Helper — copy GPTQ (scale, zp) into PTQ observers
 # -------------------------------------------------------------------------
@@ -357,145 +500,7 @@ def get_ptq_model_name(model, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="GPTQ+PTQ pipeline (weight-only + activation)",
-    )
-    parser.add_argument(
-        "--model", type=str, required=True, help="HF repo name or local path."
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to run on (cuda|cpu|mps).",
-    )
-    parser.add_argument(
-        "--dtype",
-        choices=list(DTYPE_MAP.keys()),
-        default="float32",
-        help="Model dtype for load.",
-    )
-    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
-    parser.add_argument(
-        "--trust-remote-code",
-        action="store_true",
-        help="Enable only if you trust the model repo code.",
-    )
-    parser.add_argument(
-        "--hf-token",
-        type=str,
-        default=None,
-        help="Optional HF token for gated/private repos.",
-    )
-    parser.add_argument(
-        "--no-tqdm", action="store_true", help="Disable tqdm progress bars."
-    )
-    parser.add_argument(
-        "--no_GPTQ",
-        action="store_true",
-        default=False,
-        help="Don't use GPTQ",
-    )
-    parser.add_argument(
-        "--no_spinquant",
-        action="store_true",
-        default=False,
-        help="Disable SpinQuant preprocessing.",
-    )
-    parser.add_argument(
-        "--no_PTQ",
-        action="store_true",
-        default=False,
-        help="Leave model float",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="Save specified artifacts to output_dir",
-    )
-    parser.add_argument(
-        "--save",
-        nargs="*",
-        type=str,
-        choices=["circle_full", "circle_per_layer", "ptq_checkpoint", "sensitivity"],
-        help="which artifacts should be saved to output_dir",
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="cache_dir for using model/datasets loading",
-    )
-    parser.add_argument(
-        "--nsamples_for_qcalibration",
-        type=int,
-        default="128",  # almost standard
-        help="number of samples to be used in GPTQ/PTQ calibration",
-    )
-    parser.add_argument(
-        "--linear_weight_bits",
-        type=int,
-        default=4,
-        help="Number of bits to be used in quantizer for matmul weight quantization",
-    )
-    parser.add_argument(
-        "--gptq_mse",
-        type=str,
-        default=None,
-        choices=["mse", "smse"],
-        help="Whether and how to use mse in gptq (none/mse/smse/)",
-    )
-    parser.add_argument(
-        "--max_seq_len",
-        type=int,
-        default=None,
-        help="seq_len to use in model evaluation and conversion to circle",
-    )
-    parser.add_argument(
-        "--calibrate_seq_len",
-        type=int,
-        default=2048,
-        help="seq_len to use in quantized model calibration. More the better",
-    )
-    parser.add_argument(
-        "--decode_calibration_steps",
-        type=int,
-        default=0,
-        help=(
-            "Number of short decode steps to run after each prefill calibration pass. "
-            "Set to 0 to disable decode-path calibration."
-        ),
-    )
-    parser.add_argument(
-        "--embedding_weight_bits",
-        type=int,
-        default=8,
-        help="Number of bits to be used to quantize input Embedding",
-    )
-    parser.add_argument(
-        "--lm_head_weight_bits",
-        type=int,
-        default=4,
-        help="Number of bits to be used to quantize lm_head",
-    )
-    parser.add_argument(
-        "--eval_tasks",
-        type=str,
-        default=None,
-        help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
-    )
-    parser.add_argument(
-        "--sensitivity_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Verbose logging for debugging (e.g., GPTQ injection coverage)",
-    )
-    args = parser.parse_args()
+    args = parse_args()
     print(args)
 
     # Basic setup
