@@ -589,6 +589,10 @@ def main():
     if not args.no_GPTQ:
         print("Applying GPTQ …")
 
+        # use_cache increases vram usage significantly, but we don't use decoding in GPTQ
+        prev_use_cache = model.config.use_cache
+        model.config.use_cache = False
+
         sens = None
         if args.gptq_mse is not None and args.gptq_mse == "smse":
             if args.sensitivity_path is not None:
@@ -616,6 +620,8 @@ def main():
                 q_m(inp.to(args.device))
 
         q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
+
+        model.config.use_cache = prev_use_cache  # restore use-cache
     else:
         q_m = model
 
