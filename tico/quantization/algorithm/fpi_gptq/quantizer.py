@@ -75,6 +75,9 @@ class FPIGPTQQuantizer(GPTQQuantizer):
                 disable=not gptq_conf.show_progress,
             )
         ):
+            layer_prefix = (
+                f"model.layers.{l_idx}" if hasattr(model, "model") else str(l_idx)
+            )
             # 1) Identify quantizable submodules within the layer
             full = find_layers(
                 layer,
@@ -132,13 +135,16 @@ class FPIGPTQQuantizer(GPTQQuantizer):
 
                 # 3) Quantize each submodule
                 for name in subset:
+                    full_module_name = f"{layer_prefix}.{name}"
+
                     if gptq_conf.verbose:
-                        print(f"[Layer {l_idx}] {name} -> Quantizing ...")
+                        print(f"[{full_module_name}] -> Quantizing ...")
+
                     gptq[name].fasterquant(
                         percdamp=0.01,
                         verbose=gptq_conf.verbose,
                     )
-                    quantizers[f"{l_idx}.{name}"] = gptq[name].quantizer
+                    quantizers[full_module_name] = gptq[name].quantizer
                     gptq[name].free()
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer

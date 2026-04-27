@@ -311,8 +311,11 @@ class GPTQQuantizer(BaseQuantizer):
 
                 # 3) Quantize each submodule
                 for name in subset:
+                    full_module_name = module_name[subset[name]]
+
                     if gptq_conf.verbose:
                         print(f"[Layer {l_idx}] {name} -> Quantizing ...")
+
                     gptq[name].fasterquant(
                         percdamp=gptq_conf.percdamp,
                         groupsize=gptq_conf.groupsize,
@@ -320,7 +323,7 @@ class GPTQQuantizer(BaseQuantizer):
                         static_groups=gptq_conf.static_groups,
                         verbose=gptq_conf.verbose,
                     )
-                    quantizers[f"{l_idx}.{name}"] = gptq[name].quantizer
+                    quantizers[full_module_name] = gptq[name].quantizer
                     gptq[name].free()
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer

@@ -20,6 +20,7 @@ import torch.nn as nn
 from transformers.cache_utils import Cache
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
     LlamaDecoderLayerPrefillExportAdapter,
@@ -86,7 +87,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         self.self_attn = PTQWrapper(
             fp_layer.self_attn,
             qcfg=attn_cfg,
-            fp_name=f"{fp_name}.self_attn" if fp_name else None,
+            fp_name=join_name(fp_name, "self_attn"),
         )
         if hasattr(self.self_attn, "wrapped") and hasattr(
             self.self_attn.wrapped, "layer_idx"
@@ -95,17 +96,17 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         self.mlp = PTQWrapper(
             fp_layer.mlp,
             qcfg=mlp_cfg,
-            fp_name=f"{fp_name}.mlp" if fp_name else None,
+            fp_name=join_name(fp_name, "mlp"),
         )
         self.input_layernorm = PTQWrapper(
             fp_layer.input_layernorm,
             qcfg=input_ln_cfg,
-            fp_name=f"{fp_name}.input_layernorm" if fp_name else None,
+            fp_name=join_name(fp_name, "input_layernorm"),
         )
         self.post_attention_layernorm = PTQWrapper(
             fp_layer.post_attention_layernorm,
             qcfg=post_ln_cfg,
-            fp_name=f"{fp_name}.post_attention_layernorm" if fp_name else None,
+            fp_name=join_name(fp_name, "post_attention_layernorm"),
         )
 
         self.obs_mlp_residual_out = self._make_obs("mlp_residual_out")

@@ -55,3 +55,33 @@ def get_model_arg(
         value = value[key]
 
     return value
+
+
+def join_name(parent: Optional[str], child: str) -> str:
+    """
+    Join a parent scope and a child name into a dot-delimited hierarchical name.
+
+    This utility is used to construct a globally unique `fp_name` for each
+    quantized module, while keeping `qcfg` scope resolution independent.
+    It safely handles the root case where `parent` may be ``None``.
+
+    Examples:
+        >>> join_name(None, "model")
+        "model"
+        >>> join_name("model", "layers.0")
+        "model.layers.0"
+        >>> join_name("model.layers.0", "self_attn.q_proj")
+        "model.layers.0.self_attn.q_proj"
+
+    Args:
+        parent (Optional[str]):
+            The parent scope or prefix. If ``None`` or empty, the child name
+            is returned as-is.
+        child (str):
+            The child scope or name to append.
+
+    Returns:
+        str:
+            A dot-separated hierarchical name suitable for use as `fp_name`.
+    """
+    return f"{parent}.{child}" if parent else child

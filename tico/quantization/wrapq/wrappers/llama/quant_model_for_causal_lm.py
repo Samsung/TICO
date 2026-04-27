@@ -22,6 +22,7 @@ from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     QuantLlamaForCausalLMPrefillExportAdapter,
 )
@@ -63,10 +64,12 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
             model_fp.lm_head, torch.nn.Module
         )
 
-        self.model = PTQWrapper(model_fp.model, qcfg=model_cfg, fp_name=f"model")
+        self.model = PTQWrapper(
+            model_fp.model, qcfg=model_cfg, fp_name=join_name(fp_name, "model")
+        )
 
         self.lm_head = PTQWrapper(
-            model_fp.lm_head, qcfg=lm_head_cfg, fp_name=f"lm_head"
+            model_fp.lm_head, qcfg=lm_head_cfg, fp_name=join_name(fp_name, "lm_head")
         )
 
         # `rotate_lm_head` exists only for SpinQuant-style custom models.
@@ -79,7 +82,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
             self.rotate_lm_head = PTQWrapper(
                 model_fp.rotate_lm_head,
                 rotate_lm_head_cfg,
-                fp_name=f"{fp_name}.rotate_lm_head",
+                fp_name=join_name(fp_name, "rotate_lm_head"),
             )
 
         self.config = model_fp.config
