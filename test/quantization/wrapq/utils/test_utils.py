@@ -15,7 +15,7 @@
 import unittest
 from types import SimpleNamespace
 
-from tico.quantization.wrapq.utils.utils import get_model_arg
+from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 
 
 class TestGetModelArg(unittest.TestCase):
@@ -113,3 +113,29 @@ class TestGetModelArg(unittest.TestCase):
 
         value = get_model_arg(qcfg, default=None)  # type: ignore[arg-type]
         self.assertEqual(value, {"vision": {"spatial_merge_size": 2}})
+
+
+class TestJoinName(unittest.TestCase):
+    """Tests for hierarchical fp_name construction."""
+
+    def test_returns_child_when_parent_is_none(self):
+        """join_name should return the child name for root-level modules."""
+        self.assertEqual(join_name(None, "model"), "model")
+
+    def test_returns_child_when_parent_is_empty(self):
+        """join_name should treat an empty parent as the root scope."""
+        self.assertEqual(join_name("", "model"), "model")
+
+    def test_joins_parent_and_child_with_dot(self):
+        """join_name should build a dot-delimited hierarchical name."""
+        self.assertEqual(
+            join_name("model", "layers.0"),
+            "model.layers.0",
+        )
+
+    def test_joins_nested_parent_and_child(self):
+        """join_name should preserve an existing nested parent scope."""
+        self.assertEqual(
+            join_name("model.layers.0", "self_attn.q_proj"),
+            "model.layers.0.self_attn.q_proj",
+        )

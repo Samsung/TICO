@@ -20,6 +20,7 @@ import torch.nn as nn
 from transformers.cache_utils import Cache
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaAttentionDecodeExportAdapter,
     LlamaAttentionPrefillExportAdapter,
@@ -106,16 +107,16 @@ class QuantLlamaAttention(QuantModuleBase):
             fp_attn.o_proj, torch.nn.Module
         )
         self.q_proj = PTQWrapper(
-            fp_attn.q_proj, qcfg=q_cfg, fp_name=f"{fp_name}.q_proj" if fp_name else None
+            fp_attn.q_proj, qcfg=q_cfg, fp_name=join_name(fp_name, "q_proj")
         )
         self.k_proj = PTQWrapper(
-            fp_attn.k_proj, qcfg=k_cfg, fp_name=f"{fp_name}.k_proj" if fp_name else None
+            fp_attn.k_proj, qcfg=k_cfg, fp_name=join_name(fp_name, "k_proj")
         )
         self.v_proj = PTQWrapper(
-            fp_attn.v_proj, qcfg=v_cfg, fp_name=f"{fp_name}.v_proj" if fp_name else None
+            fp_attn.v_proj, qcfg=v_cfg, fp_name=join_name(fp_name, "v_proj")
         )
         self.o_proj = PTQWrapper(
-            fp_attn.o_proj, qcfg=o_cfg, fp_name=f"{fp_name}.o_proj" if fp_name else None
+            fp_attn.o_proj, qcfg=o_cfg, fp_name=join_name(fp_name, "o_proj")
         )
 
         # Constant scale (1/√d)

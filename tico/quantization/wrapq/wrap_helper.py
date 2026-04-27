@@ -17,6 +17,7 @@ from typing import Optional
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
@@ -37,14 +38,19 @@ class PTQWrapHelper:
         self,
         root: nn.Module,
         qcfg: PTQConfig,
+        *,
+        fp_name: Optional[str] = None,
     ) -> nn.Module:
         """
         Recursively attempt to wrap boundaries. Strictness is applied at every boundary.
+
+        `qcfg.child(...)` always uses a local child scope.
+        `fp_name` always carries the full floating-point module path.
         """
         assert not isinstance(root, QuantModuleBase), "The module is already wrapped."
 
         try:
-            return PTQWrapper(root, qcfg=qcfg, fp_name="model")
+            return PTQWrapper(root, qcfg=qcfg, fp_name=fp_name)
         except NotImplementedError:
             print(
                 f"No specialized wrapper found for {type(root).__name__}; applying recursive wrapping."
@@ -52,29 +58,35 @@ class PTQWrapHelper:
 
         # Case A: HuggingFace-style transformers: model.model.layers
         lm = getattr(root, "model", None)
+        lm_cfg = qcfg.child("model")
+        lm_fp_name = join_name(fp_name, "model")
 
         embeddings = (
             getattr(lm, "embed_tokens", None) if isinstance(lm, nn.Module) else None
         )
         if isinstance(embeddings, nn.Module):
-            child_scope = "model.embeddings"
-            child_cfg = qcfg.child(child_scope)
+            child_scope = "embed_tokens"
+            child_cfg = lm_cfg.child(child_scope)
+            child_fp_name = join_name(lm_fp_name, child_scope)
+
             wrapped = self.try_wrap(
                 embeddings,
                 child_cfg,
-                fp_name=child_scope,
+                fp_name=child_fp_name,
                 raise_on_fail=self.strict_wrap,
             )
             lm.embed_tokens = wrapped  # type: ignore[union-attr]
 
         model_norm = getattr(lm, "norm", None) if isinstance(lm, nn.Module) else None
         if isinstance(model_norm, nn.Module):
-            child_scope = "model.norm"
-            child_cfg = qcfg.child(child_scope)
+            child_scope = "norm"
+            child_cfg = lm_cfg.child(child_scope)
+            child_fp_name = join_name(lm_fp_name, child_scope)
+
             wrapped = self.try_wrap(
                 model_norm,
                 child_cfg,
-                fp_name=child_scope,
+                fp_name=child_fp_name,
                 raise_on_fail=self.strict_wrap,
             )
             lm.norm = wrapped  # type: ignore[union-attr]
@@ -83,72 +95,88 @@ class PTQWrapHelper:
         if isinstance(lm_head, nn.Module):
             child_scope = "lm_head"
             child_cfg = qcfg.child(child_scope)
+            child_fp_name = join_name(fp_name, child_scope)
+
             wrapped = self.try_wrap(
                 lm_head,
                 child_cfg,
-                fp_name=child_scope,
+                fp_name=child_fp_name,
                 raise_on_fail=self.strict_wrap,
             )
             root.lm_head = wrapped  # type: ignore[attr-defined]
 
         layers = getattr(lm, "layers", None) if isinstance(lm, nn.Module) else None
         if isinstance(layers, nn.ModuleList):
+            layers_scope = "layers"
+            layers_cfg = lm_cfg.child(layers_scope)
+            layers_fp_name = join_name(lm_fp_name, layers_scope)
+
             new_list = nn.ModuleList()
             for idx, layer in enumerate(layers):
-                child_scope = f"layer{idx}"
-                child_cfg = qcfg.child(child_scope)
+                child_scope = str(idx)
+                child_cfg = layers_cfg.child(child_scope)
+                child_fp_name = join_name(layers_fp_name, child_scope)
 
                 wrapped = self.try_wrap(
                     layer,
                     child_cfg,
-                    fp_name=child_scope,
+                    fp_name=child_fp_name,
                     raise_on_fail=self.strict_wrap,
                 )
                 new_list.append(wrapped)
+
             lm.layers = new_list  # type: ignore[union-attr]
             return root
 
         # Case B: Containers
         if isinstance(root, (nn.Sequential, nn.ModuleList)):
             for i, child in enumerate(list(root)):
-                name = str(i)
-                child_cfg = qcfg.child(name)
+                child_scope = str(i)
+                child_cfg = qcfg.child(child_scope)
+                child_fp_name = join_name(fp_name, child_scope)
 
                 wrapped = self.try_wrap(
                     child,
                     child_cfg,
-                    fp_name=name,
+                    fp_name=child_fp_name,
                     raise_on_fail=self.strict_wrap,
                 )
                 if wrapped is child:
                     assert not self.strict_wrap
-                    wrapped = self.wrap_supported(wrapped, child_cfg)
+                    wrapped = self.wrap_supported(
+                        wrapped,
+                        child_cfg,
+                        fp_name=child_fp_name,
+                    )
                 root[i] = wrapped  # type: ignore[index]
             return root
 
         if isinstance(root, nn.ModuleDict):
-            for k, child in list(root.items()):
-                name = k
-                child_cfg = qcfg.child(name)
+            for child_scope, child in list(root.items()):
+                child_cfg = qcfg.child(child_scope)
+                child_fp_name = join_name(fp_name, child_scope)
 
                 wrapped = self.try_wrap(
                     child,
                     child_cfg,
-                    fp_name=name,
+                    fp_name=child_fp_name,
                     raise_on_fail=self.strict_wrap,
                 )
                 if wrapped is child:
                     assert not self.strict_wrap
-                    wrapped = self.wrap_supported(wrapped, child_cfg)
-                root[k] = wrapped  # type: ignore[index]
+                    wrapped = self.wrap_supported(
+                        wrapped,
+                        child_cfg,
+                        fp_name=child_fp_name,
+                    )
+                root[child_scope] = wrapped  # type: ignore[index]
             return root
 
         # Case C: Leaf node
-        root_name = getattr(root, "_get_name", lambda: None)()
         wrapped = self.try_wrap(
             root,
             qcfg,
-            fp_name=root_name,
+            fp_name=fp_name,
             raise_on_fail=self.strict_wrap,
         )
         if wrapped is not root:
@@ -156,19 +184,24 @@ class PTQWrapHelper:
 
         assert not self.strict_wrap
 
-        # Case D: Named children
-        for name, child in list(root.named_children()):
-            child_cfg = qcfg.child(name)
+        # Case D: Generic named children
+        for child_scope, child in list(root.named_children()):
+            child_cfg = qcfg.child(child_scope)
+            child_fp_name = join_name(fp_name, child_scope)
 
             wrapped = self.try_wrap(
                 child,
                 child_cfg,
-                fp_name=name,
+                fp_name=child_fp_name,
                 raise_on_fail=self.strict_wrap,
             )
             if wrapped is child:
-                wrapped = self.wrap_supported(wrapped, child_cfg)
-            setattr(root, name, wrapped)
+                wrapped = self.wrap_supported(
+                    wrapped,
+                    child_cfg,
+                    fp_name=child_fp_name,
+                )
+            setattr(root, child_scope, wrapped)
 
         return root
 

@@ -23,6 +23,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.processing_utils import Unpack
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -61,10 +62,12 @@ class QuantLlamaModel(QuantModuleBase):
         )
 
         self.embed_tokens = PTQWrapper(
-            model_fp.embed_tokens, embed_cfg, fp_name=f"{fp_name}.embed_tokens"
+            model_fp.embed_tokens, embed_cfg, fp_name=join_name(fp_name, "embed_tokens")
         )
 
-        self.norm = PTQWrapper(model_fp.norm, norm_cfg, fp_name=f"{fp_name}.norm")
+        self.norm = PTQWrapper(
+            model_fp.norm, norm_cfg, fp_name=join_name(fp_name, "norm")
+        )
 
         # `rotate_embedding` exists only for SpinQuant-style custom models.
         # For a standard LlamaModel, skip creating the wrapper and bypass it
@@ -76,17 +79,18 @@ class QuantLlamaModel(QuantModuleBase):
             self.rotate_embedding = PTQWrapper(
                 model_fp.rotate_embedding,
                 rotate_embed_cfg,
-                fp_name=f"{fp_name}.rotate_embedding",
+                fp_name=join_name(fp_name, "rotate_embedding"),
             )
 
         new_list = nn.ModuleList()
         for idx, layer in enumerate(model_fp.layers):
-            child_scope = f"{idx}"
+            child_scope = f"{idx}"  # qcfg scope
+            child_fp_name = join_name(fp_name, f"layers.{idx}")
             child_cfg = layers_cfg.child(child_scope) if layers_cfg is not None else None  # type: ignore[union-attr]
             wrapped_layer = PTQWrapper(
                 layer,
                 child_cfg,
-                fp_name=child_scope,
+                fp_name=child_fp_name,
             )
 
             # Generation/cache path needs tuple outputs from decoder layers.
