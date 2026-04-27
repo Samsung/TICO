@@ -62,7 +62,7 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             max_position_embeddings=cls.seq_len,
             use_cache=False,
             vocab_size=cls.vocab_size,
-            return_dict=True,  # 명시적으로 설정
+            return_dict=True,
         )
 
         cls.fp_model = LlamaForCausalLM(cfg)
