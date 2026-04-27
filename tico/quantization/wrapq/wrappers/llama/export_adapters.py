@@ -227,3 +227,33 @@ class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
 
         new_k, new_v = outputs[1]
         return hidden, new_k, new_v
+
+
+class QuantLlamaForCausalLMPrefillExportAdapter(nn.Module):
+    """
+    Export adapter for prefill QuantLLamaForCausalLM.
+
+    This adapter keeps a minimal accelerator-friendly signature while reusing the
+    wrapper unchanged.
+    """
+
+    def __init__(self, wrapped):
+        super().__init__()
+        self.wrapped = wrapped
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs,
+    ):
+        outputs = self.wrapped(
+            input_ids=input_ids,
+            past_key_values=None,
+            use_cache=False,
+            return_dict=True,
+            **kwargs,
+        )
+
+        logits = outputs.logits
+
+        return logits
