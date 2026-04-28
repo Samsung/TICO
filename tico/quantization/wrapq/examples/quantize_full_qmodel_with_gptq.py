@@ -195,8 +195,7 @@ def save_layers_to(
         suffix = "prefill_" if prefill_decode else ""
         layer_name = f"decoder_layer_{suffix}{i}"
         save_path = pathlib.Path(save_layers_to_folder, f"{layer_name}.q.circle")
-        B, D = 1, config.hidden_size
-        S = max_seq_len if not prefill_decode else max_seq_len - 1
+        B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D)
 
         attention_mask = (
