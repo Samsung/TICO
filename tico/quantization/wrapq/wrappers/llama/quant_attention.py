@@ -344,9 +344,18 @@ class QuantLlamaAttention(QuantModuleBase):
             past_k, past_v = past_key_value
             if past_k is None or past_v is None:
                 return None
-            return past_key_value
+            past_k = self._fq(past_k, self.obs_past_key)
+            past_v = self._fq(past_v, self.obs_past_value)
+            return (past_k, past_v)
 
-        return self._extract_layer_kv_from_cache(past_key_value)
+        past_key_value = self._extract_layer_kv_from_cache(past_key_value)
+        if past_key_value is not None:
+            past_k, past_v = past_key_value
+            past_k = self._fq(past_k, self.obs_past_key)
+            past_v = self._fq(past_v, self.obs_past_value)
+            return (past_k, past_v)
+
+        return past_key_value
 
     def _get_past_len(
         self,
@@ -449,8 +458,8 @@ class QuantLlamaAttention(QuantModuleBase):
         if past_k is None or past_v is None:
             return None, None
 
-        past_k_i = self._fq(past_k[:, kv_idx, :, :], self.obs_past_key)
-        past_v_i = self._fq(past_v[:, kv_idx, :, :], self.obs_past_value)
+        past_k_i = past_k[:, kv_idx, :, :]
+        past_v_i = past_v[:, kv_idx, :, :]
         return past_k_i, past_v_i
 
     def _build_present_kv_head(
