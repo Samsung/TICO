@@ -287,7 +287,41 @@ def save_model_to(q_m, calib_inputs, save_circle_to_folder):
             cm.save(save_path)
 
 
-def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
+# -----------------------------------------------------------------------------
+# copied from quantize_decoder_layer_decode.py
+# -----------------------------------------------------------------------------
+def make_random_decode_batch(model, B, DEVICE, MAX_SEQ):
+    # TODO reduce code duplication
+    D = model.config.hidden_size
+    head_dim = getattr(model.config, "head_dim", D // model.config.num_attention_heads)
+    n_kv = model.config.num_key_value_heads
+
+    # Single-token hidden state.
+    x = torch.randn(B, 1, D, device=DEVICE)
+
+    # RoPE tables for the *current token* only.
+    cos = torch.randn(B, 1, head_dim, device=DEVICE)
+    sin = torch.randn(B, 1, head_dim, device=DEVICE)
+    pos = (cos, sin)
+
+    # Additive mask of final static width: (B, 1, MAX_SEQ)
+    # Simulate that only the first L_eff positions are valid and the rest are padding.
+    L_eff = torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item()
+    mask = torch.zeros(B, 1, MAX_SEQ, device=DEVICE, dtype=torch.float32)
+    if L_eff < MAX_SEQ:
+        mask[:, :, L_eff:] = float("-120")
+
+    # Static-sized past KV (already RoPE-applied for past tokens).
+    past_k = torch.randn(B, n_kv, MAX_SEQ - 1, head_dim, device=DEVICE)
+    past_v = torch.randn(B, n_kv, MAX_SEQ - 1, head_dim, device=DEVICE)
+    past = (past_k, past_v)
+
+    return x, pos, mask, past
+
+
+def save_layers_to(
+    q_m, max_seq_len, save_layers_to_folder, prefill_decode: bool = False
+):
     """
     Export and save quantized decoder layers one by one in circle format.
     """
@@ -301,7 +335,9 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
     layers = q_m.wrapped.model.wrapped.layers
     config = q_m.wrapped.config
     for i, qlayer in enumerate(layers):
-        save_path = pathlib.Path(save_layers_to_folder, f"decoder_layer_{i}.q.circle")
+        suffix = "prefill_" if prefill_decode else ""
+        layer_name = f"decoder_layer_{suffix}{i}"
+        save_path = pathlib.Path(save_layers_to_folder, f"{layer_name}.q.circle")
         B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D)
 
@@ -313,13 +349,15 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
             start=0, seq_len=S, device="cpu", dtype=dtype
         )
 
-        print(f"Saving model layer_{i} to {save_path.resolve()}")
+        print(f"Saving {layer_name} to {save_path.resolve()}")
         with torch.no_grad():
             with SuppressWarning(UserWarning, ".*"):
                 # Pass attention_mask and position_embeddings as inputs to avoid
                 # storing them per layer and increasing model size.
                 cm = tico.convert(
-                    qlayer.wrapped.as_export_module("prefill").eval(),
+                    qlayer.wrapped.as_export_module(
+                        "prefill", return_kv=prefill_decode
+                    ).eval(),
                     (example_hidden,),
                     kwargs={
                         "attention_mask": attention_mask,
@@ -327,6 +365,26 @@ def save_layers_to(q_m, max_seq_len, save_layers_to_folder):
                     },
                 )
         cm.save(save_path)
+
+        if prefill_decode is True:
+            layer_name = f"decoder_layer_decode_{i}"
+            save_path = pathlib.Path(save_layers_to_folder, f"{layer_name}.q.circle")
+            print(f"Saving {layer_name} to {save_path.resolve()}")
+            with torch.no_grad():
+                with SuppressWarning(UserWarning, ".*"):
+                    ex_hid, pos_embeds, attn_mask, past = make_random_decode_batch(
+                        q_m.wrapped, B=1, DEVICE="cpu", MAX_SEQ=max_seq_len
+                    )
+                    cm = tico.convert(
+                        qlayer.wrapped.as_export_module("decode").eval(),
+                        (ex_hid,),  # hidden_states
+                        {
+                            "attention_mask": attn_mask,
+                            "past_key_value": past,
+                            "position_embeddings": pos_embeds,
+                        },
+                    )
+            cm.save(save_path)
 
 
 def calibrate_ptq_observers(
@@ -659,7 +717,12 @@ def main():
         and args.save is not None
         and "circle_per_layer" in args.save
     ):
-        save_layers_to(q_m, args.max_seq_len, args.output_dir)
+        save_layers_to(
+            q_m,
+            args.max_seq_len,
+            args.output_dir,
+            prefill_decode=args.decode_calibration_steps != 0,
+        )
 
     if (
         args.output_dir is not None
