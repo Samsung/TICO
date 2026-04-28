@@ -40,6 +40,7 @@ import tico
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_llm_ptq_config
+from tico.quantization.config.cle import CLEConfig
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
@@ -116,6 +117,35 @@ def parse_args():
         action="store_true",
         default=False,
         help="Leave model float",
+    )
+    parser.add_argument(
+        "--enable_CLE",
+        action="store_true",
+        help="Enable Cross-Layer Equalization preprocessing.",
+    )
+    parser.add_argument(
+        "--cle_pairs",
+        nargs="+",
+        default=[
+            "model.layers.*.mlp.up_proj:model.layers.*.mlp.down_proj",
+        ],
+        help=(
+            "Manual CLE layer pairs. Each pair must be formatted as "
+            "`first_layer:second_layer`. Exact names and wildcard patterns are supported. "
+            "Example: `model.layers.*.mlp.up_proj:model.layers.*.mlp.down_proj`."
+        ),
+    )
+    parser.add_argument(
+        "--cle_method",
+        choices=["absmax", "range"],
+        default="absmax",
+        help="Range method used for Cross-Layer Equalization.",
+    )
+    parser.add_argument(
+        "--cle_max_iter",
+        type=int,
+        default=1,
+        help="Number of CLE iterations.",
     )
     parser.add_argument(
         "--output_dir",
@@ -268,6 +298,40 @@ def inject_gptq_qparams(
 
         _print_sample("missed modules", missed_modules)
         _print_sample("unused GPTQ entries", unused)
+
+
+def parse_cle_pairs(raw_pairs: list[str] | None) -> list[tuple[str, str]]:
+    """
+    Parse command-line CLE pairs.
+
+    Each pair must be formatted as `first_layer:second_layer`.
+    Both exact module names and wildcard patterns are supported.
+
+    Examples:
+        model.layers.*.mlp.up_proj:model.layers.*.mlp.down_proj
+        model.layers.0.mlp.up_proj:model.layers.0.mlp.down_proj
+    """
+    if raw_pairs is None:
+        return []
+
+    pairs = []
+    for raw_pair in raw_pairs:
+        if ":" not in raw_pair:
+            raise ValueError(
+                "Each CLE pair must be formatted as `first_layer:second_layer`. "
+                f"Got: {raw_pair}"
+            )
+
+        first_name, second_name = raw_pair.split(":", maxsplit=1)
+        first_name = first_name.strip()
+        second_name = second_name.strip()
+
+        if not first_name or not second_name:
+            raise ValueError(f"Invalid CLE pair: {raw_pair}")
+
+        pairs.append((first_name, second_name))
+
+    return pairs
 
 
 def save_model_to(q_m, calib_inputs, save_circle_to_folder):
@@ -489,6 +553,7 @@ def get_ptq_model_name(model, args):
     name = (
         f"PTQ_{model_name}_"
         + ("SpinQuant_" if args.no_spinquant is False else "")
+        + ("CLE_" if args.enable_CLE else "")
         + ("GPTQ_" if args.no_GPTQ is False else "")
         + (f"{args.gptq_mse}_" if args.no_GPTQ is False else "")
         + str(args.nsamples_for_qcalibration)
@@ -541,6 +606,26 @@ def main():
         model = convert(model)
     else:
         print("Skipping SpinQuant preprocessing …")
+
+    if args.enable_CLE:
+        cle_pairs = parse_cle_pairs(args.cle_pairs)
+        if not cle_pairs:
+            raise ValueError(
+                "CLE is enabled, but no CLE pairs were provided. "
+                "Pass pairs with `--cle_pairs first_layer:second_layer ...`."
+            )
+
+        print("Applying Cross-Layer Equalization preprocessing …")
+        cle_config = CLEConfig(
+            pairs=cle_pairs,
+            method=args.cle_method,
+            max_iter=args.cle_max_iter,
+            show_progress=not args.no_tqdm,
+        )
+        model = prepare(model, cle_config)
+        model = convert(model)
+    else:
+        print("Skipping Cross-Layer Equalization preprocessing …")
 
     if args.calibrate_seq_len is not None:
         model.config.max_position_embeddings = min(
