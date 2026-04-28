@@ -36,12 +36,14 @@ class _FakeNode:
         meta=None,
         users=None,
         name: str = "node",
+        args=(),
     ):
         self.op = op
         self.target = target if target is not None else _FakeTarget("fake_op")
         self.meta = meta if meta is not None else {}
         self.users = users if users is not None else {}
         self.name = name
+        self.args = args
 
 
 def _make_exported_program(nodes):
@@ -68,14 +70,17 @@ class CheckMissingQParamTest(unittest.TestCase):
             meta={"val": 16},
             users={},
         )
-        node_non_call = _FakeNode(
+        node_input = _FakeNode(
             op="placeholder",
             name="input_0",
-            meta={"val": torch.randn(1, 4)},
+            meta={
+                "val": torch.randn(1, 4),
+                QPARAM_KEY: object(),
+            },
         )
 
         exported_program = _make_exported_program(
-            [node_quantized, node_non_tensor, node_non_call]
+            [node_quantized, node_non_tensor, node_input]
         )
 
         mock_logger = MagicMock()
@@ -86,7 +91,7 @@ class CheckMissingQParamTest(unittest.TestCase):
         ), patch("builtins.print") as mock_print:
             check_missing_qparam(exported_program, strict=False)
 
-        mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 1")
+        mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 2")
         mock_logger.debug.assert_any_call("[QuantCheck] fp nodes        : 0")
         mock_logger.warning.assert_not_called()
         mock_print.assert_not_called()
@@ -129,16 +134,12 @@ class CheckMissingQParamTest(unittest.TestCase):
             "[QuantCheck] WARNING: 1 nodes without qparam detected " "(see logs)."
         )
 
-        dummy_name = "add_0"
-        dummy_target = "add"
-        dummy_users = 2
-        dummy_trace = "model.py:20"
         mock_logger.debug.assert_any_call(
-            f"[QuantCheck] Missing qparam:\n"
-            f"  name   : {dummy_name}\n"
-            f"  target : {dummy_target}\n"
-            f"  users  : {dummy_users}\n"
-            f"  trace  : {dummy_trace}",
+            "[QuantCheck] Missing qparam:\n"
+            "  name   : add_0\n"
+            "  target : add\n"
+            "  users  : 2\n"
+            "  trace  : model.py:20",
         )
 
     def test_strict_mode_raises_runtime_error(self):
@@ -241,3 +242,132 @@ class CheckMissingQParamTest(unittest.TestCase):
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 0")
         mock_logger.debug.assert_any_call("[QuantCheck] fp nodes        : 1")
         mock_print.assert_called_once()
+
+    def test_missing_placeholder_qparam_is_detected(self):
+        node_missing_input = _FakeNode(
+            op="placeholder",
+            name="input_0",
+            meta={
+                "val": torch.randn(1, 4),
+                "stack_trace": "model.py:60",
+            },
+            users={"user0": object()},
+        )
+
+        exported_program = _make_exported_program([node_missing_input])
+
+        mock_logger = MagicMock()
+
+        with patch(
+            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+            return_value=mock_logger,
+        ), patch("builtins.print") as mock_print:
+            check_missing_qparam(exported_program, strict=False)
+
+        mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 0")
+        mock_logger.debug.assert_any_call("[QuantCheck] fp nodes        : 1")
+        mock_print.assert_called_once_with(
+            "[QuantCheck] WARNING: 1 nodes without qparam detected " "(see logs)."
+        )
+
+    def test_missing_output_qparam_is_detected(self):
+        node_missing_output_value = _FakeNode(
+            name="output_value",
+            target=_FakeTarget("linear"),
+            meta={
+                "val": torch.randn(1, 4),
+                "stack_trace": "model.py:70",
+            },
+            users={},
+        )
+        node_output = _FakeNode(
+            op="output",
+            name="output",
+            args=(node_missing_output_value,),
+        )
+
+        exported_program = _make_exported_program(
+            [node_missing_output_value, node_output]
+        )
+
+        mock_logger = MagicMock()
+
+        with patch(
+            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+            return_value=mock_logger,
+        ), patch("builtins.print") as mock_print:
+            check_missing_qparam(exported_program, strict=False)
+
+        mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 0")
+        mock_logger.debug.assert_any_call("[QuantCheck] fp nodes        : 1")
+        mock_print.assert_called_once_with(
+            "[QuantCheck] WARNING: 1 nodes without qparam detected " "(see logs)."
+        )
+
+    def test_quantized_output_qparam_is_not_reported(self):
+        node_output_value = _FakeNode(
+            name="output_value",
+            target=_FakeTarget("linear"),
+            meta={
+                "val": torch.randn(1, 4),
+                QPARAM_KEY: object(),
+                "stack_trace": "model.py:80",
+            },
+            users={},
+        )
+        node_output = _FakeNode(
+            op="output",
+            name="output",
+            args=(node_output_value,),
+        )
+
+        exported_program = _make_exported_program([node_output_value, node_output])
+
+        mock_logger = MagicMock()
+
+        with patch(
+            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+            return_value=mock_logger,
+        ), patch("builtins.print") as mock_print:
+            check_missing_qparam(exported_program, strict=False)
+
+        mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 1")
+        mock_logger.debug.assert_any_call("[QuantCheck] fp nodes        : 0")
+        mock_print.assert_not_called()
+
+    def test_cached_scale_and_zp_buffers_are_skipped(self):
+        node_cached_scale = _FakeNode(
+            op="placeholder",
+            name="linear_cached_scale",
+            meta={"val": torch.randn(1)},
+        )
+        node_cached_zp = _FakeNode(
+            op="placeholder",
+            name="linear_cached_zp",
+            meta={"val": torch.zeros(1, dtype=torch.int32)},
+        )
+        node_quantized = _FakeNode(
+            name="linear_0",
+            target=_FakeTarget("linear"),
+            meta={
+                "val": torch.randn(1, 4),
+                QPARAM_KEY: object(),
+            },
+            users={"user0": object()},
+        )
+
+        exported_program = _make_exported_program(
+            [node_cached_scale, node_cached_zp, node_quantized]
+        )
+
+        mock_logger = MagicMock()
+
+        with patch(
+            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+            return_value=mock_logger,
+        ), patch("builtins.print") as mock_print:
+            check_missing_qparam(exported_program, strict=False)
+
+        mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 1")
+        mock_logger.debug.assert_any_call("[QuantCheck] fp nodes        : 0")
+        mock_print.assert_not_called()
