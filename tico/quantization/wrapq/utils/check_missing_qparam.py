@@ -42,6 +42,34 @@ def _is_tensor_like_node(node: torch.fx.Node) -> bool:
     return False
 
 
+def _flatten_fx_nodes(obj: object) -> list[torch.fx.Node]:
+    if isinstance(obj, torch.fx.Node):
+        return [obj]
+
+    if isinstance(obj, (tuple, list)):
+        ret: list[torch.fx.Node] = []
+        for item in obj:
+            ret.extend(_flatten_fx_nodes(item))
+        return ret
+
+    if isinstance(obj, dict):
+        ret: list[torch.fx.Node] = []  # type: ignore[no-redef]
+        for item in obj.values():
+            ret.extend(_flatten_fx_nodes(item))
+        return ret
+
+    return []
+
+
+def _is_qparam_buffer_node(node: torch.fx.Node) -> bool:
+    """
+    Identify nodes that correspond to cached quantization parameters
+    (e.g., scale / zero-point buffers).
+    """
+    name = node.name
+    return name.endswith("_cached_scale") or name.endswith("_cached_zp")
+
+
 def check_missing_qparam(
     exported_program: ExportedProgram,
     *,
@@ -75,20 +103,32 @@ def check_missing_qparam(
     fp_nodes = 0
 
     for node in graph.nodes:
-        if node.op != "call_function":
-            continue
+        if node.op in {"call_function", "placeholder"}:
+            if node.op == "call_function" and node.target in ignore_targets:
+                continue
 
-        if node.target in ignore_targets:
-            continue
+            if _is_qparam_buffer_node(node):
+                continue
 
-        if not _is_tensor_like_node(node):
-            continue
+            if not _is_tensor_like_node(node):
+                continue
 
-        if QPARAM_KEY in node.meta:
-            quantized_nodes += 1
-        else:
-            fp_nodes += 1
-            missing.append(node)
+            if QPARAM_KEY in node.meta:
+                quantized_nodes += 1
+            else:
+                fp_nodes += 1
+                missing.append(node)
+
+        elif node.op == "output":
+            for out_node in _flatten_fx_nodes(node.args[0]):
+                if _is_qparam_buffer_node(out_node):
+                    continue
+
+                if not _is_tensor_like_node(out_node):
+                    continue
+
+                if QPARAM_KEY not in out_node.meta:
+                    missing.append(out_node)
 
     # Summary statistics
     logger.debug(f"[QuantCheck] quantized nodes : {quantized_nodes}")
