@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import re
-from typing import Dict, Sequence, Tuple
+from typing import cast, Dict, Sequence, Tuple, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -22,7 +22,7 @@ from tqdm import tqdm
 from tico.quantization.config.cle import CLEConfig
 
 
-SupportedLayer = nn.Conv2d | nn.Linear
+SupportedLayer: TypeAlias = nn.Conv2d | nn.Linear
 
 
 def _glob_to_regex(pattern: str) -> re.Pattern:
@@ -358,8 +358,8 @@ def apply_cross_layer_equalization(
             )
 
         for first_name, second_name in iterator:
-            first = _get_module_by_name(model, first_name)
-            second = _get_module_by_name(model, second_name)
+            first = cast(SupportedLayer, _get_module_by_name(model, first_name))
+            second = cast(SupportedLayer, _get_module_by_name(model, second_name))
 
             scale = equalize_layer_pair(
                 first,
