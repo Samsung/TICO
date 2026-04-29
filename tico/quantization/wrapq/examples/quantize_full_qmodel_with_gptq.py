@@ -516,6 +516,9 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     """
     Wrap the model with PTQ wrappers, calibrate observers, and convert it.
     """
+    if args.no_PTQ:
+        return q_m
+
     print("Wrapping layers with PTQWrapper …")
 
     qcfg = build_llm_ptq_config(
@@ -622,26 +625,43 @@ def get_ptq_model_name(model, args):
     return name
 
 
-def main():
-    args = parse_args()
-    print(args)
+def should_save(args, artifact: str) -> bool:
+    """
+    Return True when a specific artifact should be saved.
+    """
+    return (
+        args.output_dir is not None and args.save is not None and artifact in args.save
+    )
 
-    # Basic setup
+
+def setup_runtime(args) -> tuple[torch.device, torch.dtype]:
+    """
+    Initialize deterministic settings and resolve runtime device / dtype.
+    """
     torch.manual_seed(args.seed)
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
+    return device, dtype
 
+
+def print_config(args, device: torch.device) -> None:
+    """
+    Print the effective high-level runtime configuration.
+    """
     print("=== Config ===")
     print(f"Model            : {args.model}")
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
     print()
 
-    # -------------------------------------------------------------------------
-    # 2. Load the FP backbone and tokenizer
-    # -------------------------------------------------------------------------
+
+def load_model_and_tokenizer(args, dtype: torch.dtype):
+    """
+    Load the floating-point model backbone and tokenizer.
+    """
     print("Loading FP model …")
     dev_map = "balanced" if args.device != "cpu" else "cpu"
+
     tokenizer = AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=args.trust_remote_code,
@@ -658,46 +678,87 @@ def main():
         device_map=dev_map,
     ).eval()
 
-    if not args.no_spinquant:
-        print("Applying SpinQuant preprocessing …")
-        model = prepare(model, SpinQuantConfig())
-        model = convert(model)
-    else:
+    return model, tokenizer
+
+
+def apply_spinquant(model, args):
+    """
+    Optionally apply SpinQuant preprocessing.
+    """
+    if args.no_spinquant:
         print("Skipping SpinQuant preprocessing …")
+        return model
 
-    if args.enable_CLE:
-        cle_pairs = parse_cle_pairs(args.cle_pairs)
-        if not cle_pairs:
-            raise ValueError(
-                "CLE is enabled, but no CLE pairs were provided. "
-                "Pass pairs with `--cle_pairs first_layer:second_layer ...`."
-            )
+    print("Applying SpinQuant preprocessing …")
+    model = prepare(model, SpinQuantConfig())
+    return convert(model)
 
-        print("Applying Cross-Layer Equalization preprocessing …")
-        cle_config = CLEConfig(
-            pairs=cle_pairs,
-            method=args.cle_method,
-            max_iter=args.cle_max_iter,
-            show_progress=not args.no_tqdm,
-        )
-        model = prepare(model, cle_config)
-        model = convert(model)
-    else:
+
+def apply_cle(model, args):
+    """
+    Optionally apply Cross-Layer Equalization preprocessing.
+    """
+    if not args.enable_CLE:
         print("Skipping Cross-Layer Equalization preprocessing …")
+        return model
 
-    if args.calibrate_seq_len is not None:
-        model.config.max_position_embeddings = min(
-            model.config.max_position_embeddings, args.calibrate_seq_len
+    cle_pairs = parse_cle_pairs(args.cle_pairs)
+    if not cle_pairs:
+        raise ValueError(
+            "CLE is enabled, but no CLE pairs were provided. "
+            "Pass pairs with `--cle_pairs first_layer:second_layer ...`."
         )
 
-    dataset_test = load_dataset(
-        DATASET_NAME, DATASET_CONFIG, split=TEST_SPLIT, cache_dir=args.cache_dir
+    print("Applying Cross-Layer Equalization preprocessing …")
+    cle_config = CLEConfig(
+        pairs=cle_pairs,
+        method=args.cle_method,
+        max_iter=args.cle_max_iter,
+        show_progress=not args.no_tqdm,
+    )
+    model = prepare(model, cle_config)
+    return convert(model)
+
+
+def configure_max_position_embeddings(model, args) -> None:
+    """
+    Clamp model max_position_embeddings when a calibration sequence length is set.
+    """
+    if args.calibrate_seq_len is None:
+        return
+
+    model.config.max_position_embeddings = min(
+        model.config.max_position_embeddings,
+        args.calibrate_seq_len,
     )
 
+
+def load_eval_dataset(args):
+    """
+    Load the fixed Wikitext evaluation split.
+    """
+    return load_dataset(
+        DATASET_NAME,
+        DATASET_CONFIG,
+        split=TEST_SPLIT,
+        cache_dir=args.cache_dir,
+    )
+
+
+def evaluate_original_model(
+    model, tokenizer, dataset_test, args, device: torch.device
+) -> None:
+    """
+    Evaluate the original floating-point model before quantization.
+    """
     print("\nCalculating original perplexities …")
     enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
     ppl_fp32 = perplexity(
-        model, enc, device, max_length=args.max_seq_len, stride=args.max_seq_len
+        model,
+        enc,
+        device,
+        max_length=args.max_seq_len,
+        stride=args.max_seq_len,
     )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
@@ -706,18 +767,30 @@ def main():
 
     if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
-            model, tokenizer, args.eval_tasks, max_length=args.max_seq_len
+            model,
+            tokenizer,
+            args.eval_tasks,
+            max_length=args.max_seq_len,
         )
         print("Original RESULTS ARE:")
         print(make_table(results))
 
-    # -------------------------------------------------------------------------
-    # Prepare calibration dataset
-    # -------------------------------------------------------------------------
-    dataset_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split=TRAIN_SPLIT)
+
+def build_calibration_inputs(
+    model, tokenizer, args, device: torch.device
+) -> list[torch.Tensor]:
+    """
+    Build random fixed-length calibration samples from the Wikitext train split.
+    """
+    dataset_train = load_dataset(
+        DATASET_NAME,
+        DATASET_CONFIG,
+        split=TRAIN_SPLIT,
+        cache_dir=args.cache_dir,
+    )
     calib_txt = " ".join(dataset_train["text"])
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
-    calib_inputs = []
+
     nsamples = args.nsamples_for_qcalibration
     seqlen = model.config.max_position_embeddings - args.decode_calibration_steps
     if seqlen <= 0:
@@ -726,82 +799,91 @@ def main():
         )
 
     random.seed(args.seed)
+    calib_inputs = []
     for _ in range(nsamples):
         i = random.randint(0, train_ids.shape[1] - seqlen - 1)
         j = i + seqlen
-        inp = train_ids[:, i:j]
-        calib_inputs.append(inp.cpu())
+        calib_inputs.append(train_ids[:, i:j].cpu())
 
-    # -------------------------------------------------------------------------
-    # Run GPTQ (weight-only) pass
-    # -------------------------------------------------------------------------
-    if not args.no_GPTQ:
-        print("Applying GPTQ …")
+    return calib_inputs
 
-        # use_cache increases vram usage significantly, but we don't use decoding in GPTQ
-        prev_use_cache = model.config.use_cache
-        model.config.use_cache = False
 
-        sens = None
-        if args.gptq_mse is not None and args.gptq_mse == "smse":
-            if args.sensitivity_path is not None:
-                sens = torch.load(args.sensitivity_path)
-            else:
-                calibrator = SensitivityCalibrator(model, calib_inputs)
-                sens = calibrator.compute_sensitivity_info()
-                if (
-                    args.output_dir is not None
-                    and args.save is not None
-                    and "sensitivity" in args.save
-                ):
-                    save_name = get_sensitivities_info_name(
-                        model, "wikitext", args.seed, len(calib_inputs)
-                    )
-                    save_path = pathlib.Path(args.output_dir, save_name)
-                    print(f"Saving calibrated_sensitivities to {save_path}")
-                    torch.save(sens, save_path)
+def compute_or_load_sensitivity(model, calib_inputs, args):
+    """
+    Load or compute sensitivity information for SMSE GPTQ.
+    """
+    if args.gptq_mse != "smse":
+        return None
 
-        gptq_config = GPTQConfig(
-            weight_bits=args.linear_weight_bits,
-            perchannel=True,
-            mse=args.gptq_mse,
-            sensitivity=sens,
+    if args.sensitivity_path is not None:
+        return torch.load(args.sensitivity_path)
+
+    calibrator = SensitivityCalibrator(model, calib_inputs)
+    sens = calibrator.compute_sensitivity_info()
+
+    if should_save(args, "sensitivity"):
+        save_name = get_sensitivities_info_name(
+            model,
+            "wikitext",
+            args.seed,
+            len(calib_inputs),
         )
-        q_m = prepare(model, gptq_config, inplace=True)
-        with torch.no_grad():
-            for inp in calib_inputs:
-                q_m(inp.to(args.device))
+        save_path = pathlib.Path(args.output_dir, save_name)
+        print(f"Saving calibrated_sensitivities to {save_path}")
+        torch.save(sens, save_path)
 
-        q_m = convert(q_m, inplace=True)  # materialize INT-weight tensors
+    return sens
 
-        model.config.use_cache = prev_use_cache  # restore use-cache
-    else:
-        q_m = model
 
-    # -------------------------------------------------------------------------
-    # Wrap every layer with PTQWrapper
-    # -------------------------------------------------------------------------
-    if not args.no_PTQ:
-        q_m = quantize_using_PTQ(q_m, calib_inputs, args)
+def quantize_using_GPTQ(model, calib_inputs, args):
+    """
+    Run the optional GPTQ weight-only quantization pass.
+    """
+    if args.no_GPTQ:
+        return model
 
-        if (
-            args.output_dir is not None
-            and args.save is not None
-            and "ptq_checkpoint" in args.save
-        ):
-            save_name = get_ptq_model_name(model, args)
-            save_path = pathlib.Path(args.output_dir, save_name)
-            print(f"Saving PTQ model to {save_path}")
-            torch.save(q_m, save_path)
+    print("Applying GPTQ …")
 
-    # after PTQ quantizer only fixed-length input sequences are valid
-    evaluate(q_m, tokenizer, dataset_test, args)
+    # use_cache increases VRAM usage significantly, but GPTQ does not use decoding.
+    prev_use_cache = model.config.use_cache
+    model.config.use_cache = False
 
-    if (
-        args.output_dir is not None
-        and args.save is not None
-        and "circle_per_layer" in args.save
-    ):
+    sens = compute_or_load_sensitivity(model, calib_inputs, args)
+    gptq_config = GPTQConfig(
+        weight_bits=args.linear_weight_bits,
+        perchannel=True,
+        mse=args.gptq_mse,
+        sensitivity=sens,
+    )
+
+    q_m = prepare(model, gptq_config, inplace=True)
+    with torch.no_grad():
+        for inp in calib_inputs:
+            q_m(inp.to(args.device))
+
+    q_m = convert(q_m, inplace=True)
+    model.config.use_cache = prev_use_cache
+    return q_m
+
+
+def save_ptq_checkpoint(q_m, model, args) -> None:
+    """
+    Save the PTQ checkpoint when requested by CLI flags.
+    """
+    if not should_save(args, "ptq_checkpoint"):
+        return
+
+    save_name = get_ptq_model_name(model, args)
+    save_path = pathlib.Path(args.output_dir, save_name)
+    print(f"Saving PTQ model to {save_path}")
+    torch.save(q_m, save_path)
+
+
+def save_requested_artifacts(q_m, calib_inputs, args) -> None:
+    """
+    Save requested Circle artifacts after final evaluation.
+    """
+    if should_save(args, "circle_per_layer"):
         save_layers_to(
             q_m,
             args.max_seq_len,
@@ -809,13 +891,40 @@ def main():
             prefill_decode=args.decode_calibration_steps != 0,
         )
 
-    if (
-        args.output_dir is not None
-        and args.save is not None
-        and "circle_full" in args.save
-    ):
+    if should_save(args, "circle_full"):
         calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
         save_model_to(q_m, calib_inputs, args.output_dir)
+
+
+def run_pipeline(args) -> None:
+    """
+    Run the full Llama GPTQ + PTQ quantization pipeline.
+    """
+    print(args)
+
+    device, dtype = setup_runtime(args)
+    print_config(args, device)
+
+    model, tokenizer = load_model_and_tokenizer(args, dtype)
+    model = apply_spinquant(model, args)
+    model = apply_cle(model, args)
+    configure_max_position_embeddings(model, args)
+
+    dataset_test = load_eval_dataset(args)
+    evaluate_original_model(model, tokenizer, dataset_test, args, device)
+
+    calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
+    q_m = quantize_using_GPTQ(model, calib_inputs, args)
+    q_m = quantize_using_PTQ(q_m, calib_inputs, args)
+    save_ptq_checkpoint(q_m, model, args)
+
+    evaluate(q_m, tokenizer, dataset_test, args)
+    save_requested_artifacts(q_m, calib_inputs, args)
+
+
+def main() -> None:
+    args = parse_args()
+    run_pipeline(args)
 
 
 if __name__ == "__main__":
