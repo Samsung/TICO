@@ -23,6 +23,8 @@ import torch
 from transformers.modeling_outputs import ModelOutput
 
 from tico.quantization.evaluation.metric import MetricCalculator
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.utils.version import package_version_is_at_least
@@ -71,8 +73,8 @@ class ModuleInputOutput(NamedTuple):
     module: torch.nn.Module
     """The module instance that was executed."""
 
-    module_name: ModuleName
-    """Fully qualified name of the module in the model hierarchy."""
+    module_name: ModuleName | None
+    """(Optional) Fully qualified name of the module in the model hierarchy."""
 
     inputs: tuple[torch.Tensor, ...]
     """Positional arguments passed to the module's forward method."""
@@ -82,6 +84,9 @@ class ModuleInputOutput(NamedTuple):
 
     output: ModuleOutput
     """Output returned by the module's forward method."""
+
+    quantization: Iterable[ObserverBase] | None = None
+    """(Optional) Quantization parameters associated with the module"""
 
     def as_serializable(
         self,
@@ -122,6 +127,12 @@ class ModuleInputOutput(NamedTuple):
                 include_type=include_type,
             ),
         }
+        if self.quantization is not None:
+            data["quantization"] = model_output_to_serializable(
+                self.quantization,
+                include_tensor_content=include_tensor_content,
+                include_type=include_type,
+            )
         return data
 
 
@@ -229,6 +240,37 @@ def model_output_to_serializable(
                     include_type=include_type,
                 )
                 for k, v in x.__dict__.items()
+            }
+        )
+        return data
+
+    if isinstance(x, AffineObserverBase):
+        data.update(
+            {
+                "name": x.name,
+                "dtype": str(x.dtype),
+                "qscheme": str(x.qscheme),
+                "channel_axis": str(x.channel_axis),
+                "min_val": model_output_to_serializable(
+                    x.min_val,
+                    include_tensor_content=include_tensor_content,
+                    include_type=include_type,
+                ),
+                "max_val": model_output_to_serializable(
+                    x.max_val,
+                    include_tensor_content=include_tensor_content,
+                    include_type=include_type,
+                ),
+                "scale": model_output_to_serializable(
+                    x._cached_scale,
+                    include_tensor_content=include_tensor_content,
+                    include_type=include_type,
+                ),
+                "zp": model_output_to_serializable(
+                    x._cached_zp,
+                    include_tensor_content=include_tensor_content,
+                    include_type=include_type,
+                ),
             }
         )
         return data
@@ -359,7 +401,9 @@ def create_tracing_hook(
     """
 
     def hook(data: ModuleInputOutput):
-        this_module_is_interesting = data.module_name in interesting_modules
+        this_module_is_interesting = (
+            data.module_name is not None and data.module_name in interesting_modules
+        )
         if print_input_output:
             print(f"\n{'='*80}")
             print(
@@ -372,7 +416,7 @@ def create_tracing_hook(
             )
             print(f"{'='*80}")
 
-        if module_outputs is not None:
+        if module_outputs is not None and data.module_name is not None:
             module_outputs[data.module_name] = data.output
 
         if this_module_is_interesting and breakpoint_on_interesting_modules:
@@ -439,11 +483,14 @@ def trace_model_input_output(
             module_name = module_to_name[module]
         else:
             module_name = module.fp_name
-            # PTQWrapper adds an fp_name "model" to the top-level model,
-            # which is why every submodule obtains an additional "model."
-            # prefix in its fp_name. We trim that prefix in order to be
-            # consistent with usual (unquantized, unwrapped) models.
-            module_name = trim_prefix_up_to(module_name, char=".")
+            # fp_name attribute of PTQWrapper is usually None,
+            # fp_name is set to a meaningful string for wrapped modules only.
+            if module_name is not None:
+                # PTQWrapper adds an fp_name "model" to the top-level model,
+                # which is why every submodule obtains an additional "model."
+                # prefix in its fp_name. We trim that prefix in order to be
+                # consistent with usual (unquantized, unwrapped) models.
+                module_name = trim_prefix_up_to(module_name, char=".")
 
         data = ModuleInputOutput(
             module=module,
@@ -451,6 +498,9 @@ def trace_model_input_output(
             inputs=inputs,
             kwargs=kwargs,
             output=detach_tensors(output),
+            quantization=module._all_observers()
+            if isinstance(module, QuantModuleBase)
+            else None,
         )
         hook(data)
 

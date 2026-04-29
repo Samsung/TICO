@@ -246,7 +246,7 @@ def prepare_inputs(
     processor = AutoProcessor.from_pretrained(
         model_name,
         cache_dir=cache_dir,
-        local_files_only=cache_dir is not None,
+        local_files_only=os.path.isdir(model_name),
         trust_remote_code=True,
         token=hf_token,
     )
@@ -475,6 +475,12 @@ def parse_arguments():
     )
 
     parser.add_argument(
+        "--no-skip-ptqwrappers",
+        action="store_true",
+        help="Don't skip PTQ wrappers when tracing.",
+    )
+
+    parser.add_argument(
         "--no-side-by-side",
         action="store_true",
         help="Don't do side-by-side validation between quantized and unquantized models.",
@@ -526,6 +532,11 @@ def parse_arguments():
             f"[ERROR] --dtype {args.dtype} requires --enable-quantization flag to be specified."
         )
         sys.exit(1)
+
+    if args.no_trace_quantized and args.no_skip_ptqwrappers:
+        print(
+            f"[WARNING] --no-skip-ptqwrappers has no effect when --no-trace-quantized flag is specified."
+        )
 
     if args.dtype is None:
         args.dtype = "uint8"
@@ -603,6 +614,7 @@ def main():
                 interesting_modules=args.interesting_modules,
                 breakpoint_on_interesting_modules=args.breakpoint_on_interesting_modules,
             ),
+            skip_ptqwrappers=not args.no_skip_ptqwrappers,
         )
 
     if not args.no_side_by_side:

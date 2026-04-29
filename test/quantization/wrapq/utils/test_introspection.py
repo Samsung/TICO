@@ -725,12 +725,14 @@ class TestModuleInputOutput(unittest.TestCase):
         self.inputs = (torch.tensor([1.0, 2.0, 3.0, 4.0]),)
         self.kwargs = {"mask": None}
         self.output = torch.tensor([5.0, 6.0, 7.0, 8.0])
+        self.quantization: list = []
         self.mio = ModuleInputOutput(
             module=self.module,
             module_name="linear1",
             inputs=self.inputs,
             kwargs=self.kwargs,
             output=self.output,
+            quantization=self.quantization,
         )
 
     def test_field_access(self):
@@ -740,6 +742,7 @@ class TestModuleInputOutput(unittest.TestCase):
         self.assertEqual(self.mio.inputs, self.inputs)
         self.assertEqual(self.mio.kwargs, self.kwargs)
         self.assertIs(self.mio.output, self.output)
+        self.assertIs(self.mio.quantization, self.quantization)
 
     def test_is_named_tuple(self):
         """Test that ModuleInputOutput is a NamedTuple."""
@@ -748,7 +751,7 @@ class TestModuleInputOutput(unittest.TestCase):
         self.assertTrue(hasattr(ModuleInputOutput, "_fields"))
         self.assertEqual(
             ModuleInputOutput._fields,
-            ("module", "module_name", "inputs", "kwargs", "output"),
+            ("module", "module_name", "inputs", "kwargs", "output", "quantization"),
         )
         self.assertIsInstance(self.mio, tuple)
 
@@ -762,6 +765,7 @@ class TestModuleInputOutput(unittest.TestCase):
         self.assertIn("inputs", result)
         self.assertIn("kwargs", result)
         self.assertIn("output", result)
+        self.assertIn("quantization", result)
         self.assertEqual(result["module_name"], "linear1")
         self.assertEqual(result["module_type"], "Linear")
 
