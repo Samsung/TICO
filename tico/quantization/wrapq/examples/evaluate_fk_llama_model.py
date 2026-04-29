@@ -29,7 +29,7 @@ from tico.quantization.wrapq.examples.static_llama_layer_runtime import (
     LayerCache,
 )
 
-left_pad = False#True
+left_pad = True
 
 def pad_input(input, pad_token, max_seq_len, right: bool = True):
     """Pad a tensor to a maximum sequence length using the specified pad token."""
@@ -222,65 +222,41 @@ class PrefillDecodeGreedyDecoder:
         with torch.no_grad():
             outputs = self.prefill_model(prefill_input, attention_mask = attn_mask, past_key_values = past_key_values, position_embeddings=position_embeddings, use_cache = True)
             
-           # orig_inputs = self.tokenizer(prompt, return_tensors="pt", max_length=prefill_max_seq_len, padding='max_length', padding_side="right").to(self.device)
-           # orig_attn_mask = orig_inputs["attention_mask"]
-           # orig_position_ids = orig_attn_mask.long().cumsum(-1) - 1
-           # orig_position_ids.masked_fill_(orig_attn_mask == 0, 0)
-           # orig_inputs["position_ids"] = orig_position_ids
-           # orig_outs = self.orig_model.to(self.device)(**orig_inputs)
-          
-       
         logits = outputs.logits
         past_key_values = outputs.past_key_values
-        
+        token_index_in_logits = cur_seq_len - 1
+            
         self.prefill_model = self.prefill_model.cpu()
         self.decode_model = self.decode_model.to(self.device)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
-        hf_pad = False
+
         produced_tokens = 0
         with torch.no_grad():
          while produced_tokens < max_new_tokens:
-            next_token = torch.tensor([[torch.argmax(logits[..., -1, :])]], device=self.device)
+            next_token = torch.tensor([[torch.argmax(logits[..., token_index_in_logits, :])]], device=self.device)
             if eos_token_id is not None and torch.all(next_token == eos_token_id):
                 break
             generated = torch.cat([generated, next_token], dim=1)
-            if hf_pad:
-                pad_mask = torch.concatenate((pad_mask, torch.tensor([[True]], device = pad_mask.device)), dim = -1)
-                dec_pad_mask = pad_mask
-            else:
-                dec_pad_mask = torch.concatenate((pad_mask, torch.tensor([[False]], device = pad_mask.device)), dim = -1)
-                #dec_pad_mask = torch.concatenate((pad_mask, torch.tensor([[True]], device = pad_mask.device)), dim = -1)
+            dec_pad_mask = torch.concatenate((pad_mask, torch.tensor([[False]], device = pad_mask.device)), dim = -1)  # only pads at the end
                 
             cur_seq_len += 1
             produced_tokens += 1
-
             dec_inputs = self.helper.get_input_for_decode_model(next_token, past_key_values=past_key_values, pad_mask=dec_pad_mask, cur_seq_len = cur_seq_len)
             outputs = self.decode_model(**dec_inputs)
             logits = outputs.logits
             new_key_values = outputs.past_key_values
-            # shift past_key_values
-            if hf_pad is True:
-                for i in range(prefill_max_seq_len):
-                    for idx in range(len(new_key_values)):
-                        past_key_values[idx][0][:, :, i : i + 1, :] =\
-                            new_key_values[idx][0][:, :, i + 1: i + 2, :]
-                        past_key_values[idx][1][:, :, i : i + 1, :] =\
-                            new_key_values[idx][1][:, :, i + 1 : i + 2, :]
-                #update pad mask
-                pad_mask = pad_mask[..., 1:] #shift everything to the left
-            else:
-                # insert new key-value at seq_len
-                for idx in range(len(new_key_values)):
-                    past_key_values[idx][0][:, :, cur_seq_len - 1 : cur_seq_len, :] =\
-                        new_key_values[idx][0][:, :, -1:, :]
-                    past_key_values[idx][1][:, :, cur_seq_len - 1 : cur_seq_len, :] =\
-                        new_key_values[idx][1][:, :, -1:, :]
-                pad_mask[..., cur_seq_len - 1] = True
-                   
-            
+            token_index_in_logits = -1
 
+            # insert new key-value at seq_len
+            for idx in range(len(new_key_values)):
+                past_key_values[idx][0][:, :, cur_seq_len - 1 : cur_seq_len, :] =\
+                    new_key_values[idx][0][:, :, -1:, :]
+                past_key_values[idx][1][:, :, cur_seq_len - 1 : cur_seq_len, :] =\
+                    new_key_values[idx][1][:, :, -1:, :]
+            # update mask accordingly
+            pad_mask[..., cur_seq_len - 1] = True
+            
         return generated
     
     def generate(self, prompt, max_new_tokens):
@@ -402,7 +378,8 @@ def main():
 
         if args.prompt is not None:
             max_seq_len = 2048#model.config.max_position_embeddings
-            inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left" if left_pad else "right").to(device)
+            #inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left" if left_pad else "right").to(device)
+            inputs = tokenizer(args.prompt, return_tensors="pt", max_length=max_seq_len - 1, padding='max_length', padding_side="left").to(device)
             out_ids = model.to(args.device).generate(**inputs, max_length=max_seq_len + args.max_new_tokens, do_sample = False)
             output = tokenizer.decode(out_ids.squeeze(), skip_special_tokens=True)
             print(f"Original model prompt: {output}")
