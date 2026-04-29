@@ -205,6 +205,95 @@ class QuantLlamaAttention(QuantModuleBase):
         t_sin = self._fq(t_half * sin, obs_sin)
         return self._fq(t_cos + t_sin, obs_rot)
 
+    def _quantize_kv_cache(self, cache: Cache, k_obs, v_obs):
+        # based on _extract_layer_kv_from_cache method
+        # TODO reduce code duplication
+        if self.layer_idx is None:
+            raise RuntimeError(
+                "layer_idx must be set to extract per-layer KV from an HF Cache."
+            )
+
+        layer_idx = self.layer_idx
+
+        # Empty cache should behave like no past KV.
+        get_seq_length = getattr(cache, "get_seq_length", None)
+        if callable(get_seq_length):
+            try:
+                if int(get_seq_length()) == 0:
+                    return None
+            except TypeError:
+                try:
+                    if int(get_seq_length(layer_idx)) == 0:
+                        return None
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # 1) key_cache / value_cache layout
+        key_cache = getattr(cache, "key_cache", None)
+        value_cache = getattr(cache, "value_cache", None)
+        if key_cache is not None and value_cache is not None:
+            assert layer_idx < len(key_cache) and layer_idx < len(value_cache)
+            key_cache[layer_idx] = self._fq(key_cache[layer_idx], k_obs)
+            value_cache[layer_idx] = self._fq(value_cache[layer_idx], v_obs)
+            return (key_cache[layer_idx], value_cache[layer_idx])
+
+        # 2) layers[layer_idx] layout
+        layers = getattr(cache, "layers", None)
+        if layers is not None:
+            if layer_idx >= len(layers):
+                return None
+
+            layer_cache = layers[layer_idx]
+            if layer_cache is None:
+                return None
+
+            if isinstance(layer_cache, tuple):
+                if len(layer_cache) >= 2:
+                    past_k, past_v = layer_cache[0], layer_cache[1]
+                    layer_cache[0] = self._fq(layer_cache[0], k_obs)  # type: ignore[index]
+                    layer_cache[1] = self._fq(layer_cache[1], v_obs)  # type: ignore[index]
+                    return (layer_cache[0], layer_cache[1])
+
+            for k_name, v_name in (
+                ("keys", "values"),
+                ("key", "value"),
+                ("k", "v"),
+            ):
+                past_k = getattr(layer_cache, k_name, None)
+                past_v = getattr(layer_cache, v_name, None)
+                if past_k is not None and past_v is not None:
+                    setattr(layer_cache, k_name, self._fq(past_k, k_obs))
+                    setattr(layer_cache, v_name, self._fq(past_v, v_obs))
+
+                # The layer object may exist but still empty, with keys/values=None
+                if hasattr(layer_cache, k_name) and hasattr(layer_cache, v_name):
+                    return None
+
+        # 3) tuple-like indexing
+        try:
+            if (
+                cache[layer_idx] is not None
+                and isinstance(cache[layer_idx], tuple)
+                and len(cache[layer_idx]) >= 2
+            ):
+                cache[layer_idx][0] = self._fq(cache[layer_idx][0], k_obs)
+                cache[layer_idx][1] = self._fq(cache[layer_idx][1], v_obs)
+                return cache[layer_idx]
+        except IndexError:
+            return None
+        except Exception:
+            layer_cache = None
+
+        raise RuntimeError(
+            "Unsupported Cache layout. "
+            f"type={type(cache)}, layer_idx={layer_idx}, "
+            f"has_key_cache={hasattr(cache, 'key_cache')}, "
+            f"has_value_cache={hasattr(cache, 'value_cache')}, "
+            f"has_layers={hasattr(cache, 'layers')}, "
+        )
+
     def _extract_layer_kv_from_cache(self, cache: Cache) -> Optional[LayerKV]:
         """
         Extract per-layer KV tensors from an HF Cache object across multiple
@@ -531,6 +620,20 @@ class QuantLlamaAttention(QuantModuleBase):
         new_v = self._fq(torch.stack(new_v_parts, dim=1), self.obs_new_v)
 
         if cache_output_mode == "delta":
+            if torch.compiler.is_compiling() and isinstance(past_key_value_in, Cache):
+                if self.layer_idx is None:
+                    raise RuntimeError(
+                        "layer_idx must be set to update an HF Cache object."
+                    )
+                past_key_value_in.layers[self.layer_idx] = type(
+                    past_key_value_in.layers[self.layer_idx]
+                )()  # reset layer cache
+                past_key_value_in.update(
+                    new_k, new_v, self.layer_idx, cache_kwargs=None
+                )  # set new cache
+                self._quantize_kv_cache(
+                    past_key_value_in, self.obs_new_k, self.obs_new_v
+                )
             return new_k, new_v
 
         if isinstance(past_key_value_in, Cache):
@@ -539,6 +642,10 @@ class QuantLlamaAttention(QuantModuleBase):
                     "layer_idx must be set to update an HF Cache object."
                 )
             past_key_value_in.update(new_k, new_v, self.layer_idx, cache_kwargs=None)
+            if torch.compiler.is_compiling():
+                self._quantize_kv_cache(
+                    past_key_value_in, self.obs_past_key, self.obs_past_value
+                )
             return past_key_value_in
 
         present_k = self._fq(torch.stack(present_k_parts, dim=1), self.obs_present_key)

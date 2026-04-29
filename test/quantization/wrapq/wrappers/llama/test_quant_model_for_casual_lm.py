@@ -25,6 +25,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    QuantLlamaForCausalLMDecodeExportAdapter,
     QuantLlamaForCausalLMPrefillExportAdapter,
 )
 from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (
@@ -132,3 +133,69 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
             )
 
         self.assertEqual(logits.shape, (batch_size, self.seq_len, self.vocab_size))
+
+    def test_export_adapter_with_cache_return_logits_and_kv(self):
+        qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
+        prefill_adapter = QuantLlamaForCausalLMPrefillExportAdapter(
+            qmodel, return_kv=True
+        )
+
+        batch_size = 1
+        inp = torch.randint(
+            0,
+            self.vocab_size,
+            (1, self.seq_len),
+        )
+
+        with torch.no_grad():
+            out = prefill_adapter(
+                input_ids=inp,
+            )
+        # out should be a tuple (logits, past_key_values)
+        self.assertIsInstance(out, tuple)
+        logits, past_key_values = out
+        self.assertEqual(logits.shape, (batch_size, self.seq_len, self.vocab_size))
+        # Expect past_key_values length equals number of layers (2)
+        self.assertEqual(len(past_key_values), 2)
+        for pkv in past_key_values:
+            self.assertIsInstance(pkv, tuple)
+            self.assertEqual(len(pkv), 2)
+            k, v = pkv
+            self.assertEqual(k.shape, (batch_size, 1, self.seq_len, 4))
+            self.assertEqual(v.shape, (batch_size, 1, self.seq_len, 4))
+
+    def test_decode_adapter_with_cache_return_logits_and_kv(self):
+        qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
+        decode_adapter = QuantLlamaForCausalLMDecodeExportAdapter(qmodel)
+
+        batch_size = 1
+        inp = torch.randint(
+            0,
+            self.vocab_size,
+            (1, 1),
+        )
+        past_key_values = [
+            (
+                torch.randn(batch_size, 1, self.seq_len - 1, 4),
+                torch.randn(batch_size, 1, self.seq_len - 1, 4),
+            )
+            for _ in range(2)
+        ]
+
+        with torch.no_grad():
+            out = decode_adapter(
+                input_ids=inp,
+                past_key_values=past_key_values,
+            )
+        # out should be a tuple (logits, new_key_values)
+        self.assertIsInstance(out, tuple)
+        logits, new_key_values = out
+        self.assertEqual(logits.shape, (batch_size, 1, self.vocab_size))
+        self.assertEqual(len(new_key_values), 2)
+
+    # for nkv in new_key_values:
+    #     self.assertIsInstance(nkv, tuple)
+    #     self.assertEqual(len(nkv), 2)
+    #     k, v = nkv
+    #     self.assertEqual(k.shape, (batch_size, 1, 1, 4))
+    #     self.assertEqual(v.shape, (batch_size, 1, 1, 4))
