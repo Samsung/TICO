@@ -497,6 +497,7 @@ class QuantLlamaModel(QuantModuleBase):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        position_embeddings: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
 
@@ -552,10 +553,12 @@ class QuantLlamaModel(QuantModuleBase):
             attention_mask,
             past_len=past_seen_tokens,
         )
-        position_embeddings = self.get_position_embeddings_for(
-            hidden_states,
-            start=past_seen_tokens,
-        )
+
+        if position_embeddings is None:
+            position_embeddings = self.get_position_embeddings_for(
+                hidden_states,
+                start=past_seen_tokens,
+            )
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
