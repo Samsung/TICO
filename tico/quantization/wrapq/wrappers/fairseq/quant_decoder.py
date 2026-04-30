@@ -129,8 +129,8 @@ class QuantFairseqDecoder(QuantModuleBase):
             self.layers.append(wrapped)
         self.num_layers = len(self.layers)
 
-        # choose a generous upper-bound; you can wire this from cfg if you like
-        self.mask_fill_value: float = -120.0
+        # Use the configurable attention mask fill value from PTQConfig
+        self.mask_fill_value: float = self.qcfg.attention_mask_fill_value
         max_tgt = int(getattr(self.cfg, "max_target_positions", 2048))  # fallback: 2048
 
         mask = torch.full((1, 1, max_tgt, max_tgt), float(self.mask_fill_value))

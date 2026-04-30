@@ -167,6 +167,10 @@ class PTQConfig(BaseConfig):
         It is propagated as-is to child configurations.
     strict_wrap : bool
         If ``True``, any module that cannot be wrapped will raise an error.
+    attention_mask_fill_value : float
+        Value used to fill masked positions in attention masks before softmax.
+        This affects softmax suppression strength for masked positions and
+        numerical range before quantization/fake-quant. Default: -120.0.
 
     Example
     -------
@@ -199,6 +203,8 @@ class PTQConfig(BaseConfig):
     model_args: Mapping[str, Any] = field(default_factory=dict)
     # If True, any module that cannot be wrapped will raise.
     strict_wrap: bool = True
+    # Value used to fill masked positions in attention masks before softmax.
+    attention_mask_fill_value: float = -120.0
 
     def __post_init__(self) -> None:
         """
@@ -328,6 +334,7 @@ class PTQConfig(BaseConfig):
           • same `default_observer`
           • same `default_qscheme`
           • same `model_args`
+          • same `attention_mask_fill_value`
           • overrides under `self.overrides.get(scope, {})`
 
         Other scopes remain invisible to the child.
@@ -340,6 +347,7 @@ class PTQConfig(BaseConfig):
             overrides=sub_overrides,
             model_args=self.model_args,
             strict_wrap=self.strict_wrap,
+            attention_mask_fill_value=self.attention_mask_fill_value,
         )
 
     def __repr__(self):
