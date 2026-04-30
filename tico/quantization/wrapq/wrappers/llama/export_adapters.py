@@ -301,7 +301,6 @@ class QuantLlamaForCausalLMDecodeExportAdapter(nn.Module):
     def __init__(self, wrapped):
         super().__init__()
         self.wrapped = wrapped
-        self.wrapped.return_type = "tuple"
 
     def forward(
         self,
