@@ -246,7 +246,7 @@ class QuantLlamaForCausalLMPrefillExportAdapter(nn.Module):
         (logits, past_key_values) where logits have shape (B, S) and
         past_key_values is a list of KV tensors for the next token generation.
     - return_kv=False:
-        logits ~ (B, S)
+        logits ~ (B, S, vocab_size)
     """
 
     def __init__(self, wrapped, *, return_kv: bool = False):

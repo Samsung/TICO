@@ -359,7 +359,7 @@ def save_model_to(
     q_m.eval()
     q_m.cpu()
     suffix = "prefill" if prefill_decode else ""
-    model_name = f"model_{suffix}"
+    model_name = "model_prefill" if prefill_decode else "model"
     save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
     print(f"saving the whole {model_name} to {save_path.resolve()}")
     with torch.no_grad():
