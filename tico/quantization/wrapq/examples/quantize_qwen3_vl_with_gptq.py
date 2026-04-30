@@ -25,6 +25,11 @@ from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
+from tico.quantization.evaluation.mmlu_eval_utils import (
+    evaluate_mmlu,
+    parse_mmlu_subjects,
+    print_mmlu_results,
+)
 from tico.quantization.evaluation.vlm_eval_utils import (
     get_accuracy_on_dataset,
     get_calib_inputs,
@@ -254,6 +259,36 @@ def parse_args():
         type=int,
         default=2,
         help="Spatial merge size for vision tokens.",
+    )
+
+    # MMLU evaluation arguments
+    parser.add_argument(
+        "--mmlu_subjects",
+        type=str,
+        default=None,
+        help=(
+            "MMLU subjects to evaluate. Use 'all' for all subjects, "
+            "'stem', 'humanities', 'social_sciences', or 'other' for domain-specific, "
+            "or comma-separated subject names like 'college_physics,abstract_algebra'."
+        ),
+    )
+    parser.add_argument(
+        "--mmlu_n_shots",
+        type=int,
+        default=5,
+        help="Number of few-shot examples for MMLU evaluation.",
+    )
+    parser.add_argument(
+        "--mmlu_n_samples",
+        type=int,
+        default=-1,
+        help="Number of samples per MMLU subject. Use -1 for full test set.",
+    )
+    parser.add_argument(
+        "--mmlu_max_new_tokens",
+        type=int,
+        default=1,
+        help="Maximum new tokens to generate for MMLU answers.",
     )
 
     return parser.parse_args()
@@ -701,6 +736,24 @@ def main() -> None:
         )
         print_eval_results("Evaluating original model", original_results)
 
+    # MMLU evaluation on original model
+    original_mmlu_results = None
+    if args.mmlu_subjects is not None:
+        print("\n=== MMLU Evaluation (Original Model) ===")
+        tokenizer = processor.tokenizer
+        subjects = parse_mmlu_subjects(args.mmlu_subjects)
+        original_mmlu_results = evaluate_mmlu(
+            model=model,
+            tokenizer=tokenizer,
+            subjects=subjects,
+            device=args.device,
+            n_shots=args.mmlu_n_shots,
+            n_samples=args.mmlu_n_samples,
+            max_new_tokens=args.mmlu_max_new_tokens,
+            verbose=args.verbose,
+        )
+        print_mmlu_results(original_mmlu_results)
+
     calib_inputs = get_calib_inputs(
         "vqav2",
         processor,
@@ -788,6 +841,38 @@ def main() -> None:
         )
         print_eval_results("Evaluating quantized model", quantized_results)
         print_markdown_comparison(original_results, quantized_results)
+
+    # MMLU evaluation on quantized model
+    if args.mmlu_subjects is not None:
+        print("\n=== MMLU Evaluation (Quantized Model) ===")
+        tokenizer = processor.tokenizer
+        subjects = parse_mmlu_subjects(args.mmlu_subjects)
+        quantized_mmlu_results = evaluate_mmlu(
+            model=q_m,
+            tokenizer=tokenizer,
+            subjects=subjects,
+            device=args.device,
+            n_shots=args.mmlu_n_shots,
+            n_samples=args.mmlu_n_samples,
+            max_new_tokens=args.mmlu_max_new_tokens,
+            verbose=args.verbose,
+        )
+        print_mmlu_results(quantized_mmlu_results)
+
+        # Print comparison if original results exist
+        if original_mmlu_results is not None:
+            print("\n=== MMLU Comparison: Original vs Quantized ===")
+            print(f"{'Metric':<30} {'Original':>10} {'Quantized':>10} {'Delta':>10}")
+            print("-" * 62)
+            print(
+                f"{'Overall Accuracy':<30} {original_mmlu_results['overall']:>10.4f} {quantized_mmlu_results['overall']:>10.4f} {quantized_mmlu_results['overall'] - original_mmlu_results['overall']:>+10.4f}"
+            )
+            for domain in sorted(original_mmlu_results["domains"].keys()):
+                orig = original_mmlu_results["domains"].get(domain, 0.0)
+                quant = quantized_mmlu_results["domains"].get(domain, 0.0)
+                print(
+                    f"{domain:<30} {orig:>10.4f} {quant:>10.4f} {quant - orig:>+10.4f}"
+                )
 
 
 if __name__ == "__main__":
