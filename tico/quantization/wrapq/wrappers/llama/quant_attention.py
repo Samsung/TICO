@@ -178,7 +178,10 @@ class QuantLlamaAttention(QuantModuleBase):
         self.obs_present_value = mk("present_value")  # (B, max_seq, H)
 
         # Static causal mask template
-        mask = torch.full((1, 1, self.max_seq, self.max_seq), float("-120"))
+        mask = torch.full(
+            (1, 1, self.max_seq, self.max_seq),
+            float(self.qcfg.attention_mask_fill_value),
+        )
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
@@ -425,11 +428,12 @@ class QuantLlamaAttention(QuantModuleBase):
                 ..., past_len : past_len + q_len, :k_len
             ].to(device)
 
+            fill_val = self.qcfg.attention_mask_fill_value
             additive = torch.zeros_like(attention_mask, dtype=torch.float32)
-            additive = additive.masked_fill(~attention_mask, float("-120"))
+            additive = additive.masked_fill(~attention_mask, float(fill_val))
 
             # Combine causal mask and padding mask.
-            mask = torch.clamp(causal_mask + additive, min=-120.0)
+            mask = torch.clamp(causal_mask + additive, min=fill_val)
             return self._fq(mask.squeeze(0), self.obs_attn_mask)
 
         return self._fq(attention_mask, self.obs_attn_mask)

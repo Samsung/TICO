@@ -130,7 +130,9 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         # Static causal mask template
         assert hasattr(cfg, "max_position_embeddings")
         max_seq = cfg.max_position_embeddings
-        mask = torch.full((1, 1, max_seq, max_seq), float("-120"))  # type: ignore[arg-type]
+        mask = torch.full(
+            (1, 1, max_seq, max_seq), float(self.qcfg.attention_mask_fill_value)
+        )
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 

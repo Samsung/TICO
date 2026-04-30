@@ -61,13 +61,18 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
         fp_name: Optional[str] = None,
         max_seq: int = 4096,
         use_static_causal: bool = False,
-        mask_fill_value: float = -120.0,
+        mask_fill_value: Optional[float] = None,
         assume_additive_key_padding: bool = False,
     ):
         super().__init__(qcfg, fp_name=fp_name)
 
         self.use_static_causal = use_static_causal
-        self.mask_fill_value = mask_fill_value
+        # Use provided mask_fill_value or fall back to PTQConfig's attention_mask_fill_value
+        self.mask_fill_value: float = (
+            mask_fill_value
+            if mask_fill_value is not None
+            else self.qcfg.attention_mask_fill_value
+        )
         self.assume_additive_key_padding = assume_additive_key_padding
         self.embed_dim: int = int(fp_attn.embed_dim)  # type: ignore[arg-type]
         self.num_heads: int = int(fp_attn.num_heads)  # type: ignore[arg-type]

@@ -97,7 +97,9 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         # ----- static buffers: causal mask template ---------------------------
         assert isinstance(self.config.max_position_embeddings, int)
         max_seq = self.config.max_position_embeddings
-        mask = torch.full((1, 1, max_seq, max_seq), float("-120"))
+        mask = torch.full(
+            (1, 1, max_seq, max_seq), float(self.qcfg.attention_mask_fill_value)
+        )
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
@@ -264,6 +266,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             else:
                 padding_keep = attention_mask.to(torch.long) != 0
 
+            fill_val = self.qcfg.attention_mask_fill_value
             padding_mask = torch.zeros(
                 batch_size,
                 1,
@@ -274,10 +277,10 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             )
             padding_mask = padding_mask.masked_fill(
                 ~padding_keep[:, None, None, :].to(device=input_embeds.device),
-                float("-120"),
+                float(fill_val),
             )
 
-            return torch.clamp(causal_mask + padding_mask, min=-120.0, max=0.0)
+            return torch.clamp(causal_mask + padding_mask, min=fill_val, max=0.0)
 
         if attention_mask.ndim == 4:
             if attention_mask.shape[-2] != q_len or attention_mask.shape[-1] != kv_len:
@@ -292,6 +295,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                     dtype=input_embeds.dtype,
                 )
 
+            fill_val = self.qcfg.attention_mask_fill_value
             if attention_mask.dtype == torch.bool:
                 additive_mask = torch.zeros_like(
                     attention_mask,
@@ -300,7 +304,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                 )
                 additive_mask = additive_mask.masked_fill(
                     ~attention_mask.to(device=input_embeds.device),
-                    float("-120"),
+                    float(fill_val),
                 )
                 return additive_mask
 
@@ -312,7 +316,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             )
             additive_mask = additive_mask.masked_fill(
                 ~bool_mask.to(device=input_embeds.device),
-                float("-120"),
+                float(fill_val),
             )
             return additive_mask
 
