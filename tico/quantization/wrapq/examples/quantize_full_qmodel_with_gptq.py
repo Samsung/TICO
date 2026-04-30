@@ -243,6 +243,10 @@ def parse_args():
 # -------------------------------------------------------------------------
 def pad_input(input, pad_token, max_seq_len):
     """Pad a tensor to a maximum sequence length using the specified pad token."""
+
+    if input.shape[1] > max_seq_len:
+        input = input[:, :max_seq_len]
+
     pads = torch.full(
         (input.shape[0], max_seq_len - input.shape[1]),
         fill_value=pad_token,
@@ -358,7 +362,6 @@ def save_model_to(
     """
     q_m.eval()
     q_m.cpu()
-    suffix = "prefill" if prefill_decode else ""
     model_name = "model_prefill" if prefill_decode else "model"
     save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
     print(f"saving the whole {model_name} to {save_path.resolve()}")
