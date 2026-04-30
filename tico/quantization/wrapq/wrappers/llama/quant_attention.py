@@ -205,103 +205,20 @@ class QuantLlamaAttention(QuantModuleBase):
         t_sin = self._fq(t_half * sin, obs_sin)
         return self._fq(t_cos + t_sin, obs_rot)
 
-    def _quantize_kv_cache(self, cache: Cache, k_obs, v_obs):
-        # based on _extract_layer_kv_from_cache method
-        # TODO reduce code duplication
-        if self.layer_idx is None:
-            raise RuntimeError(
-                "layer_idx must be set to extract per-layer KV from an HF Cache."
-            )
-
-        layer_idx = self.layer_idx
-
-        # Empty cache should behave like no past KV.
-        get_seq_length = getattr(cache, "get_seq_length", None)
-        if callable(get_seq_length):
-            try:
-                if int(get_seq_length()) == 0:
-                    return None
-            except TypeError:
-                try:
-                    if int(get_seq_length(layer_idx)) == 0:
-                        return None
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-        # 1) key_cache / value_cache layout
-        key_cache = getattr(cache, "key_cache", None)
-        value_cache = getattr(cache, "value_cache", None)
-        if key_cache is not None and value_cache is not None:
-            assert layer_idx < len(key_cache) and layer_idx < len(value_cache)
-            key_cache[layer_idx] = self._fq(key_cache[layer_idx], k_obs)
-            value_cache[layer_idx] = self._fq(value_cache[layer_idx], v_obs)
-            return (key_cache[layer_idx], value_cache[layer_idx])
-
-        # 2) layers[layer_idx] layout
-        layers = getattr(cache, "layers", None)
-        if layers is not None:
-            if layer_idx >= len(layers):
-                return None
-
-            layer_cache = layers[layer_idx]
-            if layer_cache is None:
-                return None
-
-            if isinstance(layer_cache, tuple):
-                if len(layer_cache) >= 2:
-                    past_k, past_v = layer_cache[0], layer_cache[1]
-                    layer_cache[0] = self._fq(layer_cache[0], k_obs)  # type: ignore[index]
-                    layer_cache[1] = self._fq(layer_cache[1], v_obs)  # type: ignore[index]
-                    return (layer_cache[0], layer_cache[1])
-
-            for k_name, v_name in (
-                ("keys", "values"),
-                ("key", "value"),
-                ("k", "v"),
-            ):
-                past_k = getattr(layer_cache, k_name, None)
-                past_v = getattr(layer_cache, v_name, None)
-                if past_k is not None and past_v is not None:
-                    setattr(layer_cache, k_name, self._fq(past_k, k_obs))
-                    setattr(layer_cache, v_name, self._fq(past_v, v_obs))
-
-                # The layer object may exist but still empty, with keys/values=None
-                if hasattr(layer_cache, k_name) and hasattr(layer_cache, v_name):
-                    return None
-
-        # 3) tuple-like indexing
-        try:
-            if (
-                cache[layer_idx] is not None
-                and isinstance(cache[layer_idx], tuple)
-                and len(cache[layer_idx]) >= 2
-            ):
-                cache[layer_idx][0] = self._fq(cache[layer_idx][0], k_obs)
-                cache[layer_idx][1] = self._fq(cache[layer_idx][1], v_obs)
-                return cache[layer_idx]
-        except IndexError:
-            return None
-        except Exception:
-            layer_cache = None
-
-        raise RuntimeError(
-            "Unsupported Cache layout. "
-            f"type={type(cache)}, layer_idx={layer_idx}, "
-            f"has_key_cache={hasattr(cache, 'key_cache')}, "
-            f"has_value_cache={hasattr(cache, 'value_cache')}, "
-            f"has_layers={hasattr(cache, 'layers')}, "
-        )
-
-    def _extract_layer_kv_from_cache(self, cache: Cache) -> Optional[LayerKV]:
+    def _get_layer_kv_from_cache(
+        self,
+        cache: Cache,
+        *,
+        k_obs=None,
+        v_obs=None,
+        write_back: bool = False,
+    ) -> Optional[LayerKV]:
         """
-        Extract per-layer KV tensors from an HF Cache object across multiple
-        transformers cache layouts.
+        Extract per-layer KV tensors from an HF Cache object.
 
-        Returns:
-            A tuple `(past_k, past_v)` with shape `(B, n_kv, K, H)` if available,
-            otherwise None.
+        If k_obs/v_obs are provided, the extracted tensors are fake-quantized.
+        If write_back=True, the quantized tensors are written back to the cache when
+        the cache layout is mutable.
         """
         if self.layer_idx is None:
             raise RuntimeError(
@@ -309,6 +226,13 @@ class QuantLlamaAttention(QuantModuleBase):
             )
 
         layer_idx = self.layer_idx
+
+        def maybe_quantize(k: torch.Tensor, v: torch.Tensor) -> LayerKV:
+            if k_obs is not None:
+                k = self._fq(k, k_obs)
+            if v_obs is not None:
+                v = self._fq(v, v_obs)
+            return k, v
 
         # Empty cache should behave like no past KV.
         get_seq_length = getattr(cache, "get_seq_length", None)
@@ -331,10 +255,18 @@ class QuantLlamaAttention(QuantModuleBase):
         if key_cache is not None and value_cache is not None:
             if layer_idx >= len(key_cache) or layer_idx >= len(value_cache):
                 return None
+
             past_k = key_cache[layer_idx]
             past_v = value_cache[layer_idx]
             if past_k is None or past_v is None:
                 return None
+
+            past_k, past_v = maybe_quantize(past_k, past_v)
+
+            if write_back:
+                key_cache[layer_idx] = past_k
+                value_cache[layer_idx] = past_v
+
             return past_k, past_v
 
         # 2) layers[layer_idx] layout
@@ -347,11 +279,35 @@ class QuantLlamaAttention(QuantModuleBase):
             if layer_cache is None:
                 return None
 
-            if isinstance(layer_cache, tuple):
-                if len(layer_cache) >= 2:
-                    past_k, past_v = layer_cache[0], layer_cache[1]
-                    if past_k is not None and past_v is not None:
-                        return past_k, past_v
+            if isinstance(layer_cache, list) and len(layer_cache) >= 2:
+                past_k, past_v = layer_cache[0], layer_cache[1]
+                if past_k is None or past_v is None:
+                    return None
+
+                past_k, past_v = maybe_quantize(past_k, past_v)
+
+                if write_back:
+                    layer_cache[0] = past_k
+                    layer_cache[1] = past_v
+
+                return past_k, past_v
+
+            if isinstance(layer_cache, tuple) and len(layer_cache) >= 2:
+                past_k, past_v = layer_cache[0], layer_cache[1]
+                if past_k is None or past_v is None:
+                    return None
+
+                past_k, past_v = maybe_quantize(past_k, past_v)
+
+                # tuple itself is immutable, but some cache implementations may allow
+                # replacing the whole layer entry.
+                if write_back:
+                    try:
+                        layers[layer_idx] = (past_k, past_v)
+                    except Exception:
+                        pass
+
+                return past_k, past_v
 
             for k_name, v_name in (
                 ("keys", "values"),
@@ -360,9 +316,17 @@ class QuantLlamaAttention(QuantModuleBase):
             ):
                 past_k = getattr(layer_cache, k_name, None)
                 past_v = getattr(layer_cache, v_name, None)
+
                 if past_k is not None and past_v is not None:
+                    past_k, past_v = maybe_quantize(past_k, past_v)
+
+                    if write_back:
+                        setattr(layer_cache, k_name, past_k)
+                        setattr(layer_cache, v_name, past_v)
+
                     return past_k, past_v
-                # The layer object may exist but still empty, with keys/values=None
+
+                # The layer object may exist but still be empty.
                 if hasattr(layer_cache, k_name) and hasattr(layer_cache, v_name):
                     return None
 
@@ -375,17 +339,18 @@ class QuantLlamaAttention(QuantModuleBase):
         if layer_cache is not None:
             if isinstance(layer_cache, tuple) and len(layer_cache) >= 2:
                 past_k, past_v = layer_cache[0], layer_cache[1]
-                if past_k is not None and past_v is not None:
-                    return past_k, past_v
+                if past_k is None or past_v is None:
+                    return None
+
+                past_k, past_v = maybe_quantize(past_k, past_v)
+                return past_k, past_v
 
         # 4) fallback: convert whole cache to legacy cache if supported
         to_legacy_cache = getattr(cache, "to_legacy_cache", None)
         if callable(to_legacy_cache):
             try:
                 legacy_cache = to_legacy_cache()
-                if legacy_cache is None:
-                    return None
-                if layer_idx >= len(legacy_cache):
+                if legacy_cache is None or layer_idx >= len(legacy_cache):
                     return None
 
                 layer_cache = legacy_cache[layer_idx]
@@ -396,7 +361,8 @@ class QuantLlamaAttention(QuantModuleBase):
                     past_k, past_v = layer_cache[0], layer_cache[1]
                     if past_k is None or past_v is None:
                         return None
-                    return past_k, past_v
+
+                    return maybe_quantize(past_k, past_v)
             except Exception:
                 pass
 
@@ -437,12 +403,11 @@ class QuantLlamaAttention(QuantModuleBase):
             past_v = self._fq(past_v, self.obs_past_value)
             return (past_k, past_v)
 
-        past_key_value = self._extract_layer_kv_from_cache(past_key_value)
-        if past_key_value is not None:
-            past_k, past_v = past_key_value
-            past_k = self._fq(past_k, self.obs_past_key)
-            past_v = self._fq(past_v, self.obs_past_value)
-            return (past_k, past_v)
+        past_key_value = self._get_layer_kv_from_cache(
+            past_key_value,
+            k_obs=self.obs_past_key,
+            v_obs=self.obs_past_value,
+        )
 
         return past_key_value
 
@@ -631,8 +596,11 @@ class QuantLlamaAttention(QuantModuleBase):
                 past_key_value_in.update(
                     new_k, new_v, self.layer_idx, cache_kwargs=None
                 )  # set new cache
-                self._quantize_kv_cache(
-                    past_key_value_in, self.obs_new_k, self.obs_new_v
+                self._get_layer_kv_from_cache(
+                    past_key_value_in,
+                    k_obs=self.obs_new_k,
+                    v_obs=self.obs_new_v,
+                    write_back=True,
                 )
             return new_k, new_v
 
@@ -643,8 +611,11 @@ class QuantLlamaAttention(QuantModuleBase):
                 )
             past_key_value_in.update(new_k, new_v, self.layer_idx, cache_kwargs=None)
             if torch.compiler.is_compiling():
-                self._quantize_kv_cache(
-                    past_key_value_in, self.obs_past_key, self.obs_past_value
+                self._get_layer_kv_from_cache(
+                    past_key_value_in,
+                    k_obs=self.obs_past_key,
+                    v_obs=self.obs_past_value,
+                    write_back=True,
                 )
             return past_key_value_in
 
