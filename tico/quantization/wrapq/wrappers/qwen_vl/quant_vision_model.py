@@ -19,7 +19,7 @@ import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.utils.utils import get_model_arg
+from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -102,7 +102,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self.patch_embed = PTQWrapper(
             fp_model.patch_embed,
             qcfg=qcfg.child("patch_embed") if qcfg else None,
-            fp_name=f"{fp_name}.patch_embed",
+            fp_name=join_name(fp_name, "patch_embed"),
         )
 
         # Wrap transformer blocks
@@ -113,7 +113,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
                 PTQWrapper(
                     blk,
                     qcfg=blocks_cfg.child(str(i)) if blocks_cfg else None,
-                    fp_name=f"{fp_name}.blocks.{i}",
+                    fp_name=join_name(fp_name, f"blocks.{i}"),
                 )
             )
 
@@ -121,7 +121,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self.merger = PTQWrapper(
             fp_model.merger,
             qcfg=qcfg.child("merger") if qcfg else None,
-            fp_name=f"{fp_name}.merger",
+            fp_name=join_name(fp_name, "merger"),
         )
 
         # Wrap deepstack merger list
@@ -134,7 +134,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
                     qcfg=deepstack_merger_cfg.child(str(i))
                     if deepstack_merger_cfg
                     else None,
-                    fp_name=f"{fp_name}.deepstack_merger_list.{i}",
+                    fp_name=join_name(fp_name, f"deepstack_merger_list.{i}"),
                 )
             )
 

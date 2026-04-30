@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -48,16 +49,20 @@ class QuantQwen3VLVisionMLP(QuantModuleBase):
         )
 
         self.linear_fc1 = PTQWrapper(
-            mlp_fp.linear_fc1, qcfg=linear_fc1_cfg, fp_name=f"{fp_name}.linear_fc1"
+            mlp_fp.linear_fc1,
+            qcfg=linear_fc1_cfg,
+            fp_name=join_name(fp_name, "linear_fc1"),
         )
         self.linear_fc2 = PTQWrapper(
-            mlp_fp.linear_fc2, qcfg=linear_fc2_cfg, fp_name=f"{fp_name}.linear_fc2"
+            mlp_fp.linear_fc2,
+            qcfg=linear_fc2_cfg,
+            fp_name=join_name(fp_name, "linear_fc2"),
         )
 
         # ----- activation ---------------------------------------------
         assert hasattr(mlp_fp, "act_fn") and isinstance(mlp_fp.act_fn, torch.nn.Module)
         self.act_fn = PTQWrapper(
-            mlp_fp.act_fn, qcfg=act_cfg, fp_name=f"{fp_name}.act_fn"
+            mlp_fp.act_fn, qcfg=act_cfg, fp_name=join_name(fp_name, "act_fn")
         )
 
         # ----- local observers ----------------------------------------

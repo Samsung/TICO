@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -65,22 +66,24 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         assert hasattr(fp_attn, "k_norm") and isinstance(fp_attn.k_norm, nn.Module)
 
         self.q_proj = PTQWrapper(
-            fp_attn.q_proj, qcfg=q_cfg, fp_name=f"{fp_name}.q_proj"
+            fp_attn.q_proj, qcfg=q_cfg, fp_name=join_name(fp_name, "q_proj")
         )
         self.k_proj = PTQWrapper(
-            fp_attn.k_proj, qcfg=k_cfg, fp_name=f"{fp_name}.k_proj"
+            fp_attn.k_proj, qcfg=k_cfg, fp_name=join_name(fp_name, "k_proj")
         )
         self.v_proj = PTQWrapper(
-            fp_attn.v_proj, qcfg=v_cfg, fp_name=f"{fp_name}.v_proj"
+            fp_attn.v_proj, qcfg=v_cfg, fp_name=join_name(fp_name, "v_proj")
         )
         self.o_proj = PTQWrapper(
-            fp_attn.o_proj, qcfg=o_cfg, fp_name=f"{fp_name}.o_proj"
+            fp_attn.o_proj, qcfg=o_cfg, fp_name=join_name(fp_name, "o_proj")
         )
         self.q_norm = PTQWrapper(
-            fp_attn.q_norm, qcfg=qn_cfg, fp_name=f"{fp_name}.q_norm"
+            fp_attn.q_norm, qcfg=qn_cfg, fp_name=join_name(fp_name, "q_norm")
         )
         self.k_norm = PTQWrapper(
-            copy.deepcopy(fp_attn.k_norm), qcfg=kn_cfg, fp_name=f"{fp_name}.k_norm"
+            copy.deepcopy(fp_attn.k_norm),
+            qcfg=kn_cfg,
+            fp_name=join_name(fp_name, "k_norm"),
         )
 
         # Constant scale (1/√d)

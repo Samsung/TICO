@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.utils.utils import get_model_arg
+from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -69,7 +69,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         self.embed_tokens = PTQWrapper(
             fp_model.embed_tokens,
             qcfg=embed_tokens_cfg,
-            fp_name=f"{fp_name}.embed_tokens",
+            fp_name=join_name(fp_name, "embed_tokens"),
         )
 
         # Wrap each decoder layer
@@ -79,14 +79,14 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             wrapped_layer = PTQWrapper(
                 layer,
                 qcfg=layer_cfg,
-                fp_name=f"{fp_name}.layers.{idx}",
+                fp_name=join_name(fp_name, f"layers.{idx}"),
             )
             self.layers.append(wrapped_layer)
 
         self.norm = PTQWrapper(
             fp_model.norm,
             qcfg=norm_cfg,
-            fp_name=f"{fp_name}.norm",
+            fp_name=join_name(fp_name, "norm"),
         )
 
         # rotary_emb
