@@ -239,6 +239,26 @@ def parse_args():
 
 
 # -------------------------------------------------------------------------
+# Pad input tensor to a maximum sequence length using the specified pad token.
+# -------------------------------------------------------------------------
+def pad_input(input, pad_token, max_seq_len):
+    """Pad a tensor to a maximum sequence length using the specified pad token."""
+
+    if input.shape[1] > max_seq_len:
+        input = input[:, :max_seq_len]
+
+    pads = torch.full(
+        (input.shape[0], max_seq_len - input.shape[1]),
+        fill_value=pad_token,
+        device=input.device,
+    )
+
+    res = torch.cat((input, pads), dim=1)
+
+    return res
+
+
+# -------------------------------------------------------------------------
 # Helper — copy GPTQ (scale, zp) into PTQ observers
 # -------------------------------------------------------------------------
 def inject_gptq_qparams(
@@ -334,21 +354,56 @@ def parse_cle_pairs(raw_pairs: list[str] | None) -> list[tuple[str, str]]:
     return pairs
 
 
-def save_model_to(q_m, calib_inputs, save_circle_to_folder):
+def save_model_to(
+    q_m, calib_input, save_circle_to_folder, prefill_decode: bool = False
+):
     """
     Export and save the whole quantized model in circle format.
     """
     q_m.eval()
     q_m.cpu()
-
-    save_path = pathlib.Path(save_circle_to_folder, "model.q.circle")
-    print(f"saving the whole model to {save_path.resolve()}")
+    model_name = "model_prefill" if prefill_decode else "model"
+    save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
+    print(f"saving the whole {model_name} to {save_path.resolve()}")
     with torch.no_grad():
         with SuppressWarning(UserWarning, ".*"):
             cm = tico.convert(
-                q_m.wrapped.as_export_module().eval(), (calib_inputs[0],), strict=False
+                q_m.wrapped.as_export_module(
+                    "prefill", return_kv=prefill_decode
+                ).eval(),
+                (calib_input,),
+                strict=False,
             )
             cm.save(save_path)
+
+    if prefill_decode is True:
+        model_name = f"model_decode"
+        save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
+        print(f"saving the whole {model_name} to {save_path.resolve()}")
+        with torch.no_grad():
+            with SuppressWarning(UserWarning, ".*"):
+                token = torch.Tensor([[calib_input[..., 0]]], device="cpu").to(
+                    dtype=calib_input.dtype
+                )  # no matter which token
+
+                config = q_m.wrapped.config
+                D = config.hidden_size
+                head_dim = getattr(config, "head_dim", D // config.num_attention_heads)
+                n_kv = config.num_key_value_heads
+                max_seq_len = calib_input.shape[-1]
+                past_kv = [
+                    (
+                        torch.randn(1, n_kv, max_seq_len - 1, head_dim, device="cpu"),
+                        torch.randn(1, n_kv, max_seq_len - 1, head_dim, device="cpu"),
+                    )
+                    for _ in range(config.num_hidden_layers)
+                ]
+                cm = tico.convert(
+                    q_m.wrapped.as_export_module("decode").eval(),
+                    (token, past_kv),
+                    strict=False,
+                )
+                cm.save(save_path)
 
 
 # -----------------------------------------------------------------------------
@@ -879,7 +934,7 @@ def save_ptq_checkpoint(q_m, model, args) -> None:
     torch.save(q_m, save_path)
 
 
-def save_requested_artifacts(q_m, calib_inputs, args) -> None:
+def save_requested_artifacts(q_m, tokenizer, calib_inputs, args) -> None:
     """
     Save requested Circle artifacts after final evaluation.
     """
@@ -892,8 +947,20 @@ def save_requested_artifacts(q_m, calib_inputs, args) -> None:
         )
 
     if should_save(args, "circle_full"):
-        calib_inputs = list(torch.stack(calib_inputs).reshape(-1, 1, args.max_seq_len))
-        save_model_to(q_m, calib_inputs, args.output_dir)
+        pad_token_id = (
+            tokenizer.pad_token_id
+            if tokenizer.pad_token_id is not None
+            else tokenizer.eos_token_id
+        )
+        calib_input = pad_input(
+            calib_inputs[0], pad_token_id, max_seq_len=args.max_seq_len
+        )
+        save_model_to(
+            q_m,
+            calib_input,
+            args.output_dir,
+            prefill_decode=args.decode_calibration_steps != 0,
+        )
 
 
 def run_pipeline(args) -> None:
@@ -919,7 +986,7 @@ def run_pipeline(args) -> None:
     save_ptq_checkpoint(q_m, model, args)
 
     evaluate(q_m, tokenizer, dataset_test, args)
-    save_requested_artifacts(q_m, calib_inputs, args)
+    save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
 
 
 def main() -> None:

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -231,10 +231,71 @@ class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
 
 class QuantLlamaForCausalLMPrefillExportAdapter(nn.Module):
     """
-    Export adapter for prefill QuantLLamaForCausalLM.
+    Export adapter for prefill mode of QuantLLamaForCausalLM.
 
     This adapter keeps a minimal accelerator-friendly signature while reusing the
     wrapper unchanged.
+
+    Input contract
+    --------------
+    - input_ids: (B, S) input token ids
+
+    Return contract
+    ---------------
+    - return_kv=True:
+        (logits, past_key_values) where logits have shape (B, S) and
+        past_key_values is a list of KV tensors for the next token generation.
+    - return_kv=False:
+        logits ~ (B, S, vocab_size)
+    """
+
+    def __init__(self, wrapped, *, return_kv: bool = False):
+        super().__init__()
+        self.wrapped = wrapped
+        self.wrapped.return_type = "tuple"
+        self.return_kv = return_kv
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs,
+    ):
+        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]] | None = (
+            None if self.return_kv is False else []
+        )
+        outputs = self.wrapped(
+            input_ids=input_ids,
+            past_key_values=past_key_values,
+            use_cache=self.return_kv,
+            return_dict=True,
+            **kwargs,
+        )
+
+        logits = outputs.logits
+        if self.return_kv is False:
+            return logits
+
+        past_key_values = outputs.past_key_values
+        return (logits, past_key_values)
+
+
+class QuantLlamaForCausalLMDecodeExportAdapter(nn.Module):
+    """
+    Export adapter for decode mode of QuantLLamaForCausalLM.
+
+    This adapter keeps a minimal accelerator-friendly signature while reusing the
+    wrapper unchanged.
+
+    Input contract
+    --------------
+    - input_ids: (B, S) input token ids
+    - past_key_values: optional list of past key/value tensors, each of shape
+      (B, num_kv_heads, S-1, head_dim) when provided.
+
+    Return contract
+    ---------------
+    - Returns a tuple (logits, new_key_values) where logits have (B, S)-shape and
+      new_key_values is a list of KV tensors for the next token.
     """
 
     def __init__(self, wrapped):
@@ -244,16 +305,19 @@ class QuantLlamaForCausalLMPrefillExportAdapter(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
+        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]],
         **kwargs,
     ):
         outputs = self.wrapped(
             input_ids=input_ids,
-            past_key_values=None,
-            use_cache=False,
+            past_key_values=past_key_values,
+            use_cache=True,
             return_dict=True,
+            cache_output_mode="delta",
             **kwargs,
         )
 
         logits = outputs.logits
+        new_key_values = outputs.past_key_values
 
-        return logits
+        return (logits, new_key_values)

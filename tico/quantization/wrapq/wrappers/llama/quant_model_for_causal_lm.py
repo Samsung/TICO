@@ -24,12 +24,12 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    QuantLlamaForCausalLMDecodeExportAdapter,
     QuantLlamaForCausalLMPrefillExportAdapter,
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
-
 
 LegacyCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
@@ -290,7 +290,11 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
         if self.rotate_lm_head is not None:
             yield from self.rotate_lm_head._all_observers()
 
-    def as_export_module(self, mode: ExportMode = "prefill") -> nn.Module:
+    def as_export_module(
+        self, mode: ExportMode = "prefill", return_kv: bool = True
+    ) -> nn.Module:
         if mode == "prefill":
-            return QuantLlamaForCausalLMPrefillExportAdapter(self)
+            return QuantLlamaForCausalLMPrefillExportAdapter(self, return_kv=return_kv)
+        elif mode == "decode":
+            return QuantLlamaForCausalLMDecodeExportAdapter(self)
         raise ValueError(f"Unsupported export mode: {mode!r}")
