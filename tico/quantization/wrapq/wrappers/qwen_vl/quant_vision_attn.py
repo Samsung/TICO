@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -49,9 +50,13 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         assert hasattr(attn_fp, "proj") and isinstance(attn_fp.proj, torch.nn.Module)
 
         self.qkv = PTQWrapper(
-            copy.deepcopy(attn_fp.qkv), qcfg=qkv_cfg, fp_name=f"{fp_name}.qkv_cfg"
+            copy.deepcopy(attn_fp.qkv),
+            qcfg=qkv_cfg,
+            fp_name=join_name(fp_name, "qkv"),
         )
-        self.proj = PTQWrapper(attn_fp.proj, qcfg=proj_cfg, fp_name=f"{fp_name}.proj")
+        self.proj = PTQWrapper(
+            attn_fp.proj, qcfg=proj_cfg, fp_name=join_name(fp_name, "proj")
+        )
 
         # Let's fold constant scale (1/√d) to k_proj
         scale_t = torch.tensor(

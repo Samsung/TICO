@@ -436,13 +436,7 @@ def inject_gptq_qparams(
         if m.fp_name is None:
             continue
 
-        gptq_key = m.fp_name
-        if gptq_key.startswith("model."):
-            gptq_key = gptq_key[
-                len("model.") :
-            ]  # Remove "model." prefix which comes from `QuantQwen3VLForConditionalGeneration` wrapper
-
-        quantizer = gptq_quantizers.get(gptq_key)
+        quantizer = gptq_quantizers.get(m.fp_name)
         if quantizer is None:
             continue
         obs = m.get_observer(weight_obs_name)

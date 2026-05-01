@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -59,14 +60,14 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         self.model = PTQWrapper(
             fp_model.model,
             qcfg=qcfg.child("model") if qcfg else None,
-            fp_name=f"{fp_name}.model",
+            fp_name=join_name(fp_name, "model"),
         )
 
         # Wrap the language modeling head
         self.lm_head = PTQWrapper(
             fp_model.lm_head,
             qcfg=qcfg.child("lm_head") if qcfg else None,
-            fp_name=f"{fp_name}.lm_head",
+            fp_name=join_name(fp_name, "lm_head"),
         )
 
     def forward(

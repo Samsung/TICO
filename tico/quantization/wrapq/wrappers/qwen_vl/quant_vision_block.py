@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -60,25 +61,25 @@ class QuantQwen3VLVisionBlock(QuantModuleBase):
         self.norm1 = PTQWrapper(
             fp_block.norm1,
             qcfg=norm1_cfg,
-            fp_name=f"{fp_name}.norm1",
+            fp_name=join_name(fp_name, "norm1"),
         )
 
         self.norm2 = PTQWrapper(
             fp_block.norm2,
             qcfg=norm2_cfg,
-            fp_name=f"{fp_name}.norm2",
+            fp_name=join_name(fp_name, "norm2"),
         )
 
         self.attn = PTQWrapper(
             fp_block.attn,
             qcfg=attn_cfg,
-            fp_name=f"{fp_name}.attn",
+            fp_name=join_name(fp_name, "attn"),
         )
 
         self.mlp = PTQWrapper(
             fp_block.mlp,
             qcfg=mlp_cfg,
-            fp_name=f"{fp_name}.mlp",
+            fp_name=join_name(fp_name, "mlp"),
         )
 
         # --- Observers for residual additions ----------------------------------

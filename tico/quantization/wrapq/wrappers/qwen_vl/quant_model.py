@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.utils.utils import get_model_arg
+from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -66,14 +66,14 @@ class QuantQwen3VLModel(QuantModuleBase):
         self.visual = PTQWrapper(
             fp_model.visual,
             qcfg=qcfg.child("visual") if qcfg else None,
-            fp_name=f"{fp_name}.visual",
+            fp_name=join_name(fp_name, "visual"),
         )
 
         # Wrap language model
         self.language_model = PTQWrapper(
             fp_model.language_model,
             qcfg=qcfg.child("language_model") if qcfg else None,
-            fp_name=f"{fp_name}.language_model",
+            fp_name=join_name(fp_name, "language_model"),
         )
 
         # Cache for rope_deltas - register as buffer for proper export handling

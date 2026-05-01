@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -64,25 +65,25 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
         self.norm = PTQWrapper(
             fp_merger.norm,
             qcfg=norm_cfg,
-            fp_name=f"{fp_name}.norm",
+            fp_name=join_name(fp_name, "norm"),
         )
 
         self.linear_fc1 = PTQWrapper(
             fp_merger.linear_fc1,
             qcfg=fc1_cfg,
-            fp_name=f"{fp_name}.linear_fc1",
+            fp_name=join_name(fp_name, "linear_fc1"),
         )
 
         self.act_fn = PTQWrapper(
             fp_merger.act_fn,
             qcfg=act_cfg,
-            fp_name=f"{fp_name}.act_fn",
+            fp_name=join_name(fp_name, "act_fn"),
         )
 
         self.linear_fc2 = PTQWrapper(
             fp_merger.linear_fc2,
             qcfg=fc2_cfg,
-            fp_name=f"{fp_name}.linear_fc2",
+            fp_name=join_name(fp_name, "linear_fc2"),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

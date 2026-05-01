@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -62,25 +63,25 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         self.self_attn = PTQWrapper(
             fp_layer.self_attn,
             qcfg=self_attn_cfg,
-            fp_name=f"{fp_name}.self_attn",
+            fp_name=join_name(fp_name, "self_attn"),
         )
 
         self.mlp = PTQWrapper(
             fp_layer.mlp,
             qcfg=mlp_cfg,
-            fp_name=f"{fp_name}.mlp",
+            fp_name=join_name(fp_name, "mlp"),
         )
 
         self.input_layernorm = PTQWrapper(
             fp_layer.input_layernorm,
             qcfg=input_layernorm_cfg,
-            fp_name=f"{fp_name}.input_layernorm",
+            fp_name=join_name(fp_name, "input_layernorm"),
         )
 
         self.post_attention_layernorm = PTQWrapper(
             fp_layer.post_attention_layernorm,
             qcfg=post_attention_layernorm_cfg,
-            fp_name=f"{fp_name}.post_attention_layernorm",
+            fp_name=join_name(fp_name, "post_attention_layernorm"),
         )
 
         # --- Observers for residual additions ----------------------------------
