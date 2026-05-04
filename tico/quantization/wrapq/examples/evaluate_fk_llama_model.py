@@ -28,7 +28,7 @@ from tico.quantization.wrapq.examples.static_llama_layer_runtime import (
 )
 
 
-def pad_input(input, pad_token, max_seq_len):
+def pad_input(input, pad_token, max_seq_len, pads_on_left=True):
     """Pad a tensor to a maximum sequence length using the specified pad token."""
     pads = torch.full(
         (input.shape[0], max_seq_len - input.shape[1]),
@@ -36,7 +36,11 @@ def pad_input(input, pad_token, max_seq_len):
         device=input.device,
     )
 
-    res = torch.cat((pads, input), dim=1)
+    if pads_on_left is True:
+        res = torch.cat((pads, input), dim=1)
+    else:
+        res = torch.cat((input, pads), dim=1)
+
     return res
 
 
@@ -167,6 +171,7 @@ class PrefillDecodeGreedyDecoder:
         config: Configuration object used to build RoPE position embeddings.
         device: Torch device (e.g., ``torch.device('cuda')``) on which the model
             runs.
+        use_right_padding: pad input sequence to the right or left (left is default)
 
     The workflow is:
     1. the input prompt to ``max_seq_len - 1`` and build the attention mask.
@@ -178,18 +183,138 @@ class PrefillDecodeGreedyDecoder:
        * Stop when ``max_new_tokens`` is reached or an EOS token is produced.
     """
 
-    def __init__(self, model, tokenizer, max_seq_len, config, device):
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        max_seq_len,
+        config,
+        device,
+        use_right_padding: bool = False,
+    ):
         self.prefill_model = model
         self.decode_model = model
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.device = device
+        self.use_right_padding = use_right_padding
         self.helper = PrefillDecodeUtils(max_seq_len, config, self.device)
         self.pos_embeds = _build_rope_templates_from_config(
             config, max_seq=max_seq_len, device=device, dtype=torch.float32
         )
 
-    def generate(self, prompt, max_new_tokens):
+    def generate_right_padding(self, prompt, max_new_tokens):
+        """
+        Generate tokens using right‑padded prefill‑decode pipeline.
+
+        Parameters
+        ----------
+        prompt : str
+            Input text prompt to be tokenised.
+        max_new_tokens : int
+            Maximum number of new tokens to generate after the prompt.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor containing the original prompt token IDs followed by the generated token IDs.
+
+        Notes
+        -----
+        The method pads the input on the right,
+        (<PROMPT_TOKEN1>...<PROMPT_TOKENN><PAD><PAD>...<PAD>)
+        builds the appropriate attention mask, runs a prefill
+        pass to obtain the KV‑cache, and then iteratively decodes
+        tokens while updating the cache as if new token was added
+        to the original one. It differs from huggingface decoding
+        mode which adds new kv-cache tuples strictly to the end.
+        Generation stops early if the EOS token is produced.
+        """
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
+        assert isinstance(inputs, torch.Tensor)
+
+        eos_token_id = self.tokenizer.eos_token_id
+
+        generated = inputs.clone()
+        cur_seq_len = inputs.shape[-1]
+        prefill_max_seq_len = self.max_seq_len - 1
+        prefill_input = pad_input(
+            inputs, self.tokenizer.pad_token_id, prefill_max_seq_len, pads_on_left=False
+        )
+        pad_mask = (prefill_input != self.tokenizer.pad_token_id).to(inputs.device)
+        attn_mask = self.helper.build_attention_mask_for_padded_input(
+            pad_mask=pad_mask, prefill=True
+        )
+
+        prefill_position_ids = pad_mask.long().cumsum(-1) - 1
+        prefill_position_ids.masked_fill_(pad_mask == 0, 0)
+        position_embeddings = self.helper.build_position_embeddings_for_padded_input(
+            self.pos_embeds, prefill_position_ids
+        )
+        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]] = []
+
+        with torch.no_grad():
+            outputs = self.prefill_model(
+                prefill_input,
+                attention_mask=attn_mask,
+                past_key_values=past_key_values,
+                position_embeddings=position_embeddings,
+                use_cache=True,
+            )
+
+        logits = outputs.logits
+        past_key_values = outputs.past_key_values
+        token_index_in_logits = (
+            cur_seq_len - 1
+        )  # token at -1 will be just some <PAD> or <NEW_LINE>
+
+        self.prefill_model = self.prefill_model.cpu()
+        self.decode_model = self.decode_model.to(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        produced_tokens = 0
+        with torch.no_grad():
+            while produced_tokens < max_new_tokens:
+                next_token = torch.tensor(
+                    [[torch.argmax(logits[..., token_index_in_logits, :])]],
+                    device=self.device,
+                )
+                if eos_token_id is not None and torch.all(next_token == eos_token_id):
+                    break
+                generated = torch.cat([generated, next_token], dim=1)
+                dec_pad_mask = torch.concatenate(
+                    (pad_mask, torch.tensor([[False]], device=pad_mask.device)), dim=-1
+                )
+
+                cur_seq_len += 1
+                produced_tokens += 1
+                dec_inputs = self.helper.get_input_for_decode_model(
+                    next_token,
+                    past_key_values=past_key_values,
+                    pad_mask=dec_pad_mask,
+                    cur_seq_len=cur_seq_len,
+                )
+                outputs = self.decode_model(**dec_inputs)
+                logits = outputs.logits
+                new_key_values = outputs.past_key_values
+                token_index_in_logits = -1
+
+                # insert new key-value at seq_len as if decoded token was present at original prompt
+                for idx in range(len(new_key_values)):
+                    past_key_values[idx][0][
+                        :, :, cur_seq_len - 1 : cur_seq_len, :
+                    ] = new_key_values[idx][0][:, :, -1:, :]
+                    past_key_values[idx][1][
+                        :, :, cur_seq_len - 1 : cur_seq_len, :
+                    ] = new_key_values[idx][1][:, :, -1:, :]
+                # update mask accordingly as if decoded token was present at original prompt
+                pad_mask[..., cur_seq_len - 1] = True
+
+        return generated
+
+    def generate_left_padding(self, prompt, max_new_tokens):
         """
         Generate tokens for the given prompt using a greedy decoding strategy.
 
@@ -201,9 +326,12 @@ class PrefillDecodeGreedyDecoder:
             torch.Tensor: Tensor containing the original prompt token ids followed
             by the generated token ids.
 
-        The method performs a prefill pass to obtain initial key/value caches,
-        then iteratively generates tokens, updating the cache and attention masks
-        after each step. Generation stops early if the EOS token is produced.
+        The method performs a prefill pass on padded to the left sequence
+        (<PAD><PAD>...<PAD><PROMPT_TOKEN1>...<PROMPT_TOKENN>)
+        to obtain initial key/value caches, then iteratively generates tokens,
+        updating the cache and attention masks after each step.
+        Generation stops early if the EOS token is produced.
+        This way of generation corresponds to decoding used in huggingface.
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").input_ids.to(self.device)
         assert isinstance(inputs, torch.Tensor)
@@ -283,6 +411,12 @@ class PrefillDecodeGreedyDecoder:
                 pad_mask = pad_mask[..., 1:]  # update pad_mask accordingly
 
         return generated
+
+    def generate(self, prompt, max_new_tokens):
+        if self.use_right_padding:
+            return self.generate_right_padding(prompt, max_new_tokens)
+
+        return self.generate_left_padding(prompt, max_new_tokens)
 
 
 class OriginalModelEvaluator:
@@ -415,7 +549,12 @@ class QuantizedModelEvaluator:
         else:
             # Use original model for prefill‑decode if available
             decoder = PrefillDecodeGreedyDecoder(
-                fk_model, self.tokenizer, max_seq_len, config, self.args.device
+                fk_model,
+                self.tokenizer,
+                max_seq_len,
+                config,
+                self.args.device,
+                self.args.use_right_padding,
             )  # type: ignore[assignment]
 
         out_ids = decoder.generate(
@@ -497,6 +636,11 @@ def parse_args():
     )
     parser.add_argument(
         "--max_new_tokens", type=int, default=128, help="Maximum new tokens to produce"
+    )
+    parser.add_argument(
+        "--use_right_padding",
+        action="store_true",
+        help="Use right padding instead of left (default) for prefill-decode pipeline.",
     )
     return parser.parse_args()
 
