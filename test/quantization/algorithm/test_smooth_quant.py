@@ -25,6 +25,12 @@ import torch.nn.functional as F
 from tico.quantization import convert, prepare
 from tico.quantization.config.smoothquant import SmoothQuantConfig
 
+# Initialize the registry with real transformer classes before any faux classes are installed.
+# This prevents the registry from registering wrappers for faux/mock classes.
+from tico.quantization.wrapq.wrappers.registry import _lazy_init
+
+_lazy_init()
+
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 
@@ -253,4 +259,299 @@ class SmoothQuantOutputHookTest(unittest.TestCase):
         #    so weights shouldn't blow up or vanish.
         self.assertTrue(
             torch.isfinite(new_fc1_w).all() and torch.isfinite(new_fc2_w).all()
+        )
+
+
+# ────────────────────────────────────────────────────────────
+# Faux Qwen3-VL vision components injection
+# ────────────────────────────────────────────────────────────
+
+# Store original classes for restoration
+_ORIGINAL_QWEN3VL_CLASSES = {}
+
+
+class FauxQwen3VLVisionAttention(nn.Module):
+    """Minimal faux Qwen3VLVisionAttention with combined qkv projection."""
+
+    def __init__(self, hidden_size: int = 64):
+        super().__init__()
+        self.qkv = nn.Linear(hidden_size, hidden_size * 3, bias=True)
+        self.proj = nn.Linear(hidden_size, hidden_size)
+
+
+class FauxQwen3VLVisionMLP(nn.Module):
+    """Minimal faux Qwen3VLVisionMLP."""
+
+    def __init__(self, hidden_size: int = 64, intermediate_size: int = 128):
+        super().__init__()
+        self.linear_fc1 = nn.Linear(hidden_size, intermediate_size, bias=True)
+        self.linear_fc2 = nn.Linear(intermediate_size, hidden_size, bias=True)
+
+
+class FauxQwen3VLVisionBlock(nn.Module):
+    """
+    Minimal faux Qwen3VLVisionBlock:
+      - norm1 (LayerNorm) -> attn (attention with qkv)
+      - norm2 (LayerNorm) -> mlp
+    """
+
+    def __init__(self, hidden_size: int = 64, intermediate_size: int = 128):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, eps=1e-6)
+        self.attn = FauxQwen3VLVisionAttention(hidden_size)
+        self.mlp = FauxQwen3VLVisionMLP(hidden_size, intermediate_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Simplified forward (not used in tests)
+        return x + self.attn(self.norm1(x)) + self.mlp(self.norm2(x))
+
+
+class FauxQwen3VLVisionPatchMerger(nn.Module):
+    """
+    Minimal faux Qwen3VLVisionPatchMerger:
+      - norm (LayerNorm) -> linear_fc1 -> act_fn -> linear_fc2
+    """
+
+    def __init__(
+        self,
+        hidden_size: int = 64,
+        out_hidden_size: int = 128,
+        use_postshuffle_norm: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.use_postshuffle_norm = use_postshuffle_norm
+        # norm.weight shape matches hidden_size for standard case
+        norm_size = hidden_size if not use_postshuffle_norm else hidden_size * 4
+        self.norm = nn.LayerNorm(norm_size, eps=1e-6)
+        self.linear_fc1 = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.linear_fc2 = nn.Linear(hidden_size, out_hidden_size, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Simplified forward (not used in tests)
+        return self.linear_fc2(self.linear_fc1(self.norm(x)))
+
+
+def _install_faux_qwen3vl():
+    """
+    Install minimal fake 'transformers.models.qwen3_vl.modeling_qwen3_vl' into sys.modules
+    with Qwen3VLVisionBlock and Qwen3VLVisionPatchMerger.
+    """
+    global _ORIGINAL_QWEN3VL_CLASSES
+
+    # Build the module hierarchy
+    transformers_mod = sys.modules.get("transformers", types.ModuleType("transformers"))
+    models_mod = sys.modules.get(
+        "transformers.models", types.ModuleType("transformers.models")
+    )
+    qwen3_vl_mod = sys.modules.get(
+        "transformers.models.qwen3_vl", types.ModuleType("transformers.models.qwen3_vl")
+    )
+    modeling_mod = sys.modules.get(
+        "transformers.models.qwen3_vl.modeling_qwen3_vl",
+        types.ModuleType("transformers.models.qwen3_vl.modeling_qwen3_vl"),
+    )
+
+    # Store original classes if they exist (for restoration)
+    if hasattr(modeling_mod, "Qwen3VLVisionBlock"):
+        _ORIGINAL_QWEN3VL_CLASSES[
+            "Qwen3VLVisionBlock"
+        ] = modeling_mod.Qwen3VLVisionBlock
+    if hasattr(modeling_mod, "Qwen3VLVisionPatchMerger"):
+        _ORIGINAL_QWEN3VL_CLASSES[
+            "Qwen3VLVisionPatchMerger"
+        ] = modeling_mod.Qwen3VLVisionPatchMerger
+
+    # Override with faux classes
+    modeling_mod.Qwen3VLVisionBlock = FauxQwen3VLVisionBlock  # type: ignore[attr-defined]
+    modeling_mod.Qwen3VLVisionPatchMerger = FauxQwen3VLVisionPatchMerger  # type: ignore[attr-defined]
+    modeling_mod.FauxQwen3VLVisionAttention = FauxQwen3VLVisionAttention  # type: ignore[attr-defined]
+    modeling_mod.FauxQwen3VLVisionMLP = FauxQwen3VLVisionMLP  # type: ignore[attr-defined]
+
+    sys.modules["transformers"] = transformers_mod
+    sys.modules["transformers.models"] = models_mod
+    sys.modules["transformers.models.qwen3_vl"] = qwen3_vl_mod
+    sys.modules["transformers.models.qwen3_vl.modeling_qwen3_vl"] = modeling_mod
+
+
+def _uninstall_faux_qwen3vl():
+    """
+    Restore original classes in the modeling module instead of deleting modules.
+
+    Deleting modules from sys.modules causes subsequent imports to create NEW class
+    objects that don't match the ones registered in the wrapper registry, leading to
+    'No quant wrapper for X' errors in subsequent tests.
+    """
+    global _ORIGINAL_QWEN3VL_CLASSES
+
+    modeling_mod = sys.modules.get("transformers.models.qwen3_vl.modeling_qwen3_vl")
+    if modeling_mod is not None:
+        # Restore original classes if they were stored
+        if "Qwen3VLVisionBlock" in _ORIGINAL_QWEN3VL_CLASSES:
+            modeling_mod.Qwen3VLVisionBlock = _ORIGINAL_QWEN3VL_CLASSES["Qwen3VLVisionBlock"]  # type: ignore[attr-defined]
+        if "Qwen3VLVisionPatchMerger" in _ORIGINAL_QWEN3VL_CLASSES:
+            modeling_mod.Qwen3VLVisionPatchMerger = _ORIGINAL_QWEN3VL_CLASSES["Qwen3VLVisionPatchMerger"]  # type: ignore[attr-defined]
+
+        # Remove faux classes that we added
+        if hasattr(modeling_mod, "FauxQwen3VLVisionAttention"):
+            delattr(modeling_mod, "FauxQwen3VLVisionAttention")
+        if hasattr(modeling_mod, "FauxQwen3VLVisionMLP"):
+            delattr(modeling_mod, "FauxQwen3VLVisionMLP")
+
+    # Clear the stored original classes
+    _ORIGINAL_QWEN3VL_CLASSES = {}
+
+
+# ────────────────────────────────────────────────────────────
+# Tests for _apply_if_qwen3vl_vision_block
+# ────────────────────────────────────────────────────────────
+class ApplyIfQwen3VLVisionBlockTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.manual_seed(0)
+        np.random.seed(0)
+        _install_faux_qwen3vl()
+        # Get the faux classes from sys.modules
+        cls.Qwen3VLVisionBlock = sys.modules[  # type: ignore[attr-defined]
+            "transformers.models.qwen3_vl.modeling_qwen3_vl"
+        ].Qwen3VLVisionBlock
+
+    @classmethod
+    def tearDownClass(cls):
+        _uninstall_faux_qwen3vl()
+
+    def setUp(self):
+        # Import the function after faux module is installed
+        from tico.quantization.algorithm.smoothquant.smooth_quant import (
+            _apply_if_qwen3vl_vision_block,
+        )
+
+        self._apply_if_qwen3vl_vision_block = _apply_if_qwen3vl_vision_block
+
+    @torch.inference_mode()
+    def test_returns_true_for_valid_block_with_qkv(self):
+        """Test that the function returns True for a valid Qwen3VLVisionBlock with qkv."""
+        block = self.Qwen3VLVisionBlock(hidden_size=64, intermediate_size=128)  # type: ignore[attr-defined]
+
+        # Store original weights
+        orig_norm1_weight = block.norm1.weight.clone()
+        orig_norm2_weight = block.norm2.weight.clone()
+        orig_qkv_weight = block.attn.qkv.weight.clone()
+        orig_mlp_weight = block.mlp.linear_fc1.weight.clone()
+
+        # Create activation_max with correct keys
+        activation_max = {
+            "test.attn.qkv": torch.abs(torch.randn(64)) + 0.1,
+            "test.mlp.linear_fc1": torch.abs(torch.randn(64)) + 0.1,
+        }
+
+        result = self._apply_if_qwen3vl_vision_block("test", block, activation_max, 0.5)
+
+        self.assertTrue(result)
+        # Verify weights were modified
+        self.assertFalse(torch.allclose(orig_norm1_weight, block.norm1.weight))
+        self.assertFalse(torch.allclose(orig_norm2_weight, block.norm2.weight))
+        self.assertFalse(torch.allclose(orig_qkv_weight, block.attn.qkv.weight))
+        self.assertFalse(torch.allclose(orig_mlp_weight, block.mlp.linear_fc1.weight))
+
+
+# ────────────────────────────────────────────────────────────
+# Tests for _apply_if_qwen3vl_vision_patch_merger
+# ────────────────────────────────────────────────────────────
+class ApplyIfQwen3VLVisionPatchMergerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.manual_seed(0)
+        np.random.seed(0)
+        _install_faux_qwen3vl()
+        # Get the faux classes from sys.modules
+        cls.Qwen3VLVisionPatchMerger = sys.modules[  # type: ignore[attr-defined]
+            "transformers.models.qwen3_vl.modeling_qwen3_vl"
+        ].Qwen3VLVisionPatchMerger
+
+    @classmethod
+    def tearDownClass(cls):
+        _uninstall_faux_qwen3vl()
+
+    def setUp(self):
+        from tico.quantization.algorithm.smoothquant.smooth_quant import (
+            _apply_if_qwen3vl_vision_patch_merger,
+        )
+
+        self._apply_if_qwen3vl_vision_patch_merger = (
+            _apply_if_qwen3vl_vision_patch_merger
+        )
+
+    @torch.inference_mode()
+    def test_returns_true_and_applies_smoothing_for_valid_merger(self):
+        """Test that function returns True and applies smoothing for valid merger."""
+        # Create merger with matching dimensions (default case)
+        merger = self.Qwen3VLVisionPatchMerger(hidden_size=64, out_hidden_size=128)  # type: ignore[attr-defined]
+
+        # Verify dimensions match
+        norm_numel = merger.norm.weight.numel()  # 64
+        linear_in = merger.linear_fc1.in_features  # 64
+        self.assertEqual(norm_numel, linear_in)
+
+        # Store original weights
+        orig_norm_weight = merger.norm.weight.clone()
+        orig_fc1_weight = merger.linear_fc1.weight.clone()
+
+        # Create activation_max with correct key
+        activation_max = {
+            "test.linear_fc1": torch.abs(torch.randn(64)) + 0.1,
+        }
+
+        result = self._apply_if_qwen3vl_vision_patch_merger(
+            "test", merger, activation_max, 0.5
+        )
+
+        self.assertTrue(result)
+        # Verify weights were modified
+        self.assertFalse(torch.allclose(orig_norm_weight, merger.norm.weight))
+        self.assertFalse(torch.allclose(orig_fc1_weight, merger.linear_fc1.weight))
+
+    @torch.inference_mode()
+    def test_smoothing_preserves_numerical_equivalence(self):
+        """Test that smoothing preserves numerical equivalence of forward pass."""
+        merger = self.Qwen3VLVisionPatchMerger(hidden_size=64, out_hidden_size=128)  # type: ignore[attr-defined]
+        merger.eval()
+
+        # Create sample input
+        x = torch.randn(2, 10, 64)
+
+        # Get baseline output
+        with torch.no_grad():
+            base_output = merger(x)
+
+        # Store original weights
+        orig_norm_weight = merger.norm.weight.clone()
+        orig_fc1_weight = merger.linear_fc1.weight.clone()
+
+        # Apply smoothing
+        activation_max = {
+            "test.linear_fc1": torch.abs(torch.randn(64)) + 0.1,
+        }
+        result = self._apply_if_qwen3vl_vision_patch_merger(
+            "test", merger, activation_max, 0.5
+        )
+
+        self.assertTrue(result)
+
+        # Verify weights changed
+        self.assertFalse(torch.allclose(orig_norm_weight, merger.norm.weight))
+        self.assertFalse(torch.allclose(orig_fc1_weight, merger.linear_fc1.weight))
+
+        # Get output after smoothing
+        with torch.no_grad():
+            new_output = merger(x)
+
+        # Outputs should be close (smoothquant preserves equivalence)
+        np.testing.assert_allclose(
+            actual=new_output.numpy(),
+            desired=base_output.numpy(),
+            rtol=1e-4,
+            atol=1e-4,
+            err_msg="Output mismatch after SmoothQuant on PatchMerger.",
         )

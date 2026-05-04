@@ -23,6 +23,7 @@ from transformers import AutoProcessor
 
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
+from tico.quantization.algorithm.smoothquant.smooth_quant import apply_smoothing
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.evaluation.mmlu_eval_utils import (
@@ -258,6 +259,26 @@ def parse_args():
         type=int,
         default=2,
         help="Spatial merge size for vision tokens.",
+    )
+    # SmoothQuant arguments (for LayerNorm-based vision components and RMSNorm-based text components)
+    parser.add_argument(
+        "--smoothquant",
+        action="store_true",
+        default=False,
+        help="Apply SmoothQuant smoothing for vision and text layers.",
+    )
+    parser.add_argument(
+        "--smoothquant_alpha",
+        type=float,
+        default=0.5,
+        help="SmoothQuant alpha for vision components (Qwen3VLVisionBlock, Qwen3VLVisionPatchMerger). "
+        "Range: 0.0-1.0. Higher = more weight smoothing.",
+    )
+    parser.add_argument(
+        "--print_quantized_model",
+        action="store_true",
+        default=False,
+        help="Print model after quantization",
     )
 
     # MMLU evaluation arguments
@@ -667,6 +688,9 @@ def main() -> None:
     print(f"Quantize lm_head : {quantize_lm_head}")
     print(f"Use GPTQ         : {not args.no_GPTQ}")
     print(f"Use PTQ          : {not args.no_PTQ}")
+    print(f"Use SmoothQuant  : {args.smoothquant}")
+    if args.smoothquant:
+        print(f"SmoothQuant alpha: {args.smoothquant_alpha}")
     print(f"grid_thw         : {grid_thw}")
     print(f"spatial_merge_size: {args.spatial_merge_size}")
     print(f"visual_start_idx : {args.visual_start_idx}")
@@ -753,6 +777,63 @@ def main() -> None:
         max_seq_len=args.calib_seq_len,
     )
 
+    # -------------------------------------------------------------------------
+    # Apply SmoothQuant transformation (for LayerNorm-based vision components)
+    # -------------------------------------------------------------------------
+    if args.smoothquant:
+        print("Applying SmoothQuant smoothing for vision LayerNorm layers …")
+
+        # Compute activation maximum values from calibration data
+        print("Computing activation maximum values for SmoothQuant …")
+        activation_max = {}
+
+        # Hook to capture activation maximums
+        hooks = []
+
+        def make_hook(name):
+            def hook(module, input, output):
+                if isinstance(input, tuple):
+                    x = input[0]
+                else:
+                    x = input
+                # Compute per-channel maximum
+                if x.dim() >= 2:
+                    # Reshape to (batch * seq, hidden)
+                    x_flat = x.view(-1, x.shape[-1])
+                    amax = x_flat.abs().max(dim=0)[0]
+                    if name not in activation_max:
+                        activation_max[name] = amax
+                    else:
+                        activation_max[name] = torch.maximum(activation_max[name], amax)
+
+            return hook
+
+        # Register hooks on Linear layers that follow LayerNorm
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                hook = module.register_forward_hook(make_hook(name))
+                hooks.append(hook)
+
+        # Run calibration pass
+        with torch.no_grad():
+            for inp in calib_inputs:
+                dev_inp = move_batch_to_device(inp, args.device)
+                model(**dev_inp)
+
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+
+        print(f"Computed activation_max for {len(activation_max)} layers")
+
+        # Apply smoothing
+        apply_smoothing(
+            model,
+            activation_max,
+            alpha=args.smoothquant_alpha,
+        )
+        print("SmoothQuant smoothing complete.")
+
     if not args.no_GPTQ:
         print("Applying Qwen3-VL GPTQ …")
 
@@ -821,6 +902,10 @@ def main() -> None:
             num_text_layers=num_text_layers,
             num_deepstack_mergers=num_deepstack_mergers,
         )
+
+    # Print model
+    if args.print_quantized_model:
+        print(q_m)
 
     if args.eval_tasks is not None:
         quantized_results = evaluate_model(
