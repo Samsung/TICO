@@ -25,6 +25,10 @@ from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
+from tico.quantization.evaluation.mmlu_eval_utils import (
+    evaluate_mmlu,
+    print_mmlu_results,
+)
 from tico.quantization.evaluation.vlm_eval_utils import (
     get_accuracy_on_dataset,
     get_calib_inputs,
@@ -254,6 +258,38 @@ def parse_args():
         type=int,
         default=2,
         help="Spatial merge size for vision tokens.",
+    )
+
+    # MMLU evaluation arguments
+    parser.add_argument(
+        "--mmlu_subjects",
+        type=str,
+        default=None,
+        nargs="+",
+        help=(
+            "Space-separated list of MMLU subjects to evaluate. Use 'mmlu' for all subjects."
+            "Use 'stem', 'humanities', 'social_sciences', or 'other' for the broader domains of knowledge."
+            "Or use narrower subjects like 'college_physics', 'abstract_algebra', etc."
+            "See https://huggingface.co/datasets/cais/mmlu for the full list."
+        ),
+    )
+    parser.add_argument(
+        "--mmlu_n_shots",
+        type=int,
+        default=5,
+        help="Number of few-shot examples for MMLU evaluation.",
+    )
+    parser.add_argument(
+        "--mmlu_n_samples",
+        type=int,
+        default=-1,
+        help="Number of samples per MMLU subject. Use -1 for full test set.",
+    )
+    parser.add_argument(
+        "--mmlu_batch_size",
+        type=int,
+        default=1,
+        help="Number of samples in a batch for MMLU evaluation.",
     )
 
     return parser.parse_args()
@@ -695,6 +731,21 @@ def main() -> None:
         )
         print_eval_results("Evaluating original model", original_results)
 
+    # MMLU evaluation on original model
+    if args.mmlu_subjects is not None:
+        print("\n=== MMLU Evaluation (Original Model) ===")
+        original_mmlu_results = evaluate_mmlu(
+            model=model,
+            tokenizer=processor.tokenizer,
+            subjects=args.mmlu_subjects,
+            device=args.device,
+            n_shots=args.mmlu_n_shots,
+            n_samples=args.mmlu_n_samples,
+            batch_size=args.mmlu_batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        print_mmlu_results(original_mmlu_results)
+
     calib_inputs = get_calib_inputs(
         "vqav2",
         processor,
@@ -782,6 +833,21 @@ def main() -> None:
         )
         print_eval_results("Evaluating quantized model", quantized_results)
         print_markdown_comparison(original_results, quantized_results)
+
+    # MMLU evaluation on quantized model
+    if args.mmlu_subjects is not None:
+        print("\n=== MMLU Evaluation (Quantized Model) ===")
+        quantized_mmlu_results = evaluate_mmlu(
+            model=q_m,
+            tokenizer=processor.tokenizer,
+            subjects=args.mmlu_subjects,
+            device=args.device,
+            n_shots=args.mmlu_n_shots,
+            n_samples=args.mmlu_n_samples,
+            batch_size=args.mmlu_batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        print_mmlu_results(quantized_mmlu_results)
 
 
 if __name__ == "__main__":

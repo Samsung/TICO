@@ -202,3 +202,6 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             video_grid_thw=video_grid_thw,
             **kwargs,
         )
+
+    def tie_weights(self):
+        pass
