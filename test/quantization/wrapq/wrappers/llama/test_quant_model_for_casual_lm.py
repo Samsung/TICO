@@ -192,10 +192,3 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         logits, new_key_values = out
         self.assertEqual(logits.shape, (batch_size, 1, self.vocab_size))
         self.assertEqual(len(new_key_values), 2)
-
-    # for nkv in new_key_values:
-    #     self.assertIsInstance(nkv, tuple)
-    #     self.assertEqual(len(nkv), 2)
-    #     k, v = nkv
-    #     self.assertEqual(k.shape, (batch_size, 1, 1, 4))
-    #     self.assertEqual(v.shape, (batch_size, 1, 1, 4))
