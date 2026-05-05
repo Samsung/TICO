@@ -32,6 +32,7 @@ from tico.quantization.evaluation.mmlu_eval_utils import (
 from tico.quantization.evaluation.vlm_eval_utils import (
     get_accuracy_on_dataset,
     get_calib_inputs,
+    get_coco_scores_on_dataset,
     get_dataset,
 )
 from tico.quantization.wrapq.dtypes import DType
@@ -52,6 +53,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Qwen3-VL GPTQ+PTQ pipeline (architecture-aware, stagewise)"
     )
+
     parser.add_argument(
         "--model",
         type=str,
@@ -369,6 +371,8 @@ def evaluate_model(
     results: dict[str, tuple[int, int]] = {}
 
     for task in tasks_list:
+        if "vqa" not in task:
+            continue
         with (
             io.StringIO() as buffer,
             contextlib.redirect_stdout(buffer),
@@ -386,6 +390,29 @@ def evaluate_model(
             results[task] = (em_cnt, total)
 
     return results
+
+
+def evaluate_model_coco(
+    model,
+    processor,
+    device: str,
+    nsamples: int = 50,
+    max_seq_len: Optional[int] = None,
+):
+    with (
+        io.StringIO() as buffer,
+        contextlib.redirect_stdout(buffer),
+        contextlib.redirect_stderr(buffer),
+    ):
+        ds, _ = get_dataset("coco", n=nsamples)
+        result = get_coco_scores_on_dataset(
+            model=model,
+            processor=processor,
+            ds=ds,
+            device=device,
+            max_seq_len=max_seq_len,
+        )
+        return result
 
 
 def move_batch_to_device(
@@ -721,15 +748,28 @@ def main() -> None:
             model.config.text_config.use_cache = False
 
     if args.eval_tasks is not None:
-        original_results = evaluate_model(
-            model,
-            processor,
-            args.eval_tasks,
-            args.device,
-            args.nsamples_for_evaluation,
-            max_seq_len=args.max_seq_len,
-        )
-        print_eval_results("Evaluating original model", original_results)
+        if "vqa" in args.eval_tasks:
+            original_results = evaluate_model(
+                model,
+                processor,
+                args.eval_tasks,
+                args.device,
+                args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            print_eval_results("Evaluating original model", original_results)
+
+        if "coco" in args.eval_tasks:
+            print("\n=== COCO Evaluation (Original Model) ===")
+            results = evaluate_model_coco(
+                model=model,
+                processor=processor,
+                device=args.device,
+                nsamples=args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            for metric, value in results.items():
+                print(f"{metric:<10} {value:.3f}")
 
     # MMLU evaluation on original model
     if args.mmlu_subjects is not None:
@@ -823,16 +863,29 @@ def main() -> None:
         )
 
     if args.eval_tasks is not None:
-        quantized_results = evaluate_model(
-            q_m,
-            processor,
-            args.eval_tasks,
-            args.device,
-            args.nsamples_for_evaluation,
-            max_seq_len=args.max_seq_len,
-        )
-        print_eval_results("Evaluating quantized model", quantized_results)
-        print_markdown_comparison(original_results, quantized_results)
+        if "vqa" in args.eval_tasks:
+            quantized_results = evaluate_model(
+                q_m,
+                processor,
+                args.eval_tasks,
+                args.device,
+                args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            print_eval_results("Evaluating quantized model", quantized_results)
+            print_markdown_comparison(original_results, quantized_results)
+
+        if "coco" in args.eval_tasks:
+            print("\n=== COCO Evaluation (Quantized Model) ===")
+            results = evaluate_model_coco(
+                model=q_m,
+                processor=processor,
+                device=args.device,
+                nsamples=args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            for metric, value in results.items():
+                print(f"{metric:<10} {value:.3f}")
 
     # MMLU evaluation on quantized model
     if args.mmlu_subjects is not None:
