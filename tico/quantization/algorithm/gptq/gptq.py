@@ -356,12 +356,12 @@ class GPTQ:
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
+        H = torch.linalg.cholesky(H.double()).float()
         assert isinstance(H, torch.Tensor)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
+        H = torch.cholesky_inverse(H.double()).float()
+        H = torch.linalg.cholesky(H.double(), upper=True).float()
         Hinv = H
-
+        
         assert isinstance(Hinv, torch.Tensor)
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)

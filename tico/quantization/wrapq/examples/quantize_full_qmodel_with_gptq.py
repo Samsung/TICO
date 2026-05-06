@@ -35,6 +35,8 @@ import tqdm
 from datasets import load_dataset
 from lm_eval.utils import make_table
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+import numpy as np
 
 import tico
 from tico.quantization import convert, prepare
@@ -65,6 +67,7 @@ DATASET_CONFIG = "wikitext-2-raw-v1"
 TRAIN_SPLIT = "train"
 TEST_SPLIT = "test"
 
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -1029,6 +1032,15 @@ def run_pipeline(args) -> None:
     model = apply_cle(model, args)
     configure_max_position_embeddings(model, args)
 
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    torch.utils.deterministic.fill_uninitialized_memory = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    
     dataset_test = load_eval_dataset(args)
     evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
