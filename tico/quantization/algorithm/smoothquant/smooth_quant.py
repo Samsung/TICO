@@ -69,6 +69,8 @@ def smooth_weights(
     # Check shapes
     if isinstance(front_module, LlamaRMSNorm):
         front_numel = front_module.weight.numel()
+    elif isinstance(front_module, torch.nn.LayerNorm):
+        front_numel = front_module.weight.numel()
     else:
         raise NotImplementedError(
             f"Unsupported module type: {type(front_module).__name__}"
@@ -280,11 +282,193 @@ def _apply_if_fairseq_relu_bridge(
     return True
 
 
-# Registry of appliers (order matters: try LLaMA first, then fairseq)
+# ────────────────────────────────────────────────────────────
+# Qwen3-VL Vision Components (LayerNorm-based)
+# ────────────────────────────────────────────────────────────
+
+
+@torch.no_grad()
+def _apply_if_qwen3vl_vision_block(
+    name: str,
+    module: torch.nn.Module,
+    activation_max: Dict[str, torch.Tensor],
+    alpha_to_apply: float,
+) -> bool:
+    """
+    Apply SmoothQuant smoothing to Qwen3VLVisionBlock (LayerNorm-based).
+
+    Qwen3VLVisionBlock structure:
+        - norm1 (LayerNorm) → attn (attention)
+        - norm2 (LayerNorm) → mlp (feed-forward)
+
+    Returns True if this handler applied smoothing to `module`.
+    """
+    try:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
+    except Exception:
+        return False
+
+    if not isinstance(module, Qwen3VLVisionBlock):
+        return False
+
+    # Check for required attributes
+    if not hasattr(module, "norm1") or not hasattr(module, "norm2"):
+        return False
+    if not hasattr(module, "attn") or not hasattr(module, "mlp"):
+        return False
+
+    # Get attention input projections (qkv is typically combined or separate)
+    attn = module.attn
+    if hasattr(attn, "qkv"):
+        # Combined qkv projection
+        back_modules_attn = [attn.qkv]
+    elif (
+        hasattr(attn, "q_proj") and hasattr(attn, "k_proj") and hasattr(attn, "v_proj")
+    ):
+        # Separate q, k, v projections
+        back_modules_attn = [attn.q_proj, attn.k_proj, attn.v_proj]
+    else:
+        # Try to find any linear layers in attention
+        back_modules_attn = []
+        for attr_name in ["q", "k", "v", "query", "key", "value"]:
+            if hasattr(attn, attr_name):
+                attr = getattr(attn, attr_name)
+                if isinstance(attr, torch.nn.Linear):
+                    back_modules_attn.append(attr)
+        if not back_modules_attn:
+            return False
+
+    # Smooth norm1 → attention
+    applied_attn = False
+    attn_key = f"{name}.attn"
+    for key_suffix in ["", ".qkv", ".q_proj", ".q", ".query"]:
+        potential_key = f"{attn_key}{key_suffix}"
+        if potential_key in activation_max:
+            smooth_weights(
+                module.norm1,
+                back_modules_attn,
+                activation_max[potential_key],
+                alpha_to_apply,
+            )
+            applied_attn = True
+            break
+
+    if not applied_attn:
+        print(
+            f"[SmoothQuant] Warning: activation stats not found for "
+            f"{name} attention input."
+        )
+
+    # Get MLP input projections
+    mlp = module.mlp
+    back_modules_mlp = []
+    for attr_name in ["linear_fc1", "fc1", "up_proj", "gate_proj", "w1"]:
+        if hasattr(mlp, attr_name):
+            attr = getattr(mlp, attr_name)
+            if isinstance(attr, torch.nn.Linear):
+                back_modules_mlp.append(attr)
+
+    if not back_modules_mlp:
+        return True  # Already applied attention smoothing
+
+    # Smooth norm2 → mlp
+    applied_mlp = False
+    mlp_key = f"{name}.mlp"
+    for key_suffix in [".linear_fc1", ".fc1", ".up_proj", ".gate_proj", ".w1", ""]:
+        potential_key = f"{mlp_key}{key_suffix}"
+        if potential_key in activation_max:
+            smooth_weights(
+                module.norm2,
+                back_modules_mlp,
+                activation_max[potential_key],
+                alpha_to_apply,
+            )
+            applied_mlp = True
+            break
+
+    if not applied_mlp:
+        print(
+            f"[SmoothQuant] Warning: activation stats not found for "
+            f"{name} mlp input."
+        )
+
+    return True
+
+
+@torch.no_grad()
+def _apply_if_qwen3vl_vision_patch_merger(
+    name: str,
+    module: torch.nn.Module,
+    activation_max: Dict[str, torch.Tensor],
+    alpha_to_apply: float,
+) -> bool:
+    """
+    Apply SmoothQuant smoothing to Qwen3VLVisionPatchMerger (LayerNorm-based).
+
+    Qwen3VLVisionPatchMerger structure:
+        - norm (LayerNorm) → linear_fc1 → act_fn → linear_fc2
+
+    NOTE: In Qwen3-VL, the PatchMerger has a special structure where:
+        - norm.weight shape: [1024] (normalized_shape)
+        - linear_fc1.in_features: 4096 (hidden_size)
+
+    This means the LayerNorm is applied to a smaller dimension, then reshaped
+    before the linear layer. SmoothQuant cannot be directly applied here
+    because the dimensions don't match. We skip smoothing for this module.
+
+    Returns True if this handler applied smoothing to `module`, False otherwise.
+    """
+    try:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+            Qwen3VLVisionPatchMerger,
+        )
+    except Exception:
+        return False
+
+    if not isinstance(module, Qwen3VLVisionPatchMerger):
+        return False
+
+    # Check for required attributes
+    if not hasattr(module, "norm"):
+        return False
+    if not hasattr(module, "linear_fc1"):
+        return False
+
+    # Check if dimensions are compatible for SmoothQuant
+    # LayerNorm weight shape = normalized_shape
+    # Linear in_features must match normalized_shape for smoothing
+    norm_numel = module.norm.weight.numel()
+    linear_in_features = module.linear_fc1.in_features
+
+    if norm_numel != linear_in_features:
+        # Dimensions don't match - PatchMerger reshapes between norm and linear
+        # SmoothQuant cannot be applied here
+        return False
+
+    # Smooth norm → linear_fc1
+    fc1_key = f"{name}.linear_fc1"
+    if fc1_key in activation_max:
+        fc1_input_scales = activation_max[fc1_key]
+        smooth_weights(
+            module.norm, [module.linear_fc1], fc1_input_scales, alpha_to_apply
+        )
+        return True
+    else:
+        print(
+            f"[SmoothQuant] Warning: activation stats not found for "
+            f"{name} linear_fc1 input."
+        )
+
+    return False
+
+
+# Registry of appliers (order matters: try LLaMA first, then Qwen3-VL vision, then fairseq)
 _APPLIERS: List[
     Callable[[str, torch.nn.Module, Dict[str, torch.Tensor], float], bool]
 ] = [
     _apply_if_llama_decoder,
+    _apply_if_qwen3vl_vision_block,
+    _apply_if_qwen3vl_vision_patch_merger,
     _apply_if_fairseq_relu_bridge,
 ]
 
