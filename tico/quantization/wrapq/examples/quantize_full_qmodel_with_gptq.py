@@ -320,6 +320,22 @@ def inject_gptq_qparams(
         _print_sample("unused GPTQ entries", unused)
 
 
+# -------------------------------------------------------------------------
+# Helper — clear gptq quantizers after injection
+# -------------------------------------------------------------------------
+def clear_gptq_quantizers(model: torch.nn.Module) -> None:
+    """Remove GPTQ quantizer attributes from the model to free memory.
+
+    This helper clears the ``quantizers`` attribute from both the top-level model
+    and, if present, from the wrapped sub‑model. It is typically called after
+    GPTQ quantizers injection is complete and the quantizers are no longer needed.
+    """
+    if hasattr(model, "quantizers"):
+        delattr(model, "quantizers")
+    if hasattr(model, "wrapped") and hasattr(model.wrapped, "quantizers"):
+        delattr(model.wrapped, "quantizers")
+
+
 def parse_cle_pairs(raw_pairs: list[str] | None) -> list[tuple[str, str]]:
     """
     Parse command-line CLE pairs.
@@ -627,12 +643,14 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
 
     if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
         inject_gptq_qparams(q_m, q_m.quantizers, verbose=args.verbose)
+        clear_gptq_quantizers(q_m)
     elif (
         hasattr(q_m, "wrapped")
         and hasattr(q_m.wrapped, "quantizers")
         and isinstance(q_m.wrapped.quantizers, dict)
     ):
         inject_gptq_qparams(q_m.wrapped, q_m.wrapped.quantizers, verbose=args.verbose)
+        clear_gptq_quantizers(q_m)
     else:
         print(
             "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
