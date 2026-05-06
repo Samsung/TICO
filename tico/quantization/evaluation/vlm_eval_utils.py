@@ -12,9 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import os
 import re
 import string
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import tempfile
+
+from collections.abc import Callable
+from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 import torch
 from datasets import load_dataset
@@ -154,6 +159,31 @@ def get_item_textvqa(ex: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def get_item_coco(ex: dict[str, Any]) -> dict[str, Any]:
+    """
+    Adapt a COCO Captioning-style sample to a common evaluation format.
+
+    COCO Captioning differs from VQA datasets:
+    - There is no question; the task is to describe the image.
+    - Each image has multiple reference captions (typically 5).
+
+    The returned schema is:
+
+    `{"image": image, "question": question, "golds": gold_answers}`
+
+    Args:
+        ex: Raw dataset example.
+
+    Returns:
+        A normalized evaluation item.
+    """
+    return {
+        "image": ex["image"],
+        "question": ex.get("question", ""),
+        "golds": _extract_golds(ex.get("answer")),
+    }
+
+
 DATASETS = {
     "vqav2": {
         "default_split": "validation",
@@ -164,6 +194,13 @@ DATASETS = {
         "default_split": "validation",
         "adapter": get_item_textvqa,
         "candidates": ["textvqa", "HuggingFaceM4/TextVQA", "lmms-lab/textvqa"],
+    },
+    "coco": {
+        "default_split": "val",
+        "adapter": get_item_coco,
+        "candidates": [
+            "lmms-lab/COCO-Caption2017",
+        ],
     },
 }
 
@@ -325,6 +362,148 @@ def generate_answer(
     gen_ids = out_ids[0, input_len:]
 
     return processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
+
+class CocoResult(TypedDict):
+    image_id: str
+    caption: str
+
+
+class CocoAnnotation(TypedDict):
+    id: int
+    image_id: str
+    caption: str
+
+
+class CocoImage(TypedDict):
+    id: str
+    file_name: str
+
+
+def get_coco_scores_on_dataset(
+    model,
+    processor,
+    ds: Iterable[dict[str, Any]],
+    device: str | torch.device,
+    max_new_tokens: int = 30,
+    temperature: float = 0.0,
+    max_seq_len: int | None = None,
+    verbose: bool = True,
+    log_first_n: int = 5,
+    log_every_n: int = 50,
+) -> dict[str, float]:
+    """
+    Compute CIDEr, BLEU, and other captioning metrics on a dataset iterator.
+
+    This function uses the pycocoevalcap package to compute standard captioning
+    metrics including CIDEr, BLEU-1 through BLEU-4, METEOR, ROUGE-L, and SPICE.
+
+    Args:
+        model: Vision-language generation model.
+        processor: Matching processor for the model.
+        ds: Iterable dataset yielding raw examples.
+        device: Device used for inference.
+        max_new_tokens: Maximum number of generated tokens.
+        temperature: Sampling temperature.
+        max_seq_len: Optional maximum text sequence length.
+        verbose: Whether to print sample predictions and progress logs.
+        log_first_n: Number of early examples to print.
+        log_every_n: Logging interval after the initial examples.
+
+    Returns:
+        A dictionary mapping metric names to scores (e.g., "CIDEr", "Bleu_4").
+    """
+    # Collect predictions and ground truth
+    results: list[CocoResult] = []
+    images: list[CocoImage] = []
+    annotations: list[CocoAnnotation] = []
+
+    for i, ex in enumerate(ds, 1):
+        image: Any = ex["image"]
+        question: str = ex["question"]
+        id: int = ex["id"]
+        image_id: str = ex["question_id"]
+        file_name: str = ex["file_name"]
+        gold_answers: list[str] = ex["answer"]
+
+        # Generate caption
+        pred = generate_answer(
+            model=model,
+            processor=processor,
+            image=image,
+            question=question,
+            device=device,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            max_seq_len=max_seq_len,
+        )
+
+        # Store result
+        result: CocoResult = {"image_id": image_id, "caption": pred}
+        results.append(result)
+
+        # Store ground truth
+        img: CocoImage = {"id": image_id, "file_name": file_name}
+        images.append(img)
+
+        for answer in gold_answers:
+            annotation: CocoAnnotation = {
+                "id": id,
+                "image_id": image_id,
+                "caption": answer,
+            }
+            annotations.append(annotation)
+
+        should_log = verbose and (
+            i <= log_first_n or (log_every_n > 0 and i % log_every_n == 0)
+        )
+        if should_log:
+            print("id:", id)
+            print("image_id:", image_id)
+            print("Q:", question)
+            print("pred:", repr(pred))
+            print("pred_norm:", repr(normalize_answer(pred)))
+            print("golds[:10]:", [repr(x) for x in gold_answers[:10]])
+            print("-" * 60)
+
+    assert results
+    assert images
+    assert annotations
+
+    # Create temporary files for COCO evaluation
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as annotations_file:
+        json.dump(
+            {
+                "images": images,
+                "annotations": annotations,
+            },
+            annotations_file,
+        )
+        annotations_file.flush()
+        annotation_path = annotations_file.name
+
+    # Run COCO evaluation
+    try:
+        from pycocoevalcap.eval import COCOEvalCap
+        from pycocotools.coco import COCO
+
+        coco = COCO(annotation_path)
+        coco_result = coco.loadRes(results)
+        coco_eval = COCOEvalCap(coco, coco_result)
+        coco_eval.params["id"] = coco_result.getImgIds()
+        coco_eval.evaluate()
+
+        metrics: dict[str, float] = {}
+        for metric, score in coco_eval.eval.items():
+            metrics[metric] = float(score)
+            if verbose:
+                print(f"{metric}: {score:.4f}")
+
+        return metrics
+    finally:
+        os.unlink(annotation_path)
 
 
 def get_accuracy_on_dataset(
