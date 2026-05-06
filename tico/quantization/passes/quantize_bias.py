@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+from typing import Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -25,7 +25,35 @@ from tico.utils import logging
 from tico.utils.graph import add_placeholder, get_torch_param_value, is_torch_param
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import LinearArgs
+from tico.utils.validate_args_kwargs import Conv2DArgs, LinearArgs
+
+
+def _get_input_weight_bias_for_bias_quantization(
+    node: "torch.fx.Node",
+) -> Optional[Tuple["torch.fx.Node", "torch.fx.Node", "torch.fx.Node"]]:
+    """
+    Return input, weight, and bias nodes for operators whose bias can be quantized.
+
+    The returned tuple follows the common bias quantization rule where the bias
+    scale is computed from the input scale and the per-output-channel weight scale.
+    """
+
+    if node.target == torch.ops.aten.linear.default:
+        lin_args = LinearArgs(*node.args, **node.kwargs)
+        if lin_args.bias is None:
+            return None
+        return lin_args.input, lin_args.weight, lin_args.bias
+
+    if node.target in [
+        torch.ops.circle_custom.conv2d,
+        torch.ops.circle_custom.conv2d.padding,
+    ]:
+        conv_args = Conv2DArgs(*node.args, **node.kwargs)
+        if conv_args.bias is None:
+            return None
+        return conv_args.input, conv_args.weight, conv_args.bias
+
+    return None
 
 
 @trace_graph_diff_on_pass
@@ -49,70 +77,65 @@ class QuantizeBias(PassBase):
         for node in graph.nodes:
             if node.op != "call_function":
                 continue
-            if node.target == torch.ops.aten.linear.default:
-                lin_args = LinearArgs(*node.args, **node.kwargs)
-                inp = lin_args.input
-                weights = lin_args.weight
-                bias = lin_args.bias
 
-                if bias is None:
-                    continue
+            op_args = _get_input_weight_bias_for_bias_quantization(node)
+            if op_args is None:
+                continue
 
-                # Only support bias is Parameter
-                # TODO Is it possible that bias is not Parameter?
-                if not is_torch_param(bias, exported_program):
-                    continue
+            inp, weights, bias = op_args
 
-                bias_val: torch.Tensor = get_torch_param_value(bias, exported_program)
-                if bias_val.dtype != torch.float32:
-                    continue
+            # Only support bias is Parameter.
+            # TODO Is it possible that bias is not Parameter?
+            if not is_torch_param(bias, exported_program):
+                continue
 
-                if QPARAM_KEY not in inp.meta:
-                    continue
+            bias_val: torch.Tensor = get_torch_param_value(bias, exported_program)
+            if bias_val.dtype != torch.float32:
+                continue
 
-                if QPARAM_KEY not in weights.meta:
-                    continue
+            if QPARAM_KEY not in inp.meta:
+                continue
 
-                quant_dtype = None
-                if inp.meta[QPARAM_KEY].dtype == "int16":
-                    quant_dtype = torch.int64
-                elif inp.meta[QPARAM_KEY].dtype == "uint8":
-                    quant_dtype = torch.int32
-                else:
-                    continue
+            if QPARAM_KEY not in weights.meta:
+                continue
 
-                type_info = torch.iinfo(quant_dtype)
+            quant_dtype = None
+            if inp.meta[QPARAM_KEY].dtype == "int16":
+                quant_dtype = torch.int64
+            elif inp.meta[QPARAM_KEY].dtype == "uint8":
+                quant_dtype = torch.int32
+            else:
+                continue
 
-                assert quant_dtype is not None
+            assert quant_dtype is not None
+            type_info = torch.iinfo(quant_dtype)
 
-                i_scale = inp.meta[QPARAM_KEY].scale
-                w_scale = weights.meta[QPARAM_KEY].scale
+            i_scale = inp.meta[QPARAM_KEY].scale
+            w_scale = weights.meta[QPARAM_KEY].scale
 
-                assert i_scale is not None
-                assert w_scale is not None
-                assert len(i_scale) == 1
-                assert len(w_scale) == bias_val.shape[0]
+            assert i_scale is not None
+            assert w_scale is not None
+            assert len(i_scale) == 1
+            assert len(w_scale) == bias_val.shape[0]
 
-                bias_scale = torch.tensor(i_scale) * torch.tensor(w_scale)
-                q_bias = torch.round(bias_val / bias_scale)
-                q_bias = torch.clamp(q_bias, min=type_info.min, max=type_info.max)
-                q_bias = q_bias.to(quant_dtype)
+            bias_scale = torch.tensor(i_scale) * torch.tensor(w_scale)
+            q_bias = torch.round(bias_val / bias_scale)
+            q_bias = torch.clamp(q_bias, min=type_info.min, max=type_info.max)
+            q_bias = q_bias.to(quant_dtype)
 
-                q_bias_node = add_placeholder(exported_program, q_bias, bias.name)
+            q_bias_node = add_placeholder(exported_program, q_bias, bias.name)
 
-                qparam = QuantParam()
-                qparam.scale = bias_scale.tolist()
-                assert qparam.scale is not None
-                qparam.zero_point = [0] * len(qparam.scale)
-                qparam.dtype = to_qparam_dtype(quant_dtype)
-                qparam.quantized_dimension = 0
-                q_bias_node.meta[QPARAM_KEY] = qparam
+            qparam = QuantParam()
+            qparam.scale = bias_scale.tolist()
+            assert qparam.scale is not None
+            qparam.zero_point = [0] * len(qparam.scale)
+            qparam.dtype = to_qparam_dtype(quant_dtype)
+            qparam.quantized_dimension = 0
+            q_bias_node.meta[QPARAM_KEY] = qparam
 
-                node.update_arg(2, q_bias_node)
+            node.update_arg(2, q_bias_node)
 
-                logger.debug(f"Bias ({bias.name}) is quantized to {q_bias_node.name}.")
-
-            # TODO Support more ops.
+            logger.debug(f"Bias ({bias.name}) is quantized to {q_bias_node.name}.")
 
         graph.eliminate_dead_code()
         graph.lint()
