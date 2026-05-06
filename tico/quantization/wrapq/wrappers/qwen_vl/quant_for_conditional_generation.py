@@ -143,8 +143,16 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         )
 
         if return_dict:
+            loss = None
+            if labels is not None:
+                loss = self.module.loss_function(
+                    logits=logits,
+                    labels=labels,
+                    vocab_size=self.module.config.text_config.vocab_size,
+                )
+
             output = Qwen3VLCausalLMOutputWithPast(
-                loss=None,
+                loss=loss,
                 logits=logits,
                 past_key_values=outputs.past_key_values,
                 hidden_states=outputs.hidden_states,
