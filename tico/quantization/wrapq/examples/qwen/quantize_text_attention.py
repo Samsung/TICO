@@ -22,7 +22,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attn import (
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
     QuantQwen3VLTextAttention,
 )
 from tico.utils.utils import SuppressWarning
