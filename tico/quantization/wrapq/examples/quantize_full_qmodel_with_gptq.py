@@ -365,13 +365,33 @@ def save_model_to(
     model_name = "model_prefill" if prefill_decode else "model"
     save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
     print(f"saving the whole {model_name} to {save_path.resolve()}")
+    config = q_m.wrapped.config
     with torch.no_grad():
         with SuppressWarning(UserWarning, ".*"):
+            qmodel = q_m.wrapped.model.wrapped
+            if prefill_decode is True:
+                # kwargs for padding
+                S = calib_input.shape[-1]
+                attention_mask = (
+                    qmodel.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
+                )
+                pos_embeds = (
+                    qmodel.rope_cos_template[:, :S, :].to("cpu"),
+                    qmodel.rope_sin_template[::S, :].to("cpu"),
+                )
+                kwargs = {
+                    "attention_mask": attention_mask,
+                    "position_embeddings": pos_embeds,
+                }
+            else:
+                kwargs = {}
+
             cm = tico.convert(
                 q_m.wrapped.as_export_module(
                     "prefill", return_kv=prefill_decode
                 ).eval(),
                 (calib_input,),
+                kwargs=kwargs,
                 strict=False,
             )
             cm.save(save_path)
@@ -386,7 +406,6 @@ def save_model_to(
                     dtype=calib_input.dtype
                 )  # no matter which token
 
-                config = q_m.wrapped.config
                 D = config.hidden_size
                 head_dim = getattr(config, "head_dim", D // config.num_attention_heads)
                 n_kv = config.num_key_value_heads
@@ -398,12 +417,37 @@ def save_model_to(
                     )
                     for _ in range(config.num_hidden_layers)
                 ]
+                # kwargs for padding
+                attention_mask = make_random_decode_attn_mask(1, max_seq_len, "cpu")
+                pos_embeds = make_random_position_embeddings(1, head_dim, "cpu")
+
                 cm = tico.convert(
                     q_m.wrapped.as_export_module("decode").eval(),
                     (token, past_kv),
+                    kwargs={
+                        "attention_mask": attention_mask,
+                        "position_embeddings": pos_embeds,
+                    },
                     strict=False,
                 )
                 cm.save(save_path)
+
+
+def make_random_position_embeddings(B, head_dim, DEVICE):
+    # RoPE tables for the *current token* only.
+    cos = torch.randn(B, 1, head_dim, device=DEVICE)
+    sin = torch.randn(B, 1, head_dim, device=DEVICE)
+    return (cos, sin)
+
+
+def make_random_decode_attn_mask(B, MAX_SEQ, DEVICE):
+    # Additive mask of final static width: (B, 1, MAX_SEQ)
+    # Simulate that only the first L_eff positions are valid and the rest are padding.
+    L_eff = torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item()
+    mask = torch.zeros(B, 1, MAX_SEQ, device=DEVICE, dtype=torch.float32)
+    if L_eff < MAX_SEQ:
+        mask[:, :, L_eff:] = float("-120")
+    return mask
 
 
 # -----------------------------------------------------------------------------
@@ -417,18 +461,8 @@ def make_random_decode_batch(model, B, DEVICE, MAX_SEQ):
 
     # Single-token hidden state.
     x = torch.randn(B, 1, D, device=DEVICE)
-
-    # RoPE tables for the *current token* only.
-    cos = torch.randn(B, 1, head_dim, device=DEVICE)
-    sin = torch.randn(B, 1, head_dim, device=DEVICE)
-    pos = (cos, sin)
-
-    # Additive mask of final static width: (B, 1, MAX_SEQ)
-    # Simulate that only the first L_eff positions are valid and the rest are padding.
-    L_eff = torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item()
-    mask = torch.zeros(B, 1, MAX_SEQ, device=DEVICE, dtype=torch.float32)
-    if L_eff < MAX_SEQ:
-        mask[:, :, L_eff:] = float("-120")
+    pos = make_random_position_embeddings(B, head_dim, DEVICE)
+    mask = make_random_decode_attn_mask(B, MAX_SEQ, DEVICE)
 
     # Static-sized past KV (already RoPE-applied for past tokens).
     past_k = torch.randn(B, n_kv, MAX_SEQ - 1, head_dim, device=DEVICE)
