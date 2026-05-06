@@ -22,7 +22,7 @@ from collections.abc import Callable
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 import torch
-from datasets import load_dataset
+from datasets import Dataset, IterableDataset, load_dataset
 
 
 def normalize_answer(s: str) -> str:
@@ -184,7 +184,7 @@ def get_item_coco(ex: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-DATASETS = {
+DATASETS: dict[str, dict[str, Any]] = {
     "vqav2": {
         "default_split": "validation",
         "adapter": get_item_vqav2,
@@ -201,6 +201,12 @@ DATASETS = {
         "candidates": [
             "lmms-lab/COCO-Caption2017",
         ],
+    },
+    "wikitext2": {
+        "default_split": "test",
+        "adapter": None,  # Text-only dataset, no adapter needed
+        "candidates": ["wikitext"],
+        "config": "wikitext-2-raw-v1",
     },
 }
 
@@ -612,10 +618,11 @@ def get_dataset(
             f"Unsupported dataset '{dataset}'. Available datasets: {list(DATASETS.keys())}"
         )
 
-    meta = DATASETS[dataset]
+    meta: dict[str, Any] = DATASETS[dataset]
     adapter = meta["adapter"]
     split = split or meta["default_split"]  # type: ignore[assignment]
     candidates = meta["candidates"]
+    config = meta.get("config")  # Optional config for datasets like wikitext
     assert isinstance(candidates, list)
 
     ds = None
@@ -623,14 +630,20 @@ def get_dataset(
 
     for name in candidates:
         try:
-            ds = load_dataset(name, split=split, streaming=streaming)
+            if config:
+                ds = load_dataset(
+                    path=name, name=config, split=split, streaming=streaming
+                )
+            else:
+                ds = load_dataset(path=name, split=split, streaming=streaming)
             if n >= 0:
                 ds = ds.take(n)
 
             size_str = str(n) if n >= 0 else "all"
             stream_str = "streaming" if streaming else "non-streaming"
+            config_str = f"config={config}, " if config else ""
             print(
-                f"[info] Loaded dataset: {name} ({split}, {stream_str}), size={size_str}"
+                f"[info] Loaded dataset: {name} ({config_str}{split}, {stream_str}), size={size_str}"
             )
             break
         except Exception as exc:
@@ -643,6 +656,53 @@ def get_dataset(
         )
 
     return ds, adapter
+
+
+def evaluate_ppl(
+    model,
+    tokenizer,
+    ds: Dataset | IterableDataset,
+    device: str | torch.device,
+    stride: int = 512,
+    max_seq_len: Optional[int] = None,
+    show_progress: bool = True,
+) -> float:
+    """
+    Evaluate perplexity on a text dataset.
+
+    This function computes perplexity using a strided sliding-window approach.
+    It expects a dataset that yields examples with a "text" field (e.g., wikitext2).
+
+    Args:
+        model: Language model to evaluate.
+        tokenizer: Tokenizer for encoding text.
+        ds: Iterable dataset yielding examples with a "text" field.
+        device: Device used for evaluation.
+        stride: Sliding window stride for perplexity calculation.
+        max_seq_len: Maximum sequence length. Defaults to model's max_position_embeddings.
+        show_progress: Whether to show progress bar.
+
+    Returns:
+        Perplexity score.
+    """
+    from tico.quantization.wrapq.utils.metrics import perplexity
+
+    # Concatenate all text from the dataset
+    full_text = "\n\n".join(ds["text"])
+
+    # Encode the full text
+    encodings = tokenizer(full_text, return_tensors="pt")
+
+    # Compute perplexity
+    ppl = perplexity(
+        model=model,
+        encodings=encodings,
+        device=device,
+        max_length=max_seq_len,
+        stride=stride,
+        show_progress=show_progress,
+    )
+    return ppl
 
 
 def get_calib_inputs(

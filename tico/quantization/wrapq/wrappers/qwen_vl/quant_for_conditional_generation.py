@@ -142,18 +142,28 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             Qwen3VLCausalLMOutputWithPast,
         )
 
-        if return_dict:
-            output = Qwen3VLCausalLMOutputWithPast(
-                loss=None,
+        loss = None
+        if labels is not None:
+            loss = self.module.loss_function(
                 logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.hidden_states,
-                attentions=outputs.attentions,
-                rope_deltas=outputs.rope_deltas,
+                labels=labels,
+                vocab_size=self.module.config.text_config.vocab_size,
+                **kwargs,
             )
-        else:
-            # (logits, past_key_values)
-            output = (logits,) if len(outputs) == 1 else (logits, outputs[1])
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        output = Qwen3VLCausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=outputs.rope_deltas,
+        )
+
         return output
 
     def _all_observers(self) -> Iterable:
