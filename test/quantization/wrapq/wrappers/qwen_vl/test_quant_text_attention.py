@@ -20,7 +20,7 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
-from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attn import (
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
     QuantQwen3VLTextAttention,
 )
 
