@@ -30,6 +30,10 @@ from tico.quantization.evaluation.mmlu_eval_utils import (
     evaluate_mmlu,
     print_mmlu_results,
 )
+from tico.quantization.evaluation.mmmu_eval_utils import (
+    evaluate_mmmu,
+    print_mmmu_results,
+)
 from tico.quantization.evaluation.vlm_eval_utils import (
     evaluate_ppl,
     get_accuracy_on_dataset,
@@ -320,6 +324,31 @@ def parse_args():
         type=int,
         default=1,
         help="Number of samples in a batch for MMLU evaluation.",
+    )
+
+    # MMMU evaluation arguments
+    parser.add_argument(
+        "--mmmu_subjects",
+        type=str,
+        default=None,
+        nargs="+",
+        help=(
+            "Space-separated list of MMMU subjects to evaluate. Use 'mmmu' for all subjects."
+            "Use 'Accounting', 'Agriculture', 'Art', etc. for specific subjects."
+            "See https://huggingface.co/datasets/MMMU/MMMU for the full list."
+        ),
+    )
+    parser.add_argument(
+        "--mmmu_n_shots",
+        type=int,
+        default=5,
+        help="Number of few-shot examples for MMMU evaluation.",
+    )
+    parser.add_argument(
+        "--mmmu_n_samples",
+        type=int,
+        default=-1,
+        help="Number of samples per MMMU subject. Use -1 for full test set.",
     )
 
     # PPL evaluation arguments
@@ -839,6 +868,21 @@ def main() -> None:
         )
         print_mmlu_results(original_mmlu_results)
 
+    # MMMU evaluation on original model
+    if args.mmmu_subjects is not None:
+        print("\n=== MMMU Evaluation (Original Model) ===")
+        original_mmmu_results = evaluate_mmmu(
+            model=model,
+            processor=processor,
+            subjects=args.mmmu_subjects,
+            device=args.device,
+            n_shots=args.mmmu_n_shots,
+            n_samples=args.mmmu_n_samples,
+            max_seq_len=args.max_seq_len,
+            verbose=args.verbose,
+        )
+        print_mmmu_results(original_mmmu_results)
+
     # PPL evaluation on original model
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Original Model) ===")
@@ -1050,6 +1094,21 @@ def main() -> None:
             max_seq_len=args.max_seq_len,
         )
         print_mmlu_results(quantized_mmlu_results)
+
+    # MMMU evaluation on quantized model
+    if args.mmmu_subjects is not None:
+        print("\n=== MMMU Evaluation (Quantized Model) ===")
+        quantized_mmmu_results = evaluate_mmmu(
+            model=model,
+            processor=processor,
+            subjects=args.mmmu_subjects,
+            device=args.device,
+            n_shots=args.mmmu_n_shots,
+            n_samples=args.mmmu_n_samples,
+            max_seq_len=args.max_seq_len,
+            verbose=args.verbose,
+        )
+        print_mmmu_results(quantized_mmmu_results)
 
     # PPL evaluation on quantized model
     if args.ppl_dataset:
