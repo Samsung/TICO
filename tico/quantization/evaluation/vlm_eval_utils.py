@@ -386,6 +386,45 @@ class CocoImage(TypedDict):
     file_name: str
 
 
+# ============================================================
+# Metric computation functions
+# - Each function computes a specific captioning metric
+# - These can be used independently or via get_coco_scores_on_dataset
+# ============================================================
+def compute_bleu_scores(
+    ground_truths: dict[str, list[str]],
+    predictions: dict[str, list[str]],
+    bleu_metrics: list[str] = ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"],
+) -> dict[str, float]:
+    """
+    Compute BLEU scores (Bleu_1 through Bleu_4) for image captioning.
+
+    Args:
+        ground_truths: Dictionary mapping image_id to list of reference captions.
+        predictions: Dictionary mapping image_id to list of predicted captions.
+        bleu_metrics: List of BLEU metrics to compute. Supported: "Bleu_1", "Bleu_2",
+                      "Bleu_3", "Bleu_4".
+
+    Returns:
+        Dictionary mapping metric names to scores.
+    """
+    from pycocoevalcap.bleu.bleu import Bleu
+
+    bleu_scorer = Bleu(4)
+    bleu_scores, _ = bleu_scorer.compute_score(ground_truths, predictions)
+    bleu_map = {
+        "Bleu_1": 0,
+        "Bleu_2": 1,
+        "Bleu_3": 2,
+        "Bleu_4": 3,
+    }
+    result: dict[str, float] = {}
+    for m in bleu_metrics:
+        idx = bleu_map[m]
+        result[m] = float(bleu_scores[idx])
+    return result
+
+
 def get_coco_scores_on_dataset(
     model,
     processor,
@@ -397,12 +436,19 @@ def get_coco_scores_on_dataset(
     verbose: bool = True,
     log_first_n: int = 5,
     log_every_n: int = 50,
+    metrics: list[str] = [
+        "CIDEr",
+        "Bleu_1",
+        "Bleu_2",
+        "Bleu_3",
+        "Bleu_4",
+    ],
 ) -> dict[str, float]:
     """
     Compute CIDEr, BLEU, and other captioning metrics on a dataset iterator.
 
     This function uses the pycocoevalcap package to compute standard captioning
-    metrics including CIDEr, BLEU-1 through BLEU-4, METEOR, ROUGE-L, and SPICE.
+    metrics including CIDEr, BLEU-1 through BLEU-4, METEOR, ROUGE-L.
 
     Args:
         model: Vision-language generation model.
@@ -415,10 +461,28 @@ def get_coco_scores_on_dataset(
         verbose: Whether to print sample predictions and progress logs.
         log_first_n: Number of early examples to print.
         log_every_n: Logging interval after the initial examples.
+        metrics: List of metrics to compute. Supported values: "CIDEr", "Bleu_1",
+                 "Bleu_2", "Bleu_3", "Bleu_4", "METEOR", "ROUGE_L".
+                 Defaults to CIDEr and BLEU metrics.
 
     Returns:
         A dictionary mapping metric names to scores (e.g., "CIDEr", "Bleu_4").
     """
+    # Validate metrics
+    supported_metrics = {
+        "CIDEr",
+        "Bleu_1",
+        "Bleu_2",
+        "Bleu_3",
+        "Bleu_4",
+        "METEOR",
+        "ROUGE_L",
+    }
+    for m in metrics:
+        if m not in supported_metrics:
+            raise ValueError(
+                f"Unsupported metric '{m}'. Supported metrics: {supported_metrics}"
+            )
     # Collect predictions and ground truth
     results: list[CocoResult] = []
     images: list[CocoImage] = []
@@ -492,22 +556,71 @@ def get_coco_scores_on_dataset(
 
     # Run COCO evaluation
     try:
-        from pycocoevalcap.eval import COCOEvalCap
         from pycocotools.coco import COCO
 
         coco = COCO(annotation_path)
-        coco_result = coco.loadRes(results)
-        coco_eval = COCOEvalCap(coco, coco_result)
-        coco_eval.params["id"] = coco_result.getImgIds()
-        coco_eval.evaluate()
 
-        metrics: dict[str, float] = {}
-        for metric, score in coco_eval.eval.items():
-            metrics[metric] = float(score)
+        # Convert COCO objects to dictionaries expected by Cider and Bleu
+        # Format: {image_id: [caption1, caption2, ...]}
+        ground_truths: dict[str, list[str]] = {}
+        ann_ids = coco.getAnnIds()
+        anns = coco.loadAnns(ann_ids)
+        for a in anns:
+            img_id = str(a["image_id"])
+            if img_id not in ground_truths:
+                ground_truths[img_id] = []
+            ground_truths[img_id].append(a["caption"])
+
+        # Format: {image_id: [caption]}
+        res: dict[str, list[str]] = {}
+        for r in results:
+            img_id = str(r["image_id"])
+            res[img_id] = [r["caption"]]
+
+        all_scores: dict[str, float] = {}
+
+        # Compute CIDEr if needed
+        if "CIDEr" in metrics:
+            from pycocoevalcap.cider.cider import Cider
+
+            cider_scorer = Cider()
+            cider_score, _ = cider_scorer.compute_score(ground_truths, res)
+            all_scores["CIDEr"] = float(cider_score)
             if verbose:
-                print(f"{metric}: {score:.4f}")
+                print(f"CIDEr: {cider_score:.4f}")
 
-        return metrics
+        # Compute BLEU scores if needed
+        bleu_metrics = [m for m in metrics if m.startswith("Bleu_")]
+        if bleu_metrics:
+            bleu_scores = compute_bleu_scores(
+                ground_truths, res, bleu_metrics=bleu_metrics
+            )
+            all_scores.update(bleu_scores)
+            if verbose:
+                for m, score in bleu_scores.items():
+                    print(f"{m}: {score:.4f}")
+
+        # Compute METEOR if needed
+        if "METEOR" in metrics:
+            from pycocoevalcap.meteor.meteor import Meteor
+
+            meteor_scorer = Meteor()
+            meteor_score, _ = meteor_scorer.compute_score(ground_truths, res)
+            all_scores["METEOR"] = float(meteor_score)
+            if verbose:
+                print(f"METEOR: {meteor_score:.4f}")
+
+        # Compute ROUGE_L if needed
+        if "ROUGE_L" in metrics:
+            from pycocoevalcap.rouge.rouge import Rouge
+
+            rouge_scorer = Rouge()
+            rouge_score, _ = rouge_scorer.compute_score(ground_truths, res)
+            all_scores["ROUGE_L"] = float(rouge_score)
+            if verbose:
+                print(f"ROUGE_L: {rouge_score:.4f}")
+
+        return all_scores
     finally:
         os.unlink(annotation_path)
 
