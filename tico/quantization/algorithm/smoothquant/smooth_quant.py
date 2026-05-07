@@ -72,9 +72,22 @@ def smooth_weights(
     elif isinstance(front_module, torch.nn.LayerNorm):
         front_numel = front_module.weight.numel()
     else:
-        raise NotImplementedError(
-            f"Unsupported module type: {type(front_module).__name__}"
-        )
+        # Try Qwen3VLTextRMSNorm
+        try:
+            from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+                Qwen3VLTextRMSNorm,
+            )
+
+            if isinstance(front_module, Qwen3VLTextRMSNorm):
+                front_numel = front_module.weight.numel()
+            else:
+                raise NotImplementedError(
+                    f"Unsupported module type: {type(front_module).__name__}"
+                )
+        except ImportError:
+            raise NotImplementedError(
+                f"Unsupported module type: {type(front_module).__name__}"
+            )
     for back_m in back_modules:
         if isinstance(back_m, torch.nn.Linear):
             back_numel = back_m.in_features
@@ -283,6 +296,78 @@ def _apply_if_fairseq_relu_bridge(
 
 
 # ────────────────────────────────────────────────────────────
+# Qwen3-VL Text Model Components (RMSNorm-based)
+# ────────────────────────────────────────────────────────────
+
+
+@torch.no_grad()
+def _apply_if_qwen3vl_text_decoder(
+    name: str,
+    module: torch.nn.Module,
+    activation_max: Dict[str, torch.Tensor],
+    alpha_to_apply: float,
+) -> bool:
+    """
+    Apply SmoothQuant smoothing to Qwen3VLTextDecoderLayer (RMSNorm-based).
+
+    Qwen3VLTextDecoderLayer structure:
+        - input_layernorm (RMSNorm) → self_attn (q_proj, k_proj, v_proj)
+        - post_attention_layernorm (RMSNorm) → mlp (gate_proj, up_proj)
+
+    Returns True if this handler applied smoothing to `module`.
+    """
+    try:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+            Qwen3VLTextDecoderLayer,
+        )
+    except Exception:
+        return False
+
+    if not isinstance(module, Qwen3VLTextDecoderLayer):
+        return False
+
+    # Check for required attributes
+    if not hasattr(module, "input_layernorm") or not hasattr(
+        module, "post_attention_layernorm"
+    ):
+        return False
+    if not hasattr(module, "self_attn") or not hasattr(module, "mlp"):
+        return False
+
+    # Smooth input_layernorm → q_proj, k_proj, v_proj
+    attn_ln = module.input_layernorm
+    qkv = [
+        module.self_attn.q_proj,
+        module.self_attn.k_proj,
+        module.self_attn.v_proj,
+    ]
+    # Input-hook stats for q_proj input
+    qkv_input_scales = activation_max.get(name + ".self_attn.q_proj")
+    if qkv_input_scales is not None:
+        smooth_weights(attn_ln, qkv, qkv_input_scales, alpha_to_apply)
+    else:
+        print(
+            f"[SmoothQuant] Warning: activation stats not found for "
+            f"{name} self_attn.q_proj input."
+        )
+
+    # Smooth post_attention_layernorm → gate_proj, up_proj
+    ffn_ln = module.post_attention_layernorm
+    fcs = [module.mlp.gate_proj, module.mlp.up_proj]
+    # Input-hook stats for gate_proj input
+    fcs_input_scales = activation_max.get(name + ".mlp.gate_proj")
+    if fcs_input_scales is not None:
+        smooth_weights(ffn_ln, fcs, fcs_input_scales, alpha_to_apply)
+    else:
+        print(
+            f"[SmoothQuant] Warning: activation stats not found for "
+            f"{name} mlp.gate_proj input."
+        )
+
+    return True
+
+
+# ────────────────────────────────────────────────────────────
 # Qwen3-VL Vision Components (LayerNorm-based)
 # ────────────────────────────────────────────────────────────
 
@@ -467,6 +552,7 @@ _APPLIERS: List[
     Callable[[str, torch.nn.Module, Dict[str, torch.Tensor], float], bool]
 ] = [
     _apply_if_llama_decoder,
+    _apply_if_qwen3vl_text_decoder,
     _apply_if_qwen3vl_vision_block,
     _apply_if_qwen3vl_vision_patch_merger,
     _apply_if_fairseq_relu_bridge,
@@ -479,6 +565,7 @@ def apply_smoothing(
     activation_max: Dict[str, torch.Tensor],
     alpha: float = 0.5,
     custom_alpha_map: Optional[Dict[str, float]] = None,
+    exclude_appliers: Optional[List[str]] = None,
 ):
     """
     Applies SmoothQuant-style smoothing to the model's weights using activation maximum values.
@@ -495,7 +582,20 @@ def apply_smoothing(
             A dictionary mapping layer/module names to custom alpha values.
             Layers specified in this dictionary will use the corresponding alpha
              value instead of the default.
+        exclude_appliers
+            A list of applier function names to exclude from processing.
+            Valid names: '_apply_if_llama_decoder', '_apply_if_qwen3vl_text_decoder',
+            '_apply_if_qwen3vl_vision_block', '_apply_if_qwen3vl_vision_patch_merger',
+            '_apply_if_fairseq_relu_bridge'.
     """
+    # Build list of appliers to use (excluding specified ones)
+    if exclude_appliers is None:
+        appliers_to_use = _APPLIERS
+    else:
+        appliers_to_use = [
+            applier for applier in _APPLIERS if applier.__name__ not in exclude_appliers
+        ]
+
     for name, module in model.named_modules():
         alpha_to_apply = (
             custom_alpha_map.get(name, alpha) if custom_alpha_map else alpha
@@ -506,6 +606,6 @@ def apply_smoothing(
             )
 
         # Try each applier until one succeeds.
-        for applier in _APPLIERS:
+        for applier in appliers_to_use:
             if applier(name, module, activation_max, alpha_to_apply):
                 break  # applied → stop trying others

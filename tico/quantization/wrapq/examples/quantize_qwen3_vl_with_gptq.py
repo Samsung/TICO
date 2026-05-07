@@ -277,6 +277,12 @@ def parse_args():
         "Range: 0.0-1.0. Higher = more weight smoothing.",
     )
     parser.add_argument(
+        "--smoothquant_components",
+        choices=["vision", "text", "both"],
+        default=None,
+        help="Target components for SmoothQuant.",
+    )
+    parser.add_argument(
         "--print_quantized_model",
         action="store_true",
         default=False,
@@ -818,10 +824,29 @@ def main() -> None:
     )
 
     # -------------------------------------------------------------------------
-    # Apply SmoothQuant transformation (for LayerNorm-based vision components)
+    # Apply SmoothQuant transformation
     # -------------------------------------------------------------------------
     if args.smoothquant:
-        print("Applying SmoothQuant smoothing for vision LayerNorm layers …")
+        if args.smoothquant_components is None:
+            raise ValueError(
+                "--smoothquant_components must be specified when "
+                "--smoothquant is enabled."
+            )
+        # Build exclude_appliers list based on arguments
+        exclude_appliers = []
+        if args.smoothquant_components == "text":
+            exclude_appliers.extend(
+                [
+                    "_apply_if_qwen3vl_vision_block",
+                    "_apply_if_qwen3vl_vision_patch_merger",
+                ]
+            )
+        if args.smoothquant_components == "vision":
+            exclude_appliers.append("_apply_if_qwen3vl_text_decoder")
+
+        print(
+            f"Applying SmoothQuant smoothing for {args.smoothquant_components} components"
+        )
 
         # Compute activation maximum values from calibration data
         print("Computing activation maximum values for SmoothQuant …")
@@ -871,6 +896,7 @@ def main() -> None:
             model,
             activation_max,
             alpha=args.smoothquant_alpha,
+            exclude_appliers=exclude_appliers if exclude_appliers else None,
         )
         print("SmoothQuant smoothing complete.")
 
