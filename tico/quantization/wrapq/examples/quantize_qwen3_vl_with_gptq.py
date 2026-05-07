@@ -31,6 +31,7 @@ from tico.quantization.evaluation.mmlu_eval_utils import (
     print_mmlu_results,
 )
 from tico.quantization.evaluation.vlm_eval_utils import (
+    evaluate_ppl,
     get_accuracy_on_dataset,
     get_calib_inputs,
     get_coco_scores_on_dataset,
@@ -313,6 +314,21 @@ def parse_args():
         type=int,
         default=1,
         help="Number of samples in a batch for MMLU evaluation.",
+    )
+
+    # PPL evaluation arguments
+    parser.add_argument(
+        "--ppl_dataset",
+        type=str,
+        default=None,
+        choices=["wikitext2"],
+        help="Text dataset for PPL (perplexity) evaluation.",
+    )
+    parser.add_argument(
+        "--ppl_stride",
+        type=int,
+        default=512,
+        help="Sliding window stride for perplexity calculation.",
     )
 
     return parser.parse_args()
@@ -810,6 +826,21 @@ def main() -> None:
         )
         print_mmlu_results(original_mmlu_results)
 
+    # PPL evaluation on original model
+    if args.ppl_dataset:
+        print("\n=== PPL Evaluation (Original Model) ===")
+        ds_ppl, _ = get_dataset(args.ppl_dataset, n=args.nsamples_for_evaluation)
+        original_ppl = evaluate_ppl(
+            model=model,
+            tokenizer=processor.tokenizer,
+            ds=ds_ppl,
+            device=args.device,
+            stride=args.ppl_stride,
+            max_seq_len=args.max_seq_len,
+            show_progress=not args.hide_progress,
+        )
+        print(f"Original PPL: {original_ppl:.2f}")
+
     calib_inputs = get_calib_inputs(
         "vqav2",
         processor,
@@ -986,6 +1017,21 @@ def main() -> None:
             max_seq_len=args.max_seq_len,
         )
         print_mmlu_results(quantized_mmlu_results)
+
+    # PPL evaluation on quantized model
+    if args.ppl_dataset:
+        print("\n=== PPL Evaluation (Quantized Model) ===")
+        ds_ppl, _ = get_dataset(args.ppl_dataset, n=args.nsamples_for_evaluation)
+        quantized_ppl = evaluate_ppl(
+            model=q_m,
+            tokenizer=processor.tokenizer,
+            ds=ds_ppl,
+            device=args.device,
+            stride=args.ppl_stride,
+            max_seq_len=args.max_seq_len,
+            show_progress=not args.hide_progress,
+        )
+        print(f"Quantized PPL: {quantized_ppl:.2f}")
 
 
 if __name__ == "__main__":
