@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import List, Literal, Optional, Tuple
 
 import torch
@@ -88,6 +89,10 @@ class QuantLlamaAttention(QuantModuleBase):
         self.num_kv_heads = cfg.num_key_value_heads
         self.kv_rep = cfg.num_attention_heads // cfg.num_key_value_heads
         self.max_seq = cfg.max_position_embeddings
+        # Constant scale (1/√d)
+        scale_t = torch.tensor(
+            float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
+        )
 
         q_cfg = qcfg.child("q_proj") if qcfg else None
         k_cfg = qcfg.child("k_proj") if qcfg else None
@@ -109,9 +114,6 @@ class QuantLlamaAttention(QuantModuleBase):
         self.q_proj = PTQWrapper(
             fp_attn.q_proj, qcfg=q_cfg, fp_name=join_name(fp_name, "q_proj")
         )
-        self.k_proj = PTQWrapper(
-            fp_attn.k_proj, qcfg=k_cfg, fp_name=join_name(fp_name, "k_proj")
-        )
         self.v_proj = PTQWrapper(
             fp_attn.v_proj, qcfg=v_cfg, fp_name=join_name(fp_name, "v_proj")
         )
@@ -119,17 +121,18 @@ class QuantLlamaAttention(QuantModuleBase):
             fp_attn.o_proj, qcfg=o_cfg, fp_name=join_name(fp_name, "o_proj")
         )
 
-        # Constant scale (1/√d)
-        scale_t = torch.tensor(
-            float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
-        )
-
+        k_proj_fp = copy.deepcopy(fp_attn.k_proj)
         # merge scale_t to k_proj, (otherwise merge it to q_proj)
         with torch.no_grad():
-            lin = self.k_proj.wrapped.module
-            lin.weight.mul_(scale_t)
-            if lin.bias is not None:
-                lin.bias.mul_(scale_t)
+            k_proj_fp.weight.mul_(scale_t)
+            if k_proj_fp.bias is not None:
+                k_proj_fp.bias.mul_(scale_t)
+
+        self.k_proj = PTQWrapper(
+            k_proj_fp,
+            qcfg=k_cfg,
+            fp_name=join_name(fp_name, "k_proj"),
+        )
 
         mk = self._make_obs
         self.obs_hidden = mk("hidden")
