@@ -337,6 +337,13 @@ def parse_args():
         help="Sliding window stride for perplexity calculation.",
     )
 
+    parser.add_argument(
+        "--ppl_split",
+        type=str,
+        default="test",
+        help="Split for PPL evaluation",
+    )
+
     return parser.parse_args()
 
 
@@ -835,7 +842,7 @@ def main() -> None:
     # PPL evaluation on original model
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Original Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, n=args.nsamples_for_evaluation)
+        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
         original_ppl = evaluate_ppl(
             model=model,
             tokenizer=processor.tokenizer,
@@ -1047,7 +1054,7 @@ def main() -> None:
     # PPL evaluation on quantized model
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Quantized Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, n=args.nsamples_for_evaluation)
+        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
         quantized_ppl = evaluate_ppl(
             model=q_m,
             tokenizer=processor.tokenizer,
