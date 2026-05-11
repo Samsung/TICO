@@ -22,6 +22,7 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.processing_utils import Unpack
 
+from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
@@ -37,6 +38,14 @@ LegacyCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
     "tico.quantization.algorithm.spinquant.spin_llama.SpinLlamaModel",
 )
 class QuantLlamaModel(QuantModuleBase):
+    """
+    Quantized wrapper for a Llama-style decoder-only model.
+
+    The wrapper owns model-level masks and RoPE templates shared across decoder
+    layers. RoPE sign convention is controlled by `PTQConfig.model_args` so it
+    stays consistent with `QuantLlamaAttention`.
+    """
+
     def __init__(
         self,
         model_fp: nn.Module,
@@ -45,6 +54,8 @@ class QuantLlamaModel(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
+
+        self.attn_options = get_llama_attention_options(self.qcfg)
 
         # ----- child configs (hierarchical override) -------------------
         embed_cfg = qcfg.child("embed_tokens") if qcfg else None
@@ -161,7 +172,8 @@ class QuantLlamaModel(QuantModuleBase):
         cos_t = emb.cos() * attn_scaling
         sin_t = emb.sin() * attn_scaling
         half_dim = head_dim // 2
-        sin_t[..., :half_dim] = -sin_t[..., :half_dim]
+        if self.attn_options.rope == "pre_negated_sin":
+            sin_t[..., :half_dim] = -sin_t[..., :half_dim]
         cos_t = cos_t.unsqueeze(0)  # [1, max_seq, head_dim]
         sin_t = sin_t.unsqueeze(0)  # [1, max_seq, head_dim]
 
@@ -426,6 +438,9 @@ class QuantLlamaModel(QuantModuleBase):
         past_len: int,
         device: torch.device,
     ) -> torch.Tensor:
+        """
+        Slice the static causal mask template.
+        """
         assert isinstance(self.causal_mask_template, torch.Tensor)
         return self.causal_mask_template[..., past_len : past_len + q_len, :k_len].to(
             device
@@ -438,6 +453,9 @@ class QuantLlamaModel(QuantModuleBase):
         *,
         past_len: int,
     ) -> torch.Tensor:
+        """
+        Build an additive attention mask for the current model step.
+        """
         q_len = hidden_states.size(1)
         k_len = past_len + q_len
         device = hidden_states.device
@@ -476,6 +494,9 @@ class QuantLlamaModel(QuantModuleBase):
         *,
         start: int,
     ):
+        """
+        Return RoPE tables for the current model step.
+        """
         end = start + hidden_states.size(1)
         cos = self.rope_cos_template[:, start:end, :].to(
             dtype=hidden_states.dtype, device=hidden_states.device

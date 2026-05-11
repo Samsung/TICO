@@ -13,13 +13,17 @@
 # limitations under the License.
 
 import copy
-from typing import List, Literal, Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache
 
+from tico.quantization.config.llama_attention import (
+    get_llama_attention_options,
+    is_npu_export_attention_options,
+)
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
@@ -35,6 +39,25 @@ CacheOutputMode = Literal["present", "delta"]
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
 
+def _clone_projection_with_scale(module: nn.Module, scale: torch.Tensor) -> nn.Module:
+    """
+    Return a deep-copied projection module with its affine parameters scaled.
+
+    The helper is intentionally conservative and only touches `weight` and
+    `bias` attributes when they exist.
+    """
+    scaled = copy.deepcopy(module)
+    with torch.no_grad():
+        weight = getattr(scaled, "weight", None)
+        if weight is not None:
+            weight.mul_(scale.to(device=weight.device, dtype=weight.dtype))
+
+        bias = getattr(scaled, "bias", None)
+        if bias is not None:
+            bias.mul_(scale.to(device=bias.device, dtype=bias.dtype))
+    return scaled
+
+
 @try_register(
     "transformers.models.llama.modeling_llama.LlamaAttention",
     "transformers.models.llama.modeling_llama.LlamaSdpaAttention",
@@ -47,7 +70,9 @@ class QuantLlamaAttention(QuantModuleBase):
       - prefill: `past_key_value is None`
       - decode : `past_key_value is not None`
 
-    Export specialization is provided by thin adapter modules.
+    Export specialization is provided by thin adapter modules. Implementation
+    details such as projection scale fusion, RoPE sign convention, and attention
+    layout are controlled by `PTQConfig.model_args`.
 
     Behavior
     --------
@@ -69,6 +94,8 @@ class QuantLlamaAttention(QuantModuleBase):
     ):
         super().__init__(qcfg, fp_name=fp_name)
 
+        self.attn_options = get_llama_attention_options(self.qcfg)
+
         cfg = fp_attn.config
         self.config = cfg
         self.layer_idx = layer_idx
@@ -89,8 +116,9 @@ class QuantLlamaAttention(QuantModuleBase):
         self.num_kv_heads = cfg.num_key_value_heads
         self.kv_rep = cfg.num_attention_heads // cfg.num_key_value_heads
         self.max_seq = cfg.max_position_embeddings
+
         # Constant scale (1/√d)
-        scale_t = torch.tensor(
+        self.attn_scale = torch.tensor(
             float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
         )
 
@@ -111,27 +139,31 @@ class QuantLlamaAttention(QuantModuleBase):
         assert hasattr(fp_attn, "o_proj") and isinstance(
             fp_attn.o_proj, torch.nn.Module
         )
+
+        q_proj_fp = fp_attn.q_proj
+        k_proj_fp = fp_attn.k_proj
+        if self.attn_options.scale_fusion == "q_proj":
+            q_proj_fp = _clone_projection_with_scale(fp_attn.q_proj, self.attn_scale)
+        elif self.attn_options.scale_fusion == "k_proj":
+            k_proj_fp = _clone_projection_with_scale(fp_attn.k_proj, self.attn_scale)
+        elif self.attn_options.scale_fusion != "none":
+            raise RuntimeError(
+                f"Invalid scale fusion option: {self.attn_options.scale_fusion!r}"
+            )
+
         self.q_proj = PTQWrapper(
-            fp_attn.q_proj, qcfg=q_cfg, fp_name=join_name(fp_name, "q_proj")
+            q_proj_fp, qcfg=q_cfg, fp_name=join_name(fp_name, "q_proj")
+        )
+        self.k_proj = PTQWrapper(
+            k_proj_fp,
+            qcfg=k_cfg,
+            fp_name=join_name(fp_name, "k_proj"),
         )
         self.v_proj = PTQWrapper(
             fp_attn.v_proj, qcfg=v_cfg, fp_name=join_name(fp_name, "v_proj")
         )
         self.o_proj = PTQWrapper(
             fp_attn.o_proj, qcfg=o_cfg, fp_name=join_name(fp_name, "o_proj")
-        )
-
-        k_proj_fp = copy.deepcopy(fp_attn.k_proj)
-        # merge scale_t to k_proj, (otherwise merge it to q_proj)
-        with torch.no_grad():
-            k_proj_fp.weight.mul_(scale_t)
-            if k_proj_fp.bias is not None:
-                k_proj_fp.bias.mul_(scale_t)
-
-        self.k_proj = PTQWrapper(
-            k_proj_fp,
-            qcfg=k_cfg,
-            fp_name=join_name(fp_name, "k_proj"),
         )
 
         mk = self._make_obs
@@ -167,14 +199,16 @@ class QuantLlamaAttention(QuantModuleBase):
         self.obs_attn_out = mk("attn_out")
         self.obs_attn_weights = mk("attn_weights")
         self.obs_attn_out_h = mk("attn_out_h")
+        self.obs_scale = mk("scale")
+        self.obs_logits_raw = mk("logits_raw")
 
         # kv cache
         self.obs_past_key = mk("past_key")
         self.obs_past_value = mk("past_value")
 
-        # New kv delta``
-        self.obs_new_k = mk("new_k")  # (B, n_kv, 1, H)
-        self.obs_new_v = mk("new_v")  # (B, n_kv, 1, H)
+        # New kv delta
+        self.obs_new_k = mk("new_k")  # (B, n_kv, S, H)
+        self.obs_new_v = mk("new_v")  # (B, n_kv, S, H)
 
         # Total KV after concat (used for matmul/attn)
         self.obs_present_key = mk("present_key")  # (B, max_seq, H)
@@ -189,10 +223,25 @@ class QuantLlamaAttention(QuantModuleBase):
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
     def _rot(self, t: torch.Tensor, o_x1, o_x2, o_cat):
+        """
+        Apply the profile-selected rotate-half primitive.
+
+        `rope='hf'` computes `(-x2, x1)`. `rope='pre_negated_sin'` assumes
+        the first half of the sine table has already been negated and therefore
+        computes `(x2, x1)`.
+        """
         x1, x2 = torch.chunk(t, 2, dim=-1)
         x1 = self._fq(x1, o_x1)
         x2 = self._fq(x2, o_x2)
-        return self._fq(torch.cat((x2, x1), dim=-1), o_cat)
+
+        if self.attn_options.rope == "hf":
+            first = -x2
+        elif self.attn_options.rope == "pre_negated_sin":
+            first = x2
+        else:
+            raise RuntimeError(f"Invalid RoPE option: {self.attn_options.rope!r}")
+
+        return self._fq(torch.cat((first, x1), dim=-1), o_cat)
 
     def _apply_rope(
         self,
@@ -206,10 +255,43 @@ class QuantLlamaAttention(QuantModuleBase):
         obs_sin,
         obs_rot,
     ):
+        """
+        Apply rotary position embedding to a Q or K tensor.
+        """
         t_half = self._rot(t, obs_x1, obs_x2, obs_cat)
         t_cos = self._fq(t * cos, obs_cos)
         t_sin = self._fq(t_half * sin, obs_sin)
         return self._fq(t_cos + t_sin, obs_rot)
+
+    def _apply_attention_scale_if_needed(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Apply runtime attention scaling when it was not fused into a projection.
+        """
+        if self.attn_options.scale_fusion == "none":
+            logits = self._fq(logits, self.obs_logits_raw)
+            scale = self._fq(self.attn_scale, self.obs_scale)
+            return logits * scale
+        return logits
+
+    @staticmethod
+    def _expand_rope_for_batched(t: torch.Tensor) -> torch.Tensor:
+        """
+        Convert a RoPE table to a shape broadcastable to `(B, heads, S, H)`.
+        """
+        if t.dim() == 2:
+            t = t.unsqueeze(0)
+        if t.dim() == 3:
+            t = t.unsqueeze(1)
+        return t
+
+    @staticmethod
+    def _expand_attention_mask_for_batched(t: torch.Tensor) -> torch.Tensor:
+        """
+        Convert an attention mask to a shape broadcastable to batched logits.
+        """
+        if t.dim() == 3:
+            t = t.unsqueeze(1)
+        return t
 
     def _get_layer_kv_from_cache(
         self,
@@ -452,7 +534,7 @@ class QuantLlamaAttention(QuantModuleBase):
 
         Supported cases:
         - None: build a causal mask slice.
-        - bool/int mask: convert to additive mask using 0 / -120.
+        - bool/int mask: convert to additive mask using 0 / configured fill value.
         - additive mask: use as-is.
 
         Args:
@@ -569,21 +651,7 @@ class QuantLlamaAttention(QuantModuleBase):
         cache_output_mode: CacheOutputMode,
     ) -> Cache | LayerKV:
         """
-        Finalize the cache object returned by forward.
-
-        Args:
-            past_key_value_in: Original input cache in HF `Cache` or legacy form.
-            new_k_parts: Per-head new key tensors of shape `(B, S, H)`.
-            new_v_parts: Per-head new value tensors of shape `(B, S, H)`.
-            present_k_parts: Per-head full key tensors of shape `(B, K, H)`.
-            present_v_parts: Per-head full value tensors of shape `(B, K, H)`.
-            cache_output_mode: Cache return policy.
-
-        Returns:
-            Cache object to return from forward:
-            - delta `(new_k, new_v)` if `cache_output_mode == "delta"`
-            - updated HF `Cache` if the input cache was an HF cache
-            - full present legacy tuple otherwise
+        Finalize the cache object returned by the unrolled forward path.
         """
         if cache_output_mode not in ("present", "delta"):
             raise ValueError(f"Unsupported cache_output_mode: {cache_output_mode!r}")
@@ -632,61 +700,77 @@ class QuantLlamaAttention(QuantModuleBase):
         )
         return present_k, present_v
 
-    def forward(
+    def _finalize_cache_output_batched(
         self,
-        hidden_states: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache | LayerKV] = None,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        cache_output_mode: CacheOutputMode = "present",
-        **kwargs,
+        *,
+        past_key_value_in: Optional[Cache | LayerKV],
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        present_k: torch.Tensor,
+        present_v: torch.Tensor,
+        cache_output_mode: CacheOutputMode,
+    ) -> Cache | LayerKV:
+        """
+        Finalize the cache object returned by the batched forward path.
+        """
+        if cache_output_mode not in ("present", "delta"):
+            raise ValueError(f"Unsupported cache_output_mode: {cache_output_mode!r}")
+
+        if cache_output_mode == "delta":
+            if torch.compiler.is_compiling() and isinstance(past_key_value_in, Cache):
+                if self.layer_idx is None:
+                    raise RuntimeError(
+                        "layer_idx must be set to update an HF Cache object."
+                    )
+                past_key_value_in.layers[self.layer_idx] = type(
+                    past_key_value_in.layers[self.layer_idx]
+                )()
+                past_key_value_in.update(
+                    new_k, new_v, self.layer_idx, cache_kwargs=None
+                )
+                self._get_layer_kv_from_cache(
+                    past_key_value_in,
+                    k_obs=self.obs_new_k,
+                    v_obs=self.obs_new_v,
+                    write_back=True,
+                )
+            return new_k, new_v
+
+        if isinstance(past_key_value_in, Cache):
+            if self.layer_idx is None:
+                raise RuntimeError(
+                    "layer_idx must be set to update an HF Cache object."
+                )
+            past_key_value_in.update(new_k, new_v, self.layer_idx, cache_kwargs=None)
+            if torch.compiler.is_compiling():
+                self._get_layer_kv_from_cache(
+                    past_key_value_in,
+                    k_obs=self.obs_past_key,
+                    v_obs=self.obs_past_value,
+                    write_back=True,
+                )
+            return past_key_value_in
+
+        return present_k, present_v
+
+    def _forward_unrolled(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        attn_mask: torch.Tensor,
+        past_key_value: Optional[LayerKV],
+        past_key_value_in: Optional[Cache | LayerKV],
+        use_cache: Optional[bool],
+        cache_output_mode: CacheOutputMode,
     ):
         """
-        Run quantized Llama attention.
-
-        Args:
-            hidden_states: Input hidden states with shape `(B, S, D)`.
-            position_embeddings: Rotary cosine and sine tensors.
-            attention_mask: Optional additive or boolean attention mask.
-            past_key_value: Optional cache in HF `Cache` or legacy tuple form.
-            use_cache: Whether to return cache output.
-            cache_position: Unused compatibility placeholder.
-            cache_output_mode: Cache return policy.
-                - "present": return the full present cache.
-                - "delta": return only the newly produced K/V.
-            **kwargs: Extra compatibility arguments ignored by this wrapper.
-
-        Returns:
-            A tuple of:
-                - attention output
-                - attention weights
-                - optional cache output when `use_cache=True`
+        Run the NPU-export-friendly per-head unrolled attention path.
         """
-        del cache_position, kwargs
-
-        past_key_value_in = past_key_value
-        past_key_value = self._normalize_past_key_value(past_key_value)
-
-        hidden = self._fq(hidden_states, self.obs_hidden)
-        B, S, _ = hidden.shape
-        H = self.head_dim
-
-        q = self.q_proj(hidden).view(B, S, self.num_heads, H)
-        k = self.k_proj(hidden).view(B, S, self.num_kv_heads, H)
-        v = self.v_proj(hidden).view(B, S, self.num_kv_heads, H)
-
-        cos, sin = position_embeddings
-        cos = self._fq(cos, self.obs_cos)
-        sin = self._fq(sin, self.obs_sin)
-
-        attn_mask = self._build_attention_mask(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            past_key_value=past_key_value,
-            device=hidden.device,
-        )
+        B, S, _, _ = q.shape
 
         attn_weights_parts: list[torch.Tensor] = []
         attn_out_parts: list[torch.Tensor] = []
@@ -749,10 +833,9 @@ class QuantLlamaAttention(QuantModuleBase):
                     self.obs_q_rot,
                 )
 
-                logits_i = self._fq(
-                    q_i @ present_k_i.transpose(-2, -1),
-                    self.obs_logits,
-                )
+                logits_i = q_i @ present_k_i.transpose(-2, -1)
+                logits_i = self._apply_attention_scale_if_needed(logits_i)
+                logits_i = self._fq(logits_i, self.obs_logits)
 
                 assert attn_mask.shape[-2:] == logits_i.shape[-2:], (
                     attn_mask.shape,
@@ -798,6 +881,195 @@ class QuantLlamaAttention(QuantModuleBase):
 
         return outputs
 
+    def _forward_batched(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        attn_mask: torch.Tensor,
+        past_key_value: Optional[LayerKV],
+        past_key_value_in: Optional[Cache | LayerKV],
+        use_cache: Optional[bool],
+        cache_output_mode: CacheOutputMode,
+    ):
+        """
+        Run a HF-like batched attention path optimized for GPU evaluation.
+        """
+        B, S, _, _ = q.shape
+
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        cos = self._expand_rope_for_batched(cos)
+        sin = self._expand_rope_for_batched(sin)
+
+        q = self._apply_rope(
+            q,
+            cos,
+            sin,
+            self.obs_q_x1,
+            self.obs_q_x2,
+            self.obs_q_cat,
+            self.obs_q_cos,
+            self.obs_q_sin,
+            self.obs_q_rot,
+        )
+        k = self._apply_rope(
+            k,
+            cos,
+            sin,
+            self.obs_k_x1,
+            self.obs_k_x2,
+            self.obs_k_cat,
+            self.obs_k_cos,
+            self.obs_k_sin,
+            self.obs_k_rot,
+        )
+
+        new_k = self._fq(k, self.obs_new_k)
+        new_v = self._fq(v, self.obs_new_v)
+
+        if past_key_value is None:
+            present_k = self._fq(new_k, self.obs_present_key)
+            present_v = self._fq(new_v, self.obs_present_value)
+        else:
+            past_k, past_v = past_key_value
+            present_k = self._fq(
+                torch.cat([past_k, new_k], dim=2),
+                self.obs_present_key,
+            )
+            present_v = self._fq(
+                torch.cat([past_v, new_v], dim=2),
+                self.obs_present_value,
+            )
+
+        if self.kv_rep != 1:
+            present_k_for_attn = present_k.repeat_interleave(self.kv_rep, dim=1)
+            present_v_for_attn = present_v.repeat_interleave(self.kv_rep, dim=1)
+        else:
+            present_k_for_attn = present_k
+            present_v_for_attn = present_v
+
+        logits = q @ present_k_for_attn.transpose(-2, -1)
+        logits = self._apply_attention_scale_if_needed(logits)
+        logits = self._fq(logits, self.obs_logits)
+
+        attn_mask = self._expand_attention_mask_for_batched(attn_mask)
+        assert attn_mask.shape[-2:] == logits.shape[-2:], (
+            attn_mask.shape,
+            logits.shape,
+        )
+
+        logits = self._fq(logits + attn_mask, self.obs_mask_add)
+
+        attn_weights = torch.softmax(logits, dim=-1, dtype=torch.float32).to(q.dtype)
+        attn_weights = self._fq(attn_weights, self.obs_softmax)
+        attn_weights = self._fq(attn_weights, self.obs_attn_weights)
+
+        attn_out_h = self._fq(attn_weights @ present_v_for_attn, self.obs_attn_out)
+        attn_out_h = self._fq(attn_out_h, self.obs_attn_out_h)
+
+        attn_out = attn_out_h.transpose(1, 2).contiguous().reshape(B, S, -1)
+        out = self.o_proj(attn_out)
+
+        outputs = (out, attn_weights)
+
+        if use_cache:
+            cache_out = self._finalize_cache_output_batched(
+                past_key_value_in=past_key_value_in,
+                new_k=new_k,
+                new_v=new_v,
+                present_k=present_k,
+                present_v=present_v,
+                cache_output_mode=cache_output_mode,
+            )
+            outputs += (cache_out,)  # type: ignore[assignment]
+
+        return outputs
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Cache | LayerKV] = None,
+        use_cache: Optional[bool] = False,
+        cache_position: Optional[torch.LongTensor] = None,
+        cache_output_mode: CacheOutputMode = "present",
+        **kwargs,
+    ):
+        """
+        Run quantized Llama attention.
+
+        Args:
+            cache_output_mode: Cache return policy.
+                - "present": return the full present cache.
+                - "delta": return only the newly produced K/V.
+
+        Returns:
+            A tuple of:
+                - attention output
+                - attention weights
+                - optional cache output when `use_cache=True`
+        """
+        del cache_position, kwargs
+
+        past_key_value_in = past_key_value
+        past_key_value = self._normalize_past_key_value(past_key_value)
+
+        hidden = self._fq(hidden_states, self.obs_hidden)
+        B, S, _ = hidden.shape
+        H = self.head_dim
+
+        q = self.q_proj(hidden).view(B, S, self.num_heads, H)
+        k = self.k_proj(hidden).view(B, S, self.num_kv_heads, H)
+        v = self.v_proj(hidden).view(B, S, self.num_kv_heads, H)
+
+        cos, sin = position_embeddings
+        cos = self._fq(cos, self.obs_cos)
+        sin = self._fq(sin, self.obs_sin)
+
+        attn_mask = self._build_attention_mask(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            past_key_value=past_key_value,
+            device=hidden.device,
+        )
+
+        if self.attn_options.layout == "batched":
+            return self._forward_batched(
+                q=q,
+                k=k,
+                v=v,
+                cos=cos,
+                sin=sin,
+                attn_mask=attn_mask,
+                past_key_value=past_key_value,
+                past_key_value_in=past_key_value_in,
+                use_cache=use_cache,
+                cache_output_mode=cache_output_mode,
+            )
+
+        if self.attn_options.layout == "unrolled":
+            return self._forward_unrolled(
+                q=q,
+                k=k,
+                v=v,
+                cos=cos,
+                sin=sin,
+                attn_mask=attn_mask,
+                past_key_value=past_key_value,
+                past_key_value_in=past_key_value_in,
+                use_cache=use_cache,
+                cache_output_mode=cache_output_mode,
+            )
+
+        raise RuntimeError(f"Invalid attention layout: {self.attn_options.layout!r}")
+
     def _all_observers(self):
         # local first
         yield from (
@@ -818,6 +1090,8 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_k_rot,
             self.obs_attn_mask,
             self.obs_logits,
+            self.obs_logits_raw,
+            self.obs_scale,
             self.obs_mask_add,
             self.obs_softmax,
             self.obs_attn_out,
@@ -835,8 +1109,35 @@ class QuantLlamaAttention(QuantModuleBase):
             yield from m._all_observers()
 
     def as_export_module(
-        self, mode: ExportMode = "prefill", *, return_kv: bool = True
+        self,
+        mode: ExportMode = "prefill",
+        *,
+        return_kv: bool = True,
+        require_npu_profile: bool = False,
     ) -> nn.Module:
+        """
+        Return an export adapter for the requested attention mode.
+
+        Parameters
+        ----------
+        mode : ExportMode
+            Export mode, either ``"prefill"`` or ``"decode"``.
+        return_kv : bool
+            Whether the adapter should return the newly produced KV tensors.
+        require_npu_profile : bool
+            If True, reject configurations that do not match the NPU-export
+            profile. This protects export flows from accidentally using the
+            HF-like evaluation graph.
+        """
+        if require_npu_profile and not is_npu_export_attention_options(
+            self.attn_options
+        ):
+            raise ValueError(
+                "NPU export requires execution profile 'npu_export'. "
+                "Set PTQConfig.model_args['profile'] "
+                "to 'npu_export'."
+            )
+
         if mode == "prefill":
             return LlamaAttentionPrefillExportAdapter(self, return_kv=return_kv)
         if mode == "decode":

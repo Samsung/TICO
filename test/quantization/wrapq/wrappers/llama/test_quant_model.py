@@ -36,6 +36,7 @@ class TestQuantLlamaModel(unittest.TestCase):
     seq_len: int
     vocab_size: int
     fp_model: torch.nn.Module
+    head_dim: int
 
     @classmethod
     def setUpClass(cls):
@@ -46,12 +47,13 @@ class TestQuantLlamaModel(unittest.TestCase):
 
         cls.seq_len = 16
         cls.vocab_size = 10000
+        cls.head_dim = 4
 
         cfg = LlamaConfig(
             hidden_size=8,
             num_attention_heads=2,
             num_key_value_heads=1,
-            head_dim=4,
+            head_dim=cls.head_dim,
             attention_bias=False,
             attention_dropout=0.0,
             attn_implementation="eager",
@@ -106,6 +108,70 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertGreater(diff, 0.0)
         self.assertLess(diff, 0.4)
         self.assertEqual(fp_out.shape, q_out.shape)
+
+    def test_reference_eval_profile_propagates_to_layers_and_attention(self):
+        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg)
+
+        first_layer = qmodel.layers[0].wrapped
+        first_attn = first_layer.self_attn.wrapped
+
+        self.assertEqual(qmodel.attn_options.scale_fusion, "none")
+        self.assertEqual(qmodel.attn_options.rope, "hf")
+        self.assertEqual(qmodel.attn_options.layout, "batched")
+
+        self.assertEqual(first_layer.attn_options.scale_fusion, "none")
+        self.assertEqual(first_layer.attn_options.rope, "hf")
+        self.assertEqual(first_layer.attn_options.layout, "batched")
+
+        self.assertEqual(first_attn.attn_options.scale_fusion, "none")
+        self.assertEqual(first_attn.attn_options.rope, "hf")
+        self.assertEqual(first_attn.attn_options.layout, "batched")
+
+    def test_attention_specific_profile_override_propagates(self):
+        qcfg = PTQConfig(
+            model_args={
+                "profile": "reference_eval",
+                "attention": {
+                    "profile": "npu_export",
+                },
+            }
+        )
+        qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg)
+
+        first_attn = qmodel.layers[0].wrapped.self_attn.wrapped
+
+        self.assertEqual(qmodel.attn_options.scale_fusion, "k_proj")
+        self.assertEqual(qmodel.attn_options.rope, "pre_negated_sin")
+        self.assertEqual(qmodel.attn_options.layout, "unrolled")
+        self.assertEqual(first_attn.attn_options.scale_fusion, "k_proj")
+        self.assertEqual(first_attn.attn_options.rope, "pre_negated_sin")
+        self.assertEqual(first_attn.attn_options.layout, "unrolled")
+
+    def test_rope_sin_template_convention_depends_on_profile(self):
+        qmodel_ref = QuantLlamaModel(
+            self.fp_model,
+            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+        )
+        qmodel_npu = QuantLlamaModel(
+            self.fp_model,
+            qcfg=PTQConfig(model_args={"profile": "npu_export"}),
+        )
+
+        half_dim = self.head_dim // 2
+
+        torch.testing.assert_close(
+            qmodel_ref.rope_cos_template,
+            qmodel_npu.rope_cos_template,
+        )
+        torch.testing.assert_close(
+            qmodel_npu.rope_sin_template[..., :half_dim],
+            -qmodel_ref.rope_sin_template[..., :half_dim],
+        )
+        torch.testing.assert_close(
+            qmodel_npu.rope_sin_template[..., half_dim:],
+            qmodel_ref.rope_sin_template[..., half_dim:],
+        )
 
     def test_layer_qscheme_override_propagates_to_projection_weight_observer(self):
         """

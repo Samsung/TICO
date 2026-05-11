@@ -82,6 +82,64 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         past_v = torch.randn(batch_size, self.n_kv, past_len, self.head_dim)
         return past_k, past_v
 
+    def test_reference_eval_profile_propagates_to_self_attention(self):
+        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qlayer = QuantLlamaDecoderLayer(self.fp_layer, qcfg=qcfg, layer_idx=0)
+
+        self.assertEqual(qlayer.attn_options.scale_fusion, "none")
+        self.assertEqual(qlayer.attn_options.rope, "hf")
+        self.assertEqual(qlayer.attn_options.layout, "batched")
+
+        qattn = qlayer.self_attn.wrapped
+        self.assertEqual(qattn.attn_options.scale_fusion, "none")
+        self.assertEqual(qattn.attn_options.rope, "hf")
+        self.assertEqual(qattn.attn_options.layout, "batched")
+
+    def test_attention_specific_profile_override_propagates_to_self_attention(self):
+        qcfg = PTQConfig(
+            model_args={
+                "profile": "reference_eval",
+                "attention": "npu_export",
+            }
+        )
+        qlayer = QuantLlamaDecoderLayer(self.fp_layer, qcfg=qcfg, layer_idx=0)
+
+        self.assertEqual(qlayer.attn_options.scale_fusion, "k_proj")
+        self.assertEqual(qlayer.attn_options.rope, "pre_negated_sin")
+        self.assertEqual(qlayer.attn_options.layout, "unrolled")
+
+        qattn = qlayer.self_attn.wrapped
+        self.assertEqual(qattn.attn_options.scale_fusion, "k_proj")
+        self.assertEqual(qattn.attn_options.rope, "pre_negated_sin")
+        self.assertEqual(qattn.attn_options.layout, "unrolled")
+
+    def test_rope_sin_template_convention_depends_on_profile(self):
+        qlayer_ref = QuantLlamaDecoderLayer(
+            self.fp_layer,
+            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+            layer_idx=0,
+        )
+        qlayer_npu = QuantLlamaDecoderLayer(
+            self.fp_layer,
+            qcfg=PTQConfig(model_args={"profile": "npu_export"}),
+            layer_idx=0,
+        )
+
+        half_dim = self.head_dim // 2
+
+        torch.testing.assert_close(
+            qlayer_ref.rope_cos_template,
+            qlayer_npu.rope_cos_template,
+        )
+        torch.testing.assert_close(
+            qlayer_npu.rope_sin_template[..., :half_dim],
+            -qlayer_ref.rope_sin_template[..., :half_dim],
+        )
+        torch.testing.assert_close(
+            qlayer_npu.rope_sin_template[..., half_dim:],
+            qlayer_ref.rope_sin_template[..., half_dim:],
+        )
+
     def test_mode_transitions_prefill(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
         self.assertIs(qlayer._mode, Mode.NO_QUANT)

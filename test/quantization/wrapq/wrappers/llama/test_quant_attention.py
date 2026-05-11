@@ -64,21 +64,45 @@ class TestQuantLlamaAttention(unittest.TestCase):
         cls.n_h = cfg.num_attention_heads
         cls.hidden_size = cfg.hidden_size
 
-    def _make_qattn(self) -> QuantLlamaAttention:
-        qattn = QuantLlamaAttention(self.fp_attn, layer_idx=0)
+    def _make_qattn(self, qcfg: PTQConfig | None = None) -> QuantLlamaAttention:
+        qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg, layer_idx=0)
         qattn.enable_calibration()
 
         for _ in range(3):
             x = torch.randn(2, 4, self.hidden_size)
-            pos = self._rand_rope(2, 4)
+            pos = self._rand_rope_for(qattn, 2, 4)
             _ = qattn(x, pos)
 
         qattn.freeze_qparams()
         return qattn
 
-    def _rand_rope(self, batch_size: int, seq_len: int):
+    def _rand_rope(
+        self,
+        batch_size: int,
+        seq_len: int,
+        *,
+        pre_negated_sin: bool = False,
+    ):
         emb = torch.randn(batch_size, seq_len, self.head_dim)
-        return emb.cos(), emb.sin()
+        cos = emb.cos()
+        sin = emb.sin()
+        if pre_negated_sin:
+            half_dim = self.head_dim // 2
+            sin = sin.clone()
+            sin[..., :half_dim] = -sin[..., :half_dim]
+        return cos, sin
+
+    def _rand_rope_for(
+        self,
+        qattn: QuantLlamaAttention,
+        batch_size: int,
+        seq_len: int,
+    ):
+        return self._rand_rope(
+            batch_size,
+            seq_len,
+            pre_negated_sin=qattn.attn_options.rope == "pre_negated_sin",
+        )
 
     def _rand_additive_mask(self, batch_size: int, q_len: int, k_len: int):
         mask = torch.zeros(batch_size, q_len, k_len, dtype=torch.float32)
@@ -101,6 +125,123 @@ class TestQuantLlamaAttention(unittest.TestCase):
         past_v = torch.randn(batch_size, self.n_kv, past_len, self.head_dim)
         return past_k, past_v
 
+    def test_default_profile_preserves_npu_export_options(self):
+        qattn = QuantLlamaAttention(self.fp_attn)
+
+        self.assertEqual(qattn.attn_options.scale_fusion, "k_proj")
+        self.assertEqual(qattn.attn_options.rope, "pre_negated_sin")
+        self.assertEqual(qattn.attn_options.layout, "unrolled")
+
+    def test_reference_eval_profile_selects_batched_hf_like_path(self):
+        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg)
+
+        self.assertEqual(qattn.attn_options.scale_fusion, "none")
+        self.assertEqual(qattn.attn_options.rope, "hf")
+        self.assertEqual(qattn.attn_options.layout, "batched")
+
+    def test_projection_scale_fusion_is_profile_controlled(self):
+        scale = float(getattr(self.fp_attn, "scaling", self.head_dim**-0.5))
+
+        qattn_npu = QuantLlamaAttention(self.fp_attn)
+        torch.testing.assert_close(
+            qattn_npu.q_proj.wrapped.module.weight,
+            self.fp_attn.q_proj.weight,
+        )
+        torch.testing.assert_close(
+            qattn_npu.k_proj.wrapped.module.weight,
+            self.fp_attn.k_proj.weight * scale,
+        )
+
+        qattn_ref = QuantLlamaAttention(
+            self.fp_attn,
+            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+        )
+        torch.testing.assert_close(
+            qattn_ref.q_proj.wrapped.module.weight,
+            self.fp_attn.q_proj.weight,
+        )
+        torch.testing.assert_close(
+            qattn_ref.k_proj.wrapped.module.weight,
+            self.fp_attn.k_proj.weight,
+        )
+
+        qattn_q_fused = QuantLlamaAttention(
+            self.fp_attn,
+            qcfg=PTQConfig(
+                model_args={
+                    "attention": {
+                        "scale_fusion": "q_proj",
+                        "rope": "hf",
+                        "layout": "batched",
+                    }
+                }
+            ),
+        )
+        torch.testing.assert_close(
+            qattn_q_fused.q_proj.wrapped.module.weight,
+            self.fp_attn.q_proj.weight * scale,
+        )
+        torch.testing.assert_close(
+            qattn_q_fused.k_proj.wrapped.module.weight,
+            self.fp_attn.k_proj.weight,
+        )
+
+    def test_reference_eval_and_npu_export_profiles_are_float_equivalent(self):
+        torch.manual_seed(11)
+
+        qattn_ref = QuantLlamaAttention(
+            self.fp_attn,
+            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+        )
+        qattn_npu = QuantLlamaAttention(
+            self.fp_attn,
+            qcfg=PTQConfig(model_args={"profile": "npu_export"}),
+        )
+
+        batch_size, seq_len = 2, 5
+        x = torch.randn(batch_size, seq_len, self.hidden_size)
+        cos, sin = self._rand_rope(batch_size, seq_len)
+        _, pre_negated_sin = self._rand_rope(
+            batch_size,
+            seq_len,
+            pre_negated_sin=True,
+        )
+        # Keep the same sine magnitudes for both profiles and only switch the
+        # convention-dependent sign.
+        pre_negated_sin = sin.clone()
+        pre_negated_sin[..., : self.head_dim // 2] = -pre_negated_sin[
+            ..., : self.head_dim // 2
+        ]
+        mask = torch.zeros(batch_size, seq_len, seq_len)
+
+        with torch.no_grad():
+            ref_out, ref_attn = qattn_ref(
+                x,
+                (cos, sin),
+                attention_mask=mask,
+            )
+            npu_out, npu_attn = qattn_npu(
+                x,
+                (cos, pre_negated_sin),
+                attention_mask=mask,
+            )
+
+        torch.testing.assert_close(ref_out, npu_out, rtol=1e-5, atol=1e-5)
+        torch.testing.assert_close(ref_attn, npu_attn, rtol=1e-5, atol=1e-5)
+
+    def test_as_export_module_can_require_npu_profile(self):
+        qattn_npu = QuantLlamaAttention(self.fp_attn)
+        adapter = qattn_npu.as_export_module("prefill", require_npu_profile=True)
+        self.assertIsInstance(adapter, LlamaAttentionPrefillExportAdapter)
+
+        qattn_ref = QuantLlamaAttention(
+            self.fp_attn,
+            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+        )
+        with self.assertRaises(ValueError):
+            qattn_ref.as_export_module("prefill", require_npu_profile=True)
+
     def test_mode_transitions_prefill(self):
         qattn = QuantLlamaAttention(self.fp_attn)
         self.assertIs(qattn._mode, Mode.NO_QUANT)
@@ -109,7 +250,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertIs(qattn._mode, Mode.CALIB)
 
         x = torch.randn(2, 5, self.hidden_size)
-        pos = self._rand_rope(2, 5)
+        pos = self._rand_rope_for(qattn, 2, 5)
         _ = qattn(x, pos)
 
         qattn.freeze_qparams()
@@ -124,7 +265,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         batch_size = 1
         x = torch.randn(batch_size, 1, self.hidden_size)
-        pos = self._rand_rope(batch_size, 1)
+        pos = self._rand_rope_for(qattn, batch_size, 1)
         past = self._rand_past(batch_size, self.max_seq - 1)
         mask = self._rand_additive_mask(batch_size, 1, self.max_seq)
 
@@ -140,19 +281,26 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertIs(qattn._mode, Mode.QUANT)
 
     def test_forward_diff_prefill(self):
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg)
         qattn.enable_calibration()
         for _ in range(4):
             inp = torch.randn(2, 6, self.hidden_size)
-            pos = self._rand_rope(2, 6)
-            _ = qattn(inp, pos)
+            pos = self._rand_rope_for(qattn, 2, 6)
+            mask = torch.zeros(2, 6, 6)
+            _ = qattn(inp, pos, attention_mask=mask)
         qattn.freeze_qparams()
 
         x = torch.randn(2, 6, self.hidden_size)
-        pos = self._rand_rope(2, 6)
+        pos = self._rand_rope_for(qattn, 2, 6)
+        mask = torch.zeros(2, 6, 6)
         with torch.no_grad():
-            q_out, _ = qattn(x, pos)
-            fp_out = self.fp_attn(x, position_embeddings=pos, attention_mask=None)[0]
+            q_out, _ = qattn(x, pos, attention_mask=mask)
+            fp_out = self.fp_attn(
+                x,
+                position_embeddings=pos,
+                attention_mask=mask.unsqueeze(1),
+            )[0]
 
         diff = (fp_out - q_out).abs().mean().item()
         self.assertGreater(diff, 0.0)
@@ -162,19 +310,20 @@ class TestQuantLlamaAttention(unittest.TestCase):
     def test_forward_with_float_attention_mask_prefill(self):
         torch.manual_seed(123)
 
-        qattn = QuantLlamaAttention(self.fp_attn)
+        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg)
         batch_size, seq_len = 2, 4
         float_mask = torch.zeros(batch_size, seq_len, seq_len)
 
         qattn.enable_calibration()
         for _ in range(2):
             x = torch.randn(batch_size, seq_len, self.hidden_size)
-            pos = self._rand_rope(batch_size, seq_len)
+            pos = self._rand_rope_for(qattn, batch_size, seq_len)
             _ = qattn(x, pos, attention_mask=float_mask)
         qattn.freeze_qparams()
 
         x = torch.randn(batch_size, seq_len, self.hidden_size)
-        pos = self._rand_rope(batch_size, seq_len)
+        pos = self._rand_rope_for(qattn, batch_size, seq_len)
         with torch.no_grad():
             q_out, attn_w = qattn(x, pos, attention_mask=float_mask)
             fp_out = self.fp_attn(
@@ -195,7 +344,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         batch_size = 2
         seq_len = 4
         x = torch.randn(batch_size, seq_len, self.hidden_size)
-        pos = self._rand_rope(batch_size, seq_len)
+        pos = self._rand_rope_for(qattn, batch_size, seq_len)
         bool_mask = self._rand_bool_mask(batch_size, seq_len, seq_len)
 
         with torch.no_grad():
@@ -212,7 +361,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         batch_size = 2
         seq_prefill = 4
         x0 = torch.randn(batch_size, seq_prefill, self.hidden_size)
-        pos0 = self._rand_rope(batch_size, seq_prefill)
+        pos0 = self._rand_rope_for(qattn, batch_size, seq_prefill)
 
         with torch.no_grad():
             out0, attn_w0, present0 = qattn(
@@ -233,7 +382,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         seq_decode = 1
         x1 = torch.randn(batch_size, seq_decode, self.hidden_size)
-        pos1 = self._rand_rope(batch_size, seq_decode)
+        pos1 = self._rand_rope_for(qattn, batch_size, seq_decode)
         mask1 = self._rand_additive_mask(
             batch_size, seq_decode, seq_prefill + seq_decode
         )
@@ -271,7 +420,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         batch_size = 1
         x = torch.randn(batch_size, 1, self.hidden_size)
-        pos = self._rand_rope(batch_size, 1)
+        pos = self._rand_rope_for(qattn, batch_size, 1)
         mask = self._rand_additive_mask(batch_size, 1, self.max_seq)
         past_k, past_v = self._rand_past(batch_size, self.max_seq - 1)
 
@@ -294,7 +443,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         qattn = self._make_qattn()
 
         x = torch.randn(1, 1, self.hidden_size)
-        pos = self._rand_rope(1, 1)
+        pos = self._rand_rope_for(qattn, 1, 1)
 
         with self.assertRaises(ValueError):
             _ = qattn(
@@ -311,7 +460,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         batch_size = 2
         seq_len = 4
         x = torch.randn(batch_size, seq_len, self.hidden_size)
-        pos = self._rand_rope(batch_size, seq_len)
+        pos = self._rand_rope_for(qattn, batch_size, seq_len)
 
         with torch.no_grad():
             hidden, new_k, new_v = adapter(
@@ -332,7 +481,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         q_len = 1
         past_len = self.max_seq - 1
         x = torch.randn(batch_size, q_len, self.hidden_size)
-        pos = self._rand_rope(batch_size, q_len)
+        pos = self._rand_rope_for(qattn, batch_size, q_len)
         past = self._rand_past(batch_size, past_len)
         mask = self._rand_additive_mask(batch_size, q_len, past_len + q_len)
 
@@ -357,7 +506,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         batch_size = 1
         q_len = 1
         x = torch.randn(batch_size, q_len, self.hidden_size)
-        pos = self._rand_rope(batch_size, q_len)
+        pos = self._rand_rope_for(qattn, batch_size, q_len)
         past = self._rand_past(batch_size, self.max_seq - 1)
         mask = self._rand_additive_mask(batch_size, q_len, self.max_seq)
 
@@ -402,13 +551,13 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         for _ in range(4):
             x = torch.randn(1, 1, self.hidden_size)
-            pos = self._rand_rope(1, 1)
+            pos = self._rand_rope_for(qattn, 1, 1)
             mask = self._rand_additive_mask(1, 1, self.max_seq)
             past = self._rand_past(1, self.max_seq - 1)
             _ = qattn(x, pos, mask, past, use_cache=True)
 
         x = torch.randn(1, 1, self.hidden_size)
-        pos = self._rand_rope(1, 1)
+        pos = self._rand_rope_for(qattn, 1, 1)
         mask = self._rand_additive_mask(1, 1, self.max_seq)
         past = self._rand_past(1, self.max_seq - 1)
 

@@ -13,9 +13,13 @@
 # limitations under the License.
 
 import copy
-from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional, Tuple, Type
 
+from tico.quantization.config.llama_attention import (
+    DEFAULT_EXECUTION_PROFILE,
+    ExecutionProfile,
+    normalize_execution_profile,
+)
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.utils import auto_qscheme_for
 from tico.quantization.wrapq.dtypes import DType
@@ -336,6 +340,7 @@ def build_llm_ptq_config(
     norm_weight_bits: Optional[int] = None,
     norm_weight_dtype: Optional[DType] = None,
     strict_wrap: bool = True,
+    profile: ExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> PTQConfig:
     """
     Build a PTQConfig for an LLM using model-family-aware override generation.
@@ -363,9 +368,7 @@ def build_llm_ptq_config(
         explicit override.
     default_observer : Type[ObserverBase], default=MinMaxObserver
         Observer class to instantiate when no explicit observer is provided
-        via overrides.
-        This should be a subclass of `ObserverBase` (e.g., MinMaxObserver,
-        EMAObserver). The class itself (not an instance) must be passed.
+        through overrides.
     linear_weight_bits : Optional[int], default=None
         Convenience bit-width for decoder-layer linear projection weights.
         Used only when `linear_weight_dtype` is not provided.
@@ -391,6 +394,12 @@ def build_llm_ptq_config(
     strict_wrap : bool, default=True
         If True, preparing a model will raise when a required module cannot be
         wrapped.
+    profile : ExecutionProfile, default="npu_export"
+        Execution profile stored as `PTQConfig.model_args["profile"]`.
+        "reference_eval" selects a GPU-friendly, Hugging Face-like path.
+        "npu_export" preserves the existing NPU-export-oriented graph.
+        Advanced users may override or extend `qcfg.model_args` directly
+        before calling `prepare()`.
 
     Returns
     -------
@@ -402,6 +411,11 @@ def build_llm_ptq_config(
     NotImplementedError
         If the requested `model_type` is not supported.
     """
+    profile = normalize_execution_profile(
+        profile,
+        context="build_llm_ptq_config.profile",
+    )
+
     resolved_linear_weight_dtype = _resolve_weight_dtype(
         dtype=linear_weight_dtype,
         bits=linear_weight_bits,
@@ -438,6 +452,7 @@ def build_llm_ptq_config(
         default_qscheme=default_qscheme,
         default_observer=default_observer,
         overrides=overrides,
+        model_args={"profile": profile},
         strict_wrap=strict_wrap,
     )
 
@@ -448,7 +463,10 @@ def _build_qwen3_vl_norm_override(
     norm_weight_dtype: Optional[DType],
 ) -> Dict[str, Any]:
     """
-    Build an override dictionary for Qwen3-VL norm modules (RMSNorm and LayerNorm).
+    Build an override dictionary for Qwen3-VL norm modules.
+
+    The generated override covers both RMSNorm-style observers used by text
+    modules and LayerNorm-style observers used by vision modules.
 
     Parameters
     ----------

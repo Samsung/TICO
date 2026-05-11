@@ -22,13 +22,23 @@
 #   4. Calibrate activations observers in a single pass over a text corpus.
 #   5. Inject GPTQ’s per-tensor weight scales / zero-points into the PTQ graph.
 #   6. Freeze all Q-params and compute Wikitext-2 perplexity.
-#   7. Save model/layers (optional)
+#   7. Save model/layers (optional).
+#
+# Llama attention execution profiles
+# -----------------------------------------------------------------------------
+#   --profile npu_export
+#       Preserves the current NPU-export-oriented attention graph.
+#
+#   --profile reference_eval
+#       Uses a Hugging Face-like attention path that is better suited for quick
+#       GPU evaluation and regression checks. Circle export is intentionally
+#       restricted to npu_export in this example.
 # =============================================================================
 
 import argparse
 import pathlib
 import random
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import tqdm
@@ -42,6 +52,10 @@ from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.cle import CLEConfig
 from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.llama_attention import (
+    DEFAULT_EXECUTION_PROFILE,
+    SUPPORTED_EXECUTION_PROFILES,
+)
 from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
@@ -169,7 +183,7 @@ def parse_args():
     parser.add_argument(
         "--nsamples_for_qcalibration",
         type=int,
-        default="128",  # almost standard
+        default=128,  # almost standard
         help="number of samples to be used in GPTQ/PTQ calibration",
     )
     parser.add_argument(
@@ -217,6 +231,15 @@ def parse_args():
         type=int,
         default=4,
         help="Number of bits to be used to quantize lm_head",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=list(SUPPORTED_EXECUTION_PROFILES),
+        default=DEFAULT_EXECUTION_PROFILE,
+        help=(
+            "Use 'reference_eval' for a GPU-friendly, HF-like attention path. "
+            "Use 'npu_export' for the NPU-export-oriented attention graph."
+        ),
     )
     parser.add_argument(
         "--eval_tasks",
@@ -450,7 +473,7 @@ def save_model_to(
 
 
 def make_random_position_embeddings(B, head_dim, DEVICE):
-    # RoPE tables for the *current token* only.
+    """Create random RoPE tables for one decode step."""
     cos = torch.randn(B, 1, head_dim, device=DEVICE)
     sin = torch.randn(B, 1, head_dim, device=DEVICE)
     return (cos, sin)
@@ -470,6 +493,7 @@ def make_random_decode_attn_mask(B, MAX_SEQ, DEVICE):
 # copied from quantize_decoder_layer_decode.py
 # -----------------------------------------------------------------------------
 def make_random_decode_batch(model, B, DEVICE, MAX_SEQ):
+    """Create a synthetic decode batch for per-layer export."""
     # TODO reduce code duplication
     D = model.config.hidden_size
     head_dim = getattr(model.config, "head_dim", D // model.config.num_attention_heads)
@@ -625,6 +649,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         return q_m
 
     print("Wrapping layers with PTQWrapper …")
+    print(f"Using PTQ execution profile: {args.profile}")
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -636,6 +661,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         lm_head_weight_bits=args.lm_head_weight_bits,
         norm_weight_dtype=DType.int(16),
         strict_wrap=True,
+        profile=args.profile,
     )
     q_m = prepare(q_m, qcfg)
 
@@ -741,6 +767,27 @@ def should_save(args, artifact: str) -> bool:
     )
 
 
+def circle_export_requested(args) -> bool:
+    """Return True if any Circle export artifact is requested."""
+    return should_save(args, "circle_full") or should_save(args, "circle_per_layer")
+
+
+def validate_export_profile(args) -> None:
+    """
+    Reject Circle export when the model was prepared with a non-export profile.
+    """
+    if not circle_export_requested(args):
+        return
+
+    if args.profile != "npu_export":
+        raise ValueError(
+            "Circle export in this example requires --profile npu_export. "
+            "Use --profile reference_eval for fast GPU evaluation without "
+            "circle_full/circle_per_layer saving, or rerun calibration with "
+            "--profile npu_export before exporting."
+        )
+
+
 def setup_runtime(args) -> tuple[torch.device, torch.dtype]:
     """
     Initialize deterministic settings and resolve runtime device / dtype.
@@ -759,6 +806,7 @@ def print_config(args, device: torch.device) -> None:
     print(f"Model            : {args.model}")
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
+    print(f"PTQ profile      : {args.profile}")
     print()
 
 
@@ -923,127 +971,142 @@ def compute_or_load_sensitivity(model, calib_inputs, args):
         return None
 
     if args.sensitivity_path is not None:
-        return torch.load(args.sensitivity_path)
+        path = pathlib.Path(args.sensitivity_path)
+        if path.exists():
+            print(f"Loading sensitivity information from {path.resolve()}")
+            return torch.load(path)
 
+    print("Computing sensitivity information for GPTQ SMSE ...")
     calibrator = SensitivityCalibrator(model, calib_inputs)
     sens = calibrator.compute_sensitivity_info()
 
     if should_save(args, "sensitivity"):
-        save_name = get_sensitivities_info_name(
-            model,
-            "wikitext",
-            args.seed,
-            len(calib_inputs),
+        default_path = pathlib.Path(
+            get_sensitivities_info_name(
+                model,
+                DATASET_NAME,
+                args.seed,
+                args.nsamples_for_qcalibration,
+            )
         )
-        save_path = pathlib.Path(args.output_dir, save_name)
-        print(f"Saving calibrated_sensitivities to {save_path}")
+        output_dir = pathlib.Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        save_path = output_dir / default_path.name
+        print(f"Saving sensitivity information to {save_path.resolve()}")
         torch.save(sens, save_path)
 
     return sens
 
 
-def quantize_using_GPTQ(model, calib_inputs, args):
+def apply_gptq(model, calib_inputs, args):
     """
-    Run the optional GPTQ weight-only quantization pass.
+    Optionally run GPTQ weight-only quantization.
     """
     if args.no_GPTQ:
+        print("Skipping GPTQ ...")
         return model
 
-    print("Applying GPTQ …")
-
-    # use_cache increases VRAM usage significantly, but GPTQ does not use decoding.
-    prev_use_cache = model.config.use_cache
-    model.config.use_cache = False
-
+    print("Applying GPTQ ...")
     sens = compute_or_load_sensitivity(model, calib_inputs, args)
+
     gptq_config = GPTQConfig(
         weight_bits=args.linear_weight_bits,
         perchannel=True,
         mse=args.gptq_mse,
         sensitivity=sens,
     )
-
     q_m = prepare(model, gptq_config, inplace=True)
+
+    iterator = calib_inputs
+    if not args.no_tqdm:
+        iterator = tqdm.tqdm(calib_inputs, desc="GPTQ calibration")
+
     with torch.no_grad():
-        for inp in calib_inputs:
+        for inp in iterator:
             q_m(inp.to(args.device))
 
-    q_m = convert(q_m, inplace=True)
-    model.config.use_cache = prev_use_cache
-    return q_m
+    return convert(q_m, inplace=True)
 
 
-def save_ptq_checkpoint(q_m, model, args) -> None:
+def get_pad_token_id(tokenizer) -> int:
     """
-    Save the PTQ checkpoint when requested by CLI flags.
+    Return a usable pad token id for export example inputs.
     """
-    if not should_save(args, "ptq_checkpoint"):
-        return
+    if tokenizer.pad_token_id is not None:
+        return int(tokenizer.pad_token_id)
+    if tokenizer.eos_token_id is not None:
+        return int(tokenizer.eos_token_id)
+    return 0
 
-    save_name = get_ptq_model_name(model, args)
-    save_path = pathlib.Path(args.output_dir, save_name)
-    print(f"Saving PTQ model to {save_path}")
-    torch.save(q_m, save_path)
+
+def get_export_input(calib_inputs, tokenizer, args) -> torch.Tensor:
+    """
+    Build the token tensor used for full-model export.
+    """
+    example = calib_inputs[0].cpu()
+    if args.max_seq_len is None:
+        return example
+    return pad_input(example, get_pad_token_id(tokenizer), args.max_seq_len).cpu()
 
 
 def save_requested_artifacts(q_m, tokenizer, calib_inputs, args) -> None:
     """
-    Save requested Circle artifacts after final evaluation.
+    Save requested artifacts after PTQ conversion.
     """
-    if should_save(args, "circle_per_layer"):
-        save_layers_to(
-            q_m,
-            args.max_seq_len,
-            args.output_dir,
-            prefill_decode=args.decode_calibration_steps != 0,
-        )
+    if args.output_dir is None or args.save is None:
+        return
+
+    output_dir = pathlib.Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if should_save(args, "ptq_checkpoint"):
+        save_path = output_dir / get_ptq_model_name(q_m.wrapped, args)
+        print(f"Saving PTQ checkpoint to {save_path.resolve()}")
+        torch.save(q_m, save_path)
 
     if should_save(args, "circle_full"):
-        pad_token_id = (
-            tokenizer.pad_token_id
-            if tokenizer.pad_token_id is not None
-            else tokenizer.eos_token_id
-        )
-        calib_input = pad_input(
-            calib_inputs[0], pad_token_id, max_seq_len=args.max_seq_len
-        )
+        export_input = get_export_input(calib_inputs, tokenizer, args)
         save_model_to(
             q_m,
-            calib_input,
-            args.output_dir,
-            prefill_decode=args.decode_calibration_steps != 0,
+            export_input,
+            output_dir,
+            prefill_decode=args.decode_calibration_steps > 0,
+        )
+
+    if should_save(args, "circle_per_layer"):
+        max_seq_len = args.max_seq_len or q_m.wrapped.config.max_position_embeddings
+        save_layers_to(
+            q_m,
+            max_seq_len,
+            output_dir,
+            prefill_decode=args.decode_calibration_steps > 0,
         )
 
 
-def run_pipeline(args) -> None:
-    """
-    Run the full Llama GPTQ + PTQ quantization pipeline.
-    """
+def main():
+    args = parse_args()
     print(args)
+    validate_export_profile(args)
 
     device, dtype = setup_runtime(args)
     print_config(args, device)
 
     model, tokenizer = load_model_and_tokenizer(args, dtype)
-    model = apply_spinquant(model, args)
-    model = apply_cle(model, args)
     configure_max_position_embeddings(model, args)
 
     dataset_test = load_eval_dataset(args)
     evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
     calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
-    q_m = quantize_using_GPTQ(model, calib_inputs, args)
-    q_m = quantize_using_PTQ(q_m, calib_inputs, args)
-    save_ptq_checkpoint(q_m, model, args)
+
+    model = apply_spinquant(model, args)
+    model = apply_cle(model, args)
+    model = apply_gptq(model, calib_inputs, args)
+
+    q_m = quantize_using_PTQ(model, calib_inputs, args)
 
     evaluate(q_m, tokenizer, dataset_test, args)
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
-
-
-def main() -> None:
-    args = parse_args()
-    run_pipeline(args)
 
 
 if __name__ == "__main__":

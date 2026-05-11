@@ -23,6 +23,7 @@ from tico.quantization.config.builders import (
     _weight_dtype_from_bits,
     build_llm_ptq_config,
 )
+from tico.quantization.config.llama_attention import DEFAULT_EXECUTION_PROFILE
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.utils import auto_qscheme_for
 from tico.quantization.wrapq.dtypes import DType
@@ -200,6 +201,7 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
         self.assertEqual(cfg.default_dtype, DType.uint(8))
         self.assertEqual(cfg.default_qscheme, QScheme.PER_TENSOR_ASYMM)
         self.assertFalse(cfg.strict_wrap)
+        self.assertEqual(cfg.model_args["profile"], DEFAULT_EXECUTION_PROFILE)
 
         self.assertEqual(
             cfg.overrides["model"]["embed_tokens"]["weight"]["qscheme"],
@@ -219,6 +221,32 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
             cfg.overrides["model"]["norm"]["qscheme"],
             QScheme.PER_TENSOR_SYMM,
         )
+
+    def test_build_llm_ptq_config_sets_reference_eval_profile(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            profile="reference_eval",
+        )
+
+        self.assertEqual(cfg.model_args, {"profile": "reference_eval"})
+
+    def test_build_llm_ptq_config_sets_npu_export_profile(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            profile="npu_export",
+        )
+
+        self.assertEqual(cfg.model_args, {"profile": "npu_export"})
+
+    def test_build_llm_ptq_config_invalid_profile_raises(self):
+        with self.assertRaises(ValueError):
+            build_llm_ptq_config(
+                model_type="llama",
+                num_hidden_layers=1,
+                profile="invalid_profile",  # type: ignore[arg-type]
+            )
 
     def test_explicit_dtype_takes_precedence_over_bits(self):
         cfg = build_llm_ptq_config(
@@ -297,6 +325,7 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
         self.assertEqual(cfg.default_dtype, DType.int(16))
         self.assertEqual(cfg.default_qscheme, QScheme.PER_TENSOR_SYMM)
         self.assertTrue(cfg.strict_wrap)
+        self.assertEqual(cfg.model_args, {"profile": DEFAULT_EXECUTION_PROFILE})
         self.assertIn("model", cfg.overrides)
         self.assertIn("layers", cfg.overrides["model"])
         self.assertEqual(cfg.overrides["model"]["layers"]["0"], {})

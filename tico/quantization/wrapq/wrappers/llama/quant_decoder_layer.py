@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from transformers.cache_utils import Cache
 
+from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
@@ -40,6 +41,8 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
     - Keep a single HF-compatible forward for both prefill and decode.
     - Preserve calibration/runtime semantics in the main wrapper.
     - Move export-specific static contracts to thin export adapters.
+    - Share the same Llama attention implementation profile used by
+      `QuantLlamaAttention` for RoPE table generation.
     """
 
     def __init__(
@@ -52,9 +55,11 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         layer_idx: Optional[int] = None,
     ):
         """
-        Q) Why do we need `return_type`?
-        A) Different versions of `transformers` wrap the decoder output in
-            different containers: a plain Tensor or a tuple.
+        Initialize the quantized decoder-layer wrapper.
+
+        `return_type` is needed because different versions of
+        `transformers` wrap decoder output in different containers: a plain
+        tensor or a tuple.
         """
         self.return_type = return_type
         if self.return_type is None:
@@ -66,6 +71,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
 
         super().__init__(qcfg, fp_name=fp_name)
 
+        self.attn_options = get_llama_attention_options(self.qcfg)
         self.layer_idx = layer_idx
 
         attn_cfg = qcfg.child("self_attn") if qcfg else None
@@ -157,7 +163,8 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         cos_t = emb.cos() * attn_scaling
         sin_t = emb.sin() * attn_scaling
         half_dim = head_dim // 2
-        sin_t[..., :half_dim] = -sin_t[..., :half_dim]
+        if self.attn_options.rope == "pre_negated_sin":
+            sin_t[..., :half_dim] = -sin_t[..., :half_dim]
         self.register_buffer(
             "rope_cos_template", cos_t.unsqueeze(0), persistent=False
         )  # [1, max_seq, head_dim]
@@ -173,6 +180,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Slice the static RoPE templates for the requested token range.
+        """
         assert isinstance(self.rope_cos_template, torch.Tensor)
         assert isinstance(self.rope_sin_template, torch.Tensor)
         end = start + seq_len
@@ -184,6 +194,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         self,
         past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
     ) -> int:
+        """
+        Return the cached sequence length for this layer.
+        """
         if past_key_value is None:
             return 0
         if isinstance(past_key_value, Cache):
@@ -202,6 +215,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]],
         past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return position embeddings that match this wrapper's RoPE convention.
+        """
         if position_embeddings is None:
             q_len = hidden_states.size(1)
             past_len = self._get_past_len(past_key_value)
@@ -228,7 +244,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
 
         Supported cases:
         - None: build a causal mask slice.
-        - bool mask: convert to additive mask using 0 / -120.
+        - bool mask: convert to additive mask using 0 / configured fill value.
         - additive mask: use as-is.
         """
         q_len = hidden_states.size(1)
@@ -271,6 +287,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         Optional[torch.Tensor],
         Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
     ]:
+        """
+        Normalize attention outputs into hidden, attention, and cache values.
+        """
         if not isinstance(attn_out, tuple):
             return attn_out, None, None
 
@@ -301,6 +320,11 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ):
+        """
+        Run the quantized decoder layer.
+        """
+        del position_ids
+
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -358,6 +382,9 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         yield self.obs_mlp_residual_out
 
     def as_export_module(self, mode: ExportMode = "prefill", *, return_kv: bool = True):
+        """
+        Return a decoder-layer export adapter for the requested mode.
+        """
         if mode == "prefill":
             return LlamaDecoderLayerPrefillExportAdapter(self, return_kv=return_kv)
         if mode == "decode":
