@@ -105,6 +105,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             torch.ops.aten.conv3d.default,
             torch.ops.aten.conv3d.padding,
             torch.ops.aten.conv_transpose2d.input,
+            torch.ops.aten.elu.default,
             torch.ops.aten.instance_norm.default,
             torch.ops.aten._safe_softmax.default,
             torch.ops.aten.relu6.default,  # Do not decompose to hardtanh
@@ -126,6 +127,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             torch.ops.aten.conv3d.default,
             torch.ops.aten.conv3d.padding,
             torch.ops.aten.conv_transpose2d.input,
+            torch.ops.aten.elu.default,
             torch.ops.aten.instance_norm.default,
             torch.ops.aten._safe_softmax.default,
             torch.ops.aten.relu6.default,  # Do not decompose to hardtanh

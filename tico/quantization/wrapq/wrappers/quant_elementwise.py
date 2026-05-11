@@ -123,6 +123,10 @@ def _gelu(x: torch.Tensor, approximate="none") -> torch.Tensor:
     return torch.nn.functional.gelu(x, approximate=approximate)
 
 
+def _elu(x: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.elu(x)
+
+
 @register(nn.Sigmoid)
 class QuantSigmoid(QuantElementwise):
     @staticmethod
@@ -149,6 +153,13 @@ class QuantGELU(QuantElementwise):
     @staticmethod
     def FUNC(x: torch.Tensor) -> torch.Tensor:
         return _gelu(x)
+
+
+@register(nn.ELU)
+class QuantELU(QuantElementwise):
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _elu(x)
 
 
 @try_register("transformers.activations.GELUTanh")

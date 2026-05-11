@@ -36,6 +36,7 @@ from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_elementwise import (
     QuantElementwise,
+    QuantELU,
     QuantGELU,
     QuantGELUTanh,
     QuantReLU,
@@ -50,6 +51,7 @@ ACTIVATIONS: List[
         torch.nn.Module, Callable[[torch.Tensor], torch.Tensor], Type[QuantModuleBase]
     ]
 ] = [
+    (torch.nn.ELU(), torch.nn.functional.elu, QuantELU),
     (torch.nn.Sigmoid(), torch.sigmoid, QuantSigmoid),
     (torch.nn.Tanh(), torch.tanh, QuantTanh),
     (torch.nn.ReLU(), torch.relu, QuantReLU),
