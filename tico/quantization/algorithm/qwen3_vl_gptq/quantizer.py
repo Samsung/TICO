@@ -27,6 +27,7 @@ from tico.quantization.algorithm.qwen3_vl_gptq.utils import (
     gather_single_batch_from_dict,
     gather_single_batch_from_list,
     get_deepstack_entry,
+    get_module_by_path,
     get_quantizable_layers,
     iter_cached_batches,
     maybe_move_cache_to_cpu,
@@ -192,6 +193,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 stage_module=components.lm_head,
                 module_name=module_name,
                 stage_desc="lm_head",
+            )
+            self._mirror_lm_head_quantizer_to_embedding_if_tied(
+                model=model,
+                module_name=module_name,
             )
 
         self._restore_model_cache(model, orig_use_cache)
@@ -487,7 +492,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         for local_name, submodule in subset.items():
             gptq_obj = GPTQ(submodule)
 
-            full_name = module_name.get(submodule)
+            full_name = module_name.get(submodule, local_name)
             if (
                 gptq_conf.sensitivity is not None
                 and isinstance(gptq_conf.sensitivity, dict)
@@ -497,8 +502,14 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             else:
                 cur_sensitivity = None
 
+            weight_bits = self._resolve_weight_bits(
+                gptq_conf,
+                full_module_name=full_name,
+                local_module_name=local_name,
+            )
+
             gptq_obj.quantizer.configure(
-                bits=gptq_conf.weight_bits,
+                bits=weight_bits,
                 perchannel=gptq_conf.perchannel,
                 sym=gptq_conf.symmetric,
                 mse=gptq_conf.mse,
@@ -507,6 +518,38 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             gptq_objs[local_name] = gptq_obj
 
         return gptq_objs
+
+    def _resolve_weight_bits(
+        self,
+        gptq_conf: Qwen3VLGPTQConfig,
+        *,
+        full_module_name: str,
+        local_module_name: str,
+    ) -> int:
+        """
+        Resolve the effective bit-width for one quantized submodule.
+
+        Resolution order:
+            1) exact full-module override
+            2) exact local-name override
+            3) full-name suffix override
+            4) default `weight_bits`
+        """
+        if full_module_name in gptq_conf.weight_bits_overrides:
+            return gptq_conf.weight_bits_overrides[full_module_name]
+
+        if local_module_name in gptq_conf.weight_bits_overrides:
+            return gptq_conf.weight_bits_overrides[local_module_name]
+
+        suffix_matches = [
+            bits
+            for pattern, bits in gptq_conf.weight_bits_overrides.items()
+            if full_module_name.endswith(f".{pattern}")
+        ]
+        if suffix_matches:
+            return suffix_matches[-1]
+
+        return gptq_conf.weight_bits
 
     def _make_add_batch_hook(
         self,
@@ -564,6 +607,55 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             full_name = module_name.get(submodule, local_name)
             self._quantizers[full_name] = gptq_obj.quantizer
             gptq_obj.free()
+
+    # ------------------------------------------------------------------
+    # Tied embedding helpers
+    # ------------------------------------------------------------------
+
+    def _mirror_lm_head_quantizer_to_embedding_if_tied(
+        self,
+        model: nn.Module,
+        module_name: dict[nn.Module, str],
+    ) -> None:
+        """
+        Reuse the `lm_head` quantizer for the input embedding when weights are tied.
+
+        Qwen3-VL ties `model.language_model.embed_tokens.weight` and
+        `lm_head.weight` in the usual language-model setup. GPTQ quantizes the
+        `lm_head`, not the embedding module itself. If both modules share the same
+        storage, the embedding observer must receive the same quantization
+        metadata during the later PTQ injection step.
+        """
+        gptq_conf = self.config
+        assert isinstance(gptq_conf, Qwen3VLGPTQConfig)
+
+        try:
+            embedding = get_module_by_path(model, gptq_conf.input_embedding_attr)
+            lm_head = get_module_by_path(model, gptq_conf.lm_head_attr)
+        except (AttributeError, ValueError):
+            return
+
+        if not self._modules_share_weight_storage(embedding, lm_head):
+            return
+
+        lm_head_name = module_name.get(lm_head, gptq_conf.lm_head_attr)
+        embedding_name = module_name.get(embedding, gptq_conf.input_embedding_attr)
+        lm_head_quantizer = self._quantizers.get(lm_head_name)
+        if lm_head_quantizer is None:
+            return
+
+        self._quantizers[embedding_name] = lm_head_quantizer
+
+    @staticmethod
+    def _modules_share_weight_storage(first: Any, second: Any) -> bool:
+        """
+        Return True when two modules expose the exact same weight storage.
+        """
+        first_weight = getattr(first, "weight", None)
+        second_weight = getattr(second, "weight", None)
+        if first_weight is None or second_weight is None:
+            return False
+        return first_weight.data_ptr() == second_weight.data_ptr()
 
     # ------------------------------------------------------------------
     # Stage input capture

@@ -80,6 +80,7 @@ class Qwen3VLGPTQConfig(GPTQConfig):
 
     language_model_attr: str = "model.language_model"
     text_layers_attr: str = "model.language_model.layers"
+    input_embedding_attr: str = "model.language_model.embed_tokens"
     lm_head_attr: str = "lm_head"
 
     @property
@@ -142,6 +143,7 @@ class Qwen3VLGPTQConfig(GPTQConfig):
             "visual_deepstack_mergers_attr": self.visual_deepstack_mergers_attr,
             "language_model_attr": self.language_model_attr,
             "text_layers_attr": self.text_layers_attr,
+            "input_embedding_attr": self.input_embedding_attr,
             "lm_head_attr": self.lm_head_attr,
         }
 
