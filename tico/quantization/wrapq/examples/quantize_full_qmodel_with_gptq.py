@@ -228,7 +228,7 @@ def parse_args():
     parser.add_argument(
         "--embedding_lm_head_weight_bits",
         type=int,
-        default=8,
+        default=4,
         help=(
             "Number of bits used for both tied input embedding and lm_head "
             "weight quantization."
