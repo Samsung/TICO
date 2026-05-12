@@ -38,7 +38,7 @@
 import argparse
 import pathlib
 import random
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import tqdm
@@ -78,6 +78,11 @@ DATASET_NAME = "wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
 TRAIN_SPLIT = "train"
 TEST_SPLIT = "test"
+
+# Llama-style tied embedding uses the same parameter for input embedding and
+# lm_head. Keep one effective bit-width for both use sites.
+EMBEDDING_FP_NAME = "model.embed_tokens"
+LM_HEAD_FP_NAME = "lm_head"
 
 
 def parse_args():
@@ -221,16 +226,13 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--embedding_weight_bits",
+        "--embedding_lm_head_weight_bits",
         type=int,
         default=8,
-        help="Number of bits to be used to quantize input Embedding",
-    )
-    parser.add_argument(
-        "--lm_head_weight_bits",
-        type=int,
-        default=4,
-        help="Number of bits to be used to quantize lm_head",
+        help=(
+            "Number of bits used for both tied input embedding and lm_head "
+            "weight quantization."
+        ),
     )
     parser.add_argument(
         "--profile",
@@ -357,6 +359,42 @@ def clear_gptq_quantizers(model: torch.nn.Module) -> None:
         delattr(model, "quantizers")
     if hasattr(model, "wrapped") and hasattr(model.wrapped, "quantizers"):
         delattr(model.wrapped, "quantizers")
+
+
+def has_tied_embedding_lm_head(model: torch.nn.Module) -> bool:
+    """Return True when the model config declares tied word embeddings."""
+    config = getattr(model, "config", None)
+    return bool(getattr(config, "tie_word_embeddings", False))
+
+
+def mirror_lm_head_quantizer_to_embedding_if_tied(
+    model: torch.nn.Module,
+    *,
+    assume_tied: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Reuse the GPTQ lm_head quantizer for embed_tokens when weights are tied."""
+    owners = [model]
+    wrapped = getattr(model, "wrapped", None)
+    if wrapped is not None:
+        owners.append(wrapped)
+
+    is_tied = assume_tied or any(has_tied_embedding_lm_head(owner) for owner in owners)
+    if not is_tied:
+        return
+
+    for owner in owners:
+        quantizers = getattr(owner, "quantizers", None)
+        if not isinstance(quantizers, dict):
+            continue
+        if LM_HEAD_FP_NAME not in quantizers:
+            continue
+        quantizers[EMBEDDING_FP_NAME] = quantizers[LM_HEAD_FP_NAME]
+        if verbose:
+            print(
+                f"Mirrored GPTQ quantizer from {LM_HEAD_FP_NAME} "
+                f"to {EMBEDDING_FP_NAME} for tied embedding."
+            )
 
 
 def parse_cle_pairs(raw_pairs: list[str] | None) -> list[tuple[str, str]]:
@@ -657,8 +695,8 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         activation_dtype=DType.int(16),
         default_qscheme=QScheme.PER_TENSOR_SYMM,
         linear_weight_bits=args.linear_weight_bits,
-        embedding_weight_bits=args.embedding_weight_bits,
-        lm_head_weight_bits=args.lm_head_weight_bits,
+        embedding_weight_bits=args.embedding_lm_head_weight_bits,
+        lm_head_weight_bits=args.embedding_lm_head_weight_bits,
         norm_weight_dtype=DType.int(16),
         strict_wrap=True,
         profile=args.profile,
@@ -807,6 +845,8 @@ def print_config(args, device: torch.device) -> None:
     print(f"Device           : {device.type}")
     print(f"DType            : {args.dtype}")
     print(f"PTQ profile      : {args.profile}")
+    print(f"Linear W bits    : {args.linear_weight_bits}")
+    print(f"Embed/Head W bits: {args.embedding_lm_head_weight_bits}")
     print()
 
 
@@ -1007,10 +1047,12 @@ def apply_gptq(model, calib_inputs, args):
         return model
 
     print("Applying GPTQ ...")
+    embedding_lm_head_tied = has_tied_embedding_lm_head(model)
     sens = compute_or_load_sensitivity(model, calib_inputs, args)
 
     gptq_config = GPTQConfig(
         weight_bits=args.linear_weight_bits,
+        weight_bits_overrides={LM_HEAD_FP_NAME: args.embedding_lm_head_weight_bits},
         perchannel=True,
         mse=args.gptq_mse,
         sensitivity=sens,
@@ -1025,7 +1067,13 @@ def apply_gptq(model, calib_inputs, args):
         for inp in iterator:
             q_m(inp.to(args.device))
 
-    return convert(q_m, inplace=True)
+    q_m = convert(q_m, inplace=True)
+    mirror_lm_head_quantizer_to_embedding_if_tied(
+        q_m,
+        assume_tied=embedding_lm_head_tied,
+        verbose=args.verbose,
+    )
+    return q_m
 
 
 def get_pad_token_id(tokenizer) -> int:
