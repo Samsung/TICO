@@ -20,6 +20,203 @@ import torch.nn as nn
 from transformers.cache_utils import Cache
 
 
+_FAKE_QUANT_META_KERNELS_REGISTERED = False
+
+
+def register_fake_quant_meta_kernels_for_dynamic_export() -> None:
+    """
+    Register fake kernels required by torch.export dynamic-shape tracing.
+
+    Dynamic-shape export uses FakeTensor/Meta tensors for shape propagation.
+    Some fake-quantization aten operators used by PTQ observers do not provide
+    fake/meta kernels in PyTorch, even though TICO can decompose those operators
+    after torch.export succeeds.
+
+    These fake kernels only describe output shapes for tracing. They do not
+    replace the real fake-quantization operators in the exported graph.
+    """
+    global _FAKE_QUANT_META_KERNELS_REGISTERED
+
+    if _FAKE_QUANT_META_KERNELS_REGISTERED:
+        return
+
+    def _already_registered(exc: RuntimeError) -> bool:
+        msg = str(exc)
+        return (
+            "already has a fake impl" in msg
+            or "already registered" in msg
+            or "register_fake" in msg
+            and "already" in msg
+        )
+
+    try:
+
+        @torch.library.register_fake(
+            "aten::_fake_quantize_per_tensor_affine_cachemask_tensor_qparams"
+        )
+        def _fake_quantize_per_tensor_affine_cachemask_tensor_qparams_fake(
+            self: torch.Tensor,
+            scale: torch.Tensor,
+            zero_point: torch.Tensor,
+            fake_quant_enabled: torch.Tensor,
+            quant_min: int,
+            quant_max: int,
+        ):
+            return (
+                torch.empty_like(self),
+                torch.empty_like(self, dtype=torch.bool),
+            )
+
+    except RuntimeError as e:
+        if not _already_registered(e):
+            raise
+
+    try:
+
+        @torch.library.register_fake("aten::fake_quantize_per_tensor_affine_cachemask")
+        def _fake_quantize_per_tensor_affine_cachemask_fake(
+            self: torch.Tensor,
+            scale: float,
+            zero_point: int,
+            quant_min: int,
+            quant_max: int,
+        ):
+            return (
+                torch.empty_like(self),
+                torch.empty_like(self, dtype=torch.bool),
+            )
+
+    except RuntimeError as e:
+        if not _already_registered(e):
+            raise
+
+    try:
+
+        @torch.library.register_fake("aten::fake_quantize_per_channel_affine_cachemask")
+        def _fake_quantize_per_channel_affine_cachemask_fake(
+            self: torch.Tensor,
+            scale: torch.Tensor,
+            zero_point: torch.Tensor,
+            axis: int,
+            quant_min: int,
+            quant_max: int,
+        ):
+            return (
+                torch.empty_like(self),
+                torch.empty_like(self, dtype=torch.bool),
+            )
+
+    except RuntimeError as e:
+        if not _already_registered(e):
+            raise
+
+    _FAKE_QUANT_META_KERNELS_REGISTERED = True
+
+
+def make_token_embedding_example_input(
+    qmodel: torch.nn.Module,
+    max_seq_len: int,
+) -> torch.Tensor:
+    """
+    Create an example token-id tensor for dynamic token embedding export.
+    """
+    if max_seq_len < 1:
+        raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
+
+    return torch.randint(
+        low=0,
+        high=int(qmodel.config.vocab_size),
+        size=(1, max_seq_len),
+        dtype=torch.long,
+        device="cpu",
+    )
+
+
+def make_token_embedding_dynamic_shapes(max_seq_len: int):
+    """
+    Build a torch.export dynamic-shape spec for token embedding.
+
+    Batch dimension is fixed to 1. The sequence dimension `S` is dynamic and
+    bounded by `1 <= S <= max_seq_len`.
+
+    Returns:
+        A dynamic-shape spec matching the positional input tuple
+        `(input_ids,)`. Returns `None` when `max_seq_len` is 1 because
+        there is no useful dynamic range.
+    """
+    if max_seq_len < 1:
+        raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
+
+    if max_seq_len == 1:
+        return None
+
+    seq_dim = torch.export.Dim(
+        "token_embedding_seq_len",
+        min=1,
+        max=int(max_seq_len),
+    )
+    return {"input_ids": {1: seq_dim}}
+
+
+class LlamaTokenEmbeddingExportAdapter(torch.nn.Module):
+    """
+    Export adapter for the token embedding stage.
+
+    The adapter maps token IDs to decoder hidden states. When SpinQuant-style
+    embedding rotation is present, it is included so the output can be fed
+    directly into the first separately exported decoder layer.
+
+    Input contract:
+        input_ids: Tensor with shape `(1, S)` where `S` is dynamic.
+
+    Return contract:
+        hidden_states: Tensor with shape `(1, S, hidden_size)`.
+    """
+
+    def __init__(self, qmodel: torch.nn.Module):
+        super().__init__()
+        llama_model = qmodel.model.wrapped
+        self.embed_tokens = llama_model.embed_tokens
+        self.rotate_embedding = getattr(llama_model, "rotate_embedding", None)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Return decoder hidden states for the given token IDs."""
+        hidden_states = self.embed_tokens(input_ids)
+        if self.rotate_embedding is not None:
+            hidden_states = self.rotate_embedding(hidden_states)
+        return hidden_states
+
+
+class LlamaLMHeadExportAdapter(torch.nn.Module):
+    """
+    Export adapter for the final normalization and LM head stage.
+
+    The adapter consumes the output of the last separately exported decoder
+    layer and returns vocabulary logits. It includes the final model norm and
+    the optional SpinQuant LM-head rotation to preserve full-model semantics.
+
+    Input contract:
+        hidden_states: Tensor with shape `(1, 1, hidden_size)`.
+
+    Return contract:
+        logits: Tensor with shape `(1, 1, vocab_size)`.
+    """
+
+    def __init__(self, qmodel: torch.nn.Module):
+        super().__init__()
+        llama_model = qmodel.model.wrapped
+        self.norm = llama_model.norm
+        self.rotate_lm_head = getattr(qmodel, "rotate_lm_head", None)
+        self.lm_head = qmodel.lm_head
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Return vocabulary logits for a single decoder hidden state."""
+        hidden_states = self.norm(hidden_states)
+        if self.rotate_lm_head is not None:
+            hidden_states = self.rotate_lm_head(hidden_states)
+        return self.lm_head(hidden_states)
+
+
 class LlamaAttentionPrefillExportAdapter(nn.Module):
     """
     Export adapter for prefill attention.

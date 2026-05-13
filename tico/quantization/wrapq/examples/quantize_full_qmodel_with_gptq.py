@@ -62,6 +62,13 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
+from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    LlamaLMHeadExportAdapter,
+    LlamaTokenEmbeddingExportAdapter,
+    make_token_embedding_dynamic_shapes,
+    make_token_embedding_example_input,
+    register_fake_quant_meta_kernels_for_dynamic_export,
+)
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 from tico.utils.utils import SuppressWarning
@@ -512,11 +519,121 @@ def make_random_decode_batch(model, B, DEVICE, MAX_SEQ):
     return x, pos, mask, past
 
 
+def save_export_module_to(
+    module: torch.nn.Module,
+    example_inputs: tuple[torch.Tensor, ...],
+    save_path: pathlib.Path,
+    artifact_name: str,
+    *,
+    kwargs: Optional[dict[str, Any]] = None,
+    dynamic_shapes: Optional[Any] = None,
+    strict: bool = False,
+) -> None:
+    """Convert an export module to Circle and save it."""
+    print(f"Saving {artifact_name} to {save_path.resolve()}")
+
+    with torch.no_grad():
+        with SuppressWarning(UserWarning, ".*"):
+            cm = tico.convert(
+                module.eval(),
+                example_inputs,
+                kwargs=kwargs,
+                dynamic_shapes=dynamic_shapes,
+                strict=strict,
+            )
+
+    cm.save(save_path)
+
+
+def save_token_embedding_to(
+    qmodel: torch.nn.Module,
+    max_seq_len: int,
+    save_layers_to_folder: str | pathlib.Path,
+) -> None:
+    """
+    Export and save the token embedding stage with a dynamic sequence dimension.
+
+    The generated Circle model is shared by prefill and decode runtime paths.
+
+    Circle contract:
+        input_ids:     `(1, S)`
+        hidden_states: `(1, S, hidden_size)`
+
+    The sequence dimension `S` is dynamic and bounded by
+    `1 <= S <= max_seq_len`.
+    """
+    register_fake_quant_meta_kernels_for_dynamic_export()
+
+    artifact_name = "token_embedding"
+    save_path = pathlib.Path(save_layers_to_folder, f"{artifact_name}.q.circle")
+
+    example_input_ids = make_token_embedding_example_input(
+        qmodel=qmodel,
+        max_seq_len=max_seq_len,
+    )
+    dynamic_shapes = make_token_embedding_dynamic_shapes(max_seq_len)
+
+    save_export_module_to(
+        LlamaTokenEmbeddingExportAdapter(qmodel),
+        (example_input_ids,),
+        save_path,
+        artifact_name,
+        dynamic_shapes=dynamic_shapes,
+    )
+
+
+def save_lm_head_to(
+    qmodel: torch.nn.Module,
+    save_layers_to_folder: str | pathlib.Path,
+) -> None:
+    """
+    Export and save the shared single-token LM head stage.
+
+    This artifact is used for both:
+        - the last real token after prefill
+        - every decode token
+
+    Circle contract:
+        hidden_states: `(1, 1, hidden_size)`
+        logits:        `(1, 1, vocab_size)`
+
+    The runtime should slice or gather the last real prefill hidden state before
+    calling this artifact.
+    """
+    artifact_name = "lm_head"
+    save_path = pathlib.Path(save_layers_to_folder, f"{artifact_name}.q.circle")
+    example_hidden = torch.randn(
+        1,
+        1,
+        int(qmodel.config.hidden_size),
+        device="cpu",
+    )
+
+    save_export_module_to(
+        LlamaLMHeadExportAdapter(qmodel),
+        (example_hidden,),
+        save_path,
+        artifact_name,
+    )
+
+
 def save_layers_to(
     q_m, max_seq_len, save_layers_to_folder, prefill_decode: bool = False
 ):
     """
-    Export and save quantized decoder layers one by one in circle format.
+    Export and save quantized token embedding, decoder layers, and LM head.
+
+    Artifacts:
+        - `token_embedding.q.circle`
+            Shared by prefill and decode. Its sequence dimension is dynamic.
+
+        - `decoder_layer_prefill_{i}.q.circle` and
+          `decoder_layer_decode_{i}.q.circle` when `prefill_decode=True`.
+
+        - `decoder_layer_{i}.q.circle` when `prefill_decode=False`.
+
+        - `lm_head.q.circle`
+            Shared single-token final norm and LM head stage.
     """
     q_m.eval()
     q_m.cpu()
@@ -525,14 +642,31 @@ def save_layers_to(
         print("Saving layers currently is supported only for PTQ quantized model")
         return
 
-    layers = q_m.wrapped.model.wrapped.layers
-    config = q_m.wrapped.config
+    if max_seq_len is None:
+        raise ValueError("max_seq_len must be set for per-layer Circle export.")
+
+    max_seq_len = int(max_seq_len)
+    if max_seq_len < 1:
+        raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
+
+    qmodel = q_m.wrapped
+    layers = qmodel.model.wrapped.layers
+    config = qmodel.config
+
+    # Token embedding runs on CPU in the target runtime, so export it once with
+    # dynamic sequence length. This one artifact covers both prefill and decode.
+    save_token_embedding_to(
+        qmodel=qmodel,
+        max_seq_len=max_seq_len,
+        save_layers_to_folder=save_layers_to_folder,
+    )
+
     for i, qlayer in enumerate(layers):
         suffix = "prefill_" if prefill_decode else ""
         layer_name = f"decoder_layer_{suffix}{i}"
         save_path = pathlib.Path(save_layers_to_folder, f"{layer_name}.q.circle")
         B, S, D = 1, max_seq_len, config.hidden_size
-        example_hidden = torch.randn(B, S, D)
+        example_hidden = torch.randn(B, S, D, device="cpu")
 
         attention_mask = (
             qlayer.wrapped.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
@@ -563,6 +697,7 @@ def save_layers_to(
             layer_name = f"decoder_layer_decode_{i}"
             save_path = pathlib.Path(save_layers_to_folder, f"{layer_name}.q.circle")
             print(f"Saving {layer_name} to {save_path.resolve()}")
+
             with torch.no_grad():
                 with SuppressWarning(UserWarning, ".*"):
                     ex_hid, pos_embeds, attn_mask, past = make_random_decode_batch(
@@ -578,6 +713,15 @@ def save_layers_to(
                         },
                     )
             cm.save(save_path)
+
+    # The runtime only needs logits for one token:
+    #   - the last real token after prefill
+    #   - the current token during decode
+    # Therefore one shared single-token LM head artifact is enough.
+    save_lm_head_to(
+        qmodel=qmodel,
+        save_layers_to_folder=save_layers_to_folder,
+    )
 
 
 def calibrate_ptq_observers(
