@@ -168,6 +168,13 @@ class GPTQQuantizer(BaseQuantizer):
         self._orig_model_forward = model.forward
         model.forward = types.MethodType(model_forward_wrapper, model)
 
+        # Disable use_cache during calibration
+        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+            self.orig_use_cache = model.config.use_cache
+            model.config.use_cache = False
+        else:
+            self.orig_use_cache = None
+
         return model
 
     @torch.no_grad()
@@ -201,12 +208,6 @@ class GPTQQuantizer(BaseQuantizer):
         gptq_conf = self.config
         assert isinstance(gptq_conf, GPTQConfig)
         gptq_conf.validate()
-        # Disable use_cache during calibration
-        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-            orig_use_cache = model.config.use_cache
-            model.config.use_cache = False
-        else:
-            orig_use_cache = None
 
         # Identify layers
         if hasattr(model, "model"):
@@ -372,8 +373,8 @@ class GPTQQuantizer(BaseQuantizer):
             self._quantize_lm_head(model, quantizers)
 
         # Restore the original cache configuration.
-        if orig_use_cache is not None:
-            model.config.use_cache = orig_use_cache
+        if self.orig_use_cache is not None:
+            model.config.use_cache = self.orig_use_cache
 
         # Clear caches to free memory
         self.cache_args.clear()
