@@ -37,6 +37,9 @@
 
 import argparse
 import os
+
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import pathlib
 import random
 from typing import Any, Optional
@@ -988,7 +991,6 @@ def setup_runtime(args) -> tuple[torch.device, torch.dtype]:
     torch.utils.deterministic.fill_uninitialized_memory = True
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
     return device, dtype
