@@ -45,6 +45,8 @@ import tqdm
 from datasets import load_dataset
 from lm_eval.utils import make_table
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+import numpy as np
 
 import tico
 from tico.quantization import convert, prepare
@@ -86,6 +88,8 @@ DATASET_CONFIG = "wikitext-2-raw-v1"
 TRAIN_SPLIT = "train"
 TEST_SPLIT = "test"
 
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+#os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -274,6 +278,18 @@ def parse_args():
         help="Verbose logging for debugging (e.g., GPTQ injection coverage)",
     )
     parser.add_argument(
+        "--gptq_stability_option",
+        type=int,
+        default=0,
+        help="Stability_option",
+    )
+    parser.add_argument(
+        "--gptq_percdamp",
+        type=float,
+        default=0.01,
+        help="Dampening factor to be used in GPTQ",
+    )
+    parser.add_argument(
         "--gptq_use_orig_model_inference",
         action="store_true",
         default=False,
@@ -438,6 +454,8 @@ def build_gptq_config(
         sensitivity=sensitivity,
         quantize_lm_head=args.gptq_lm_head,
         use_orig_model_inference=args.gptq_use_orig_model_inference,
+        percdamp=args.gptq_percdamp,
+        stability_option=args.gptq_stability_option,
     )
 
 
@@ -891,7 +909,7 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
-    print(f"│ int16 : {ppl_uint8:8.2f}")
+    print(f"│ int16 : {ppl_uint8:8.9f}")
     print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
@@ -978,6 +996,13 @@ def setup_runtime(args) -> tuple[torch.device, torch.dtype]:
     Initialize deterministic settings and resolve runtime device / dtype.
     """
     torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    torch.utils.deterministic.fill_uninitialized_memory = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
     return device, dtype
@@ -1114,7 +1139,7 @@ def evaluate_original_model(
     )
 
     print("\n┌── Wikitext-2 test perplexity ─────────────")
-    print(f"│ FP32 : {ppl_fp32:8.2f}")
+    print(f"│ FP32 : {ppl_fp32:8.9f}")
     print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:

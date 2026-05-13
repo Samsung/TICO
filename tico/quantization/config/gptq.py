@@ -65,6 +65,7 @@ class GPTQConfig(BaseConfig):
     groupsize: int = -1
     actorder: bool = True
     static_groups: bool = False
+    stability_option: int = 4
 
     # use this option to stabilize GPTQ for deep models
     use_orig_model_inference: bool = False

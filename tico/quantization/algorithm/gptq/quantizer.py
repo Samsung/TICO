@@ -264,7 +264,7 @@ class GPTQQuantizer(BaseQuantizer):
 
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
-                    gptq[name] = GPTQ(subset[name])
+                    gptq[name] = GPTQ(subset[name], stability_option=gptq_conf.stability_option)
                     full_module_name = module_name[subset[name]]
                     weight_bits = self._resolve_weight_bits(
                         gptq_conf,
@@ -440,7 +440,7 @@ class GPTQQuantizer(BaseQuantizer):
                 self.cache_args[0][batch_idx] = move_to_cpu(hidden_states)
 
         layer = model.lm_head
-        gptq = GPTQ(layer)
+        gptq = GPTQ(layer, stability_option=gptq_conf.stability_option)
         full_module_name = "lm_head"
         weight_bits = self._resolve_weight_bits(
             gptq_conf,

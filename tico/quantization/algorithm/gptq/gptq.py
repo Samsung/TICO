@@ -164,7 +164,8 @@ def get_matmul_input_for_convtranspose2d(layer, inp):
 
 
 class GPTQ:
-    def __init__(self, layer):
+    def __init__(self, layer, stability_option):
+        self.stability_option = stability_option
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
@@ -177,7 +178,7 @@ class GPTQ:
         self.rows = W.shape[0]
         self.columns = W.shape[1]
         self.H: Optional[torch.Tensor] = torch.zeros(
-            (self.columns, self.columns), device=self.dev
+            (self.columns, self.columns), device=self.dev, dtype=torch.float64 if self.stability_option >= 2 else torch.float32
         )
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
@@ -294,11 +295,20 @@ class GPTQ:
                 inp.shape[0] * inp.shape[1], inp.shape[2] * inp.shape[3]
             ).T  # inp.shape =(C_in * krn_size[0] * krn_size[1] * krn_size[2], N * num_patches)
 
-        self.H *= self.nsamples / (self.nsamples + tmp)
-        self.nsamples += tmp
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        self.H += inp.matmul(inp.t()).to(self.H.device)
-
+        if self.stability_option == 0:
+            self.H *= self.nsamples / (self.nsamples + tmp)
+            self.nsamples += tmp
+            inp = math.sqrt(2 / self.nsamples) * inp.float()
+            self.H += inp.matmul(inp.t()).to(self.H.device)
+        elif self.stability_option == 1:
+            self.H += inp.double().matmul(inp.double().t()).float().to(self.H.device)
+        elif self.stability_option == 2: #(2, 3) H in double 
+            inp = inp.double()
+            self.H = (self.H * self.nsamples + 2.0 * inp.matmul(inp.t())) / (self.nsamples + tmp) #.float().to(self.H.device)
+            self.nsamples += tmp
+        elif self.stability_option == 3:
+            self.H += inp.double().matmul(inp.double().t()).to(self.H.device)
+        
     def fasterquant(
         self,
         blocksize=128,
@@ -352,16 +362,44 @@ class GPTQ:
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
-
-        damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(self.columns, device=self.dev)
-        H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
-        assert isinstance(H, torch.Tensor)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
+        if verbose:
+            cond_initial = torch.linalg.cond(H)
+        #if cond_initial > 100:
+        #    percdamp = 0.1
+        #else:
+        #    percdamp = 0.0
+        if self.stability_option == 0:
+            damp = percdamp * torch.mean(torch.diag(torch.abs(H)))
+            diag = torch.arange(self.columns, device=self.dev)
+            H[diag, diag] += damp
+            if verbose:
+                cond_dampened = torch.linalg.cond(H)
+            H = torch.linalg.cholesky(H)
+            assert isinstance(H, torch.Tensor)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True)
+        elif self.stability_option == 1:
+            damp = percdamp * torch.mean(torch.diag(torch.abs(H)))
+            diag = torch.arange(self.columns, device=self.dev)
+            H[diag, diag] += damp
+            if verbose:
+                cond_dampened = torch.linalg.cond(H)
+            H = torch.linalg.cholesky(H.double()).float()
+            assert isinstance(H, torch.Tensor)
+            H = torch.cholesky_inverse(H.double()).float()
+            H = torch.linalg.cholesky(H.double(), upper=True).float()
+        else:
+            damp = percdamp * torch.mean(torch.diag(torch.abs(H)))
+            diag = torch.arange(self.columns, device=self.dev)
+            H[diag, diag] += damp
+            if verbose:
+                cond_dampened = torch.linalg.cond(H)
+            H = torch.linalg.cholesky(H)
+            assert isinstance(H, torch.Tensor)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True).float()
         Hinv = H
-
+        
         assert isinstance(Hinv, torch.Tensor)
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
@@ -412,6 +450,8 @@ class GPTQ:
         if verbose:
             print("time %.2f" % (time.time() - tick))
             print("error", torch.sum(Losses).item())
+            print("condition_number_inital", cond_initial.item())
+            print("condition_number_dampened", cond_dampened.item())
 
         if actorder:
             Q = Q[:, invperm]
