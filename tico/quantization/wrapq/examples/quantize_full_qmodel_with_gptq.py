@@ -273,7 +273,12 @@ def parse_args():
         action="store_true",
         help="Verbose logging for debugging (e.g., GPTQ injection coverage)",
     )
-
+    parser.add_argument(
+        "--gptq_use_orig_model_inference",
+        action="store_true",
+        default=False,
+        help="Run inputs for the next layer on original model to stabilize GPTQ",
+    )
     return parser.parse_args()
 
 
@@ -432,6 +437,7 @@ def build_gptq_config(
         mse=args.gptq_mse,
         sensitivity=sensitivity,
         quantize_lm_head=args.gptq_lm_head,
+        use_orig_model_inference=args.gptq_use_orig_model_inference,
     )
 
 

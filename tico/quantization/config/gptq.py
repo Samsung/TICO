@@ -66,6 +66,9 @@ class GPTQConfig(BaseConfig):
     actorder: bool = True
     static_groups: bool = False
 
+    # use this option to stabilize GPTQ for deep models
+    use_orig_model_inference: bool = False
+
     @property
     def name(self) -> str:
         return "gptq"
