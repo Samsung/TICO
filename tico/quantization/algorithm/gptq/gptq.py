@@ -294,7 +294,8 @@ class GPTQ:
                 inp.shape[0] * inp.shape[1], inp.shape[2] * inp.shape[3]
             ).T  # inp.shape =(C_in * krn_size[0] * krn_size[1] * krn_size[2], N * num_patches)
 
-        self.H += inp.double().matmul(inp.double().t()).float().to(self.H.device)  # type: ignore[union-attr]
+        inp = inp.double()
+        self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
 
     def fasterquant(
         self,
