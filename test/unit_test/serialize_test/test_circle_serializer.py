@@ -68,7 +68,7 @@ class CircleSerializerSharedTensorTest(unittest.TestCase):
     @staticmethod
     def _get_tied_weight_placeholders(exported_program):
         """Return placeholders for the canonicalized tied embedding weight."""
-        placeholders_by_target = {}
+        placeholders_by_target = {}  # type: ignore[var-annotated]
 
         for (
             placeholder_name,
