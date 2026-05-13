@@ -36,9 +36,12 @@
 # =============================================================================
 
 import argparse
+import os
 import pathlib
 import random
 from typing import Any, Optional
+
+import numpy as np
 
 import torch
 import tqdm
@@ -978,6 +981,14 @@ def setup_runtime(args) -> tuple[torch.device, torch.dtype]:
     Initialize deterministic settings and resolve runtime device / dtype.
     """
     torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+    torch.utils.deterministic.fill_uninitialized_memory = True
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
     return device, dtype
