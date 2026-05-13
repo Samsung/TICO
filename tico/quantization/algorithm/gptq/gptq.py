@@ -18,7 +18,6 @@
 
 # https://github.com/IST-DASLab/gptq/blob/2d65066/gptq.py
 
-import math
 import time
 from typing import Optional
 
@@ -294,6 +293,7 @@ class GPTQ:
                 inp.shape[0] * inp.shape[1], inp.shape[2] * inp.shape[3]
             ).T  # inp.shape =(C_in * krn_size[0] * krn_size[1] * krn_size[2], N * num_patches)
 
+        self.nsamples += tmp
         inp = inp.double()
         self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
 
@@ -351,13 +351,14 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
+        H = H.double()
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        H = torch.linalg.cholesky(H.double()).float()
+        H = torch.linalg.cholesky(H)
         assert isinstance(H, torch.Tensor)
-        H = torch.cholesky_inverse(H.double()).float()
-        H = torch.linalg.cholesky(H.double(), upper=True).float()
+        H = torch.cholesky_inverse(H)
+        H = torch.linalg.cholesky(H, upper=True).float()
         Hinv = H
 
         assert isinstance(Hinv, torch.Tensor)
