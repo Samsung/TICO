@@ -182,7 +182,8 @@ class GPTQQuantizer(BaseQuantizer):
              b) Run the layer on cached inputs for all batches.
              c) Apply GPTQ and update the weights.
              d) Re-run the layer to produce outputs for the next layer; update cached inputs.
-          3) Restore model.config.use_cache if needed and clear internal caches.
+          3) Optionally apply GPTQ to lm_head when configured.
+          4) Restore model.config.use_cache if needed and clear internal caches.
 
         Parameters:
             model (torch.nn.Module): The prepared model.
@@ -365,10 +366,11 @@ class GPTQQuantizer(BaseQuantizer):
                 torch.cuda.empty_cache()
 
         if (
-            hasattr(model, "model")
+            gptq_conf.quantize_lm_head
+            and hasattr(model, "model")
             and hasattr(model.model, "norm")
             and hasattr(model, "lm_head")
-        ):  # quantize lm_head
+        ):
             self._quantize_lm_head(model, quantizers)
 
         # Restore the original cache configuration.
@@ -385,6 +387,14 @@ class GPTQQuantizer(BaseQuantizer):
         return model
 
     def _quantize_lm_head(self, model, quantizers):
+        """
+        Apply GPTQ to the language-model output head.
+
+        This method consumes cached decoder outputs, applies the final model
+        normalization, collects GPTQ statistics for `lm_head`, and then
+        quantizes the output head weights. It should only be called when
+        `GPTQConfig.quantize_lm_head` is enabled.
+        """
         gptq_conf = self.config
         assert isinstance(gptq_conf, GPTQConfig)
         # TODO reduce code duplication with layer-wise quantization

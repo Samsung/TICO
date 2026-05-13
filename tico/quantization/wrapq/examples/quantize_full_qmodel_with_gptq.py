@@ -128,6 +128,15 @@ def parse_args():
         help="Don't use GPTQ",
     )
     parser.add_argument(
+        "--gptq_lm_head",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply GPTQ to lm_head. Disabled by default because "
+            "lm_head.weight can be tied with the input embedding table."
+        ),
+    )
+    parser.add_argument(
         "--no_spinquant",
         action="store_true",
         default=False,
@@ -398,6 +407,32 @@ def parse_cle_pairs(raw_pairs: list[str] | None) -> list[tuple[str, str]]:
         pairs.append((first_name, second_name))
 
     return pairs
+
+
+def build_gptq_config(
+    args,
+    sensitivity: dict[str, torch.Tensor] | None = None,
+) -> GPTQConfig:
+    """
+    Build a GPTQ configuration from command-line arguments.
+
+    GPTQ for lm_head is disabled by default because many causal language models
+    tie `lm_head.weight` with the input embedding table. Users can enable it
+    explicitly with `--gptq_lm_head`.
+    """
+    weight_bits_overrides: dict[str, int] = {}
+
+    if args.gptq_lm_head:
+        weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
+
+    return GPTQConfig(
+        show_progress=not args.no_tqdm,
+        weight_bits=args.linear_weight_bits,
+        weight_bits_overrides=weight_bits_overrides,
+        mse=args.gptq_mse,
+        sensitivity=sensitivity,
+        quantize_lm_head=args.gptq_lm_head,
+    )
 
 
 def save_model_to(
@@ -947,10 +982,22 @@ def print_config(args, device: torch.device) -> None:
     Print the effective high-level runtime configuration.
     """
     print("=== Config ===")
-    print(f"Model            : {args.model}")
-    print(f"Device           : {device.type}")
-    print(f"DType            : {args.dtype}")
-    print(f"PTQ profile      : {args.profile}")
+    print(f"Model                  : {args.model}")
+    print(f"Device                 : {args.device}")
+    print(f"DType                  : {args.dtype}")
+    print(f"Seed                   : {args.seed}")
+    print(f"GPTQ enabled           : {not args.no_GPTQ}")
+    print(f"GPTQ lm_head enabled   : {args.gptq_lm_head}")
+    print(f"PTQ enabled            : {not args.no_PTQ}")
+    print(f"SpinQuant enabled      : {not args.no_spinquant}")
+    print(f"CLE enabled            : {args.enable_CLE}")
+    print(f"Linear weight bits     : {args.linear_weight_bits}")
+    print(f"Embedding weight bits  : {args.embedding_weight_bits}")
+    print(f"LM head weight bits    : {args.lm_head_weight_bits}")
+    print(f"Calibration samples    : {args.nsamples_for_qcalibration}")
+    print(f"Calibration seq length : {args.calibrate_seq_len}")
+    print(f"Max seq length         : {args.max_seq_len}")
+    print(f"Profile                : {args.profile}")
     print()
 
 
@@ -1152,13 +1199,8 @@ def apply_gptq(model, calib_inputs, args):
 
     print("Applying GPTQ ...")
     sens = compute_or_load_sensitivity(model, calib_inputs, args)
+    gptq_config = build_gptq_config(args, sensitivity=sens)
 
-    gptq_config = GPTQConfig(
-        weight_bits=args.linear_weight_bits,
-        perchannel=True,
-        mse=args.gptq_mse,
-        sensitivity=sens,
-    )
     q_m = prepare(model, gptq_config, inplace=True)
 
     iterator = calib_inputs

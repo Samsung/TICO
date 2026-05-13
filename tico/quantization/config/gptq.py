@@ -38,11 +38,19 @@ class GPTQConfig(BaseConfig):
 
         This makes it possible to keep a default bit-width for most modules
         while selectively increasing precision for specific projections.
+    quantize_lm_head : bool
+        Whether to apply GPTQ to the language-model output head. This option
+        is disabled by default because many language models tie
+        `lm_head.weight` with the input embedding table, and quantizing the
+        head can modify the shared embedding weights.
     """
 
     # general
     verbose: bool = False
     show_progress: bool = True
+
+    # model-specific quantization switches
+    quantize_lm_head: bool = False
 
     # quantizer.configure params (weight quantization spec)
     weight_bits: int = 8
@@ -63,6 +71,10 @@ class GPTQConfig(BaseConfig):
         return "gptq"
 
     def validate(self) -> None:
+        if not isinstance(self.quantize_lm_head, bool):
+            raise TypeError(
+                f"quantize_lm_head must be bool. got {type(self.quantize_lm_head)}"
+            )
         if self.weight_bits <= 0:
             raise ValueError(f"weight_bits must be positive. got {self.weight_bits}")
         for module_name, bits in self.weight_bits_overrides.items():
