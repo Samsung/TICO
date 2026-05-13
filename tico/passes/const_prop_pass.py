@@ -19,7 +19,7 @@
 # https://github.com/pytorch/executorch/blob/61ddee5/exir/passes/constant_prop_pass.py
 
 from collections import OrderedDict
-from typing import List, Mapping, Optional, TYPE_CHECKING
+from typing import Any, List, Mapping, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -47,12 +47,266 @@ from tico.utils.trace_decorators import (
 from tico.utils.utils import get_fake_mode
 
 
+_MISSING = object()
+
+TensorStorageIdentityKey = tuple[
+    str,
+    int,
+    int,
+    tuple[int, ...],
+    tuple[int, ...],
+    torch.dtype,
+    torch.layout,
+]
+QuantizedTensorCacheKey = tuple[Any, ...]
+
+
+def _get_quantized_decomposed_default_op(op_name: str) -> Any | None:
+    """Return a quantized_decomposed default op if it is registered.
+
+    Quantized decomposed ops may not be registered when this module is imported.
+    Therefore, all access to torch.ops.quantized_decomposed must be lazy.
+    """
+    try:
+        namespace = torch.ops.quantized_decomposed
+    except AttributeError:
+        return None
+
+    try:
+        overload_packet = getattr(namespace, op_name)
+    except AttributeError:
+        return None
+
+    try:
+        return overload_packet.default
+    except AttributeError:
+        return None
+
+
+def _get_dequantize_ops() -> tuple[Any, ...]:
+    """Return registered quantized_decomposed dequantize ops."""
+    return tuple(
+        op
+        for op in (
+            _get_quantized_decomposed_default_op("dequantize_per_channel"),
+            _get_quantized_decomposed_default_op("dequantize_per_tensor"),
+        )
+        if op is not None
+    )
+
+
+def _get_quantize_ops() -> tuple[Any, ...]:
+    """Return registered quantized_decomposed quantize ops."""
+    return tuple(
+        op
+        for op in (
+            _get_quantized_decomposed_default_op("quantize_per_channel"),
+            _get_quantized_decomposed_default_op("quantize_per_tensor"),
+        )
+        if op is not None
+    )
+
+
+def _get_tensor_storage_identity_key(
+    tensor: torch.Tensor,
+) -> Optional[TensorStorageIdentityKey]:
+    """Return a hashable key that identifies the logical storage of a tensor.
+
+    The key is based on storage identity, not tensor contents. This avoids
+    accidentally merging cloned tensors that happen to have the same values,
+    while still detecting tied weights that share the same tensor storage.
+    """
+    if tensor.layout != torch.strided:
+        return None
+
+    if tensor.numel() == 0:
+        # Empty tensors often have a zero data pointer, so unrelated empty
+        # tensors may look identical.
+        return None
+
+    try:
+        data_ptr = tensor.data_ptr()
+    except RuntimeError:
+        return None
+
+    if data_ptr == 0:
+        return None
+
+    return (
+        str(tensor.device),
+        data_ptr,
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.layout,
+    )
+
+
+def _make_hashable_constant(value: Any) -> Any:
+    """Convert constant values into hashable values for cache keys.
+
+    Quantization parameters are part of the operation semantics, so tensor
+    values used as quantization parameters are compared by value. The quantized
+    weight input itself is handled separately by storage identity.
+    """
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach()
+        if tensor.layout != torch.strided:
+            return ("tensor", str(tensor.layout), repr(tensor))
+
+        cpu_tensor = tensor.cpu().contiguous()
+        return (
+            "tensor",
+            cpu_tensor.dtype,
+            tuple(cpu_tensor.shape),
+            tuple(cpu_tensor.reshape(-1).tolist()),
+        )
+
+    if isinstance(value, (tuple, list)):
+        return tuple(_make_hashable_constant(v) for v in value)
+
+    if isinstance(value, dict):
+        return tuple(sorted((k, _make_hashable_constant(v)) for k, v in value.items()))
+
+    if isinstance(value, torch.dtype):
+        return ("torch.dtype", str(value))
+
+    if isinstance(value, torch.device):
+        return ("torch.device", str(value))
+
+    if isinstance(value, torch.layout):
+        return ("torch.layout", str(value))
+
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+
+    try:
+        hash(value)
+        return value
+    except TypeError:
+        return repr(value)
+
+
+def _get_argument_value(
+    args: tuple[Any, ...],
+    kwargs: Mapping[str, Any],
+    position: int,
+    names: tuple[str, ...],
+) -> Any:
+    """Return an argument value by position or by one of its possible names."""
+    if len(args) > position:
+        return args[position]
+
+    for name in names:
+        if name in kwargs:
+            return kwargs[name]
+
+    return _MISSING
+
+
+def _get_quantized_tensor_cache_key(
+    node: torch.fx.Node,
+    args_data: tuple[Any, ...],
+    kwargs_data: Mapping[str, Any],
+) -> Optional[QuantizedTensorCacheKey]:
+    """Return a cache key for quantizing tied constant tensors.
+
+    The source tensor is keyed by storage identity, while quantization
+    parameters are keyed by value. This lets tied weights reuse a single
+    propagated quantized tensor only when the quantization operation is
+    semantically identical.
+    """
+    quantize_per_tensor = _get_quantized_decomposed_default_op("quantize_per_tensor")
+    quantize_per_channel = _get_quantized_decomposed_default_op("quantize_per_channel")
+
+    if quantize_per_tensor is not None and node.target == quantize_per_tensor:
+        input_tensor = _get_argument_value(
+            args_data, kwargs_data, 0, ("input", "tensor")
+        )
+        scale = _get_argument_value(args_data, kwargs_data, 1, ("scale",))
+        zero_point = _get_argument_value(
+            args_data, kwargs_data, 2, ("zero_point", "zero_p")
+        )
+        quant_min = _get_argument_value(args_data, kwargs_data, 3, ("quant_min",))
+        quant_max = _get_argument_value(args_data, kwargs_data, 4, ("quant_max",))
+        dtype = _get_argument_value(args_data, kwargs_data, 5, ("dtype",))
+
+        if any(
+            x is _MISSING
+            for x in (input_tensor, scale, zero_point, quant_min, quant_max, dtype)
+        ):
+            return None
+
+        if not isinstance(input_tensor, torch.Tensor):
+            return None
+
+        input_key = _get_tensor_storage_identity_key(input_tensor)
+        if input_key is None:
+            return None
+
+        return (
+            str(node.target),
+            input_key,
+            _make_hashable_constant(scale),
+            _make_hashable_constant(zero_point),
+            _make_hashable_constant(quant_min),
+            _make_hashable_constant(quant_max),
+            _make_hashable_constant(dtype),
+        )
+
+    if quantize_per_channel is not None and node.target == quantize_per_channel:
+        input_tensor = _get_argument_value(
+            args_data, kwargs_data, 0, ("input", "tensor")
+        )
+        scales = _get_argument_value(args_data, kwargs_data, 1, ("scales", "scale"))
+        zero_points = _get_argument_value(
+            args_data, kwargs_data, 2, ("zero_points", "zero_point", "zero_p")
+        )
+        axis = _get_argument_value(args_data, kwargs_data, 3, ("axis",))
+        quant_min = _get_argument_value(args_data, kwargs_data, 4, ("quant_min",))
+        quant_max = _get_argument_value(args_data, kwargs_data, 5, ("quant_max",))
+        dtype = _get_argument_value(args_data, kwargs_data, 6, ("dtype",))
+
+        if any(
+            x is _MISSING
+            for x in (
+                input_tensor,
+                scales,
+                zero_points,
+                axis,
+                quant_min,
+                quant_max,
+                dtype,
+            )
+        ):
+            return None
+
+        if not isinstance(input_tensor, torch.Tensor):
+            return None
+
+        input_key = _get_tensor_storage_identity_key(input_tensor)
+        if input_key is None:
+            return None
+
+        return (
+            str(node.target),
+            input_key,
+            _make_hashable_constant(scales),
+            _make_hashable_constant(zero_points),
+            _make_hashable_constant(axis),
+            _make_hashable_constant(quant_min),
+            _make_hashable_constant(quant_max),
+            _make_hashable_constant(dtype),
+        )
+
+    return None
+
+
 def get_constant_placeholder_to_tensor_dict(
     exported_program: ExportedProgram,
 ) -> OrderedDict[torch.fx.Node, torch.Tensor]:
-    """
-    Returns a dictionary of constant placeholder node to constant tensor.
-    """
+    """Return a dictionary from constant placeholder nodes to constant tensors."""
     const_node_to_tensor: OrderedDict[torch.fx.Node, torch.Tensor] = OrderedDict()
     graph_module = exported_program.graph_module
     graph: torch.fx.Graph = graph_module.graph
@@ -75,11 +329,11 @@ def get_constant_placeholder_to_tensor_dict(
 
 
 def has_constant_data(arg, const_node_to_tensor=None) -> bool:
-    """
-    Check if `arg` has constant data.
+    """Check whether an argument has constant data.
 
-    Assume that `const_node_to_tensor` is retrived from exported program.
-    When a node is a placeholder, only method to check if it is constant is to check the exported program.
+    Placeholder nodes are checked against the exported program's constant
+    placeholder mapping because placeholders do not carry enough information by
+    themselves to distinguish constants from user inputs.
     """
     if isinstance(arg, (tuple, list)):
         return all(has_constant_data(a, const_node_to_tensor) for a in arg)
@@ -103,6 +357,7 @@ def get_data(
     exported_program: ExportedProgram,
     const_node_to_tensor: Mapping[torch.fx.Node, torch.Tensor],
 ):
+    """Return concrete constant data for a constant argument."""
     if isinstance(arg, (tuple, list)):
         return (get_data(x, exported_program, const_node_to_tensor) for x in arg)
     elif isinstance(arg, _PRIMITIVE_TYPES):
@@ -115,20 +370,25 @@ def get_data(
 def propagate_constants(
     exported_program: ExportedProgram,
 ) -> OrderedDict[torch.fx.Node, torch.Tensor]:
-    """
-    Propagates constants and returns a dictionary of node to constant tensors of the graph.
+    """Propagate constants and return node-to-constant tensor mappings.
+
+    Quantize ops are cached by tied source tensor identity and quantization
+    parameters. This preserves tied weight sharing through constant propagation:
+    two quantize nodes that quantize the same tied weight with the same
+    quantization parameters reuse the same propagated quantized tensor object.
     """
     const_node_to_tensor = get_constant_placeholder_to_tensor_dict(exported_program)
+    quantized_tensor_cache: dict[QuantizedTensorCacheKey, torch.Tensor] = {}
+
+    dequantize_ops = _get_dequantize_ops()
+    quantize_ops = _get_quantize_ops()
 
     graph_module = exported_program.graph_module
     graph: torch.fx.Graph = graph_module.graph
     for node in graph.nodes:
         if node.op != "call_function":
             continue
-        if node.target in [
-            torch.ops.quantized_decomposed.dequantize_per_channel.default,
-            torch.ops.quantized_decomposed.dequantize_per_tensor.default,
-        ]:
+        if node.target in dequantize_ops:
             continue
         if not has_constant_data(
             [node.args, node.kwargs],
@@ -141,9 +401,27 @@ def propagate_constants(
             (node.args, node.kwargs),
         )
 
-        # propagate constant because all of its args are constant tensors.
+        quantized_tensor_cache_key = None
+        if node.target in quantize_ops:
+            quantized_tensor_cache_key = _get_quantized_tensor_cache_key(
+                node, args_data, kwargs_data
+            )
+            if (
+                quantized_tensor_cache_key is not None
+                and quantized_tensor_cache_key in quantized_tensor_cache
+            ):
+                const_node_to_tensor[node] = quantized_tensor_cache[
+                    quantized_tensor_cache_key
+                ]
+                continue
+
+        # Propagate constant because all of its args are constant tensors.
         with torch.no_grad():
             prop_constant_tensor = node.target(*args_data, **kwargs_data)
+
+        if quantized_tensor_cache_key is not None:
+            quantized_tensor_cache[quantized_tensor_cache_key] = prop_constant_tensor
+
         const_node_to_tensor[node] = prop_constant_tensor
 
     return const_node_to_tensor
@@ -153,13 +431,10 @@ def erase_constant_node(
     exported_program: ExportedProgram,
     node: torch.fx.Node,
 ) -> None:
-    """
-    Remove corresponding tensor from param/constants dict.
+    """Remove the corresponding tensor from parameter or constant dictionaries.
 
-    Q) Isn't it necessary to remove a node from `inputs_to_parameters`, `inputs_to_lifted_tensor_constants`
-      and `inputs_to_buffers` as well? Why do they just call `get`?
-    A) They internally uses `exported_program.graph_signature.input_specs` and the `input_specs` are updated
-      at the end of the const_prop_pass.
+    The input signature maps do not need to be updated here because the final
+    input specs are rebuilt at the end of this pass.
     """
     signature = exported_program.graph_signature
     if name := signature.inputs_to_parameters.get(node.name, None):
@@ -178,10 +453,15 @@ def create_constant_placeholder(
     const_node_to_tensor: Mapping[torch.fx.Node, torch.Tensor],
     exported_program: ExportedProgram,
 ) -> List[torch.fx.Node]:
-    """
-    This function creates constant placeholder nodes according to the given constant nodes (`const_node_to_tensor`) and replace it with the original node.
+    """Create constant placeholder nodes for propagated constant tensors.
+
+    If multiple propagated nodes share the same tensor object, only one
+    placeholder is created and the other nodes are replaced by that placeholder.
+    This is used for tied weights whose quantize ops are cached by
+    `propagate_constants`.
     """
     placeholders = []
+    tensor_id_to_placeholder: dict[int, torch.fx.Node] = {}
 
     fake_mode = get_fake_mode(exported_program)
     first_user_input = get_first_user_input(exported_program)
@@ -200,6 +480,13 @@ def create_constant_placeholder(
             continue
 
         if node.op == "placeholder":
+            continue
+
+        tensor_id = id(prop_constant_tensor)
+        if tensor_id in tensor_id_to_placeholder:
+            const_placeholder_node = tensor_id_to_placeholder[tensor_id]
+            node.replace_all_uses_with(const_placeholder_node, propagate_meta=False)
+            exported_program.graph.erase_node(node)
             continue
 
         # Add `prop_constant_tensor` to program.state_dict.
@@ -226,6 +513,7 @@ def create_constant_placeholder(
         )
         const_placeholder_node.meta["val"].constant = prop_constant_tensor
 
+        tensor_id_to_placeholder[tensor_id] = const_placeholder_node
         placeholders.append(const_placeholder_node)
 
     return placeholders
@@ -234,6 +522,7 @@ def create_constant_placeholder(
 def create_input_specs(
     placeholders: List[torch.fx.Node],
 ) -> dict[str, InputSpec]:
+    """Create input specs for newly created constant placeholders."""
     name_to_spec: dict[str, InputSpec] = {}
 
     # https://pytorch.org/docs/stable/export.ir_spec.html#placeholder
@@ -247,12 +536,11 @@ def create_input_specs(
 @trace_graph_diff_on_pass
 @trace_const_diff_on_pass
 class ConstPropPass(PassBase):
-    """
-    Performs constant folding and constant propagation.
+    """Perform constant folding and constant propagation.
 
-    NOTE The exported program gurantees that parameters, buffers, and constant tensors are lifted out of the graph as inputs.
-    It means that the pass need to update input specs after folding the constant nodes.
-    # ref: https://pytorch.org/docs/stable/export.html#torch.export.ExportGraphSignature
+    The exported program guarantees that parameters, buffers, and constant
+    tensors are lifted out of the graph as inputs. Therefore, this pass updates
+    input specs after folding constant nodes.
 
     [WHAT IT DOES]
     [1] Propagate the constants.

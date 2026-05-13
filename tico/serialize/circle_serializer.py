@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import operator
-from typing import Dict
+from typing import Dict, Optional
 
 import flatbuffers
 import torch
@@ -26,6 +26,7 @@ from tico.serialize.operators import *
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import get_node_visitors
+from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
 from tico.utils.serialize import finalise_tensor_names, validate_tensor_shapes
 
@@ -34,6 +35,27 @@ multiple_output_ops = [
     torch.ops.aten.split_with_sizes.default,
     torch.ops.aten.max.dim,
 ]
+
+
+QuantizationAliasKey = tuple[
+    tuple[float, ...] | None,
+    tuple[int, ...] | None,
+    int | None,
+    tuple[float, ...] | None,
+    tuple[float, ...] | None,
+    str,
+]
+TensorAliasKey = tuple[
+    str,
+    int,
+    int,
+    tuple[int, ...],
+    tuple[int, ...],
+    torch.dtype,
+    torch.layout,
+    QuantizationAliasKey | None,
+]
+SharedTensorRegistry = Dict[TensorAliasKey, str]
 
 
 def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
@@ -133,6 +155,119 @@ def build_circle(
     return bytes(buf)
 
 
+def _get_quantization_alias_key(node: torch.fx.Node) -> QuantizationAliasKey | None:
+    """Return a hashable representation of a node's quantization metadata."""
+    qparam = node.meta.get(QPARAM_KEY)
+    if qparam is None:
+        return None
+
+    return (
+        tuple(qparam.scale) if qparam.scale is not None else None,
+        tuple(qparam.zero_point) if qparam.zero_point is not None else None,
+        qparam.quantized_dimension,
+        tuple(qparam.min) if qparam.min is not None else None,
+        tuple(qparam.max) if qparam.max is not None else None,
+        qparam.dtype,
+    )
+
+
+def _get_tensor_alias_key(
+    tensor: torch.Tensor,
+    node: torch.fx.Node,
+) -> Optional[TensorAliasKey]:
+    """
+    Return a key that identifies shared logical tensor storage.
+
+    The key is based on tensor identity, not tensor contents. This lets tied
+    parameters, such as tied embeddings and LM-head weights, reuse the same
+    Circle tensor while avoiding accidental deduplication of cloned tensors that
+    merely contain equal values.
+    """
+    if tensor.layout != torch.strided:
+        return None
+
+    if tensor.numel() == 0:
+        # Empty tensors often have a zero data pointer, which can cause
+        # unrelated empty tensors to look identical.
+        return None
+
+    try:
+        data_ptr = tensor.data_ptr()
+    except RuntimeError:
+        return None
+
+    if data_ptr == 0:
+        return None
+
+    return (
+        str(tensor.device),
+        data_ptr,
+        tensor.storage_offset(),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        tensor.dtype,
+        tensor.layout,
+        _get_quantization_alias_key(node),
+    )
+
+
+def _register_tensor_alias(
+    graph: CircleSubgraph,
+    node: torch.fx.Node,
+    canonical_tensor_name: str,
+) -> None:
+    """Register an FX node name as an alias of an existing Circle tensor."""
+    if canonical_tensor_name not in graph.name_to_tid:
+        raise KeyError(f"{canonical_tensor_name} is not registered.")
+
+    canonical_tid = graph.name_to_tid[canonical_tensor_name]
+    existing_tid = graph.name_to_tid.get(node.name)
+
+    if existing_tid is not None:
+        if existing_tid != canonical_tid:
+            raise ValueError(
+                f"Cannot alias {node.name} to {canonical_tensor_name}: "
+                f"{node.name} is already registered to tensor id {existing_tid}."
+            )
+        return
+
+    graph.name_to_tid[node.name] = canonical_tid
+
+
+def _add_tensor_from_node_with_data_sharing(
+    graph: CircleSubgraph,
+    node: torch.fx.Node,
+    tensor_data: torch.Tensor,
+    shared_tensors: SharedTensorRegistry,
+) -> str | None:
+    """Add a data-backed tensor, reusing a Circle tensor for shared storage.
+
+    Args:
+        graph: CircleSubgraph to add tensor to
+        node: The FX node that represents the tensor
+        tensor_data: Tensor data associated with the node
+        shared_tensors: Mapping from tensor identity keys to Circle tensor names
+
+    Returns:
+        The reused Circle tensor name when the node is registered as an alias.
+        Returns None when a new Circle tensor is created.
+    """
+    alias_key = _get_tensor_alias_key(tensor_data, node)
+
+    if alias_key is not None and alias_key in shared_tensors:
+        canonical_tensor_name = shared_tensors[alias_key]
+        _register_tensor_alias(graph, node, canonical_tensor_name)
+        return canonical_tensor_name
+
+    tensor_value = tensor_data.detach().cpu().numpy()
+    graph.add_tensor_from_node(node, tensor_value)
+
+    if alias_key is not None:
+        shared_tensors[alias_key] = graph.tensors[-1].name
+
+    return None
+
+
 def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
     """Export all tensors from the exported program to the circle graph.
 
@@ -143,6 +278,7 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
     logger = logging.getLogger(__name__)
     logger.debug("---------------Export tensors--------------")
     buf_name_to_data = {name: buf for name, buf in ep.named_buffers()}
+    shared_tensors: SharedTensorRegistry = {}
 
     for node in ep.graph.nodes:
         if node.op == "call_function":
@@ -157,7 +293,7 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
             logger.debug(f"call_function: {node.name} tensor exported.")
 
         elif node.op == "placeholder":
-            _handle_placeholder_node(graph, node, ep, buf_name_to_data)
+            _handle_placeholder_node(graph, node, ep, buf_name_to_data, shared_tensors)
 
         elif node.op == "get_attr":
             _handle_get_attr_node(graph, node)
@@ -183,17 +319,18 @@ def _handle_placeholder_node(
     node: torch.fx.Node,
     ep: ExportedProgram,
     buf_name_to_data: dict,
+    shared_tensors: SharedTensorRegistry,
 ) -> None:
     """Handle a placeholder node during tensor export."""
     # placeholder invariants
     assert node.args is None or len(node.args) == 0  # Not support default param
 
     if node.name in ep.graph_signature.inputs_to_parameters:
-        _handle_parameter_node(graph, node, ep)
+        _handle_parameter_node(graph, node, ep, shared_tensors)
     elif node.name in ep.graph_signature.inputs_to_buffers:
-        _handle_buffer_node(graph, node, ep, buf_name_to_data)
+        _handle_buffer_node(graph, node, ep, buf_name_to_data, shared_tensors)
     elif node.name in ep.graph_signature.inputs_to_lifted_tensor_constants:
-        _handle_constant_tensor_node(graph, node, ep)
+        _handle_constant_tensor_node(graph, node, ep, shared_tensors)
     else:
         _handle_user_input_node(graph, node, ep)
 
@@ -202,6 +339,7 @@ def _handle_parameter_node(
     graph: CircleSubgraph,
     node: torch.fx.Node,
     ep: ExportedProgram,
+    shared_tensors: SharedTensorRegistry,
 ) -> None:
     """Handle a parameter placeholder node by exporting its tensor data.
 
@@ -209,6 +347,7 @@ def _handle_parameter_node(
         graph: CircleSubgraph to add tensor to
         node: The parameter node to process
         ep: ExportedProgram containing parameter data
+        shared_tensors: Mapping used to reuse Circle tensors for shared data
     """
     param_name = ep.graph_signature.inputs_to_parameters[node.name]
     param_data = ep.state_dict[param_name]
@@ -216,11 +355,17 @@ def _handle_parameter_node(
     if not isinstance(param_data, torch.Tensor):
         raise ValueError(f"Parameter {param_name} is not a tensor")
 
-    tensor_value = param_data.cpu().detach().numpy()
-    graph.add_tensor_from_node(node, tensor_value)
+    reused_tensor_name = _add_tensor_from_node_with_data_sharing(
+        graph, node, param_data, shared_tensors
+    )
 
     logger = logging.getLogger(__name__)
-    logger.debug(f"Exported parameter tensor: {node.name}")
+    if reused_tensor_name is None:
+        logger.debug(f"Exported parameter tensor: {node.name}")
+    else:
+        logger.debug(
+            f"Reused shared parameter tensor: {node.name} -> {reused_tensor_name}"
+        )
 
 
 def _handle_buffer_node(
@@ -228,6 +373,7 @@ def _handle_buffer_node(
     node: torch.fx.Node,
     ep: ExportedProgram,
     buf_name_to_data: dict,
+    shared_tensors: SharedTensorRegistry,
 ) -> None:
     """Handle a buffer placeholder node by exporting its tensor data.
 
@@ -236,6 +382,7 @@ def _handle_buffer_node(
         node: The buffer node to process
         ep: ExportedProgram containing buffer info
         buf_name_to_data: Mapping of buffer names to data
+        shared_tensors: Mapping used to reuse Circle tensors for shared data
     """
     buffer_name = ep.graph_signature.inputs_to_buffers[node.name]
 
@@ -247,17 +394,24 @@ def _handle_buffer_node(
     if not isinstance(buffer_data, torch.Tensor):
         raise ValueError(f"Buffer {buffer_name} is not a tensor")
 
-    tensor_value = buffer_data.cpu().detach().numpy()
-    graph.add_tensor_from_node(node, tensor_value)
+    reused_tensor_name = _add_tensor_from_node_with_data_sharing(
+        graph, node, buffer_data, shared_tensors
+    )
 
     logger = logging.getLogger(__name__)
-    logger.debug(f"Exported buffer tensor: {node.name}")
+    if reused_tensor_name is None:
+        logger.debug(f"Exported buffer tensor: {node.name}")
+    else:
+        logger.debug(
+            f"Reused shared buffer tensor: {node.name} -> {reused_tensor_name}"
+        )
 
 
 def _handle_constant_tensor_node(
     graph: CircleSubgraph,
     node: torch.fx.Node,
     ep: ExportedProgram,
+    shared_tensors: SharedTensorRegistry,
 ) -> None:
     """Handle a constant tensor placeholder node by exporting its tensor data.
 
@@ -265,6 +419,7 @@ def _handle_constant_tensor_node(
         graph: CircleSubgraph to add tensor to
         node: The constant tensor node to process
         ep: ExportedProgram containing constant data
+        shared_tensors: Mapping used to reuse Circle tensors for shared data
     """
     ctensor_name = ep.graph_signature.inputs_to_lifted_tensor_constants[node.name]
 
@@ -276,11 +431,17 @@ def _handle_constant_tensor_node(
     if not isinstance(ctensor_data, torch.Tensor):
         raise ValueError(f"Constant tensor {ctensor_name} is not a tensor")
 
-    tensor_value = ctensor_data.cpu().detach().numpy()
-    graph.add_tensor_from_node(node, tensor_value)
+    reused_tensor_name = _add_tensor_from_node_with_data_sharing(
+        graph, node, ctensor_data, shared_tensors
+    )
 
     logger = logging.getLogger(__name__)
-    logger.debug(f"Exported constant tensor: {node.name}")
+    if reused_tensor_name is None:
+        logger.debug(f"Exported constant tensor: {node.name}")
+    else:
+        logger.debug(
+            f"Reused shared constant tensor: {node.name} -> {reused_tensor_name}"
+        )
 
 
 def _handle_user_input_node(
