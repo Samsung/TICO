@@ -67,33 +67,43 @@ class CircleSerializerSharedTensorTest(unittest.TestCase):
 
     @staticmethod
     def _get_tied_weight_placeholders(exported_program):
-        """Return placeholders for the canonicalized tied embedding weight."""
-        placeholders_by_target = {}  # type: ignore[var-annotated]
+        """Return placeholders whose target parameters share tied embedding storage."""
+        pairs = [
+            (placeholder_name, target_name)
+            for placeholder_name, target_name in (
+                exported_program.graph_signature.inputs_to_parameters.items()
+            )
+            if target_name in _TIED_WEIGHT_NAMES
+        ]
 
-        for (
-            placeholder_name,
-            target_name,
-        ) in exported_program.graph_signature.inputs_to_parameters.items():
-            if target_name in _TIED_WEIGHT_NAMES:
-                placeholders_by_target.setdefault(target_name, []).append(
-                    placeholder_name
+        if len(pairs) != 2:
+            raise AssertionError(
+                "Expected two placeholders for tied embedding weights, but got "
+                f"{pairs}."
+            )
+
+        alias_keys = set()
+        for _, target_name in pairs:
+            tensor = exported_program.state_dict[target_name]
+            alias_keys.add(
+                (
+                    str(tensor.device),
+                    tensor.data_ptr(),
+                    tensor.storage_offset(),
+                    tuple(tensor.shape),
+                    tuple(tensor.stride()),
+                    tensor.dtype,
+                    tensor.layout,
                 )
-
-        if len(placeholders_by_target) != 1:
-            raise AssertionError(
-                "Expected tied embedding weights to be canonicalized to one "
-                f"target name, but got {placeholders_by_target}."
             )
 
-        target_name, placeholder_names = next(iter(placeholders_by_target.items()))
-
-        if len(placeholder_names) != 2:
+        if len(alias_keys) != 1:
             raise AssertionError(
-                "Expected two placeholders for the tied embedding weight, but got "
-                f"{placeholder_names} for target {target_name}."
+                "Expected tied embedding parameters to share storage, but got "
+                f"{pairs} with alias keys {alias_keys}."
             )
 
-        return target_name, placeholder_names
+        return [placeholder_name for placeholder_name, _ in pairs]
 
     @staticmethod
     def _get_single_parameter_placeholder(exported_program, parameter_name):
@@ -129,11 +139,7 @@ class CircleSerializerSharedTensorTest(unittest.TestCase):
         )
 
         exported_program = self._export_model(model)
-        target_name, placeholder_names = self._get_tied_weight_placeholders(
-            exported_program
-        )
-
-        self.assertIn(target_name, _TIED_WEIGHT_NAMES)
+        placeholder_names = self._get_tied_weight_placeholders(exported_program)
 
         graph = self._export_graph(exported_program)
 
