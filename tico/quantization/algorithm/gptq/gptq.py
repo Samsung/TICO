@@ -294,10 +294,7 @@ class GPTQ:
                 inp.shape[0] * inp.shape[1], inp.shape[2] * inp.shape[3]
             ).T  # inp.shape =(C_in * krn_size[0] * krn_size[1] * krn_size[2], N * num_patches)
 
-        self.H *= self.nsamples / (self.nsamples + tmp)
-        self.nsamples += tmp
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        self.H += inp.matmul(inp.t()).to(self.H.device)
+        self.H += inp.double().matmul(inp.double().t()).float().to(self.H.device)  # type: ignore[union-attr]
 
     def fasterquant(
         self,
@@ -356,10 +353,10 @@ class GPTQ:
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        H = torch.linalg.cholesky(H)
+        H = torch.linalg.cholesky(H.double()).float()
         assert isinstance(H, torch.Tensor)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True)
+        H = torch.cholesky_inverse(H.double()).float()
+        H = torch.linalg.cholesky(H.double(), upper=True).float()
         Hinv = H
 
         assert isinstance(Hinv, torch.Tensor)
