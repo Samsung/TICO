@@ -20,6 +20,7 @@
 
 import torch
 
+
 def quantize(x, scale, zero, maxq):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
@@ -49,7 +50,7 @@ def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-            
+
     cur_Q = quantize(cur_weights, scale, zero, maxq)
 
     return cur_Q, cur_weights

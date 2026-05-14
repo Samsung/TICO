@@ -390,7 +390,7 @@ def inject_gptq_qparams(
         _print_sample("unused GPTQ entries", unused)
 
 
-def evaluate_ppl_of_model_on_dataset(model, dataset, device: str = "cuda"):
+def evaluate_ppl_of_model_on_dataset(model, dataset, device):
     if hasattr(model, "device") and model.device.type != device.type:
         if hasattr(model, "to"):
             model.to(device)
@@ -434,6 +434,7 @@ def evaluate_ppl_of_model_on_dataset(model, dataset, device: str = "cuda"):
 
     ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
     return ppl
+
 
 # -------------------------------------------------------------------------
 # Helper — clear gptq quantizers after injection
@@ -1460,12 +1461,11 @@ def main():
 
     calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
     train_ppl_ioqdtype = evaluate_ppl_of_model_on_dataset(
-            model, calib_inputs, device=device
-        )
+        model, calib_inputs, device=device
+    )
     print("\n┌── Wikitext-2 train perplexity ─────────────")
     print(f"│ FP32 : {train_ppl_ioqdtype:8.2f}")
     print("└───────────────────────────────────────────")
-    
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
@@ -1474,14 +1474,14 @@ def main():
     q_m = quantize_using_PTQ(model, calib_inputs, args)
 
     evaluate(q_m, tokenizer, dataset_test, args)
-    
+
     train_ppl_ioqdtype = evaluate_ppl_of_model_on_dataset(
-            q_m, calib_inputs, device=device
-        )
+        q_m, calib_inputs, device=device
+    )
     print("\n┌── Wikitext-2 train perplexity ─────────────")
     print(f"│ int16 : {train_ppl_ioqdtype:8.2f}")
     print("└───────────────────────────────────────────")
-    
+
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
 
 

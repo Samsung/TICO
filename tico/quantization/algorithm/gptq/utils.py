@@ -227,7 +227,7 @@ class SensitivityCalibrator:
         if model.device.type != "cpu":
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
-                
+
         model = model.to(dtype)
 
         return sensitivity

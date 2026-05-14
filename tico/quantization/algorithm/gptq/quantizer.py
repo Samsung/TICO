@@ -478,7 +478,7 @@ class GPTQQuantizer(BaseQuantizer):
         model.lm_head = model.lm_head.to(old_device)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        
+
         device = next(layer.parameters()).device  # in case lm_head is located on cpu
         for batch_idx in tqdm(
             range(batch_num),
