@@ -501,6 +501,15 @@ def split_model_inputs(
     )
 
 
+def _num_cached_batches(
+    cache_args: list[list[Any]],
+    cache_kwargs: dict[str, list[Any]],
+) -> int:
+    lengths = [len(v) for v in cache_args]
+    lengths.extend(len(v) for v in cache_kwargs.values())
+    return max(lengths, default=0)
+
+
 def append_batch_to_cache(
     cache_args: list[list[Any]],
     cache_kwargs: dict[str, list[Any]],
@@ -515,15 +524,26 @@ def append_batch_to_cache(
         cache_kwargs: Keyword cache storage.
         *args: Positional batch values.
         **kwargs: Keyword batch values.
+
+    Note:
+        The previous batch count is derived from the existing cache contents
+        and keys occurrences are aligned among cache_args and cache_kwargs.
+        This ensures index alignment across all batches.
     """
+    prev_batches = _num_cached_batches(cache_args, cache_kwargs)
+
     for idx, item in enumerate(args):
         if idx >= len(cache_args):
-            cache_args.append([])
+            cache_args.append([None] * prev_batches)
         cache_args[idx].append(detach_clone_tree(item))
+
+    for key in list(cache_kwargs.keys()):
+        if key not in kwargs:
+            cache_kwargs[key].append(None)
 
     for key, value in kwargs.items():
         if key not in cache_kwargs:
-            cache_kwargs[key] = []
+            cache_kwargs[key] = [None] * prev_batches
         cache_kwargs[key].append(detach_clone_tree(value))
 
 

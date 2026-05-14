@@ -15,7 +15,7 @@
 import argparse
 import contextlib
 import io
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import tqdm
@@ -37,9 +37,9 @@ from tico.quantization.evaluation.mmmu_eval_utils import (
 from tico.quantization.evaluation.vlm_eval_utils import (
     evaluate_ppl,
     get_accuracy_on_dataset,
-    get_calib_inputs,
     get_coco_scores_on_dataset,
     get_dataset,
+    get_mixed_calib_inputs,
 )
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -124,9 +124,15 @@ def parse_args():
     )
     parser.add_argument(
         "--nsamples_for_qcalibration",
-        type=int,
-        default=128,
-        help="Number of samples to be used in GPTQ calibration.",
+        type=str,
+        default="vqav2:testdev:128,wikitext2:train:128",
+        help=(
+            "Just a number -> uses default dataset `vqav2` with `testdev` split and N samples. "
+            "Comma-separated list: "
+            "a) dataset:n_samples -> uses default split. "
+            "b) dataset:split:n_samples -> uses specified split. "
+            "c) Multiple datasets example: vqav2:testdev:128,wikitext2:train:128,coco:32"
+        ),
     )
     parser.add_argument(
         "--nsamples_for_evaluation",
@@ -1074,6 +1080,57 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
         print(f"Quantized PPL: {quantized_ppl:.2f}")
 
 
+def load_calib_inputs(processor, args) -> List[Dict[str, Any]]:
+    """
+    Load calibration inputs
+    Parse the nsamples_for_qcalibration argument
+
+    Formats supported:
+    - Just a number -> uses default dataset "vqav2" with N samples
+    - "dataset:n_samples" -> uses default split
+    - "dataset:split:n_samples" -> uses specified split
+    - Multiple datasets: "vqav2:32,coco:val:32,wikitext2:test:32"
+    """
+    dataset_config: Dict[str, Dict[str, Any]] = {}
+    raw_input = args.nsamples_for_qcalibration.strip()
+
+    # Check if the input is just a number
+    # In this case, use the default dataset "vqav2"
+    if raw_input.isdigit():
+        n_samples = int(raw_input)
+        dataset_config["vqav2"] = {"n_samples": n_samples, "split": "testdev"}
+        print(f"[info] Using default dataset 'vqav2' with {n_samples} samples")
+    else:
+        # Parse the full format
+        for item in raw_input.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            parts = item.split(":")
+            if len(parts) == 2:
+                # Format: "dataset:n_samples" (use default split)
+                name, n_samples = parts
+                dataset_config[name.strip()] = {"n_samples": int(n_samples)}
+            elif len(parts) == 3:
+                # Format: "dataset:split:n_samples"
+                name, split, n_samples = parts
+                dataset_config[name.strip()] = {
+                    "n_samples": int(n_samples),
+                    "split": split.strip(),
+                }
+            else:
+                print(
+                    f"[warn] Invalid format '{item}', expected 'dataset:n_samples' or 'dataset:split:n_samples'"
+                )
+
+    return get_mixed_calib_inputs(
+        processor=processor,
+        dataset_config=dataset_config,
+        max_seq_len=args.calib_seq_len,
+        seed=args.seed,
+    )
+
+
 def main() -> None:
     args = parse_args()
     print(args)
@@ -1158,12 +1215,7 @@ def main() -> None:
 
     original_results = evaluate_original_model(model, processor, args)
 
-    calib_inputs = get_calib_inputs(
-        "vqav2",
-        processor,
-        n_samples=args.nsamples_for_qcalibration,
-        max_seq_len=args.calib_seq_len,
-    )
+    calib_inputs = load_calib_inputs(processor, args)
 
     apply_smoothquant_if_requested(model, calib_inputs, args)
 

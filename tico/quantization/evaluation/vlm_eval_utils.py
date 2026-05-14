@@ -14,11 +14,11 @@
 
 import json
 import os
+import random
 import re
 import string
 import tempfile
 
-from collections.abc import Callable
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
 import torch
@@ -184,16 +184,61 @@ def get_item_coco(ex: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def get_item_wikitext2(ex: dict[str, Any]) -> dict[str, Any]:
+    """
+    Adapt a Wikitext2 sample to a common format for text-only calibration.
+
+    The returned schema is:
+
+    `{"text": text}`
+
+    Args:
+        ex: Raw dataset example.
+
+    Returns:
+        A normalized text item.
+    """
+    return {"text": ex.get("text", "")}
+
+
+def get_item_alpaca(ex: dict[str, Any]) -> dict[str, Any]:
+    """
+    Adapt an Alpaca-style sample to a common format for text-only calibration.
+
+    Alpaca format has "instruction", "input", and "output" fields.
+    The instruction and input are combined for the text.
+
+    The returned schema is:
+
+    `{"text": text}`
+
+    Args:
+        ex: Raw dataset example.
+
+    Returns:
+        A normalized text item.
+    """
+    instruction = ex.get("instruction", "")
+    input_text = ex.get("input", "")
+    if input_text:
+        text = f"{instruction}\n{input_text}"
+    else:
+        text = instruction
+    return {"text": text}
+
+
 DATASETS: dict[str, dict[str, Any]] = {
     "vqav2": {
         "default_split": "validation",
         "adapter": get_item_vqav2,
         "candidates": ["HuggingFaceM4/VQAv2", "vqav2", "lmms-lab/VQAv2"],
+        "is_text_only": False,
     },
     "textvqa": {
         "default_split": "validation",
         "adapter": get_item_textvqa,
         "candidates": ["textvqa", "HuggingFaceM4/TextVQA", "lmms-lab/textvqa"],
+        "is_text_only": False,
     },
     "coco": {
         "default_split": "val",
@@ -201,12 +246,20 @@ DATASETS: dict[str, dict[str, Any]] = {
         "candidates": [
             "lmms-lab/COCO-Caption2017",
         ],
+        "is_text_only": False,
     },
     "wikitext2": {
         "default_split": "test",
-        "adapter": None,  # Text-only dataset, no adapter needed
+        "adapter": get_item_wikitext2,
         "candidates": ["wikitext"],
         "config": "wikitext-2-raw-v1",
+        "is_text_only": True,
+    },
+    "alpaca": {
+        "default_split": "train",
+        "adapter": get_item_alpaca,
+        "candidates": ["tatsu-lab/alpaca"],
+        "is_text_only": True,
     },
 }
 
@@ -855,4 +908,196 @@ def get_calib_inputs(
         )
         calib_inputs.append(inputs)
 
+    return calib_inputs
+
+
+def build_text_only_inputs(
+    processor,
+    text: str,
+    return_tensors: str = "pt",
+    max_seq_len: Optional[int] = None,
+):
+    """
+    Build processor inputs for text-only data (no image).
+
+    Args:
+        processor: Hugging Face processor.
+        text: Input text.
+        return_tensors: Tensor format requested from the processor.
+        max_seq_len: Optional maximum text sequence length. If provided,
+                     text inputs are truncated to this length.
+
+    Returns:
+        A processor output object containing model-ready text inputs.
+    """
+    processor_kwargs: Dict[str, Any] = {
+        "text": text,
+        "return_tensors": return_tensors,
+    }
+    if max_seq_len is not None and max_seq_len > 0:
+        processor_kwargs["truncation"] = True
+        processor_kwargs["max_length"] = max_seq_len
+
+    return processor(**processor_kwargs)
+
+
+def _build_text_calib_inputs(
+    processor,
+    text: str,
+    n_samples: int,
+    max_seq_len: int,
+    seed: int,
+) -> List[Dict[str, Any]]:
+    """
+    Build calibration inputs from text by sampling random fixed-length sequences.
+
+    Tokenize all text, then sample random fixed-length sequences.
+
+    Args:
+        processor: Hugging Face processor with tokenizer.
+        text: Full text to sample from.
+        n_samples: Number of calibration samples to generate.
+        max_seq_len: Sequence length for each sample.
+        seed: Random seed for reproducible sampling.
+
+    Returns:
+        A list of processor output objects, each containing input_ids.
+    """
+    # Tokenize the full text
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    input_ids = tokenizer(text, return_tensors="pt").input_ids
+
+    calib_inputs = []
+    rng = random.Random(seed)
+
+    for _ in range(n_samples):
+        # Sample a random starting position
+        max_start = input_ids.shape[1] - max_seq_len - 1
+        if max_start <= 0:
+            # If text is too short, use what we have
+            start = 0
+            end = input_ids.shape[1]
+        else:
+            start = rng.randint(0, max_start)
+            end = start + max_seq_len
+
+        sample_ids = input_ids[:, start:end]
+
+        # Build inputs dict similar to processor output
+        inputs = {"input_ids": sample_ids}
+        calib_inputs.append(inputs)
+
+    return calib_inputs
+
+
+def get_mixed_calib_inputs(
+    processor,
+    dataset_config: Dict[str, Dict[str, Any]],
+    max_seq_len: int,
+    seed: int = 42,
+) -> List[Dict[str, Any]]:
+    """
+    Build calibration inputs from multiple datasets
+
+    This function loads samples from multiple datasets and combines them into
+    a single calibration set. It handles both image-text datasets (e.g. VQAv2, COCO)
+    and text-only datasets (e.g. Wikitext2, Alpaca).
+
+    For text-only datasets, it concatenates all text and samples random
+    fixed-length sequences.
+
+    For image-text datasets, it takes the first n_samples directly.
+
+    Args:
+        processor: Hugging Face processor.
+        max_seq_len: maximum text sequence length.
+        dataset_config: Dictionary mapping dataset names (with optional split) to
+            number of samples. Format: {"dataset": {"n_samples": n_samples}} or
+                                       {"dataset": {"split":"split","n_samples": n_samples}}.
+            Example: {
+                      "wikitext2": {"n_samples": 128},
+                      "alpaca": {"split": "train", "n_samples": 32}
+                      }
+        seed: Random seed for reproducible sampling (used only for text-only
+            datasets).
+
+    Returns:
+        A list of processor output objects from all datasets.
+    """
+    calib_inputs = []
+
+    for dataset, config in dataset_config.items():
+        n_samples = config.get("n_samples", None)
+        split = config.get("split", None)
+        if n_samples is None or n_samples <= 0:
+            continue
+
+        if dataset not in DATASETS:
+            print(f"[warn] Unknown dataset '{dataset}', skipping")
+            continue
+
+        is_text_only = DATASETS[dataset].get("is_text_only", False)
+
+        if is_text_only:
+            # TODO: text only inputs should be changed with chat template
+
+            # Loading whole dataset
+            ds, adapter = get_dataset(dataset=dataset, n=-1, split=split)
+
+            # For text-only datasets: use adapter to extract text, then sample random sequences
+            if adapter is None:
+                print(f"[warn] No adapter for dataset '{dataset}', skipping")
+                continue
+
+            all_texts = []
+            for ex in ds:
+                item = adapter(ex)
+                text = item.get("text", "")
+                if text.strip():
+                    all_texts.append(text)
+
+            if not all_texts:
+                print(f"[warn] No text found in dataset '{dataset}', skipping")
+                continue
+
+            # Concatenate all text
+            full_text = "\n\n".join(all_texts)
+            print(f"[info] Tokenizing {len(full_text)} chars from '{dataset}'")
+
+            # Sample random fixed-length sequences
+            text_inputs = _build_text_calib_inputs(
+                processor=processor,
+                text=full_text,
+                n_samples=n_samples,
+                max_seq_len=max_seq_len,
+                seed=seed,
+            )
+            calib_inputs.extend(text_inputs)
+        else:
+            # Loading whole dataset
+            ds, adapter = get_dataset(dataset=dataset, n=n_samples, split=split)
+
+            # For image-text datasets: take first n_samples directly
+            if adapter is None:
+                print(f"[warn] No adapter for dataset '{dataset}', skipping")
+                continue
+
+            for ex in ds:
+                item = adapter(ex)
+                inputs = build_vlm_inputs(
+                    processor=processor,
+                    image=item["image"],
+                    question=item["question"],
+                    return_tensors="pt",
+                    max_seq_len=max_seq_len,
+                )
+                calib_inputs.append(inputs)
+
+    if not calib_inputs:
+        raise ValueError(
+            "No calibration inputs were loaded. "
+            "Please check --nsamples_for_qcalibration."
+        )
+
+    print(f"[info] Total calibration samples: {len(calib_inputs)}")
     return calib_inputs

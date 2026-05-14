@@ -190,6 +190,10 @@ class SensitivityCalibrator:
             # update second order information as current weights gradients are ready
             for name in modules_to_process:
                 cur_module = modules_to_process[name]
+                # Skip modules that didn't participate in the forward pass
+                # (e.g., vision modules when processing text-only inputs)
+                if cur_module.weight.grad is None:
+                    continue
                 cur_grad = cur_module.weight.grad.detach().clone()
                 if torch.isnan(cur_grad).any().item():
                     print("WARNING NaN detected")

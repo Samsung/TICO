@@ -78,6 +78,12 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         self._orig_model_forward: Optional[Callable[..., Any]] = None
         self._quantizers: dict[str, Any] = {}
 
+        # Separate caches for vision batches (batches with pixel_values)
+        # This is needed because vision batches have different kwargs than text batches
+        self._vision_cache_args: list[list[Any]] = []
+        self._vision_cache_kwargs: dict[str, list[Any]] = {}
+        self._num_vision_batches: int = 0
+
     def _resolve_weight_bits(
         self,
         gptq_conf: Qwen3VLGPTQConfig,
@@ -150,6 +156,26 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 **cache_kwargs,
             )
 
+            # Track whether this batch has vision inputs (pixel_values)
+            # Vision inputs have 'pixel_values' or 'pixel_values_videos' in kwargs
+            # Store vision batches separately for vision stage quantization
+            has_vision_input = (
+                "pixel_values" in m_kwargs and m_kwargs["pixel_values"] is not None
+            ) or (
+                "pixel_values_videos" in m_kwargs
+                and m_kwargs["pixel_values_videos"] is not None
+            )
+
+            if has_vision_input:
+                # Also store in separate vision cache
+                append_batch_to_cache(
+                    self._vision_cache_args,
+                    self._vision_cache_kwargs,
+                    *cache_args,
+                    **cache_kwargs,
+                )
+                self._num_vision_batches += 1
+
             self.num_batches += 1
             return None
 
@@ -185,6 +211,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 stage_module=components.visual_patch_embed,
                 module_name=module_name,
                 stage_desc="vision.patch_embed",
+                vision_only=True,  # Only use vision inputs for vision stages
             )
 
         if should_quantize_vision_stage(gptq_conf, stage="blocks"):
@@ -200,6 +227,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 stage_module=components.visual_merger,
                 module_name=module_name,
                 stage_desc="vision.merger",
+                vision_only=True,  # Only use vision inputs for vision stages
             )
 
         if should_quantize_vision_stage(gptq_conf, stage="deepstack_mergers"):
@@ -209,6 +237,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     stage_module=merger,
                     module_name=module_name,
                     stage_desc=f"vision.deepstack_merger[{idx}]",
+                    vision_only=True,  # Only use vision inputs for vision stages
                 )
 
         if should_quantize_text_stage(gptq_conf, stage="layers"):
@@ -231,6 +260,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         self.cache_args.clear()
         self.cache_kwargs.clear()
         self.num_batches = 0
+        # Clear vision cache
+        self._vision_cache_args.clear()
+        self._vision_cache_kwargs.clear()
+        self._num_vision_batches = 0
         model.quantizers = self._quantizers
         return model
 
@@ -249,11 +282,21 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         Quantize Qwen3-VL vision blocks in layerwise order using first-block entry
         caches and progressive re-forward.
         """
-        block_args, block_kwargs = self._collect_stage_entry_inputs(
+        # Only use vision inputs for vision block quantization
+        block_args, block_kwargs, num_vision_batches = self._collect_stage_entry_inputs(
             model=model,
             target_module=components.visual_blocks[0],
             desc="vision block entry capture",
+            vision_only=True,
         )
+
+        if num_vision_batches == 0:
+            print(
+                "Warning: No vision inputs found in calibration data. "
+                "Skipping vision block quantization."
+            )
+            return
+
         assert isinstance(self.config, Qwen3VLGPTQConfig)
         for block_idx, block in enumerate(
             tqdm(
@@ -271,10 +314,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 cached_args=block_args,
                 cached_kwargs=block_kwargs,
                 stage_desc=stage_name,
+                num_batches=num_vision_batches,
             )
 
             for batch_idx in tqdm(
-                range(self.num_batches),
+                range(num_vision_batches),
                 desc=f"[vision block {block_idx}] re-forward",
                 leave=False,
                 unit="batch",
@@ -309,10 +353,12 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         Quantize text decoder layers in layerwise order using first-layer entry
         caches and progressive re-forward.
         """
-        layer_args, layer_kwargs = self._collect_stage_entry_inputs(
+        # Text layers process all batches (both vision and text-only)
+        layer_args, layer_kwargs, num_batches = self._collect_stage_entry_inputs(
             model=model,
             target_module=components.text_layers[0],
             desc="text layer entry capture",
+            vision_only=False,  # Text layers process all inputs
         )
         assert isinstance(self.config, Qwen3VLGPTQConfig)
         for layer_idx, layer in enumerate(
@@ -331,10 +377,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 cached_args=layer_args,
                 cached_kwargs=layer_kwargs,
                 stage_desc=stage_name,
+                num_batches=num_batches,
             )
 
             for batch_idx in tqdm(
-                range(self.num_batches),
+                range(num_batches),
                 desc=f"[text layer {layer_idx}] re-forward",
                 leave=False,
                 unit="batch",
@@ -403,10 +450,20 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         stage_module: nn.Module,
         module_name: dict[nn.Module, str],
         stage_desc: str,
+        vision_only: bool = False,
     ) -> None:
         """
         Quantize a stage by replaying raw model inputs and collecting statistics
         only for that stage's quantizable submodules.
+
+        Args:
+            model: The full model.
+            stage_module: The specific module being quantized.
+            module_name: Mapping from module to name.
+            stage_desc: Description for logging.
+            vision_only: If True, only replay batches that have vision inputs
+                (pixel_values). This is needed for vision stages to avoid errors
+                when text-only inputs lack image tokens.
         """
         subset = get_quantizable_layers(stage_module)
         if not subset:
@@ -425,18 +482,35 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 )
             )
         assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # Use separate vision cache for vision-only quantization
+        if vision_only:
+            if self._num_vision_batches == 0:
+                print(
+                    f"[{stage_desc}] Warning: No vision inputs found in calibration data. "
+                    f"Skipping vision stage quantization."
+                )
+                for handle in handles:
+                    handle.remove()
+                return
+            cache_args = self._vision_cache_args
+            cache_kwargs = self._vision_cache_kwargs
+            num_batches = self._num_vision_batches
+        else:
+            cache_args = self.cache_args
+            cache_kwargs = self.cache_kwargs
+            num_batches = self.num_batches
+
         try:
             for batch_idx in tqdm(
-                range(self.num_batches),
+                range(num_batches),
                 desc=f"[{stage_desc}] collecting",
                 leave=False,
                 unit="batch",
                 disable=not self.config.show_progress,
             ):
-                args_batch = gather_single_batch_from_list(self.cache_args, batch_idx)
-                kwargs_batch = gather_single_batch_from_dict(
-                    self.cache_kwargs, batch_idx
-                )
+                args_batch = gather_single_batch_from_list(cache_args, batch_idx)
+                kwargs_batch = gather_single_batch_from_dict(cache_kwargs, batch_idx)
                 args_batch = self._move_batch_to_model_device(model, args_batch)
                 kwargs_batch = self._move_batch_to_model_device(model, kwargs_batch)
                 model(*args_batch, **kwargs_batch)
@@ -459,13 +533,25 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         cached_args: list[list[Any]],
         cached_kwargs: dict[str, list[Any]],
         stage_desc: str,
+        num_batches: Optional[int] = None,
     ) -> None:
         """
         Quantize a stage by replaying cached stage-entry inputs.
+
+        Args:
+            stage_module: The module to quantize.
+            module_name: Mapping from module to name.
+            cached_args: Cached positional arguments.
+            cached_kwargs: Cached keyword arguments.
+            stage_desc: Description for logging.
+            num_batches: Number of batches to use. If None, uses self.num_batches.
         """
         subset = get_quantizable_layers(stage_module)
         if not subset:
             return
+
+        if num_batches is None:
+            num_batches = self.num_batches
 
         gptq_objs = self._build_gptq_objects(
             subset=subset,
@@ -482,7 +568,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         assert isinstance(self.config, Qwen3VLGPTQConfig)
         try:
             for args_batch, kwargs_batch in tqdm(
-                iter_cached_batches(cached_args, cached_kwargs, self.num_batches),
+                iter_cached_batches(cached_args, cached_kwargs, num_batches),
                 desc=f"[{stage_desc}] collecting",
                 leave=False,
                 unit="batch",
@@ -613,10 +699,22 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         model: nn.Module,
         target_module: nn.Module,
         desc: str,
-    ) -> tuple[list[list[Any]], dict[str, list[Any]]]:
+        vision_only: bool = False,
+    ) -> tuple[list[list[Any]], dict[str, list[Any]], int]:
         """
         Capture the per-batch inputs fed into a specific stage module by replaying
         raw model inputs and stopping at the stage boundary.
+
+        Args:
+            model: The full model.
+            target_module: The module whose inputs to capture.
+            desc: Description for logging.
+            vision_only: If True, only capture inputs from batches with vision data.
+
+        Returns:
+            Tuple of (stage_args, stage_kwargs, num_batches) where num_batches is the
+            number of batches captured (may be less than self.num_batches if
+            vision_only=True).
         """
         stage_args: list[list[Any]] = []
         stage_kwargs: dict[str, list[Any]] = {}
@@ -660,19 +758,27 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
         target_module.forward = types.MethodType(capture_forward, target_module)
 
+        # Use separate vision cache for vision-only quantization
+        if vision_only:
+            cache_args = self._vision_cache_args
+            cache_kwargs = self._vision_cache_kwargs
+            num_batches = self._num_vision_batches
+        else:
+            cache_args = self.cache_args
+            cache_kwargs = self.cache_kwargs
+            num_batches = self.num_batches
+
         assert isinstance(self.config, Qwen3VLGPTQConfig)
         try:
             for batch_idx in tqdm(
-                range(self.num_batches),
+                range(num_batches),
                 desc=desc,
                 leave=False,
                 unit="batch",
                 disable=not self.config.show_progress,
             ):
-                args_batch = gather_single_batch_from_list(self.cache_args, batch_idx)
-                kwargs_batch = gather_single_batch_from_dict(
-                    self.cache_kwargs, batch_idx
-                )
+                args_batch = gather_single_batch_from_list(cache_args, batch_idx)
+                kwargs_batch = gather_single_batch_from_dict(cache_kwargs, batch_idx)
                 args_batch = self._move_batch_to_model_device(model, args_batch)
                 kwargs_batch = self._move_batch_to_model_device(model, kwargs_batch)
 
@@ -683,7 +789,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         finally:
             target_module.forward = orig_forward
 
-        return stage_args, stage_kwargs
+        return stage_args, stage_kwargs, num_batches
 
     # ------------------------------------------------------------------
     # Device / dtype helpers
