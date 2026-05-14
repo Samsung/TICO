@@ -52,6 +52,9 @@ applied after _convert()_, the effectiveness of GPTQ may be diminished.
 There are two options :
 1. `mse`- vanilla `mse`. Produce quantization parameters for GPTQ quantizer (`min`\`max`) which minimize mean squared error of quantization. $MSE_{MIN, MAX}(W) = argmin_{min, max}||W-Q_{min, max}(W)||^2$.
 2. `smse` - sensitivity-based `mse`. Use sensitivity of some global feature (e.g. float model logits) to parameters change to minimize global effect of quantization. $SMSE_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W))^2*Sensitivity(W)|$. So we try to keep `important` parameters unchanged, while quantizing `unimportant` parameters more aggressively.
+3. `smse_for_gptq` - `smse` adjusted for GPTQ. GPTQ modifies the matrix during the quantization process, so the most accurate method would consist in finding a quantizer that yields the smallest quantization error after the GPTQ method has been applied $SMSE\_FOR\_GPTQ_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W_{GPTQ}))^2*Sensitivity(W)|$. Since this would be quite computationally expensive, we can use an accelerated approximate GPTQ method — FPI_GPTQ $SMSE\_FOR\_GPTQ_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W_{FPI\_GPTQ}))^2*Sensitivity(W)|$. This is slower than `mse`/`smse` but can provide better accuracy.
+
+
 
 You can turn this feature `on`/`off` by using `mse` parameter of `GPTQConfig`:
 ```

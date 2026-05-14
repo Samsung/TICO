@@ -163,7 +163,11 @@ class SensitivityCalibrator:
         if self.show_progress is True:
             print("Calibrating sensitivity")
         for inputs, targets in tqdm.tqdm(data_loader, disable=not self.show_progress):
-            model.zero_grad()
+            model.zero_grad(set_to_none=True)
+            if model.device.type != "cpu":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
             if isinstance(inputs, torch.Tensor):
                 inp_ids = inputs.squeeze(0)  # remove redundant batch dimension
                 logits = model(inp_ids.to(model.device)).logits
@@ -215,6 +219,11 @@ class SensitivityCalibrator:
         for name in modules_to_process:
             sensitivity[name] /= len(data_loader)
 
+        model.zero_grad(set_to_none=True)
+        if model.device.type != "cpu":
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+                
         model = model.to(dtype)
 
         return sensitivity
