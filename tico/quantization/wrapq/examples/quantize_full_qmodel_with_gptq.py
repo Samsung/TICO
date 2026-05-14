@@ -285,6 +285,13 @@ def parse_args():
         default=False,
         help="Run inputs for the next layer on original model to stabilize GPTQ",
     )
+    parser.add_argument(
+        "--gptq_percdamp",
+        type=float,
+        default=0.01,
+        help="Dampening parameter to be used in GPTQ. It helps to avoid degenerate,"
+        "ill-conditioned matrices and serve as a tradeoff between GPTQ and ordinary min-max quantizer.",
+    )
     return parser.parse_args()
 
 
@@ -444,6 +451,7 @@ def build_gptq_config(
         sensitivity=sensitivity,
         quantize_lm_head=args.gptq_lm_head,
         use_orig_model_inference=args.gptq_use_orig_model_inference,
+        percdamp=args.gptq_percdamp,
     )
 
 
