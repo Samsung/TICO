@@ -23,6 +23,7 @@ import torch.nn as nn
 
 from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ
 
+
 def quantize(x, scale, zero, maxq):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
@@ -62,11 +63,11 @@ class Quantizer(nn.Module):
 
     def _prepare_tensor(self, x, weight=False):
         """Prepare tensor for quantization by flattening according to per-channel setting.
-        
+
         Args:
             x: Input tensor to prepare
             weight: Whether the tensor is a weight (affects flattening for activations)
-            
+
         Returns:
             Tuple of (prepared tensor, original shape)
         """
@@ -88,10 +89,10 @@ class Quantizer(nn.Module):
 
     def _compute_scale_zero_bounds(self, x):
         """Compute scale and zero bounds from tensor values.
-        
+
         Args:
             x: Prepared tensor (flattened according to per-channel setting)
-            
+
         Returns:
             Tuple of (scale, zero, xmin, xmax) computed from tensor bounds
         """
@@ -123,17 +124,17 @@ class Quantizer(nn.Module):
 
     def _reshape_scale_zero(self, shape, weight=False):
         """Reshape scale and zero tensors according to the original tensor shape.
-        
+
         Args:
             shape: Original tensor shape before preparation
             weight: Whether the tensor is a weight (affects reshape for activations)
         """
         if weight:
             shape = [-1] + [1] * (len(shape) - 1)
-            self.scale = self.scale.reshape(shape)
-            self.zero = self.zero.reshape(shape)
+            self.scale = self.scale.reshape(shape)  # type: ignore[has-type]
+            self.zero = self.zero.reshape(shape)  # type: ignore[has-type]
             return
-            
+
         if len(shape) == 4:
             self.scale = self.scale.reshape((1, -1, 1, 1))
             self.zero = self.zero.reshape((1, -1, 1, 1))
@@ -146,7 +147,7 @@ class Quantizer(nn.Module):
 
     def _expand_for_per_tensor(self, shape, weight=False):
         """Expand scale and zero for per-tensor quantization.
-        
+
         Args:
             shape: Original tensor shape before preparation
             weight: Whether the tensor is a weight
@@ -169,7 +170,11 @@ class Quantizer(nn.Module):
 
         self.scale, self.zero, xmin, xmax = self._compute_scale_zero_bounds(x)
 
-        if self.mse is not None and self.mse != "smse_for_gptq" and self.mse != "mse_for_gptq":
+        if (
+            self.mse is not None
+            and self.mse != "smse_for_gptq"
+            and self.mse != "mse_for_gptq"
+        ):
             self._optimize_mse(x, xmin, xmax)
 
         self._expand_for_per_tensor(shape, weight)
@@ -177,12 +182,12 @@ class Quantizer(nn.Module):
 
     def _compute_shrink_params(self, p, xmin, xmax):
         """Compute scale and zero for a shrink factor p.
-        
+
         Args:
             p: Shrink factor (1 - i / grid)
             xmin: Minimum values per channel
             xmax: Maximum values per channel
-            
+
         Returns:
             Tuple of (scale1, zero1) for the given shrink factor
         """
@@ -194,13 +199,13 @@ class Quantizer(nn.Module):
 
     def _update_best_params(self, best, err, scale1, zero1):
         """Update best parameters if current error is lower.
-        
+
         Args:
             best: Current best error values
             err: Current iteration error values
             scale1: Current iteration scale values
             zero1: Current iteration zero values
-            
+
         Returns:
             Updated best error values
         """
@@ -213,7 +218,7 @@ class Quantizer(nn.Module):
 
     def _grid_search(self, x, xmin, xmax, compute_error_fn):
         """Common grid search loop for MSE optimization.
-        
+
         Args:
             x: Prepared tensor
             xmin: Minimum values per channel
@@ -230,12 +235,13 @@ class Quantizer(nn.Module):
 
     def _optimize_mse(self, x, xmin, xmax):
         """Optimize scale and zero using MSE-based grid search.
-        
+
         Args:
             x: Prepared tensor
             xmin: Minimum values per channel
             xmax: Maximum values per channel
         """
+
         def compute_error(x, scale1, zero1):
             q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
             q -= x
@@ -243,12 +249,14 @@ class Quantizer(nn.Module):
             if self.mse == "smse":  # sensitivity weighted mse
                 # in case sensitivity is a second order derivatives of some global loss
                 # (q**2) * self.sensitivity is just a global loss change due to quantization.
-                q = (q**2) * self.sensitivity.to(q.device)  # estimate global target change
+                q = (q**2) * self.sensitivity.to(
+                    q.device
+                )  # estimate global target change
             else:
                 assert self.mse == "mse"
                 q.pow_(self.norm)
             return torch.sum(q, 1)
-        
+
         self._grid_search(x, xmin, xmax, compute_error)
 
     def update(self, x, Hinv, perm):
@@ -269,13 +277,13 @@ class Quantizer(nn.Module):
         self._optimize_mse_for_gptq(x, Hinv, sensitivity, xmin, xmax)
 
         self._reshape_scale_zero(shape, weight=True)
-        
+
         del sensitivity
         sensitivity = None
 
     def _optimize_mse_for_gptq(self, x, Hinv, sensitivity, xmin, xmax):
         """Optimize scale and zero using GPTQ-aware MSE grid search.
-        
+
         Args:
             x: Prepared tensor
             Hinv: Inverse Hessian matrix
@@ -284,7 +292,7 @@ class Quantizer(nn.Module):
             xmax: Maximum values per channel
         """
         num_of_iters = 15
-        
+
         def compute_error(x, scale1, zero1):
             q, _ = iterate_GPTQ(
                 scale1.unsqueeze(1),
@@ -298,7 +306,7 @@ class Quantizer(nn.Module):
             assert self.mse == "smse_for_gptq"
             err = ((q - x) ** 2) * sensitivity.to(q.device)
             return torch.sum(err, 1)
-        
+
         self._grid_search(x, xmin, xmax, compute_error)
 
     def quantize(self, x):

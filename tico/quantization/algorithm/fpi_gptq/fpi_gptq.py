@@ -32,7 +32,8 @@ from tico.quantization.algorithm.gptq.gptq import (
 )
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
-from tico.quantization.algorithm.fpi_gptq.util import quantize, iterate_GPTQ
+from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ, quantize
+
 
 class FPI_GPTQ:
     def __init__(self, layer):
