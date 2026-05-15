@@ -47,7 +47,7 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     # ------------------------------------------------------------------
     quantize_vision: bool = True
     quantize_text: bool = True
-    quantize_lm_head: bool = True
+    quantize_lm_head: bool = False
 
     # ------------------------------------------------------------------
     # Vision-side stage switches
@@ -98,6 +98,11 @@ class Qwen3VLGPTQConfig(GPTQConfig):
 
         if self.model_type != "qwen3_vl":
             raise ValueError(f"model_type must be 'qwen3_vl'. got {self.model_type!r}")
+
+        if not isinstance(self.quantize_lm_head, bool):
+            raise TypeError(
+                f"quantize_lm_head must be bool. got {type(self.quantize_lm_head)}"
+            )
 
         if not (self.quantize_vision or self.quantize_text or self.quantize_lm_head):
             raise ValueError(

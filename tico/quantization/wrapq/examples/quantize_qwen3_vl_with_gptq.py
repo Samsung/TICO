@@ -102,6 +102,15 @@ def parse_args():
         help="Skip GPTQ and keep the model in floating-point.",
     )
     parser.add_argument(
+        "--gptq_lm_head",
+        action="store_true",
+        default=False,
+        help=(
+            "Apply GPTQ to lm_head. Disabled by default because "
+            "lm_head.weight can be tied with the input embedding table."
+        ),
+    )
+    parser.add_argument(
         "--no_PTQ",
         action="store_true",
         default=False,
@@ -187,24 +196,25 @@ def parse_args():
         help="Optional path to precomputed sensitivity tensors.",
     )
 
-    # Qwen3-VL GPTQ-specific switches
+    # Qwen3-VL stage switches. These switches are shared by GPTQ/PTQ except
+    # lm_head, whose GPTQ path is controlled separately by --gptq_lm_head.
     parser.add_argument(
         "--no_quantize_vision",
         action="store_false",
         dest="quantize_vision",
-        help="Quantize the vision tower.",
+        help="Skip quantization for the vision tower.",
     )
     parser.add_argument(
         "--no_quantize_text",
         action="store_false",
         dest="quantize_text",
-        help="Quantize the text tower.",
+        help="Skip quantization for the text tower.",
     )
     parser.add_argument(
         "--no_quantize_lm_head",
         action="store_false",
         dest="quantize_lm_head",
-        help="Quantize lm_head.",
+        help="Skip PTQ quantization for lm_head.",
     )
     parser.add_argument(
         "--move_cache_to_cpu",
@@ -495,9 +505,9 @@ def evaluate_model_coco(
 
 
 def move_batch_to_device(
-    batch: dict[str, torch.Tensor],
+    batch: dict[str, Any],
     device: str | torch.device,
-) -> dict[str, torch.Tensor]:
+) -> dict[str, Any]:
     """
     Move one processor batch to the target device.
 
@@ -508,7 +518,7 @@ def move_batch_to_device(
     Returns:
         Device-moved batch.
     """
-    return {k: v.to(device) for k, v in batch.items()}
+    return {k: v.to(device) if hasattr(v, "to") else v for k, v in batch.items()}
 
 
 def print_eval_results(
@@ -559,6 +569,40 @@ def print_markdown_comparison(
     print(quantized_row)
 
 
+def build_qwen3_vl_gptq_config(
+    args,
+    sensitivity: dict[str, torch.Tensor] | None = None,
+) -> Qwen3VLGPTQConfig:
+    """
+    Build a Qwen3-VL GPTQ configuration from command-line arguments.
+
+    GPTQ for lm_head is disabled by default because many language models tie
+    `lm_head.weight` with the input embedding table. Users can enable it
+    explicitly with `--gptq_lm_head`.
+    """
+    weight_bits_overrides: dict[str, int] = {}
+
+    if args.gptq_lm_head:
+        weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
+
+    return Qwen3VLGPTQConfig(
+        verbose=args.verbose,
+        show_progress=not args.hide_progress,
+        weight_bits=args.linear_weight_bits,
+        weight_bits_overrides=weight_bits_overrides,
+        mse=args.gptq_mse,
+        sensitivity=sensitivity,
+        percdamp=args.percdamp,
+        groupsize=args.groupsize,
+        actorder=args.actorder,
+        static_groups=args.static_groups,
+        quantize_vision=args.quantize_vision,
+        quantize_text=args.quantize_text,
+        quantize_lm_head=args.gptq_lm_head,
+        move_cache_to_cpu=args.move_cache_to_cpu,
+    )
+
+
 # -------------------------------------------------------------------------
 # Helper — copy GPTQ (scale, zp) into PTQ observers
 # -------------------------------------------------------------------------
@@ -605,6 +649,7 @@ def quantize_using_PTQ(
         q_m: Model after GPTQ quantization.
         calib_inputs: Calibration inputs for PTQ calibration.
         args: Command-line arguments.
+        grid_thw: Vision grid temporal-height-width tuple.
         num_vision_blocks: Number of vision transformer blocks.
         num_text_layers: Number of text decoder layers.
         num_deepstack_mergers: Number of deepstack merger modules.
@@ -748,6 +793,287 @@ def get_num_deepstack_mergers(q_m) -> int:
     return num_deepstack_mergers
 
 
+def apply_smoothquant_if_requested(model, calib_inputs, args) -> None:
+    """
+    Apply SmoothQuant smoothing when requested.
+
+    Calibration maxima are collected from Linear module inputs, then passed to
+    SmoothQuant appliers for the selected Qwen3-VL components.
+    """
+    if not args.smoothquant:
+        return
+
+    if args.smoothquant_components is None:
+        raise ValueError(
+            "--smoothquant_components must be specified when --smoothquant is enabled."
+        )
+
+    exclude_appliers = []
+    if args.smoothquant_components == "text":
+        exclude_appliers.extend(
+            [
+                "_apply_if_qwen3vl_vision_block",
+                "_apply_if_qwen3vl_vision_patch_merger",
+            ]
+        )
+    if args.smoothquant_components == "vision":
+        exclude_appliers.append("_apply_if_qwen3vl_text_decoder")
+
+    print(
+        f"Applying SmoothQuant smoothing for {args.smoothquant_components} components"
+    )
+    print("Computing activation maximum values for SmoothQuant …")
+    activation_max: dict[str, torch.Tensor] = {}
+    hooks = []
+
+    def make_hook(name):
+        def hook(module, input, output):
+            if isinstance(input, tuple):
+                x = input[0]
+            else:
+                x = input
+            if not isinstance(x, torch.Tensor):
+                return
+            if x.dim() < 2:
+                return
+            x_flat = x.reshape(-1, x.shape[-1])
+            amax = x_flat.abs().max(dim=0)[0].detach()
+            if name not in activation_max:
+                activation_max[name] = amax
+            else:
+                activation_max[name] = torch.maximum(activation_max[name], amax)
+
+        return hook
+
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            hooks.append(module.register_forward_hook(make_hook(name)))
+
+    try:
+        with torch.no_grad():
+            iterator = tqdm.tqdm(
+                calib_inputs,
+                desc="SmoothQuant calibration",
+                disable=args.hide_progress,
+            )
+            for inp in iterator:
+                dev_inp = move_batch_to_device(inp, args.device)
+                model(**dev_inp)
+    finally:
+        for hook in hooks:
+            hook.remove()
+
+    apply_smoothing(
+        model,
+        activation_max,
+        alpha=args.smoothquant_alpha,
+        exclude_appliers=exclude_appliers,
+    )
+
+
+def load_or_compute_sensitivity(model, calib_inputs, args):
+    """
+    Load or compute sensitivity tensors used by sensitivity-aware GPTQ.
+
+    Sensitivity information is only needed when `--gptq_mse smse` is used.
+    """
+    if args.gptq_mse != "smse":
+        return None
+
+    if args.sensitivity_path is not None:
+        print(f"Loading sensitivity tensors from {args.sensitivity_path}")
+        return torch.load(args.sensitivity_path, map_location="cpu")
+
+    print("Computing sensitivity tensors for GPTQ …")
+    calibrator = SensitivityCalibrator(
+        model,
+        calib_inputs,
+        show_progress=not args.hide_progress,
+    )
+    return calibrator.compute_sensitivity_info()
+
+
+def quantize_using_GPTQ(model, calib_inputs, args):
+    """
+    Apply Qwen3-VL GPTQ to the configured model stages.
+
+    GPTQ for lm_head is controlled by `--gptq_lm_head` and is disabled by
+    default to avoid modifying tied embedding weights.
+    """
+    if args.no_GPTQ:
+        return model
+
+    print("Applying GPTQ …")
+    sensitivity = load_or_compute_sensitivity(model, calib_inputs, args)
+    qcfg = build_qwen3_vl_gptq_config(args, sensitivity=sensitivity)
+
+    q_m = prepare(model, qcfg)
+
+    with torch.no_grad():
+        iterator = tqdm.tqdm(
+            calib_inputs,
+            desc="GPTQ calibration",
+            disable=args.hide_progress,
+        )
+        for inp in iterator:
+            dev_inp = move_batch_to_device(inp, args.device)
+            q_m(**dev_inp)
+
+    q_m = convert(q_m, inplace=True)
+    return q_m
+
+
+def evaluate_original_model(model, processor, args):
+    """
+    Run requested evaluations on the original floating-point model.
+    """
+    original_results = None
+
+    if args.eval_tasks is not None:
+        if "vqa" in args.eval_tasks:
+            original_results = evaluate_model(
+                model,
+                processor,
+                args.eval_tasks,
+                args.device,
+                args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            print_eval_results("Evaluating original model", original_results)
+
+        if "coco" in args.eval_tasks:
+            print("\n=== COCO Evaluation (Original Model) ===")
+            results = evaluate_model_coco(
+                model=model,
+                processor=processor,
+                device=args.device,
+                nsamples=args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            for metric, value in results.items():
+                print(f"{metric:<10} {value:.3f}")
+
+    if args.mmlu_subjects is not None:
+        print("\n=== MMLU Evaluation (Original Model) ===")
+        original_mmlu_results = evaluate_mmlu(
+            model=model,
+            tokenizer=processor.tokenizer,
+            subjects=args.mmlu_subjects,
+            device=args.device,
+            n_shots=args.mmlu_n_shots,
+            n_samples=args.mmlu_n_samples,
+            batch_size=args.mmlu_batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        print_mmlu_results(original_mmlu_results)
+
+    if args.mmmu_subjects is not None:
+        print("\n=== MMMU Evaluation (Original Model) ===")
+        original_mmmu_results = evaluate_mmmu(
+            model=model,
+            processor=processor,
+            subjects=args.mmmu_subjects,
+            device=args.device,
+            n_shots=args.mmmu_n_shots,
+            n_samples=args.mmmu_n_samples,
+            max_seq_len=args.max_seq_len,
+            verbose=args.verbose,
+        )
+        print_mmmu_results(original_mmmu_results)
+
+    if args.ppl_dataset:
+        print("\n=== PPL Evaluation (Original Model) ===")
+        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
+        original_ppl = evaluate_ppl(
+            model=model,
+            tokenizer=processor.tokenizer,
+            ds=ds_ppl,
+            device=args.device,
+            stride=args.ppl_stride,
+            max_seq_len=args.max_seq_len,
+            show_progress=not args.hide_progress,
+        )
+        print(f"Original PPL: {original_ppl:.2f}")
+
+    return original_results
+
+
+def evaluate_quantized_model(model, processor, args, original_results=None) -> None:
+    """
+    Run requested evaluations on the quantized model.
+    """
+    quantized_results = None
+
+    if args.eval_tasks is not None:
+        if "vqa" in args.eval_tasks:
+            quantized_results = evaluate_model(
+                model,
+                processor,
+                args.eval_tasks,
+                args.device,
+                args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            print_eval_results("Evaluating quantized model", quantized_results)
+
+            if original_results is not None:
+                print_markdown_comparison(original_results, quantized_results)
+
+        if "coco" in args.eval_tasks:
+            print("\n=== COCO Evaluation (Quantized Model) ===")
+            results = evaluate_model_coco(
+                model=model,
+                processor=processor,
+                device=args.device,
+                nsamples=args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            for metric, value in results.items():
+                print(f"{metric:<10} {value:.3f}")
+
+    if args.mmlu_subjects is not None:
+        print("\n=== MMLU Evaluation (Quantized Model) ===")
+        quantized_mmlu_results = evaluate_mmlu(
+            model=model,
+            tokenizer=processor.tokenizer,
+            subjects=args.mmlu_subjects,
+            device=args.device,
+            n_shots=args.mmlu_n_shots,
+            n_samples=args.mmlu_n_samples,
+            batch_size=args.mmlu_batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        print_mmlu_results(quantized_mmlu_results)
+
+    if args.mmmu_subjects is not None:
+        print("\n=== MMMU Evaluation (Quantized Model) ===")
+        quantized_mmmu_results = evaluate_mmmu(
+            model=model,
+            processor=processor,
+            subjects=args.mmmu_subjects,
+            device=args.device,
+            n_shots=args.mmmu_n_shots,
+            n_samples=args.mmmu_n_samples,
+            max_seq_len=args.max_seq_len,
+            verbose=args.verbose,
+        )
+        print_mmmu_results(quantized_mmmu_results)
+
+    if args.ppl_dataset:
+        print("\n=== PPL Evaluation (Quantized Model) ===")
+        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
+        quantized_ppl = evaluate_ppl(
+            model=model,
+            tokenizer=processor.tokenizer,
+            ds=ds_ppl,
+            device=args.device,
+            stride=args.ppl_stride,
+            max_seq_len=args.max_seq_len,
+            show_progress=not args.hide_progress,
+        )
+        print(f"Quantized PPL: {quantized_ppl:.2f}")
+
+
 def main() -> None:
     args = parse_args()
     print(args)
@@ -758,28 +1084,29 @@ def main() -> None:
 
     quantize_vision = args.quantize_vision
     quantize_text = args.quantize_text
-    quantize_lm_head = args.quantize_lm_head
+    quantize_ptq_lm_head = args.quantize_lm_head
+    quantize_gptq_lm_head = args.gptq_lm_head
 
     grid_thw = tuple(args.grid_thw)
 
     print("=== Config ===")
-    print(f"Model            : {args.model}")
-    print(f"Device           : {device.type}")
-    print(f"DType            : {args.dtype}")
-    print(f"Calib seq len    : {args.calib_seq_len}")
-    print(f"Max seq len      : {args.max_seq_len}")
-    print(f"Quantize vision  : {quantize_vision}")
-    print(f"Quantize text    : {quantize_text}")
-    print(f"Quantize lm_head : {quantize_lm_head}")
-    print(f"Use GPTQ         : {not args.no_GPTQ}")
-    print(f"Use PTQ          : {not args.no_PTQ}")
-    print(f"Use SmoothQuant  : {args.smoothquant}")
+    print(f"Model               : {args.model}")
+    print(f"Device              : {device.type}")
+    print(f"DType               : {args.dtype}")
+    print(f"Calib seq len       : {args.calib_seq_len}")
+    print(f"Max seq len         : {args.max_seq_len}")
+    print(f"Quantize vision     : {quantize_vision}")
+    print(f"Quantize text       : {quantize_text}")
+    print(f"Quantize PTQ lm_head: {quantize_ptq_lm_head}")
+    print(f"Quantize GPTQ lm_head: {quantize_gptq_lm_head}")
+    print(f"Use GPTQ            : {not args.no_GPTQ}")
+    print(f"Use PTQ             : {not args.no_PTQ}")
+    print(f"Use SmoothQuant     : {args.smoothquant}")
     if args.smoothquant:
-        print(f"SmoothQuant alpha: {args.smoothquant_alpha}")
-    print(f"grid_thw         : {grid_thw}")
-    print(f"spatial_merge_size: {args.spatial_merge_size}")
-    print(f"visual_start_idx : {args.visual_start_idx}")
-
+        print(f"SmoothQuant alpha   : {args.smoothquant_alpha}")
+    print(f"grid_thw            : {grid_thw}")
+    print(f"spatial_merge_size  : {args.spatial_merge_size}")
+    print(f"visual_start_idx    : {args.visual_start_idx}")
     print()
 
     print("Loading FP model …")
@@ -829,74 +1156,7 @@ def main() -> None:
         if hasattr(model.config.text_config, "use_cache"):
             model.config.text_config.use_cache = False
 
-    if args.eval_tasks is not None:
-        if "vqa" in args.eval_tasks:
-            original_results = evaluate_model(
-                model,
-                processor,
-                args.eval_tasks,
-                args.device,
-                args.nsamples_for_evaluation,
-                max_seq_len=args.max_seq_len,
-            )
-            print_eval_results("Evaluating original model", original_results)
-
-        if "coco" in args.eval_tasks:
-            print("\n=== COCO Evaluation (Original Model) ===")
-            results = evaluate_model_coco(
-                model=model,
-                processor=processor,
-                device=args.device,
-                nsamples=args.nsamples_for_evaluation,
-                max_seq_len=args.max_seq_len,
-            )
-            for metric, value in results.items():
-                print(f"{metric:<10} {value:.3f}")
-
-    # MMLU evaluation on original model
-    if args.mmlu_subjects is not None:
-        print("\n=== MMLU Evaluation (Original Model) ===")
-        original_mmlu_results = evaluate_mmlu(
-            model=model,
-            tokenizer=processor.tokenizer,
-            subjects=args.mmlu_subjects,
-            device=args.device,
-            n_shots=args.mmlu_n_shots,
-            n_samples=args.mmlu_n_samples,
-            batch_size=args.mmlu_batch_size,
-            max_seq_len=args.max_seq_len,
-        )
-        print_mmlu_results(original_mmlu_results)
-
-    # MMMU evaluation on original model
-    if args.mmmu_subjects is not None:
-        print("\n=== MMMU Evaluation (Original Model) ===")
-        original_mmmu_results = evaluate_mmmu(
-            model=model,
-            processor=processor,
-            subjects=args.mmmu_subjects,
-            device=args.device,
-            n_shots=args.mmmu_n_shots,
-            n_samples=args.mmmu_n_samples,
-            max_seq_len=args.max_seq_len,
-            verbose=args.verbose,
-        )
-        print_mmmu_results(original_mmmu_results)
-
-    # PPL evaluation on original model
-    if args.ppl_dataset:
-        print("\n=== PPL Evaluation (Original Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
-        original_ppl = evaluate_ppl(
-            model=model,
-            tokenizer=processor.tokenizer,
-            ds=ds_ppl,
-            device=args.device,
-            stride=args.ppl_stride,
-            max_seq_len=args.max_seq_len,
-            show_progress=not args.hide_progress,
-        )
-        print(f"Original PPL: {original_ppl:.2f}")
+    original_results = evaluate_original_model(model, processor, args)
 
     calib_inputs = get_calib_inputs(
         "vqav2",
@@ -905,225 +1165,29 @@ def main() -> None:
         max_seq_len=args.calib_seq_len,
     )
 
-    # -------------------------------------------------------------------------
-    # Apply SmoothQuant transformation
-    # -------------------------------------------------------------------------
-    if args.smoothquant:
-        if args.smoothquant_components is None:
-            raise ValueError(
-                "--smoothquant_components must be specified when "
-                "--smoothquant is enabled."
-            )
-        # Build exclude_appliers list based on arguments
-        exclude_appliers = []
-        if args.smoothquant_components == "text":
-            exclude_appliers.extend(
-                [
-                    "_apply_if_qwen3vl_vision_block",
-                    "_apply_if_qwen3vl_vision_patch_merger",
-                ]
-            )
-        if args.smoothquant_components == "vision":
-            exclude_appliers.append("_apply_if_qwen3vl_text_decoder")
+    apply_smoothquant_if_requested(model, calib_inputs, args)
 
-        print(
-            f"Applying SmoothQuant smoothing for {args.smoothquant_components} components"
-        )
+    q_m = model
+    q_m = quantize_using_GPTQ(q_m, calib_inputs, args)
 
-        # Compute activation maximum values from calibration data
-        print("Computing activation maximum values for SmoothQuant …")
-        activation_max = {}
-
-        # Hook to capture activation maximums
-        hooks = []
-
-        def make_hook(name):
-            def hook(module, input, output):
-                if isinstance(input, tuple):
-                    x = input[0]
-                else:
-                    x = input
-                # Compute per-channel maximum
-                if x.dim() >= 2:
-                    # Reshape to (batch * seq, hidden)
-                    x_flat = x.view(-1, x.shape[-1])
-                    amax = x_flat.abs().max(dim=0)[0]
-                    if name not in activation_max:
-                        activation_max[name] = amax
-                    else:
-                        activation_max[name] = torch.maximum(activation_max[name], amax)
-
-            return hook
-
-        # Register hooks on Linear layers that follow LayerNorm
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear):
-                hook = module.register_forward_hook(make_hook(name))
-                hooks.append(hook)
-
-        # Run calibration pass
-        with torch.no_grad():
-            for inp in calib_inputs:
-                dev_inp = move_batch_to_device(inp, args.device)
-                model(**dev_inp)
-
-        # Remove hooks
-        for hook in hooks:
-            hook.remove()
-
-        print(f"Computed activation_max for {len(activation_max)} layers")
-
-        # Apply smoothing
-        apply_smoothing(
-            model,
-            activation_max,
-            alpha=args.smoothquant_alpha,
-            exclude_appliers=exclude_appliers if exclude_appliers else None,
-        )
-        print("SmoothQuant smoothing complete.")
-
-    if not args.no_GPTQ:
-        print("Applying Qwen3-VL GPTQ …")
-
-        sens = None
-        if args.gptq_mse == "smse":
-            if args.sensitivity_path is not None:
-                sens = torch.load(args.sensitivity_path, map_location="cpu")
-            else:
-                calibrator = SensitivityCalibrator(model, calib_inputs)
-                sens = calibrator.compute_sensitivity_info()
-
-        gptq_config = Qwen3VLGPTQConfig(
-            weight_bits=args.linear_weight_bits,
-            perchannel=True,
-            symmetric=False,
-            mse=args.gptq_mse,
-            sensitivity=sens,
-            percdamp=args.percdamp,
-            groupsize=args.groupsize,
-            actorder=args.actorder,
-            static_groups=args.static_groups,
-            verbose=args.verbose,
-            show_progress=not args.hide_progress,
-            quantize_vision=quantize_vision,
-            quantize_text=quantize_text,
-            quantize_lm_head=quantize_lm_head,
-            quantize_vision_patch_embed=quantize_vision,
-            quantize_vision_blocks=quantize_vision,
-            quantize_vision_merger=quantize_vision,
-            quantize_vision_deepstack_mergers=quantize_vision,
-            quantize_text_layers=quantize_text,
-            move_cache_to_cpu=args.move_cache_to_cpu,
-        )
-
-        q_m = prepare(model, gptq_config, inplace=True)
-
-        with torch.no_grad():
-            for inp in calib_inputs:
-                dev_inp = move_batch_to_device(inp, args.device)
-                q_m(**dev_inp)
-
-        q_m = convert(q_m, inplace=True)
-    else:
-        q_m = model
-
-    # -------------------------------------------------------------------------
-    # Wrap with PTQ for activation quantization
-    # -------------------------------------------------------------------------
     if not args.no_PTQ:
-        # Get architecture parameters from model config
         num_vision_blocks = get_num_vision_blocks(q_m)
         num_text_layers = get_num_text_layers(q_m)
         num_deepstack_mergers = get_num_deepstack_mergers(q_m)
-
-        print(
-            f"Vision blocks: {num_vision_blocks}, "
-            f"Text layers: {num_text_layers}, "
-            f"Deepstack mergers: {num_deepstack_mergers}"
-        )
         q_m = quantize_using_PTQ(
-            q_m=q_m,
-            calib_inputs=calib_inputs,
-            args=args,
+            q_m,
+            calib_inputs,
+            args,
             grid_thw=grid_thw,
             num_vision_blocks=num_vision_blocks,
             num_text_layers=num_text_layers,
             num_deepstack_mergers=num_deepstack_mergers,
         )
 
-    # Print model
     if args.print_quantized_model:
         print(q_m)
 
-    if args.eval_tasks is not None:
-        if "vqa" in args.eval_tasks:
-            quantized_results = evaluate_model(
-                q_m,
-                processor,
-                args.eval_tasks,
-                args.device,
-                args.nsamples_for_evaluation,
-                max_seq_len=args.max_seq_len,
-            )
-            print_eval_results("Evaluating quantized model", quantized_results)
-            print_markdown_comparison(original_results, quantized_results)
-
-        if "coco" in args.eval_tasks:
-            print("\n=== COCO Evaluation (Quantized Model) ===")
-            results = evaluate_model_coco(
-                model=q_m,
-                processor=processor,
-                device=args.device,
-                nsamples=args.nsamples_for_evaluation,
-                max_seq_len=args.max_seq_len,
-            )
-            for metric, value in results.items():
-                print(f"{metric:<10} {value:.3f}")
-
-    # MMLU evaluation on quantized model
-    if args.mmlu_subjects is not None:
-        print("\n=== MMLU Evaluation (Quantized Model) ===")
-        quantized_mmlu_results = evaluate_mmlu(
-            model=q_m,
-            tokenizer=processor.tokenizer,
-            subjects=args.mmlu_subjects,
-            device=args.device,
-            n_shots=args.mmlu_n_shots,
-            n_samples=args.mmlu_n_samples,
-            batch_size=args.mmlu_batch_size,
-            max_seq_len=args.max_seq_len,
-        )
-        print_mmlu_results(quantized_mmlu_results)
-
-    # MMMU evaluation on quantized model
-    if args.mmmu_subjects is not None:
-        print("\n=== MMMU Evaluation (Quantized Model) ===")
-        quantized_mmmu_results = evaluate_mmmu(
-            model=model,
-            processor=processor,
-            subjects=args.mmmu_subjects,
-            device=args.device,
-            n_shots=args.mmmu_n_shots,
-            n_samples=args.mmmu_n_samples,
-            max_seq_len=args.max_seq_len,
-            verbose=args.verbose,
-        )
-        print_mmmu_results(quantized_mmmu_results)
-
-    # PPL evaluation on quantized model
-    if args.ppl_dataset:
-        print("\n=== PPL Evaluation (Quantized Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
-        quantized_ppl = evaluate_ppl(
-            model=q_m,
-            tokenizer=processor.tokenizer,
-            ds=ds_ppl,
-            device=args.device,
-            stride=args.ppl_stride,
-            max_seq_len=args.max_seq_len,
-            show_progress=not args.hide_progress,
-        )
-        print(f"Quantized PPL: {quantized_ppl:.2f}")
+    evaluate_quantized_model(q_m, processor, args, original_results=original_results)
 
 
 if __name__ == "__main__":

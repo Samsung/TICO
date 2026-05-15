@@ -78,6 +78,38 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         self._orig_model_forward: Optional[Callable[..., Any]] = None
         self._quantizers: dict[str, Any] = {}
 
+    def _resolve_weight_bits(
+        self,
+        gptq_conf: Qwen3VLGPTQConfig,
+        *,
+        full_module_name: str,
+        local_module_name: str,
+    ) -> int:
+        """
+        Resolve the effective bit-width for a quantized submodule.
+
+        Override keys are matched in the following order:
+            1) Full module name.
+            2) Stage-local module name.
+            3) Full-name suffix.
+        """
+        if full_module_name in gptq_conf.weight_bits_overrides:
+            return gptq_conf.weight_bits_overrides[full_module_name]
+
+        if local_module_name in gptq_conf.weight_bits_overrides:
+            return gptq_conf.weight_bits_overrides[local_module_name]
+
+        suffix_matches = [
+            bits
+            for pattern, bits in gptq_conf.weight_bits_overrides.items()
+            if full_module_name.endswith(f".{pattern}")
+        ]
+
+        if suffix_matches:
+            return suffix_matches[-1]
+
+        return gptq_conf.weight_bits
+
     @torch.no_grad()
     def prepare(
         self,
@@ -487,7 +519,13 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         for local_name, submodule in subset.items():
             gptq_obj = GPTQ(submodule)
 
-            full_name = module_name.get(submodule)
+            full_name = module_name.get(submodule, local_name)
+            weight_bits = self._resolve_weight_bits(
+                gptq_conf,
+                full_module_name=full_name,
+                local_module_name=local_name,
+            )
+
             if (
                 gptq_conf.sensitivity is not None
                 and isinstance(gptq_conf.sensitivity, dict)
@@ -498,7 +536,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 cur_sensitivity = None
 
             gptq_obj.quantizer.configure(
-                bits=gptq_conf.weight_bits,
+                bits=weight_bits,
                 perchannel=gptq_conf.perchannel,
                 sym=gptq_conf.symmetric,
                 mse=gptq_conf.mse,
