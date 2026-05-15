@@ -28,6 +28,7 @@ from transformers.generation.utils import GenerationMixin
 
 @try_register(
     "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLForConditionalGeneration",
+    "tico.quantization.algorithm.spinquant.spin_qwen3_vl.SpinQwen3VLForConditionalGeneration",
 )
 class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
     """
@@ -69,6 +70,20 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             qcfg=qcfg.child("lm_head") if qcfg else None,
             fp_name=join_name(fp_name, "lm_head"),
         )
+
+        rotate_lm_head_cfg = qcfg.child("rotate_lm_head") if qcfg else None
+        # `rotate_lm_head` exists only for SpinQuant-style custom models.
+        # For a standard model, skip creating the wrapper and
+        # bypass it during forward.
+        self.rotate_lm_head = None
+        if hasattr(fp_model, "rotate_lm_head") and isinstance(
+            fp_model.rotate_lm_head, torch.nn.Module
+        ):
+            self.rotate_lm_head = PTQWrapper(
+                fp_model.rotate_lm_head,
+                rotate_lm_head_cfg,
+                fp_name=join_name(fp_name, "rotate_lm_head"),
+            )
 
     def forward(
         self,
@@ -128,6 +143,9 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         )
 
         hidden_states = outputs[0]
+
+        if self.rotate_lm_head is not None:
+            hidden_states = self.rotate_lm_head(hidden_states)
 
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = (

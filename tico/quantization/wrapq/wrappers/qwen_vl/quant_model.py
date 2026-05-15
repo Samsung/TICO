@@ -27,6 +27,7 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 
 @try_register(
     "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLModel",
+    "tico.quantization.algorithm.spinquant.spin_qwen3_vl.SpinQwen3VLModel",
 )
 class QuantQwen3VLModel(QuantModuleBase):
     """

@@ -360,3 +360,9 @@ class SpinQuantQuantizer(BaseQuantizer):
 
         if hasattr(src, "config"):
             dst.config = src.config
+
+
+# Register additional SpinQuant variants.
+from tico.quantization.algorithm.spinquant.qwen3_vl_quantizer import (  # noqa: E402,F401
+    Qwen3VLSpinQuantQuantizer,
+)

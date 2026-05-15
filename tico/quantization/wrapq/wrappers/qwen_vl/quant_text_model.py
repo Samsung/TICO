@@ -28,6 +28,7 @@ from transformers.cache_utils import Cache
 
 @try_register(
     "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextModel",
+    "tico.quantization.algorithm.spinquant.spin_qwen3_vl.SpinQwen3VLTextModel",
 )
 class QuantQwen3VLTextModel(QuantModuleBase):
     """
@@ -63,6 +64,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
         # --- Wrap submodules via PTQWrapper ----------------------------------
         embed_tokens_cfg = qcfg.child("embed_tokens") if qcfg else None
+        rotate_embed_cfg = qcfg.child("rotate_embedding") if qcfg else None
         layers_cfg = qcfg.child("layers") if qcfg else None
         norm_cfg = qcfg.child("norm") if qcfg else None
 
@@ -71,6 +73,19 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             qcfg=embed_tokens_cfg,
             fp_name=join_name(fp_name, "embed_tokens"),
         )
+
+        # `rotate_embedding` exists only for SpinQuant-style custom models.
+        # For a standard model, skip creating the wrapper and bypass it
+        # during forward.
+        self.rotate_embedding = None
+        if hasattr(fp_model, "rotate_embedding") and isinstance(
+            fp_model.rotate_embedding, torch.nn.Module
+        ):
+            self.rotate_embedding = PTQWrapper(
+                fp_model.rotate_embedding,
+                rotate_embed_cfg,
+                fp_name=join_name(fp_name, "rotate_embedding"),
+            )
 
         # Wrap each decoder layer
         self.layers = nn.ModuleList()
@@ -523,6 +538,9 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             inputs_embeds = self.embed_tokens(input_ids)
         else:
             inputs_embeds = self._fq(inputs_embeds, self.obs_inputs_embeds)
+
+        if hasattr(self.module, "rotate_embedding"):
+            inputs_embeds = self.module.rotate_embedding(inputs_embeds)
 
         batch_size, seq_len, _ = inputs_embeds.shape
         past_seen_tokens = (

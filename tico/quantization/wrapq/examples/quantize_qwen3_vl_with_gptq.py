@@ -26,6 +26,7 @@ from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.algorithm.smoothquant.smooth_quant import apply_smoothing
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
+from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
 from tico.quantization.evaluation.hellaswag_eval_utils import (
     evaluate_hellaswag,
     get_hellaswag_accuracy,
@@ -205,7 +206,10 @@ def parse_args():
         "--lm_head_weight_bits",
         type=int,
         default=4,
-        help="Number of bits for lm_head quantization.",
+        help=(
+            "Number of bits for lm_head quantization. Qwen3-VL SpinQuant assumes "
+            "tied word embeddings, so this must match --embedding_weight_bits."
+        ),
     )
     parser.add_argument(
         "--gptq_mse",
@@ -287,6 +291,51 @@ def parse_args():
         default=2,
         help="Spatial merge size for vision tokens.",
     )
+
+    # SpinQuant arguments
+    parser.add_argument(
+        "--spinquant",
+        action="store_true",
+        default=False,
+        help="Apply tied-embedding-safe Qwen3-VL SpinQuant before SmoothQuant/GPTQ/PTQ.",
+    )
+    parser.add_argument(
+        "--spinquant_init_method",
+        choices=["random", "hadamard", "external"],
+        default="random",
+        help="Rotation initialization method for Qwen3-VL SpinQuant.",
+    )
+    parser.add_argument(
+        "--spinquant_disable_r1",
+        action="store_true",
+        default=False,
+        help="Disable global hidden-dimension R1 rotation.",
+    )
+    parser.add_argument(
+        "--spinquant_disable_r2",
+        action="store_true",
+        default=False,
+        help="Disable OV-side head-dimension R2 rotation.",
+    )
+    parser.add_argument(
+        "--spinquant_disable_deepstack_fusion",
+        action="store_true",
+        default=False,
+        help="Disable R1 fusion for Qwen3-VL DeepStack visual output projections.",
+    )
+    parser.add_argument(
+        "--spinquant_r1_path",
+        type=str,
+        default=None,
+        help="Optional path to an external R1 tensor.",
+    )
+    parser.add_argument(
+        "--spinquant_r2_map_path",
+        type=str,
+        default=None,
+        help="Optional path to an external R2 tensor map.",
+    )
+
     # SmoothQuant arguments (for LayerNorm-based vision components and RMSNorm-based text components)
     parser.add_argument(
         "--smoothquant",
@@ -524,6 +573,19 @@ def evaluate_model_coco(
     nsamples: int = 50,
     max_seq_len: Optional[int] = None,
 ):
+    """
+    Evaluate a model on the mini COCO captioning benchmark.
+
+    Args:
+        model: Model to evaluate.
+        processor: Hugging Face processor.
+        device: Target device string.
+        nsamples: Number of evaluation samples. -1 means full dataset.
+        max_seq_len: Optional maximum text sequence length.
+
+    Returns:
+        COCO metric dictionary.
+    """
     with (
         io.StringIO() as buffer,
         contextlib.redirect_stdout(buffer),
@@ -603,6 +665,86 @@ def print_markdown_comparison(
     print(sep)
     print(original_row)
     print(quantized_row)
+
+
+def load_torch_object(path: Optional[str]) -> Any:
+    """
+    Load a torch object from disk if a path is provided.
+
+    Args:
+        path: Optional file path.
+
+    Returns:
+        Loaded object, or None if the path is None.
+    """
+    if path is None:
+        return None
+    return torch.load(path, map_location="cpu")
+
+
+def ensure_spinquant_compatible_args(args: argparse.Namespace) -> None:
+    """
+    Validate command-line options that interact with Qwen3-VL SpinQuant.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Raises:
+        ValueError: If incompatible options are enabled together.
+    """
+    if not args.spinquant:
+        return
+
+    if args.smoothquant and args.smoothquant_components in {"text", "both"}:
+        raise ValueError(
+            "Qwen3-VL SpinQuant Phase 1 does not support text SmoothQuant "
+            "together. Use --smoothquant_components vision or disable SmoothQuant."
+        )
+
+    if args.embedding_weight_bits != args.lm_head_weight_bits:
+        raise ValueError(
+            "Qwen3-VL SpinQuant assumes tied word embeddings, so "
+            "--embedding_weight_bits and --lm_head_weight_bits must match."
+        )
+
+
+def apply_spinquant_if_enabled(
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+) -> torch.nn.Module:
+    """
+    Apply Qwen3-VL SpinQuant before SmoothQuant/GPTQ/PTQ if requested.
+
+    Args:
+        model: Floating-point Qwen3-VL model.
+        args: Parsed command-line arguments.
+
+    Returns:
+        The original model if SpinQuant is disabled, otherwise a SpinQwen3VL
+        model with fused rotations.
+    """
+    if not args.spinquant:
+        return model
+
+    r1 = load_torch_object(args.spinquant_r1_path)
+    r2_map = load_torch_object(args.spinquant_r2_map_path)
+
+    spinquant_config = Qwen3VLSpinQuantConfig(
+        init_method=args.spinquant_init_method,
+        r1=r1,
+        r2_map=r2_map,
+        apply_r1=not args.spinquant_disable_r1,
+        apply_r2=not args.spinquant_disable_r2,
+        fuse_deepstack_visual_outputs=not args.spinquant_disable_deepstack_fusion,
+        show_progress=not args.hide_progress,
+    )
+
+    print("Applying Qwen3-VL SpinQuant …")
+    model = prepare(model, spinquant_config, inplace=True)
+    model = convert(model, inplace=True)
+    model.eval()
+    print("Qwen3-VL SpinQuant complete.")
+    return model
 
 
 def has_gptq_targets(args) -> bool:
@@ -844,12 +986,24 @@ def get_num_deepstack_mergers(q_m) -> int:
     return num_deepstack_mergers
 
 
-def apply_smoothquant_if_requested(model, calib_inputs, args) -> None:
+def apply_smoothquant_if_requested(
+    model: torch.nn.Module,
+    calib_inputs: list[dict[str, torch.Tensor]],
+    args: argparse.Namespace,
+) -> None:
     """
     Apply SmoothQuant smoothing when requested.
 
     Calibration maxima are collected from Linear module inputs, then passed to
     SmoothQuant appliers for the selected Qwen3-VL components.
+
+    Args:
+        model: Target model.
+        calib_inputs: Calibration inputs.
+        args: Parsed command-line arguments.
+
+    Raises:
+        ValueError: If SmoothQuant is enabled without target components.
     """
     if not args.smoothquant:
         return
@@ -1164,6 +1318,7 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
 
 def main() -> None:
     args = parse_args()
+    ensure_spinquant_compatible_args(args)
     print(args)
 
     torch.manual_seed(args.seed)
@@ -1183,6 +1338,11 @@ def main() -> None:
     print(f"DType               : {args.dtype}")
     print(f"Calib seq len       : {args.calib_seq_len}")
     print(f"Max seq len         : {args.max_seq_len}")
+    print(f"Use SpinQuant       : {args.spinquant}")
+    if args.spinquant:
+        print(f"SpinQuant init      : {args.spinquant_init_method}")
+        print(f"SpinQuant R1        : {not args.spinquant_disable_r1}")
+        print(f"SpinQuant R2        : {not args.spinquant_disable_r2}")
     print(f"Use GPTQ            : {use_gptq}")
     print(f"GPTQ vision         : {gptq_vision}")
     print(f"GPTQ text           : {gptq_text}")
@@ -1252,6 +1412,7 @@ def main() -> None:
         max_seq_len=args.calib_seq_len,
     )
 
+    model = apply_spinquant_if_enabled(model, args)
     apply_smoothquant_if_requested(model, calib_inputs, args)
 
     q_m = model
