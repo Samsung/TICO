@@ -26,6 +26,11 @@ from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.algorithm.smoothquant.smooth_quant import apply_smoothing
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
+from tico.quantization.evaluation.hellaswag_eval_utils import (
+    evaluate_hellaswag,
+    get_hellaswag_accuracy,
+    print_hellaswag_results,
+)
 from tico.quantization.evaluation.mmlu_eval_utils import (
     evaluate_mmlu,
     print_mmlu_results,
@@ -359,6 +364,32 @@ def parse_args():
         type=int,
         default=-1,
         help="Number of samples per MMMU subject. Use -1 for full test set.",
+    )
+
+    # HellaSwag evaluation arguments
+    parser.add_argument(
+        "--hellaswag",
+        action="store_true",
+        default=False,
+        help="Evaluate on HellaSwag benchmark.",
+    )
+    parser.add_argument(
+        "--hellaswag_n_shots",
+        type=int,
+        default=10,
+        help="Number of few-shot examples for HellaSwag evaluation.",
+    )
+    parser.add_argument(
+        "--hellaswag_n_samples",
+        type=int,
+        default=-1,
+        help="Number of samples for HellaSwag evaluation. Use -1 for full test set.",
+    )
+    parser.add_argument(
+        "--hellaswag_batch_size",
+        type=int,
+        default=1,
+        help="Batch size for HellaSwag evaluation.",
     )
 
     # PPL evaluation arguments
@@ -967,6 +998,21 @@ def evaluate_original_model(model, processor, args):
         )
         print_mmlu_results(original_mmlu_results)
 
+    if args.hellaswag:
+        print("\n=== HellaSwag Evaluation (Original Model) ===")
+        original_hellaswag_results = evaluate_hellaswag(
+            model=model,
+            tokenizer=processor.tokenizer,
+            device=args.device,
+            n_shots=args.hellaswag_n_shots,
+            n_samples=args.hellaswag_n_samples,
+            batch_size=args.hellaswag_batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        print_hellaswag_results(original_hellaswag_results)
+        acc = get_hellaswag_accuracy(original_hellaswag_results)
+        print(f"Accuracy: {acc['acc']:.4f}, Accuracy (norm): {acc['acc_norm']:.4f}")
+
     if args.mmmu_subjects is not None:
         print("\n=== MMMU Evaluation (Original Model) ===")
         original_mmmu_results = evaluate_mmmu(
@@ -1044,6 +1090,21 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
             max_seq_len=args.max_seq_len,
         )
         print_mmlu_results(quantized_mmlu_results)
+
+    if args.hellaswag:
+        print("\n=== HellaSwag Evaluation (Quantized Model) ===")
+        quantized_hellaswag_results = evaluate_hellaswag(
+            model=model,
+            tokenizer=processor.tokenizer,
+            device=args.device,
+            n_shots=args.hellaswag_n_shots,
+            n_samples=args.hellaswag_n_samples,
+            batch_size=args.hellaswag_batch_size,
+            max_seq_len=args.max_seq_len,
+        )
+        print_hellaswag_results(quantized_hellaswag_results)
+        acc = get_hellaswag_accuracy(quantized_hellaswag_results)
+        print(f"Accuracy: {acc['acc']:.4f}, Accuracy (norm): {acc['acc_norm']:.4f}")
 
     if args.mmmu_subjects is not None:
         print("\n=== MMMU Evaluation (Quantized Model) ===")
