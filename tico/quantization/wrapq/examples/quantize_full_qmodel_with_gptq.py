@@ -255,6 +255,16 @@ def parse_args():
         help="Number of bits to be used to quantize lm_head",
     )
     parser.add_argument(
+        "--spin_rotation_weight_bits",
+        type=int,
+        default=16,
+        help=(
+            "Number of bits to be used to quantize SpinLlama rotation weights "
+            "created by SpinQuant, namely model.rotate_embedding.weight and "
+            "rotate_lm_head.weight. This option is used only when SpinQuant is enabled."
+        ),
+    )
+    parser.add_argument(
         "--profile",
         choices=list(SUPPORTED_EXECUTION_PROFILES),
         default=DEFAULT_EXECUTION_PROFILE,
@@ -850,6 +860,9 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         linear_weight_bits=args.linear_weight_bits,
         embedding_weight_bits=args.embedding_weight_bits,
         lm_head_weight_bits=args.lm_head_weight_bits,
+        spin_rotation_weight_bits=(
+            None if args.no_spinquant else args.spin_rotation_weight_bits
+        ),
         norm_weight_dtype=DType.int(16),
         strict_wrap=True,
         profile=args.profile,
@@ -1013,6 +1026,10 @@ def print_config(args, device: torch.device) -> None:
     print(f"Linear weight bits     : {args.linear_weight_bits}")
     print(f"Embedding weight bits  : {args.embedding_weight_bits}")
     print(f"LM head weight bits    : {args.lm_head_weight_bits}")
+    print(
+        "Spin rotation bits     : "
+        f"{args.spin_rotation_weight_bits if not args.no_spinquant else 'disabled'}"
+    )
     print(f"Calibration samples    : {args.nsamples_for_qcalibration}")
     print(f"Calibration seq length : {args.calibrate_seq_len}")
     print(f"Max seq length         : {args.max_seq_len}")

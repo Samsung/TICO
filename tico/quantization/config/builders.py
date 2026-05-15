@@ -257,6 +257,7 @@ def _build_llama_overrides(
     linear_weight_dtype: Optional[DType],
     embedding_weight_dtype: Optional[DType],
     lm_head_weight_dtype: Optional[DType],
+    spin_rotation_weight_dtype: Optional[DType],
     norm_dtype: Optional[DType],
     norm_weight_dtype: Optional[DType],
 ) -> Dict[str, Any]:
@@ -265,12 +266,15 @@ def _build_llama_overrides(
 
     This helper generates overrides for:
       - input embedding: model.embed_tokens
+      - SpinLlama input rotation: model.rotate_embedding
       - all decoder layers: model.layers.{i}
       - final model norm: model.norm
+      - SpinLlama output rotation: rotate_lm_head
       - output projection: lm_head
 
     Modules that are not explicitly overridden continue to use PTQConfig
-    defaults.
+    defaults. SpinLlama rotation overrides are emitted only when
+    `spin_rotation_weight_dtype` is provided.
 
     Parameters
     ----------
@@ -282,6 +286,8 @@ def _build_llama_overrides(
         Weight dtype override for model.embed_tokens.weight.
     lm_head_weight_dtype : Optional[DType]
         Weight dtype override for lm_head.weight.
+    spin_rotation_weight_dtype : Optional[DType]
+        Weight dtype override for SpinLlama rotation weights.
     norm_dtype : Optional[DType]
         Module-level dtype override for norm modules.
     norm_weight_dtype : Optional[DType]
@@ -305,6 +311,13 @@ def _build_llama_overrides(
     lm_head_override = _build_weight_override(lm_head_weight_dtype)
     if lm_head_override:
         overrides["lm_head"] = lm_head_override
+
+    spin_rotation_override = _build_weight_override(spin_rotation_weight_dtype)
+    if spin_rotation_override:
+        _set_nested_override(
+            overrides, ("model", "rotate_embedding"), spin_rotation_override
+        )
+        _set_nested_override(overrides, ("rotate_lm_head",), spin_rotation_override)
 
     final_norm_override = _build_norm_override(
         norm_dtype=norm_dtype,
@@ -336,6 +349,8 @@ def build_llm_ptq_config(
     embedding_weight_dtype: Optional[DType] = None,
     lm_head_weight_bits: Optional[int] = None,
     lm_head_weight_dtype: Optional[DType] = None,
+    spin_rotation_weight_bits: Optional[int] = None,
+    spin_rotation_weight_dtype: Optional[DType] = None,
     norm_dtype: Optional[DType] = None,
     norm_weight_bits: Optional[int] = None,
     norm_weight_dtype: Optional[DType] = None,
@@ -384,6 +399,12 @@ def build_llm_ptq_config(
         Used only when `lm_head_weight_dtype` is not provided.
     lm_head_weight_dtype : Optional[DType], default=None
         Explicit dtype for the LM head weight.
+    spin_rotation_weight_bits : Optional[int], default=None
+        Convenience bit-width for SpinLlama rotation weights:
+        `model.rotate_embedding.weight` and `rotate_lm_head.weight`.
+        Used only when `spin_rotation_weight_dtype` is not provided.
+    spin_rotation_weight_dtype : Optional[DType], default=None
+        Explicit dtype for SpinLlama rotation weights.
     norm_dtype : Optional[DType], default=None
         Explicit module-level dtype override for norm modules.
     norm_weight_bits : Optional[int], default=None
@@ -428,6 +449,10 @@ def build_llm_ptq_config(
         dtype=lm_head_weight_dtype,
         bits=lm_head_weight_bits,
     )
+    resolved_spin_rotation_weight_dtype = _resolve_weight_dtype(
+        dtype=spin_rotation_weight_dtype,
+        bits=spin_rotation_weight_bits,
+    )
     resolved_norm_weight_dtype = _resolve_weight_dtype(
         dtype=norm_weight_dtype,
         bits=norm_weight_bits,
@@ -439,6 +464,7 @@ def build_llm_ptq_config(
             linear_weight_dtype=resolved_linear_weight_dtype,
             embedding_weight_dtype=resolved_embedding_weight_dtype,
             lm_head_weight_dtype=resolved_lm_head_weight_dtype,
+            spin_rotation_weight_dtype=resolved_spin_rotation_weight_dtype,
             norm_dtype=norm_dtype,
             norm_weight_dtype=resolved_norm_weight_dtype,
         )

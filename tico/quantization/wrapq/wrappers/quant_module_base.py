@@ -21,6 +21,20 @@ from tico.quantization.config.ptq import PTQConfig
 
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.qscheme import QScheme
+
+
+def _symmetric_qscheme_like(qscheme: QScheme) -> QScheme:
+    """
+    Return the symmetric qscheme with the same tensor/channel granularity.
+
+    This helper is used when a signed dtype is selected but the observer did
+    not receive an explicit user qscheme. It preserves the wrapper's preferred
+    granularity while avoiding signed asymmetric quantization by default.
+    """
+    if qscheme.is_per_channel():
+        return QScheme.PER_CHANNEL_SYMM
+    return QScheme.PER_TENSOR_SYMM
 
 
 class QuantModuleBase(nn.Module, ABC):
@@ -154,6 +168,13 @@ class QuantModuleBase(nn.Module, ABC):
         user_qscheme = user_cfg.pop("qscheme", _UNSPEC)
         wrapper_qscheme = wrapper_defaults.pop("qscheme", _UNSPEC)
         final_qscheme = pick3(user_qscheme, wrapper_qscheme, self.qcfg.default_qscheme)
+
+        if (
+            user_qscheme is _UNSPEC
+            and final_dtype.signed
+            and not final_qscheme.is_symmetric()
+        ):
+            final_qscheme = _symmetric_qscheme_like(final_qscheme)
 
         # 4) merge remaining kwargs: user_cfg wins
         final_kw = wrapper_defaults
