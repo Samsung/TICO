@@ -724,12 +724,9 @@ def _build_qwen3_vl_overrides(
     lm_head_weight_dtype: Optional[DType],
     norm_dtype: Optional[DType],
     norm_weight_dtype: Optional[DType],
-    quantize_vision: bool = True,
-    quantize_text: bool = True,
-    quantize_lm_head: bool = True,
 ) -> Dict[str, Any]:
     """
-    Build PTQ overrides for a Qwen3-VL model.
+    Build PTQ overrides for a full Qwen3-VL model.
 
     This helper generates overrides for:
       - Vision tower: model.visual.patch_embed, model.visual.blocks.{i},
@@ -758,12 +755,6 @@ def _build_qwen3_vl_overrides(
         Module-level dtype override for norm modules.
     norm_weight_dtype : Optional[DType]
         Weight dtype override for norm weights.
-    quantize_vision : bool
-        Whether to quantize vision tower.
-    quantize_text : bool
-        Whether to quantize text model.
-    quantize_lm_head : bool
-        Whether to quantize lm_head.
 
     Returns
     -------
@@ -773,86 +764,81 @@ def _build_qwen3_vl_overrides(
     overrides: Dict[str, Any] = {"model": {}}
 
     # Vision tower overrides
-    if quantize_vision:
-        vision_overrides: Dict[str, Any] = {}
+    vision_overrides: Dict[str, Any] = {}
 
-        # Patch embedding projection (Conv3d) - uses separate dtype
-        patch_embed_override = _build_weight_override(vision_patch_embed_weight_dtype)
-        if patch_embed_override:
-            _set_nested_override(
-                vision_overrides, ("patch_embed", "proj"), patch_embed_override
-            )
+    # Patch embedding projection (Conv3d) - uses separate dtype
+    patch_embed_override = _build_weight_override(vision_patch_embed_weight_dtype)
+    if patch_embed_override:
+        _set_nested_override(
+            vision_overrides, ("patch_embed", "proj"), patch_embed_override
+        )
 
-        # Vision blocks
-        vision_overrides["blocks"] = {}
-        for block_idx in range(num_vision_blocks):
-            vision_overrides["blocks"][
-                str(block_idx)
-            ] = _build_qwen3_vl_vision_block_overrides(
-                linear_weight_dtype=linear_weight_dtype,
-                norm_dtype=norm_dtype,
-                norm_weight_dtype=norm_weight_dtype,
-            )
-
-        # Merger (has norm, linear_fc1, linear_fc2)
-        merger_override = _build_qwen3_vl_vision_merger_overrides(
+    # Vision blocks
+    vision_overrides["blocks"] = {}
+    for block_idx in range(num_vision_blocks):
+        vision_overrides["blocks"][
+            str(block_idx)
+        ] = _build_qwen3_vl_vision_block_overrides(
             linear_weight_dtype=linear_weight_dtype,
             norm_dtype=norm_dtype,
             norm_weight_dtype=norm_weight_dtype,
         )
-        if merger_override:
-            vision_overrides["merger"] = merger_override
 
-        # Deepstack mergers (each has norm, linear_fc1, linear_fc2)
-        if num_deepstack_mergers > 0:
-            vision_overrides["deepstack_merger_list"] = {}
-            deepstack_override = _build_qwen3_vl_vision_merger_overrides(
-                linear_weight_dtype=linear_weight_dtype,
-                norm_dtype=norm_dtype,
-                norm_weight_dtype=norm_weight_dtype,
-            )
-            for merger_idx in range(num_deepstack_mergers):
-                vision_overrides["deepstack_merger_list"][
-                    str(merger_idx)
-                ] = copy.deepcopy(deepstack_override)
+    # Merger (has norm, linear_fc1, linear_fc2)
+    merger_override = _build_qwen3_vl_vision_merger_overrides(
+        linear_weight_dtype=linear_weight_dtype,
+        norm_dtype=norm_dtype,
+        norm_weight_dtype=norm_weight_dtype,
+    )
+    if merger_override:
+        vision_overrides["merger"] = merger_override
 
-        overrides["model"]["visual"] = vision_overrides
-
-    # Text model overrides
-    if quantize_text:
-        text_overrides: Dict[str, Any] = {}
-
-        # Text embedding
-        embedding_override = _build_weight_override(embedding_weight_dtype)
-        if embedding_override:
-            _set_nested_override(text_overrides, ("embed_tokens",), embedding_override)
-
-        # Text layers
-        text_overrides["layers"] = {}
-        for layer_idx in range(num_text_layers):
-            text_overrides["layers"][
-                str(layer_idx)
-            ] = _build_qwen3_vl_text_layer_overrides(
-                linear_weight_dtype=linear_weight_dtype,
-                norm_dtype=norm_dtype,
-                norm_weight_dtype=norm_weight_dtype,
-            )
-
-        # Final norm
-        final_norm_override = _build_qwen3_vl_norm_override(
+    # Deepstack mergers (each has norm, linear_fc1, linear_fc2)
+    if num_deepstack_mergers > 0:
+        vision_overrides["deepstack_merger_list"] = {}
+        deepstack_override = _build_qwen3_vl_vision_merger_overrides(
+            linear_weight_dtype=linear_weight_dtype,
             norm_dtype=norm_dtype,
             norm_weight_dtype=norm_weight_dtype,
         )
-        if final_norm_override:
-            _set_nested_override(text_overrides, ("norm",), final_norm_override)
+        for merger_idx in range(num_deepstack_mergers):
+            vision_overrides["deepstack_merger_list"][str(merger_idx)] = copy.deepcopy(
+                deepstack_override
+            )
 
-        overrides["model"]["language_model"] = text_overrides
+    overrides["model"]["visual"] = vision_overrides
+
+    # Text model overrides
+    text_overrides: Dict[str, Any] = {}
+
+    # Text embedding
+    embedding_override = _build_weight_override(embedding_weight_dtype)
+    if embedding_override:
+        _set_nested_override(text_overrides, ("embed_tokens",), embedding_override)
+
+    # Text layers
+    text_overrides["layers"] = {}
+    for layer_idx in range(num_text_layers):
+        text_overrides["layers"][str(layer_idx)] = _build_qwen3_vl_text_layer_overrides(
+            linear_weight_dtype=linear_weight_dtype,
+            norm_dtype=norm_dtype,
+            norm_weight_dtype=norm_weight_dtype,
+        )
+
+    # Final norm
+    final_norm_override = _build_qwen3_vl_norm_override(
+        norm_dtype=norm_dtype,
+        norm_weight_dtype=norm_weight_dtype,
+    )
+    if final_norm_override:
+        _set_nested_override(text_overrides, ("norm",), final_norm_override)
+
+    overrides["model"]["language_model"] = text_overrides
 
     # LM head
-    if quantize_lm_head:
-        lm_head_override = _build_weight_override(lm_head_weight_dtype)
-        if lm_head_override:
-            overrides["lm_head"] = lm_head_override
+    lm_head_override = _build_weight_override(lm_head_weight_dtype)
+    if lm_head_override:
+        overrides["lm_head"] = lm_head_override
 
     return overrides
 
@@ -877,15 +863,12 @@ def build_qwen3_vl_ptq_config(
     norm_dtype: Optional[DType] = None,
     norm_weight_bits: Optional[int] = None,
     norm_weight_dtype: Optional[DType] = None,
-    quantize_vision: bool = True,
-    quantize_text: bool = True,
-    quantize_lm_head: bool = True,
     strict_wrap: bool = True,
 ) -> PTQConfig:
     """
-    Build a PTQConfig for Qwen3-VL model.
+    Build a PTQConfig for the full Qwen3-VL model.
 
-    This helper generates PTQ configuration for the full Qwen3-VL model including:
+    This helper generates PTQ configuration for all supported Qwen3-VL modules:
       - Vision tower (patch_embed, blocks, merger, deepstack_mergers)
       - Text decoder (Llama-like layers)
       - Language modeling head
@@ -898,13 +881,22 @@ def build_qwen3_vl_ptq_config(
         Number of decoder layers in the text model.
     num_deepstack_mergers : int, default=0
         Number of deepstack merger modules in the vision tower.
+    model_args : Mapping[str, Any]
+        Model-specific arguments forwarded to PTQConfig.
     activation_dtype : DType, default=DType.int(16)
+        Default dtype for activation observers.
+    default_qscheme : QScheme, default=QScheme.PER_TENSOR_SYMM
+        Default quantization scheme for observers without an explicit override.
     default_observer : Type[ObserverBase], default=MinMaxObserver
         Observer class to instantiate when no explicit observer is provided.
     linear_weight_bits : Optional[int], default=None
         Convenience bit-width for linear projection weights.
     linear_weight_dtype : Optional[DType], default=None
         Explicit dtype for linear projection weights.
+    vision_patch_embed_weight_bits : Optional[int], default=None
+        Convenience bit-width for the vision patch embedding projection.
+    vision_patch_embed_weight_dtype : Optional[DType], default=None
+        Explicit dtype for the vision patch embedding projection.
     embedding_weight_bits : Optional[int], default=None
         Convenience bit-width for embedding weights.
     embedding_weight_dtype : Optional[DType], default=None
@@ -919,12 +911,6 @@ def build_qwen3_vl_ptq_config(
         Convenience bit-width for norm weights.
     norm_weight_dtype : Optional[DType], default=None
         Explicit dtype for norm weights.
-    quantize_vision : bool, default=True
-        Whether to quantize the vision tower.
-    quantize_text : bool, default=True
-        Whether to quantize the text model.
-    quantize_lm_head : bool, default=True
-        Whether to quantize the language modeling head.
     strict_wrap : bool, default=True
         If True, preparing a model will raise when a required module cannot be wrapped.
 
@@ -964,9 +950,6 @@ def build_qwen3_vl_ptq_config(
         lm_head_weight_dtype=resolved_lm_head_weight_dtype,
         norm_dtype=norm_dtype,
         norm_weight_dtype=resolved_norm_weight_dtype,
-        quantize_vision=quantize_vision,
-        quantize_text=quantize_text,
-        quantize_lm_head=quantize_lm_head,
     )
 
     return PTQConfig(

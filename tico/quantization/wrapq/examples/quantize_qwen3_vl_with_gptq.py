@@ -57,7 +57,7 @@ DTYPE_MAP = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Qwen3-VL GPTQ+PTQ pipeline (architecture-aware, stagewise)"
+        description="Qwen3-VL modular GPTQ plus PTQ pipeline"
     )
 
     parser.add_argument(
@@ -99,7 +99,33 @@ def parse_args():
         "--no_GPTQ",
         action="store_true",
         default=False,
-        help="Skip GPTQ and keep the model in floating-point.",
+        help="Skip GPTQ. PTQ still runs unless --no_PTQ is also set.",
+    )
+    parser.add_argument(
+        "--gptq_vision",
+        dest="gptq_vision",
+        action="store_true",
+        default=True,
+        help="Apply GPTQ to the vision tower. Enabled by default.",
+    )
+    parser.add_argument(
+        "--no_gptq_vision",
+        dest="gptq_vision",
+        action="store_false",
+        help="Disable GPTQ for the vision tower.",
+    )
+    parser.add_argument(
+        "--gptq_text",
+        dest="gptq_text",
+        action="store_true",
+        default=True,
+        help="Apply GPTQ to the text decoder. Enabled by default.",
+    )
+    parser.add_argument(
+        "--no_gptq_text",
+        dest="gptq_text",
+        action="store_false",
+        help="Disable GPTQ for the text decoder.",
     )
     parser.add_argument(
         "--gptq_lm_head",
@@ -156,7 +182,7 @@ def parse_args():
         "--linear_weight_bits",
         type=int,
         default=4,
-        help="Weight bit-width for GPTQ quantization.",
+        help="Weight bit-width for linear weight quantization.",
     )
     parser.add_argument(
         "--vision_patch_embed_weight_bits",
@@ -194,27 +220,6 @@ def parse_args():
         type=str,
         default=None,
         help="Optional path to precomputed sensitivity tensors.",
-    )
-
-    # Qwen3-VL stage switches. These switches are shared by GPTQ/PTQ except
-    # lm_head, whose GPTQ path is controlled separately by --gptq_lm_head.
-    parser.add_argument(
-        "--no_quantize_vision",
-        action="store_false",
-        dest="quantize_vision",
-        help="Skip quantization for the vision tower.",
-    )
-    parser.add_argument(
-        "--no_quantize_text",
-        action="store_false",
-        dest="quantize_text",
-        help="Skip quantization for the text tower.",
-    )
-    parser.add_argument(
-        "--no_quantize_lm_head",
-        action="store_false",
-        dest="quantize_lm_head",
-        help="Skip PTQ quantization for lm_head.",
     )
     parser.add_argument(
         "--move_cache_to_cpu",
@@ -569,6 +574,19 @@ def print_markdown_comparison(
     print(quantized_row)
 
 
+def has_gptq_targets(args) -> bool:
+    """
+    Return whether at least one module is selected for GPTQ.
+
+    Args:
+        args: Command-line arguments.
+
+    Returns:
+        True when GPTQ is enabled for vision, text, or lm_head.
+    """
+    return args.gptq_vision or args.gptq_text or args.gptq_lm_head
+
+
 def build_qwen3_vl_gptq_config(
     args,
     sensitivity: dict[str, torch.Tensor] | None = None,
@@ -576,9 +594,9 @@ def build_qwen3_vl_gptq_config(
     """
     Build a Qwen3-VL GPTQ configuration from command-line arguments.
 
-    GPTQ for lm_head is disabled by default because many language models tie
-    `lm_head.weight` with the input embedding table. Users can enable it
-    explicitly with `--gptq_lm_head`.
+    GPTQ can be configured independently for the vision tower, text decoder,
+    and lm_head. Vision and text GPTQ are enabled by default; lm_head GPTQ is
+    disabled by default.
     """
     weight_bits_overrides: dict[str, int] = {}
 
@@ -596,9 +614,14 @@ def build_qwen3_vl_gptq_config(
         groupsize=args.groupsize,
         actorder=args.actorder,
         static_groups=args.static_groups,
-        quantize_vision=args.quantize_vision,
-        quantize_text=args.quantize_text,
+        quantize_vision=args.gptq_vision,
+        quantize_text=args.gptq_text,
         quantize_lm_head=args.gptq_lm_head,
+        quantize_vision_patch_embed=args.gptq_vision,
+        quantize_vision_blocks=args.gptq_vision,
+        quantize_vision_merger=args.gptq_vision,
+        quantize_vision_deepstack_mergers=args.gptq_vision,
+        quantize_text_layers=args.gptq_text,
         move_cache_to_cpu=args.move_cache_to_cpu,
     )
 
@@ -643,10 +666,10 @@ def quantize_using_PTQ(
     num_deepstack_mergers: int,
 ):
     """
-    Wrap model with PTQWrapper and calibrate activation observers.
+    Wrap the full model with PTQWrapper and calibrate activation observers.
 
     Args:
-        q_m: Model after GPTQ quantization.
+        q_m: Model after optional GPTQ quantization.
         calib_inputs: Calibration inputs for PTQ calibration.
         args: Command-line arguments.
         grid_thw: Vision grid temporal-height-width tuple.
@@ -670,9 +693,6 @@ def quantize_using_PTQ(
         lm_head_weight_bits=args.lm_head_weight_bits,
         norm_dtype=DType.int(16),
         norm_weight_dtype=DType.int(16),
-        quantize_vision=args.quantize_vision,
-        quantize_text=args.quantize_text,
-        quantize_lm_head=args.quantize_lm_head,
         strict_wrap=True,
         model_args={
             "vision": {
@@ -690,22 +710,22 @@ def quantize_using_PTQ(
     # -------------------------------------------------------------------------
     print("Calibrating PTQ observers…")
 
-    # Overwrite weight observers with GPTQ statistics
-    if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
-        inject_gptq_qparams(q_m, q_m.quantizers)
-    elif (
-        hasattr(q_m, "wrapped")
-        and hasattr(q_m.wrapped, "module")
-        and hasattr(q_m.wrapped.module, "quantizers")
-        and isinstance(q_m.wrapped.module.quantizers, dict)
-    ):
-        inject_gptq_qparams(q_m.wrapped, q_m.wrapped.module.quantizers)
-    else:
-        print(
-            "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
-        )
+    # Overwrite weight observers with GPTQ statistics when GPTQ was applied.
+    if not args.no_GPTQ and has_gptq_targets(args):
+        if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
+            inject_gptq_qparams(q_m, q_m.quantizers)
+        elif (
+            hasattr(q_m, "wrapped")
+            and hasattr(q_m.wrapped, "module")
+            and hasattr(q_m.wrapped.module, "quantizers")
+            and isinstance(q_m.wrapped.module.quantizers, dict)
+        ):
+            inject_gptq_qparams(q_m.wrapped, q_m.wrapped.module.quantizers)
+        else:
+            print(
+                "[Warn] q_m.quantizers not found or not a dict; skipping GPTQ qparam injection."
+            )
 
-    device = torch.device(args.device)
     with torch.no_grad():
         for inp in tqdm.tqdm(calib_inputs):
             dev_inp = move_batch_to_device(inp, args.device)
@@ -895,12 +915,19 @@ def load_or_compute_sensitivity(model, calib_inputs, args):
 
 def quantize_using_GPTQ(model, calib_inputs, args):
     """
-    Apply Qwen3-VL GPTQ to the configured model stages.
+    Apply Qwen3-VL GPTQ to the selected model modules.
 
-    GPTQ for lm_head is controlled by `--gptq_lm_head` and is disabled by
-    default to avoid modifying tied embedding weights.
+    GPTQ for vision, text, and lm_head is controlled independently. Vision
+    and text GPTQ are enabled by default and can be disabled with
+    `--no_gptq_vision` and `--no_gptq_text`. lm_head GPTQ remains opt-in via
+    `--gptq_lm_head`.
     """
     if args.no_GPTQ:
+        print("Skipping GPTQ because --no_GPTQ was set.")
+        return model
+
+    if not has_gptq_targets(args):
+        print("Skipping GPTQ because no GPTQ targets were selected.")
         return model
 
     print("Applying GPTQ …")
@@ -1082,10 +1109,10 @@ def main() -> None:
     device = torch.device(args.device)
     dtype = DTYPE_MAP[args.dtype]
 
-    quantize_vision = args.quantize_vision
-    quantize_text = args.quantize_text
-    quantize_ptq_lm_head = args.quantize_lm_head
-    quantize_gptq_lm_head = args.gptq_lm_head
+    use_gptq = not args.no_GPTQ and has_gptq_targets(args)
+    gptq_vision = use_gptq and args.gptq_vision
+    gptq_text = use_gptq and args.gptq_text
+    gptq_lm_head = use_gptq and args.gptq_lm_head
 
     grid_thw = tuple(args.grid_thw)
 
@@ -1095,11 +1122,10 @@ def main() -> None:
     print(f"DType               : {args.dtype}")
     print(f"Calib seq len       : {args.calib_seq_len}")
     print(f"Max seq len         : {args.max_seq_len}")
-    print(f"Quantize vision     : {quantize_vision}")
-    print(f"Quantize text       : {quantize_text}")
-    print(f"Quantize PTQ lm_head: {quantize_ptq_lm_head}")
-    print(f"Quantize GPTQ lm_head: {quantize_gptq_lm_head}")
-    print(f"Use GPTQ            : {not args.no_GPTQ}")
+    print(f"Use GPTQ            : {use_gptq}")
+    print(f"GPTQ vision         : {gptq_vision}")
+    print(f"GPTQ text           : {gptq_text}")
+    print(f"GPTQ lm_head        : {gptq_lm_head}")
     print(f"Use PTQ             : {not args.no_PTQ}")
     print(f"Use SmoothQuant     : {args.smoothquant}")
     if args.smoothquant:
