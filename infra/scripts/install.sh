@@ -28,7 +28,7 @@ SUPPORTED_FAMILIES=("2.5" "2.6" "2.7" "2.8" "2.9" "2.10")
 DEFAULT_FAMILY="2.7"
 
 show_help() {
-cat <<EOF
+cat <<EOF_HELP
 Usage: ./ccex install [OPTIONS]
 
 --dist                 Install from wheel in ./dist instead of editable mode
@@ -42,7 +42,20 @@ Usage: ./ccex install [OPTIONS]
 --cpu_only             Force CPU-only Torch installation
                        (disables CUDA detection / --cuda_ver)
 -h | --help            Show this help
-EOF
+EOF_HELP
+}
+
+version_le() {
+  local a="$1" b="$2"
+  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" == "$a" ]]
+}
+
+add_unique_index_url() {
+  local candidate="$1" existing
+  for existing in "${INDEX_URLS[@]}"; do
+    [[ "$existing" == "$candidate" ]] && return 0
+  done
+  INDEX_URLS+=("$candidate")
 }
 
 ###############################################################################
@@ -130,10 +143,11 @@ get_index_url_for_cuda_version() {
 }
 
 INDEX_URL="https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
+CUDA_TO_USE=""
+
 if [[ -n "$_CPU_ONLY" ]]; then
   echo "[INFO] Forcing CPU-only Torch installation"
 else
-  CUDA_TO_USE=""
   if [[ -n "$_USER_CUDA" ]]; then
     CUDA_TO_USE="$_USER_CUDA"
     echo "[INFO] Using CUDA ${CUDA_TO_USE} specified with --cuda_ver"
@@ -144,9 +158,29 @@ else
     CUDA_TO_USE=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+")
     echo "[INFO] Detected CUDA ${CUDA_TO_USE}"
   fi
+
   if [[ -n "$CUDA_TO_USE" ]]; then
     INDEX_URL=$(get_index_url_for_cuda_version "$CUDA_TO_USE" "$REQUEST_IS_NIGHTLY")
   fi
+fi
+
+INDEX_URLS=()
+add_unique_index_url "$INDEX_URL"
+
+if [[ -z "$_CPU_ONLY" && -n "$CUDA_TO_USE" ]]; then
+  # PyTorch does not publish wheels for every CUDA minor version.
+  # Example: CUDA 13.1 maps to cu131, but cu131 may not exist.
+  # Try the detected/requested CUDA first, then fall back to known PyTorch
+  # CUDA wheel indices that are <= the detected/requested CUDA version.
+  PYTORCH_CUDA_FALLBACKS=("13.0" "12.8" "12.6" "12.4" "12.1" "11.8")
+  for cuda_fb in "${PYTORCH_CUDA_FALLBACKS[@]}"; do
+    if version_le "$cuda_fb" "$CUDA_TO_USE"; then
+      add_unique_index_url "$(get_index_url_for_cuda_version "$cuda_fb" "$REQUEST_IS_NIGHTLY")"
+    fi
+  done
+
+  # Last resort: keep install working on machines without a matching CUDA wheel.
+  add_unique_index_url "https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
 fi
 
 ###############################################################################
@@ -154,19 +188,32 @@ fi
 ###############################################################################
 install_torch() {
   local spec="$1"
-  echo "[INFO] Installing torch (${spec}) from ${INDEX_URL}"
-  python3 -m pip install ${spec} --index-url "${INDEX_URL}"
+  local index_url
+
+  for index_url in "${INDEX_URLS[@]}"; do
+    echo "[INFO] Installing torch (${spec}) from ${index_url}"
+    if python3 -m pip install ${spec} --index-url "${index_url}"; then
+      INDEX_URL="${index_url}"
+      echo "[INFO] Successfully installed torch from ${index_url}"
+      return 0
+    fi
+
+    echo "[WARN] Failed to install torch (${spec}) from ${index_url}; trying next candidate..." >&2
+  done
+
+  echo "[ERROR] Could not install torch (${spec}) from any candidate PyTorch index." >&2
+  return 1
 }
 
 if [[ -z "$SKIP_TORCH_INSTALL" ]]; then
   if [[ -n "$REQUEST_IS_NIGHTLY" ]]; then
-    install_torch "-r ${SCRIPTS_DIR}/../dependency/torch_dev.txt"
+    install_torch "-r ${SCRIPTS_DIR}/../dependency/torch_dev.txt" || exit 1
   else
     if [[ -n "$REQUEST_IS_EXACT" ]]; then
-      install_torch "torch==${_TORCH_VER}"
+      install_torch "torch==${_TORCH_VER}" || exit 1
     else
       # family only → pip’s ~= spec picks the newest patch in the family
-      install_torch "torch==${_TORCH_VER}.*"
+      install_torch "torch==${_TORCH_VER}.*" || exit 1
     fi
   fi
 fi
