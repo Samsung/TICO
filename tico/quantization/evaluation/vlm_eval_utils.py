@@ -370,6 +370,85 @@ def generate_answer(
     return processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
 
+@torch.no_grad()
+def generate_image_only_answer(
+    model,
+    processor,
+    image,
+    device: str | torch.device,
+    question: str | None = None,
+    max_new_tokens: int = 16,
+    temperature: float = 0.0,
+    max_seq_len: int | None = None,
+) -> str:
+    """
+    Generate an answer from the image only.
+
+    Args:
+        model: Vision-language generation model.
+        processor: Matching processor for the model.
+        image: Input image.
+        question: Optional text question.
+        device: Device on which generation should run.
+        max_new_tokens: Maximum number of generated tokens.
+        temperature: Sampling temperature. Greedy decoding is used when this
+                     value is less than or equal to zero.
+        max_seq_len: Optional maximum text sequence length for processor
+                     tokenization.
+
+    Returns:
+        The decoded model answer string.
+    """
+    content: list = [{"type": "image"}]
+
+    if question is not None:
+        content.append(
+            {
+                "type": "text",
+                "text": question,
+            }
+        )
+
+    messages = [
+        {
+            "role": "user",
+            "content": content,
+        }
+    ]
+
+    prompt = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    processor_kwargs: dict[str, Any] = {
+        "text": prompt,
+        "images": image,
+        "return_tensors": "pt",
+    }
+    if max_seq_len is not None and max_seq_len > 0:
+        processor_kwargs["truncation"] = True
+        processor_kwargs["max_length"] = max_seq_len
+
+    inputs = processor(**processor_kwargs)
+    inputs = move_inputs_to_device(inputs, device)
+
+    do_sample = temperature > 0.0
+    gen_kwargs: dict[str, Any] = {
+        "max_new_tokens": max_new_tokens,
+        "do_sample": do_sample,
+    }
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+
+    out_ids = model.generate(**inputs, **gen_kwargs)
+    input_len = inputs["input_ids"].shape[1]
+    gen_ids = out_ids[0, input_len:]
+
+    return processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
+
 class CocoResult(TypedDict):
     image_id: str
     caption: str

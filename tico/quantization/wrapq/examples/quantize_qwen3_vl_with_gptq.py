@@ -38,6 +38,7 @@ from tico.quantization.evaluation.mmlu_eval_utils import (
 )
 from tico.quantization.evaluation.mmmu_eval_utils import (
     evaluate_mmmu,
+    MMMU_DATASETS,
     print_mmmu_results,
 )
 from tico.quantization.evaluation.vlm_eval_utils import (
@@ -397,14 +398,23 @@ def parse_args():
 
     # MMMU evaluation arguments
     parser.add_argument(
+        "--mmmu_dataset",
+        type=str,
+        choices=MMMU_DATASETS,
+        default=None,
+        help="MMMU dataset name.",
+    )
+
+    parser.add_argument(
         "--mmmu_subjects",
         type=str,
         default=None,
         nargs="+",
         help=(
-            "Space-separated list of MMMU subjects to evaluate. Use 'mmmu' for all subjects."
-            "Use 'Accounting', 'Agriculture', 'Art', etc. for specific subjects."
-            "See https://huggingface.co/datasets/MMMU/MMMU for the full list."
+            "Space-separated list of MMMU subjects to evaluate. "
+            "Use 'Accounting', 'Agriculture', 'Art', etc. for specific subjects. "
+            "See https://huggingface.co/datasets/MMMU/MMMU for the full list. "
+            "If not specified, all subjects will be evaluated."
         ),
     )
     parser.add_argument(
@@ -1194,11 +1204,12 @@ def evaluate_original_model(model, processor, args):
         acc = get_hellaswag_accuracy(original_hellaswag_results)
         print(f"Accuracy: {acc['acc']:.4f}, Accuracy (norm): {acc['acc_norm']:.4f}")
 
-    if args.mmmu_subjects is not None:
+    if args.mmmu_dataset is not None:
         print("\n=== MMMU Evaluation (Original Model) ===")
         original_mmmu_results = evaluate_mmmu(
             model=model,
             processor=processor,
+            dataset=args.mmmu_dataset,
             subjects=args.mmmu_subjects,
             device=args.device,
             n_shots=args.mmmu_n_shots,
@@ -1287,11 +1298,12 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
         acc = get_hellaswag_accuracy(quantized_hellaswag_results)
         print(f"Accuracy: {acc['acc']:.4f}, Accuracy (norm): {acc['acc_norm']:.4f}")
 
-    if args.mmmu_subjects is not None:
+    if args.mmmu_dataset is not None:
         print("\n=== MMMU Evaluation (Quantized Model) ===")
         quantized_mmmu_results = evaluate_mmmu(
             model=model,
             processor=processor,
+            dataset=args.mmmu_dataset,
             subjects=args.mmmu_subjects,
             device=args.device,
             n_shots=args.mmmu_n_shots,
