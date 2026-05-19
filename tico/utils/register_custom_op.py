@@ -705,12 +705,62 @@ def CircleQuantizeMX():
         return input_
 
 
+def CircleQuantizeMXDecomposed():
+    # TODO
+    @custom_op("circle_custom::quantize_mx_decomposed", mutates_args=())
+    def quantize_mx(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        # this op should be fake one, so please consider different quantization scheme in case it failed here
+        assert False
+        return input_.clone()
+
+    @register_fake("circle_custom::quantize_mx_decomposed")
+    def _(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",  # Fixed
+        round: str = "nearest",  # Fixed
+    ) -> torch.Tensor:
+        return input_
+
+
+def CircleDeQuantizeMXDecomposed():
+    # TODO
+    @custom_op("circle_custom::dequantize_mx_decomposed", mutates_args=())
+    def quantize_mx(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        # this op should be fake one, so please consider different quantization scheme in case it failed here
+        assert False
+        return input_.clone()
+
+    @register_fake("circle_custom::dequantize_mx_decomposed")
+    def _(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",  # Fixed
+        round: str = "nearest",  # Fixed;
+    ) -> torch.Tensor:
+        return input_
+
+
 def CircleRMSNorm():
     @custom_op("circle_custom::rms_norm", mutates_args=())
     def rms_norm(
         hidden_states: torch.Tensor,
         weight: torch.Tensor,
-        eps: float = 1e-06,
+        eps: float,
     ) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
@@ -800,6 +850,8 @@ def RegisterOps():
     CircleAvgPool2D()
     CircleInstanceNorm()
     CircleQuantizeMX()
+    CircleQuantizeMXDecomposed()
+    CircleDeQuantizeMXDecomposed()
     CircleRMSNorm()
     CircleAttention()
     CircleShape()

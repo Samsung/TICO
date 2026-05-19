@@ -169,6 +169,10 @@ class QuantLlamaAttention(QuantModuleBase):
         mk = self._make_obs
         self.obs_hidden = mk("hidden")
 
+        self.obs_q_unrolled = mk("q_unrolled")
+        self.obs_k_unrolled = mk("k_unrolled")
+        self.obs_v_unrolled = mk("v_unrolled")
+        
         # RoPE tables
         self.obs_cos = mk("cos")
         self.obs_sin = mk("sin")
@@ -1029,6 +1033,10 @@ class QuantLlamaAttention(QuantModuleBase):
         k = self.k_proj(hidden).view(B, S, self.num_kv_heads, H)
         v = self.v_proj(hidden).view(B, S, self.num_kv_heads, H)
 
+        q = self._fq(q, self.obs_q_unrolled)
+        k = self._fq(k, self.obs_k_unrolled)
+        v = self._fq(v, self.obs_v_unrolled)
+        
         cos, sin = position_embeddings
         cos = self._fq(cos, self.obs_cos)
         sin = self._fq(sin, self.obs_sin)
@@ -1074,6 +1082,9 @@ class QuantLlamaAttention(QuantModuleBase):
         # local first
         yield from (
             self.obs_hidden,
+            self.obs_q_unrolled,
+            self.obs_k_unrolled,
+            self.obs_v_unrolled,
             self.obs_cos,
             self.obs_sin,
             self.obs_q_x1,

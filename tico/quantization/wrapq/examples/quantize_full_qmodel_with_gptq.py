@@ -58,6 +58,7 @@ from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.cle import CLEConfig
 from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
     SUPPORTED_EXECUTION_PROFILES,
@@ -66,6 +67,8 @@ from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
@@ -215,10 +218,34 @@ def parse_args():
         help="Number of bits to be used in quantizer for matmul weight quantization",
     )
     parser.add_argument(
+        "--default_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed as default for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--linear_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for matmuls for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--softmax_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for softmax for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--rms_norm_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for rmsnorm for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
         "--gptq_mse",
         type=str,
         default=None,
-        choices=["mse", "smse"],
+        choices=["mse", "smse", "smse_for_gptq", "mse_for_gptq"],
         help="Whether and how to use mse in gptq (none/mse/smse/)",
     )
     parser.add_argument(
@@ -386,6 +413,51 @@ def inject_gptq_qparams(
         _print_sample("missed modules", missed_modules)
         _print_sample("unused GPTQ entries", unused)
 
+
+def evaluate_ppl_of_model_on_dataset(model, dataset, device: str = "cuda"):
+    if hasattr(model, "device") and model.device.type != device.type:
+        if hasattr(model, "to"):
+            model.to(device)
+    nlls = []
+    with torch.no_grad():
+        for batch in tqdm.tqdm(dataset):
+            if isinstance(batch, torch.Tensor):
+                batch = batch.to(device)
+                output = model(
+                    batch.to(device),
+                )
+            else:
+                raise RuntimeError("Unknown input in ppl_eval_on_dataset")
+
+            if hasattr(output, "logits"):
+                lm_logits = output.logits
+            elif len(output) > 1:
+                lm_logits = torch.tensor(output[0])
+            else:
+                lm_logits = torch.tensor(output)
+
+            if torch.isfinite(lm_logits).all():
+                shift_logits = lm_logits[:, :-1, :].contiguous()
+                if isinstance(batch, torch.Tensor):
+                    shift_labels = batch[:, 1:].contiguous()
+                else:
+                    assert isinstance(batch, tuple)
+                    shift_labels = batch[0][:, 1:].contiguous()
+                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                loss = loss_fct(
+                    shift_logits.reshape(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                )
+                nlls.append(loss)
+                del shift_logits, shift_labels
+                shift_logits = shift_labels = None  # type: ignore[assignment]
+
+            del batch, lm_logits, output
+            lm_logits = output = batch = None  # noqa: F841
+            torch.cuda.empty_cache()
+
+    ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
+    return ppl
 
 # -------------------------------------------------------------------------
 # Helper — clear gptq quantizers after injection
@@ -860,23 +932,195 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
 
-    qcfg = build_llm_ptq_config(
-        model_type="llama",
-        num_hidden_layers=len(q_m.model.layers),
-        activation_dtype=DType.int(16),
-        default_qscheme=QScheme.PER_TENSOR_SYMM,
-        linear_weight_bits=args.linear_weight_bits,
-        embedding_weight_bits=args.embedding_weight_bits,
-        lm_head_weight_bits=args.lm_head_weight_bits,
-        spin_rotation_weight_bits=(
-            None if args.no_spinquant else args.spin_rotation_weight_bits
-        ),
-        norm_weight_dtype=DType.int(16),
-        strict_wrap=True,
-        profile=args.profile,
+    linear_observer = (
+        MinMaxObserver
+        if args.linear_io_qdtype == "int16"
+        else MXObserver if args.linear_io_qdtype == "mxint8" else None
     )
-    q_m = prepare(q_m, qcfg)
+    new = False#True
+    if new:
+        qcfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=len(q_m.model.layers),
+            activation_dtype=DType.int(16),
+            default_qscheme=QScheme.PER_TENSOR_SYMM,
+            linear_weight_bits=args.linear_weight_bits,
+            linear_activation_observer=linear_observer,
+            embedding_weight_bits=args.embedding_weight_bits,
+            lm_head_weight_bits=args.lm_head_weight_bits,
+            default_observer = MinMaxObserver,
+            
+            spin_rotation_weight_bits=(
+                None if args.no_spinquant else args.spin_rotation_weight_bits
+            ),
+            norm_weight_dtype=DType.int(16),
+            strict_wrap=True,
+            profile=args.profile,
+        )
+    else:
+        fn = 0
+        w_cfg = {
+            "mlp": {
+                "act_in" : {"observer": MinMaxObserver if args.rms_norm_io_qdtype == "int16" else MXObserver,},
+                "gate_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+                "up_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+                "mul" : {"observer": linear_observer}, # mul outputs operand for down_proj, so it should be the same 
+                "down_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+            },
+            "self_attn": {
+                "hidden" : {"observer": MinMaxObserver if args.rms_norm_io_qdtype == "int16" else MXObserver,},
+                "q_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+                "k_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+                "v_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+                "o_proj": {
+                    "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer": linear_observer},
+                    "act_out": {"observer": linear_observer},
+                },
+                "attn_mask": {"observer": linear_observer},
+                "mask_add": {"observer": linear_observer},
+                "attn_out" : {"observer": linear_observer},
+                "logits":  {"observer": linear_observer},
+          #      "k_x1":  {"observer": linear_observer},
+          #      "k_x2":  {"observer": linear_observer},
+          #      "k_cat":  {"observer": linear_observer},
+          #      "k_cos":  {"observer": linear_observer},
+          #      "k_sin":  {"observer": linear_observer},
+          #      "k_rot":  {"observer": linear_observer},
+          #      "q_x1":  {"observer": linear_observer},
+          #      "q_x2":  {"observer": linear_observer},
+          #      "q_cat":  {"observer": linear_observer},
+          #      "q_cos":  {"observer": linear_observer},
+          #      "q_sin":  {"observer": linear_observer},
+          #      "q_rot":  {"observer": linear_observer}
+            },
+            
+            "input_layernorm": {
+                "dtype": DType.int(16),
+                "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+            },
+            "post_attention_layernorm": {
+                "dtype": DType.int(16),
+                "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+            },
+            "attn_mask" : {"observer": linear_observer,},
+            "mlp_residual_out" : {"observer": linear_observer,},
+        }
+        
+        if args.softmax_io_qdtype == "int16":
+            w_cfg["self_attn"]["softmax"].update( {"softmax" : {"observer": MinMaxObserver}})
+        else:
+            assert args.softmax_io_qdtype == "mxint8"
+            w_cfg["self_attn"].update({"softmax" : {"observer": MXObserver}})
+        
+        if args.rms_norm_io_qdtype == "int16":
+            norm_act_cfg = {
+                "act_in": {"observer": MinMaxObserver},
+                "act_out": {"observer": MinMaxObserver}
+            }
+            
+        else:
+            norm_act_cfg = {
+                "act_in": {"observer": MXObserver},
+                "act_out": {"observer": MXObserver}
+            }
+        w_cfg["input_layernorm"].update(norm_act_cfg)
+        w_cfg["post_attention_layernorm"].update(norm_act_cfg)
 
+        default_observer = (
+            MinMaxObserver
+            if args.default_io_qdtype == "int16"
+            else MXObserver if args.linear_io_qdtype == "mxint8" else None
+        )
+        cfg = PTQConfig(
+            default_dtype=DType.int(16),
+            default_qscheme=QScheme.PER_TENSOR_SYMM,
+            default_observer=default_observer,  # type: ignore[arg-type]
+            overrides={
+                "model": {
+                    "causal_mask" : {"observer" : linear_observer,},
+                    "embed_tokens": {
+                        "weight": {
+                            "dtype": (
+                                DType.uint(args.embedding_weight_bits)
+                                if args.embedding_weight_bits < 16
+                                else DType.int(args.embedding_weight_bits)
+                            ),
+                            "observer": MinMaxObserver,
+                        },
+                    },
+                    "layers": {},
+                    "norm": {
+                        "weight": {"dtype": DType.int(16)},
+                    },
+                },
+                "lm_head": {
+                    "weight": {
+                        "dtype": (
+                            DType.uint(args.lm_head_weight_bits)
+                            if args.lm_head_weight_bits < 16
+                            else DType.int(args.lm_head_weight_bits)
+                        ),
+                        "observer": MinMaxObserver,
+                    },
+                    "act_in": {"observer" : linear_observer,},
+                    "act_out": {"observer" : linear_observer,},
+                },
+            },
+        )
+        cfg.overrides["model"]["norm"].update(norm_act_cfg)
+        for i in range(len(q_m.model.layers)):
+            child_scope = f"{i}"
+            cfg.overrides["model"]["layers"][child_scope] = w_cfg  # type: ignore[index]
+
+        qcfg = cfg
+
+    q_m = prepare(q_m, qcfg)
     print("Calibrating PTQ observers…")
 
     if hasattr(q_m, "quantizers") and isinstance(q_m.quantizers, dict):
@@ -911,15 +1155,15 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     """
     Evaluate the quantized model with perplexity and optional lm-eval tasks.
     """
-    print("\nCalculating perplexities …")
-    enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
-    ppl_uint8 = perplexity(
-        q_m, enc, args.device, max_length=args.max_seq_len, stride=args.max_seq_len
-    )
-
-    print("\n┌── Wikitext-2 test perplexity ─────────────")
-    print(f"│ int16 : {ppl_uint8:8.2f}")
-    print("└───────────────────────────────────────────")
+  #  print("\nCalculating perplexities …")
+  #  enc = tokenizer("\n\n".join(dataset_test["text"]), return_tensors="pt")
+  #  ppl_uint8 = perplexity(
+  #      q_m, enc, args.device, max_length=args.max_seq_len, stride=args.max_seq_len
+  #  )
+#
+  #  print("\n┌── Wikitext-2 test perplexity ─────────────")
+  #  print(f"│ {args.default_io_qdtype} : {ppl_uint8:8.2f}")
+  #  print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
@@ -927,6 +1171,52 @@ def evaluate(q_m, tokenizer, dataset_test, args):
         )
         print("Quantized RESULTS ARE:")
         print(make_table(results))
+
+    # to prevent export errors let's evaluate ppl on exported fake_quantized model
+    prev_use_cache = q_m.wrapped.config.use_cache
+    q_m.wrapped.config.use_cache = False
+    eval_exported = False
+    if eval_exported:
+        with torch.no_grad():
+            q_m.eval()
+            q_m.cpu()
+            test_ids = enc.input_ids[0]
+            test_ids_batch = []
+            if hasattr(q_m, "config"):
+                assert hasattr(q_m, "config")
+                model_config = q_m.config
+            else:
+                assert hasattr(q_m.wrapped, "config")
+                model_config = q_m.wrapped.config
+            if hasattr(model_config, "text_config"):
+                model_config = model_config.text_config
+            assert hasattr(model_config, "max_position_embeddings")
+            assert isinstance(model_config.max_position_embeddings, int)
+            max_length = model_config.max_position_embeddings
+            nsamples = test_ids.numel() // max_length
+
+            for i in range(nsamples):
+                batch = test_ids[(i * max_length) : ((i + 1) * max_length)]  # noqa E203
+                test_ids_batch.append(batch.unsqueeze(0))
+
+            rnd_input = torch.randint_like(
+                test_ids_batch[0], 0, tokenizer.vocab_size - 1
+            )  # just random ids
+            device = "cuda"
+            exported_program = torch.export.export(
+                q_m.to(device),
+                (rnd_input.to(device),),
+                kwargs=None,
+                dynamic_shapes=None,
+                strict=False,
+            )
+            ppl = evaluate_ppl_of_model_on_dataset(
+                exported_program.module(), test_ids_batch, device=device
+            )
+            print("\n┌── Wikitext-2 test perplexity ─────────────")
+            print(f"│ exported_{args.default_io_qdtype} : {ppl:8.2f}")
+            print("└───────────────────────────────────────────")
+    q_m.wrapped.config.use_cache = prev_use_cache
 
 
 def get_sensitivities_info_name(model, dataset, seed, n_samples):
@@ -1202,7 +1492,7 @@ def compute_or_load_sensitivity(model, calib_inputs, args):
     """
     Load or compute sensitivity information for SMSE GPTQ.
     """
-    if args.gptq_mse != "smse":
+    if args.gptq_mse != "smse" and args.gptq_mse != "smse_for_gptq":
         return None
 
     if args.sensitivity_path is not None:

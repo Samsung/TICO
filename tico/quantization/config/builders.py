@@ -153,6 +153,15 @@ def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
         }
     }
 
+def _build_activation_override(activation_observer: Type[ObserverBase] = MinMaxObserver) -> Dict[str, Any]:
+    
+    if activation_observer is None:
+        return {}
+    return {
+        "act_in": {"observer": activation_observer},
+        "act_out": {"observer": activation_observer},
+    }
+
 
 def _build_norm_override(
     *,
@@ -193,6 +202,7 @@ def _build_norm_override(
 def _build_llama_layer_overrides(
     *,
     linear_weight_dtype: Optional[DType],
+    linear_activation_observer: Type[ObserverBase],
     norm_dtype: Optional[DType],
     norm_weight_dtype: Optional[DType],
 ) -> Dict[str, Any]:
@@ -228,6 +238,7 @@ def _build_llama_layer_overrides(
     layer_overrides: Dict[str, Any] = {}
 
     linear_override = _build_weight_override(linear_weight_dtype)
+    linear_override.update(_build_activation_override(linear_activation_observer))
     if linear_override:
         _set_nested_override(layer_overrides, ("self_attn", "q_proj"), linear_override)
         _set_nested_override(layer_overrides, ("self_attn", "k_proj"), linear_override)
@@ -255,6 +266,7 @@ def _build_llama_overrides(
     *,
     num_hidden_layers: int,
     linear_weight_dtype: Optional[DType],
+    linear_activation_observer: Optional[ObserverBase],
     embedding_weight_dtype: Optional[DType],
     lm_head_weight_dtype: Optional[DType],
     spin_rotation_weight_dtype: Optional[DType],
@@ -329,6 +341,7 @@ def _build_llama_overrides(
     for layer_idx in range(num_hidden_layers):
         overrides["model"]["layers"][str(layer_idx)] = _build_llama_layer_overrides(
             linear_weight_dtype=linear_weight_dtype,
+            linear_activation_observer=linear_activation_observer,
             norm_dtype=norm_dtype,
             norm_weight_dtype=norm_weight_dtype,
         )
@@ -345,6 +358,7 @@ def build_llm_ptq_config(
     default_observer: Type[ObserverBase] = MinMaxObserver,
     linear_weight_bits: Optional[int] = None,
     linear_weight_dtype: Optional[DType] = None,
+    linear_activation_observer: Type[ObserverBase] = MinMaxObserver,
     embedding_weight_bits: Optional[int] = None,
     embedding_weight_dtype: Optional[DType] = None,
     lm_head_weight_bits: Optional[int] = None,
@@ -462,6 +476,7 @@ def build_llm_ptq_config(
         overrides = _build_llama_overrides(
             num_hidden_layers=num_hidden_layers,
             linear_weight_dtype=resolved_linear_weight_dtype,
+            linear_activation_observer=linear_activation_observer,
             embedding_weight_dtype=resolved_embedding_weight_dtype,
             lm_head_weight_dtype=resolved_lm_head_weight_dtype,
             spin_rotation_weight_dtype=resolved_spin_rotation_weight_dtype,
