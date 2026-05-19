@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.recipes.adapters.base import ModelAdapter
@@ -35,7 +36,6 @@ from tico.quantization.recipes.utils import (
     torch_dtype_from_name,
     wrapq_dtype_from_name,
 )
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class LlamaAdapter(ModelAdapter):

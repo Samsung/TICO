@@ -1,0 +1,12 @@
+runtime:
+  seed: 42
+
+debug:
+  static_llama_runtime:
+    model: Maykeye/TinyLLama-v0
+    max_seq: 256
+    padding_side: right
+    device: cpu
+    prompt: The capital of France is
+    verify_steps: 6
+    gen_steps: 16
