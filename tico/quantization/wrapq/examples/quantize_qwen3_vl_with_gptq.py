@@ -570,6 +570,40 @@ def evaluate_model_coco(
     model,
     processor,
     device: str,
+    dataset_name: str,
+    nsamples: int = 50,
+    max_seq_len: Optional[int] = None,
+):
+    """
+    Evaluate a model on the mini COCO captioning benchmark.
+
+    Args:
+        model: Model to evaluate.
+        processor: Hugging Face processor.
+        device: Target device string.
+        nsamples: Number of evaluation samples. -1 means full dataset.
+        max_seq_len: Optional maximum text sequence length.
+
+    Returns:
+        COCO metric dictionary.
+    """
+
+    ds, _ = get_dataset(dataset_name, n=nsamples)
+    result = get_coco_scores_on_dataset(
+        model=model,
+        processor=processor,
+        dataset_name=dataset_name,
+        ds=ds,
+        device=device,
+        max_seq_len=max_seq_len,
+    )
+    return result
+
+
+def evaluate_model_llama_bench(
+    model,
+    processor,
+    device: str,
     nsamples: int = 50,
     max_seq_len: Optional[int] = None,
 ):
@@ -595,6 +629,7 @@ def evaluate_model_coco(
         result = get_coco_scores_on_dataset(
             model=model,
             processor=processor,
+            dataset_name="llama_bench",
             ds=ds,
             device=device,
             max_seq_len=max_seq_len,
@@ -1159,6 +1194,20 @@ def evaluate_original_model(model, processor, args):
                 model=model,
                 processor=processor,
                 device=args.device,
+                dataset_name="coco",
+                nsamples=args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            for metric, value in results.items():
+                print(f"{metric:<10} {value:.3f}")
+
+        if "llama_bench" in args.eval_tasks:
+            print("\n=== Llama Bench Evaluation (Original Model) ===")
+            results = evaluate_model_coco(
+                model=model,
+                processor=processor,
+                device=args.device,
+                dataset_name="llama_bench",
                 nsamples=args.nsamples_for_evaluation,
                 max_seq_len=args.max_seq_len,
             )
@@ -1252,6 +1301,20 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
                 model=model,
                 processor=processor,
                 device=args.device,
+                dataset_name="coco",
+                nsamples=args.nsamples_for_evaluation,
+                max_seq_len=args.max_seq_len,
+            )
+            for metric, value in results.items():
+                print(f"{metric:<10} {value:.3f}")
+
+        if "llama_bench" in args.eval_tasks:
+            print("\n=== Llama Bench Evaluation (Original Model) ===")
+            results = evaluate_model_coco(
+                model=model,
+                processor=processor,
+                device=args.device,
+                dataset_name="llama_bench",
                 nsamples=args.nsamples_for_evaluation,
                 max_seq_len=args.max_seq_len,
             )
