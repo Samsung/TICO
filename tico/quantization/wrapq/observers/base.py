@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from tico.quantization.wrapq.dtypes import DType, UINT8
+from tico.quantization.wrapq.dtypes import DType, QuantDtype, UINT8
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -38,7 +38,7 @@ class ObserverBase(nn.Module, ABC):
         self,
         *,
         name: str,
-        dtype: DType = UINT8,
+        dtype: QuantDtype = UINT8,
         qscheme: QScheme = QScheme.PER_TENSOR_ASYMM,
         channel_axis: Optional[int] = None,  # None → per-tensor
     ):
