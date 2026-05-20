@@ -218,8 +218,8 @@ def parse_args():
         "--gptq_mse",
         type=str,
         default=None,
-        choices=["mse", "smse"],
-        help="Whether and how to use mse in gptq (none/mse/smse/)",
+        choices=["mse", "smse", "smse_for_gptq"],
+        help="Whether and how to use mse in gptq (none/mse/smse/smse_for_gptq)",
     )
     parser.add_argument(
         "--max_seq_len",
@@ -385,6 +385,52 @@ def inject_gptq_qparams(
 
         _print_sample("missed modules", missed_modules)
         _print_sample("unused GPTQ entries", unused)
+
+
+def evaluate_ppl_of_model_on_dataset(model, dataset, device):
+    if hasattr(model, "device") and model.device.type != device.type:
+        if hasattr(model, "to"):
+            model.to(device)
+    nlls = []
+    with torch.no_grad():
+        for batch in tqdm.tqdm(dataset):
+            if isinstance(batch, torch.Tensor):
+                batch = batch.to(device)
+                output = model(
+                    batch.to(device),
+                )
+            else:
+                raise RuntimeError("Unknown input in ppl_eval_on_dataset")
+
+            if hasattr(output, "logits"):
+                lm_logits = output.logits
+            elif len(output) > 1:
+                lm_logits = torch.tensor(output[0])
+            else:
+                lm_logits = torch.tensor(output)
+
+            if torch.isfinite(lm_logits).all():
+                shift_logits = lm_logits[:, :-1, :].contiguous()
+                if isinstance(batch, torch.Tensor):
+                    shift_labels = batch[:, 1:].contiguous()
+                else:
+                    assert isinstance(batch, tuple)
+                    shift_labels = batch[0][:, 1:].contiguous()
+                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                loss = loss_fct(
+                    shift_logits.reshape(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                )
+                nlls.append(loss)
+                del shift_logits, shift_labels
+                shift_logits = shift_labels = None  # type: ignore[assignment]
+
+            del batch, lm_logits, output
+            lm_logits = output = batch = None  # noqa: F841
+            torch.cuda.empty_cache()
+
+    ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
+    return ppl
 
 
 # -------------------------------------------------------------------------
@@ -1200,9 +1246,9 @@ def build_calibration_inputs(
 
 def compute_or_load_sensitivity(model, calib_inputs, args):
     """
-    Load or compute sensitivity information for SMSE GPTQ.
+    Load or compute sensitivity information for sensitivity-based GPTQ.
     """
-    if args.gptq_mse != "smse":
+    if args.gptq_mse != "smse" and args.gptq_mse != "smse_for_gptq":
         return None
 
     if args.sensitivity_path is not None:
@@ -1328,6 +1374,12 @@ def main():
     evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
     calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
+    train_ppl_ioqdtype = evaluate_ppl_of_model_on_dataset(
+        model, calib_inputs, device=device
+    )
+    print("\n┌── Wikitext-2 train perplexity ─────────────")
+    print(f"│ FP32 : {train_ppl_ioqdtype:8.2f}")
+    print("└───────────────────────────────────────────")
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
@@ -1336,6 +1388,14 @@ def main():
     q_m = quantize_using_PTQ(model, calib_inputs, args)
 
     evaluate(q_m, tokenizer, dataset_test, args)
+
+    train_ppl_ioqdtype = evaluate_ppl_of_model_on_dataset(
+        q_m, calib_inputs, device=device
+    )
+    print("\n┌── Wikitext-2 train perplexity ─────────────")
+    print(f"│ int16 : {train_ppl_ioqdtype:8.2f}")
+    print("└───────────────────────────────────────────")
+
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
 
 
