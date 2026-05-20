@@ -15,9 +15,9 @@
 from pathlib import Path
 from typing import Any
 
-import torch
-
 import tico
+
+import torch
 from tico.utils.utils import SuppressWarning
 
 
