@@ -92,7 +92,7 @@ class RemoveRedundantQuantisersTest(unittest.TestCase):
 
         reshape_node = None
         for node in ep.graph.nodes:
-            if node.op == "call_function" and node.target == torch.ops.aten.reshape.default:
+            if node.op == "call_function" and (node.target == torch.ops.aten.reshape.default or node.target == torch.ops.aten.view.default):
                 reshape_node = node
                 break
 
