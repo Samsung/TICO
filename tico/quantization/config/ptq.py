@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, Literal, Mapping, MutableMapping, Option
 
 from tico.quantization.config.base import BaseConfig
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
-from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.dtypes import DType, QuantDtype
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
@@ -29,7 +29,7 @@ ExportMode = Literal["prefill", "decode"]
 
 def _resolve_qscheme(
     *,
-    dtype: DType,
+    dtype: QuantDtype,
     qscheme: Optional[QScheme],
     context: str,
     obs_name: Optional[str] = None,
@@ -56,7 +56,7 @@ def _resolve_qscheme(
 def _normalize_overrides(
     mapping: Mapping[str, Any],
     *,
-    inherited_dtype: DType,
+    inherited_dtype: QuantDtype,
     inherited_qscheme: QScheme,
     context: str,
     current_name: Optional[str] = None,
@@ -196,7 +196,7 @@ class PTQConfig(BaseConfig):
     ```
     """
 
-    default_dtype: DType = DType.uint(8)
+    default_dtype: QuantDtype = DType.uint(8)
     default_observer: Type[ObserverBase] = MinMaxObserver  # type: ignore[type-abstract]
     default_qscheme: Optional[QScheme] = None
     overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)

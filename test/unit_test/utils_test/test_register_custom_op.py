@@ -356,7 +356,7 @@ class TestRegisterCustomOp(unittest.TestCase):
         hidden_states = torch.randn(2, 32, 3)
         weight = torch.randn(3)
 
-        result = torch.ops.circle_custom.rms_norm(hidden_states, weight)
+        result = torch.ops.circle_custom.rms_norm(hidden_states, weight, eps=1.e-06)
 
         # Check output shape
         self.assertEqual(list(result.shape), list(hidden_states.shape))

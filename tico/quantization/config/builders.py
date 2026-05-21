@@ -23,8 +23,11 @@ from tico.quantization.config.llama_attention import (
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.utils import auto_qscheme_for
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.dtypes import DType as AffineDType
+from tico.quantization.wrapq.dtypes import MXDtype, QuantDtype
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -125,7 +128,30 @@ def _set_nested_override(
     current[path[-1]] = copy.deepcopy(value)
 
 
-def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
+def _observer_from_dtype(qdtype: QuantDtype) -> Type[ObserverBase]:
+    """
+    Select a default observer class based on a quantization dtype.
+
+    Parameters
+    ----------
+    qdtype : QuantDtype
+        Quantization dtype used to select the observer.
+
+    Returns
+    -------
+    Type[ObserverBase]
+        ``MXObserver`` for MX dtypes, ``MinMaxObserver`` for integer dtypes.
+    """
+    if qdtype.is_mx:
+        return MXObserver
+    return MinMaxObserver
+
+
+def _build_weight_override(
+    weight_dtype: Optional[DType],
+    *,
+    observer: Optional[Type[ObserverBase]] = None,
+) -> Dict[str, Any]:
     """
     Build a weight override dictionary.
 
@@ -137,6 +163,9 @@ def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
     ----------
     weight_dtype : Optional[DType]
         Explicit dtype for the weight observer.
+    observer : Optional[Type[ObserverBase]]
+        Explicit observer class for the weight. When ``None`` the observer
+        is inferred from ``weight_dtype`` (MX → MXObserver, else MinMaxObserver).
 
     Returns
     -------
@@ -146,11 +175,54 @@ def _build_weight_override(weight_dtype: Optional[DType]) -> Dict[str, Any]:
     """
     if weight_dtype is None:
         return {}
+    resolved_observer = observer if observer is not None else _observer_from_dtype(weight_dtype)
     return {
         "weight": {
             "dtype": weight_dtype,
             "qscheme": auto_qscheme_for(weight_dtype, "weight"),
+            "observer": resolved_observer,
         }
+    }
+
+
+def _build_activation_override(
+    activation_observer: Optional[Type[ObserverBase]] = None,
+    *,
+    dtype: Optional[QuantDtype] = None,
+) -> Dict[str, Any]:
+    """
+    Build an activation override dictionary (act_in / act_out).
+
+    Parameters
+    ----------
+    activation_observer : Optional[Type[ObserverBase]]
+        Observer class for both act_in and act_out. When ``None`` the
+        observer is inferred from *dtype* (if provided).
+    dtype : Optional[QuantDtype]
+        Explicit dtype for both act_in and act_out observers.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Activation override dictionary with ``act_in`` and ``act_out`` keys.
+        Returns an empty dictionary when neither *activation_observer* nor
+        *dtype* is provided.
+    """
+    if activation_observer is None and dtype is None:
+        return {}
+
+    resolved_observer = activation_observer
+    if resolved_observer is None and dtype is not None:
+        resolved_observer = _observer_from_dtype(dtype)
+    if resolved_observer is None:
+        resolved_observer = MinMaxObserver
+
+    act_desc: Dict[str, Any] = {"observer": resolved_observer}
+    if dtype is not None:
+        act_desc["dtype"] = dtype
+    return {
+        "act_in": {**act_desc},
+        "act_out": {**act_desc},
     }
 
 
@@ -158,6 +230,8 @@ def _build_norm_override(
     *,
     norm_dtype: Optional[DType],
     norm_weight_dtype: Optional[DType],
+    norm_io_dtype: Optional[QuantDtype] = None,
+    norm_io_observer: Optional[Type[ObserverBase]] = None,
 ) -> Dict[str, Any]:
     """
     Build an override dictionary for a norm module.
@@ -168,6 +242,13 @@ def _build_norm_override(
         Explicit module-level dtype override for the norm module.
     norm_weight_dtype : Optional[DType]
         Explicit weight dtype override for the norm weight.
+    norm_io_dtype : Optional[QuantDtype]
+        Explicit dtype for norm act_in / act_out observers.
+        When provided, ``act_in`` and ``act_out`` overrides are emitted.
+    norm_io_observer : Optional[Type[ObserverBase]]
+        Explicit observer class for norm act_in / act_out.
+        When ``None`` and *norm_io_dtype* is provided, the observer is
+        inferred from the dtype.
 
     Returns
     -------
@@ -182,10 +263,18 @@ def _build_norm_override(
         override["qscheme"] = auto_qscheme_for(norm_dtype)
 
     if norm_weight_dtype is not None:
+        resolved_observer = _observer_from_dtype(norm_weight_dtype)
         override["weight"] = {
             "dtype": norm_weight_dtype,
             "qscheme": auto_qscheme_for(norm_weight_dtype, "weight"),
+            "observer": resolved_observer,
         }
+
+    if norm_io_dtype is not None or norm_io_observer is not None:
+        io_override = _build_activation_override(
+            norm_io_observer, dtype=norm_io_dtype
+        )
+        override.update(io_override)
 
     return override
 
@@ -193,28 +282,49 @@ def _build_norm_override(
 def _build_llama_layer_overrides(
     *,
     linear_weight_dtype: Optional[DType],
-    norm_dtype: Optional[DType],
-    norm_weight_dtype: Optional[DType],
+    linear_activation_observer: Optional[Type[ObserverBase]] = None,
+    linear_io_dtype: Optional[QuantDtype] = None,
+    linear_io_observer: Optional[Type[ObserverBase]] = None,
+    rms_norm_io_dtype: Optional[QuantDtype] = None,
+    rms_norm_observer: Optional[Type[ObserverBase]] = None,
+    softmax_dtype: Optional[QuantDtype] = None,
+    softmax_observer: Optional[Type[ObserverBase]] = None,
+    norm_dtype: Optional[DType] = None,
+    norm_weight_dtype: Optional[DType] = None,
 ) -> Dict[str, Any]:
     """
     Build per-layer overrides for a Llama decoder block.
 
-    The generated overrides can cover:
-      - self_attn.q_proj
-      - self_attn.k_proj
-      - self_attn.v_proj
-      - self_attn.o_proj
-      - mlp.gate_proj
-      - mlp.up_proj
-      - mlp.down_proj
-      - input_layernorm
-      - post_attention_layernorm
+    The generated overrides cover:
+      - self_attn.q_proj / k_proj / v_proj / o_proj  (weight + act_in/act_out)
+      - self_attn.hidden, attn_mask, attn_out, logits  (activations)
+      - self_attn.softmax, mask_add  (activations)
+      - mlp.gate_proj / up_proj / down_proj  (weight + act_in/act_out)
+      - mlp.act_in, mlp.mul  (activations)
+      - input_layernorm / post_attention_layernorm  (weight + act_in/act_out)
+      - attn_mask, self_attn_residual_out, mlp_residual_out  (decoder-layer-level activations)
 
     Parameters
     ----------
     linear_weight_dtype : Optional[DType]
         Explicit or resolved dtype applied to decoder-layer linear projection
-        weights. If None, no linear override is emitted.
+        weights. If None, no linear weight override is emitted.
+    linear_activation_observer : Optional[Type[ObserverBase]]
+        Observer class for linear act_in / act_out. Kept for backward
+        compatibility; prefer ``linear_io_dtype`` / ``linear_io_observer``.
+    linear_io_dtype : Optional[QuantDtype]
+        Dtype for linear-layer act_in / act_out and general-purpose
+        activations (hidden, attn_mask, logits, mul, residual, …).
+    linear_io_observer : Optional[Type[ObserverBase]]
+        Observer class paired with *linear_io_dtype*.
+    rms_norm_io_dtype : Optional[QuantDtype]
+        Dtype for norm act_in / act_out and MLP act_in.
+    rms_norm_observer : Optional[Type[ObserverBase]]
+        Observer class paired with *rms_norm_io_dtype*.
+    softmax_dtype : Optional[QuantDtype]
+        Dtype for the softmax observer inside self_attn.
+    softmax_observer : Optional[Type[ObserverBase]]
+        Observer class paired with *softmax_dtype*.
     norm_dtype : Optional[DType]
         Explicit module-level dtype override for per-layer norm modules.
     norm_weight_dtype : Optional[DType]
@@ -227,7 +337,32 @@ def _build_llama_layer_overrides(
     """
     layer_overrides: Dict[str, Any] = {}
 
+    # --- Resolve linear I/O dtype / observer ---
+    resolved_linear_io_dtype = linear_io_dtype
+    resolved_linear_io_observer = linear_io_observer
+    if resolved_linear_io_observer is None and resolved_linear_io_dtype is not None:
+        resolved_linear_io_observer = _observer_from_dtype(resolved_linear_io_dtype)
+    if resolved_linear_io_observer is None and linear_activation_observer is not None:
+        resolved_linear_io_observer = linear_activation_observer
+
+    # --- Resolve RMS norm I/O dtype / observer ---
+    resolved_rms_io_dtype = rms_norm_io_dtype
+    resolved_rms_observer = rms_norm_observer
+    if resolved_rms_observer is None and resolved_rms_io_dtype is not None:
+        resolved_rms_observer = _observer_from_dtype(resolved_rms_io_dtype)
+
+    # --- Resolve softmax dtype / observer ---
+    resolved_softmax_dtype = softmax_dtype
+    resolved_softmax_observer = softmax_observer
+    if resolved_softmax_observer is None and resolved_softmax_dtype is not None:
+        resolved_softmax_observer = _observer_from_dtype(resolved_softmax_dtype)
+
+    # --- Build linear projection override (weight + act_in + act_out) ---
     linear_override = _build_weight_override(linear_weight_dtype)
+    linear_io_desc = _build_activation_override(
+        resolved_linear_io_observer, dtype=resolved_linear_io_dtype
+    )
+    linear_override.update(linear_io_desc)
     if linear_override:
         _set_nested_override(layer_overrides, ("self_attn", "q_proj"), linear_override)
         _set_nested_override(layer_overrides, ("self_attn", "k_proj"), linear_override)
@@ -238,14 +373,72 @@ def _build_llama_layer_overrides(
         _set_nested_override(layer_overrides, ("mlp", "up_proj"), linear_override)
         _set_nested_override(layer_overrides, ("mlp", "down_proj"), linear_override)
 
+    # --- Self-attention fine-grained activation overrides ---
+    if resolved_rms_io_dtype is not None or resolved_rms_observer is not None:
+        rms_act_desc: Dict[str, Any] = {"observer": resolved_rms_observer or MinMaxObserver}
+        if resolved_rms_io_dtype is not None:
+            rms_act_desc["dtype"] = resolved_rms_io_dtype
+
+    if resolved_linear_io_dtype is not None or resolved_linear_io_observer is not None:
+        linear_act_desc: Dict[str, Any] = {"observer": resolved_linear_io_observer or MinMaxObserver}
+        if resolved_linear_io_dtype is not None:
+            linear_act_desc["dtype"] = resolved_linear_io_dtype
+        _set_nested_override(
+            layer_overrides, ("self_attn", "hidden"), {**linear_act_desc}
+        )
+        _set_nested_override(
+            layer_overrides, ("self_attn", "attn_mask"), {**linear_act_desc}
+        )
+        _set_nested_override(
+            layer_overrides, ("self_attn", "attn_out"), {**linear_act_desc}
+        )
+        _set_nested_override(
+            layer_overrides, ("self_attn", "logits"), {**linear_act_desc}
+        )
+
+    if resolved_softmax_dtype is not None or resolved_softmax_observer is not None:
+        softmax_act_desc: Dict[str, Any] = {"observer": resolved_softmax_observer or MinMaxObserver}
+        if resolved_softmax_dtype is not None:
+            softmax_act_desc["dtype"] = resolved_softmax_dtype
+        _set_nested_override(
+            layer_overrides, ("self_attn", "softmax"), {**softmax_act_desc}
+        )
+        _set_nested_override(
+            layer_overrides, ("self_attn", "mask_add"), {**softmax_act_desc}
+        )
+
+    # --- MLP fine-grained activation overrides ---
+    if resolved_rms_io_dtype is not None or resolved_rms_observer is not None:
+        _set_nested_override(
+            layer_overrides, ("mlp", "act_in"), {**rms_act_desc}
+        )
+
+    if resolved_linear_io_dtype is not None or resolved_linear_io_observer is not None:
+        _set_nested_override(
+            layer_overrides, ("mlp", "mul"), {**linear_act_desc}
+        )
+
+    # --- Norm overrides (weight + act_in + act_out) ---
     norm_override = _build_norm_override(
         norm_dtype=norm_dtype,
         norm_weight_dtype=norm_weight_dtype,
+        norm_io_dtype=resolved_rms_io_dtype,
+        norm_io_observer=resolved_rms_observer,
     )
     if norm_override:
         _set_nested_override(layer_overrides, ("input_layernorm",), norm_override)
         _set_nested_override(
             layer_overrides, ("post_attention_layernorm",), norm_override
+        )
+
+    # --- Decoder-layer-level activation overrides ---
+    if resolved_linear_io_dtype is not None or resolved_linear_io_observer is not None:
+        _set_nested_override(layer_overrides, ("attn_mask",), {**linear_act_desc})
+        _set_nested_override(
+            layer_overrides, ("self_attn_residual_out",), {**linear_act_desc}
+        )
+        _set_nested_override(
+            layer_overrides, ("mlp_residual_out",), {**linear_act_desc}
         )
 
     return layer_overrides
@@ -255,11 +448,18 @@ def _build_llama_overrides(
     *,
     num_hidden_layers: int,
     linear_weight_dtype: Optional[DType],
-    embedding_weight_dtype: Optional[DType],
-    lm_head_weight_dtype: Optional[DType],
-    spin_rotation_weight_dtype: Optional[DType],
-    norm_dtype: Optional[DType],
-    norm_weight_dtype: Optional[DType],
+    linear_activation_observer: Optional[Type[ObserverBase]] = None,
+    linear_io_dtype: Optional[QuantDtype] = None,
+    linear_io_observer: Optional[Type[ObserverBase]] = None,
+    rms_norm_io_dtype: Optional[QuantDtype] = None,
+    rms_norm_observer: Optional[Type[ObserverBase]] = None,
+    softmax_dtype: Optional[QuantDtype] = None,
+    softmax_observer: Optional[Type[ObserverBase]] = None,
+    embedding_weight_dtype: Optional[DType] = None,
+    lm_head_weight_dtype: Optional[DType] = None,
+    spin_rotation_weight_dtype: Optional[DType] = None,
+    norm_dtype: Optional[DType] = None,
+    norm_weight_dtype: Optional[DType] = None,
 ) -> Dict[str, Any]:
     """
     Build PTQ overrides for a Llama-style causal LM.
@@ -271,6 +471,7 @@ def _build_llama_overrides(
       - final model norm: model.norm
       - SpinLlama output rotation: rotate_lm_head
       - output projection: lm_head
+      - model-level causal_mask activation
 
     Modules that are not explicitly overridden continue to use PTQConfig
     defaults. SpinLlama rotation overrides are emitted only when
@@ -282,6 +483,22 @@ def _build_llama_overrides(
         Number of decoder layers in the model.
     linear_weight_dtype : Optional[DType]
         Weight dtype override for decoder-layer linear projections.
+    linear_activation_observer : Optional[Type[ObserverBase]]
+        Observer class for linear act_in / act_out. Kept for backward
+        compatibility; prefer ``linear_io_dtype`` / ``linear_io_observer``.
+    linear_io_dtype : Optional[QuantDtype]
+        Dtype for linear-layer act_in / act_out and general-purpose
+        activations (attn_mask, logits, mul, residual, causal_mask, …).
+    linear_io_observer : Optional[Type[ObserverBase]]
+        Observer class paired with *linear_io_dtype*.
+    rms_norm_io_dtype : Optional[QuantDtype]
+        Dtype for norm act_in / act_out.
+    rms_norm_observer : Optional[Type[ObserverBase]]
+        Observer class paired with *rms_norm_io_dtype*.
+    softmax_dtype : Optional[QuantDtype]
+        Dtype for the softmax observer inside self_attn.
+    softmax_observer : Optional[Type[ObserverBase]]
+        Observer class paired with *softmax_dtype*.
     embedding_weight_dtype : Optional[DType]
         Weight dtype override for model.embed_tokens.weight.
     lm_head_weight_dtype : Optional[DType]
@@ -304,14 +521,41 @@ def _build_llama_overrides(
         }
     }
 
+    # --- Resolve linear I/O dtype / observer ---
+    resolved_linear_io_dtype = linear_io_dtype
+    resolved_linear_io_observer = linear_io_observer
+    if resolved_linear_io_observer is None and resolved_linear_io_dtype is not None:
+        resolved_linear_io_observer = _observer_from_dtype(resolved_linear_io_dtype)
+    if resolved_linear_io_observer is None and linear_activation_observer is not None:
+        resolved_linear_io_observer = linear_activation_observer
+
+    # --- Resolve RMS norm I/O dtype / observer ---
+    resolved_rms_io_dtype = rms_norm_io_dtype
+    resolved_rms_observer = rms_norm_observer
+    if resolved_rms_observer is None and resolved_rms_io_dtype is not None:
+        resolved_rms_observer = _observer_from_dtype(resolved_rms_io_dtype)
+
+    # --- Resolve softmax dtype / observer ---
+    resolved_softmax_dtype = softmax_dtype
+    resolved_softmax_observer = softmax_observer
+    if resolved_softmax_observer is None and resolved_softmax_dtype is not None:
+        resolved_softmax_observer = _observer_from_dtype(resolved_softmax_dtype)
+
+    # --- Embedding ---
     embedding_override = _build_weight_override(embedding_weight_dtype)
     if embedding_override:
         _set_nested_override(overrides, ("model", "embed_tokens"), embedding_override)
 
+    # --- LM head (full linear desc: weight + act_in + act_out) ---
     lm_head_override = _build_weight_override(lm_head_weight_dtype)
+    lm_head_io = _build_activation_override(
+        resolved_linear_io_observer, dtype=resolved_linear_io_dtype
+    )
+    lm_head_override.update(lm_head_io)
     if lm_head_override:
         overrides["lm_head"] = lm_head_override
 
+    # --- Spin rotation ---
     spin_rotation_override = _build_weight_override(spin_rotation_weight_dtype)
     if spin_rotation_override:
         _set_nested_override(
@@ -319,16 +563,34 @@ def _build_llama_overrides(
         )
         _set_nested_override(overrides, ("rotate_lm_head",), spin_rotation_override)
 
+    # --- Final model norm (weight + act_in + act_out) ---
     final_norm_override = _build_norm_override(
         norm_dtype=norm_dtype,
         norm_weight_dtype=norm_weight_dtype,
+        norm_io_dtype=resolved_rms_io_dtype,
+        norm_io_observer=resolved_rms_observer,
     )
     if final_norm_override:
         _set_nested_override(overrides, ("model", "norm"), final_norm_override)
 
+    # --- Model-level causal_mask activation ---
+    if resolved_linear_io_dtype is not None or resolved_linear_io_observer is not None:
+        linear_act_desc: Dict[str, Any] = {"observer": resolved_linear_io_observer or MinMaxObserver}
+        if resolved_linear_io_dtype is not None:
+            linear_act_desc["dtype"] = resolved_linear_io_dtype
+        _set_nested_override(overrides, ("model", "causal_mask"), {**linear_act_desc})
+
+    # --- Decoder layers ---
     for layer_idx in range(num_hidden_layers):
         overrides["model"]["layers"][str(layer_idx)] = _build_llama_layer_overrides(
             linear_weight_dtype=linear_weight_dtype,
+            linear_activation_observer=linear_activation_observer,
+            linear_io_dtype=linear_io_dtype,
+            linear_io_observer=linear_io_observer,
+            rms_norm_io_dtype=rms_norm_io_dtype,
+            rms_norm_observer=rms_norm_observer,
+            softmax_dtype=softmax_dtype,
+            softmax_observer=softmax_observer,
             norm_dtype=norm_dtype,
             norm_weight_dtype=norm_weight_dtype,
         )
@@ -345,6 +607,13 @@ def build_llm_ptq_config(
     default_observer: Type[ObserverBase] = MinMaxObserver,
     linear_weight_bits: Optional[int] = None,
     linear_weight_dtype: Optional[DType] = None,
+    linear_activation_observer: Optional[Type[ObserverBase]] = None,
+    linear_io_dtype: Optional[QuantDtype] = None,
+    linear_io_observer: Optional[Type[ObserverBase]] = None,
+    rms_norm_io_dtype: Optional[QuantDtype] = None,
+    rms_norm_observer: Optional[Type[ObserverBase]] = None,
+    softmax_dtype: Optional[QuantDtype] = None,
+    softmax_observer: Optional[Type[ObserverBase]] = None,
     embedding_weight_bits: Optional[int] = None,
     embedding_weight_dtype: Optional[DType] = None,
     lm_head_weight_bits: Optional[int] = None,
@@ -389,6 +658,26 @@ def build_llm_ptq_config(
         Used only when `linear_weight_dtype` is not provided.
     linear_weight_dtype : Optional[DType], default=None
         Explicit dtype for decoder-layer linear projection weights.
+    linear_activation_observer : Type[ObserverBase], default=MinMaxObserver
+        Observer class for linear act_in / act_out. Kept for backward
+        compatibility; prefer ``linear_io_dtype`` / ``linear_io_observer``.
+    linear_io_dtype : Optional[QuantDtype], default=None
+        Dtype for linear-layer act_in / act_out and general-purpose
+        activations (attn_mask, logits, mul, residual, causal_mask, …).
+        When ``None``, the ``linear_activation_observer`` is used without
+        an explicit dtype (backward compatible).
+    linear_io_observer : Optional[Type[ObserverBase]], default=None
+        Observer class paired with *linear_io_dtype*. When ``None`` and
+        *linear_io_dtype* is provided, the observer is inferred from the
+        dtype (MX → MXObserver, integer → MinMaxObserver).
+    rms_norm_io_dtype : Optional[QuantDtype], default=None
+        Dtype for norm act_in / act_out and MLP act_in.
+    rms_norm_observer : Optional[Type[ObserverBase]], default=None
+        Observer class paired with *rms_norm_io_dtype*.
+    softmax_dtype : Optional[QuantDtype], default=None
+        Dtype for the softmax observer inside self_attn.
+    softmax_observer : Optional[Type[ObserverBase]], default=None
+        Observer class paired with *softmax_dtype*.
     embedding_weight_bits : Optional[int], default=None
         Convenience bit-width for the input embedding weight.
         Used only when `embedding_weight_dtype` is not provided.
@@ -462,6 +751,13 @@ def build_llm_ptq_config(
         overrides = _build_llama_overrides(
             num_hidden_layers=num_hidden_layers,
             linear_weight_dtype=resolved_linear_weight_dtype,
+            linear_activation_observer=linear_activation_observer,
+            linear_io_dtype=linear_io_dtype,
+            linear_io_observer=linear_io_observer,
+            rms_norm_io_dtype=rms_norm_io_dtype,
+            rms_norm_observer=rms_norm_observer,
+            softmax_dtype=softmax_dtype,
+            softmax_observer=softmax_observer,
             embedding_weight_dtype=resolved_embedding_weight_dtype,
             lm_head_weight_dtype=resolved_lm_head_weight_dtype,
             spin_rotation_weight_dtype=resolved_spin_rotation_weight_dtype,

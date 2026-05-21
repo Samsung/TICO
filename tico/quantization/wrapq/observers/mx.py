@@ -14,6 +14,7 @@
 
 import torch
 
+from tico.quantization.wrapq.dtypes import MXDtype, MXINT8
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.utils.mx.mx_ops import quantize_mx
 
@@ -25,17 +26,25 @@ class MXObserver(ObserverBase):
         self,
         *,
         name: str,
-        elem_format: str = "int8",
-        axis: int = 0,
+        dtype: MXDtype = MXINT8,
+        axis: int = -1,  # channel is the last dimension
         shared_exp_method: str = "max",
         round: str = "nearest",
         **base_kwargs,
     ):
-        super().__init__(name=name, **base_kwargs)
-        self.elem_format = elem_format
+        super().__init__(name=name, dtype=dtype, **base_kwargs)
+        assert isinstance(dtype, MXDtype), (
+            f"MXObserver requires an MXDtype, got {type(dtype).__name__}. "
+            f"Use DType with an affine observer (e.g. MinMaxObserver) instead."
+        )
         self.axis = axis
         self.shared_exp_method = shared_exp_method
         self.round = round
+
+    @property
+    def elem_format(self) -> str:
+        """Element format string forwarded to the MX quantization kernel."""
+        return self.dtype.elem_format  # type: ignore[union-attr]
 
     def reset(self) -> None:
         # No state to reset

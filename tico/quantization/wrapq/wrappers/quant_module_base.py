@@ -19,6 +19,7 @@ import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 
+from tico.quantization.wrapq.dtypes import MXDtype, QuantDtype
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.qscheme import QScheme

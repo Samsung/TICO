@@ -14,18 +14,20 @@
 
 from typing import Optional
 
-from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.dtypes import DType, MXDtype, QuantDtype
 from tico.quantization.wrapq.qscheme import QScheme
 
 
-def dtype_is_unsigned(dtype: DType) -> bool:
+def dtype_is_unsigned(dtype: QuantDtype) -> bool:
     """
     Return True when the dtype is unsigned.
+
+    MX dtypes are always signed by OCP spec, so this returns False for MXDtype.
     """
     return not dtype.signed
 
 
-def auto_qscheme_for(dtype: DType, obs_name: Optional[str] = None) -> QScheme:
+def auto_qscheme_for(dtype: QuantDtype, obs_name: Optional[str] = None) -> QScheme:
     """
     Choose the default qscheme associated with a dtype and observer name.
 
@@ -33,6 +35,7 @@ def auto_qscheme_for(dtype: DType, obs_name: Optional[str] = None) -> QScheme:
       - signed dtype    -> symmetric per-tensor
       - unsigned dtype  -> asymmetric per-tensor
       - unsigned weight -> asymmetric per-channel
+      - MX dtype        -> symmetric per-tensor (always signed, block-shared scale)
     """
     if dtype_is_unsigned(dtype):
         if obs_name == "weight":

@@ -32,6 +32,7 @@ from tico.utils.validate_args_kwargs import (
     PermuteArgs,
     ReshapeArgs,
     SliceArgs,
+    SplitWithSizesArgs,
 )
 
 
@@ -131,6 +132,9 @@ class PropagateQParamForward(PassBase):
 
                 assert max_scale_node is not None
                 _propagate_qparam_if_possible(max_scale_node, node)
+            elif node.target == torch.ops.aten.split_with_sizes.default:
+                split_args = SplitWithSizesArgs(*node.args, **node.kwargs)
+                _propagate_qparam_if_possible(split_args.input, node)
             elif node.target == torch.ops.aten.expand.default:
                 expand_args = ExpandArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(expand_args.input, node)
