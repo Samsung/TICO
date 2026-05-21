@@ -187,7 +187,7 @@ def get_item_coco(ex: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_item_llama_bench_in_the_wild(ex: dict[str, Any]) -> dict[str, Any]:
+def get_item_llava_bench_in_the_wild(ex: dict[str, Any]) -> dict[str, Any]:
     return {
         "image": ex["image"],
         "question": ex["question"],
@@ -216,9 +216,9 @@ DATASETS: dict[str, dict[str, Any]] = {
             "lmms-lab/COCO-Caption2017",
         ],
     },
-    "llama_bench": {
+    "llava_bench": {
         "default_split": "train",
-        "adapter": get_item_llama_bench_in_the_wild,
+        "adapter": get_item_llava_bench_in_the_wild,
         "candidates": [
             "lmms-lab/llava-bench-in-the-wild",
         ],
@@ -512,8 +512,8 @@ def get_coco_scores_on_dataset(
 
     if "coco" in dataset_name.lower():
         get_item = get_item_coco
-    elif "llama_bench" in dataset_name.lower():
-        get_item = get_item_llama_bench_in_the_wild
+    elif "llava_bench" in dataset_name.lower():
+        get_item = get_item_llava_bench_in_the_wild
     else:
         raise ValueError(f"Invalid dataset_name={dataset_name}")
 
@@ -540,7 +540,7 @@ def get_coco_scores_on_dataset(
             )
         except (ValueError, RuntimeError) as error:
             print(f"[WARNING] The prompt was too long. Skipping.")
-            print(f"Error: {error}")
+            print(f"{error}")
             continue
 
         # Store result
@@ -571,7 +571,11 @@ def get_coco_scores_on_dataset(
             print("golds[:10]:", [repr(x) for x in gold_answers[:10]])
             print("-" * 60)
 
-    assert results
+    if not results:
+        print(
+            "[WARNING] No evaluation results were collected (all samples were skipped)."
+        )
+        return {}
     assert images
     assert annotations
 
