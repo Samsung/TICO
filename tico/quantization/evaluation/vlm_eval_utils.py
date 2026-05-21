@@ -179,8 +179,22 @@ def get_item_coco(ex: dict[str, Any]) -> dict[str, Any]:
     """
     return {
         "image": ex["image"],
-        "question": ex.get("question", ""),
-        "golds": _extract_golds(ex.get("answer")),
+        "question": ex["question"],
+        "id": ex["id"],
+        "image_id": ex["question_id"],
+        "file_name": ex["file_name"],
+        "golds": ex["answer"],
+    }
+
+
+def get_item_llava_bench_in_the_wild(ex: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "image": ex["image"],
+        "question": ex["question"],
+        "id": ex["question_id"],
+        "image_id": ex["image_id"],
+        "file_name": ex["image_id"],
+        "golds": [ex["gpt_answer"]],
     }
 
 
@@ -247,6 +261,13 @@ DATASETS: dict[str, dict[str, Any]] = {
             "lmms-lab/COCO-Caption2017",
         ],
         "is_text_only": False,
+    },
+    "llava_bench": {
+        "default_split": "train",
+        "adapter": get_item_llava_bench_in_the_wild,
+        "candidates": [
+            "lmms-lab/llava-bench-in-the-wild",
+        ],
     },
     "wikitext2": {
         "default_split": "test",
@@ -560,6 +581,7 @@ def compute_bleu_scores(
 def get_coco_scores_on_dataset(
     model,
     processor,
+    dataset_name: str,
     ds: Iterable[dict[str, Any]],
     device: str | torch.device,
     max_new_tokens: int = 30,
@@ -620,25 +642,38 @@ def get_coco_scores_on_dataset(
     images: list[CocoImage] = []
     annotations: list[CocoAnnotation] = []
 
-    for i, ex in enumerate(ds, 1):
-        image: Any = ex["image"]
-        question: str = ex["question"]
-        id: int = ex["id"]
-        image_id: str = ex["question_id"]
-        file_name: str = ex["file_name"]
-        gold_answers: list[str] = ex["answer"]
+    if "coco" in dataset_name.lower():
+        get_item = get_item_coco
+    elif "llava_bench" in dataset_name.lower():
+        get_item = get_item_llava_bench_in_the_wild
+    else:
+        raise ValueError(f"Invalid dataset_name={dataset_name}")
 
-        # Generate caption
-        pred = generate_answer(
-            model=model,
-            processor=processor,
-            image=image,
-            question=question,
-            device=device,
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            max_seq_len=max_seq_len,
-        )
+    for i, ex in enumerate(ds, 1):
+        sample: dict[str, Any] = get_item(ex)
+
+        image: Any = sample["image"]
+        question: str = sample["question"]
+        id: int = sample["id"]
+        image_id: str = sample["image_id"]
+        file_name: str = sample["file_name"]
+        gold_answers: list[str] = sample["golds"]
+
+        try:
+            pred = generate_answer(
+                model=model,
+                processor=processor,
+                image=image,
+                question=question,
+                device=device,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                max_seq_len=max_seq_len,
+            )
+        except (ValueError, RuntimeError) as error:
+            print(f"[WARNING] The prompt was too long. Skipping.")
+            print(f"{error}")
+            continue
 
         # Store result
         result: CocoResult = {"image_id": image_id, "caption": pred}
@@ -668,7 +703,11 @@ def get_coco_scores_on_dataset(
             print("golds[:10]:", [repr(x) for x in gold_answers[:10]])
             print("-" * 60)
 
-    assert results
+    if not results:
+        print(
+            "[WARNING] No evaluation results were collected (all samples were skipped)."
+        )
+        return {}
     assert images
     assert annotations
 
