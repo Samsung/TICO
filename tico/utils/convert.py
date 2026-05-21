@@ -69,6 +69,7 @@ from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
+from tico.quantization.passes.remove_redundant_quantisers import RemoveRedundantQuantisers
 from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.quantization.passes.quantize_bias import QuantizeBias
@@ -311,6 +312,7 @@ def convert_exported_module_to_circle(
                 QuantizeBias(),
                 RemoveUnusedPlaceholder(),
                 InsertQuantizeOnDtypeMismatch(),
+                RemoveRedundantQuantisers(),
             ]
         )
         quantize_graph.run(exported_program)

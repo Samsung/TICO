@@ -975,160 +975,37 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
 
     linear_io_dtype = get_dtype_from_string(args.linear_io_qdtype)
     linear_io_observer = get_observer_from_dtype(linear_io_dtype)
-    linear_act_desc = {"dtype": linear_io_dtype, "observer": linear_io_observer}
-    linear_io_desc = {
-        "act_in": {**linear_act_desc},
-        "act_out": {**linear_act_desc},
-    }
-    linear_desc = {
-        "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                },
-        **linear_io_desc,
-    }
-    
+
     rms_norm_io_dtype = get_dtype_from_string(args.rms_norm_io_qdtype)
     rms_norm_io_observer = get_observer_from_dtype(rms_norm_io_dtype)
-    rms_act_desc = {"dtype": rms_norm_io_dtype, "observer": rms_norm_io_observer}
-    rms_io_desc = {
-        "act_in": {**rms_act_desc},
-        "act_out": {**rms_act_desc},
-    }
-    
+
     softmax_io_qdtype = get_dtype_from_string(args.softmax_io_qdtype)
     softmax_io_observer = get_observer_from_dtype(softmax_io_qdtype)
-    softmax_act_desc = {"dtype": softmax_io_qdtype, "observer": softmax_io_observer}
-    #softmax_io_desc = {
-    #    "act_in": {"dtype": softmax_io_qdtype, "observer": softmax_io_observer},
-    #    "act_out": {"dtype": softmax_io_qdtype, "observer": softmax_io_observer},}
-    
-    new = False
-    if new:
-        qcfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=len(q_m.model.layers),
-            activation_dtype=DType.int(16),
-            default_qscheme=QScheme.PER_TENSOR_SYMM,
-            linear_weight_bits=args.linear_weight_bits,
-            linear_activation_observer=linear_io_observer,
-            embedding_weight_bits=args.embedding_weight_bits,
-            lm_head_weight_bits=args.lm_head_weight_bits,
-            default_observer = MinMaxObserver,
-            
-            spin_rotation_weight_bits=(
-                None if args.no_spinquant else args.spin_rotation_weight_bits
-            ),
-            norm_weight_dtype=DType.int(16),
-            strict_wrap=True,
-            profile=args.profile,
-        )
-    else:
-        fn = 0
-        w_cfg = {
-            "mlp": {
-                "act_in" : {**rms_act_desc},
-                "gate_proj": {**linear_desc},
-                "up_proj": {**linear_desc},
-                "mul" : {**linear_act_desc}, # mul outputs operand for down_proj, so it should be the same 
-                "down_proj": {**linear_desc},
-            },
-            "self_attn": {
-                "hidden" : {**rms_act_desc},
-                "q_proj": {**linear_desc},
-                "k_proj": {**linear_desc},
-                "v_proj": {**linear_desc},
-                "o_proj": {**linear_desc},
-                "attn_mask": {**linear_act_desc},
-                "mask_add": {**linear_act_desc},
-                "attn_out" : {**linear_act_desc},
-                "logits":  {**linear_act_desc},
-                "softmax": {**softmax_act_desc},
-            },
-            
-            "input_layernorm": {
-                #"dtype": DType.int(16),
-                "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
-                **rms_io_desc
-            },
-            "post_attention_layernorm": {
-                #"dtype": DType.int(16),
-                "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
-                **rms_io_desc
-            },
-            "attn_mask" : {**linear_act_desc},
-            "mlp_residual_out" : {**linear_act_desc},
-        }
-        
-        #if args.softmax_io_qdtype == "int16":
-        #    w_cfg["self_attn"]["softmax"].update( {"softmax" : {"observer": MinMaxObserver}})
-        #else:
-        #    assert args.softmax_io_qdtype == "mxint8"
-        #    w_cfg["self_attn"].update({"softmax" : {"observer": MXObserver}})
-        
-       # if args.rms_norm_io_qdtype == "int16":
-       #     norm_act_cfg = {
-       #         "act_in": {"observer": MinMaxObserver},
-       #         "act_out": {"observer": MinMaxObserver}
-       #     }
-       #     
-       # else:
-       #     norm_act_cfg = {
-       #         "act_in": {"observer": MXObserver},
-       #         "act_out": {"observer": MXObserver}
-       #     }
-       # w_cfg["input_layernorm"].update(norm_act_cfg)
-       # w_cfg["post_attention_layernorm"].update(norm_act_cfg)
 
-        default_io_qdtype = get_dtype_from_string(args.default_io_qdtype)
-        default_observer = get_observer_from_dtype(default_io_qdtype)
-        #(
-        #    MinMaxObserver
-        #    if args.default_io_qdtype == "int16"
-        #    else MXObserver if args.linear_io_qdtype == "mxint8" else None
-        #)
-        cfg = PTQConfig(
-            default_dtype=DType.int(16),
-            default_qscheme=QScheme.PER_TENSOR_SYMM,
-            default_observer=default_observer,  # type: ignore[arg-type]
-            overrides={
-                "model": {
-                    "causal_mask" : {**linear_act_desc},
-                    "embed_tokens": {
-                        "weight": {
-                            "dtype": (
-                                DType.uint(args.embedding_weight_bits)
-                                if args.embedding_weight_bits < 16
-                                else DType.int(args.embedding_weight_bits)
-                            ),
-                            "observer": MinMaxObserver,
-                        },
-                    },
-                    "layers": {},
-                    "norm": {
-                        "weight": {"dtype": DType.int(16)},
-                        **rms_io_desc
-                    },
-                },
-                "lm_head": {**linear_desc
-                    #"weight": {
-                    #    "dtype": (
-                    #        DType.uint(args.lm_head_weight_bits)
-                    #        if args.lm_head_weight_bits < 16
-                    #        else DType.int(args.lm_head_weight_bits)
-                    #    ),
-                    #    "observer": MinMaxObserver,
-                    #},
-                    #**linear_io_desc,
-                },
-            },
-        )
-        #cfg.overrides["model"]["norm"].update(norm_act_cfg)
-        for i in range(len(q_m.model.layers)):
-            child_scope = f"{i}"
-            cfg.overrides["model"]["layers"][child_scope] = w_cfg  # type: ignore[index]
-
-        qcfg = cfg
+    qcfg = build_llm_ptq_config(
+        model_type="llama",
+        num_hidden_layers=len(q_m.model.layers),
+        activation_dtype=DType.int(16),
+        default_qscheme=QScheme.PER_TENSOR_SYMM,
+        linear_weight_bits=args.linear_weight_bits,
+        linear_io_dtype=linear_io_dtype,
+        linear_io_observer=linear_io_observer,
+        embedding_weight_bits=args.embedding_weight_bits,
+        lm_head_weight_bits=args.lm_head_weight_bits,
+        default_observer=get_observer_from_dtype(
+            get_dtype_from_string(args.default_io_qdtype)
+        ),
+        spin_rotation_weight_bits=(
+            None if args.no_spinquant else args.spin_rotation_weight_bits
+        ),
+        rms_norm_io_dtype=rms_norm_io_dtype,
+        rms_norm_observer=rms_norm_io_observer,
+        softmax_dtype=softmax_io_qdtype,
+        softmax_observer=softmax_io_observer,
+        norm_weight_dtype=DType.int(16),
+        strict_wrap=True,
+        profile=args.profile,
+    )
 
     q_m = prepare(q_m, qcfg)
     print("Calibrating PTQ observers…")

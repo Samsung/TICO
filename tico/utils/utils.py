@@ -309,6 +309,53 @@ def quant_min_max(dtype: str):
         raise NotImplementedError(f"NYI dtype: {dtype}")
 
 
+def get_mx_dtype(elem_format: str) -> str:
+    """
+    Returns the full MX dtype string from an element format string.
+
+    MX dtypes follow the naming convention ``"mx{elem_format}"``.
+    This is consistent with ``MXDtype.__str__`` in
+    ``tico.quantization.wrapq.dtypes``.
+
+    Args:
+        elem_format (str): Element encoding name, e.g. ``"int8"``, ``"fp4"``.
+
+    Returns:
+        str: Full MX dtype string, e.g. ``"mxint8"``, ``"mxfp4"``.
+
+    Examples:
+        >>> get_mx_dtype("int8")
+        'mxint8'
+        >>> get_mx_dtype("fp4")
+        'mxfp4'
+    """
+    return f"mx{elem_format}"
+
+
+def is_mx_dtype(dtype: str) -> bool:
+    """
+    Returns True if the given dtype string is an MX (microscaling) dtype.
+
+    MX dtypes follow the naming convention ``"mx{elem_format}"``,
+    e.g. ``"mxint8"``, ``"mxfp4"``.
+
+    Args:
+        dtype (str): Dtype string to check, e.g. ``"mxint8"``, ``"int16"``.
+
+    Returns:
+        bool: True if the dtype is an MX dtype.
+
+    Examples:
+        >>> is_mx_dtype("mxint8")
+        True
+        >>> is_mx_dtype("mxfp4")
+        True
+        >>> is_mx_dtype("int16")
+        False
+    """
+    return dtype.startswith("mx")
+
+
 def get_quant_dtype(qmin: int, qmax: int):
     """
     Returns the string representation of the quantized data type based on qmin and qmax.

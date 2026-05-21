@@ -29,7 +29,7 @@ from tico.utils import logging
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import get_quant_dtype, quant_min_max, set_new_meta_val
+from tico.utils.utils import get_mx_dtype, get_quant_dtype, quant_min_max, set_new_meta_val
 from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
@@ -225,9 +225,8 @@ class FoldQuantOps(PassBase):
             # Case 1: op not yet quantized
             # ───────────────────────────────────────────
             if QPARAM_KEY not in op.meta:
-                # TODO
                 qparam = QuantParam()
-                qparam.dtype = "mxint8"  # q_args[1] #TODO
+                qparam.dtype = get_mx_dtype(q_args[1])  # type: ignore[index]
                 qparam.quantized_dimension = q_args[2]  # type: ignore[index]
                 op.meta[QPARAM_KEY] = qparam
 
@@ -235,7 +234,7 @@ class FoldQuantOps(PassBase):
 
                 logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
                 if QPARAM_KEY in dq.meta:
-                    if qparam_dtype(op) == "mxint8" and (
+                    if qparam_dtype(op) == get_mx_dtype(q_args[1]) and (  # type: ignore[index]
                         qparam_dtype(dq) == "int16" or qparam_dtype(dq) == "uint8"
                     ):
                         # need to insert requantization
@@ -248,7 +247,7 @@ class FoldQuantOps(PassBase):
             # ───────────────────────────────────────────
             else:
                 op_qparam: QuantParam = op.meta[QPARAM_KEY]  # type: ignore[no-redef]
-                qdq_dtype = "mxint8"  # q_args[1] #TODO
+                qdq_dtype = get_mx_dtype(q_args[1])  # type: ignore[index]
 
                 if op_qparam.dtype != qdq_dtype:
                     # Attach QPARAM to Q once
@@ -265,7 +264,7 @@ class FoldQuantOps(PassBase):
                     # Same dtype → the Quantize–Dequantize pair is redundant.
                     assert not op_qparam.scale
                     assert not op_qparam.zero_point
-                    assert op_qparam.dtype and op_qparam.dtype == "mxint8"  # TODO
+                    assert op_qparam.dtype and op_qparam.dtype == get_mx_dtype(q_args[1])  # type: ignore[index]
                     assert (
                         op_qparam.quantized_dimension is not None
                         and op_qparam.quantized_dimension == q_args[2]  # type: ignore[index]

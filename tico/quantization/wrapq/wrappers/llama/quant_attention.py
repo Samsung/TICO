@@ -217,6 +217,10 @@ class QuantLlamaAttention(QuantModuleBase):
         # Total KV after concat (used for matmul/attn)
         self.obs_present_key = mk("present_key")  # (B, max_seq, H)
         self.obs_present_value = mk("present_value")  # (B, max_seq, H)
+        
+        # transposes and reshapes
+        self.obs_pre_o_proj_transpose = mk("pre_o_proj_transpose")
+        self.obs_pre_o_proj_reshape = mk("pre_o_proj_reshape")
 
         # Static causal mask template
         mask = torch.full(
@@ -867,7 +871,10 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_attn_out_h,
         )
 
-        attn_out = attn_out_h.transpose(1, 2).reshape(B, S, -1)
+        attn_out = attn_out_h.transpose(1, 2)
+        attn_out = self._fq(attn_out, self.obs_pre_o_proj_transpose)
+        attn_out = attn_out.reshape(B, S, -1)
+        attn_out = self._fq(attn_out, self.obs_pre_o_proj_reshape)
         out = self.o_proj(attn_out)
 
         outputs = (out, attn_weights)
@@ -977,7 +984,11 @@ class QuantLlamaAttention(QuantModuleBase):
         attn_out_h = self._fq(attn_weights @ present_v_for_attn, self.obs_attn_out)
         attn_out_h = self._fq(attn_out_h, self.obs_attn_out_h)
 
-        attn_out = attn_out_h.transpose(1, 2).contiguous().reshape(B, S, -1)
+        #attn_out = attn_out_h.transpose(1, 2).contiguous().reshape(B, S, -1)
+        attn_out = attn_out_h.transpose(1, 2).contiguous()
+        attn_out = self._fq(attn_out, self.obs_pre_o_proj_transpose)
+        attn_out = attn_out.reshape(B, S, -1)
+        attn_out = self._fq(attn_out, self.obs_pre_o_proj_reshape)
         out = self.o_proj(attn_out)
 
         outputs = (out, attn_weights)
@@ -1108,6 +1119,8 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_attn_out,
             self.obs_attn_weights,
             self.obs_attn_out_h,
+            self.obs_pre_o_proj_transpose,
+            self.obs_pre_o_proj_reshape,
             self.obs_past_key,
             self.obs_past_value,
             self.obs_new_k,
