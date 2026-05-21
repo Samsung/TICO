@@ -74,6 +74,7 @@ def evaluate_coco(
         return get_coco_scores_on_dataset(
             model=model,
             processor=processor,
+            dataset_name="coco",
             ds=dataset,
             device=device,
             max_seq_len=max_seq_len,

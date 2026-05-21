@@ -187,13 +187,13 @@ def get_item_coco(ex: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_item_llama_bench_in_the_wild(ex: dict[str, Any]) -> dict[str, Any]:
+def get_item_llava_bench_in_the_wild(ex: dict[str, Any]) -> dict[str, Any]:
     return {
         "image": ex["image"],
         "question": ex["question"],
         "id": ex["question_id"],
-        "image_id": ex["image_id"],
-        "file_name": ex["image_id"],
+        "image_id": ex["question_id"],  # unique evaluation key
+        "file_name": ex["image_id"],  # original image filename
         "golds": [ex["gpt_answer"]],
     }
 
@@ -262,9 +262,9 @@ DATASETS: dict[str, dict[str, Any]] = {
         ],
         "is_text_only": False,
     },
-    "llama_bench": {
+    "llava_bench": {
         "default_split": "train",
-        "adapter": get_item_llama_bench_in_the_wild,
+        "adapter": get_item_llava_bench_in_the_wild,
         "candidates": [
             "lmms-lab/llava-bench-in-the-wild",
         ],
@@ -423,7 +423,9 @@ def generate_answer(
         image=image,
         question=question,
         return_tensors="pt",
-        max_seq_len=max_seq_len,
+        # length of (inputs + max_new_tokens) should not exceed model's max_seq_len
+        # because quantized model has precomputed static causal mask and RoPE for max_seq_len
+        max_seq_len=max_seq_len - max_new_tokens,  # type: ignore[operator]
     )
     inputs = move_inputs_to_device(inputs, device)
 
@@ -644,8 +646,8 @@ def get_coco_scores_on_dataset(
 
     if "coco" in dataset_name.lower():
         get_item = get_item_coco
-    elif "llama_bench" in dataset_name.lower():
-        get_item = get_item_llama_bench_in_the_wild
+    elif "llava_bench" in dataset_name.lower():
+        get_item = get_item_llava_bench_in_the_wild
     else:
         raise ValueError(f"Invalid dataset_name={dataset_name}")
 
@@ -671,8 +673,21 @@ def get_coco_scores_on_dataset(
                 max_seq_len=max_seq_len,
             )
         except (ValueError, RuntimeError) as error:
-            print(f"[WARNING] The prompt was too long. Skipping.")
-            print(f"Error: {error}")
+            message = str(error).lower()
+            if not any(
+                marker in message
+                for marker in (
+                    "too long",
+                    "max_position_embeddings",
+                    "maximum context length",
+                    "sequence length",
+                    "truncation",
+                )
+            ):
+                raise
+
+            print("[WARNING] The prompt was too long. Skipping.")
+            print(f"{type(error).__name__}: {error}")
             continue
 
         # Store result
@@ -703,7 +718,11 @@ def get_coco_scores_on_dataset(
             print("golds[:10]:", [repr(x) for x in gold_answers[:10]])
             print("-" * 60)
 
-    assert results
+    if not results:
+        raise RuntimeError(
+            "No evaluation results were collected. "
+            "All samples may have been skipped due to prompt length errors."
+        )
     assert images
     assert annotations
 
