@@ -15,9 +15,9 @@
 from pathlib import Path
 from typing import Any
 
-import tico
-
 import torch
+
+import tico
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
     LlamaTokenEmbeddingExportAdapter,

@@ -27,6 +27,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import tico.quantization.examples.evaluate as evaluate_cli
+import tico.quantization.examples.inspect as inspect_cli
 import tico.quantization.examples.quantize as quantize_cli
 
 import torch
@@ -82,3 +84,172 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             ),
         )
         self.assertEqual(calls["run"], {"loaded": True})
+
+    def test_evaluate_cli_loads_checkpoint_and_overrides_tasks(self):
+        """evaluate.py should load checkpoints and route task overrides to the adapter."""
+        calls: dict[str, Any] = {}
+
+        class FakeAdapter:
+            """Fake adapter used by evaluate CLI tests."""
+
+            family = "llama"
+
+            def load_model(self, ctx):
+                """Attach a floating-point model to the context."""
+                ctx.model = SimpleNamespace(name="fp")
+                return ctx
+
+            def evaluate(self, ctx):
+                """Record the evaluated context."""
+                calls["ctx"] = ctx
+
+        class FakeCheckpoint:
+            """Fake checkpoint with an eval method."""
+
+            def eval(self):
+                """Return a marker representing the evaluated checkpoint."""
+                return "checkpoint-eval"
+
+        argv = [
+            "evaluate.py",
+            "--config",
+            "recipe.yaml",
+            "--checkpoint",
+            "model.pt",
+            "--tasks",
+            "winogrande,arc_easy",
+        ]
+
+        with patch.object(
+            evaluate_cli,
+            "load_recipe_config",
+            lambda path, overrides: {
+                "model": {"family": "llama", "name_or_path": "model"},
+                "runtime": {},
+                "evaluation": {},
+            },
+        ), patch.object(
+            evaluate_cli, "set_seed", lambda seed: calls.setdefault("seed", seed)
+        ), patch.object(
+            evaluate_cli, "get_adapter", lambda family: FakeAdapter()
+        ), patch.object(
+            evaluate_cli.torch,
+            "load",
+            lambda path, weights_only=False: FakeCheckpoint(),
+        ), patch.object(
+            sys, "argv", argv
+        ):
+            evaluate_cli.main()
+
+        self.assertEqual(calls["ctx"].model, "checkpoint-eval")
+        self.assertEqual(
+            calls["ctx"].cfg["evaluation"]["lm_eval_tasks"],
+            "winogrande,arc_easy",
+        )
+
+    def test_inspect_cli_dispatches_static_llama_runtime(self):
+        """inspect.py should dispatch static LLaMA runtime mode without loading adapters."""
+        calls: dict[str, Any] = {}
+
+        argv = [
+            "inspect.py",
+            "--config",
+            "recipe.yaml",
+            "--mode",
+            "static-llama-runtime",
+        ]
+
+        with patch.object(
+            inspect_cli,
+            "load_recipe_config",
+            lambda path, overrides: {
+                "runtime": {},
+                "debug": {"static_llama_runtime": {"model": "tiny"}},
+            },
+        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
+            inspect_cli,
+            "run_static_llama_runtime",
+            lambda cfg: calls.setdefault("cfg", cfg),
+        ), patch.object(
+            sys, "argv", argv
+        ):
+            inspect_cli.main()
+
+        self.assertEqual(calls["cfg"].model, "tiny")
+
+    def test_inspect_cli_dispatches_tied_embedding_smoke(self):
+        """inspect.py should dispatch tied embedding smoke mode."""
+        calls: dict[str, Any] = {}
+
+        argv = [
+            "inspect.py",
+            "--config",
+            "recipe.yaml",
+            "--mode",
+            "tied-embedding-smoke",
+        ]
+
+        with patch.object(
+            inspect_cli,
+            "load_recipe_config",
+            lambda path, overrides: {
+                "runtime": {},
+                "debug": {"tied_embedding": {"vocab_size": 7}},
+            },
+        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
+            inspect_cli,
+            "run_tied_embedding_smoke",
+            lambda cfg: calls.setdefault("cfg", cfg),
+        ), patch.object(
+            sys, "argv", argv
+        ):
+            inspect_cli.main()
+
+        self.assertEqual(calls["cfg"].vocab_size, 7)
+
+    def test_inspect_cli_trace_mode_loads_adapter_and_runs_trace(self):
+        """inspect.py should run the trace helper for trace mode."""
+        calls: dict[str, Any] = {}
+
+        class FakeAdapter:
+            """Fake adapter for trace mode."""
+
+            def load_model(self, ctx):
+                """Attach a dummy model."""
+                ctx.model = torch.nn.Linear(2, 2)
+                return ctx
+
+            def build_calibration_inputs(self, ctx):
+                """Return one fake calibration input."""
+                return [torch.ones(1, 2)]
+
+        argv = [
+            "inspect.py",
+            "--config",
+            "recipe.yaml",
+            "--mode",
+            "trace",
+            "--enable-quantization",
+            "--interesting-modules",
+            "model.layers.0",
+        ]
+
+        with patch.object(
+            inspect_cli,
+            "load_recipe_config",
+            lambda path, overrides: {"runtime": {}, "model": {"family": "llama"}},
+        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
+            inspect_cli, "get_adapter", lambda family: FakeAdapter()
+        ), patch.object(
+            inspect_cli,
+            "trace_ptq_parity",
+            lambda ctx, enable_quantization, interesting_modules: calls.setdefault(
+                "trace", (ctx, enable_quantization, interesting_modules)
+            ),
+        ), patch.object(
+            sys, "argv", argv
+        ):
+            inspect_cli.main()
+
+        self.assertTrue(calls["trace"][1])
+        self.assertEqual(calls["trace"][2], ["model.layers.0"])

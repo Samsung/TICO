@@ -1,0 +1,115 @@
+model:
+  family: qwen3_vl
+  name_or_path: Qwen/Qwen3-VL-2B-Instruct
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  dataset: vqav2
+  n_samples: 128
+  seq_len: 2048
+
+model_args:
+  vision:
+    grid_thw: [8, 24, 24]
+    visual_start_idx: 0
+    spatial_merge_size: 2
+
+pipeline:
+  - name: spinquant
+    enabled: false
+    init_method: random
+    disable_r1: false
+    disable_r2: false
+    disable_deepstack_fusion: false
+    r1_path: null
+    r2_map_path: null
+
+  - name: smoothquant
+    enabled: false
+    alpha: 0.5
+    components: both
+    custom_alpha_map: null
+
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+    weight_bits_overrides: {}
+    perchannel: true
+    symmetric: false
+    mse: null
+    sensitivity_path: null
+    percdamp: 0.01
+    groupsize: -1
+    actorder: true
+    static_groups: false
+    verbose: false
+    show_progress: true
+    quantize_vision: true
+    quantize_text: true
+    quantize_lm_head: false
+    quantize_vision_patch_embed: true
+    quantize_vision_blocks: true
+    quantize_vision_merger: true
+    quantize_vision_deepstack_mergers: true
+    quantize_text_layers: true
+    move_cache_to_cpu: false
+
+  - name: ptq
+    enabled: true
+    activation_dtype: int16
+    default_qscheme: per_tensor_symm
+    linear_weight_bits: 4
+    vision_patch_embed_weight_bits: 8
+    embedding_weight_bits: 8
+    lm_head_weight_bits: 4
+    norm_dtype: int16
+    norm_weight_dtype: int16
+    strict_wrap: true
+
+evaluation:
+  enabled: false
+  vlm_tasks:
+    - vqav2
+    - textvqa
+  coco: false
+  mmlu:
+    enabled: false
+    subjects: null
+    n_shots: 5
+    n_samples: -1
+    batch_size: 1
+  hellaswag:
+    enabled: false
+    n_shots: 10
+    n_samples: -1
+    batch_size: 1
+  mmmu:
+    enabled: false
+    dataset: MMMU/MMMU
+    subjects: null
+    n_shots: 5
+    n_samples: -1
+    max_new_tokens: 16
+    temperature: 0.0
+    verbose: false
+  ppl:
+    enabled: false
+    dataset: wikitext2
+    split: test
+    stride: 512
+  n_samples: 50
+  max_seq_len: 2048
+
+export:
+  enabled: false
+  output_dir: ./out/qwen3_vl
+  artifacts:
+    - ptq_checkpoint

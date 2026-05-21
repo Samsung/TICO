@@ -1,0 +1,193 @@
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+try:
+    from quantization.recipes.optional_dependency_stubs import (
+        install_optional_dependency_stubs,
+    )
+except ModuleNotFoundError:
+    from optional_dependency_stubs import install_optional_dependency_stubs
+
+install_optional_dependency_stubs()
+
+import contextlib
+import io
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import tico.quantization.recipes.adapters.qwen3_vl as qwen_mod
+
+import torch
+from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
+from tico.quantization.recipes.context import RecipeContext
+
+
+class TinyModule(torch.nn.Module):
+    """Tiny module exposing one linear submodule for hook registration."""
+
+    def __init__(self):
+        super().__init__()
+        self.linear = torch.nn.Linear(2, 2)
+
+    def forward(self, x):
+        """Run a single linear layer."""
+        return self.linear(x)
+
+
+def _fake_qwen_model():
+    """Return a fake Qwen3-VL model config."""
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            vision_config=SimpleNamespace(depth=3, deepstack_visual_indexes=[0, 1]),
+            text_config=SimpleNamespace(num_hidden_layers=4),
+        )
+    )
+
+
+class TestQwen3VLAdapter(unittest.TestCase):
+    def test_build_ptq_config_uses_architecture_counts_and_model_args(self):
+        """Qwen3VLAdapter should infer architecture counts before building PTQ config."""
+        captured = {}
+
+        def fake_build_qwen3_vl_ptq_config(**kwargs):
+            captured.update(kwargs)
+            return {"ptq": "qwen"}
+
+        ctx = RecipeContext(
+            cfg={
+                "model_args": {
+                    "vision": {
+                        "grid_thw": [1, 8, 8],
+                        "visual_start_idx": 0,
+                        "spatial_merge_size": 2,
+                    }
+                }
+            },
+            adapter=Qwen3VLAdapter(),
+            model=_fake_qwen_model(),
+        )
+
+        with patch.object(
+            qwen_mod, "build_qwen3_vl_ptq_config", fake_build_qwen3_vl_ptq_config
+        ):
+            result = Qwen3VLAdapter().build_ptq_config(
+                ctx,
+                {
+                    "activation_dtype": "int16",
+                    "default_qscheme": "per_tensor_symm",
+                    "linear_weight_bits": 4,
+                    "vision_patch_embed_weight_bits": 8,
+                    "embedding_weight_bits": 8,
+                    "lm_head_weight_bits": 4,
+                    "norm_dtype": "int16",
+                    "norm_weight_dtype": "int16",
+                    "quantize_vision": True,
+                    "quantize_text": False,
+                    "quantize_lm_head": True,
+                    "strict_wrap": False,
+                },
+            )
+
+        self.assertEqual(result, {"ptq": "qwen"})
+        self.assertEqual(captured["num_vision_blocks"], 3)
+        self.assertEqual(captured["num_text_layers"], 4)
+        self.assertEqual(captured["num_deepstack_mergers"], 2)
+        self.assertEqual(captured["model_args"]["vision"]["grid_thw"], (1, 8, 8))
+        self.assertFalse(captured["strict_wrap"])
+
+    def test_apply_smoothquant_maps_component_selection_to_excluded_appliers(self):
+        """SmoothQuant component selection should translate to excluded applier names."""
+        adapter = Qwen3VLAdapter()
+        model = TinyModule()
+        ctx = RecipeContext(
+            cfg={},
+            adapter=adapter,
+            model=model,
+            calibration_inputs=[{"x": torch.ones(1, 2)}],
+        )
+        captured = {}
+
+        def fake_apply_smoothing(
+            model, activation_max, alpha, custom_alpha_map=None, exclude_appliers=None
+        ):
+            captured["alpha"] = alpha
+            captured["exclude_appliers"] = exclude_appliers
+            captured["custom_alpha_map"] = custom_alpha_map
+
+        with patch.object(
+            adapter, "forward_calibration", lambda *args, **kwargs: None
+        ), patch(
+            "tico.quantization.algorithm.smoothquant.smooth_quant.apply_smoothing",
+            fake_apply_smoothing,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.apply_smoothquant(ctx, {"alpha": 0.25, "components": "vision"})
+
+        self.assertEqual(captured["alpha"], 0.25)
+        self.assertEqual(
+            captured["exclude_appliers"], ["_apply_if_qwen3vl_text_decoder"]
+        )
+
+    def test_evaluate_dispatches_mmmu_and_ppl(self):
+        """Qwen3VLAdapter should dispatch optional MMMU and PPL evaluation blocks."""
+        calls = []
+        adapter = Qwen3VLAdapter()
+        ctx = RecipeContext(
+            cfg={
+                "runtime": {"show_progress": False},
+                "calibration": {"seq_len": 128},
+                "evaluation": {
+                    "enabled": True,
+                    "max_seq_len": 128,
+                    "mmmu": {
+                        "enabled": True,
+                        "subjects": ["Accounting"],
+                        "n_samples": 1,
+                    },
+                    "ppl": {
+                        "enabled": True,
+                        "dataset": "wikitext2",
+                        "split": "test",
+                        "stride": 32,
+                    },
+                },
+            },
+            adapter=adapter,
+            model=object(),
+            processor=SimpleNamespace(tokenizer=object()),
+        )
+        ctx.device = torch.device("cpu")
+
+        def fake_evaluate_vlm_text_ppl(**kwargs):
+            calls.append(("ppl", kwargs))
+            return 12.5
+
+        with patch.object(
+            qwen_mod,
+            "evaluate_and_print_mmmu",
+            lambda **kwargs: calls.append(("mmmu", kwargs)),
+        ), patch.object(
+            qwen_mod,
+            "evaluate_vlm_text_ppl",
+            fake_evaluate_vlm_text_ppl,
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.evaluate(ctx)
+
+        self.assertEqual(calls[0][0], "mmmu")
+        self.assertEqual(calls[0][1]["dataset"], "MMMU/MMMU")
+        self.assertEqual(calls[0][1]["subjects"], ["Accounting"])
+        self.assertEqual(calls[1][0], "ppl")
+        self.assertEqual(calls[1][1]["stride"], 32)

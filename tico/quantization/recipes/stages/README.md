@@ -74,8 +74,6 @@ tico/quantization/recipes/stages/awq.py
 Skeleton:
 
 ```python
-from __future__ import annotations
-
 from typing import Any, Mapping
 
 from tico.quantization import convert, prepare
@@ -90,7 +88,7 @@ class AWQStage(Stage):
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         payload = stage_payload(stage_cfg)
         # Build the algorithm config from payload.
-        # config = AWQConfig(**payload)
+        config = AWQConfig(**payload)
 
         prepared = prepare(ctx.require_model(), config, inplace=bool(payload.get("inplace", True)))
 

@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.quantization.recipes.adapters.base import ModelAdapter
-from tico.quantization.recipes.adapters.llama import LlamaAdapter
-from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
+from typing import Any, Mapping
 
-_ADAPTERS = {
-    "llama": LlamaAdapter(),
-    "qwen3_vl": Qwen3VLAdapter(),
-    "qwen3-vl": Qwen3VLAdapter(),
-}
+from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.stages.base import Stage
 
 
-def get_adapter(family: str) -> ModelAdapter:
-    key = family.lower()
-    if key not in _ADAPTERS:
-        raise KeyError(f"Unknown model family: {family}. available={sorted(_ADAPTERS)}")
-    return _ADAPTERS[key]
+class SmoothQuantStage(Stage):
+    name = "smoothquant"
+
+    def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
+        if not hasattr(ctx.adapter, "apply_smoothquant"):
+            raise NotImplementedError(
+                f"{ctx.adapter.family} adapter does not implement SmoothQuant."
+            )
+        ctx.model = ctx.adapter.apply_smoothquant(ctx, stage_cfg)
+        return ctx

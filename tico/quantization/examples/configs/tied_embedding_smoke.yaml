@@ -1,0 +1,12 @@
+runtime:
+  seed: 2026
+
+debug:
+  tied_embedding:
+    vocab_size: 16
+    hidden_size: 8
+    batch_size: 1
+    seq_len: 5
+    calib_iters: 16
+    save_path: tied_embedding_lm.q.circle
+    skip_circle_sharing_check: false

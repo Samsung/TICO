@@ -12,19 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.quantization.recipes.adapters.base import ModelAdapter
-from tico.quantization.recipes.adapters.llama import LlamaAdapter
-from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
+from typing import Any
 
-_ADAPTERS = {
-    "llama": LlamaAdapter(),
-    "qwen3_vl": Qwen3VLAdapter(),
-    "qwen3-vl": Qwen3VLAdapter(),
-}
+from tico.quantization.evaluation.vlm_eval_utils import get_calib_inputs
 
 
-def get_adapter(family: str) -> ModelAdapter:
-    key = family.lower()
-    if key not in _ADAPTERS:
-        raise KeyError(f"Unknown model family: {family}. available={sorted(_ADAPTERS)}")
-    return _ADAPTERS[key]
+def build_vlm_calibration_inputs(
+    *,
+    processor: Any,
+    dataset: str,
+    n_samples: int,
+    max_seq_len: int | None = None,
+) -> list[dict]:
+    return get_calib_inputs(
+        dataset,
+        processor,
+        n_samples=n_samples,
+        max_seq_len=max_seq_len,
+    )
