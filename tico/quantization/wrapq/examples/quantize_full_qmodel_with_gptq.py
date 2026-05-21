@@ -65,7 +65,7 @@ from tico.quantization.config.llama_attention import (
 )
 from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
-from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.dtypes import DType, MXDtype
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
@@ -922,6 +922,47 @@ def calibrate_ptq_observers(
                 next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
 
+def get_dtype_from_string(dtype_str: str):
+    """
+    Convert a dtype string to the corresponding QuantDtype instance.
+
+    Supported formats:
+      - Integer affine:  "int8", "int16", "uint4", "uint8", …
+      - Microscaling (MX): "mxint8", "mxfp4", …
+
+    The string format matches the ``__str__`` output of DType and MXDtype:
+      - DType  → "int{bits}" | "uint{bits}"
+      - MXDtype → "mx{elem_format}"
+
+    Raises ValueError for unrecognised strings.
+    """
+    import re
+
+    if dtype_str.startswith("mx"):
+        # MX dtype: e.g. "mxint8" → MXDtype("int8"), "mxfp4" → MXDtype("fp4")
+        elem_format = dtype_str[2:]  # strip "mx" prefix
+        return MXDtype(elem_format=elem_format)
+
+    m = re.match(r"^(int|uint)(\d+)$", dtype_str)
+    if m:
+        signed = m.group(1) == "int"
+        bits = int(m.group(2))
+        return DType(bits=bits, signed=signed)
+
+    raise ValueError(
+        f"Unknown dtype string {dtype_str!r}. "
+        f"Expected 'int{{bits}}', 'uint{{bits}}', or 'mx{{elem_format}}'."
+    )
+    
+def get_observer_from_dtype(qdtype):
+  
+    if qdtype.is_mx:
+        return MXObserver
+    if qdtype.is_affine_integer:
+        return MinMaxObserver
+
+    assert False
+
 def quantize_using_PTQ(q_m, calib_inputs, args):
     """
     Wrap the model with PTQ wrappers, calibrate observers, and convert it.
@@ -932,12 +973,37 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
 
-    linear_observer = (
-        MinMaxObserver
-        if args.linear_io_qdtype == "int16"
-        else MXObserver if args.linear_io_qdtype == "mxint8" else None
-    )
-    new = False#True
+    linear_io_dtype = get_dtype_from_string(args.linear_io_qdtype)
+    linear_io_observer = get_observer_from_dtype(linear_io_dtype)
+    linear_act_desc = {"dtype": linear_io_dtype, "observer": linear_io_observer}
+    linear_io_desc = {
+        "act_in": {**linear_act_desc},
+        "act_out": {**linear_act_desc},
+    }
+    linear_desc = {
+        "weight": {
+                        "dtype": DType.uint(args.linear_weight_bits),
+                        "observer": MinMaxObserver,
+                },
+        **linear_io_desc,
+    }
+    
+    rms_norm_io_dtype = get_dtype_from_string(args.rms_norm_io_qdtype)
+    rms_norm_io_observer = get_observer_from_dtype(rms_norm_io_dtype)
+    rms_act_desc = {"dtype": rms_norm_io_dtype, "observer": rms_norm_io_observer}
+    rms_io_desc = {
+        "act_in": {**rms_act_desc},
+        "act_out": {**rms_act_desc},
+    }
+    
+    softmax_io_qdtype = get_dtype_from_string(args.softmax_io_qdtype)
+    softmax_io_observer = get_observer_from_dtype(softmax_io_qdtype)
+    softmax_act_desc = {"dtype": softmax_io_qdtype, "observer": softmax_io_observer}
+    #softmax_io_desc = {
+    #    "act_in": {"dtype": softmax_io_qdtype, "observer": softmax_io_observer},
+    #    "act_out": {"dtype": softmax_io_qdtype, "observer": softmax_io_observer},}
+    
+    new = False
     if new:
         qcfg = build_llm_ptq_config(
             model_type="llama",
@@ -945,7 +1011,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
             activation_dtype=DType.int(16),
             default_qscheme=QScheme.PER_TENSOR_SYMM,
             linear_weight_bits=args.linear_weight_bits,
-            linear_activation_observer=linear_observer,
+            linear_activation_observer=linear_io_observer,
             embedding_weight_bits=args.embedding_weight_bits,
             lm_head_weight_bits=args.lm_head_weight_bits,
             default_observer = MinMaxObserver,
@@ -961,129 +1027,73 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         fn = 0
         w_cfg = {
             "mlp": {
-                "act_in" : {"observer": MinMaxObserver if args.rms_norm_io_qdtype == "int16" else MXObserver,},
-                "gate_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
-                "up_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
-                "mul" : {"observer": linear_observer}, # mul outputs operand for down_proj, so it should be the same 
-                "down_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
+                "act_in" : {**rms_act_desc},
+                "gate_proj": {**linear_desc},
+                "up_proj": {**linear_desc},
+                "mul" : {**linear_act_desc}, # mul outputs operand for down_proj, so it should be the same 
+                "down_proj": {**linear_desc},
             },
             "self_attn": {
-                "hidden" : {"observer": MinMaxObserver if args.rms_norm_io_qdtype == "int16" else MXObserver,},
-                "q_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
-                "k_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
-                "v_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
-                "o_proj": {
-                    "weight": {
-                        "dtype": DType.uint(args.linear_weight_bits),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer": linear_observer},
-                    "act_out": {"observer": linear_observer},
-                },
-                "attn_mask": {"observer": linear_observer},
-                "mask_add": {"observer": linear_observer},
-                "attn_out" : {"observer": linear_observer},
-                "logits":  {"observer": linear_observer},
-          #      "k_x1":  {"observer": linear_observer},
-          #      "k_x2":  {"observer": linear_observer},
-          #      "k_cat":  {"observer": linear_observer},
-          #      "k_cos":  {"observer": linear_observer},
-          #      "k_sin":  {"observer": linear_observer},
-          #      "k_rot":  {"observer": linear_observer},
-          #      "q_x1":  {"observer": linear_observer},
-          #      "q_x2":  {"observer": linear_observer},
-          #      "q_cat":  {"observer": linear_observer},
-          #      "q_cos":  {"observer": linear_observer},
-          #      "q_sin":  {"observer": linear_observer},
-          #      "q_rot":  {"observer": linear_observer}
+                "hidden" : {**rms_act_desc},
+                "q_proj": {**linear_desc},
+                "k_proj": {**linear_desc},
+                "v_proj": {**linear_desc},
+                "o_proj": {**linear_desc},
+                "attn_mask": {**linear_act_desc},
+                "mask_add": {**linear_act_desc},
+                "attn_out" : {**linear_act_desc},
+                "logits":  {**linear_act_desc},
+                "softmax": {**softmax_act_desc},
             },
             
             "input_layernorm": {
-                "dtype": DType.int(16),
+                #"dtype": DType.int(16),
                 "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+                **rms_io_desc
             },
             "post_attention_layernorm": {
-                "dtype": DType.int(16),
+                #"dtype": DType.int(16),
                 "weight": {"dtype": DType.int(16), "observer": MinMaxObserver},
+                **rms_io_desc
             },
-            "attn_mask" : {"observer": linear_observer,},
-            "mlp_residual_out" : {"observer": linear_observer,},
+            "attn_mask" : {**linear_act_desc},
+            "mlp_residual_out" : {**linear_act_desc},
         }
         
-        if args.softmax_io_qdtype == "int16":
-            w_cfg["self_attn"]["softmax"].update( {"softmax" : {"observer": MinMaxObserver}})
-        else:
-            assert args.softmax_io_qdtype == "mxint8"
-            w_cfg["self_attn"].update({"softmax" : {"observer": MXObserver}})
+        #if args.softmax_io_qdtype == "int16":
+        #    w_cfg["self_attn"]["softmax"].update( {"softmax" : {"observer": MinMaxObserver}})
+        #else:
+        #    assert args.softmax_io_qdtype == "mxint8"
+        #    w_cfg["self_attn"].update({"softmax" : {"observer": MXObserver}})
         
-        if args.rms_norm_io_qdtype == "int16":
-            norm_act_cfg = {
-                "act_in": {"observer": MinMaxObserver},
-                "act_out": {"observer": MinMaxObserver}
-            }
-            
-        else:
-            norm_act_cfg = {
-                "act_in": {"observer": MXObserver},
-                "act_out": {"observer": MXObserver}
-            }
-        w_cfg["input_layernorm"].update(norm_act_cfg)
-        w_cfg["post_attention_layernorm"].update(norm_act_cfg)
+       # if args.rms_norm_io_qdtype == "int16":
+       #     norm_act_cfg = {
+       #         "act_in": {"observer": MinMaxObserver},
+       #         "act_out": {"observer": MinMaxObserver}
+       #     }
+       #     
+       # else:
+       #     norm_act_cfg = {
+       #         "act_in": {"observer": MXObserver},
+       #         "act_out": {"observer": MXObserver}
+       #     }
+       # w_cfg["input_layernorm"].update(norm_act_cfg)
+       # w_cfg["post_attention_layernorm"].update(norm_act_cfg)
 
-        default_observer = (
-            MinMaxObserver
-            if args.default_io_qdtype == "int16"
-            else MXObserver if args.linear_io_qdtype == "mxint8" else None
-        )
+        default_io_qdtype = get_dtype_from_string(args.default_io_qdtype)
+        default_observer = get_observer_from_dtype(default_io_qdtype)
+        #(
+        #    MinMaxObserver
+        #    if args.default_io_qdtype == "int16"
+        #    else MXObserver if args.linear_io_qdtype == "mxint8" else None
+        #)
         cfg = PTQConfig(
             default_dtype=DType.int(16),
             default_qscheme=QScheme.PER_TENSOR_SYMM,
             default_observer=default_observer,  # type: ignore[arg-type]
             overrides={
                 "model": {
-                    "causal_mask" : {"observer" : linear_observer,},
+                    "causal_mask" : {**linear_act_desc},
                     "embed_tokens": {
                         "weight": {
                             "dtype": (
@@ -1097,23 +1107,23 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
                     "layers": {},
                     "norm": {
                         "weight": {"dtype": DType.int(16)},
+                        **rms_io_desc
                     },
                 },
-                "lm_head": {
-                    "weight": {
-                        "dtype": (
-                            DType.uint(args.lm_head_weight_bits)
-                            if args.lm_head_weight_bits < 16
-                            else DType.int(args.lm_head_weight_bits)
-                        ),
-                        "observer": MinMaxObserver,
-                    },
-                    "act_in": {"observer" : linear_observer,},
-                    "act_out": {"observer" : linear_observer,},
+                "lm_head": {**linear_desc
+                    #"weight": {
+                    #    "dtype": (
+                    #        DType.uint(args.lm_head_weight_bits)
+                    #        if args.lm_head_weight_bits < 16
+                    #        else DType.int(args.lm_head_weight_bits)
+                    #    ),
+                    #    "observer": MinMaxObserver,
+                    #},
+                    #**linear_io_desc,
                 },
             },
         )
-        cfg.overrides["model"]["norm"].update(norm_act_cfg)
+        #cfg.overrides["model"]["norm"].update(norm_act_cfg)
         for i in range(len(q_m.model.layers)):
             child_scope = f"{i}"
             cfg.overrides["model"]["layers"][child_scope] = w_cfg  # type: ignore[index]
