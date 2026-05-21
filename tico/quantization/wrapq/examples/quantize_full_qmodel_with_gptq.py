@@ -251,8 +251,11 @@ def parse_args():
     parser.add_argument(
         "--lm_head_weight_bits",
         type=int,
-        default=4,
-        help="Number of bits to be used to quantize lm_head",
+        default=8,
+        help=(
+            "Number of bits to be used to quantize lm_head."
+            "For tied embedding/lm_head it must be the same as embedding_weight_bits."
+        ),
     )
     parser.add_argument(
         "--spin_rotation_weight_bits",
