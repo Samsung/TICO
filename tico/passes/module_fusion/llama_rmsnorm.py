@@ -12,24 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from contextlib import contextmanager
-
 import torch
 
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
-
-def llama_rmsnorm_forward_adapter(self: LlamaRMSNorm, hidden_states: torch.Tensor):
-    return torch.ops.circle_custom.rms_norm(
-        hidden_states, self.weight, self.variance_epsilon
-    )
+from .fusion_registry import register_fused_module
 
 
-@contextmanager
-def patched_llama_rmsnorm():
-    orig = LlamaRMSNorm.forward
-    LlamaRMSNorm.forward = llama_rmsnorm_forward_adapter
-    try:
-        yield
-    finally:
-        LlamaRMSNorm.forward = orig
+class FusedLlamaRMSNorm(LlamaRMSNorm):
+    def __init__(self, original_rmsnorm: LlamaRMSNorm):
+        super().__init__(
+            original_rmsnorm.weight.shape[0], original_rmsnorm.variance_epsilon
+        )
+        with torch.no_grad():
+            self.weight.copy_(original_rmsnorm.weight)
+
+    def forward(self, hidden_states):
+        return torch.ops.circle_custom.rms_norm(
+            hidden_states, self.weight, self.variance_epsilon
+        )
+
+
+@register_fused_module(LlamaRMSNorm)
+def create_fused_llama_rmsnorm(original_module: LlamaRMSNorm) -> FusedLlamaRMSNorm:
+    return FusedLlamaRMSNorm(original_module)
