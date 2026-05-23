@@ -53,8 +53,8 @@ class SimpleSplitWithSizesCopy(TestModuleBase):
         super().__init__()
 
     def forward(self, input_, split_size):
-        result = torch.split_with_sizes_copy(input_, split_size)  # type: ignore[func-returns-value]
-        return result
+        torch.split_with_sizes_copy(input_, split_size)
+        return None
 
     def get_example_inputs(self):
         return (
@@ -68,8 +68,8 @@ class SimpleSplitWithSizesCopyWithDim1(TestModuleBase):
         super().__init__()
 
     def forward(self, input_, split_size, dim):
-        result = torch.split_with_sizes_copy(input_, split_size, dim)  # type: ignore[func-returns-value]
-        return result
+        torch.split_with_sizes_copy(input_, split_size, dim)
+        return None
 
     def get_example_inputs(self):
         return (
