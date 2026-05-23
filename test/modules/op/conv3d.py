@@ -306,3 +306,23 @@ class GroupedConv3dWithTensorWeightNoBias(TestModuleBase):
             torch.randn(2, IC, 8, 16, 16),
             torch.randn(OC, IC // groups, 3, 3, 3),
         ), {}
+
+
+class Conv3dWithPerfectFitKernel(torch.nn.Module):
+    """Conv3D with perfect fitting kernel"""
+
+    def __init__(self):
+        super().__init__()
+        self.conv3d = torch.nn.Conv3d(
+            in_channels=3,
+            out_channels=1024,
+            kernel_size=(2, 16, 16),
+            stride=(2, 16, 16),
+            padding=(0, 0, 0),
+        )
+
+    def forward(self, input):
+        return self.conv3d(input)
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 3, 2, 16, 16),), {}
