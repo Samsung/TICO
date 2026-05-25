@@ -260,7 +260,9 @@ class Quantizer(nn.Module):
         self._grid_search(x, xmin, xmax, compute_error)
 
     def update(self, x, Hinv, perm):
-        if self.mse is None or self.mse != "smse_for_gptq":
+        if self.mse is None or (
+            self.mse != "smse_for_gptq" and self.mse != "mse_for_gptq"
+        ):
             return
 
         shape = x.shape
@@ -294,7 +296,7 @@ class Quantizer(nn.Module):
         num_of_iters = 15
 
         def compute_error(x, scale1, zero1):
-            q, _ = iterate_GPTQ(
+            q, pre_q = iterate_GPTQ(
                 scale1.unsqueeze(1),
                 zero1.unsqueeze(1),
                 self.maxq,
@@ -302,10 +304,19 @@ class Quantizer(nn.Module):
                 Hinv,
                 max_num_of_iters=num_of_iters,
             )
-            assert sensitivity is not None
-            assert self.mse == "smse_for_gptq"
-            err = ((q - x) ** 2) * sensitivity.to(q.device)
-            return torch.sum(err, 1)
+            if sensitivity is not None:
+                assert self.mse == "smse_for_gptq"
+                err = ((q - x) ** 2) * sensitivity.to(q.device)
+            else:
+                assert self.mse == "mse_for_gptq"
+                # err = ((q - x)).pow(self.norm)# ** 2)
+                # err = ((q - x) ** 2)
+                # err = torch.abs((q - pre_q)).pow_(self.norm)
+                err = ((q - pre_q) / torch.diag(Hinv)) ** 2
+
+            err = err
+            err = torch.sum(err, 1)
+            return err
 
         self._grid_search(x, xmin, xmax, compute_error)
 
