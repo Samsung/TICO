@@ -28,6 +28,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import tico.quantization.recipes.adapters.qwen3_vl as qwen_mod
+import tico.quantization.recipes.data.vlm as vlm_data
 
 import torch
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
@@ -106,6 +107,70 @@ class TestQwen3VLAdapter(unittest.TestCase):
         self.assertEqual(captured["num_deepstack_mergers"], 2)
         self.assertEqual(captured["model_args"]["vision"]["grid_thw"], (1, 8, 8))
         self.assertFalse(captured["strict_wrap"])
+
+    def test_build_calibration_inputs_routes_mixed_dataset_config(self):
+        """Qwen3VLAdapter should route mixed calibration datasets to the data helper."""
+        captured = {}
+        datasets = [
+            {"dataset": "vqav2", "split": "testdev", "n_samples": 3},
+            {"dataset": "wikitext2", "split": "train", "n_samples": 5},
+        ]
+        ctx = RecipeContext(
+            cfg={
+                "runtime": {"seed": 7},
+                "calibration": {"datasets": datasets, "seq_len": 128},
+            },
+            adapter=Qwen3VLAdapter(),
+            model=_fake_qwen_model(),
+        )
+        ctx.processor = object()
+
+        def fake_build_vlm_calibration_inputs(**kwargs):
+            captured.update(kwargs)
+            return [{"input_ids": torch.ones(1, 2)}]
+
+        with patch.object(
+            qwen_mod,
+            "build_vlm_calibration_inputs",
+            fake_build_vlm_calibration_inputs,
+        ):
+            result = Qwen3VLAdapter().build_calibration_inputs(ctx)
+
+        self.assertEqual(len(result), 1)
+        self.assertTrue(torch.equal(result[0]["input_ids"], torch.ones(1, 2)))
+        self.assertEqual(captured["datasets"], datasets)
+        self.assertEqual(captured["max_seq_len"], 128)
+        self.assertEqual(captured["seed"], 7)
+
+    def test_vlm_data_helper_parses_mixed_dataset_string(self):
+        """The VLM data helper should parse old CLI-style mixed dataset specs."""
+        captured = {}
+
+        def fake_get_mixed_calib_inputs(**kwargs):
+            captured.update(kwargs)
+            return ["mixed"]
+
+        with patch.object(
+            vlm_data, "get_mixed_calib_inputs", fake_get_mixed_calib_inputs
+        ):
+            result = vlm_data.build_vlm_calibration_inputs(
+                processor=object(),
+                dataset="vqav2:testdev:3,wikitext2:train:5",
+                n_samples=1,
+                max_seq_len=128,
+                seed=11,
+            )
+
+        self.assertEqual(result, ["mixed"])
+        self.assertEqual(
+            captured["dataset_config"],
+            {
+                "vqav2": {"split": "testdev", "n_samples": 3},
+                "wikitext2": {"split": "train", "n_samples": 5},
+            },
+        )
+        self.assertEqual(captured["max_seq_len"], 128)
+        self.assertEqual(captured["seed"], 11)
 
     def test_apply_smoothquant_maps_component_selection_to_excluded_appliers(self):
         """SmoothQuant component selection should translate to excluded applier names."""

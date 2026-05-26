@@ -12,8 +12,13 @@ runtime:
   show_progress: true
 
 calibration:
-  dataset: vqav2
-  n_samples: 128
+  datasets:
+    - dataset: vqav2
+      split: testdev
+      n_samples: 128
+    - dataset: wikitext2
+      split: train
+      n_samples: 128
   seq_len: 2048
 
 model_args:

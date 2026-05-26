@@ -38,6 +38,111 @@ from tico.quantization.recipes.utils import (
 )
 
 
+def _weights_share_storage(left: torch.Tensor, right: torch.Tensor) -> bool:
+    """Return True if two weight tensors share the exact same storage slice."""
+    if left is right:
+        return True
+
+    if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
+        return False
+
+    if left.device != right.device:
+        return False
+
+    if left.device.type == "meta" or right.device.type == "meta":
+        return False
+
+    if left.numel() == 0 or right.numel() == 0:
+        return False
+
+    return (
+        left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+        and left.storage_offset() == right.storage_offset()
+        and tuple(left.shape) == tuple(right.shape)
+        and tuple(left.stride()) == tuple(right.stride())
+    )
+
+
+def has_tied_input_output_embeddings(model: torch.nn.Module) -> bool:
+    """Return True if the input embedding and LM head weights are tied."""
+    get_input_embeddings = getattr(model, "get_input_embeddings", None)
+    get_output_embeddings = getattr(model, "get_output_embeddings", None)
+
+    if not callable(get_input_embeddings) or not callable(get_output_embeddings):
+        return False
+
+    input_embeddings = get_input_embeddings()
+    output_embeddings = get_output_embeddings()
+
+    if input_embeddings is None or output_embeddings is None:
+        return False
+
+    input_weight = getattr(input_embeddings, "weight", None)
+    output_weight = getattr(output_embeddings, "weight", None)
+
+    if input_weight is None or output_weight is None:
+        return False
+
+    return _weights_share_storage(input_weight, output_weight)
+
+
+def _resolve_lm_head_weight_bits(stage_cfg: Mapping[str, Any]) -> int | None:
+    """Resolve LM head bit-width using embedding bit-width as its default."""
+    lm_head_weight_bits = stage_cfg.get("lm_head_weight_bits")
+    if lm_head_weight_bits is not None:
+        return int(lm_head_weight_bits)
+
+    embedding_weight_bits = stage_cfg.get("embedding_weight_bits")
+    if embedding_weight_bits is None:
+        return None
+
+    return int(embedding_weight_bits)
+
+
+def _resolve_embedding_weight_bits(stage_cfg: Mapping[str, Any]) -> int | None:
+    """Resolve the optional input embedding bit-width from stage configuration."""
+    embedding_weight_bits = stage_cfg.get("embedding_weight_bits")
+    if embedding_weight_bits is None:
+        return None
+    return int(embedding_weight_bits)
+
+
+def validate_tied_embedding_weight_bits(
+    model: torch.nn.Module,
+    embedding_weight_bits: int | None,
+    lm_head_weight_bits: int | None,
+) -> None:
+    """
+    Reject different embedding and LM head bit-widths for tied weights.
+
+    Args:
+        model: Model whose input embedding and output projection are inspected.
+        embedding_weight_bits: Bit-width requested for input embedding weights.
+        lm_head_weight_bits: Bit-width requested for LM head weights.
+
+    Raises:
+        ValueError: If the model ties input embedding and LM head weights while
+            their requested bit-widths differ.
+    """
+    if embedding_weight_bits is None or lm_head_weight_bits is None:
+        return
+
+    if embedding_weight_bits == lm_head_weight_bits:
+        return
+
+    if not has_tied_input_output_embeddings(model):
+        return
+
+    raise ValueError(
+        "Cannot use different bit-widths for tied input embedding and lm_head "
+        "weights: "
+        f"embedding_weight_bits={embedding_weight_bits}, "
+        f"lm_head_weight_bits={lm_head_weight_bits}. "
+        "Set both options to the same value or use a model with untied "
+        "input/output embeddings."
+    )
+
+
 class LlamaAdapter(ModelAdapter):
     family = "llama"
 
@@ -186,6 +291,13 @@ class LlamaAdapter(ModelAdapter):
             if _is_stage_enabled(ctx.cfg, "spinquant")
             else None
         )
+        embedding_weight_bits = _resolve_embedding_weight_bits(stage_cfg)
+        lm_head_weight_bits = _resolve_lm_head_weight_bits(stage_cfg)
+        validate_tied_embedding_weight_bits(
+            ctx.model,
+            embedding_weight_bits,
+            lm_head_weight_bits,
+        )
 
         return build_llm_ptq_config(
             model_type="llama",
@@ -193,8 +305,8 @@ class LlamaAdapter(ModelAdapter):
             activation_dtype=activation_dtype,
             default_qscheme=default_qscheme,
             linear_weight_bits=stage_cfg.get("linear_weight_bits"),
-            embedding_weight_bits=stage_cfg.get("embedding_weight_bits"),
-            lm_head_weight_bits=stage_cfg.get("lm_head_weight_bits"),
+            embedding_weight_bits=embedding_weight_bits,
+            lm_head_weight_bits=lm_head_weight_bits,
             spin_rotation_weight_bits=spin_rotation_weight_bits,
             norm_dtype=wrapq_dtype_from_name(stage_cfg["norm_dtype"])
             if stage_cfg.get("norm_dtype")

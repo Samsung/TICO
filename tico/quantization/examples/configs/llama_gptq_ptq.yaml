@@ -57,7 +57,7 @@ pipeline:
     default_qscheme: per_tensor_symm
     linear_weight_bits: 4
     embedding_weight_bits: 8
-    lm_head_weight_bits: 4
+    lm_head_weight_bits: 8
     spin_rotation_weight_bits: 16
     norm_weight_dtype: int16
     strict_wrap: true

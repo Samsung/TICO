@@ -116,11 +116,15 @@ class Qwen3VLAdapter(ModelAdapter):
 
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[dict]:
         calib = ctx.cfg.get("calibration", {})
+        runtime = ctx.cfg.get("runtime", {})
         return build_vlm_calibration_inputs(
             processor=ctx.processor,
             dataset=calib.get("dataset", "vqav2"),
+            datasets=calib.get("datasets"),
             n_samples=int(calib.get("n_samples", 128)),
+            split=calib.get("split", "testdev"),
             max_seq_len=calib.get("seq_len"),
+            seed=int(runtime.get("seed", 42)),
         )
 
     def forward_calibration(
