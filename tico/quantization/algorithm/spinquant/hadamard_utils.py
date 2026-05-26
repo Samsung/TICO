@@ -473,7 +473,7 @@ def make_random_hadamard_rotation(
     if device is None:
         device = torch.device("cpu")
 
-    signs = torch.randint(0, 2, (size,), device=device, dtype=torch.int64)
+    signs = torch.randint(0, 2, (size,), device="cpu", dtype=torch.int64).to(device)
     signs = signs.to(torch.float64).mul_(2.0).sub_(1.0)
     eye = torch.eye(size, device=device, dtype=torch.float64)
     signed_eye = signs.unsqueeze(1) * eye

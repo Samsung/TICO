@@ -73,7 +73,7 @@ def make_random_orthogonal_rotation(
     Returns:
         A square orthogonal matrix.
     """
-    random_matrix = torch.randn(size, size, device=device, dtype=dtype)
+    random_matrix = torch.randn(size, size, device="cpu", dtype=dtype).to(device)
     q, r = torch.linalg.qr(random_matrix)
     signs = torch.sign(torch.diag(r))
     signs = torch.where(signs == 0, torch.ones_like(signs), signs)
