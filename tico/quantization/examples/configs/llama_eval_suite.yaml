@@ -1,0 +1,81 @@
+model:
+  family: llama
+  name_or_path: Maykeye/TinyLLama-v0
+  trust_remote_code: false
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+model_args:
+  profile: reference_eval
+
+calibration:
+  dataset: wikitext
+  dataset_config: wikitext-2-raw-v1
+  split: train
+  n_samples: 128
+  seq_len: 2048
+  decode_steps: 0
+
+pipeline:
+  - name: spinquant
+    enabled: true
+
+  - name: cle
+    enabled: false
+    pairs:
+      - model.layers.*.mlp.up_proj:model.layers.*.mlp.down_proj
+    method: absmax
+    max_iter: 1
+
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+    weight_bits_overrides: {}
+    perchannel: true
+    symmetric: false
+    mse: mse
+    sensitivity_path: null
+    percdamp: 0.01
+    groupsize: -1
+    actorder: true
+    static_groups: false
+    quantize_lm_head: false
+    use_orig_model_inference: false
+    verbose: false
+    show_progress: true
+
+  - name: ptq
+    enabled: true
+    profile: reference_eval
+    activation_dtype: int16
+    default_qscheme: per_tensor_symm
+    linear_weight_bits: 4
+    embedding_weight_bits: 8
+    lm_head_weight_bits: 8
+    spin_rotation_weight_bits: 8
+    norm_weight_dtype: int16
+    strict_wrap: true
+    decode_calibration_steps: 0
+
+evaluation:
+  enabled: true
+  perplexity:
+    dataset: wikitext
+    dataset_config: wikitext-2-raw-v1
+    split: test
+  lm_eval_tasks: hellaswag,mmlu,piqa,truthfulqa_mc1,truthfulqa_mc2,race,triviaqa
+  max_seq_len: 2048
+
+export:
+  enabled: false
+  output_dir: ./out/llama_spinquant_gptq_ptq_eval
+  max_seq_len: 2048
+  prefill_decode: false
+  artifacts:
+    - ptq_checkpoint
