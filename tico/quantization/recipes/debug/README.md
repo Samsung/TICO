@@ -18,6 +18,54 @@ python -m tico.quantization.examples.inspect \
 `inspect.py` should stay thin. It should parse arguments, load a config, create a
 `RecipeContext`, and dispatch to a reusable debug function.
 
+## Existing trace mode
+
+It performs this flow:
+
+1. Load the recipe config.
+2. Load the model through the registered adapter.
+3. Build calibration inputs through the adapter.
+4. Run the first calibration sample through the FP model and collect module
+   outputs with forward hooks.
+5. Deep-copy the FP model.
+6. Build the PTQ config from the recipe's `ptq` stage.
+7. Prepare and calibrate the copied model.
+8. Optionally call `convert()` when `--enable-quantization` is set.
+9. Run the same sample through the PTQ/converted model.
+10. Print per-module `mean|diff|` and `max|diff|`.
+
+Typical command:
+
+```bash
+python -m tico.quantization.examples.inspect \
+  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --mode trace \
+  --interesting-modules model.language_model model.visual \
+  --set calibration.n_samples=1
+```
+
+Use trace mode without `--enable-quantization` when debugging wrapper parity.
+Use it with `--enable-quantization` when debugging fake-quantization error.
+
+`--interesting-modules` accepts exact module names and parent module prefixes.
+For example, `--interesting-modules model.visual` traces `model.visual` and its
+descendant modules. When the option is omitted, all named modules are traced.
+
+Trace mode intentionally reads model, calibration, and PTQ behavior from the
+recipe config instead of hard-coding model-specific setup in the debug utility.
+For Qwen3-VL, use fields such as:
+
+```yaml
+calibration:
+  n_samples: 1
+  seq_len: 128
+
+pipeline:
+  - name: ptq
+    activation_dtype: int16
+    linear_weight_bits: 8
+```
+
 ## When to add a debug mode
 
 Add a debug mode when the workflow is for developers rather than normal users:

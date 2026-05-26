@@ -62,6 +62,60 @@ python -m tico.quantization.examples.inspect \
   --mode tied-embedding-smoke
 ```
 
+#### Trace mode
+
+Trace mode compares a floating-point model with a PTQ-prepared copy of the same
+model. It is useful for finding the first module where PTQ wrapping,
+calibration, or fake quantization changes the model output.
+
+Basic Qwen3-VL trace:
+
+```bash
+python -m tico.quantization.examples.inspect \
+  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --mode trace
+```
+
+Trace only selected module subtrees:
+
+```bash
+python -m tico.quantization.examples.inspect \
+  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --mode trace \
+  --interesting-modules model.language_model model.visual
+```
+
+By default, trace mode does **not** call `convert()` on the PTQ-prepared model.
+This checks FP-vs-PTQ wrapper parity and should normally show very small
+differences. To inspect the numerical error introduced by fake quantization,
+enable conversion explicitly:
+
+```bash
+python -m tico.quantization.examples.inspect \
+  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --mode trace \
+  --enable-quantization \
+  --interesting-modules model.language_model model.visual
+```
+
+Output sections:
+
+```text
+=== FP trace ===
+[module.name] Tensor(shape=..., dtype=..., mean=..., min=..., max=..., std=...)
+
+=== PTQ trace ===
+[module.name] Tensor(shape=..., dtype=..., mean=..., min=..., max=..., std=...)
+
+=== Side-by-side diff ===
+module.name: mean|diff|=..., max|diff|=...
+```
+
+`--interesting-modules` accepts module names or parent module prefixes. When it
+is omitted, trace mode records all named modules. Use a small calibration sample
+count before tracing large Qwen3-VL models.
+
+
 ## CLI overrides
 
 All example CLIs accept `--set KEY=VALUE` for simple dotted overrides:
