@@ -911,3 +911,60 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         diff = (fp_hidden - q_hidden).abs().mean().item()
         self.assertGreater(diff, 0.0)  # not identical
         self.assertLess(diff, 0.7)  # acceptably close
+
+    def test_spinquant_rotate_embedding_branch_for_input_ids_and_inputs_embeds(self):
+        from tico.quantization.algorithm.spinquant.spin_qwen3_vl import (
+            SpinQwen3VLTextModel,
+        )
+
+        spin_model = SpinQwen3VLTextModel(self.fp_model.config)
+        spin_model.eval()
+
+        q_model = QuantQwen3VLTextModel(spin_model)
+        q_model.eval()
+
+        self.assertIsNotNone(q_model.rotate_embedding)
+        rotate_embedding = q_model.rotate_embedding
+        assert rotate_embedding is not None
+
+        calls: list[tuple[int, ...]] = []
+
+        def rotate_once(x: torch.Tensor) -> torch.Tensor:
+            calls.append(tuple(x.shape))
+            return x
+
+        # Make the test check whether QuantQwen3VLTextModel actually calls
+        # self.rotate_embedding(inputs_embeds).
+        rotate_embedding.forward = rotate_once  # type: ignore[method-assign]
+
+        cases = [
+            {
+                "name": "input_ids",
+                "kwargs": {
+                    "input_ids": self._create_test_inputs(batch_size=1, seq_len=8),
+                },
+            },
+            {
+                "name": "inputs_embeds",
+                "kwargs": {
+                    "inputs_embeds": torch.randn(1, 8, self.hidden_size),
+                },
+            },
+        ]
+
+        with torch.no_grad():
+            for case in cases:
+                with self.subTest(case["name"]):
+                    out = q_model(**case["kwargs"], use_cache=False)
+                    self.assertEqual(
+                        out.last_hidden_state.shape,
+                        (1, 8, self.hidden_size),
+                    )
+
+        self.assertEqual(
+            calls,
+            [
+                (1, 8, self.hidden_size),
+                (1, 8, self.hidden_size),
+            ],
+        )
