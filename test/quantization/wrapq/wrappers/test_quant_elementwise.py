@@ -54,6 +54,11 @@ ACTIVATIONS: List[
     (torch.nn.Tanh(), torch.tanh, QuantTanh),
     (torch.nn.ReLU(), torch.relu, QuantReLU),
     (torch.nn.GELU(), torch.nn.functional.gelu, QuantGELU),
+    (
+        torch.nn.GELU(approximate="tanh"),
+        partial(torch.nn.functional.gelu, approximate="tanh"),
+        QuantGELU,
+    ),
 ]
 
 try:
@@ -76,6 +81,22 @@ class TestElementwiseWrappers(unittest.TestCase):
         qw.enable_calibration()
         _ = qw(x)
         qw.freeze_qparams()
+
+    # ------------------------------------------------------------------
+    def test_gelu_approximate_tanh_no_quant_parity(self):
+        x = torch.linspace(-6.0, 6.0, steps=257).reshape(-1, 1)
+        fp32_mod = torch.nn.GELU(approximate="tanh")
+        qw = PTQWrapper(fp32_mod)
+
+        self.assertIs(qw._mode, Mode.NO_QUANT)
+
+        with torch.no_grad():
+            q_out = qw(x)
+            fp_out = fp32_mod(x)
+            wrong_out = torch.nn.functional.gelu(x, approximate="none")
+
+        torch.testing.assert_close(q_out, fp_out, rtol=0, atol=0)
+        self.assertGreater((wrong_out - fp_out).abs().max().item(), 1e-6)
 
     # ------------------------------------------------------------------
     def test_registry_and_factory(self):

@@ -146,9 +146,25 @@ class QuantReLU(QuantElementwise):
 
 @register(nn.GELU)
 class QuantGELU(QuantElementwise):
+    def __init__(
+        self,
+        fp_module: nn.Module,
+        *,
+        qcfg: Optional[PTQConfig] = None,
+        fp_name: Optional[str] = None,
+    ):
+        super().__init__(fp_module, qcfg=qcfg, fp_name=fp_name)
+        self.approximate = getattr(fp_module, "approximate", "none")
+
     @staticmethod
     def FUNC(x: torch.Tensor) -> torch.Tensor:
         return _gelu(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_q = self._fq(x, self.act_in_obs)
+        y = _gelu(x_q, approximate=self.approximate)
+        y_q = self._fq(y, self.act_out_obs)
+        return y_q
 
 
 @try_register("transformers.activations.GELUTanh")
