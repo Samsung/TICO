@@ -263,7 +263,22 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     torch.nn.ConvTranspose2d,
                 ],
             )
-            sequential = [list(full.keys())]
+
+            # Define groups for quantizing by internal structure (standard Llama modules)
+            all_names = [
+                ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+                ["self_attn.o_proj"],
+                ["mlp.gate_proj", "mlp.up_proj"],
+                ["mlp.down_proj"],
+            ]
+
+            # Filter to only existing modules and group them
+            existing_names = set(full.keys())
+            sequential = []
+            for names in all_names:
+                cur_seq = [name for name in names if name in existing_names]
+                if cur_seq:
+                    sequential.append(cur_seq)
 
             # 2) Set up GPTQ objects and gather stats
             for names in sequential:
