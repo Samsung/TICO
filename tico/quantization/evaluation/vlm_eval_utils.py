@@ -651,6 +651,8 @@ def get_coco_scores_on_dataset(
     else:
         raise ValueError(f"Invalid dataset_name={dataset_name}")
 
+    total_count = 0
+    skipped_count = 0
     for i, ex in enumerate(ds, 1):
         sample: dict[str, Any] = get_item(ex)
 
@@ -661,6 +663,7 @@ def get_coco_scores_on_dataset(
         file_name: str = sample["file_name"]
         gold_answers: list[str] = sample["golds"]
 
+        total_count += 1
         try:
             pred = generate_answer(
                 model=model,
@@ -688,6 +691,7 @@ def get_coco_scores_on_dataset(
 
             print("[WARNING] The prompt was too long. Skipping.")
             print(f"{type(error).__name__}: {error}")
+            skipped_count += 1
             continue
 
         # Store result
@@ -764,6 +768,8 @@ def get_coco_scores_on_dataset(
             res[img_id] = [r["caption"]]
 
         all_scores: dict[str, float] = {}
+        all_scores["total_count"] = total_count
+        all_scores["skipped_count"] = skipped_count
 
         # Compute CIDEr if needed
         if "CIDEr" in metrics:
