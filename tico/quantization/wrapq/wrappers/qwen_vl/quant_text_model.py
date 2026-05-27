@@ -540,7 +540,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             inputs_embeds = self._fq(inputs_embeds, self.obs_inputs_embeds)
 
         if self.rotate_embedding is not None:
-            input_embeds = self.rotate_embedding(input_embeds)  # type: ignore[has-type]
+            inputs_embeds = self.rotate_embedding(inputs_embeds)
 
         batch_size, seq_len, _ = inputs_embeds.shape
         past_seen_tokens = (
