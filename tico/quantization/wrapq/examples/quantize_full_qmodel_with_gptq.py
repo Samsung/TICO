@@ -58,6 +58,7 @@ from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.cle import CLEConfig
 from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.llama_gptq import LlamaGPTQConfig
 from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
     SUPPORTED_EXECUTION_PROFILES,
@@ -305,6 +306,12 @@ def parse_args():
         help="Dampening parameter to be used in GPTQ. It helps to avoid degenerate,"
         "ill-conditioned matrices and serve as a tradeoff between GPTQ and ordinary min-max quantizer.",
     )
+    parser.add_argument(
+        "--use_llama_gptq",
+        action="store_true",
+        default=False,
+        help="Use LlamaGPTQConfig instead of GPTQConfig for Llama-specific GPTQ quantization.",
+    )
     return parser.parse_args()
 
 
@@ -525,29 +532,45 @@ def validate_tied_embedding_weight_bits(
 def build_gptq_config(
     args,
     sensitivity: dict[str, torch.Tensor] | None = None,
-) -> GPTQConfig:
+):
     """
     Build a GPTQ configuration from command-line arguments.
 
     GPTQ for lm_head is disabled by default because many causal language models
     tie `lm_head.weight` with the input embedding table. Users can enable it
     explicitly with `--gptq_lm_head`.
+
+    If `--use_llama_gptq` is specified, returns a LlamaGPTQConfig instead of
+    GPTQConfig for Llama-specific GPTQ quantization.
     """
     weight_bits_overrides: dict[str, int] = {}
 
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
 
-    return GPTQConfig(
-        show_progress=not args.no_tqdm,
-        weight_bits=args.linear_weight_bits,
-        weight_bits_overrides=weight_bits_overrides,
-        mse=args.gptq_mse,
-        sensitivity=sensitivity,
-        quantize_lm_head=args.gptq_lm_head,
-        use_orig_model_inference=args.gptq_use_orig_model_inference,
-        percdamp=args.gptq_percdamp,
-    )
+    if args.use_llama_gptq:
+        return LlamaGPTQConfig(
+            show_progress=not args.no_tqdm,
+            weight_bits=args.linear_weight_bits,
+            weight_bits_overrides=weight_bits_overrides,
+            mse=args.gptq_mse,
+            sensitivity=sensitivity,
+            quantize_lm_head=args.gptq_lm_head,
+            quantize_rotate_lm_head=not args.no_spinquant,
+            use_orig_model_inference=args.gptq_use_orig_model_inference,
+            percdamp=args.gptq_percdamp,
+        )
+    else:
+        return GPTQConfig(
+            show_progress=not args.no_tqdm,
+            weight_bits=args.linear_weight_bits,
+            weight_bits_overrides=weight_bits_overrides,
+            mse=args.gptq_mse,
+            sensitivity=sensitivity,
+            quantize_lm_head=args.gptq_lm_head,
+            use_orig_model_inference=args.gptq_use_orig_model_inference,
+            percdamp=args.gptq_percdamp,
+        )
 
 
 def save_model_to(
