@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+import warnings
 
 import torch
 import torch.nn as nn
@@ -62,8 +63,10 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
 
     def test_decomposition_correctness_no_quant(self):
         """
-        In NO_QUANT mode, decomposition should match FP32 Conv3d exactly.
-        This verifies the slice+Conv2d+Add logic is correct.
+        Verify that the decomposed NO_QUANT path matches FP32 Conv3d exactly.
+
+        This test checks the slice + Conv2d + Add decomposition logic without
+        quantization noise.
         """
         # Create quantized wrapper (stays in NO_QUANT)
         q_conv = QuantConv3dDecomposed(self.fp32)
@@ -313,8 +316,11 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
 
     def test_different_padding(self):
         """
-        Test that different padding schemes produce correct outputs.
-        Covers all branches in _parse_padding method.
+        Test that different padding schemes produce outputs matching PyTorch.
+
+        The FP32 reference intentionally calls fp32(x) instead of recomputing
+        padding manually. This preserves PyTorch semantics for padding='same',
+        including asymmetric padding and dilation-aware effective kernels.
         """
         # Define test cases: (padding, description)
         test_cases = [
@@ -355,39 +361,16 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
                     x = torch.randn(2, 3, 4, 8, 8)
 
                     # Get outputs
-                    q_out = q_conv(x)
-
-                    # Calculate expected padding for FP32 reference
-                    ref_padding = None
-                    if isinstance(padding, str):
-                        if padding == "same":
-                            ref_padding = (
-                                fp32.kernel_size[0] // 2,
-                                fp32.kernel_size[1] // 2,
-                                fp32.kernel_size[2] // 2,
-                            )
-                        elif padding == "valid":
-                            ref_padding = (0, 0, 0)
-                    elif isinstance(padding, (list, tuple)):
-                        if len(padding) == 1:
-                            ref_padding = (padding[0], padding[0], padding[0])
-                        elif len(padding) == 3:
-                            ref_padding = (padding[0], padding[1], padding[2])
-                        else:
-                            continue  # Skip unsupported padding format
-                    elif isinstance(padding, int):
-                        ref_padding = (padding, padding, padding)
-                    else:
-                        continue  # Skip unsupported padding type
-
-                    # Get FP32 reference output
-                    fp_out = F.conv3d(
-                        x,
-                        fp32.weight,
-                        fp32.bias,
-                        stride=(1, 1, 1),
-                        padding=ref_padding,
-                    )
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings(
+                            "ignore",
+                            message=(
+                                "Using padding='same' with even kernel lengths "
+                                "and odd dilation may require a zero-padded copy"
+                            ),
+                        )
+                        q_out = q_conv(x)
+                        fp_out = fp32(x)
 
                     # Verify outputs match
                     self.assertEqual(
@@ -405,8 +388,58 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
                     if "Unsupported padding" in str(e):
                         # This is expected behavior for invalid padding formats
                         continue
-                    else:
-                        raise
+                    raise
+
+    def test_padding_same_matches_pytorch_even_kernel_no_quant(self):
+        """
+        Verify that padding='same' matches PyTorch for even kernels.
+
+        Even kernels may require asymmetric padding. This guards against treating
+        padding='same' as symmetric kernel_size // 2 padding.
+        """
+        fp32 = nn.Conv3d(
+            in_channels=3,
+            out_channels=8,
+            kernel_size=(2, 4, 4),
+            stride=(1, 1, 1),
+            padding="same",
+            bias=True,
+        )
+        q_conv = QuantConv3dDecomposed(fp32)
+
+        x = torch.randn(2, 3, 5, 7, 9)
+
+        q_out = q_conv(x)
+        fp_out = fp32(x)
+
+        self.assertEqual(q_out.shape, fp_out.shape)
+        self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-6, rtol=1e-6))
+
+    def test_padding_same_matches_pytorch_with_dilation_no_quant(self):
+        """
+        Verify that padding='same' accounts for dilation.
+
+        A kernel size of 3 with dilation 2 has an effective kernel size of 5,
+        so the required same padding is 2 on each side, not kernel_size // 2.
+        """
+        fp32 = nn.Conv3d(
+            in_channels=3,
+            out_channels=8,
+            kernel_size=(3, 3, 3),
+            stride=(1, 1, 1),
+            padding="same",
+            dilation=(2, 2, 2),
+            bias=True,
+        )
+        q_conv = QuantConv3dDecomposed(fp32)
+
+        x = torch.randn(2, 3, 6, 8, 10)
+
+        q_out = q_conv(x)
+        fp_out = fp32(x)
+
+        self.assertEqual(q_out.shape, fp_out.shape)
+        self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-6, rtol=1e-6))
 
     def test_temporal_padding(self):
         """Test temporal padding with zeros+cat."""
@@ -463,8 +496,6 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
 
     def test_registration_in_registry(self):
         """Test that nn.Conv3d is properly registered."""
-        import warnings
-
         # Suppress warnings from PyTorch's Swig-generated types
         with warnings.catch_warnings():
             warnings.filterwarnings(

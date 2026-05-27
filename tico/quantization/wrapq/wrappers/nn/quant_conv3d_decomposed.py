@@ -26,6 +26,10 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import register
 
 
+Padding3D = Tuple[int, int, int, int, int, int]
+SpatialPadding2D = Tuple[int, int, int, int]
+
+
 @register(nn.Conv3d)
 class QuantConv3dDecomposed(QuantModuleBase):
     """
@@ -123,48 +127,106 @@ class QuantConv3dDecomposed(QuantModuleBase):
 
         self._dynamic_obs_calibrated = True
 
-    def _parse_padding(self, padding) -> Tuple[int, int, int]:
-        """Parse padding parameter to (temporal, height, width) tuple."""
+    @staticmethod
+    def _same_padding_pair(kernel_size: int, dilation: int) -> Tuple[int, int]:
+        """
+        Return the asymmetric padding pair used by padding='same'.
+
+        PyTorch's same padding is based on the effective kernel size:
+        dilation * (kernel_size - 1) + 1. When the required total padding is
+        odd, the extra element is placed on the trailing side of the dimension.
+        """
+        total_padding = dilation * (kernel_size - 1)
+        pad_before = total_padding // 2
+        pad_after = total_padding - pad_before
+        return pad_before, pad_after
+
+    def _parse_padding(self, padding) -> Padding3D:
+        """
+        Parse padding into explicit per-side 3D padding.
+
+        Returns:
+            A tuple of (t_front, t_back, h_top, h_bottom, w_left, w_right).
+        """
         if isinstance(padding, str):
             if padding == "same":
+                if self.module.stride != (1, 1, 1):
+                    raise ValueError(
+                        "padding='same' only supports stride=1, matching torch.nn.Conv3d"
+                    )
+
                 kT, kH, kW = self.module.kernel_size
-                return kT // 2, kH // 2, kW // 2
-            elif padding == "valid":
-                return 0, 0, 0
-            else:
-                raise ValueError(f"Unsupported padding string: {padding}")
-        elif isinstance(padding, (list, tuple)):
+                dT, dH, dW = self.module.dilation
+
+                t_front, t_back = self._same_padding_pair(kT, dT)
+                h_top, h_bottom = self._same_padding_pair(kH, dH)
+                w_left, w_right = self._same_padding_pair(kW, dW)
+
+                return t_front, t_back, h_top, h_bottom, w_left, w_right
+
+            if padding == "valid":
+                return 0, 0, 0, 0, 0, 0
+
+            raise ValueError(f"Unsupported padding string: {padding}")
+
+        if isinstance(padding, (list, tuple)):
             if len(padding) == 1:
-                return padding[0], padding[0], padding[0]
-            elif len(padding) == 3:
-                return padding[0], padding[1], padding[2]
-            else:
-                raise ValueError(f"Unsupported padding format: {padding}")
-        elif isinstance(padding, int):  # int
-            return padding, padding, padding
-        else:
-            raise ValueError(f"Unsupported padding type: {type(padding)}")
+                p = padding[0]
+                return p, p, p, p, p, p
+
+            if len(padding) == 3:
+                pT, pH, pW = padding
+                return pT, pT, pH, pH, pW, pW
+
+            raise ValueError(f"Unsupported padding format: {padding}")
+
+        if isinstance(padding, int):
+            return padding, padding, padding, padding, padding, padding
+
+        raise ValueError(f"Unsupported padding type: {type(padding)}")
 
     def _apply_temporal_padding(
         self,
         x: torch.Tensor,
-        temporal_padding: int,
+        pad_front: int,
+        pad_back: int,
     ) -> torch.Tensor:
-        """Apply temporal padding using zeros and cat."""
-        if temporal_padding == 0:
+        """Apply explicit temporal padding using zeros and cat."""
+        if pad_front == 0 and pad_back == 0:
             return x
 
-        N, C_in, T_in, H_in, W_in = x.shape
+        N, C_in, _, H_in, W_in = x.shape
+        padded_parts = []
 
-        # Create zero padding tensors
-        zero_pad = torch.zeros(
-            N, C_in, temporal_padding, H_in, W_in, dtype=x.dtype, device=x.device
-        )
+        if pad_front > 0:
+            padded_parts.append(
+                torch.zeros(
+                    N,
+                    C_in,
+                    pad_front,
+                    H_in,
+                    W_in,
+                    dtype=x.dtype,
+                    device=x.device,
+                )
+            )
 
-        # Cat: [zeros, input, zeros]
-        padded = torch.cat([zero_pad, x, zero_pad], dim=2)
+        padded_parts.append(x)
 
-        return padded
+        if pad_back > 0:
+            padded_parts.append(
+                torch.zeros(
+                    N,
+                    C_in,
+                    pad_back,
+                    H_in,
+                    W_in,
+                    dtype=x.dtype,
+                    device=x.device,
+                )
+            )
+
+        return torch.cat(padded_parts, dim=2)
 
     def _get_padded_input_slice(
         self,
@@ -197,51 +259,59 @@ class QuantConv3dDecomposed(QuantModuleBase):
         weight_slice: torch.Tensor,
         bias: Optional[torch.Tensor],
         k: int,
-        H_out: int,
-        W_out: int,
-        padding: Tuple[int, int, int],
+        spatial_padding: SpatialPadding2D,
     ) -> torch.Tensor:
         """
-        Apply quantized Conv2d operation.
+        Apply a quantized Conv2d operation for one temporal kernel slice.
 
         Args:
-            input_2d: 2D input (N, C_in, H_in, W_in)
-            weight_slice: 2D weight slice (C_out, C_in, kH, kW)
-            bias: Optional bias tensor
-            k: Kernel temporal position (for observer lookup)
-            H_out: Output height
-            W_out: Output width
+            input_2d: 2D input tensor with shape (N, C_in, H_in, W_in).
+            weight_slice: 2D weight slice with shape
+                (C_out, C_in / groups, kH, kW).
+            bias: Optional bias tensor. This argument is kept for API clarity;
+                bias is added after temporal accumulation.
+            k: Kernel temporal position used for observer lookup.
+            spatial_padding: Explicit padding as
+                (h_top, h_bottom, w_left, w_right).
 
         Returns:
-            Quantized Conv2d output (N, C_out, H_out, W_out)
+            Quantized Conv2d output with shape (N, C_out, H_out, W_out).
         """
-        # Apply Conv2d
+        del bias  # Bias is intentionally added after temporal accumulation.
+
+        h_top, h_bottom, w_left, w_right = spatial_padding
+
+        if h_top == h_bottom and w_left == w_right:
+            conv_padding = (h_top, w_left)
+        else:
+            input_2d = F.pad(input_2d, (w_left, w_right, h_top, h_bottom))
+            conv_padding = (0, 0)
+
         conv_out = F.conv2d(
             input_2d,
             weight_slice,
-            bias=None,  # Bias added after accumulation
+            bias=None,
             stride=(self.module.stride[1], self.module.stride[2]),
-            padding=(padding[1], padding[2]),
+            padding=conv_padding,
             dilation=(self.module.dilation[1], self.module.dilation[2]),
             groups=self.module.groups,
         )
 
-        # Quantize Conv2d output
         conv_out_q = self._fq(conv_out, self._conv2d_obs[k])
-
         return conv_out_q
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with quantized Conv3d decomposition.
 
-        Decomposes Conv3d into:
-        1. Temporal padding (if needed)
-        2. Slice input at each temporal kernel position
-        3. Apply Conv2d to each slice
-        4. Accumulate Conv2d results with quantization
-        5. Add bias (if present)
-        6. Stack temporal outputs
+        The decomposed path performs:
+        1. Input activation fake quantization.
+        2. Explicit temporal padding if needed.
+        3. Input slicing for each temporal kernel position.
+        4. Conv2d over each temporal slice.
+        5. Quantized accumulation of Conv2d outputs.
+        6. Bias addition if present.
+        7. Output activation fake quantization.
 
         Special case optimization:
         When kernel_size = input_size, stride = kernel_size,
@@ -262,28 +332,43 @@ class QuantConv3dDecomposed(QuantModuleBase):
                 f"Channels mismatch: input C={C_in}, weight C/groups={C_in_weight}, groups={groups}"
             )
 
-        # Parse padding
-        padding = self._parse_padding(self.module.padding)
-        temporal_padding, h_padding, w_padding = padding
+        # Parse padding into explicit per-side values.
+        (
+            pad_t_front,
+            pad_t_back,
+            pad_h_top,
+            pad_h_bottom,
+            pad_w_left,
+            pad_w_right,
+        ) = self._parse_padding(self.module.padding)
 
-        # Quantize input activation
+        no_padding = (
+            pad_t_front == 0
+            and pad_t_back == 0
+            and pad_h_top == 0
+            and pad_h_bottom == 0
+            and pad_w_left == 0
+            and pad_w_right == 0
+        )
+
+        # Quantize input activation.
         x_q = self._fq(x, self.obs_act_in)
 
-        # Get quantized weight
+        # Get quantized weight.
         w = self.module.weight
         if self._mode is Mode.QUANT:
             w = self.obs_weight.fake_quant(w)
 
         # Check for special case:
-        # kernel_size = input_size,
-        # stride = kernel_size,
-        # padding = 0,
-        # no dilation
-        # groups = 1
+        # - kernel_size = input_size
+        # - stride = kernel_size
+        # - padding = 0
+        # - dilation = 1
+        # - groups = 1
         is_special_case = (
             (kT, kH, kW) == (T_in, H_in, W_in)
             and (sT, sH, sW) == (kT, kH, kW)
-            and (temporal_padding, h_padding, w_padding) == (0, 0, 0)
+            and no_padding
             and (dT, dH, dW) == (1, 1, 1)
             and groups == 1
         )
@@ -309,82 +394,92 @@ class QuantConv3dDecomposed(QuantModuleBase):
             result_q = self._fq(result, self.obs_act_out)
             return result_q
 
-        # Normal case: Conv3d is decomposed to multiple Conv2D and Add operations
-        else:
-            # Calculate output dimensions
-            T_padded = T_in + 2 * temporal_padding
-            T_out = (T_padded - dT * (kT - 1) - 1) // sT + 1
-            H_out = (H_in + 2 * h_padding - dH * (kH - 1) - 1) // sH + 1
-            W_out = (W_in + 2 * w_padding - dW * (kW - 1) - 1) // sW + 1
+        # Normal case: Conv3d is decomposed into Conv2d and Add operations.
+        T_padded = T_in + pad_t_front + pad_t_back
+        T_out = (T_padded - dT * (kT - 1) - 1) // sT + 1
+        H_out = (H_in + pad_h_top + pad_h_bottom - dH * (kH - 1) - 1) // sH + 1
+        W_out = (W_in + pad_w_left + pad_w_right - dW * (kW - 1) - 1) // sW + 1
 
-            # Create dynamic observers on first forward pass
-            if not self._dynamic_obs_calibrated:
-                if self._mode is Mode.QUANT:
-                    raise RuntimeError(
-                        "Trying to quantize without calibration. Need to calibrate first."
+        if T_out <= 0 or H_out <= 0 or W_out <= 0:
+            raise RuntimeError(
+                "Calculated output size is too small: "
+                f"T_out={T_out}, H_out={H_out}, W_out={W_out}"
+            )
+
+        # Create dynamic observers on first forward pass.
+        if not self._dynamic_obs_calibrated:
+            if self._mode is Mode.QUANT:
+                raise RuntimeError(
+                    "Trying to quantize without calibration. Need to calibrate first."
+                )
+            self._create_dynamic_observers(kT, T_out)
+
+        # Apply temporal padding.
+        padded_input = self._apply_temporal_padding(x_q, pad_t_front, pad_t_back)
+
+        # Temporal processing loop.
+        temporal_outputs = []
+        spatial_padding = (pad_h_top, pad_h_bottom, pad_w_left, pad_w_right)
+        for t_out in range(T_out):
+            t_in = t_out * sT
+            accumulator = None
+
+            for k in range(kT):
+                t_idx = t_in + k * dT
+
+                # The output shape formula should keep t_idx in bounds. Keep this guard
+                # for defensive behavior if unsupported shapes reach this path.
+                if t_idx >= T_padded:
+                    continue
+
+                # Get and quantize input slice.
+                input_slice_q = self._get_padded_input_slice(padded_input, t_idx, k)
+
+                # Remove temporal dimension: (N, C_in, 1, H_in, W_in) ->
+                # (N, C_in, H_in, W_in)
+                input_2d = input_slice_q.squeeze(2)
+
+                # Slice weight at temporal position k:
+                # (C_out, C_in / groups, kH, kW)
+                weight_slice = w[:, :, k, :, :]
+
+                # Apply quantized Conv2d.
+                conv_out_q = self._apply_conv2d_quantized(
+                    input_2d,
+                    weight_slice,
+                    self.module.bias,
+                    k,
+                    spatial_padding,
+                )
+
+                # Accumulate with quantization.
+                if accumulator is None:
+                    accumulator = conv_out_q
+                else:
+                    accumulator = self._fq(
+                        accumulator + conv_out_q, self._acc_obs[t_out]
                     )
-                self._create_dynamic_observers(kT, T_out)
 
-            # Apply temporal padding
-            padded_input = self._apply_temporal_padding(x_q, temporal_padding)
+            if accumulator is None:
+                raise RuntimeError(
+                    "No valid temporal kernel positions were processed for "
+                    f"output temporal index {t_out}"
+                )
 
-            # Temporal processing loop
-            temporal_outputs = []
-            for t_out in range(T_out):
-                t_in = t_out * sT
-                accumulator = None
+            # Add bias if present.
+            if self.module.bias is not None:
+                bias_reshaped = self.module.bias.reshape(1, C_out, 1, 1)
+                accumulator = accumulator + bias_reshaped
 
-                for k in range(kT):
-                    t_idx = t_in + k * dT
+            temporal_outputs.append(accumulator)
 
-                    # Handle dilation: mask out-of-bounds positions
-                    if dT > 1 and t_idx >= T_padded:
-                        # Skip this kernel position (out of bounds)
-                        continue
+        # Stack temporal outputs.
+        unsqueezed = [t.unsqueeze(2) for t in temporal_outputs]
+        stacked = torch.cat(unsqueezed, dim=2)  # (N, C_out, T_out, H_out, W_out)
 
-                    # Get and quantize input slice
-                    input_slice_q = self._get_padded_input_slice(padded_input, t_idx, k)
-
-                    # Remove temporal dimension: (N, C_in, 1, H_in, W_in) → (N, C_in, H_in, W_in)
-                    input_2d = input_slice_q.squeeze(2)
-
-                    # Slice weight at temporal position k
-                    weight_slice = w[:, :, k, :, :]  # (C_out, C_in, kH, kW)
-
-                    # Apply quantized Conv2d
-                    conv_out_q = self._apply_conv2d_quantized(
-                        input_2d,
-                        weight_slice,
-                        self.module.bias,
-                        k,
-                        H_out,
-                        W_out,
-                        padding,
-                    )
-
-                    # Accumulate with quantization
-                    if accumulator is None:
-                        accumulator = conv_out_q
-                    else:
-                        accumulator = self._fq(
-                            accumulator + conv_out_q, self._acc_obs[t_out]
-                        )
-
-                # Add bias if present
-                if self.module.bias is not None:
-                    bias_reshaped = self.module.bias.reshape(1, C_out, 1, 1)
-                    accumulator = accumulator + bias_reshaped
-
-                temporal_outputs.append(accumulator)
-
-            # Stack temporal outputs
-            unsqueezed = [t.unsqueeze(2) for t in temporal_outputs]  # type: ignore[union-attr]
-            stacked = torch.cat(unsqueezed, dim=2)  # (N, C_out, T_out, H_out, W_out)
-
-            # Quantize output activation
-            stacked_q = self._fq(stacked, self.obs_act_out)
-
-            return stacked_q
+        # Quantize output activation.
+        stacked_q = self._fq(stacked, self.obs_act_out)
+        return stacked_q
 
     def _all_observers(self):
         """Return all observers for this module."""
