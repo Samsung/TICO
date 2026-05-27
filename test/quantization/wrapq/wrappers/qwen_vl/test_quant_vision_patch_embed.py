@@ -141,14 +141,21 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
 
     def test_observer_count(self):
         """
-        Test that the wrapper has the correct number of observers.
-        - 2 local observers (obs_hidden, obs_output)
-        - 3 observers from wrapped Conv3d (obs_weight, obs_act_in, obs_act_out)
+        Test observer ownership and recursive enumeration.
+        - PatchEmbed owns no local observers directly.
+        - Recursive named_observers() exposes 3 observers from wrapped Conv3d.
         """
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
 
-        observers = list(q_patch._all_observers())
-        self.assertEqual(len(observers), 3)  # 3 from Conv3d
+        local_observers = list(q_patch._all_observers())
+        self.assertEqual(len(local_observers), 0)
+
+        observers = list(q_patch.named_observers())
+        self.assertEqual(len(observers), 3)
+        self.assertSetEqual(
+            {name for name, _ in observers},
+            {"proj.weight", "proj.act_in", "proj.act_out"},
+        )
 
     def test_registration_in_registry(self):
         """

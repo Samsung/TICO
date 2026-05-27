@@ -1071,7 +1071,6 @@ class QuantLlamaAttention(QuantModuleBase):
         raise RuntimeError(f"Invalid attention layout: {self.attn_options.layout!r}")
 
     def _all_observers(self):
-        # local first
         yield from (
             self.obs_hidden,
             self.obs_cos,
@@ -1104,9 +1103,6 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_present_key,
             self.obs_present_value,
         )
-        # recurse into children that are QuantModuleBase
-        for m in (self.q_proj, self.k_proj, self.v_proj, self.o_proj):
-            yield from m._all_observers()
 
     def as_export_module(
         self,

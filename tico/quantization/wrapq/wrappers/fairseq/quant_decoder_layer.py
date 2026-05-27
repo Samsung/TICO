@@ -468,25 +468,9 @@ class QuantFairseqDecoderLayer(QuantModuleBase):
         )  # [1,B,C], attn, [B*H, Tnew, Dh], [B*H, Tnew, Dh]
 
     def _all_observers(self) -> Iterable:
-        """
-        Expose all observers from child PTQ-wrapped modules.
-        This layer itself does not add extra per-tensor observers.
-        """
-        # local observers
+        """Return observers owned directly by this decoder layer."""
         yield from (
             self.obs_activation_fn,
             self.obs_prev_self_k_in,
             self.obs_prev_self_v_in,
         )
-
-        for m in (
-            self.self_attn,
-            self.encoder_attn,
-            self.fc1,
-            self.fc2,
-            self.encoder_attn_layer_norm,
-            self.self_attn_layer_norm,
-            self.final_layer_norm,
-        ):
-            if isinstance(m, QuantModuleBase) and m is not None:
-                yield from m._all_observers()

@@ -80,6 +80,31 @@ class QuantModuleBase(nn.Module, ABC):
                 # `m` is a container or a non-quant leaf: keep descending until we hit quant modules
                 stack.extend(list(m.children()))
 
+    def _named_child_quant_modules(self):
+        """
+        Yield immediate QuantModuleBase descendants with their module-tree names,
+        skipping over pure containers.
+
+        This mirrors _child_quant_modules(), but preserves stable prefixes so
+        recursive observer names remain unique, e.g. `q_proj.weight` and
+        `k_proj.weight` instead of multiple ambiguous `weight` entries.
+        """
+        seen = set()
+        stack = list(reversed(list(self.named_children())))
+
+        while stack:
+            prefix, m = stack.pop()
+            if isinstance(m, QuantModuleBase):
+                if id(m) not in seen:
+                    seen.add(id(m))
+                    yield prefix, m
+                # Do not recurse into `m` here; its own named_observers() will
+                # handle its subtree and keep names relative to that child.
+            elif isinstance(m, (nn.ModuleList, nn.ModuleDict, nn.Sequential)):
+                children = list(m.named_children())
+                for child_name, child in reversed(children):
+                    stack.append((f"{prefix}.{child_name}", child))
+
     def enable_calibration(self) -> None:
         self._mode = Mode.CALIB
         for obs in self._all_observers():
@@ -111,16 +136,31 @@ class QuantModuleBase(nn.Module, ABC):
 
     @abstractmethod
     def _all_observers(self) -> Iterable[ObserverBase]:
-        """Return every observer owned by this module."""
+        """Return observers owned directly by this module.
+
+        Child QuantModuleBase instances are traversed by the base lifecycle
+        methods, so subclasses must not yield child observers here.
+        """
         ...
 
-    def named_observers(self) -> Iterable[Tuple[str, ObserverBase]]:
+    def named_observers(
+        self, *, recurse: bool = True
+    ) -> Iterable[Tuple[str, ObserverBase]]:
         for obs in self._all_observers():
             yield obs.name, obs
 
-    def get_observer(self, name: str) -> Optional[ObserverBase]:
-        for obs in self._all_observers():
-            if obs.name == name:
+        if not recurse:
+            return
+
+        for child_name, child in self._named_child_quant_modules():
+            for name, obs in child.named_observers(recurse=True):
+                yield f"{child_name}.{name}", obs
+
+    def get_observer(
+        self, name: str, *, recurse: bool = True
+    ) -> Optional[ObserverBase]:
+        for obs_name, obs in self.named_observers(recurse=recurse):
+            if obs_name == name:
                 return obs
         return None
 

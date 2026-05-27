@@ -152,12 +152,3 @@ class QuantFairseqEncoderLayer(QuantModuleBase):
 
     def _all_observers(self):
         yield from (self.obs_activation_fn,)
-        for m in (
-            self.self_attn,
-            self.fc1,
-            self.fc2,
-            self.self_attn_layer_norm,
-            self.final_layer_norm,
-        ):
-            if isinstance(m, QuantModuleBase):
-                yield from m._all_observers()

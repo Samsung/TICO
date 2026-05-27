@@ -60,17 +60,21 @@ class PTQWrapper(QuantModuleBase):
         """
         return ()  # no local observers
 
-    def named_observers(self):
+    def named_observers(self, *, recurse: bool = True):
         """
         Proxy to the wrapped module so debugging tools can still enumerate observers.
         """
-        yield from self.wrapped.named_observers()
+        if not recurse:
+            return
+        yield from self.wrapped.named_observers(recurse=True)
 
-    def get_observer(self, name: str):
+    def get_observer(self, name: str, *, recurse: bool = True):
         """
         Proxy to the wrapped module for direct lookup by name.
         """
-        return self.wrapped.get_observer(name)
+        if not recurse:
+            return None
+        return self.wrapped.get_observer(name, recurse=True)
 
     def extra_repr(self) -> str:
         return self.wrapped.extra_repr()

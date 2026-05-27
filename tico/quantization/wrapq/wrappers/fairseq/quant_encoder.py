@@ -326,6 +326,5 @@ class QuantFairseqEncoder(QuantModuleBase):
         return state_dict
 
     def _all_observers(self):
-        for m in self.layers:
-            if isinstance(m, QuantModuleBase):
-                yield from m._all_observers()
+        # This wrapper owns no observers directly.
+        return ()

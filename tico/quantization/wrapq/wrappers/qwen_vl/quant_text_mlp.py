@@ -103,11 +103,7 @@ class QuantQwen3VLTextMLP(QuantModuleBase):
         return h
 
     def _all_observers(self) -> Iterable:
-        # Yield local observers
         yield self.obs_act_in
         yield self.obs_gated_out
         yield self.obs_act_out
-
-        # Recurse into children that are QuantModuleBase
-        for m in (self.gate_proj, self.up_proj, self.down_proj, self.act_fn):
-            yield from m._all_observers()
+        # Child observers are handled by QuantModuleBase recursion.

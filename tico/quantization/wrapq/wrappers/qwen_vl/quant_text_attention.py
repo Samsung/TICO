@@ -261,7 +261,6 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         return out, attn_weights
 
     def _all_observers(self) -> Iterable:
-        # local first
         yield from (
             self.obs_hidden,
             self.obs_cos,
@@ -288,13 +287,3 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             self.obs_attn_weights,
             self.obs_attn_out_h,
         )
-
-        for m in (
-            self.q_proj,
-            self.k_proj,
-            self.v_proj,
-            self.o_proj,
-            self.q_norm,
-            self.k_norm,
-        ):
-            yield from m._all_observers()

@@ -185,10 +185,8 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         return output
 
     def _all_observers(self) -> Iterable:
-        """Yield all observers from this module and wrapped submodules."""
-        # No local observers - all observers are in wrapped submodules
-        # This method is required by QuantModuleBase but yields nothing
-        return iter([])
+        """This wrapper owns no observers directly."""
+        return ()
 
     @property
     def device(self):

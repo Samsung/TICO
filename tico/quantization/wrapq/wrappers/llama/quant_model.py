@@ -630,14 +630,4 @@ class QuantLlamaModel(QuantModuleBase):
         return output if return_dict else output.to_tuple()
 
     def _all_observers(self):
-        # Recurse into children that are QuantModuleBase
         yield from (self.obs_causal_mask, self.obs_cos, self.obs_sin)
-
-        for m in (self.embed_tokens, self.norm):
-            yield from m._all_observers()
-
-        if self.rotate_embedding is not None:
-            yield from self.rotate_embedding._all_observers()
-
-        for m in self.layers:
-            yield from m._all_observers()

@@ -284,11 +284,8 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
         )
 
     def _all_observers(self):
-        # recurse into children that are QuantModuleBase
-        for m in (self.model, self.lm_head):
-            yield from m._all_observers()
-        if self.rotate_lm_head is not None:
-            yield from self.rotate_lm_head._all_observers()
+        # This wrapper owns no observers directly.
+        return ()
 
     def as_export_module(
         self, mode: ExportMode = "prefill", return_kv: bool = True

@@ -214,5 +214,3 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
             self.obs_softmax,
             self.obs_attn_out,
         )
-        for m in (self.qkv, self.proj):
-            yield from m._all_observers()

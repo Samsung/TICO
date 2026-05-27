@@ -90,6 +90,4 @@ class QuantQwen3VLVisionMLP(QuantModuleBase):
     def _all_observers(self) -> Iterable:
         yield self.obs_act_in
         yield self.obs_act_out
-        # recurse into children that are QuantModuleBase
-        for m in (self.linear_fc1, self.linear_fc2, self.act_fn):
-            yield from m._all_observers()
+        # Child observers are handled by QuantModuleBase recursion.

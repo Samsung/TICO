@@ -376,10 +376,12 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         raise RuntimeError("Invalid return_type configuration.")
 
     def _all_observers(self):
-        yield from (self.obs_attn_mask, self.obs_cos, self.obs_sin)
-        yield from self.self_attn._all_observers()
-        yield from self.mlp._all_observers()
-        yield self.obs_mlp_residual_out
+        yield from (
+            self.obs_attn_mask,
+            self.obs_cos,
+            self.obs_sin,
+            self.obs_mlp_residual_out,
+        )
 
     def as_export_module(self, mode: ExportMode = "prefill", *, return_kv: bool = True):
         """

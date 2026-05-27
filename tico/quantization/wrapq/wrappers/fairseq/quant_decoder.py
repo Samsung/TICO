@@ -423,7 +423,5 @@ class QuantFairseqDecoder(QuantModuleBase):
         return x, new_k_list, new_v_list  # [1,B,C], lists of [B*H, Tnew, Dh]
 
     def _all_observers(self) -> Iterable:
-        """Yield all observers from wrapped decoder layers (if any)."""
-        for m in self.layers:
-            if isinstance(m, QuantModuleBase):
-                yield from m._all_observers()
+        """This wrapper owns no observers directly."""
+        return ()

@@ -94,6 +94,5 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
         return hidden
 
     def _all_observers(self) -> Iterable:
-        """Yield all observers from this module and wrapped submodules."""
-        # Observers from wrapped Conv3d layer
-        yield from self.proj.wrapped._all_observers()
+        """This wrapper owns no observers directly."""
+        return ()

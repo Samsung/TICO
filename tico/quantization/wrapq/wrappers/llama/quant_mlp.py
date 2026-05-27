@@ -89,9 +89,6 @@ class QuantLlamaMLP(QuantModuleBase):
         return self.down_proj(h)
 
     def _all_observers(self):
-        # local first
         yield self.obs_act_in
         yield self.obs_mul
-        # recurse into children that are QuantModuleBase
-        for m in (self.gate_proj, self.up_proj, self.down_proj, self.act_fn):
-            yield from m._all_observers()
+        # Child observers are handled by QuantModuleBase recursion.

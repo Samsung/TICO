@@ -115,7 +115,5 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
         return x
 
     def _all_observers(self) -> Iterable:
-        """Yield all observers from this module and wrapped submodules."""
-        # Observers from wrapped submodules
-        for module in (self.norm, self.linear_fc1, self.act_fn, self.linear_fc2):
-            yield from module.wrapped._all_observers()
+        """This wrapper owns no observers directly."""
+        return ()

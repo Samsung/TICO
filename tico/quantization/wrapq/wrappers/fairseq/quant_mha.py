@@ -381,6 +381,3 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
             self.obs_softmax,
             self.obs_attn_out,
         )
-        for m in (self.q_proj, self.k_proj, self.v_proj, self.out_proj):
-            if isinstance(m, QuantModuleBase):
-                yield from m._all_observers()
