@@ -167,6 +167,169 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
 
         return q_rot, k_rot
 
+    @staticmethod
+    def _normalize_attention_mask_shape(
+        mask: torch.Tensor,
+        *,
+        q_len: int,
+        k_len: int,
+    ) -> torch.Tensor:
+        """
+        Normalize attention mask shape so it is broadcastable to per-head logits.
+
+        Supported input shapes:
+          - (B, K)
+          - (B, Q, K)
+          - (B, 1, Q, K)
+
+        Returns:
+          - (B, 1, 1, K)
+          - (B, 1, Q, K)
+          - (B, 1, Q, K)
+
+        Note:
+          This decomposed attention loop adds the same mask to each KV-head group.
+          Therefore, per-head masks with shape (B, H, Q, K), H != 1, are rejected
+          to avoid silently applying the wrong head-specific mask.
+        """
+        if mask.dim() not in (2, 3, 4):
+            raise RuntimeError(
+                "Unsupported attention_mask rank for Qwen text attention: "
+                f"rank={mask.dim()}, shape={tuple(mask.shape)}"
+            )
+
+        if mask.size(-1) != k_len:
+            if mask.size(-1) > k_len:
+                # HF masks may be preallocated or include a longer cache span.
+                mask = mask[..., :k_len]
+            else:
+                raise RuntimeError(
+                    "attention_mask key length is shorter than key states: "
+                    f"mask_k={mask.size(-1)}, k_len={k_len}, "
+                    f"shape={tuple(mask.shape)}"
+                )
+
+        if mask.dim() == 2:
+            return mask[:, None, None, :]
+
+        if mask.size(-2) not in (1, q_len):
+            if mask.size(-2) > q_len:
+                # In decode/cache mode, a full QxK mask may be passed while this
+                # layer only processes the last q_len query positions.
+                mask = mask[..., -q_len:, :]
+            else:
+                raise RuntimeError(
+                    "attention_mask query length is incompatible with query states: "
+                    f"mask_q={mask.size(-2)}, q_len={q_len}, "
+                    f"shape={tuple(mask.shape)}"
+                )
+
+        if mask.dim() == 3:
+            return mask[:, None, :, :]
+
+        if mask.size(1) != 1:
+            raise RuntimeError(
+                "Per-head attention masks are not supported by this decomposed "
+                "Qwen text attention wrapper. Expected mask shape (B, 1, Q, K), "
+                f"got shape={tuple(mask.shape)}"
+            )
+
+        return mask
+
+    def _build_attention_mask(
+        self,
+        *,
+        attention_mask: Optional[torch.Tensor],
+        q_len: int,
+        k_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """
+        Build an additive attention mask for logits shaped `(B, heads, Q, K)`.
+
+        Cases:
+          - None:
+              Use only the causal mask.
+          - bool/int:
+              Interpret True/non-zero as "keep", False/zero as "mask".
+              Convert to additive mask and combine with causal mask.
+          - floating point:
+              Assume caller already provided an additive mask. Shape is normalized
+              for broadcasting, but values are preserved.
+        """
+        fill_val = float(self.qcfg.attention_mask_fill_value)
+
+        assert isinstance(self.causal_mask_template, torch.Tensor)
+
+        if k_len > self.causal_mask_template.size(-1):
+            raise RuntimeError(
+                "Key length exceeds causal mask capacity: "
+                f"k_len={k_len}, capacity={self.causal_mask_template.size(-1)}"
+            )
+
+        # If KV cache is used, k_len == past_len + q_len. The current query rows
+        # correspond to [past_len, past_len + q_len), not [0, q_len).
+        q_start = max(k_len - q_len, 0)
+        q_end = q_start + q_len
+        if q_end > self.causal_mask_template.size(-2):
+            raise RuntimeError(
+                "Query range exceeds causal mask capacity: "
+                f"q_start={q_start}, q_end={q_end}, "
+                f"capacity={self.causal_mask_template.size(-2)}"
+            )
+
+        causal_mask = self.causal_mask_template[..., q_start:q_end, :k_len].to(device)
+
+        if attention_mask is None:
+            return self._fq(causal_mask, self.obs_causal_mask)
+
+        attention_mask = attention_mask.to(device)
+
+        if attention_mask.dtype in (
+            torch.bool,
+            torch.uint8,
+            torch.int8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        ):
+            keep_mask = attention_mask
+            if keep_mask.dtype != torch.bool:
+                keep_mask = keep_mask != 0
+
+            keep_mask = self._normalize_attention_mask_shape(
+                keep_mask,
+                q_len=q_len,
+                k_len=k_len,
+            )
+
+            additive_mask = torch.zeros(
+                keep_mask.shape,
+                dtype=torch.float32,
+                device=device,
+            )
+            additive_mask = additive_mask.masked_fill(~keep_mask, fill_val)
+
+            # OR semantics for two additive masks:
+            #   allowed + allowed -> 0
+            #   masked by either side -> fill_val
+            # Clamp prevents fill_val + fill_val from becoming twice as negative.
+            mask = torch.clamp(causal_mask + additive_mask, min=fill_val)
+            return self._fq(mask, self.obs_causal_mask)
+
+        if torch.is_floating_point(attention_mask):
+            attention_mask = self._normalize_attention_mask_shape(
+                attention_mask,
+                q_len=q_len,
+                k_len=k_len,
+            )
+            return self._fq(attention_mask, self.obs_causal_mask)
+
+        raise RuntimeError(
+            "Unsupported attention_mask dtype for Qwen text attention: "
+            f"dtype={attention_mask.dtype}, shape={tuple(attention_mask.shape)}"
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -201,15 +364,13 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             k_rot, v = past_key_values.update(k_rot, v, self.layer_idx, cache_kwargs)
 
-        # Build causal mask if needed
-        if attention_mask is None or attention_mask.dtype == torch.bool:
-            q_len = q_rot.size(-2)
-            k_len = k_rot.size(-2)
-            attention_mask = self.causal_mask_template[..., :q_len, :k_len].to(
-                hidden.device
-            )
-        if torch.is_floating_point(attention_mask):
-            attention_mask = self._fq(attention_mask, self.obs_causal_mask)
+        # Build additive attention mask.
+        attention_mask = self._build_attention_mask(
+            attention_mask=attention_mask,
+            q_len=q_rot.size(-2),
+            k_len=k_rot.size(-2),
+            device=hidden.device,
+        )
 
         attn_weights_parts = []
         attn_out_parts = []

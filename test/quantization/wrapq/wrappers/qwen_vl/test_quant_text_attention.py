@@ -12,9 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import types
 import unittest
 
 import torch
+import torch.nn as nn
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
@@ -294,3 +296,37 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         assert isinstance(cache.v, torch.Tensor)
         self.assertEqual(cache.k.shape, (B, self.num_kv_heads, 5, self.head_dim))
         self.assertEqual(cache.v.shape, (B, self.num_kv_heads, 5, self.head_dim))
+
+    def test_qwen_text_attention_bool_mask_is_combined_with_causal_mask(self):
+        qcfg = PTQConfig(attention_mask_fill_value=-100.0)
+        attn = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
+
+        mask = torch.full((1, 1, 8, 8), -100.0)
+        mask.triu_(1)
+        attn.register_buffer("causal_mask_template", mask, persistent=False)
+
+        # B=1, K=4. Last key is padding, so every query should mask key index 3.
+        keep_mask = torch.tensor([[1, 1, 1, 0]], dtype=torch.bool)
+
+        out = attn._build_attention_mask(
+            attention_mask=keep_mask,
+            q_len=4,
+            k_len=4,
+            device=torch.device("cpu"),
+        )
+
+        assert out.shape == (1, 1, 4, 4)
+
+        # Causal mask: query 0 cannot attend to keys 1,2,3.
+        assert out[0, 0, 0, 0].item() == 0.0
+        assert out[0, 0, 0, 1].item() == -100.0
+        assert out[0, 0, 0, 2].item() == -100.0
+
+        # Padding mask: key 3 is masked for all queries.
+        assert torch.all(out[..., 3] == -100.0)
+
+        # Query 2 can attend to keys 0,1,2, but not key 3.
+        assert out[0, 0, 2, 0].item() == 0.0
+        assert out[0, 0, 2, 1].item() == 0.0
+        assert out[0, 0, 2, 2].item() == 0.0
+        assert out[0, 0, 2, 3].item() == -100.0
