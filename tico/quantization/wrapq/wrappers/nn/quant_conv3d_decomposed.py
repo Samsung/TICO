@@ -257,8 +257,10 @@ class QuantConv3dDecomposed(QuantModuleBase):
         dT, dH, dW = self.module.dilation
         groups = self.module.groups
 
-        if C_in != C_in_weight:
-            raise RuntimeError("Channels number mismatch")
+        if C_in != C_in_weight * groups:
+            raise RuntimeError(
+                f"Channels mismatch: input C={C_in}, weight C/groups={C_in_weight}, groups={groups}"
+            )
 
         # Parse padding
         padding = self._parse_padding(self.module.padding)

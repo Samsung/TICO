@@ -50,6 +50,21 @@ class TestQuantSiLU(unittest.TestCase):
         self.assertGreater(diff, 0.0)  # not identical
         self.assertLess(diff, 0.3)  # acceptably close
 
+    def test_uses_quantized_input_for_mul(self):
+        x = torch.tensor([-2.0, -0.5, 0.5, 3.0])
+
+        def fake_fq(tensor, obs):
+            if obs is self.qsilu.obs_act_in:
+                return torch.zeros_like(tensor)
+            return tensor
+
+        self.qsilu._fq = fake_fq  # type: ignore[method-assign]
+
+        with torch.no_grad():
+            out = self.qsilu(x)
+
+        torch.testing.assert_close(out, torch.zeros_like(x))
+
     def test_dtype_override(self):
         cfg = PTQConfig(
             default_dtype=DType.uint(8),

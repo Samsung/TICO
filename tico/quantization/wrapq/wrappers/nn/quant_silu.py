@@ -51,7 +51,7 @@ class QuantSiLU(QuantModuleBase):
         s = torch.sigmoid(x_q)
         s = self._fq(s, self.obs_sig)
 
-        y = x * s
+        y = x_q * s
         y = self._fq(y, self.obs_mul)
 
         return y

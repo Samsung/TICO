@@ -109,6 +109,42 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
                 self.assertEqual(q_out.shape, fp_out.shape)
                 self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-6, rtol=1e-6))
 
+    def test_decomposition_correctness_grouped_conv_no_quant(self):
+        """
+        In NO_QUANT mode, grouped Conv3d should match FP32 Conv3d.
+
+        For grouped Conv3d, weight.shape[1] is in_channels // groups, not the
+        full input channel count. This regression test guards against rejecting
+        valid grouped Conv3d modules by comparing input channels directly with
+        weight.shape[1].
+        """
+        fp32 = nn.Conv3d(
+            in_channels=4,
+            out_channels=8,
+            kernel_size=(2, 3, 3),
+            stride=(1, 1, 1),
+            padding=(0, 1, 1),
+            groups=2,
+            bias=True,
+        )
+        q_conv = QuantConv3dDecomposed(fp32)
+
+        x = torch.randn(2, 4, 4, 8, 8)
+
+        q_out = q_conv(x)
+        fp_out = F.conv3d(
+            x,
+            fp32.weight,
+            fp32.bias,
+            stride=fp32.stride,
+            padding=fp32.padding,
+            dilation=fp32.dilation,
+            groups=fp32.groups,
+        )
+
+        self.assertEqual(q_out.shape, fp_out.shape)
+        self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-6, rtol=1e-6))
+
     def test_quantized_output_close(self):
         """
         After calibration and freeze, quantized output should:
