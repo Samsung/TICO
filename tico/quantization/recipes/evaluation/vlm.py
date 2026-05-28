@@ -59,6 +59,40 @@ def print_vqa_results(title: str, results: dict[str, tuple[int, int]]) -> None:
         print(f"{task}: EM={correct / total:.4f}  (n={total})")
 
 
+def evaluate_coco_score_dataset(
+    *,
+    model: Any,
+    processor: Any,
+    dataset_name: str,
+    device: str,
+    n_samples: int,
+    max_seq_len: int | None,
+) -> dict[str, float]:
+    """
+    Evaluate a COCO-score-compatible VLM dataset.
+
+    Args:
+        model: Model to evaluate.
+        processor: Hugging Face processor paired with the model.
+        dataset_name: Dataset key accepted by the shared VLM evaluation helper.
+        device: Device string used for inference.
+        n_samples: Number of samples to evaluate. -1 means the full dataset.
+        max_seq_len: Optional maximum text sequence length.
+
+    Returns:
+        COCO-style metric values returned by the shared evaluation helper.
+    """
+    dataset, _ = get_dataset(dataset_name, n=n_samples)
+    return get_coco_scores_on_dataset(
+        model=model,
+        processor=processor,
+        dataset_name=dataset_name,
+        ds=dataset,
+        device=device,
+        max_seq_len=max_seq_len,
+    )
+
+
 def evaluate_coco(
     *,
     model: Any,
@@ -67,18 +101,74 @@ def evaluate_coco(
     n_samples: int,
     max_seq_len: int | None,
 ) -> dict[str, float]:
-    with io.StringIO() as buffer, contextlib.redirect_stdout(
-        buffer
-    ), contextlib.redirect_stderr(buffer):
-        dataset, _ = get_dataset("coco", n=n_samples)
-        return get_coco_scores_on_dataset(
-            model=model,
-            processor=processor,
-            dataset_name="coco",
-            ds=dataset,
-            device=device,
-            max_seq_len=max_seq_len,
-        )
+    """
+    Evaluate the COCO captioning dataset with COCO-style metrics.
+
+    Args:
+        model: Model to evaluate.
+        processor: Hugging Face processor paired with the model.
+        device: Device string used for inference.
+        n_samples: Number of samples to evaluate. -1 means the full dataset.
+        max_seq_len: Optional maximum text sequence length.
+
+    Returns:
+        COCO-style metric values.
+    """
+    return evaluate_coco_score_dataset(
+        model=model,
+        processor=processor,
+        dataset_name="coco",
+        device=device,
+        n_samples=n_samples,
+        max_seq_len=max_seq_len,
+    )
+
+
+def evaluate_llava_bench(
+    *,
+    model: Any,
+    processor: Any,
+    device: str,
+    n_samples: int,
+    max_seq_len: int | None,
+) -> dict[str, float]:
+    """
+    Evaluate LLaVA-Bench-in-the-Wild with COCO-style metrics.
+
+    Args:
+        model: Model to evaluate.
+        processor: Hugging Face processor paired with the model.
+        device: Device string used for inference.
+        n_samples: Number of samples to evaluate. -1 means the full dataset.
+        max_seq_len: Optional maximum text sequence length.
+
+    Returns:
+        COCO-style metric values.
+    """
+    return evaluate_coco_score_dataset(
+        model=model,
+        processor=processor,
+        dataset_name="llava_bench",
+        device=device,
+        n_samples=n_samples,
+        max_seq_len=max_seq_len,
+    )
+
+
+def print_coco_score_results(title: str, results: dict[str, float]) -> None:
+    """
+    Print COCO-style score results while keeping count fields readable.
+
+    Args:
+        title: Section title to print before metrics.
+        results: Metric mapping returned by a COCO-style evaluation helper.
+    """
+    print(title)
+    for metric, value in results.items():
+        if isinstance(value, int):
+            print(f"{metric:<14} {value:d}")
+        else:
+            print(f"{metric:<14} {float(value):.3f}")
 
 
 def evaluate_vlm_text_ppl(

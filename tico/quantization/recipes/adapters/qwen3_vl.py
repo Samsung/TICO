@@ -31,8 +31,10 @@ from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
 from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
+    evaluate_llava_bench,
     evaluate_vlm_text_ppl,
     evaluate_vqa_tasks,
+    print_coco_score_results,
     print_vqa_results,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
@@ -374,9 +376,17 @@ class Qwen3VLAdapter(ModelAdapter):
                 n_samples=n_samples,
                 max_seq_len=max_seq_len,
             )
-            print("\n=== COCO Evaluation ===")
-            for metric, value in coco_results.items():
-                print(f"{metric:<10} {value:.3f}")
+            print_coco_score_results("\n=== COCO Evaluation ===", coco_results)
+
+        if eval_cfg.get("llava_bench", False):
+            llava_results = evaluate_llava_bench(
+                model=ctx.model,
+                processor=ctx.processor,
+                device=str(ctx.device),
+                n_samples=n_samples,
+                max_seq_len=max_seq_len,
+            )
+            print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
 
         mmlu = eval_cfg.get("mmlu", {})
         if mmlu.get("enabled", False):

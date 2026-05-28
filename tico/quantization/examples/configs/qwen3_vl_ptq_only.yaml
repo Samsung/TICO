@@ -49,6 +49,7 @@ evaluation:
   vlm_tasks:
     - vqav2
   coco: false
+  llava_bench: false
   mmlu:
     enabled: false
   hellaswag:

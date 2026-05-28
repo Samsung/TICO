@@ -205,6 +205,55 @@ class TestQwen3VLAdapter(unittest.TestCase):
             captured["exclude_appliers"], ["_apply_if_qwen3vl_text_decoder"]
         )
 
+    def test_evaluate_dispatches_coco_and_llava_bench(self):
+        """Qwen3VLAdapter should dispatch COCO-style image caption benchmarks."""
+        calls = []
+        adapter = Qwen3VLAdapter()
+        ctx = RecipeContext(
+            cfg={
+                "evaluation": {
+                    "enabled": True,
+                    "coco": True,
+                    "llava_bench": True,
+                    "n_samples": 2,
+                    "max_seq_len": 128,
+                }
+            },
+            adapter=adapter,
+            model=object(),
+            processor=SimpleNamespace(tokenizer=object()),
+        )
+        ctx.device = torch.device("cpu")
+
+        def fake_evaluate_coco(**kwargs):
+            calls.append(("coco", kwargs))
+            return {"CIDEr": 1.0, "total_count": 2, "skipped_count": 0}
+
+        def fake_evaluate_llava_bench(**kwargs):
+            calls.append(("llava_bench", kwargs))
+            return {"CIDEr": 2.0, "total_count": 2, "skipped_count": 1}
+
+        def fake_print_coco_score_results(title, results):
+            calls.append(("print", {"title": title, "results": results}))
+
+        with patch.object(qwen_mod, "evaluate_coco", fake_evaluate_coco), patch.object(
+            qwen_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+        ), patch.object(
+            qwen_mod, "print_coco_score_results", fake_print_coco_score_results
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.evaluate(ctx)
+
+        self.assertEqual(calls[0][0], "coco")
+        self.assertEqual(calls[0][1]["n_samples"], 2)
+        self.assertEqual(calls[0][1]["max_seq_len"], 128)
+        self.assertEqual(calls[1][0], "print")
+        self.assertIn("COCO", calls[1][1]["title"])
+        self.assertEqual(calls[2][0], "llava_bench")
+        self.assertEqual(calls[2][1]["device"], "cpu")
+        self.assertEqual(calls[3][0], "print")
+        self.assertIn("Llava Bench", calls[3][1]["title"])
+
     def test_evaluate_dispatches_mmmu_and_ppl(self):
         """Qwen3VLAdapter should dispatch optional MMMU and PPL evaluation blocks."""
         calls = []
@@ -256,3 +305,7 @@ class TestQwen3VLAdapter(unittest.TestCase):
         self.assertEqual(calls[0][1]["subjects"], ["Accounting"])
         self.assertEqual(calls[1][0], "ppl")
         self.assertEqual(calls[1][1]["stride"], 32)
+
+
+if __name__ == "__main__":
+    unittest.main()

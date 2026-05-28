@@ -85,6 +85,7 @@ evaluation:
     - vqav2
     - textvqa
   coco: false
+  llava_bench: false
   mmlu:
     enabled: false
     subjects: null
