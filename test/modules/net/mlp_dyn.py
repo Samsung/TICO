@@ -17,7 +17,7 @@ from torch.export import Dim
 
 from test.modules.base import TestModuleBase
 
-from test.utils.tag import use_onert
+from test.support.tag import use_onert
 
 B = 4
 SEQ_LEN = 8

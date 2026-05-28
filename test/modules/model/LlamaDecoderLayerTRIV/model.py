@@ -22,7 +22,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from test.modules.base import TestModuleBase
-from test.utils.tag import target
+from test.support.tag import target
 
 
 # Define the sequence length for the test case.

@@ -30,8 +30,8 @@ from tico.utils.utils import SuppressWarning
 from torch.export import export
 from torch.utils import _pytree as pytree
 
-from test.utils.infer import infer_with_circle_interpreter, infer_with_onert
-from test.utils.runtime import Runtime
+from test.support.infer import infer_with_circle_interpreter, infer_with_onert
+from test.support.runtime import Runtime
 
 # TODO Move this to utils or helper
 
@@ -237,7 +237,7 @@ def validate_result(
         else:
             raise TypeError("Expected result must be a tensor or scalar value.")
 
-        # Check both dypte and value mismatch
+        # Check both dtype and value mismatch
         torch.testing.assert_close(
             actual=circle_tensor,
             expected=expected_tensor,

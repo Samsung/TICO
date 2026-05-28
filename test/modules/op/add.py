@@ -17,7 +17,7 @@ from tico.config.v1 import CompileConfigV1
 
 from test.modules.base import TestModuleBase
 
-from test.utils import tag
+from test.support import tag
 
 
 class SimpleAdd(TestModuleBase):

@@ -17,7 +17,7 @@ from torch.nn import functional as F
 
 from test.modules.base import TestModuleBase
 
-from test.utils.tag import test_without_inference
+from test.support.tag import test_without_inference
 
 
 class SimpleLinear(TestModuleBase):

@@ -30,14 +30,14 @@
 | Requirement | Test Module(s) | Test File(s) | Notes |
 |-------------|----------------|--------------|-------|
 | **RF‑1**: PyTorch Model Conversion | `test/pt2_to_circle_test/` | `test_pt2_to_circle.py`, `test_op.py` | End‑to‑end conversion of exported programs and PT2 models. |
-| **RF‑2**: Optimization Passes | `test/unit_test/pass_test/` | `test_remove_redundant_reshape.py`, `test_fuse_redundant_reshape_to_mean.py`, … | Each pass is exercised with representative graphs. |
+| **RF‑2**: Optimization Passes | `test/unit_test/passes/` | `test_remove_redundant_reshape.py`, `test_fuse_redundant_reshape_to_mean.py`, … | Each pass is exercised with representative graphs. |
 | **RF‑3**: Quantization Integration | `test/quantization/` | `test_propagate_quant_param.py`, `test_insert_quantize_on_dtype_mismatch.py`, `test_fold_quant_ops.py` | Covers folding, bias quantization, dtype‑mismatch insertion, and forward/backward propagation. |
 | **RF‑4**: Verification & Debugging | `test/pt2_to_qcircle_test/` | `test_op.py` | Runs the generated Circle model on the reference interpreter (`circle-interpreter` or `onert`) and compares outputs. |
 | **RF‑5**: NPU Compiler Compatibility | `test/pt2_to_qcircle_test/` | `test_op.py` | Uses the `onert` runtime (installed via `requirements_pre_*.txt`) to validate compatibility. |
 | **RNF‑1**: Conversion Speed | `test/performance/` | `benchmark_perf.py` | Benchmark script should time `tico.convert()` on Llama‑3.2‑1B and larger models. |
 | **RNF‑2**: File Size | `test/performance/` | `benchmark_perf.py` | Compare Circle file size against `torch.save(...).size`. |
 | **RNF‑3**: Accuracy (PEIR ≤ 0.03) | `test/pt2_to_qcircle_test/` | `test_op.py` | Uses `tico.quantization.evaluation.metric.compute_peir` to compute PEIR for each output tensor. |
-| **RNF‑4 / RNF‑5**: Operator Coverage & Schema Updates | `test/unit_test/pass_test/` & `test/unit_test/quantization_test/` | Various | New operators are added to the test suite when they are supported. |
+| **RNF‑4 / RNF‑5**: Operator Coverage & Schema Updates | `test/unit_test/passes/` & `test/unit_test/quantization/` | Various | New operators are added to the test suite when they are supported. |
 | **RNF‑6**: API Usability | `test/README.md` (manual) & example scripts in `test/` | – | Example scripts (`dump_exported_program.py`, `dump_pt2_model.py`) demonstrate the public API. |
 | **RNF‑7 / RNF‑8**: Environment & Compliance | CI workflows (`.github/workflows/*.yaml`) | – | CI runs on Linux with Python 3.10+, checks license headers. |
 
@@ -51,8 +51,8 @@ test/
 ├── dump_pt2_model.py        # Example for PT2 model generation
 ├── requirements_*.txt       # Dependency lists for different PyTorch versions
 ├── unit_test/
-│   ├── pass_test/           # Unit tests for each conversion pass
-│   └── quantization_test/   # Unit tests for quantization passes
+│   ├── passes/           # Unit tests for each conversion pass
+│   └── quantization/   # Unit tests for quantization passes
 ├── pt2_to_circle_test/      # End‑to‑end conversion tests (PT2 → Circle)
 ├── pt2_to_qcircle_test/     # End‑to‑end conversion + quantization tests
 ├── performance/             # Performance tests
@@ -106,7 +106,7 @@ All functional requirements are exercised by variations of this flow.
 | **Stability** | Re‑run same conversion 5×, variance < 5 % | – |
 | **Compatibility** | Successful execution on `onert` 0.2.0.dev* | – |
 
-Performance test is executed with `ccex test -p`. Details are implemented in `test/peformance/benchmark_perf.py`.
+Performance test is executed with `ccex test -p`. Details are implemented in `test/performance/benchmark_perf.py`.
 
 
 ## 6. Continuous Integration (CI)
@@ -119,7 +119,7 @@ Performance test is executed with `ccex test -p`. Details are implemented in `te
 ## 7. Maintenance Process
 
 1. **When a new functional requirement is added** – create a corresponding test module under `test/` and update the mapping table above.  
-2. **When a new pass is introduced** – add a unit test in `test/unit_test/pass_test/` that exercises the pass on a minimal graph.  
+2. **When a new pass is introduced** – add a unit test in `test/unit_test/passes/` that exercises the pass on a minimal graph.  
 3. **When the Circle schema evolves** – update the compatibility tests in `test/pt2_to_qcircle_test/` and bump the version in `requirements_pre_*.txt`.  
 
 

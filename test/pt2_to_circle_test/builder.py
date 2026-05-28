@@ -36,8 +36,8 @@ from test.pt2_to_circle_test.test_pt2_to_circle import (
     validate_result,
     verify_circle,
 )
-from test.utils.base_builders import TestDictBuilderBase, TestRunnerBase
-from test.utils.tag import is_tagged
+from test.support.base_builders import TestDictBuilderBase, TestRunnerBase
+from test.support.tag import is_tagged
 
 
 @contextlib.contextmanager

@@ -13,9 +13,9 @@
 # limitations under the License.
 
 from test.pt2_to_circle_test.builder import NormalTestDictBuilder
-from test.utils.helper import declare_unittests
+from test.support.helper import declare_unittests
 
-# NOTE Thie file's name must start with `test_` to be found by unittest
+# NOTE This file's name must start with `test_` to be found by unittest
 
 
 declare_unittests(globals(), "test.modules.op", NormalTestDictBuilder)

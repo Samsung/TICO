@@ -16,7 +16,7 @@ import torch
 
 from test.modules.base import TestModuleBase
 
-from test.utils import tag
+from test.support import tag
 
 
 class SimpleSliceCopy(TestModuleBase):

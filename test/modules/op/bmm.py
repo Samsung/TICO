@@ -16,7 +16,7 @@ import torch
 from tico.config.v1 import CompileConfigV1
 
 from test.modules.base import TestModuleBase
-from test.utils.tag import test_negative, use_onert
+from test.support.tag import test_negative, use_onert
 
 
 class SimpleBatchMatMul(TestModuleBase):

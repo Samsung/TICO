@@ -19,7 +19,7 @@ from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from test.modules.base import TestModuleBase
-from test.utils import tag
+from test.support import tag
 
 
 @tag.use_onert

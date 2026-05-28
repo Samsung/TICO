@@ -20,7 +20,7 @@ from unittest import TestSuite
 
 from test.pt2_to_circle_test.builder import NormalTestDictBuilder
 
-# NOTE Thie file's name must start with `test_` to be found by unittest
+# NOTE This file's name must start with `test_` to be found by unittest
 
 testdir = Path(os.path.dirname(os.path.dirname(__file__)))
 

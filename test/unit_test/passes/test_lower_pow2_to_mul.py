@@ -13,20 +13,32 @@
 # limitations under the License.
 
 import torch
+from tico.passes.lower_pow2_to_mul import LowerPow2ToMul
 
-from test.modules.base import TestModuleBase
+from test.support.helper import num_of_ops
+from test.support.pass_value_test import SinglePassValueTest
 
-from test.support import tag
 
-
-@tag.use_onert
-class SimpleRound(TestModuleBase):
+class Pow2Net(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x):
-        result = torch.round(x)
-        return result
+        z = x.pow(2)
+        return z
 
     def get_example_inputs(self):
-        return (torch.randn(3, 5),), {}
+        return (torch.randn(3, 4),), {}
+
+
+class LowerPow2ToMulTest(SinglePassValueTest):
+    def test_pass(self):
+        self.setup(Pow2Net())
+        self.assertEqual(
+            num_of_ops(self.exported_program(), [torch.ops.aten.pow.Tensor_Scalar]), 1
+        )
+
+        self.run_value_test(LowerPow2ToMul())
+        self.assertEqual(
+            num_of_ops(self.exported_program(), [torch.ops.aten.pow.Tensor_Scalar]), 0
+        )

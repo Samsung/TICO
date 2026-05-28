@@ -17,7 +17,7 @@ from torch.export import Dim
 
 from test.modules.base import TestModuleBase
 
-from test.utils.tag import skip, use_onert
+from test.support.tag import skip, use_onert
 
 
 class SimpleConvTranspose(TestModuleBase):

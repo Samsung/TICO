@@ -16,7 +16,7 @@ import torch
 
 from test.modules.base import TestModuleBase
 
-from test.utils.tag import skip
+from test.support.tag import skip
 
 
 class SimpleSumDimMinus1(TestModuleBase):
