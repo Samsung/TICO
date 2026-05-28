@@ -123,8 +123,8 @@ def _gelu(x: torch.Tensor, approximate="none") -> torch.Tensor:
     return torch.nn.functional.gelu(x, approximate=approximate)
 
 
-def _elu(x: torch.Tensor) -> torch.Tensor:
-    return torch.nn.functional.elu(x)
+def _elu(x: torch.Tensor, alpha: float = 1.0) -> torch.Tensor:
+    return torch.nn.functional.elu(x, alpha=alpha)
 
 
 @register(nn.Sigmoid)
