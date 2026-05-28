@@ -463,6 +463,7 @@ class QuantQwen3VLModel(QuantModuleBase):
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
                 attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
             )
             self.rope_deltas = rope_deltas
         # then use the prev pre-calculated rope-deltas to get the correct position ids
@@ -483,10 +484,11 @@ class QuantQwen3VLModel(QuantModuleBase):
 
     def _get_rope_index(
         self,
-        input_ids: torch.Tensor,
-        image_grid_thw: torch.Tensor,
-        video_grid_thw: torch.Tensor,
-        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        image_grid_thw: torch.Tensor | None,
+        video_grid_thw: torch.Tensor | None,
+        attention_mask: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None = None,
     ):
         """Calculate 3D rope index based on image and video sizes."""
         # Since we use timestamps to separate videos, video_grid_thw should be split
@@ -552,6 +554,7 @@ class QuantQwen3VLModel(QuantModuleBase):
 
                     if ed_image < ed_video:
                         # This is an image
+                        assert image_grid_thw is not None
                         t, h, w = (
                             image_grid_thw[image_index][0],
                             image_grid_thw[image_index][1],
@@ -562,6 +565,7 @@ class QuantQwen3VLModel(QuantModuleBase):
                         ed = ed_image
                     else:
                         # This is a video
+                        assert video_grid_thw is not None
                         t, h, w = (
                             video_grid_thw[video_index][0],
                             video_grid_thw[video_index][1],
@@ -661,15 +665,25 @@ class QuantQwen3VLModel(QuantModuleBase):
                 )[0]
                 mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
             else:
+                if input_ids is not None:
+                    batch_size, seq_len = input_ids.shape
+                    device = input_ids.device
+                    dtype = input_ids.dtype
+                else:
+                    assert inputs_embeds is not None
+                    batch_size, seq_len = inputs_embeds.shape[:2]
+                    device = inputs_embeds.device
+                    dtype = torch.long
+
                 position_ids = (
-                    torch.arange(input_ids.shape[1], device=input_ids.device)
+                    torch.arange(seq_len, device=device, dtype=dtype)
                     .view(1, 1, -1)
-                    .expand(3, input_ids.shape[0], -1)
+                    .expand(3, batch_size, -1)
                 )
                 mrope_position_deltas = torch.zeros(
-                    [input_ids.shape[0], 1],
-                    device=input_ids.device,
-                    dtype=input_ids.dtype,
+                    [batch_size, 1],
+                    device=device,
+                    dtype=dtype,
                 )
 
             return position_ids, mrope_position_deltas

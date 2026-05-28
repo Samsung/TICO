@@ -545,6 +545,28 @@ class TestQuantQwen3VLModel(unittest.TestCase):
             output.last_hidden_state.shape, (batch_size, seq_len, self.hidden_size)
         )
 
+    def test_forward_with_inputs_embeds_without_attention_mask(self):
+        """Test text-only inputs_embeds path when attention_mask is omitted."""
+        ptq_config = self._make_ptq_config(grid_thw=(1, 8, 8))
+        q_model = QuantQwen3VLModel(self.fp_model, qcfg=ptq_config)
+
+        batch_size = 2
+        seq_len = 20
+        inputs_embeds = torch.randn(batch_size, seq_len, self.hidden_size)
+
+        with torch.no_grad():
+            output = q_model(input_ids=None, inputs_embeds=inputs_embeds)
+
+        self.assertTrue(hasattr(output, "last_hidden_state"))
+        self.assertTrue(hasattr(output, "rope_deltas"))
+        self.assertEqual(
+            output.last_hidden_state.shape,
+            (batch_size, seq_len, self.hidden_size),
+        )
+        self.assertEqual(output.rope_deltas.shape, (batch_size, 1))
+        self.assertEqual(output.rope_deltas.device, inputs_embeds.device)
+        self.assertEqual(output.rope_deltas.dtype, torch.long)
+
     def test_forward_with_inputs_embeds_and_images(self):
         """Test forward pass with inputs_embeds and images (triggers QuantQwen3VLModel._get_placeholder_mask)."""
         thw = (1, 8, 8)
