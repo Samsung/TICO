@@ -18,8 +18,9 @@
 
 # https://github.com/pytorch/executorch/blob/61ddee5/exir/passes/constant_prop_pass.py
 
+import copy
 from collections import OrderedDict
-from typing import Any, List, Mapping, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Mapping, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -37,6 +38,7 @@ from torch.export.exported_program import InputKind, InputSpec
 from torch.utils import _pytree as pytree
 
 from tico.serialize.circle_graph import _PRIMITIVE_TYPES
+from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
 from tico.utils.graph import create_input_spec, generate_fqn, get_first_user_input
 from tico.utils.passes import PassBase, PassResult
@@ -59,6 +61,8 @@ TensorStorageIdentityKey = tuple[
     torch.layout,
 ]
 QuantizedTensorCacheKey = tuple[Any, ...]
+ConstPropFoldFilter = Callable[[torch.fx.Node], bool]
+ConstPropFoldedNodeCallback = Callable[[torch.fx.Node, torch.Tensor], None]
 
 
 def _get_quantized_decomposed_default_op(op_name: str) -> Any | None:
@@ -369,8 +373,17 @@ def get_data(
 
 def propagate_constants(
     exported_program: ExportedProgram,
+    fold_filter: Optional[ConstPropFoldFilter] = None,
+    folded_node_callback: Optional[ConstPropFoldedNodeCallback] = None,
 ) -> OrderedDict[torch.fx.Node, torch.Tensor]:
     """Propagate constants and return node-to-constant tensor mappings.
+
+    Args:
+        exported_program: Exported program to update.
+        fold_filter: Optional predicate that decides whether a constant node may
+            be folded.
+        folded_node_callback: Optional callback invoked after a node is evaluated
+            as a constant and before the folded tensor is materialized.
 
     Quantize ops are cached by tied source tensor identity and quantization
     parameters. This preserves tied weight sharing through constant propagation:
@@ -389,6 +402,8 @@ def propagate_constants(
         if node.op != "call_function":
             continue
         if node.target in dequantize_ops:
+            continue
+        if fold_filter is not None and not fold_filter(node):
             continue
         if not has_constant_data(
             [node.args, node.kwargs],
@@ -418,6 +433,9 @@ def propagate_constants(
         # Propagate constant because all of its args are constant tensors.
         with torch.no_grad():
             prop_constant_tensor = node.target(*args_data, **kwargs_data)
+
+        if folded_node_callback is not None:
+            folded_node_callback(node, prop_constant_tensor)
 
         if quantized_tensor_cache_key is not None:
             quantized_tensor_cache[quantized_tensor_cache_key] = prop_constant_tensor
@@ -504,10 +522,15 @@ def create_constant_placeholder(
         exported_program.constants[prop_constant_tensor_fqn] = prop_constant_tensor
 
         # Replace the original node with the new constant node.
+        propagated_meta = dict(node.meta)
         node.replace_all_uses_with(const_placeholder_node, propagate_meta=True)
         exported_program.graph.erase_node(node)
 
         # Update the meta data of the new placeholder node.
+        if QPARAM_KEY in propagated_meta:
+            const_placeholder_node.meta[QPARAM_KEY] = copy.deepcopy(
+                propagated_meta[QPARAM_KEY]
+            )
         const_placeholder_node.meta["val"] = fake_mode.from_tensor(
             prop_constant_tensor, static_shapes=True
         )
@@ -550,8 +573,15 @@ class ConstPropPass(PassBase):
     [5] Update the input specs.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        fold_filter: Optional[ConstPropFoldFilter] = None,
+        folded_node_callback: Optional[ConstPropFoldedNodeCallback] = None,
+    ) -> None:
         super().__init__()
+        self._fold_filter = fold_filter
+        self._folded_node_callback = folded_node_callback
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
@@ -562,7 +592,11 @@ class ConstPropPass(PassBase):
         # [1], [2]
         const_node_to_tensor: OrderedDict[
             torch.fx.Node, torch.Tensor
-        ] = propagate_constants(exported_program)
+        ] = propagate_constants(
+            exported_program,
+            fold_filter=self._fold_filter,
+            folded_node_callback=self._folded_node_callback,
+        )
         # [3]
         placeholders = create_constant_placeholder(
             const_node_to_tensor, exported_program

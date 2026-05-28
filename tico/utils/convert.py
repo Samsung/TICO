@@ -71,6 +71,7 @@ from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
 )
 from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
+from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropPass
 from tico.quantization.passes.quantize_bias import QuantizeBias
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.quantization.wrapq.utils.check_missing_qparam import check_missing_qparam
@@ -309,6 +310,7 @@ def convert_exported_module_to_circle(
                 RemoveWeightDequantOp(),
                 PropagateQParamForward(),
                 PropagateQParamBackward(),
+                QParamSafeConstPropPass(),
                 QuantizeBias(),
                 RemoveUnusedPlaceholder(),
                 InsertQuantizeOnDtypeMismatch(),
