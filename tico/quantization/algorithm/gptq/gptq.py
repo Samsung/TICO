@@ -333,6 +333,11 @@ class GPTQ:
         H[dead, dead] = 1
         W[:, dead] = 0
 
+        if groupsize != -1 and self.quantizer.mse in {"mse_for_gptq", "smse_for_gptq"}:
+            raise ValueError(
+                "GPTQ-adjusted MSE currently does not support groupsize != -1"
+            )
+
         if static_groups:
             import copy
 
@@ -342,6 +347,8 @@ class GPTQ:
                 quantizer.find_params(W[:, i : (i + groupsize)], weight=True)
                 groups.append(quantizer)
 
+        perm = None
+        invperm = None
         if actorder:
             perm = torch.argsort(torch.diag(H), descending=True)
             W = W[:, perm]
@@ -387,7 +394,7 @@ class GPTQ:
                     else:
                         idx: torch.Tensor | int = i1 + i
                         if actorder:
-                            idx = perm[idx]
+                            idx = perm[idx]  # type: ignore[index]
                         self.quantizer = groups[idx // groupsize]
 
                 q = quantize(
