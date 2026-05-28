@@ -418,11 +418,14 @@ class DivTensorArgs:
 @dataclass
 class EluArgs:
     """
-    elu(Tensor self) -> Tensor
+    elu(Tensor self, Scalar alpha=1, Scalar scale=1, Scalar input_scale=1) -> Tensor
     """
 
     input: torch.fx.Node
-    alpha: float = 1.0
+    alpha: Union[int, float] = 1
+    scale: Union[int, float] = 1
+    input_scale: Union[int, float] = 1
+
 
 
 @enforce_type
