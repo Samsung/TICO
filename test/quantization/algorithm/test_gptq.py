@@ -473,6 +473,294 @@ class GPTQTest(unittest.TestCase):
             "m.1" in q_m.quantizers  # type: ignore[operator]
         ), "second conv node is not quantized"
 
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv2d_with_logits_mse_for_gptq(self):
+        q_m = NormConv2DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        # Apply GPTQ with mse_for_gptq (no sensitivity needed)
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="mse_for_gptq",
+                perchannel=True,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv2d_with_logits_smse_for_gptq(self):
+        q_m = NormConv2DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ with smse_for_gptq
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse_for_gptq",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv1d_with_logits_mse_for_gptq(self):
+        q_m = NormConv1DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        # Apply GPTQ with mse_for_gptq (no sensitivity needed)
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="mse_for_gptq",
+                perchannel=True,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "conv" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "conv2" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv1d_with_logits_smse_for_gptq(self):
+        q_m = NormConv1DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ with smse_for_gptq
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse_for_gptq",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "conv" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "conv2" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_transposed_conv2d_with_logits_mse_for_gptq(self):
+        q_m = TransposedConv2DGeneralWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        # Apply GPTQ with mse_for_gptq (no sensitivity needed)
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="mse_for_gptq",
+                perchannel=True,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "tconv" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "tconv2" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_transposed_conv2d_with_logits_smse_for_gptq(self):
+        q_m = TransposedConv2DGeneralWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ with smse_for_gptq
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse_for_gptq",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "tconv" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "tconv2" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv3d_with_logits_mse_for_gptq(self):
+        q_m = NormConv3DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        # Apply GPTQ with mse_for_gptq (no sensitivity needed)
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="mse_for_gptq",
+                perchannel=True,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
+    @unittest.skipIf(
+        not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"
+    )
+    def test_normconv3d_with_logits_smse_for_gptq(self):
+        q_m = NormConv3DWithLogits()
+        q_m.eval()
+        ori_m = q_m
+
+        dataset = []  # type: ignore[var-annotated]
+        for _ in range(30):
+            args, _ = ori_m.get_example_inputs()
+            dataset.append(*args)
+
+        calibrator = SensitivityCalibrator(q_m, dataset, show_progress=False)
+        sens = calibrator.compute_sensitivity_info()
+
+        # Apply GPTQ with smse_for_gptq
+        q_m = prepare(
+            q_m,
+            GPTQConfig(
+                show_progress=False,
+                mse="smse_for_gptq",
+                perchannel=True,
+                sensitivity=sens,
+            ),
+        )
+        for input in dataset:
+            q_m(input)
+        convert(q_m, inplace=True)
+        # check that all convolution nodes are quantized
+        assert hasattr(q_m, "quantizers"), "quantized model does not have quantizers"
+        assert (
+            "m.0" in q_m.quantizers  # type: ignore[operator]
+        ), "first conv node is not quantized"
+        assert (
+            "m.1" in q_m.quantizers  # type: ignore[operator]
+        ), "second conv node is not quantized"
+
         # Enable after Conv2D quantization support
         if False:
             args, kwargs = ori_m.get_example_inputs()

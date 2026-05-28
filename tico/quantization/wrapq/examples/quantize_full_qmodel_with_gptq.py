@@ -218,8 +218,8 @@ def parse_args():
         "--gptq_mse",
         type=str,
         default=None,
-        choices=["mse", "smse"],
-        help="Whether and how to use mse in gptq (none/mse/smse/)",
+        choices=["mse", "smse", "smse_for_gptq", "mse_for_gptq"],
+        help="Whether and how to use mse in gptq (none/mse/smse/smse_for_gptq/mse_for_gptq)",
     )
     parser.add_argument(
         "--max_seq_len",
@@ -1285,9 +1285,9 @@ def build_calibration_inputs(
 
 def compute_or_load_sensitivity(model, calib_inputs, args):
     """
-    Load or compute sensitivity information for SMSE GPTQ.
+    Load or compute sensitivity information for sensitivity-based GPTQ.
     """
-    if args.gptq_mse != "smse":
+    if args.gptq_mse not in ("smse", "smse_for_gptq"):
         return None
 
     if args.sensitivity_path is not None:

@@ -473,6 +473,12 @@ class GPTQQuantizer(BaseQuantizer):
         handles = [layer.register_forward_hook(add_batch())]
 
         # Run layer forward over all cached batches to build Hessian/statistics
+        old_device = device
+        model = model.to("cpu")
+        model.lm_head = model.lm_head.to(old_device)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         device = next(layer.parameters()).device  # in case lm_head is located on cpu
         for batch_idx in tqdm(
             range(batch_num),
@@ -502,3 +508,4 @@ class GPTQQuantizer(BaseQuantizer):
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()
+        model = model.to(old_device)

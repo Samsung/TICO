@@ -49,20 +49,34 @@ applied after _convert()_, the effectiveness of GPTQ may be diminished.
 
 ### `MSE`
 `mse` parameter of `GPTQConfig` is supposed to tune quantizer for using in GPTQ.
-There are two options :
+There are four options :
 1. `mse`- vanilla `mse`. Produce quantization parameters for GPTQ quantizer (`min`\`max`) which minimize mean squared error of quantization. $MSE_{MIN, MAX}(W) = argmin_{min, max}||W-Q_{min, max}(W)||^2$.
 2. `smse` - sensitivity-based `mse`. Use sensitivity of some global feature (e.g. float model logits) to parameters change to minimize global effect of quantization. $SMSE_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W))^2*Sensitivity(W)|$. So we try to keep `important` parameters unchanged, while quantizing `unimportant` parameters more aggressively.
+3. `smse_for_gptq` - `smse` adjusted for GPTQ. GPTQ modifies the matrix during the quantization process, so the most accurate method would consist in finding a quantizer that yields the smallest quantization error after the GPTQ method has been applied $SMSE\_FOR\_GPTQ_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W_{GPTQ}))^2*Sensitivity(W)|$. Since this would be quite computationally expensive, we can use an accelerated approximate GPTQ method — FPI_GPTQ $SMSE\_FOR\_GPTQ_{MIN, MAX}(W) = argmin_{min, max}|(W-Q_{min, max}(W_{FPI\_GPTQ}))^2*Sensitivity(W)|$. This is slower than `mse`/`smse` but can provide better accuracy.
+4. `mse_for_gptq` - `mse` adjusted for GPTQ. GPTQ modifies the matrix during the quantization process, so the most accurate method would consist in finding a quantizer that yields the smallest error (minimized by GPTQ) after the GPTQ method has been applied $MSE\_FOR\_GPTQ_{MIN, MAX}(W) = argmin_{min, max}||\frac{(W_{GPTQ}-Q_{min, max}(W_{GPTQ}))}{diag(Hinv)} ||^2$. Since this would be quite computationally expensive, we can use an accelerated approximate GPTQ method — FPI_GPTQ $MSE\_FOR\_GPTQ_{MIN, MAX}(W) = argmin_{min, max}||\frac{(W_{FPI\_GPTQ}-Q_{min, max}(W_{FPI\_GPTQ}))}{diag(Hinv)} ||^2$. This is slower than `mse`/`smse` but can provide better accuracy. To stabilize computations you may need to increase percdamp to >= 0.1 , because `mse_for_gptq` overfits pretty fast.
+
+
 
 You can turn this feature `on`/`off` by using `mse` parameter of `GPTQConfig`:
 ```
-cfg = GPTConfig(..., mse="mse", ...)
+cfg = GPTQConfig(..., mse="mse", ...)
 ```
 for vanilla `mse` or
 ```
-cfg = GPTConfig(..., mse="smse", sensitivity=some_sensitivity)
+cfg = GPTQConfig(..., mse="smse", sensitivity=some_sensitivity)
 ```
 for `smse` with `some_sensitivity` being dictionary of modules sensitivities {`module_name:module_sensitivity`}.
 Sensitivities can be computed using empirical Fisher information e.g. (see `SensitivityCalibrator` util class).
+
+For GPTQ-adjusted methods:
+```
+cfg = GPTQConfig(..., mse="mse_for_gptq", ...)
+```
+for `mse_for_gptq` or
+```
+cfg = GPTQConfig(..., mse="smse_for_gptq", sensitivity=some_sensitivity)
+```
+for `smse_for_gptq` with sensitivity weighting.
 
 
 **TODO**: Modify the GPTQ algorithm to directly perform quantization using the scale and zero
