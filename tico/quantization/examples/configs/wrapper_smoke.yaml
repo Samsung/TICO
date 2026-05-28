@@ -1,0 +1,14 @@
+runtime:
+  device: cpu
+  dtype: float32
+  seed: 123
+
+debug:
+  wrapper_smoke:
+    calibration_iters: 3
+    output_dir: ./out/wrapper_smoke
+    export:
+      enabled: false
+      artifact: circle
+    plot:
+      enabled: true
