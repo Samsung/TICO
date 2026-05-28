@@ -43,6 +43,10 @@ class EluVisitor(NodeVisitor):
         )
 
         args = EluArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        if args.alpha != 1 or args.scale != 1 or args.input_scale != 1:
+        raise NotYetSupportedError(
+            "Only ELU(alpha=1, scale=1, input_scale=1) can be serialized as Circle builtin ELU"
+        )
         input = args.input
 
         inputs = [input]
