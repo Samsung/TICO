@@ -66,8 +66,11 @@ class TestCircleExecutor(unittest.TestCase):
             executor.run_inference([])
 
     @patch("pathlib.Path.is_file")
+    @patch("tico.quantization.evaluation.executor.circle_executor.run_bash_cmd")
     @patch("tico.quantization.evaluation.executor.circle_executor.CircleModel.load")
-    def test_run_inference_with_single_tensor_output(self, mock_load, mock_is_file):
+    def test_run_inference_with_single_tensor_output(
+        self, mock_load, mock_run_bash, mock_is_file
+    ):
         mock_is_file.return_value = True
 
         # Create a real CircleModel
@@ -81,9 +84,13 @@ class TestCircleExecutor(unittest.TestCase):
         executor = CircleExecutor()
         executor.compile(circle_model)
 
+        self.assertTrue(mock_run_bash.called)
+
         # Run inference
         input_data = [torch.tensor([4, 5, 6])]
         result = executor.run_inference(input_data)
+
+        mock_loaded_model.assert_called_with(input_data[0])
 
         # Check the result
         self.assertEqual(len(result), 1)
