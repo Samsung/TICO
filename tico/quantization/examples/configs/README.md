@@ -18,11 +18,12 @@ Use:
 Examples:
 
 ```text
+llama_eval_suite.yaml
 llama_gptq_ptq.yaml
 llama_ptq_only.yaml
+qwen3_vl_eval_suite.yaml
 qwen3_vl_gptq_ptq.yaml
 qwen3_vl_ptq_only.yaml
-qwen3_vl_synthetic_smoke.yaml
 ```
 
 Use lower snake case. Keep names descriptive but short.
@@ -222,6 +223,7 @@ evaluation:
     - vqav2
     - textvqa
   coco: false
+  llava_bench: false
   mmlu:
     enabled: false
     subjects: null

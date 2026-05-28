@@ -100,6 +100,7 @@ def evaluate_coco(
     device: str,
     n_samples: int,
     max_seq_len: int | None,
+    dataset_name: str = "coco",
 ) -> dict[str, float]:
     """
     Evaluate the COCO captioning dataset with COCO-style metrics.

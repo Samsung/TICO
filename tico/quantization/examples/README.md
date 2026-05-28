@@ -33,6 +33,12 @@ python -m tico.quantization.examples.quantize \
   --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --model Qwen/Qwen3-VL-2B-Instruct
+```
+
 ### Evaluate
 
 ```bash
