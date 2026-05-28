@@ -44,6 +44,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm",
     "tico.quantization.wrapq.wrappers.llama.quant_model",
     ## fairseq ##
+    "tico.quantization.wrapq.wrappers.fairseq.quant_decoder",
     "tico.quantization.wrapq.wrappers.fairseq.quant_decoder_layer",
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder",
     "tico.quantization.wrapq.wrappers.fairseq.quant_encoder_layer",
