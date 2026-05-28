@@ -86,7 +86,7 @@ class TestInspectWrapperSmokeCLI(unittest.TestCase):
 
     def test_wrapper_smoke_list_cases_does_not_require_config(self):
         """Case listing should not require loading a recipe config."""
-        calls = {}
+        calls: dict[str, bool] = {}
         argv = ["inspect.py", "--mode", "wrapper-smoke", "--list-cases"]
 
         with patch.object(

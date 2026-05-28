@@ -159,6 +159,8 @@ class LlamaAttentionPrefillCase(WrapperSmokeCase):
         """Run the original LlamaAttention signature for a prefill sample."""
         hidden, rope = sample.args
         mask = sample.kwargs.get("attention_mask")
+        if not isinstance(mask, torch.Tensor):
+            raise TypeError("Llama attention prefill requires a tensor attention mask.")
         return reference(
             hidden, position_embeddings=rope, attention_mask=mask.unsqueeze(1)
         )[0]

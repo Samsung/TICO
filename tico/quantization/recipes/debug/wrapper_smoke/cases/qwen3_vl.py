@@ -295,7 +295,7 @@ def _create_image_input(
 class QwenBaseCase(WrapperSmokeCase):
     """Base class for Qwen3-VL wrapper smoke cases."""
 
-    tags = ("qwen3_vl",)
+    tags: tuple[str, ...] = ("qwen3_vl",)
 
     def availability(self) -> CaseAvailability:
         """Return whether this case can import Qwen3-VL modules."""
@@ -719,7 +719,7 @@ class QwenModelCase(QwenBaseCase):
 
     name = "qwen3_vl_model"
     description = "Quantize a tiny multimodal Qwen3-VL model."
-    tags = ("qwen3_vl", "model")
+    tags: tuple[str, ...] = ("qwen3_vl", "model")
     max_mean_abs_diff = 10.0
     inplace_prepare = True
     inplace_convert = True
