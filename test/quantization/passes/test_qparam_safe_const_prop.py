@@ -15,6 +15,7 @@
 import unittest
 
 import torch
+from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropPass
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from torch._export.utils import is_buffer
@@ -121,6 +122,8 @@ class QParamSafeConstPropPassTest(unittest.TestCase):
 
     def test_fold_per_tensor_reshape(self):
         ep = torch.export.export(ConstReshapeModule().eval(), ())
+        # This is necessary for testing Reshape on torch 2.5
+        ConvertLayoutOpToReshape().call(ep)
 
         weight = _get_buffer_placeholder(ep)
         weight.meta[QPARAM_KEY] = _make_qparam(
@@ -188,6 +191,8 @@ class QParamSafeConstPropPassTest(unittest.TestCase):
 
     def test_do_not_fold_per_channel_reshape_without_axis_proof(self):
         ep = torch.export.export(PerChannelReshapeModule().eval(), ())
+        # This is necessary for testing Reshape on torch 2.5
+        ConvertLayoutOpToReshape().call(ep)
 
         weight = _get_buffer_placeholder(ep)
         weight.meta[QPARAM_KEY] = _make_qparam(
