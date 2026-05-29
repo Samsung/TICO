@@ -118,6 +118,35 @@ class TestRecipeStages(unittest.TestCase):
         assert calibrated is not None
         self.assertIs(calibrated[1], prepared_model)
 
+    def test_ptq_stage_uses_runtime_verbose_for_gptq_injection_summary(self):
+        """PTQStage should allow runtime.verbose to print injection summaries."""
+        adapter = DummyAdapter()
+        ctx = RecipeContext(
+            cfg={"runtime": {"verbose": True}},
+            adapter=adapter,
+            model=object(),
+        )
+        prepared_model = SimpleNamespace(name="prepared")
+        calls: dict[str, Any] = {}
+
+        def fake_inject(owner, quantizers, verbose=False):
+            calls["verbose"] = verbose
+            return {"matched": 1, "missed": 0, "unused": 0}
+
+        with patch.object(
+            ptq_mod, "prepare", lambda model, config: prepared_model
+        ), patch.object(ptq_mod, "convert", lambda model: model), patch.object(
+            ptq_mod, "find_gptq_quantizers", lambda model: (model, {"linear": object()})
+        ), patch.object(
+            ptq_mod, "inject_gptq_qparams", fake_inject
+        ), patch.object(
+            ptq_mod, "clear_gptq_quantizers", lambda model: None
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                PTQStage().run(ctx, {"name": "ptq"})
+
+        self.assertTrue(calls["verbose"])
+
     def test_gptq_stage_builds_generic_config_and_runs_calibration(self):
         """GPTQStage should build a generic GPTQConfig and run calibration/convert."""
         adapter = DummyAdapter()
@@ -165,8 +194,8 @@ class TestRecipeStages(unittest.TestCase):
         )
         self.assertEqual(calls["convert"], (prepared_model, True))
 
-    def test_gptq_stage_loads_sensitivity_from_path(self):
-        """GPTQStage should load saved sensitivity tensors for smse mode."""
+    def test_gptq_stage_loads_sensitivity_from_nested_path(self):
+        """GPTQStage should load sensitivity tensors with mode=load."""
         adapter = DummyAdapter()
         ctx = RecipeContext(
             cfg={},
@@ -194,10 +223,179 @@ class TestRecipeStages(unittest.TestCase):
                         {
                             "name": "gptq",
                             "mse": "smse",
-                            "sensitivity_path": str(sensitivity_path),
+                            "sensitivity": {
+                                "mode": "load",
+                                "path": str(sensitivity_path),
+                            },
                         },
                     )
 
         self.assertTrue(
             calls["config"].sensitivity["linear"].equal(sensitivity["linear"])
         )
+
+    def test_gptq_stage_saves_computed_sensitivity_with_mode_save(self):
+        """GPTQStage should save computed SMSE sensitivity with mode=save."""
+        adapter = DummyAdapter()
+        ctx = RecipeContext(
+            cfg={},
+            adapter=adapter,
+            model=torch.nn.Linear(2, 2),
+            calibration_inputs=[torch.randn(1, 2)],
+        )
+        sensitivity = {"linear": torch.tensor([1.0, 2.0])}
+        calls: dict[str, Any] = {}
+
+        class FakeSensitivityCalibrator:
+            """Fake sensitivity calibrator used by this stage test."""
+
+            def __init__(self, model, calibration_inputs):
+                """Record constructor arguments."""
+                calls["calibrator"] = (model, calibration_inputs)
+
+            def compute_sensitivity_info(self):
+                """Return deterministic fake sensitivity tensors."""
+                return sensitivity
+
+        def fake_prepare(model, config, inplace=False):
+            calls["config"] = config
+            return model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "gptq_sensitivity.pt"
+
+            with patch.object(
+                gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
+            ), patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
+                gptq_mod, "convert", lambda model, inplace=False: model
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = GPTQStage().run(
+                        ctx,
+                        {
+                            "name": "gptq",
+                            "mse": "smse",
+                            "sensitivity": {
+                                "mode": "save",
+                                "path": str(output_path),
+                            },
+                        },
+                    )
+
+            loaded = torch.load(output_path, map_location="cpu")
+
+        self.assertTrue(loaded["linear"].equal(sensitivity["linear"]))
+        self.assertTrue(
+            calls["config"].sensitivity["linear"].equal(sensitivity["linear"])
+        )
+        self.assertEqual(result.artifacts["gptq_sensitivity_path"], str(output_path))
+        self.assertEqual(calls["calibrator"], (ctx.model, ctx.calibration_inputs))
+
+    def test_gptq_stage_caches_computed_sensitivity_on_cache_miss(self):
+        """GPTQStage should compute and save sensitivity when mode=cache misses."""
+        adapter = DummyAdapter()
+        sensitivity = {"linear": torch.tensor([3.0])}
+        calls: dict[str, Any] = {}
+
+        class FakeSensitivityCalibrator:
+            """Fake sensitivity calibrator used by this stage test."""
+
+            def __init__(self, model, calibration_inputs):
+                """Record constructor arguments."""
+                calls["calibrator"] = (model, calibration_inputs)
+
+            def compute_sensitivity_info(self):
+                """Return deterministic fake sensitivity tensors."""
+                return sensitivity
+
+        def fake_prepare(model, config, inplace=False):
+            calls["config"] = config
+            return model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "gptq_sensitivity.pt"
+            ctx = RecipeContext(
+                cfg={},
+                adapter=adapter,
+                model=torch.nn.Linear(2, 2),
+                calibration_inputs=[torch.randn(1, 2)],
+            )
+
+            with patch.object(
+                gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
+            ), patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
+                gptq_mod, "convert", lambda model, inplace=False: model
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    result = GPTQStage().run(
+                        ctx,
+                        {
+                            "name": "gptq",
+                            "mse": "smse",
+                            "sensitivity": {
+                                "mode": "cache",
+                                "path": str(output_path),
+                            },
+                        },
+                    )
+
+            loaded = torch.load(output_path, map_location="cpu")
+
+        self.assertTrue(loaded["linear"].equal(sensitivity["linear"]))
+        self.assertTrue(
+            calls["config"].sensitivity["linear"].equal(sensitivity["linear"])
+        )
+        self.assertEqual(result.artifacts["gptq_sensitivity_path"], str(output_path))
+
+    def test_gptq_stage_loads_cached_sensitivity_on_cache_hit(self):
+        """GPTQStage should load sensitivity when mode=cache finds an existing file."""
+        adapter = DummyAdapter()
+        calls: dict[str, Any] = {}
+
+        class FakeSensitivityCalibrator:
+            """Calibrator that should not be called on cache hits."""
+
+            def __init__(self, model, calibration_inputs):
+                """Fail if a cache hit tries to compute sensitivity."""
+                raise AssertionError("cache hit should not compute sensitivity")
+
+        def fake_prepare(model, config, inplace=False):
+            calls["config"] = config
+            return model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "gptq_sensitivity.pt"
+            sensitivity = {"linear": torch.tensor([4.0])}
+            torch.save(sensitivity, output_path)
+            ctx = RecipeContext(
+                cfg={},
+                adapter=adapter,
+                model=torch.nn.Linear(2, 2),
+                calibration_inputs=[torch.randn(1, 2)],
+            )
+
+            with patch.object(
+                gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
+            ), patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
+                gptq_mod, "convert", lambda model, inplace=False: model
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    GPTQStage().run(
+                        ctx,
+                        {
+                            "name": "gptq",
+                            "mse": "smse",
+                            "sensitivity": {
+                                "mode": "cache",
+                                "path": str(output_path),
+                            },
+                        },
+                    )
+
+        self.assertTrue(
+            calls["config"].sensitivity["linear"].equal(sensitivity["linear"])
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

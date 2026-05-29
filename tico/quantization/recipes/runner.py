@@ -13,13 +13,169 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.config import save_effective_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.stages import get_stage
 from tico.quantization.recipes.utils import set_seed
+
+
+def _find_stage(
+    cfg: Mapping[str, Any],
+    stage_name: str,
+) -> Mapping[str, Any] | None:
+    """Return the first pipeline stage with the requested name."""
+    for stage_cfg in cfg.get("pipeline", []):
+        if isinstance(stage_cfg, Mapping) and stage_cfg.get("name") == stage_name:
+            return stage_cfg
+    return None
+
+
+def _is_stage_enabled(stage_cfg: Mapping[str, Any] | None) -> bool:
+    """Return whether a pipeline stage exists and is enabled."""
+    return stage_cfg is not None and bool(stage_cfg.get("enabled", True))
+
+
+def _stage_value(
+    stage_cfg: Mapping[str, Any] | None,
+    key: str,
+    default: Any = "not set",
+) -> Any:
+    """Read a scalar value from a stage config."""
+    if stage_cfg is None:
+        return default
+    value = stage_cfg.get(key, default)
+    return default if value is None else value
+
+
+def _first_value(*values: Any, default: Any = "not set") -> Any:
+    """Return the first non-None value."""
+    for value in values:
+        if value is not None:
+            return value
+    return default
+
+
+def _calibration_sample_count(calibration_cfg: Mapping[str, Any]) -> Any:
+    """Return a readable calibration sample count."""
+    datasets = calibration_cfg.get("datasets")
+    if isinstance(datasets, list):
+        total = 0
+        found = False
+        for dataset_cfg in datasets:
+            if not isinstance(dataset_cfg, Mapping):
+                continue
+            n_samples = dataset_cfg.get("n_samples")
+            if n_samples is None:
+                continue
+            try:
+                total += int(n_samples)
+                found = True
+            except (TypeError, ValueError):
+                return "mixed"
+        if found:
+            return total
+
+    return calibration_cfg.get("n_samples", "not set")
+
+
+def _max_seq_len(cfg: Mapping[str, Any]) -> Any:
+    """Return the most relevant max sequence length."""
+    evaluation_cfg = cfg.get("evaluation", {})
+    export_cfg = cfg.get("export", {})
+    calibration_cfg = cfg.get("calibration", {})
+
+    if isinstance(evaluation_cfg, Mapping) and evaluation_cfg.get("max_seq_len"):
+        return evaluation_cfg["max_seq_len"]
+    if isinstance(export_cfg, Mapping) and export_cfg.get("max_seq_len"):
+        return export_cfg["max_seq_len"]
+    if isinstance(calibration_cfg, Mapping) and calibration_cfg.get("seq_len"):
+        return calibration_cfg["seq_len"]
+    return "not set"
+
+
+def _print_config_row(label: str, value: Any) -> None:
+    """Print one aligned config summary row."""
+    print(f"{label:<22}: {value}")
+
+
+def _print_config_summary(cfg: Mapping[str, Any]) -> None:
+    """Print the high-level quantization recipe configuration."""
+    runtime_cfg = cfg.get("runtime", {})
+    if isinstance(runtime_cfg, Mapping) and not bool(
+        runtime_cfg.get("print_config", True)
+    ):
+        return
+
+    model_cfg = cfg.get("model", {})
+    calibration_cfg = cfg.get("calibration", {})
+    model_args = cfg.get("model_args", {})
+
+    if not isinstance(model_cfg, Mapping):
+        model_cfg = {}
+    if not isinstance(runtime_cfg, Mapping):
+        runtime_cfg = {}
+    if not isinstance(calibration_cfg, Mapping):
+        calibration_cfg = {}
+    if not isinstance(model_args, Mapping):
+        model_args = {}
+
+    spinquant_stage = _find_stage(cfg, "spinquant")
+    cle_stage = _find_stage(cfg, "cle")
+    gptq_stage = _find_stage(cfg, "gptq")
+    ptq_stage = _find_stage(cfg, "ptq")
+
+    spinquant_enabled = _is_stage_enabled(spinquant_stage)
+    gptq_enabled = _is_stage_enabled(gptq_stage)
+    ptq_enabled = _is_stage_enabled(ptq_stage)
+
+    linear_weight_bits = _first_value(
+        _stage_value(ptq_stage, "linear_weight_bits", None),
+        _stage_value(gptq_stage, "weight_bits", None),
+    )
+    spin_rotation_bits = (
+        _stage_value(ptq_stage, "spin_rotation_weight_bits")
+        if spinquant_enabled
+        else "disabled"
+    )
+    profile = _first_value(
+        _stage_value(ptq_stage, "profile", None),
+        model_args.get("profile"),
+    )
+
+    print("=== Config ===")
+    _print_config_row("Model", model_cfg.get("name_or_path", "not set"))
+    _print_config_row("Device", runtime_cfg.get("device", "auto"))
+    _print_config_row("DType", runtime_cfg.get("dtype", "float32"))
+    _print_config_row("Seed", runtime_cfg.get("seed", 42))
+    _print_config_row("GPTQ enabled", gptq_enabled)
+    _print_config_row(
+        "GPTQ lm_head enabled",
+        bool(_stage_value(gptq_stage, "quantize_lm_head", False)),
+    )
+    _print_config_row("PTQ enabled", ptq_enabled)
+    _print_config_row("SpinQuant enabled", spinquant_enabled)
+    _print_config_row("CLE enabled", _is_stage_enabled(cle_stage))
+    _print_config_row("Linear weight bits", linear_weight_bits)
+    _print_config_row(
+        "Embedding weight bits",
+        _stage_value(ptq_stage, "embedding_weight_bits"),
+    )
+    _print_config_row(
+        "LM head weight bits",
+        _stage_value(ptq_stage, "lm_head_weight_bits"),
+    )
+    _print_config_row("Spin rotation bits", spin_rotation_bits)
+    _print_config_row("Calibration samples", _calibration_sample_count(calibration_cfg))
+    _print_config_row(
+        "Calibration seq length",
+        calibration_cfg.get("seq_len", "not set"),
+    )
+    _print_config_row("Max seq length", _max_seq_len(cfg))
+    _print_config_row("Profile", profile)
+    print()
 
 
 class QuantizationRunner:
@@ -33,6 +189,7 @@ class QuantizationRunner:
             raise KeyError("Recipe config requires model.name_or_path.")
 
         set_seed(cfg.get("runtime", {}).get("seed", 42))
+        _print_config_summary(cfg)
 
         adapter = get_adapter(model_cfg["family"])
         ctx = RecipeContext(cfg=cfg, adapter=adapter)

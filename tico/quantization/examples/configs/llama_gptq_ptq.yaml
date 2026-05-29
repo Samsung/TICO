@@ -40,7 +40,9 @@ pipeline:
     perchannel: true
     symmetric: false
     mse: null
-    sensitivity_path: null
+    sensitivity:
+      mode: compute
+      path: null
     percdamp: 0.01
     groupsize: -1
     actorder: true

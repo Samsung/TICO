@@ -109,6 +109,66 @@ python -m tico.quantization.examples.quantize \
   --output-dir ./out/llama
 ```
 
+#### Quantize output and diagnostics
+
+`quantize.py` prints a high-level config summary before loading the model. This
+helps verify which stages and key bit-width settings are active.
+
+Example:
+
+```text
+=== Config ===
+Model                 : Maykeye/TinyLLama-v0
+Device                : cuda
+DType                 : float32
+Seed                  : 42
+GPTQ enabled          : True
+GPTQ lm_head enabled  : False
+PTQ enabled           : True
+SpinQuant enabled     : True
+CLE enabled           : False
+Linear weight bits    : 4
+Embedding weight bits : 8
+LM head weight bits   : 8
+Spin rotation bits    : 8
+Calibration samples   : 128
+Calibration seq length: 2048
+Max seq length        : 2048
+Profile               : npu_export
+```
+
+Disable the summary when needed:
+
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --set runtime.print_config=false
+```
+
+Print the GPTQ-to-PTQ qparam injection summary with `runtime.verbose=true`:
+
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --set runtime.verbose=true
+```
+
+The injection summary reports how many GPTQ quantizers were injected into PTQ
+weight observers:
+
+```text
+[GPTQ → PTQ injection summary]
+  matched : 56
+  missed  : 21
+  unused  : 0
+
+  missed modules:
+    - model.embed_tokens
+    - model.norm
+    - model.layers.0.input_layernorm
+    ...
+```
+
 ### Evaluate
 
 `evaluate.py` evaluates the model loaded by the adapter, or the model loaded
@@ -367,6 +427,75 @@ pipeline:
     enabled: true
     activation_dtype: int16
 ```
+
+## GPTQ SMSE sensitivity
+
+When GPTQ uses sensitivity-aware MSE, set `pipeline.<index>.mse=smse` and
+configure sensitivity behavior with a nested `sensitivity` mapping under the
+GPTQ stage.
+
+Schema:
+
+```yaml
+pipeline:
+  - name: gptq
+    enabled: true
+    mse: smse
+    sensitivity:
+      mode: compute
+      path: null
+```
+
+Supported modes:
+
+| Mode | Behavior |
+|---|---|
+| `compute` | Compute sensitivity for the current run only. `path` must be `null`. |
+| `save` | Compute sensitivity, use it for this run, and save it to `path`. |
+| `load` | Load sensitivity from `path` and use it for this run. |
+| `cache` | Load from `path` if it exists; otherwise compute and save to `path`. |
+
+Compute sensitivity without saving it:
+
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --set pipeline.2.mse=smse \
+  --set pipeline.2.sensitivity.mode=compute
+```
+
+Compute and save sensitivity:
+
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --set pipeline.2.mse=smse \
+  --set pipeline.2.sensitivity.mode=save \
+  --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
+```
+
+Load a saved sensitivity file:
+
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --set pipeline.2.mse=smse \
+  --set pipeline.2.sensitivity.mode=load \
+  --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
+```
+
+Use a cache file when available, otherwise compute and save it:
+
+```bash
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --set pipeline.2.mse=smse \
+  --set pipeline.2.sensitivity.mode=cache \
+  --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
+```
+
+For `qwen3_vl_gptq_ptq.yaml`, the GPTQ stage is also `pipeline.2`, so the same
+override pattern applies.
 
 ## Developer rule: do not add one script per model or algorithm
 
