@@ -427,7 +427,6 @@ class EluArgs:
     input_scale: Union[int, float] = 1
 
 
-
 @enforce_type
 @dataclass
 class EmbeddingArgs:

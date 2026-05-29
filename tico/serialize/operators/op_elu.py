@@ -24,6 +24,8 @@ from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+
+from tico.utils.errors import NotYetSupportedError
 from tico.utils.validate_args_kwargs import EluArgs
 
 
@@ -44,9 +46,9 @@ class EluVisitor(NodeVisitor):
 
         args = EluArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         if args.alpha != 1 or args.scale != 1 or args.input_scale != 1:
-        raise NotYetSupportedError(
-            "Only ELU(alpha=1, scale=1, input_scale=1) can be serialized as Circle builtin ELU"
-        )
+            raise NotYetSupportedError(
+                "Only ELU(alpha=1, scale=1, input_scale=1) can be serialized as Circle builtin ELU"
+            )
         input = args.input
 
         inputs = [input]
