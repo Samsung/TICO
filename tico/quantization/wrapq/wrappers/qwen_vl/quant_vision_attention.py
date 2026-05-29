@@ -154,37 +154,49 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
 
-        # Other implementations: Process each chunk separately
+        # Split into chunks (one per image/video-frame in the batch).
+        # For a single image there is 1 chunk; for video there may be
+        # multiple chunks (one per frame group).
         lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-        splits = [
+        q_splits, k_splits, v_splits = [
             torch.split(tensor, lengths.tolist(), dim=2)
             for tensor in (query_states, key_states, value_states)
         ]
-        assert (
-            len(splits)
-            == 3  # just a single image, so (q, k, v) = (splits[0], splits[1], splits[2])
-            and len(splits[0]) == 1
-            and len(splits[1]) == 1
-            and len(splits[2]) == 1
-        )  # so we may proceed without splitted attention
+        num_chunks = len(q_splits)
         rep = query_states.size(-3) // key_states.size(-3)
         assert rep == 1  # currently no GQA is supported
 
-        attn_outputs = []
-        for n_head in range(self.num_heads):
-            k_i = key_states[:, n_head : n_head + 1, :, :]
-            v_i = value_states[:, n_head : n_head + 1, :, :]
-            q_i = query_states[:, n_head : n_head + 1, :, :]
-            logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
-            # softmax
-            attn_i = torch.softmax(logits_i, -1, dtype=torch.float32).to(q_i.dtype)
-            attn_i = self._fq(attn_i, self.obs_softmax)
-            out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
-            attn_outputs.append(out_i)
+        # Process each chunk independently, then concatenate.
+        # This handles both single-image (1 chunk) and video (multiple
+        # chunks) inputs.
+        chunk_outputs = []
+        for chunk_idx in range(num_chunks):
+            q_c = q_splits[chunk_idx]
+            k_c = k_splits[chunk_idx]
+            v_c = v_splits[chunk_idx]
 
-        attn_output = torch.cat(attn_outputs, dim=1)
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(seq_length, -1).contiguous()
+            head_outputs = []
+            for n_head in range(self.num_heads):
+                q_i = q_c[:, n_head : n_head + 1, :, :]
+                k_i = k_c[:, n_head : n_head + 1, :, :]
+                v_i = v_c[:, n_head : n_head + 1, :, :]
+                logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
+                # softmax
+                attn_i = torch.softmax(logits_i, -1, dtype=torch.float32).to(q_i.dtype)
+                attn_i = self._fq(attn_i, self.obs_softmax)
+                out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
+                head_outputs.append(out_i)
+
+            # Concatenate heads: [1, num_heads, chunk_len, head_dim]
+            chunk_out = torch.cat(head_outputs, dim=1)
+            # [1, chunk_len, num_heads, head_dim] -> [chunk_len, num_heads*head_dim]
+            chunk_out = chunk_out.transpose(1, 2).contiguous()
+            chunk_len = chunk_out.shape[1]
+            chunk_out = chunk_out.reshape(chunk_len, -1).contiguous()
+            chunk_outputs.append(chunk_out)
+
+        # Concatenate all chunks back into the full sequence
+        attn_output = torch.cat(chunk_outputs, dim=0)
 
         attn_output = self.proj(attn_output)
         return attn_output

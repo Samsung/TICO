@@ -33,6 +33,10 @@ from tico.quantization.evaluation.hellaswag_eval_utils import (
     get_hellaswag_accuracy,
     print_hellaswag_results,
 )
+from tico.quantization.evaluation.lmms_eval_utils import (
+    evaluate_vlm_on_tasks,
+    print_lmms_eval_results,
+)
 from tico.quantization.evaluation.mmlu_eval_utils import (
     evaluate_mmlu,
     print_mmlu_results,
@@ -52,7 +56,6 @@ from tico.quantization.evaluation.vlm_eval_utils import (
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
-
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -482,6 +485,34 @@ def parse_args():
         type=str,
         default="test",
         help="Split for PPL evaluation",
+    )
+
+    # Video-MME evaluation arguments
+    parser.add_argument(
+        "--video_mme",
+        action="store_true",
+        default=False,
+        help="Evaluate on Video-MME benchmark via lmms-eval.",
+    )
+    parser.add_argument(
+        "--video_mme_max_new_tokens",
+        type=int,
+        default=16,
+        help="Maximum number of tokens to generate per Video-MME sample.",
+    )
+    parser.add_argument(
+        "--video_mme_limit",
+        type=int,
+        default=None,
+        help="Limit the number of Video-MME samples to evaluate (and download). "
+        "E.g. --video_mme_limit 10 evaluates only the first 10 samples.",
+    )
+    parser.add_argument(
+        "--video_mme_max_num_frames",
+        type=int,
+        default=5,
+        help="Maximum number of frames to sample from each video for Video-MME evaluation. "
+        "Default is 5 for fitting within max_position_embeddings (2048).",
     )
 
     return parser.parse_args()
@@ -1239,6 +1270,23 @@ def evaluate_original_model(model, processor, args):
         )
         print_mmmu_results(original_mmmu_results)
 
+    if args.video_mme:
+        video_mme_task = "videomme_mini" if (args.video_mme_limit) else "videomme"
+        print(
+            f"\n=== Video-MME Evaluation (Original Model) (limit={args.video_mme_limit}) ==="
+        )
+        original_video_mme_results = evaluate_vlm_on_tasks(
+            model=model,
+            processor=processor,
+            tasks=[video_mme_task],
+            device=args.device,
+            max_new_tokens=args.video_mme_max_new_tokens,
+            limit=args.video_mme_limit,
+            verbose=args.verbose,
+            max_num_frames=args.video_mme_max_num_frames,
+        )
+        print_lmms_eval_results(original_video_mme_results)
+
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Original Model) ===")
         ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
@@ -1346,6 +1394,23 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
             verbose=args.verbose,
         )
         print_mmmu_results(quantized_mmmu_results)
+
+    if args.video_mme:
+        video_mme_task = "videomme_mini" if (args.video_mme_limit) else "videomme"
+        print(
+            f"\n=== Video-MME Evaluation (Quantized Model) (limit={args.video_mme_limit}) ==="
+        )
+        quantized_video_mme_results = evaluate_vlm_on_tasks(
+            model=model,
+            processor=processor,
+            tasks=[video_mme_task],
+            device=args.device,
+            max_new_tokens=args.video_mme_max_new_tokens,
+            limit=args.video_mme_limit,
+            verbose=args.verbose,
+            max_num_frames=args.video_mme_max_num_frames,
+        )
+        print_lmms_eval_results(quantized_video_mme_results)
 
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Quantized Model) ===")

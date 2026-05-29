@@ -1,0 +1,75 @@
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Video-MME mini task – evaluates only on samples with available videos.
+#
+# When ``allow_patterns`` is used to download only a subset of video zips
+# (e.g. only ``videos_chunked_01.zip``), many samples in the parquet
+# metadata reference videos that haven't been downloaded.  This task
+# uses ``process_docs`` to filter the dataset to only include samples
+# whose video files exist on disk.
+#
+# The ``videomme_doc_to_visual`` override also handles missing videos
+# gracefully (returns empty list instead of ``sys.exit``).
+#
+# Usage with lmms-eval CLI:
+#   lmms-eval --model qwen3_vl --tasks videomme_mini --include_path <this_dir>
+#
+# Usage via TICO evaluate_vlm_on_tasks:
+#   evaluate_vlm_on_tasks(model, processor, tasks="videomme_mini")
+
+dataset_path: lmms-lab/Video-MME
+dataset_kwargs:
+  token: False
+  cache_dir: videomme
+  video: True
+task: videomme_mini
+test_split: test
+process_docs: !function utils.videomme_process_docs
+output_type: generate_until
+cluster_key: videoID
+doc_to_visual: !function utils.videomme_doc_to_visual
+doc_to_text: !function utils.videomme_doc_to_text
+doc_to_target: "answer"
+generation_kwargs:
+  max_new_tokens: 16
+  temperature: 0
+  top_p: 1.0
+  num_beams: 1
+  do_sample: false
+process_results: !function utils.videomme_process_results
+metric_list:
+  - metric: videomme_perception_score
+    aggregation: !function utils.videomme_aggregate_results
+    higher_is_better: true
+lmms_eval_specific_kwargs:
+  default:
+    pre_prompt: ""
+    post_prompt: "\nAnswer with the option's letter from the given choices directly."
+  gpt4v:
+    pre_prompt: ""
+    post_prompt: "Answer the question with A, B, C, or D."
+  llava_vid:
+    pre_prompt: ""
+    post_prompt: "The best answer is:"
+  qwen3_vl:
+    format: "qwen3_vl"
+    frame_num: 1
+    pre_prompt: "Question: "
+    post_prompt: "Answer with the option letter only."
+  xcomposer2_4khd:
+    pre_prompt: "[UNUSED_TOKEN_146]user\n"
+    post_prompt: " Answer this question with A, B, C, or D.[UNUSED_TOKEN_145]\n[UNUSED_TOKEN_146]assistant\n"
+metadata:
+  - version: 0.0
