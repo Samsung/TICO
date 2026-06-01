@@ -88,6 +88,3 @@ class PTQWrapper(QuantModuleBase):
         evaluation and inference workflows.
         """
         return self.wrapped.generate(*args, **kwargs)
-
-    def config(self):
-        return self.wrapped.config

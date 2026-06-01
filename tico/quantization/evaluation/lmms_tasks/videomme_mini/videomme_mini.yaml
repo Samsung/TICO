@@ -31,7 +31,6 @@
 
 dataset_path: lmms-lab/Video-MME
 dataset_kwargs:
-  token: False
   cache_dir: videomme
   video: True
 task: videomme_mini

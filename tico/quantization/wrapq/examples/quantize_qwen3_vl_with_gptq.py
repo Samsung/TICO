@@ -497,7 +497,7 @@ def parse_args():
     parser.add_argument(
         "--video_mme_max_new_tokens",
         type=int,
-        default=16,
+        default=None,
         help="Maximum number of tokens to generate per Video-MME sample.",
     )
     parser.add_argument(
@@ -1271,14 +1271,13 @@ def evaluate_original_model(model, processor, args):
         print_mmmu_results(original_mmmu_results)
 
     if args.video_mme:
-        video_mme_task = "videomme_mini" if (args.video_mme_limit) else "videomme"
         print(
             f"\n=== Video-MME Evaluation (Original Model) (limit={args.video_mme_limit}) ==="
         )
         original_video_mme_results = evaluate_vlm_on_tasks(
             model=model,
             processor=processor,
-            tasks=[video_mme_task],
+            tasks=["videomme"],
             device=args.device,
             max_new_tokens=args.video_mme_max_new_tokens,
             limit=args.video_mme_limit,
@@ -1396,14 +1395,13 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
         print_mmmu_results(quantized_mmmu_results)
 
     if args.video_mme:
-        video_mme_task = "videomme_mini" if (args.video_mme_limit) else "videomme"
         print(
             f"\n=== Video-MME Evaluation (Quantized Model) (limit={args.video_mme_limit}) ==="
         )
         quantized_video_mme_results = evaluate_vlm_on_tasks(
             model=model,
             processor=processor,
-            tasks=[video_mme_task],
+            tasks=["videomme"],
             device=args.device,
             max_new_tokens=args.video_mme_max_new_tokens,
             limit=args.video_mme_limit,

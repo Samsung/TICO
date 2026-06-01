@@ -40,7 +40,6 @@ def evaluate_and_print_video_mme(
     max_new_tokens: int = 30,
     limit: int | None = None,
     use_cache: str | None = None,
-    cache_dir: str | None = None,
     verbose: bool = True,
 ) -> dict[str, Any]:
     """Evaluate a VLM on the Video-MME benchmark and print results.
@@ -51,9 +50,9 @@ def evaluate_and_print_video_mme(
 
     The *limit* parameter restricts the number of samples evaluated,
     which also limits how many videos are downloaded.  For example,
-    ``limit=10`` will only download only first zip file and evaluate 
+    ``limit=10`` will only download only first zip file and evaluate
     the first 10 samples. This uses a custom ``videomme_mini`` task
-    YAML (shipped with TICO) that specifies ``test_split: test[:100]``.
+    YAML (shipped with TICO) that specifies ``test_split: test``.
 
     Args:
         model: A Hugging Face VLM (e.g. ``Qwen3_VLForConditionalGeneration``).
@@ -65,7 +64,6 @@ def evaluate_and_print_video_mme(
             also limits how many videos are downloaded.  Defaults to
             ``None`` (download and evaluate all samples).
         use_cache: Optional path to an ``lmms-eval`` results cache directory.
-        cache_dir: Optional cache directory for Hugging Face datasets.
         verbose: Whether to print detailed evaluation logs.
 
     Returns:
@@ -75,24 +73,16 @@ def evaluate_and_print_video_mme(
     Raises:
         RuntimeError: If ``lmms-eval`` is not installed.
     """
-    # When *limit* is set, always use ``videomme_mini`` because it has
-    # ``process_docs`` (filters to available videos) and a graceful
-    # ``doc_to_visual`` (returns [] instead of sys.exit on missing videos).
-    # The upstream ``videomme`` task calls ``sys.exit()`` when a video
-    # file is not found, which crashes the process when only a subset
-    # of video zips has been downloaded.
-    task_name = "videomme_mini" if (limit is not None) else "videomme"
 
     results = evaluate_vlm_on_tasks(
         model=model,
         processor=processor,
-        tasks=[task_name],
+        tasks=["videomme"],
         device=device,
         batch_size=batch_size,
         max_new_tokens=max_new_tokens,
         limit=limit,
         use_cache=use_cache,
-        cache_dir=cache_dir,
         verbose=verbose,
     )
 

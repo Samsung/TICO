@@ -101,7 +101,7 @@ def _compute_video_chunk_patterns(limit: int | None) -> list[str]:
     Returns:
         List of ``allow_patterns`` strings for ``snapshot_download``.
     """
-    _SAMPLES_PER_CHUNK = 40  # approximate number of samples per zip
+    _SAMPLES_PER_CHUNK = 30  # approximate number of samples per zip
     _MAX_CHUNKS = 20  # maximum number of video chunk zips
 
     base_patterns = [
@@ -128,6 +128,106 @@ def _compute_video_chunk_patterns(limit: int | None) -> list[str]:
         ]
 
     return base_patterns + video_patterns
+
+
+def _get_downloaded_videomme_chunks() -> set[str]:
+    """Check which Video-MME video chunk zips are already in the HF cache.
+
+    Scans the HuggingFace cache directory for the Video-MME dataset repo
+    and returns the set of chunk zip filenames that have already been
+    downloaded (e.g. ``{"videos_chunked_01.zip", "videos_chunked_02.zip"}``).
+
+    Returns:
+        A set of zip filenames found in the cache, or an empty set if the
+        cache directory does not exist yet.
+    """
+    import re
+
+    try:
+        import huggingface_hub
+    except ImportError:
+        return set()
+
+    # The HF cache stores dataset repos under:
+    #   <HF_HOME>/hub/datasets--lmms-lab--Video-MME/
+    # Inside, the actual files are under blobs/ (content-addressed) but
+    # snapshot directories contain symlinks.  We scan snapshots for the
+    # zip filenames.
+    hf_home = os.path.expanduser(os.getenv("HF_HOME", "~/.cache/huggingface/"))
+    repo_dir = os.path.join(hf_home, "hub", "datasets--lmms-lab--Video-MME")
+
+    if not os.path.isdir(repo_dir):
+        return set()
+
+    downloaded = set()
+    _chunk_re = re.compile(r"^videos_chunked_\d+\.zip$")
+    for root, dirs, files in os.walk(repo_dir):
+        for f in files:
+            if _chunk_re.match(f):
+                # Check that the file has actual content (not just a pointer)
+                fpath = os.path.join(root, f)
+                if os.path.getsize(fpath) > 0:
+                    downloaded.add(f)
+
+    return downloaded
+
+
+def _ensure_videomme_chunks_downloaded(limit: int | None) -> None:
+    """Download any missing Video-MME zip chunks needed for the given limit.
+
+    This function proactively downloads only the chunks that are not already
+    in the HuggingFace cache.  It is incremental: if you previously ran with
+    ``limit=30`` (1 chunk) and now run with ``limit=60`` (2 chunks), only
+    the second chunk is downloaded.
+
+    When *limit* is ``None``, all 20 chunks are downloaded (if not already
+    cached).
+
+    This must be called **before** ``simple_evaluate`` so that the chunks
+    are available when lmms-eval's dataset loading runs.
+
+    Args:
+        limit: Maximum number of samples to evaluate.  ``None`` means
+            download all chunks.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return  # huggingface_hub not available; nothing to download
+
+    needed_patterns = _compute_video_chunk_patterns(limit)
+    # Separate base patterns (parquet, etc.) from video chunk zips
+    needed_chunks = {p for p in needed_patterns if p.startswith("videos_chunked_")}
+    needed_base = [p for p in needed_patterns if not p.startswith("videos_chunked_")]
+
+    # Check which chunks are already in the cache
+    already_downloaded = _get_downloaded_videomme_chunks()
+
+    # Compute which chunks are missing
+    missing_chunks = needed_chunks - already_downloaded
+
+    if not missing_chunks and already_downloaded:
+        print(
+            f"[INFO] All {len(needed_chunks)} needed Video-MME chunks already "
+            f"downloaded ({len(already_downloaded)} in cache)."
+        )
+        return
+
+    # Download missing chunks + base patterns (parquet, subtitle, etc.)
+    download_patterns = needed_base + sorted(missing_chunks)
+
+    if missing_chunks:
+        print(
+            f"[INFO] Downloading {len(missing_chunks)} missing Video-MME chunks: "
+            f"{sorted(missing_chunks)}  "
+            f"({len(already_downloaded)} already in cache)"
+        )
+
+    snapshot_download(
+        "lmms-lab/Video-MME",
+        allow_patterns=download_patterns,
+        repo_type="dataset",
+    )
 
 
 def _patch_snapshot_download_for_limit(limit: int | None):
@@ -252,6 +352,16 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
 
     from transformers import AutoProcessor, AutoTokenizer
 
+    # --- Ensure the model has a .config attribute ---
+    # When the model is a PTQ wrapper (has .wrapped), lmms-eval's
+    # Qwen3_VL.__init__ accesses self._model.config, which would fail
+    # because the wrapper class doesn't define it.  We dynamically add
+    # it as an instance attribute that delegates to the inner model's
+    # config.  This avoids modifying ptq_wrapper.py.
+    _inner = getattr(model, "wrapped", None)
+    if _inner is not None and not hasattr(model, "config"):
+        model.config = _inner.config
+
     # --- Patch model class from_pretrained ---
     # Collect all model classes that might be used by lmms-eval
     _model_classes = []
@@ -283,9 +393,7 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
     _original_model_fps = {cls: cls.from_pretrained for cls in _model_classes}
 
     # Replace from_pretrained on each class with a function that returns
-    # the already-loaded model on the first call.  We use a simple list
-    # as a mutable flag so the closure can mutate it.
-    _model_returned = [False]
+    # the already-loaded model.
 
     for cls in _model_classes:
         # We must capture the original unbound function for the fallback.
@@ -293,10 +401,7 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
 
         def _make_patched_fp(orig_fn):
             def _patched_from_pretrained(cls_arg, *args, **kwargs):
-                if not _model_returned[0]:
-                    _model_returned[0] = True
-                    return model
-                return orig_fn(*args, **kwargs)
+                return model
 
             return _patched_from_pretrained
 
@@ -304,26 +409,18 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
 
     # --- Patch AutoProcessor.from_pretrained ---
     _original_processor_fp = AutoProcessor.from_pretrained
-    _processor_returned = [False]
 
     def _patched_processor_fp(cls_arg, *args, **kwargs):
-        if not _processor_returned[0]:
-            _processor_returned[0] = True
-            return processor
-        return _original_processor_fp(*args, **kwargs)
+        return processor
 
     AutoProcessor.from_pretrained = classmethod(_patched_processor_fp)
 
     # --- Patch AutoTokenizer.from_pretrained ---
     _original_tokenizer_fp = AutoTokenizer.from_pretrained
     _tokenizer = getattr(processor, "tokenizer", None)
-    _tokenizer_returned = [False]
 
     def _patched_tokenizer_fp(cls_arg, *args, **kwargs):
-        if not _tokenizer_returned[0] and _tokenizer is not None:
-            _tokenizer_returned[0] = True
-            return _tokenizer
-        return _original_tokenizer_fp(*args, **kwargs)
+        return _tokenizer
 
     AutoTokenizer.from_pretrained = classmethod(_patched_tokenizer_fp)
 
@@ -356,13 +453,10 @@ def _patch_subsample_video_inputs_for_debug():
     try:
         from lmms_eval.models.simple.qwen3_vl import Qwen3_VL
     except ImportError:
+        return contextlib.nullcontext()
 
-        @contextlib.contextmanager
-        def _noop():
-            yield
-
-        return _noop()
-
+    if not hasattr(Qwen3_VL, "_subsample_video_inputs"):
+        return contextlib.nullcontext()
     _original_subsample = Qwen3_VL._subsample_video_inputs
 
     def _patched_subsample(self, video_inputs, video_metadatas=None):
@@ -396,11 +490,10 @@ def evaluate_vlm_on_tasks(
     tasks: list[str] | str,
     device: str = "cuda",
     batch_size: int = 1,
-    max_new_tokens: int = 16,
     max_num_frames: int = 32,
-    limit: int | float | None = None,
+    max_new_tokens: int | None = None,
+    limit: int | None = None,
     use_cache: str | None = None,
-    cache_dir: str | None = None,
     verbose: bool = True,
     **kwargs: Any,
 ) -> dict[str, Any]:
@@ -434,7 +527,6 @@ def evaluate_vlm_on_tasks(
         max_new_tokens: Maximum number of tokens to generate per sample.
         use_cache: Optional path to an ``lmms-eval`` results cache directory.
             When set, results are cached and can be reused across runs.
-        cache_dir: Optional cache directory for Hugging Face datasets.
         verbose: Whether to print detailed evaluation logs.
         **kwargs: Additional keyword arguments forwarded to
             ``lmms_eval.evaluator.simple_evaluate``.
@@ -451,15 +543,25 @@ def evaluate_vlm_on_tasks(
     _check_lmms_eval_available()
     _patch_lmms_eval_broken_tasks()
 
+    import contextlib
+
     from lmms_eval.evaluator import simple_evaluate
 
-    # Unwrap fake-quant wrapper if present
-    inner_model = getattr(model, "wrapped", model)
-
-    # Determine the lmms-eval model name and build model_args
-    model_name, model_args_dict = _build_model_args(
-        inner_model, processor, device, batch_size, max_new_tokens, max_num_frames
-    )
+    if isinstance(model, str):
+        model_name = model
+        model_args_dict = {}
+        if max_num_frames is not None:
+            model_args_dict["max_num_frames"] = max_num_frames
+        _model_ctx = contextlib.nullcontext()
+    else:
+        # Unwrap fake-quant wrapper if present
+        inner_model = getattr(model, "wrapped", model)
+        # Determine the lmms-eval model name and build model_args
+        model_name, model_args_dict = _build_model_args(inner_model, max_num_frames)
+        # Patch ``from_pretrained`` so that ``lmms-eval`` reuses the
+        # already-loaded model and processor instead of downloading and
+        # loading them a second time.
+        _model_ctx = _patch_from_pretrained_to_reuse_model(model, processor)
 
     # Propagate verbose flag to custom task utils via environment variable.
     # The videomme_mini utils.py checks LMMS_VERBOSE to decide whether to
@@ -474,6 +576,14 @@ def evaluate_vlm_on_tasks(
         tasks_list = [t.strip() for t in tasks.split(",") if t.strip()]
     else:
         tasks_list = list(tasks)
+
+    # Partial Video-MME downloads require videomme_mini, which filters samples by
+    # local video availability.
+    if limit is not None:
+        tasks_list = [
+            "videomme_mini" if task in ("videomme", "video_mme") else task
+            for task in tasks_list
+        ]
 
     # Convert model_args dict to the key=value string format expected by
     # ``simple_evaluate`` → ``create_from_arg_string`` →
@@ -493,8 +603,9 @@ def evaluate_vlm_on_tasks(
         eval_kwargs["limit"] = limit
     if use_cache is not None:
         eval_kwargs["use_cache"] = use_cache
-    if cache_dir is not None:
-        eval_kwargs["cache_dir"] = cache_dir
+    if max_new_tokens is not None:
+        gen_kwargs = f"max_new_tokens={max_new_tokens}"
+        eval_kwargs["gen_kwargs"] = gen_kwargs
 
     # Auto-register custom task directories (e.g. videomme_mini) by
     # creating a ``TaskManager`` with ``include_path`` pointing to the
@@ -508,27 +619,41 @@ def evaluate_vlm_on_tasks(
         task_manager = TaskManager(
             verbosity=eval_kwargs.get("verbosity", "DEBUG"),
             include_path=custom_tasks_dir,
+            model_name=model_name,
         )
         eval_kwargs["task_manager"] = task_manager
 
     # Forward any additional kwargs (may override task_manager)
     eval_kwargs.update(kwargs)
 
-    # Patch ``from_pretrained`` so that ``lmms-eval`` reuses the
-    # already-loaded model and processor instead of downloading and
-    # loading them a second time (which would waste time, disk space,
-    # and GPU memory).
-    _model_ctx = _patch_from_pretrained_to_reuse_model(model, processor)
-
     # Patch _subsample_video_inputs to add debug logging
     _subsample_ctx = _patch_subsample_video_inputs_for_debug()
 
-    # When *limit* is set, patch ``huggingface_hub.snapshot_download`` to
-    # download only the first neccesary video zip files for Video-MME (~5-10 GB instead of
-    # ~100 GB).  The ``videomme_mini`` task's ``process_docs`` then
-    # filters the dataset to only include samples with available videos.
+    # Proactively download any missing Video-MME video chunk zips before
+    # lmms-eval runs.  This is incremental: if some chunks are already in
+    # the HF cache from a previous run (possibly with a smaller limit), only
+    # the newly needed chunks are downloaded.
+    _is_videomme = any(
+        t in ("videomme", "video_mme", "videomme_mini") for t in tasks_list
+    )
+    if _is_videomme:
+        _ensure_videomme_chunks_downloaded(limit)  # type: ignore[arg-type]
+
+        # Reset the videomme_mini utils module's _printed_prompts set so
+        # that prompts are printed again for this evaluation run.
+        try:
+            from tico.quantization.evaluation.lmms_tasks.videomme_mini.utils import (
+                _reset_printed_prompts,
+            )
+
+            _reset_printed_prompts()
+        except ImportError:
+            pass
+
+    # When *limit* is set, also patch ``huggingface_hub.snapshot_download``
+    # as a safety net to prevent lmms-eval from downloading all chunks.
     _download_ctx = None
-    if limit is not None and isinstance(limit, int) and limit > 0:
+    if _is_videomme and limit is not None and isinstance(limit, int) and limit > 0:
         _download_ctx = _patch_snapshot_download_for_limit(limit)
 
     with _model_ctx, _subsample_ctx:
@@ -563,10 +688,6 @@ def _get_custom_tasks_dir() -> str | None:
 
 def _build_model_args(
     model: Any,
-    processor: Any,
-    device: str,
-    batch_size: int,
-    max_new_tokens: int,
     max_num_frames: int = 32,
 ) -> tuple[str, dict[str, Any]]:
     """Build the ``model`` name and ``model_args`` dict for ``simple_evaluate``.

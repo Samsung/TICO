@@ -48,7 +48,14 @@ _data_dir = os.path.join(_cache_dir, "data")
 
 # Verbose flag: set LMMS_VERBOSE=1 (or pass --verbose to the quantization
 # script) to enable debug printing.  By default, printing is suppressed.
-_VERBOSE = os.getenv("LMMS_VERBOSE", "").lower() in ("1", "true", "yes")
+# NOTE: We use a helper function instead of a module-level variable so that
+# changes to the LMMS_VERBOSE environment variable at runtime are reflected
+# immediately (e.g. when evaluate_vlm_on_tasks sets it before calling
+# simple_evaluate).
+
+
+def _is_verbose() -> bool:
+    return os.getenv("LMMS_VERBOSE", "").lower() in ("1", "true", "yes")
 
 
 def _available_video_ids() -> set[str]:
@@ -77,9 +84,8 @@ def videomme_process_docs(dataset):
     """
     available = _available_video_ids()
     if not available:
-        # If no videos are extracted yet, return the dataset as-is.
-        # The download/extraction may happen later in the task init.
-        return dataset
+        # If no videos are extracted yet, raise RuntimeError.
+        raise RuntimeError("There are no avaiable videos from extracted zip files")
     return dataset.filter(lambda x: x["videoID"] in available)
 
 
@@ -97,7 +103,7 @@ def videomme_doc_to_visual(doc):
     """
     video_path = os.path.join(_data_dir, doc["videoID"] + ".mp4")
     if os.path.exists(video_path):
-        if _VERBOSE:
+        if _is_verbose():
             print(
                 f"[INFO] doc_to_visual: returning video path: {video_path}",
                 file=sys.stderr,
@@ -107,14 +113,14 @@ def videomme_doc_to_visual(doc):
     for ext in (".MP4", ".mkv"):
         alt_path = os.path.join(_data_dir, doc["videoID"] + ext)
         if os.path.exists(alt_path):
-            if _VERBOSE:
+            if _is_verbose():
                 print(
                     f"[INFO] doc_to_visual: returning video path: {alt_path}",
                     file=sys.stderr,
                 )
             return [alt_path]
     # Video not available – skip gracefully
-    if _VERBOSE:
+    if _is_verbose():
         print(
             f"[INFO] Video not found: {video_path}, skipping sample",
             file=sys.stderr,
@@ -126,6 +132,11 @@ def videomme_doc_to_visual(doc):
 # lmms-eval calls doc_to_text multiple times per sample (task construction,
 # batching, generation), so we deduplicate by (videoID, question).
 _printed_prompts: set[tuple[str, str]] = set()
+
+
+def _reset_printed_prompts() -> None:
+    """Clear the set of already-printed prompt keys."""
+    _printed_prompts.clear()
 
 
 def videomme_doc_to_text(doc, lmms_eval_specific_kwargs=None):
@@ -143,7 +154,7 @@ def videomme_doc_to_text(doc, lmms_eval_specific_kwargs=None):
     full_prompt = _upstream_doc_to_text(doc, lmms_eval_specific_kwargs)
 
     # Print the final prompt for debugging (once per unique sample, only when verbose)
-    if _VERBOSE:
+    if _is_verbose():
         video_id = doc.get("videoID", "<unknown>")
         question = doc.get("question", "")
         key = (video_id, question)
