@@ -25,6 +25,7 @@ from tico.quantization.config.utils import auto_qscheme_for
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -532,6 +533,22 @@ def _build_qwen3_vl_norm_override(
             "affine_add",
         ]:
             override[obs_name] = {"qscheme": norm_qscheme}
+
+        # LayerNorm observers that benefit from microscaling
+        mx_observers = [
+            "inv_std",
+            "act_in",
+            "centered",
+            "square",
+            "act_out",
+            "norm",
+        ]
+        for obs_name in mx_observers:
+            override[obs_name] = {
+                "observer": MXObserver,
+                "elem_format": "int8",
+                "axis": 1,
+            }
 
     if norm_weight_dtype is not None:
         weight_qscheme = auto_qscheme_for(norm_weight_dtype, "weight")
