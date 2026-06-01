@@ -27,6 +27,7 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from torch.utils.data import DataLoader, TensorDataset
 
 from test.modules.op.linear import SimpleLinear
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
 
 class TestPTQWrapper(unittest.TestCase):
@@ -34,7 +35,7 @@ class TestPTQWrapper(unittest.TestCase):
         torch.manual_seed(42)
         self.fp32 = torch.nn.Linear(4, 2)
         self.input = torch.randn(32, 4)
-        self.qcfg = qcfg or PTQConfig(default_dtype=DType.uint(8))
+        self.qcfg = qcfg or make_affine_ptq_config(dtype=DType.uint(8))
         self.wrapper = PTQWrapper(self.fp32, qcfg=self.qcfg)
 
     def setUp(self):
@@ -57,8 +58,8 @@ class TestPTQWrapper(unittest.TestCase):
         out_mm = self.wrapper(self.input)
 
         # ----- pass #2: Identity via PTQConfig override --------
-        pct_cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        pct_cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 # LinearQuant uses act_in / act_out
                 "act_in": {
@@ -111,7 +112,7 @@ class TestPTQSmoke(unittest.TestCase):
         data = torch.randn(128, 3) * 2
         self.calib_loader = DataLoader(TensorDataset(data), batch_size=32)
 
-        qcfg = PTQConfig(default_dtype=DType.uint(8))
+        qcfg = make_affine_ptq_config(dtype=DType.uint(8))
         self.model.linear = PTQWrapper(self.model.linear, qcfg=qcfg)  # type: ignore[assignment]
 
     def test_smoke_forward_quantized(self):
@@ -139,7 +140,7 @@ class TestPTQWrapperObserverSurface(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(0)
         self.fp = torch.nn.Linear(4, 2)
-        self.qcfg = PTQConfig(default_dtype=DType.uint(8))
+        self.qcfg = make_affine_ptq_config(dtype=DType.uint(8))
         self.wrapper = PTQWrapper(self.fp, qcfg=self.qcfg)
 
     def test_all_observers_is_empty_for_wrapper(self):
@@ -169,7 +170,7 @@ class TestPTQWrapperNoDoubleProcessing(unittest.TestCase):
 
     class ParentQuant(QuantModuleBase):
         def __init__(self, fp_mod: torch.nn.Module, qcfg: Optional[PTQConfig] = None):
-            super().__init__(qcfg or PTQConfig(default_dtype=DType.uint(8)))
+            super().__init__(qcfg or make_affine_ptq_config(dtype=DType.uint(8)))
             # PTQWrapper is a QuantModuleBase child -> visited by _child_quant_modules()
             self.child = PTQWrapper(fp_mod, qcfg=self.qcfg)
 

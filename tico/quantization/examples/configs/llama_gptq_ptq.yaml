@@ -55,13 +55,12 @@ pipeline:
   - name: ptq
     enabled: true
     profile: npu_export
-    activation_dtype: int16
-    default_qscheme: per_tensor_symm
-    linear_weight_bits: 4
-    embedding_weight_bits: 8
-    lm_head_weight_bits: 8
-    spin_rotation_weight_bits: 16
-    norm_weight_dtype: int16
+    activation: int16
+    linear_weight: uint4
+    embedding_weight: uint8
+    lm_head_weight: uint8
+    spin_rotation_weight: int16
+    norm_weight: int16
     strict_wrap: true
     decode_calibration_steps: 0
 

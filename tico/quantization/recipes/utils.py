@@ -19,6 +19,7 @@ from typing import Any, Mapping
 
 import torch
 
+from tico.quantization.config.specs import affine, mx, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
@@ -85,6 +86,67 @@ def qscheme_from_name(
     if key not in mapping:
         raise ValueError(f"Unsupported qscheme: {value}")
     return mapping[key]
+
+
+def quant_spec_from_config(
+    value: Any,
+    *,
+    default: QuantSpec | None = None,
+) -> QuantSpec | None:
+    """Parse a recipe quantization spec into a QuantSpec.
+
+    Supported forms:
+      - ``None``: returns ``default``.
+      - ``QuantSpec``: returned as-is.
+      - scalar dtype/bit-width: affine spec, e.g. ``"int16"`` or ``4``.
+      - mapping with ``kind: affine``: affine spec with ``dtype`` and optional
+        ``qscheme``.
+      - mapping with ``kind: mx``: MX spec with ``elem_format`` and MX kwargs.
+
+    Examples:
+        ``activation: int16``
+        ``linear_weight: uint4``
+        ``activation: {kind: mx, elem_format: fp8_e4m3, axis: -1}``
+    """
+    if value is None:
+        return default
+    if isinstance(value, QuantSpec):
+        return value
+
+    if isinstance(value, Mapping):
+        kind = str(value.get("kind", value.get("type", "affine"))).strip().lower()
+
+        if kind == "mx":
+            return mx(
+                str(value.get("elem_format", "fp8_e4m3")),
+                axis=int(value.get("axis", -1)),
+                shared_exp_method=str(value.get("shared_exp_method", "max")),
+                round=str(value.get("round", "nearest")),
+            )
+
+        if kind == "affine":
+            if "dtype" not in value:
+                raise ValueError("Affine quant spec mapping requires a 'dtype' field.")
+            qscheme = (
+                qscheme_from_name(value.get("qscheme"))
+                if value.get("qscheme") is not None
+                else None
+            )
+            return affine(
+                wrapq_dtype_from_name(value["dtype"]),
+                qscheme=qscheme,
+            )
+
+        raise ValueError(f"Unsupported quant spec kind: {kind!r}")
+
+    return affine(wrapq_dtype_from_name(value))
+
+
+def quant_specs_equivalent(left: Any, right: Any) -> bool:
+    """Return True if two recipe spec values resolve to the same QuantSpec."""
+    if left is None or right is None:
+        return left is right
+    return quant_spec_from_config(left) == quant_spec_from_config(right)
 
 
 def set_seed(seed: int | None) -> None:

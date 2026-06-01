@@ -145,8 +145,8 @@ pipeline:
 
   - name: ptq
     enabled: true
-    activation_dtype: int16
-    default_qscheme: per_tensor_symm
+    activation: int16
+    linear_weight: uint4
 ```
 
 Rules:
@@ -170,8 +170,8 @@ pipeline:
 
   - name: ptq
     enabled: true
-    activation_dtype: int16
-    linear_weight_bits: 4
+    activation: int16
+    linear_weight: uint4
 ```
 
 PTQ-only smoke:
@@ -180,8 +180,21 @@ PTQ-only smoke:
 pipeline:
   - name: ptq
     enabled: true
-    activation_dtype: int16
-    linear_weight_bits: 8
+    activation: int16
+    linear_weight: uint8
+```
+
+PTQ activation can also use an explicit spec mapping, for example MX:
+
+```yaml
+pipeline:
+  - name: ptq
+    enabled: true
+    activation:
+      kind: mx
+      elem_format: fp8_e4m3
+      axis: -1
+    linear_weight: uint4
 ```
 
 Preprocessing + GPTQ + PTQ:

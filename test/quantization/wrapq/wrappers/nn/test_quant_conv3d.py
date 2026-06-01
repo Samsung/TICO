@@ -23,6 +23,8 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_conv3d import QuantConv3d
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 @unittest.skip(
     "This test is skipped becuse QuantConv3d is not currently used to wrap Conv3d"
@@ -190,8 +192,8 @@ class TestQuantConv3d(unittest.TestCase):
         PTQConfig overrides should propagate to observers created by QuantConv3d.
         Test that different dtypes can be applied to input, output, and weights.
         """
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "act_in": {"dtype": DType.uint(4)},
                 "act_out": {"dtype": DType.uint(4)},

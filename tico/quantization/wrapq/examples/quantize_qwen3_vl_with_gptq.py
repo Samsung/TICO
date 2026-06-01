@@ -27,6 +27,7 @@ from tico.quantization.algorithm.smoothquant.smooth_quant import apply_smoothing
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
+from tico.quantization.config.specs import affine
 from tico.quantization.evaluation.hellaswag_eval_utils import (
     evaluate_hellaswag,
     get_hellaswag_accuracy,
@@ -50,7 +51,6 @@ from tico.quantization.evaluation.vlm_eval_utils import (
 )
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
@@ -873,14 +873,15 @@ def quantize_using_PTQ(
         num_vision_blocks=num_vision_blocks,
         num_text_layers=num_text_layers,
         num_deepstack_mergers=num_deepstack_mergers,
-        activation_dtype=DType.int(16),
-        default_qscheme=QScheme.PER_TENSOR_SYMM,
-        linear_weight_bits=args.linear_weight_bits,
-        vision_patch_embed_weight_bits=args.vision_patch_embed_weight_bits,
-        embedding_weight_bits=args.embedding_weight_bits,
-        lm_head_weight_bits=args.lm_head_weight_bits,
-        norm_dtype=DType.int(16),
-        norm_weight_dtype=DType.int(16),
+        activation=affine(DType.int(16)),
+        linear_weight=affine(DType.uint(args.linear_weight_bits)),
+        vision_patch_embed_weight=affine(
+            DType.uint(args.vision_patch_embed_weight_bits)
+        ),
+        embedding_weight=affine(DType.uint(args.embedding_weight_bits)),
+        lm_head_weight=affine(DType.uint(args.lm_head_weight_bits)),
+        norm=affine(DType.int(16)),
+        norm_weight=affine(DType.int(16)),
         strict_wrap=True,
         model_args={
             "vision": {

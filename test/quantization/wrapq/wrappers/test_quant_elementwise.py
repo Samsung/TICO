@@ -46,6 +46,8 @@ from tico.quantization.wrapq.wrappers.quant_elementwise import (
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import lookup
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 ACTIVATIONS: List[
     Tuple[
         torch.nn.Module, Callable[[torch.Tensor], torch.Tensor], Type[QuantModuleBase]
@@ -138,7 +140,7 @@ class TestElementwiseWrappers(unittest.TestCase):
         }
 
         for fp32_mod, _, _ in ACTIVATIONS:
-            cfg = PTQConfig(default_dtype=DType.uint(8), overrides=override)
+            cfg = make_affine_ptq_config(dtype=DType.uint(8), overrides=override)
             qw = PTQWrapper(fp32_mod, qcfg=cfg)
             wrapped = qw.wrapped  # QuantElementwise subclass
 

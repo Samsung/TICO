@@ -23,6 +23,8 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.ops.quant_rmsnorm import QuantRMSNorm
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 class _DummyRMSNorm(nn.Module):
     """
@@ -147,8 +149,8 @@ class TestQuantRMSNorm(unittest.TestCase):
         """
         PTQConfig overrides should propagate to observers created by QuantRMSNorm.
         """
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "act_in": {"dtype": DType.uint(4)},
                 "act_out": {"dtype": DType.uint(4)},

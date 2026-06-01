@@ -23,6 +23,8 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_patch_embed import (
     QuantQwen3VLVisionPatchEmbed,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = (
     "required transformers not installed — skipping Qwen3VLVisionPatchEmbed tests"
@@ -98,8 +100,8 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
         """
         PTQConfig overrides should propagate to the wrapped Conv3d layer.
         """
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "proj": {
                     "weight": {"dtype": DType.uint(4)},

@@ -23,6 +23,8 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
     QuantQwen3VLTextModel,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 skip_msg = "required transformers not installed — skipping Qwen3VLTextModel tests"
 
 
@@ -325,8 +327,8 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         """
         Test that PTQConfig overrides propagate correctly to submodules.
         """
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={"inputs_embeds": {"dtype": DType.uint(4)}},
         )
         q_model = QuantQwen3VLTextModel(self.fp_model, qcfg=cfg)
@@ -872,7 +874,7 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         vocab_size = self.fp_model.config.vocab_size
         spatial_merge_size = 2
 
-        ptq_config = PTQConfig(
+        ptq_config = make_affine_ptq_config(
             model_args={
                 "vision": {
                     "grid_thw": grid_thw,

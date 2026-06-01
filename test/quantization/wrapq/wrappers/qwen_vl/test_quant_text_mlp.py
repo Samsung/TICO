@@ -27,6 +27,8 @@ from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_mlp import QuantQwen3VLTextMLP
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = "required transformers not installed — skipping Qwen3VLTextMLP tests"
 
@@ -102,8 +104,8 @@ class TestQuantQwen3VLTextMLP(unittest.TestCase):
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_per_projection_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "gate_proj": {
                     "act_in": {"dtype": DType.uint(4)},

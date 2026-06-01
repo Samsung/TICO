@@ -62,8 +62,8 @@ calibration:
 
 pipeline:
   - name: ptq
-    activation_dtype: int16
-    linear_weight_bits: 8
+    activation: int16
+    linear_weight: uint8
 ```
 
 ## When to add a debug mode

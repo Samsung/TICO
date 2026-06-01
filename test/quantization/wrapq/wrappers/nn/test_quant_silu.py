@@ -21,6 +21,8 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_silu import QuantSiLU
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 class TestQuantSiLU(unittest.TestCase):
     def setUp(self):
@@ -66,8 +68,8 @@ class TestQuantSiLU(unittest.TestCase):
         torch.testing.assert_close(out, torch.zeros_like(x))
 
     def test_dtype_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "sigmoid": {"dtype": DType.uint(4)},
                 "mul": {"dtype": DType.uint(4)},

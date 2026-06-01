@@ -40,9 +40,9 @@ from tico.quantization.recipes.evaluation.vlm import (
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.utils import (
     move_to_device,
-    qscheme_from_name,
+    quant_spec_from_config,
+    quant_specs_equivalent,
     torch_dtype_from_name,
-    wrapq_dtype_from_name,
 )
 
 
@@ -174,24 +174,15 @@ class Qwen3VLAdapter(ModelAdapter):
             num_text_layers=num_text_layers,
             num_deepstack_mergers=num_deepstack_mergers,
             model_args=model_args,
-            activation_dtype=wrapq_dtype_from_name(
-                stage_cfg.get("activation_dtype", "int16")
+            activation=quant_spec_from_config(stage_cfg.get("activation", "int16")),
+            linear_weight=quant_spec_from_config(stage_cfg.get("linear_weight")),
+            vision_patch_embed_weight=quant_spec_from_config(
+                stage_cfg.get("vision_patch_embed_weight")
             ),
-            default_qscheme=qscheme_from_name(
-                stage_cfg.get("default_qscheme", "per_tensor_symm")
-            ),
-            linear_weight_bits=stage_cfg.get("linear_weight_bits"),
-            vision_patch_embed_weight_bits=stage_cfg.get(
-                "vision_patch_embed_weight_bits"
-            ),
-            embedding_weight_bits=stage_cfg.get("embedding_weight_bits"),
-            lm_head_weight_bits=stage_cfg.get("lm_head_weight_bits"),
-            norm_dtype=wrapq_dtype_from_name(stage_cfg["norm_dtype"])
-            if stage_cfg.get("norm_dtype")
-            else None,
-            norm_weight_dtype=wrapq_dtype_from_name(stage_cfg["norm_weight_dtype"])
-            if stage_cfg.get("norm_weight_dtype")
-            else None,
+            embedding_weight=quant_spec_from_config(stage_cfg.get("embedding_weight")),
+            lm_head_weight=quant_spec_from_config(stage_cfg.get("lm_head_weight")),
+            norm=quant_spec_from_config(stage_cfg.get("norm")),
+            norm_weight=quant_spec_from_config(stage_cfg.get("norm_weight")),
             strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
         )
 
@@ -273,13 +264,13 @@ class Qwen3VLAdapter(ModelAdapter):
         if ptq_stage is None:
             return
 
-        embedding_bits = ptq_stage.get("embedding_weight_bits")
-        lm_head_bits = ptq_stage.get("lm_head_weight_bits")
-        if embedding_bits is not None and lm_head_bits is not None:
-            if int(embedding_bits) != int(lm_head_bits):
+        embedding_weight = ptq_stage.get("embedding_weight")
+        lm_head_weight = ptq_stage.get("lm_head_weight")
+        if embedding_weight is not None and lm_head_weight is not None:
+            if not quant_specs_equivalent(embedding_weight, lm_head_weight):
                 raise ValueError(
                     "Qwen3-VL SpinQuant assumes tied word embeddings, so "
-                    "ptq.embedding_weight_bits and ptq.lm_head_weight_bits must match."
+                    "ptq.embedding_weight and ptq.lm_head_weight must match."
                 )
 
     def apply_smoothquant(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):

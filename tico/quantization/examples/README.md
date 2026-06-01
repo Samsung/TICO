@@ -112,7 +112,7 @@ python -m tico.quantization.examples.quantize \
 #### Quantize output and diagnostics
 
 `quantize.py` prints a high-level config summary before loading the model. This
-helps verify which stages and key bit-width settings are active.
+helps verify which stages and key quantization specs are active.
 
 Example:
 
@@ -127,10 +127,11 @@ GPTQ lm_head enabled  : False
 PTQ enabled           : True
 SpinQuant enabled     : True
 CLE enabled           : False
-Linear weight bits    : 4
-Embedding weight bits : 8
-LM head weight bits   : 8
-Spin rotation bits    : 8
+Activation            : int16
+Linear weight         : uint4
+Embedding weight      : uint8
+LM head weight        : uint8
+Spin rotation weight  : int8
 Calibration samples   : 128
 Calibration seq length: 2048
 Max seq length        : 2048
@@ -382,13 +383,13 @@ python -m tico.quantization.examples.quantize \
 ```
 
 You can also override fields inside later stages by index. For example, if the
-PTQ stage is `pipeline.3`, change its SpinQuant rotation weight bit-width with:
+PTQ stage is `pipeline.3`, change its SpinQuant rotation weight spec with:
 
 ```bash
 python -m tico.quantization.examples.quantize \
   --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
   --set pipeline.0.enabled=true \
-  --set pipeline.3.spin_rotation_weight_bits=8
+  --set pipeline.3.spin_rotation_weight=int8
 ```
 
 Convenience aliases are also available:
@@ -409,7 +410,7 @@ Good command-line overrides:
 ```bash
 --set pipeline.0.enabled=true
 --set pipeline.2.weight_bits=4
---set pipeline.3.activation_dtype=int16
+--set pipeline.3.activation=int16
 ```
 
 Prefer a new config file for structural changes:
@@ -425,7 +426,7 @@ pipeline:
 
   - name: ptq
     enabled: true
-    activation_dtype: int16
+    activation: int16
 ```
 
 ## GPTQ SMSE sensitivity

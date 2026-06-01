@@ -26,6 +26,8 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
     QuantQwen3VLTextAttention,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = "required transformers not installed — skipping Qwen3VLTextAttention tests"
 
@@ -111,8 +113,8 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_per_projection_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "q_proj": {
                     "act_in": {"dtype": DType.uint(4)},
@@ -298,7 +300,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         self.assertEqual(cache.v.shape, (B, self.num_kv_heads, 5, self.head_dim))
 
     def test_qwen_text_attention_bool_mask_is_combined_with_causal_mask(self):
-        qcfg = PTQConfig(attention_mask_fill_value=-100.0)
+        qcfg = make_affine_ptq_config(attention_mask_fill_value=-100.0)
         attn = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
 
         mask = torch.full((1, 1, 8, 8), -100.0)

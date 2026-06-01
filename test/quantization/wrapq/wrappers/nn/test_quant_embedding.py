@@ -22,6 +22,8 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 class TestQuantEmbedding(unittest.TestCase):
     def setUp(self):
@@ -72,8 +74,8 @@ class TestQuantEmbedding(unittest.TestCase):
         self.assertTrue(torch.allclose(pre_scale, post_scale))
 
     def test_dtype_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "act_out": {"dtype": DType.uint(4)},
             },

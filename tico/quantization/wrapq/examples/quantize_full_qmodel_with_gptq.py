@@ -62,11 +62,11 @@ from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
     SUPPORTED_EXECUTION_PROFILES,
 )
+from tico.quantization.config.specs import affine
 from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
@@ -948,15 +948,16 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     qcfg = build_llm_ptq_config(
         model_type="llama",
         num_hidden_layers=len(q_m.model.layers),
-        activation_dtype=DType.int(16),
-        default_qscheme=QScheme.PER_TENSOR_SYMM,
-        linear_weight_bits=args.linear_weight_bits,
-        embedding_weight_bits=args.embedding_weight_bits,
-        lm_head_weight_bits=args.lm_head_weight_bits,
-        spin_rotation_weight_bits=(
-            None if args.no_spinquant else args.spin_rotation_weight_bits
+        activation=affine(DType.int(16)),
+        linear_weight=affine(DType.uint(args.linear_weight_bits)),
+        embedding_weight=affine(DType.uint(args.embedding_weight_bits)),
+        lm_head_weight=affine(DType.uint(args.lm_head_weight_bits)),
+        spin_rotation_weight=(
+            None
+            if args.no_spinquant
+            else affine(DType.int(args.spin_rotation_weight_bits))
         ),
-        norm_weight_dtype=DType.int(16),
+        norm_weight=affine(DType.int(16)),
         strict_wrap=True,
         profile=args.profile,
     )

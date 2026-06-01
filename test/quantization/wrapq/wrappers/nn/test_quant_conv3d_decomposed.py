@@ -26,6 +26,8 @@ from tico.quantization.wrapq.wrappers.nn.quant_conv3d_decomposed import (
     QuantConv3dDecomposed,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 class TestQuantConv3dDecomposed(unittest.TestCase):
     def setUp(self):
@@ -262,8 +264,8 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
 
     def test_dtype_override(self):
         """Test that PTQConfig overrides propagate to observers."""
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "act_in": {"dtype": DType.uint(4)},
                 "act_out": {"dtype": DType.uint(4)},

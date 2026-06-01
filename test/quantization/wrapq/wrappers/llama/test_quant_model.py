@@ -28,6 +28,8 @@ from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 skip_msg = "required transformers not installed — skipping LlamaModel tests"
 
 
@@ -66,7 +68,7 @@ class TestQuantLlamaModel(unittest.TestCase):
         cls.fp_model = LlamaModel(cfg)
 
     def test_mode_transitions(self):
-        qmodel = QuantLlamaModel(self.fp_model, qcfg=PTQConfig())
+        qmodel = QuantLlamaModel(self.fp_model, qcfg=make_affine_ptq_config())
         self.assertIs(qmodel._mode, Mode.NO_QUANT)
 
         qmodel.enable_calibration()
@@ -79,7 +81,7 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertIs(qmodel._mode, Mode.QUANT)
 
     def test_forward_diff(self):
-        qmodel = QuantLlamaModel(self.fp_model, qcfg=PTQConfig())
+        qmodel = QuantLlamaModel(self.fp_model, qcfg=make_affine_ptq_config())
         qmodel.enable_calibration()
 
         calib_set = []
@@ -110,7 +112,7 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_reference_eval_profile_propagates_to_layers_and_attention(self):
-        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qcfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
         qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg)
 
         first_layer = qmodel.layers[0].wrapped
@@ -129,7 +131,7 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertEqual(first_attn.attn_options.layout, "batched")
 
     def test_attention_specific_profile_override_propagates(self):
-        qcfg = PTQConfig(
+        qcfg = make_affine_ptq_config(
             model_args={
                 "profile": "reference_eval",
                 "attention": {
@@ -151,11 +153,11 @@ class TestQuantLlamaModel(unittest.TestCase):
     def test_rope_sin_template_convention_depends_on_profile(self):
         qmodel_ref = QuantLlamaModel(
             self.fp_model,
-            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
         )
         qmodel_npu = QuantLlamaModel(
             self.fp_model,
-            qcfg=PTQConfig(model_args={"profile": "npu_export"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "npu_export"}),
         )
 
         half_dim = self.head_dim // 2
@@ -181,9 +183,9 @@ class TestQuantLlamaModel(unittest.TestCase):
         This catches naming mismatches such as looking up `model.layers.0`
         after the config has already been narrowed to `layers`.
         """
-        qcfg = PTQConfig(
-            default_dtype=DType.int(16),
-            default_qscheme=QScheme.PER_TENSOR_SYMM,
+        qcfg = make_affine_ptq_config(
+            dtype=DType.int(16),
+            qscheme=QScheme.PER_TENSOR_SYMM,
             overrides={
                 "layers": {
                     "0": {

@@ -29,6 +29,8 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer import (
     QuantQwen3VLTextDecoderLayer,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = (
     "required transformers not installed — skipping Qwen3VLTextDecoderLayer tests"
@@ -254,8 +256,8 @@ class TestQuantQwen3VLTextDecoderLayer(unittest.TestCase):
         """
         Test that PTQConfig overrides propagate correctly to submodules.
         """
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "self_attn": {
                     "act_in": {"dtype": DType.uint(4)},

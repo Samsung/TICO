@@ -18,20 +18,14 @@ from typing import Iterable, Optional, Tuple
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
-
+from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.qscheme import QScheme
 
 
 def _symmetric_qscheme_like(qscheme: QScheme) -> QScheme:
-    """
-    Return the symmetric qscheme with the same tensor/channel granularity.
-
-    This helper is used when a signed dtype is selected but the observer did
-    not receive an explicit user qscheme. It preserves the wrapper's preferred
-    granularity while avoiding signed asymmetric quantization by default.
-    """
+    """Return the symmetric qscheme with the same tensor/channel granularity."""
     if qscheme.is_per_channel():
         return QScheme.PER_CHANNEL_SYMM
     return QScheme.PER_TENSOR_SYMM
@@ -159,6 +153,7 @@ class QuantModuleBase(nn.Module, ABC):
     def get_observer(
         self, name: str, *, recurse: bool = True
     ) -> Optional[ObserverBase]:
+        """Return an observer by name, or None when it is not found."""
         for obs_name, obs in self.named_observers(recurse=recurse):
             if obs_name == name:
                 return obs
@@ -170,60 +165,79 @@ class QuantModuleBase(nn.Module, ABC):
         **default_kwargs,
     ) -> ObserverBase:
         """
-        Instantiate an observer named *name*.
+        Instantiate an observer named `name`.
 
-        Precedence (3-tier) for keys:
-           • observer:  user > wrapper-default > PTQConfig.default_observer
-           • dtype:     user > wrapper-default > PTQConfig.default_dtype
-           • qscheme:   user > wrapper-default > PTQConfig.default_qscheme
-
-        Other kwargs (e.g., qscheme, channel_axis, etc.) remain:
-           user override > wrapper-default
+        Precedence for observer, dtype, qscheme, and other kwargs is:
+            1. explicit observer override in PTQConfig.overrides
+            2. wrapper defaults passed by the wrapper implementation
+            3. role-level QuantSpec from PTQConfig.activation or PTQConfig.weight
         """
         _UNSPEC = object()
 
         wrapper_defaults = default_kwargs.copy()
+        role_cfg = self.qcfg.get_role_kwargs(name).copy()
         user_cfg = self.qcfg.get_kwargs(name).copy()
+        replace_role = bool(user_cfg.pop("__quant_spec_replace_role__", False))
+        if replace_role:
+            role_cfg = {}
 
-        def pick3(user_val, wrap_val, global_val):
+        def pick3(user_val, wrap_val, role_val):
             return (
                 user_val
                 if user_val is not _UNSPEC
                 else wrap_val
                 if wrap_val is not _UNSPEC
-                else global_val
+                else role_val
             )
 
-        # 1) resolve observer class
         user_observer = user_cfg.pop("observer", _UNSPEC)
+        role_observer = role_cfg.pop("observer", _UNSPEC)
         wrapper_observer = wrapper_defaults.pop("observer", _UNSPEC)
-        obs_cls = pick3(user_observer, wrapper_observer, self.qcfg.default_observer)
+        obs_cls = pick3(user_observer, wrapper_observer, role_observer)
 
-        # 2) resolve dtype
+        if obs_cls is _UNSPEC:
+            raise ValueError(f"No observer class configured for observer {name!r}.")
+
         user_dtype = user_cfg.pop("dtype", _UNSPEC)
+        role_dtype = role_cfg.pop("dtype", _UNSPEC)
         wrapper_dtype = wrapper_defaults.pop("dtype", _UNSPEC)
-        final_dtype = pick3(user_dtype, wrapper_dtype, self.qcfg.default_dtype)
+        final_dtype = pick3(user_dtype, wrapper_dtype, role_dtype)
 
-        # 3) resolve qscheme
         user_qscheme = user_cfg.pop("qscheme", _UNSPEC)
+        role_qscheme = role_cfg.pop("qscheme", _UNSPEC)
         wrapper_qscheme = wrapper_defaults.pop("qscheme", _UNSPEC)
-        final_qscheme = pick3(user_qscheme, wrapper_qscheme, self.qcfg.default_qscheme)
+        final_qscheme = pick3(user_qscheme, wrapper_qscheme, role_qscheme)
+
+        if final_dtype is not _UNSPEC:
+            if final_qscheme is _UNSPEC:
+                final_qscheme = auto_qscheme_for(final_dtype, name)
+
+            if dtype_is_unsigned(final_dtype) and final_qscheme.is_symmetric():
+                raise ValueError(
+                    f"Invalid quantization config for observer {name!r}: unsigned "
+                    f"dtype {final_dtype!r} cannot be paired with symmetric "
+                    f"qscheme {final_qscheme!r}."
+                )
 
         if (
             user_qscheme is _UNSPEC
+            and wrapper_qscheme is _UNSPEC
+            and final_dtype is not _UNSPEC
+            and final_qscheme is not _UNSPEC
             and final_dtype.signed
             and not final_qscheme.is_symmetric()
         ):
             final_qscheme = _symmetric_qscheme_like(final_qscheme)
 
-        # 4) merge remaining kwargs: user_cfg wins
-        final_kw = wrapper_defaults
+        final_kw = role_cfg
+        final_kw.update(wrapper_defaults)
         final_kw.update(user_cfg)
-        final_kw["dtype"] = final_dtype
-        final_kw["qscheme"] = final_qscheme
+        if final_dtype is not _UNSPEC:
+            final_kw["dtype"] = final_dtype
+        if final_qscheme is not _UNSPEC:
+            final_kw["qscheme"] = final_qscheme
 
         return obs_cls(**final_kw, name=name)
 
-    # nice repr
     def extra_repr(self) -> str:
         return f"mode={self._mode.name.lower()}"

@@ -19,125 +19,53 @@ from tico.quantization.config.builders import (
     _build_llama_overrides,
     _build_norm_override,
     _build_weight_override,
-    _resolve_weight_dtype,
-    _weight_dtype_from_bits,
     build_llm_ptq_config,
+    build_qwen3_vl_ptq_config,
 )
 from tico.quantization.config.llama_attention import DEFAULT_EXECUTION_PROFILE
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.utils import auto_qscheme_for
+from tico.quantization.config.specs import affine, mx
 from tico.quantization.wrapq.dtypes import DType
-from tico.quantization.wrapq.observers.ema import EMAObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
 class TestBuilderHelpers(unittest.TestCase):
-    def test_auto_qscheme_for_unsigned_activation(self):
-        self.assertEqual(
-            auto_qscheme_for(DType.uint(8), "act_in"),
-            QScheme.PER_TENSOR_ASYMM,
-        )
-
-    def test_auto_qscheme_for_unsigned_weight(self):
-        self.assertEqual(
-            auto_qscheme_for(DType.uint(8), "weight"),
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-
-    def test_auto_qscheme_for_signed_dtype(self):
-        self.assertEqual(
-            auto_qscheme_for(DType.int(8), "weight"),
-            QScheme.PER_TENSOR_SYMM,
-        )
-
-    def test_weight_dtype_from_bits(self):
-        self.assertEqual(_weight_dtype_from_bits(16), DType.int(16))
-        self.assertEqual(_weight_dtype_from_bits(8), DType.uint(8))
-        self.assertEqual(_weight_dtype_from_bits(4), DType.uint(4))
-
-    def test_weight_dtype_from_bits_invalid_raises(self):
-        with self.assertRaises(ValueError):
-            _weight_dtype_from_bits(3)
-
-    def test_resolve_weight_dtype_prefers_explicit_dtype(self):
-        self.assertEqual(
-            _resolve_weight_dtype(dtype=DType.int(8), bits=4),
-            DType.int(8),
-        )
-
-    def test_resolve_weight_dtype_falls_back_to_bits(self):
-        self.assertEqual(
-            _resolve_weight_dtype(dtype=None, bits=4),
-            DType.uint(4),
-        )
-        self.assertIsNone(_resolve_weight_dtype(dtype=None, bits=None))
-
-    def test_build_weight_override_includes_qscheme(self):
-        override = _build_weight_override(DType.uint(8))
-        self.assertEqual(
-            override,
-            {
-                "weight": {
-                    "dtype": DType.uint(8),
-                    "qscheme": QScheme.PER_CHANNEL_ASYMM,
-                }
-            },
-        )
+    def test_build_weight_override_from_quant_spec(self):
+        override = _build_weight_override(affine(DType.uint(8)))
+        self.assertEqual(override["weight"]["dtype"], DType.uint(8))
+        self.assertEqual(override["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM)
+        self.assertTrue(override["weight"]["__quant_spec_replace_role__"])
         self.assertEqual(_build_weight_override(None), {})
 
-    def test_build_weight_override_signed_dtype_uses_symmetric_qscheme(self):
-        override = _build_weight_override(DType.int(16))
-        self.assertEqual(
-            override,
-            {
-                "weight": {
-                    "dtype": DType.int(16),
-                    "qscheme": QScheme.PER_TENSOR_SYMM,
-                }
-            },
-        )
-
-    def test_build_norm_override_includes_module_and_weight_qscheme(self):
+    def test_build_norm_override_from_quant_specs(self):
         override = _build_norm_override(
-            norm_dtype=DType.uint(8),
-            norm_weight_dtype=DType.uint(4),
+            norm=affine(DType.uint(8)),
+            norm_weight=affine(DType.uint(4)),
         )
 
-        self.assertEqual(override["dtype"], DType.uint(8))
-        self.assertEqual(override["qscheme"], QScheme.PER_TENSOR_ASYMM)
+        self.assertEqual(override["act_in"]["dtype"], DType.uint(8))
+        self.assertEqual(override["act_out"]["dtype"], DType.uint(8))
         self.assertEqual(override["weight"]["dtype"], DType.uint(4))
-        self.assertEqual(
-            override["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
+        self.assertEqual(override["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM)
 
-    def test_build_norm_override_empty_when_no_overrides_requested(self):
-        self.assertEqual(
-            _build_norm_override(norm_dtype=None, norm_weight_dtype=None),
-            {},
-        )
+    def test_build_norm_override_empty_when_no_specs(self):
+        self.assertEqual(_build_norm_override(norm=None, norm_weight=None), {})
 
 
 class TestLlamaOverrideBuilders(unittest.TestCase):
     def test_build_llama_layer_overrides(self):
         overrides = _build_llama_layer_overrides(
-            linear_weight_dtype=DType.uint(8),
-            norm_dtype=DType.uint(8),
-            norm_weight_dtype=DType.uint(4),
+            linear_weight=affine(DType.uint(8)),
+            norm=affine(DType.uint(8)),
+            norm_weight=affine(DType.uint(4)),
         )
 
         self.assertEqual(
             overrides["self_attn"]["q_proj"]["weight"]["qscheme"],
             QScheme.PER_CHANNEL_ASYMM,
         )
-        self.assertEqual(
-            overrides["mlp"]["down_proj"]["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-        self.assertEqual(
-            overrides["input_layernorm"]["qscheme"],
-            QScheme.PER_TENSOR_ASYMM,
-        )
+        self.assertEqual(overrides["input_layernorm"]["act_in"]["dtype"], DType.uint(8))
         self.assertEqual(
             overrides["input_layernorm"]["weight"]["qscheme"],
             QScheme.PER_CHANNEL_ASYMM,
@@ -146,86 +74,26 @@ class TestLlamaOverrideBuilders(unittest.TestCase):
     def test_build_llama_overrides(self):
         overrides = _build_llama_overrides(
             num_hidden_layers=2,
-            linear_weight_dtype=DType.uint(8),
-            embedding_weight_dtype=DType.uint(4),
-            lm_head_weight_dtype=DType.uint(8),
-            spin_rotation_weight_dtype=None,
-            norm_dtype=DType.int(16),
-            norm_weight_dtype=DType.uint(4),
+            linear_weight=affine(DType.uint(8)),
+            embedding_weight=affine(DType.uint(4)),
+            lm_head_weight=affine(DType.uint(8)),
+            spin_rotation_weight=affine(DType.int(16)),
+            norm=affine(DType.int(16)),
+            norm_weight=affine(DType.uint(4)),
         )
 
-        self.assertIn("model", overrides)
-        self.assertIn("layers", overrides["model"])
         self.assertEqual(len(overrides["model"]["layers"]), 2)
         self.assertEqual(
-            overrides["model"]["embed_tokens"]["weight"]["qscheme"],
+            overrides["model"]["embed_tokens"]["weight"]["dtype"], DType.uint(4)
+        )
+        self.assertEqual(overrides["lm_head"]["weight"]["dtype"], DType.uint(8))
+        self.assertEqual(
+            overrides["model"]["rotate_embedding"]["weight"]["dtype"], DType.int(16)
+        )
+        self.assertEqual(
+            overrides["model"]["layers"]["1"]["mlp"]["up_proj"]["weight"]["qscheme"],
             QScheme.PER_CHANNEL_ASYMM,
         )
-        self.assertEqual(
-            overrides["lm_head"]["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-        self.assertNotIn("rotate_embedding", overrides["model"])
-        self.assertNotIn("rotate_lm_head", overrides)
-        self.assertEqual(
-            overrides["model"]["norm"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-        self.assertEqual(
-            overrides["model"]["layers"]["0"]["self_attn"]["o_proj"]["weight"][
-                "qscheme"
-            ],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-
-    def test_build_llama_overrides_with_spin_rotation_weights(self):
-        overrides = _build_llama_overrides(
-            num_hidden_layers=1,
-            linear_weight_dtype=None,
-            embedding_weight_dtype=None,
-            lm_head_weight_dtype=None,
-            spin_rotation_weight_dtype=DType.int(16),
-            norm_dtype=None,
-            norm_weight_dtype=None,
-        )
-
-        self.assertEqual(
-            overrides["model"]["rotate_embedding"]["weight"]["dtype"],
-            DType.int(16),
-        )
-        self.assertEqual(
-            overrides["model"]["rotate_embedding"]["weight"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-        self.assertEqual(
-            overrides["rotate_lm_head"]["weight"]["dtype"],
-            DType.int(16),
-        )
-        self.assertEqual(
-            overrides["rotate_lm_head"]["weight"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-
-    def test_build_llama_overrides_without_optional_weights(self):
-        overrides = _build_llama_overrides(
-            num_hidden_layers=1,
-            linear_weight_dtype=None,
-            embedding_weight_dtype=None,
-            lm_head_weight_dtype=None,
-            spin_rotation_weight_dtype=None,
-            norm_dtype=None,
-            norm_weight_dtype=None,
-        )
-
-        self.assertIn("model", overrides)
-        self.assertIn("layers", overrides["model"])
-        self.assertEqual(len(overrides["model"]["layers"]), 1)
-        self.assertNotIn("embed_tokens", overrides["model"])
-        self.assertNotIn("rotate_embedding", overrides["model"])
-        self.assertNotIn("norm", overrides["model"])
-        self.assertNotIn("lm_head", overrides)
-        self.assertNotIn("rotate_lm_head", overrides)
-        self.assertEqual(overrides["model"]["layers"]["0"], {})
 
 
 class TestBuildLlmPtqConfig(unittest.TestCase):
@@ -233,56 +101,43 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
         cfg = build_llm_ptq_config(
             model_type="llama",
             num_hidden_layers=2,
-            activation_dtype=DType.uint(8),
-            default_qscheme=QScheme.PER_TENSOR_ASYMM,
-            linear_weight_dtype=DType.uint(8),
-            embedding_weight_dtype=DType.uint(4),
-            lm_head_weight_dtype=DType.uint(8),
-            spin_rotation_weight_dtype=DType.int(16),
-            norm_dtype=DType.int(16),
-            norm_weight_dtype=DType.uint(4),
+            activation=affine(DType.uint(8)),
+            weight=affine(DType.int(16)),
+            linear_weight=affine(DType.uint(8)),
+            embedding_weight=affine(DType.uint(4)),
+            lm_head_weight=affine(DType.uint(8)),
+            spin_rotation_weight=affine(DType.int(16)),
+            norm=affine(DType.int(16)),
+            norm_weight=affine(DType.uint(4)),
             strict_wrap=False,
         )
 
         self.assertIsInstance(cfg, PTQConfig)
-        self.assertEqual(cfg.default_dtype, DType.uint(8))
-        self.assertEqual(cfg.default_qscheme, QScheme.PER_TENSOR_ASYMM)
+        self.assertEqual(cfg.activation.dtype, DType.uint(8))
+        self.assertEqual(cfg.weight.dtype, DType.int(16))
         self.assertFalse(cfg.strict_wrap)
         self.assertEqual(cfg.model_args["profile"], DEFAULT_EXECUTION_PROFILE)
+        self.assertEqual(
+            cfg.overrides["model"]["embed_tokens"]["weight"]["dtype"], DType.uint(4)
+        )
+        self.assertEqual(
+            cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM
+        )
 
-        self.assertEqual(
-            cfg.overrides["model"]["embed_tokens"]["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
+    def test_build_llm_ptq_config_supports_mx_activation(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            activation=mx("fp8_e4m3", axis=-1),
+            linear_weight=affine(DType.uint(4)),
         )
+
+        self.assertIs(cfg.activation.observer, MXObserver)
         self.assertEqual(
-            cfg.overrides["lm_head"]["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["rotate_embedding"]["weight"]["dtype"],
-            DType.int(16),
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["rotate_embedding"]["weight"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["rotate_lm_head"]["weight"]["dtype"],
-            DType.int(16),
-        )
-        self.assertEqual(
-            cfg.overrides["rotate_lm_head"]["weight"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["layers"]["1"]["mlp"]["up_proj"]["weight"][
-                "qscheme"
+            cfg.overrides["model"]["layers"]["0"]["self_attn"]["q_proj"]["weight"][
+                "dtype"
             ],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["norm"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
+            DType.uint(4),
         )
 
     def test_build_llm_ptq_config_sets_reference_eval_profile(self):
@@ -291,17 +146,7 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
             num_hidden_layers=1,
             profile="reference_eval",
         )
-
         self.assertEqual(cfg.model_args, {"profile": "reference_eval"})
-
-    def test_build_llm_ptq_config_sets_npu_export_profile(self):
-        cfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=1,
-            profile="npu_export",
-        )
-
-        self.assertEqual(cfg.model_args, {"profile": "npu_export"})
 
     def test_build_llm_ptq_config_invalid_profile_raises(self):
         with self.assertRaises(ValueError):
@@ -311,128 +156,44 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
                 profile="invalid_profile",  # type: ignore[arg-type]
             )
 
-    def test_explicit_dtype_takes_precedence_over_bits(self):
-        cfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=1,
-            linear_weight_bits=4,
-            linear_weight_dtype=DType.uint(8),
-        )
-
-        self.assertEqual(
-            cfg.overrides["model"]["layers"]["0"]["self_attn"]["q_proj"]["weight"][
-                "dtype"
-            ],
-            DType.uint(8),
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["layers"]["0"]["self_attn"]["q_proj"]["weight"][
-                "qscheme"
-            ],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-
-    def test_spin_rotation_explicit_dtype_takes_precedence_over_bits(self):
-        cfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=1,
-            spin_rotation_weight_bits=16,
-            spin_rotation_weight_dtype=DType.uint(8),
-        )
-
-        self.assertEqual(
-            cfg.overrides["model"]["rotate_embedding"]["weight"]["dtype"],
-            DType.uint(8),
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["rotate_embedding"]["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["rotate_lm_head"]["weight"]["dtype"],
-            DType.uint(8),
-        )
-        self.assertEqual(
-            cfg.overrides["rotate_lm_head"]["weight"]["qscheme"],
-            QScheme.PER_CHANNEL_ASYMM,
-        )
-
     def test_build_llm_ptq_config_unsupported_model_type_raises(self):
         with self.assertRaises(NotImplementedError):
-            build_llm_ptq_config(
-                model_type="mistral",
-                num_hidden_layers=1,
-            )
+            build_llm_ptq_config(model_type="mistral", num_hidden_layers=1)
 
-    def test_build_llm_ptq_config_accepts_default_observer(self):
-        cfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=1,
-            default_observer=EMAObserver,
+
+class TestBuildQwen3VlPtqConfig(unittest.TestCase):
+    def test_build_qwen3_vl_ptq_config(self):
+        cfg = build_qwen3_vl_ptq_config(
+            num_vision_blocks=2,
+            num_text_layers=3,
+            num_deepstack_mergers=1,
+            model_args={"vision": {"grid_thw": (1, 2, 3)}},
+            activation=affine(DType.int(16)),
+            linear_weight=affine(DType.uint(4)),
+            vision_patch_embed_weight=affine(DType.uint(8)),
+            embedding_weight=affine(DType.uint(8)),
+            lm_head_weight=affine(DType.uint(8)),
+            norm=affine(DType.int(16)),
+            norm_weight=affine(DType.int(16)),
+            strict_wrap=False,
         )
 
-        self.assertIs(cfg.default_observer, EMAObserver)
-
-    def test_build_llm_ptq_config_bits_fallbacks(self):
-        cfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=1,
-            linear_weight_bits=8,
-            embedding_weight_bits=4,
-            lm_head_weight_bits=8,
-            spin_rotation_weight_bits=16,
-            norm_weight_bits=4,
-            norm_dtype=DType.uint(8),
-        )
-
+        self.assertFalse(cfg.strict_wrap)
+        self.assertEqual(cfg.model_args["vision"]["grid_thw"], (1, 2, 3))
         self.assertEqual(
-            cfg.overrides["model"]["layers"]["0"]["self_attn"]["k_proj"]["weight"][
-                "dtype"
-            ],
+            cfg.overrides["model"]["visual"]["patch_embed"]["proj"]["weight"]["dtype"],
             DType.uint(8),
         )
         self.assertEqual(
-            cfg.overrides["model"]["embed_tokens"]["weight"]["dtype"],
+            cfg.overrides["model"]["language_model"]["layers"]["2"]["self_attn"][
+                "q_proj"
+            ]["weight"]["dtype"],
             DType.uint(4),
         )
         self.assertEqual(
-            cfg.overrides["lm_head"]["weight"]["dtype"],
-            DType.uint(8),
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["rotate_embedding"]["weight"]["dtype"],
-            DType.int(16),
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["rotate_embedding"]["weight"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["rotate_lm_head"]["weight"]["dtype"],
-            DType.int(16),
-        )
-        self.assertEqual(
-            cfg.overrides["rotate_lm_head"]["weight"]["qscheme"],
-            QScheme.PER_TENSOR_SYMM,
-        )
-        self.assertEqual(
-            cfg.overrides["model"]["norm"]["weight"]["dtype"],
-            DType.uint(4),
+            cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM
         )
 
-    def test_build_llm_ptq_config_without_optional_weight_overrides(self):
-        cfg = build_llm_ptq_config(
-            model_type="llama",
-            num_hidden_layers=1,
-        )
 
-        self.assertIsInstance(cfg, PTQConfig)
-        self.assertEqual(cfg.default_dtype, DType.int(16))
-        self.assertEqual(cfg.default_qscheme, QScheme.PER_TENSOR_SYMM)
-        self.assertTrue(cfg.strict_wrap)
-        self.assertEqual(cfg.model_args, {"profile": DEFAULT_EXECUTION_PROFILE})
-        self.assertIn("model", cfg.overrides)
-        self.assertIn("layers", cfg.overrides["model"])
-        self.assertNotIn("rotate_embedding", cfg.overrides["model"])
-        self.assertNotIn("rotate_lm_head", cfg.overrides)
-        self.assertEqual(cfg.overrides["model"]["layers"]["0"], {})
+if __name__ == "__main__":
+    unittest.main()

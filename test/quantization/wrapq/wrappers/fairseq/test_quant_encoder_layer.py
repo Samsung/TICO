@@ -30,6 +30,8 @@ from tico.quantization.wrapq.wrappers.fairseq.quant_mha import (
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 # ────────────────────────────────────────────────────────────
 #   Minimal fairseq-like FP encoder layer to wrap in tests
@@ -119,7 +121,9 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
     def test_forward_shapes_flags(self):
         for normalize_before in (True, False):
             for return_fc in (True, False):
-                layer, _ = self._build_layer(normalize_before, return_fc, PTQConfig())
+                layer, _ = self._build_layer(
+                    normalize_before, return_fc, make_affine_ptq_config()
+                )
                 x = self._make_inputs()
                 out = layer(x, encoder_padding_mask=None, attn_mask=None)
                 if return_fc:
@@ -132,7 +136,7 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
 
     # 2) Mask handling: boolean causal attn_mask and boolean key_padding_mask
     def test_mask_handling(self):
-        layer, _ = self._build_layer(True, False, PTQConfig())
+        layer, _ = self._build_layer(True, False, make_affine_ptq_config())
         x = self._make_inputs()
         # Upper-triangular causal mask [T,S] (True = masked)
         attn_mask_bool = torch.triu(
@@ -146,7 +150,7 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
 
     # 3) Additive float masks should also work
     def test_additive_float_masks(self):
-        layer, _ = self._build_layer(True, False, PTQConfig())
+        layer, _ = self._build_layer(True, False, make_affine_ptq_config())
         x = self._make_inputs()
         attn_mask_add = torch.zeros(self.T, self.T)
         attn_mask_add = attn_mask_add.fill_diagonal_(0.0)
@@ -162,7 +166,7 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
     # 4) return_fc semantics (pre-norm): out == residual + fc_result
     def test_return_fc_semantics_pre_norm(self):
         # Only valid to check exactly when normalize_before=True (no post-FFN norm)
-        qcfg = PTQConfig()
+        qcfg = make_affine_ptq_config()
         layer, _ = self._build_layer(normalize_before=True, return_fc=True, qcfg=qcfg)
         x0 = self._make_inputs()
 
@@ -188,7 +192,7 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
 
     # 5) Lifecycle: enable_calibration → freeze_qparams should propagate to children
     def test_lifecycle_propagation(self):
-        layer, _ = self._build_layer(True, False, PTQConfig())
+        layer, _ = self._build_layer(True, False, make_affine_ptq_config())
         self.assertEqual(layer._mode, Mode.NO_QUANT)
 
         layer.enable_calibration()
@@ -216,9 +220,9 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
 
     # 6) Observer wiring and child configs: override activation observer dtype/qscheme
     def test_qcfg_child_overrides_for_activation_observer(self):
-        qcfg = PTQConfig(
-            default_dtype=DType.uint(8),
-            default_qscheme=QScheme.PER_TENSOR_ASYMM,
+        qcfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
+            qscheme=QScheme.PER_TENSOR_ASYMM,
             overrides={
                 # The encoder layer defines an internal observer named "activation_fn"
                 "activation_fn": {
@@ -239,7 +243,7 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
 
     # 7) Sanity: submodules are properly wrapped
     def test_submodules_wrapped(self):
-        layer, _ = self._build_layer(True, False, PTQConfig())
+        layer, _ = self._build_layer(True, False, make_affine_ptq_config())
         # Self-attention should be QuantFairseqMultiheadAttention
         self.assertIsInstance(layer.self_attn, QuantFairseqMultiheadAttention)
         # FFN and norms are wrapped by PTQWrapper
@@ -251,7 +255,9 @@ class TestQuantFairseqEncoderLayer(unittest.TestCase):
     # 8) Pre- and post-norm numerical sanity (no NaNs; gradient not required)
     def test_numerical_sanity(self):
         for normalize_before in (True, False):
-            layer, _ = self._build_layer(normalize_before, False, PTQConfig())
+            layer, _ = self._build_layer(
+                normalize_before, False, make_affine_ptq_config()
+            )
             x = self._make_inputs()
             y = layer(x, encoder_padding_mask=None, attn_mask=None)
             self.assertFalse(torch.isnan(y).any())

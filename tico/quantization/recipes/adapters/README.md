@@ -210,7 +210,7 @@ config object for that model family.
 
 Keep these rules:
 
-- Parse dtypes and qschemes using shared helpers in `recipes/utils.py`.
+- Parse PTQ specs using `quant_spec_from_config` from `recipes/utils.py`.
 - Keep model-family wrapper names and model args in the adapter.
 - Keep generic algorithm state in stages.
 - Fail early if required model metadata is missing.
@@ -218,13 +218,12 @@ Keep these rules:
 Example:
 
 ```python
-def build_ptq_config(self, ctx, stage_cfg):
++def build_ptq_config(self, ctx, stage_cfg):
     return build_llm_ptq_config(
         model_type="gemma",
         num_hidden_layers=len(ctx.model.model.layers),
-        activation_dtype=wrapq_dtype_from_name(stage_cfg.get("activation_dtype", "int16")),
-        default_qscheme=qscheme_from_name(stage_cfg.get("default_qscheme", "per_tensor_symm")),
-        linear_weight_bits=stage_cfg.get("linear_weight_bits"),
+        activation=quant_spec_from_config(stage_cfg.get("activation", "int16")),
+        linear_weight=quant_spec_from_config(stage_cfg.get("linear_weight")),
         strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
     )
 ```

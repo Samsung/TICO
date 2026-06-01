@@ -28,6 +28,8 @@ from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
 skip_msg = "required transformers not installed — skipping Llama MLP example tests"
@@ -60,7 +62,7 @@ class TestLlamaMLPExample(unittest.TestCase):
         """Quantize a Llama MLP with the INT16 policy used by the example."""
         from tico.quantization.wrapq.wrappers.llama.quant_mlp import QuantLlamaMLP
 
-        qcfg = PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM)
+        qcfg = make_affine_ptq_config(dtype=INT16, qscheme=QScheme.PER_TENSOR_SYMM)
         prepared = prepare(self.fp_mlp, qcfg)
         self.assertIsInstance(prepared, PTQWrapper)
         self.assertIsInstance(prepared.wrapped, QuantLlamaMLP)

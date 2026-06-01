@@ -58,6 +58,58 @@ def _first_value(*values: Any, default: Any = "not set") -> Any:
     return default
 
 
+def _format_quant_spec(value: Any, default: Any = "not set") -> Any:
+    """Return a compact, human-readable quantization spec."""
+    if value is None:
+        return default
+
+    if isinstance(value, Mapping):
+        kind = str(value.get("kind", value.get("type", "affine"))).strip().lower()
+        if kind == "mx":
+            elem_format = value.get("elem_format", "fp8_e4m3")
+            axis = value.get("axis", -1)
+            shared_exp_method = value.get("shared_exp_method")
+            rounding = value.get("round")
+            parts = [f"elem_format={elem_format}", f"axis={axis}"]
+            if shared_exp_method is not None:
+                parts.append(f"shared_exp_method={shared_exp_method}")
+            if rounding is not None:
+                parts.append(f"round={rounding}")
+            return f"mx({', '.join(parts)})"
+
+        if kind == "affine":
+            dtype = value.get("dtype", default)
+            qscheme = value.get("qscheme")
+            observer = value.get("observer")
+            parts = [str(dtype)]
+            if qscheme is not None:
+                parts.append(f"qscheme={qscheme}")
+            if observer is not None:
+                parts.append(f"observer={observer}")
+            return ", ".join(parts)
+
+        return dict(value)
+
+    return value
+
+
+def _stage_quant_spec(
+    stage_cfg: Mapping[str, Any] | None,
+    key: str,
+    default: Any = "not set",
+) -> Any:
+    """Read and format a quantization spec from a stage config."""
+    return _format_quant_spec(_stage_value(stage_cfg, key, None), default)
+
+
+def _gptq_weight_bits(gptq_stage: Mapping[str, Any] | None) -> Any:
+    """Return a readable GPTQ weight bit-width fallback for summaries."""
+    bits = _stage_value(gptq_stage, "weight_bits", None)
+    if bits is None:
+        return None
+    return f"gptq:{bits}-bit"
+
+
 def _calibration_sample_count(calibration_cfg: Mapping[str, Any]) -> Any:
     """Return a readable calibration sample count."""
     datasets = calibration_cfg.get("datasets")
@@ -131,12 +183,17 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     gptq_enabled = _is_stage_enabled(gptq_stage)
     ptq_enabled = _is_stage_enabled(ptq_stage)
 
-    linear_weight_bits = _first_value(
-        _stage_value(ptq_stage, "linear_weight_bits", None),
-        _stage_value(gptq_stage, "weight_bits", None),
+    linear_weight = _first_value(
+        _stage_quant_spec(ptq_stage, "linear_weight", None),
+        _gptq_weight_bits(gptq_stage),
     )
-    spin_rotation_bits = (
-        _stage_value(ptq_stage, "spin_rotation_weight_bits")
+    vision_patch_embed_weight = _stage_quant_spec(
+        ptq_stage, "vision_patch_embed_weight", None
+    )
+    norm = _stage_quant_spec(ptq_stage, "norm", None)
+    norm_weight = _stage_quant_spec(ptq_stage, "norm_weight", None)
+    spin_rotation_weight = (
+        _stage_quant_spec(ptq_stage, "spin_rotation_weight")
         if spinquant_enabled
         else "disabled"
     )
@@ -158,16 +215,23 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     _print_config_row("PTQ enabled", ptq_enabled)
     _print_config_row("SpinQuant enabled", spinquant_enabled)
     _print_config_row("CLE enabled", _is_stage_enabled(cle_stage))
-    _print_config_row("Linear weight bits", linear_weight_bits)
+    _print_config_row("Activation", _stage_quant_spec(ptq_stage, "activation"))
+    _print_config_row("Linear weight", linear_weight)
+    if vision_patch_embed_weight is not None:
+        _print_config_row("Vision patch weight", vision_patch_embed_weight)
     _print_config_row(
-        "Embedding weight bits",
-        _stage_value(ptq_stage, "embedding_weight_bits"),
+        "Embedding weight",
+        _stage_quant_spec(ptq_stage, "embedding_weight"),
     )
     _print_config_row(
-        "LM head weight bits",
-        _stage_value(ptq_stage, "lm_head_weight_bits"),
+        "LM head weight",
+        _stage_quant_spec(ptq_stage, "lm_head_weight"),
     )
-    _print_config_row("Spin rotation bits", spin_rotation_bits)
+    if norm is not None:
+        _print_config_row("Norm", norm)
+    if norm_weight is not None:
+        _print_config_row("Norm weight", norm_weight)
+    _print_config_row("Spin rotation weight", spin_rotation_weight)
     _print_config_row("Calibration samples", _calibration_sample_count(calibration_cfg))
     _print_config_row(
         "Calibration seq length",

@@ -33,6 +33,7 @@ import tico.quantization.recipes.data.vlm as vlm_data
 import torch
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.dtypes import DType
 
 
 class TinyModule(torch.nn.Module):
@@ -86,14 +87,13 @@ class TestQwen3VLAdapter(unittest.TestCase):
             result = Qwen3VLAdapter().build_ptq_config(
                 ctx,
                 {
-                    "activation_dtype": "int16",
-                    "default_qscheme": "per_tensor_symm",
-                    "linear_weight_bits": 4,
-                    "vision_patch_embed_weight_bits": 8,
-                    "embedding_weight_bits": 8,
-                    "lm_head_weight_bits": 4,
-                    "norm_dtype": "int16",
-                    "norm_weight_dtype": "int16",
+                    "activation": "int16",
+                    "linear_weight": 4,
+                    "vision_patch_embed_weight": 8,
+                    "embedding_weight": 8,
+                    "lm_head_weight": 4,
+                    "norm": "int16",
+                    "norm_weight": "int16",
                     "quantize_vision": True,
                     "quantize_text": False,
                     "quantize_lm_head": True,
@@ -106,6 +106,9 @@ class TestQwen3VLAdapter(unittest.TestCase):
         self.assertEqual(captured["num_text_layers"], 4)
         self.assertEqual(captured["num_deepstack_mergers"], 2)
         self.assertEqual(captured["model_args"]["vision"]["grid_thw"], (1, 8, 8))
+        self.assertEqual(captured["linear_weight"].dtype, DType.uint(4))
+        self.assertEqual(captured["vision_patch_embed_weight"].dtype, DType.uint(8))
+        self.assertEqual(captured["lm_head_weight"].dtype, DType.uint(4))
         self.assertFalse(captured["strict_wrap"])
 
     def test_build_calibration_inputs_routes_mixed_dataset_config(self):

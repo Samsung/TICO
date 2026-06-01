@@ -30,6 +30,7 @@ import tico.quantization.recipes.adapters.llama as llama_mod
 import torch
 from tico.quantization.recipes.adapters.llama import LlamaAdapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.dtypes import DType
 
 
 def _fake_llama_context(cfg):
@@ -76,12 +77,11 @@ class TestLlamaAdapter(unittest.TestCase):
             config = LlamaAdapter().build_ptq_config(
                 ctx,
                 {
-                    "activation_dtype": "int16",
-                    "default_qscheme": "per_tensor_symm",
-                    "linear_weight_bits": 4,
-                    "embedding_weight_bits": 8,
-                    "lm_head_weight_bits": 8,
-                    "norm_weight_dtype": "int16",
+                    "activation": "int16",
+                    "linear_weight": 4,
+                    "embedding_weight": 8,
+                    "lm_head_weight": 8,
+                    "norm_weight": "int16",
                     "strict_wrap": False,
                 },
             )
@@ -89,9 +89,9 @@ class TestLlamaAdapter(unittest.TestCase):
         self.assertEqual(config, {"ptq": "config"})
         self.assertEqual(captured["model_type"], "llama")
         self.assertEqual(captured["num_hidden_layers"], 2)
-        self.assertEqual(captured["linear_weight_bits"], 4)
-        self.assertEqual(captured["embedding_weight_bits"], 8)
-        self.assertEqual(captured["lm_head_weight_bits"], 8)
+        self.assertEqual(captured["linear_weight"].dtype, DType.uint(4))
+        self.assertEqual(captured["embedding_weight"].dtype, DType.uint(8))
+        self.assertEqual(captured["lm_head_weight"].dtype, DType.uint(8))
         self.assertEqual(captured["profile"], "reference_eval")
         self.assertFalse(captured["strict_wrap"])
 
@@ -109,18 +109,17 @@ class TestLlamaAdapter(unittest.TestCase):
             config = LlamaAdapter().build_ptq_config(
                 ctx,
                 {
-                    "activation_dtype": "int16",
-                    "default_qscheme": "per_tensor_symm",
-                    "linear_weight_bits": 4,
-                    "embedding_weight_bits": 8,
-                    "norm_weight_dtype": "int16",
+                    "activation": "int16",
+                    "linear_weight": 4,
+                    "embedding_weight": 8,
+                    "norm_weight": "int16",
                     "strict_wrap": False,
                 },
             )
 
         self.assertEqual(config, {"ptq": "config"})
-        self.assertEqual(captured["embedding_weight_bits"], 8)
-        self.assertEqual(captured["lm_head_weight_bits"], 8)
+        self.assertEqual(captured["embedding_weight"].dtype, DType.uint(8))
+        self.assertEqual(captured["lm_head_weight"].dtype, DType.uint(8))
 
     def test_build_ptq_config_rejects_mismatched_tied_embedding_bits(self):
         """LlamaAdapter should reject mismatched bits for tied embeddings."""
@@ -134,12 +133,11 @@ class TestLlamaAdapter(unittest.TestCase):
             LlamaAdapter().build_ptq_config(
                 ctx,
                 {
-                    "activation_dtype": "int16",
-                    "default_qscheme": "per_tensor_symm",
-                    "linear_weight_bits": 4,
-                    "embedding_weight_bits": 8,
-                    "lm_head_weight_bits": 4,
-                    "norm_weight_dtype": "int16",
+                    "activation": "int16",
+                    "linear_weight": 4,
+                    "embedding_weight": 8,
+                    "lm_head_weight": 4,
+                    "norm_weight": "int16",
                     "strict_wrap": False,
                 },
             )

@@ -28,6 +28,8 @@ from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = "required transformers not installed — skipping LlamaDecoderLayer tests"
 
@@ -83,7 +85,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         return past_k, past_v
 
     def test_reference_eval_profile_propagates_to_self_attention(self):
-        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qcfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
         qlayer = QuantLlamaDecoderLayer(self.fp_layer, qcfg=qcfg, layer_idx=0)
 
         self.assertEqual(qlayer.attn_options.scale_fusion, "none")
@@ -96,7 +98,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertEqual(qattn.attn_options.layout, "batched")
 
     def test_attention_specific_profile_override_propagates_to_self_attention(self):
-        qcfg = PTQConfig(
+        qcfg = make_affine_ptq_config(
             model_args={
                 "profile": "reference_eval",
                 "attention": "npu_export",
@@ -116,12 +118,12 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
     def test_rope_sin_template_convention_depends_on_profile(self):
         qlayer_ref = QuantLlamaDecoderLayer(
             self.fp_layer,
-            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
             layer_idx=0,
         )
         qlayer_npu = QuantLlamaDecoderLayer(
             self.fp_layer,
-            qcfg=PTQConfig(model_args={"profile": "npu_export"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "npu_export"}),
             layer_idx=0,
         )
 
@@ -311,8 +313,8 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         )
 
     def test_dtype_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.int(16),
+        cfg = make_affine_ptq_config(
+            dtype=DType.int(16),
             overrides={
                 "mlp_residual_out": {"dtype": DType.uint(8)},
             },

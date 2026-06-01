@@ -14,17 +14,28 @@
 
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Literal, Mapping, MutableMapping, Optional, Type
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Literal,
+    Mapping,
+    MutableMapping,
+    Optional,
+    Union,
+)
 
 from tico.quantization.config.base import BaseConfig
+from tico.quantization.config.specs import affine, QuantSpec
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
-from tico.quantization.wrapq.observers.base import ObserverBase
-from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
 ExportMode = Literal["prefill", "decode"]
+OverridePath = Union[str, Iterable[str]]
+OverrideValue = Union[QuantSpec, Mapping[str, Any]]
+_PARAMETER_OBSERVER_NAMES = {"weight", "bias"}
 
 
 def _resolve_qscheme(
@@ -34,13 +45,7 @@ def _resolve_qscheme(
     context: str,
     obs_name: Optional[str] = None,
 ) -> QScheme:
-    """
-    Resolve a dtype/qscheme pair using the option-C policy.
-
-    Resolution policy:
-      1. If `qscheme` is None, infer it from `dtype` and `obs_name`.
-      2. If the caller explicitly provides an incompatible pair, raise.
-    """
+    """Resolve and validate a dtype/qscheme pair."""
     resolved_qscheme = qscheme or auto_qscheme_for(dtype, obs_name)
 
     if dtype_is_unsigned(dtype) and resolved_qscheme.is_symmetric():
@@ -53,55 +58,138 @@ def _resolve_qscheme(
     return resolved_qscheme
 
 
+def _parse_path(path: OverridePath) -> tuple[str, ...]:
+    """Normalize an override path into a tuple of path components."""
+    if isinstance(path, str):
+        keys = tuple(part for part in path.split(".") if part)
+    else:
+        keys = tuple(path)
+
+    if not keys:
+        raise ValueError("Override path must not be empty.")
+
+    return keys
+
+
+def _deep_merge(left: MutableMapping[str, Any], right: Mapping[str, Any]) -> None:
+    """Merge nested override mappings into ``left`` in-place."""
+    for key, value in right.items():
+        current = left.get(key)
+        if isinstance(current, MutableMapping) and isinstance(value, Mapping):
+            _deep_merge(current, value)
+        else:
+            left[key] = deepcopy(value)
+
+
+def _set_nested_override(
+    root: MutableMapping[str, Any],
+    path: tuple[str, ...],
+    value: Any,
+) -> None:
+    """Set an override value at a nested path in-place."""
+    current = root
+    for key in path[:-1]:
+        next_value = current.get(key)
+        if next_value is None:
+            child: MutableMapping[str, Any] = {}
+            current[key] = child
+        elif isinstance(next_value, MutableMapping):
+            child = next_value
+        elif isinstance(next_value, Mapping):
+            child = dict(next_value)
+            current[key] = child
+        else:
+            raise ValueError(
+                "Cannot create nested override under non-mapping node "
+                f"at {'.'.join(path)}."
+            )
+        current = child
+
+    current[path[-1]] = deepcopy(value)
+
+
+def _expand_path_overrides(mapping: Mapping[str, Any]) -> Dict[str, Any]:
+    """Expand dot-path override keys into a nested override tree."""
+    expanded: Dict[str, Any] = {}
+
+    for key, value in mapping.items():
+        if isinstance(key, str) and "." in key:
+            _set_nested_override(expanded, _parse_path(key), value)
+            continue
+
+        if isinstance(value, Mapping) and isinstance(expanded.get(key), MutableMapping):
+            _deep_merge(expanded[key], value)  # type: ignore[index,arg-type]
+        else:
+            expanded[key] = deepcopy(value)
+
+    return expanded
+
+
+def _as_override_mapping(
+    value: Any,
+    *,
+    context: str,
+    current_name: Optional[str],
+) -> Dict[str, Any]:
+    """Convert a QuantSpec or mapping override into a mutable dictionary."""
+    if isinstance(value, QuantSpec):
+        return value.to_kwargs(
+            obs_name=current_name,
+            context=context,
+            mark_replace=True,
+        )
+    if isinstance(value, Mapping):
+        return dict(value)
+
+    raise TypeError(
+        f"Invalid override value at {context}: expected QuantSpec or mapping, "
+        f"got {type(value).__name__}."
+    )
+
+
 def _normalize_overrides(
     mapping: Mapping[str, Any],
     *,
-    inherited_dtype: DType,
-    inherited_qscheme: QScheme,
+    inherited_dtype: Optional[DType] = None,
+    inherited_qscheme: Optional[QScheme] = None,
     context: str,
     current_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Recursively normalize and validate nested override mappings.
-
-    Any node that provides `dtype` but omits `qscheme` receives an inferred
-    qscheme derived from that dtype. Explicit incompatible pairs are rejected
-    immediately.
-
-    The current mapping key is tracked as `current_name` so that special
-    observer names such as `weight` can receive a more suitable automatic
-    default qscheme.
-    """
-    normalized: Dict[str, Any] = dict(mapping)
+    """Recursively normalize and validate nested override mappings."""
+    normalized = _as_override_mapping(
+        mapping,
+        context=context,
+        current_name=current_name,
+    )
 
     local_dtype = normalized.get("dtype", inherited_dtype)
     local_qscheme = normalized.get("qscheme", inherited_qscheme)
 
     if "dtype" in normalized:
         normalized["qscheme"] = _resolve_qscheme(
-            dtype=local_dtype,
+            dtype=normalized["dtype"],
             qscheme=normalized.get("qscheme"),
             context=context,
             obs_name=current_name,
         )
+        local_dtype = normalized["dtype"]
         local_qscheme = normalized["qscheme"]
-    elif "qscheme" in normalized:
+    elif "qscheme" in normalized and local_dtype is not None:
         local_qscheme = _resolve_qscheme(
             dtype=local_dtype,
             qscheme=normalized["qscheme"],
             context=context,
             obs_name=current_name,
         )
-    else:
-        _resolve_qscheme(
-            dtype=local_dtype,
-            qscheme=local_qscheme,
-            context=context,
-            obs_name=current_name,
-        )
 
     for key, value in list(normalized.items()):
-        if isinstance(value, Mapping):
+        if isinstance(value, QuantSpec):
+            normalized[key] = value.to_kwargs(
+                obs_name=key,
+                context=f"{context}.{key}",
+                mark_replace=True,
+            )
+        elif isinstance(value, Mapping):
             normalized[key] = _normalize_overrides(
                 value,
                 inherited_dtype=local_dtype,
@@ -113,108 +201,48 @@ def _normalize_overrides(
     return normalized
 
 
+def _default_activation_spec() -> QuantSpec:
+    """Return the default PTQ activation policy."""
+    return affine(DType.uint(8))
+
+
+def _default_weight_spec() -> QuantSpec:
+    """Return the default PTQ parameter policy."""
+    return affine(DType.uint(8))
+
+
 @dataclass
 class PTQConfig(BaseConfig):
-    """
-    One object describes the quantization preferences for a single wrapper
-    and its descendants.
+    """Describe quantization preferences for one wrapper and descendants.
 
     Parameters
     ----------
-    default_dtype : DType
-        Fallback dtype for every observer that DOES NOT receive an explicit
-        override.
-    default_observer : Type[ObserverBase], optional
-        Observer class to instantiate when the caller (or an override) does
-         not provide a `observer` key.
-    default_qscheme : Optional[QScheme]
-        Fallback quantization scheme for observers that do not receive an
-        explicit override.
-
-        When set to `None`, the qscheme is inferred automatically from the
-        effective dtype and, for special observer names such as `weight`,
-        from the observer role:
-            - unsigned activation-like dtype -> `QScheme.PER_TENSOR_ASYMM`
-            - unsigned weight dtype          -> `QScheme.PER_CHANNEL_ASYMM`
-            - signed dtype                   -> `QScheme.PER_TENSOR_SYMM`
-
-        When explicitly provided, the pair is validated. Incompatible pairs,
-        such as unsigned dtype with symmetric qscheme, raise immediately.
-    overrides : Mapping[str, Mapping[str, Any]]
-        Two-level mapping of scopes → observer-kwargs.
-
-        • SCOPE can be either
-            - the attribute name of a child wrapper
-              (e.g. "gate_proj" or "up_proj"), or
-            - an observer logical name inside this wrapper
-              (e.g. "mul", "act_in").
-
-        • "Observer-kwargs" is forwarded verbatim to the observer constructor
-          (`dtype`, `qscheme`, `channel_axis`, `observer`, …).
+    activation : QuantSpec
+        Default policy for activation-like observers such as `act_in` and
+        `act_out`.
+    weight : QuantSpec
+        Default policy for parameter-like observers such as `weight` and
+        `bias`.
+    overrides : Mapping[str, OverrideValue]
+        Nested override tree or dot-path override mapping. Leaves may be
+        QuantSpec objects or raw observer constructor kwargs.
     model_args : Mapping[str, Any]
         Additional model-specific metadata required by certain wrappers.
-
-        This is intended for inputs that are not part of quantization policy
-        but are still needed to construct or run a wrapper correctly.
-
-        Typical examples include:
-            - vision grid metadata for VLMs
-              (e.g. `{"vision": {"grid_thw": (T, H, W)}}`)
-            - model-specific shape hints
-            - execution metadata required for static export paths
-
-        Unlike `overrides`, `model_args` is not scope-filtered by observer name.
-        It is propagated as-is to child configurations.
     strict_wrap : bool
-        If ``True``, any module that cannot be wrapped will raise an error.
+        If `True`, unsupported modules raise during wrapping.
     attention_mask_fill_value : float
-        Value used to fill masked positions in attention masks before softmax.
-        This affects softmax suppression strength for masked positions and
-        numerical range before quantization/fake-quant. Default: -120.0.
-
-    Example
-    -------
-    ```python
-    from wrapq.observers import PercentileObserver
-
-    cfg = PTQConfig(
-        default_dtype   = DType.uint(8),
-        default_qscheme  = QScheme.PER_TENSOR_SYMM,        # <- global scheme
-        default_observer = PercentileObserver,             # <- global algorithm
-        overrides={
-            # local override: input observer now MinMax & 4-bit, per-channel asymmetric
-            "act_in": {"observer": MinMaxObserver,
-                       "dtype":    DType.uint(4),
-                       "qscheme":  QScheme.PER_CHANNEL_ASYMM},
-        },
-        model_args={
-            "vision": {
-                "grid_thw": (8, 24, 24),
-            },
-        },
-    )
-    ```
+        Value used to fill masked positions before attention softmax.
     """
 
-    default_dtype: DType = DType.uint(8)
-    default_observer: Type[ObserverBase] = MinMaxObserver  # type: ignore[type-abstract]
-    default_qscheme: Optional[QScheme] = None
-    overrides: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    activation: QuantSpec = field(default_factory=_default_activation_spec)
+    weight: QuantSpec = field(default_factory=_default_weight_spec)
+    overrides: Mapping[str, OverrideValue] = field(default_factory=dict)
     model_args: Mapping[str, Any] = field(default_factory=dict)
-    # If True, any module that cannot be wrapped will raise.
     strict_wrap: bool = True
-    # Value used to fill masked positions in attention masks before softmax.
     attention_mask_fill_value: float = -120.0
 
     def __post_init__(self) -> None:
-        """
-        Resolve automatic qscheme defaults and validate nested overrides.
-        """
-        self.default_qscheme = _resolve_qscheme(
-            dtype=self.default_dtype,
-            qscheme=self.default_qscheme,
-            context="PTQConfig.default_qscheme",
-        )
+        """Normalize path-based overrides and validate override leaves."""
         self.normalize_overrides()
 
     @property
@@ -222,140 +250,88 @@ class PTQConfig(BaseConfig):
         return "ptq"
 
     def normalize_overrides(self) -> None:
-        """
-        Normalize and validate the entire override tree in-place.
-
-        This method is useful when callers directly mutate `self.overrides`
-        after construction and want to retroactively apply automatic qscheme
-        inference and compatibility checks.
-        """
-        assert self.default_qscheme is not None
+        """Normalize and validate the entire override tree in-place."""
+        expanded = _expand_path_overrides(self.overrides)
         self.overrides = _normalize_overrides(
-            self.overrides,
-            inherited_dtype=self.default_dtype,
-            inherited_qscheme=self.default_qscheme,
+            expanded,
             context="PTQConfig.overrides",
         )
 
     def set_override(
         self,
-        path: Iterable[str],
-        value: Mapping[str, Any],
+        path: OverridePath,
+        value: OverrideValue,
     ) -> None:
-        """
-        Set a nested override and normalize only the affected subtree.
+        """Set a nested override using either a dot path or an iterable path.
 
         Parameters
         ----------
-        path : Iterable[str]
-            Hierarchical path inside `self.overrides`.
-            Example: `("model", "layers", "0", "self_attn", "o_proj", "weight")`
-        value : Mapping[str, Any]
-            Override payload to assign at the target path.
-
-        Notes
-        -----
-        The inserted subtree is normalized immediately, so callers may provide
-        only `dtype` and rely on automatic qscheme inference.
+        path : OverridePath
+            Dot path such as "model.layers.0.self_attn.q_proj.act_out"
+            or an iterable of path components.
+        value : OverrideValue
+            QuantSpec or observer constructor kwargs assigned at the path.
         """
-        keys = tuple(path)
-        if not keys:
-            raise ValueError("Override path must not be empty.")
-
-        root: MutableMapping[str, Any] = dict(self.overrides)
-        current: MutableMapping[str, Any] = root
-        parent_dtype = self.default_dtype
-        parent_qscheme = self.default_qscheme
-        context = "PTQConfig.overrides"
-
-        for key in keys[:-1]:
-            context = f"{context}.{key}"
-            next_value = current.get(key)
-            if isinstance(next_value, Mapping):
-                child = dict(next_value)
-            elif next_value is None:
-                child = {}
-            else:
-                raise ValueError(
-                    f"Cannot create nested override under non-mapping node at {context}."
-                )
-
-            current[key] = child
-            current = child
-
-            local_dtype = current.get("dtype", parent_dtype)
-            parent_qscheme = _resolve_qscheme(
-                dtype=local_dtype,
-                qscheme=current.get("qscheme", parent_qscheme),
-                context=context,
-                obs_name=key,
-            )
-            parent_dtype = local_dtype
-
-        assert parent_qscheme is not None
-        leaf_key = keys[-1]
-        leaf_context = f"{context}.{leaf_key}"
-        current[leaf_key] = _normalize_overrides(
-            deepcopy(value),
-            inherited_dtype=parent_dtype,
-            inherited_qscheme=parent_qscheme,
-            context=leaf_context,
-            current_name=leaf_key,
-        )
+        root: MutableMapping[str, Any] = deepcopy(dict(self.overrides))
+        _set_nested_override(root, _parse_path(path), value)
         self.overrides = root
+        self.normalize_overrides()
 
     def get_kwargs(self, obs_name: str) -> Dict[str, Any]:
-        """
-        Return user-specified kwargs for *obs_name* inside **this** wrapper.
+        """Return user-specified kwargs for an observer in this wrapper."""
+        value = self.overrides.get(obs_name, {})
+        if isinstance(value, QuantSpec):
+            return value.to_kwargs(
+                obs_name=obs_name,
+                context=f"PTQConfig.{obs_name}",
+                mark_replace=True,
+            )
+        if isinstance(value, Mapping):
+            return dict(value)
+        raise TypeError(
+            f"Invalid override for observer {obs_name!r}: "
+            f"expected QuantSpec or mapping, got {type(value).__name__}."
+        )
 
-        NOTE:
-        Do NOT inject a dtype/qscheme here. `_make_obs()` resolves precedence:
-            1) user override (kw_cfg["dtype" | "qscheme"])
-            2) wrapper's default passed to `_make_obs(..., dtype=..., qscheme=...)`
-            3) self.default_dtype / `self.default_qscheme`
-        """
-        return dict(self.overrides.get(obs_name, {}))
+    def get_role_kwargs(self, obs_name: str) -> Dict[str, Any]:
+        """Return default kwargs for the observer role represented by a name."""
+        spec = self.weight if obs_name in _PARAMETER_OBSERVER_NAMES else self.activation
+        return spec.to_kwargs(
+            obs_name=obs_name,
+            context=f"PTQConfig.{obs_name}",
+            infer_qscheme=False,
+        )
 
     def get_model_arg(self, key: str, default: Any = None) -> Any:
-        """
-        Return model-specific metadata stored under *key*.
-
-        This is intended for wrapper-level inputs that are not observer
-        configuration, such as vision grid information or static shape hints.
-        """
+        """Return model-specific metadata stored under `key`."""
         return self.model_args.get(key, default)
 
     def child(self, scope: str) -> "PTQConfig":
-        """
-        Produce a *view* for a child wrapper.
-
-        The child inherits:
-          • same `default_dtype`
-          • same `default_observer`
-          • same `default_qscheme`
-          • same `model_args`
-          • same `attention_mask_fill_value`
-          • overrides under `self.overrides.get(scope, {})`
-
-        Other scopes remain invisible to the child.
-        """
+        """Produce a child view scoped to overrides under `scope`."""
         sub_overrides = self.overrides.get(scope, {})
+        if isinstance(sub_overrides, QuantSpec):
+            sub_overrides = sub_overrides.to_kwargs(
+                obs_name=scope,
+                context=f"PTQConfig.overrides.{scope}",
+                mark_replace=True,
+            )
+        if not isinstance(sub_overrides, Mapping):
+            sub_overrides = {}
+
         return PTQConfig(
-            self.default_dtype,
-            self.default_observer,
-            default_qscheme=self.default_qscheme,
+            activation=self.activation,
+            weight=self.weight,
             overrides=sub_overrides,
             model_args=self.model_args,
             strict_wrap=self.strict_wrap,
             attention_mask_fill_value=self.attention_mask_fill_value,
         )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             "PTQConfig("
-            f"default_dtype={self.default_dtype}, "
-            f"default_observer={self.default_observer}, "
-            f"default_qscheme={self.default_qscheme}, "
+            f"activation={self.activation}, "
+            f"weight={self.weight}, "
             f"overrides={dict(self.overrides)}, "
             f"model_args={dict(self.model_args)}, "
             f"strict_wrap={self.strict_wrap})"

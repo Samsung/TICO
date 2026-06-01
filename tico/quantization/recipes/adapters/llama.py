@@ -32,9 +32,9 @@ from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.circle import export_full_circle
 from tico.quantization.recipes.export.llama import export_llama_per_layer
 from tico.quantization.recipes.utils import (
-    qscheme_from_name,
+    quant_spec_from_config,
+    quant_specs_equivalent,
     torch_dtype_from_name,
-    wrapq_dtype_from_name,
 )
 
 
@@ -86,65 +86,61 @@ def has_tied_input_output_embeddings(model: torch.nn.Module) -> bool:
     return _weights_share_storage(input_weight, output_weight)
 
 
-def _resolve_lm_head_weight_bits(stage_cfg: Mapping[str, Any]) -> int | None:
-    """Resolve LM head bit-width using embedding bit-width as its default."""
-    lm_head_weight_bits = stage_cfg.get("lm_head_weight_bits")
-    if lm_head_weight_bits is not None:
-        return int(lm_head_weight_bits)
-
-    embedding_weight_bits = stage_cfg.get("embedding_weight_bits")
-    if embedding_weight_bits is None:
-        return None
-
-    return int(embedding_weight_bits)
+def _resolve_lm_head_weight(stage_cfg: Mapping[str, Any]) -> Any:
+    """Resolve the LM head weight spec using the embedding spec as its default."""
+    return stage_cfg.get("lm_head_weight", stage_cfg.get("embedding_weight"))
 
 
-def _resolve_embedding_weight_bits(stage_cfg: Mapping[str, Any]) -> int | None:
-    """Resolve the optional input embedding bit-width from stage configuration."""
-    embedding_weight_bits = stage_cfg.get("embedding_weight_bits")
-    if embedding_weight_bits is None:
-        return None
-    return int(embedding_weight_bits)
+def _resolve_embedding_weight(stage_cfg: Mapping[str, Any]) -> Any:
+    """Resolve the optional input embedding weight spec."""
+    return stage_cfg.get("embedding_weight")
 
 
-def validate_tied_embedding_weight_bits(
+def validate_tied_embedding_weight_specs(
     model: torch.nn.Module,
-    embedding_weight_bits: int | None,
-    lm_head_weight_bits: int | None,
+    embedding_weight: Any,
+    lm_head_weight: Any,
 ) -> None:
     """
-    Reject different embedding and LM head bit-widths for tied weights.
+    Reject different embedding and LM head weight specs for tied weights.
 
     Args:
         model: Model whose input embedding and output projection are inspected.
-        embedding_weight_bits: Bit-width requested for input embedding weights.
-        lm_head_weight_bits: Bit-width requested for LM head weights.
+        embedding_weight: QuantSpec-like value requested for input embeddings.
+        lm_head_weight: QuantSpec-like value requested for lm_head weights.
 
     Raises:
         ValueError: If the model ties input embedding and LM head weights while
-            their requested bit-widths differ.
+            their requested quantization specs differ.
     """
-    if embedding_weight_bits is None or lm_head_weight_bits is None:
+    if embedding_weight is None or lm_head_weight is None:
         return
 
-    if embedding_weight_bits == lm_head_weight_bits:
+    if quant_specs_equivalent(embedding_weight, lm_head_weight):
         return
 
     if not has_tied_input_output_embeddings(model):
         return
 
     raise ValueError(
-        "Cannot use different bit-widths for tied input embedding and lm_head "
-        "weights: "
-        f"embedding_weight_bits={embedding_weight_bits}, "
-        f"lm_head_weight_bits={lm_head_weight_bits}. "
-        "Set both options to the same value or use a model with untied "
+        "Cannot use different quantization specs for tied input embedding and "
+        "lm_head weights. Set both options to the same value or use a model with untied "
         "input/output embeddings."
     )
 
 
 class LlamaAdapter(ModelAdapter):
     family = "llama"
+
+    def _ptq_decode_calibration_steps(self, cfg: Mapping[str, Any]) -> int:
+        calib = cfg.get("calibration", {})
+        decode_steps = int(calib.get("decode_steps", 0))
+
+        for stage in cfg.get("pipeline", []):
+            if stage.get("name") == "ptq" and stage.get("enabled", True):
+                return int(stage.get("decode_calibration_steps", decode_steps))
+
+        return decode_steps
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         cfg = ctx.cfg
@@ -198,11 +194,11 @@ class LlamaAdapter(ModelAdapter):
         calib = cfg.get("calibration", {})
         runtime = cfg.get("runtime", {})
         seq_len = int(calib.get("seq_len") or ctx.model.config.max_position_embeddings)
-        decode_steps = int(calib.get("decode_steps", 0))
+        decode_steps = self._ptq_decode_calibration_steps(cfg)
         seq_len = seq_len - decode_steps
         if seq_len <= 0:
             raise ValueError(
-                "calibration.seq_len must be larger than calibration.decode_steps"
+                "calibration.seq_len must be larger than decode calibration steps"
             )
 
         return build_wikitext_calibration_inputs(
@@ -277,43 +273,32 @@ class LlamaAdapter(ModelAdapter):
 
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
         num_hidden_layers = len(ctx.model.model.layers)
-        activation_dtype = wrapq_dtype_from_name(
-            stage_cfg.get("activation_dtype", "int16")
-        )
-        default_qscheme = qscheme_from_name(
-            stage_cfg.get("default_qscheme", "per_tensor_symm")
-        )
         profile = stage_cfg.get(
             "profile", ctx.cfg.get("model_args", {}).get("profile", "npu_export")
         )
-        spin_rotation_weight_bits = (
-            stage_cfg.get("spin_rotation_weight_bits")
+        spin_rotation_weight = (
+            stage_cfg.get("spin_rotation_weight")
             if _is_stage_enabled(ctx.cfg, "spinquant")
             else None
         )
-        embedding_weight_bits = _resolve_embedding_weight_bits(stage_cfg)
-        lm_head_weight_bits = _resolve_lm_head_weight_bits(stage_cfg)
-        validate_tied_embedding_weight_bits(
+        embedding_weight = _resolve_embedding_weight(stage_cfg)
+        lm_head_weight = _resolve_lm_head_weight(stage_cfg)
+        validate_tied_embedding_weight_specs(
             ctx.model,
-            embedding_weight_bits,
-            lm_head_weight_bits,
+            embedding_weight,
+            lm_head_weight,
         )
 
         return build_llm_ptq_config(
             model_type="llama",
             num_hidden_layers=num_hidden_layers,
-            activation_dtype=activation_dtype,
-            default_qscheme=default_qscheme,
-            linear_weight_bits=stage_cfg.get("linear_weight_bits"),
-            embedding_weight_bits=embedding_weight_bits,
-            lm_head_weight_bits=lm_head_weight_bits,
-            spin_rotation_weight_bits=spin_rotation_weight_bits,
-            norm_dtype=wrapq_dtype_from_name(stage_cfg["norm_dtype"])
-            if stage_cfg.get("norm_dtype")
-            else None,
-            norm_weight_dtype=wrapq_dtype_from_name(stage_cfg["norm_weight_dtype"])
-            if stage_cfg.get("norm_weight_dtype")
-            else None,
+            activation=quant_spec_from_config(stage_cfg.get("activation", "int16")),
+            linear_weight=quant_spec_from_config(stage_cfg.get("linear_weight")),
+            embedding_weight=quant_spec_from_config(embedding_weight),
+            lm_head_weight=quant_spec_from_config(lm_head_weight),
+            spin_rotation_weight=quant_spec_from_config(spin_rotation_weight),
+            norm=quant_spec_from_config(stage_cfg.get("norm")),
+            norm_weight=quant_spec_from_config(stage_cfg.get("norm_weight")),
             strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
             profile=profile,
         )

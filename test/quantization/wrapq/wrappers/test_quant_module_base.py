@@ -45,6 +45,8 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 # concrete toy subclass
 class DummyQM(QuantModuleBase):
@@ -95,8 +97,8 @@ class TestQuantModuleBase(unittest.TestCase):
         self.assertFalse(torch.allclose(q_out, fp_out))
 
     def test_make_obs_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "act": {"dtype": DType.uint(4)},
             },
@@ -134,16 +136,16 @@ class TestQuantModuleBase(unittest.TestCase):
 class TestQuantConfigDefaultObserver(unittest.TestCase):
     # 1) global change via default_observer -------------------------
     def test_global_default_observer(self):
-        cfg = PTQConfig(default_dtype=DType.uint(8), default_observer=EMAObserver)
+        cfg = make_affine_ptq_config(dtype=DType.uint(8), observer=EMAObserver)
         qm = DummyQM(cfg)
         obs = qm.obs
         self.assertIsInstance(obs, EMAObserver)
 
     # 2) per-observer "observer" override beats default_observer -----
     def test_observer_override_precedence(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
-            default_observer=EMAObserver,
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
+            observer=EMAObserver,
             overrides={"act": {"observer": MinMaxObserver}},
         )
         qm = DummyQM(cfg)
@@ -152,13 +154,13 @@ class TestQuantConfigDefaultObserver(unittest.TestCase):
 
     # 3) child() inherits parent default_observer -------------------
     def test_child_inherits_default_observer(self):
-        parent = PTQConfig(
-            default_dtype=DType.uint(8),
-            default_observer=EMAObserver,
+        parent = make_affine_ptq_config(
+            dtype=DType.uint(8),
+            observer=EMAObserver,
             overrides={"child_wrap": {"dtype": DType.uint(4)}},
         )
         child = parent.child("child_wrap")
-        self.assertIs(child.default_observer, parent.default_observer)
+        self.assertIs(child.activation.observer, parent.activation.observer)
         # and still works when materialised
         qm = DummyQM(child)
         obs = qm.obs
@@ -184,21 +186,21 @@ class DummyQMWrapperDefault(QuantModuleBase):
 
 class TestQuantModuleQScheme(unittest.TestCase):
     def test_config_default_qscheme(self):
-        cfg = PTQConfig(
-            default_dtype=DType.int(16), default_qscheme=QScheme.PER_CHANNEL_SYMM
+        cfg = make_affine_ptq_config(
+            dtype=DType.int(16), qscheme=QScheme.PER_CHANNEL_SYMM
         )
         qm = DummyQM(cfg)
         self.assertEqual(qm.obs.qscheme, QScheme.PER_CHANNEL_SYMM)
 
     def test_wrapper_default_qscheme_applied(self):
-        cfg = PTQConfig(default_qscheme=QScheme.PER_TENSOR_ASYMM)
+        cfg = make_affine_ptq_config(qscheme=QScheme.PER_TENSOR_ASYMM)
         qm = DummyQMWrapperDefault(cfg)
         self.assertEqual(qm.obs.qscheme, QScheme.PER_CHANNEL_ASYMM)
         self.assertEqual(qm.obs.channel_axis, 1)
 
     def test_user_override_qscheme_wins(self):
-        cfg = PTQConfig(
-            default_qscheme=QScheme.PER_TENSOR_ASYMM,
+        cfg = make_affine_ptq_config(
+            qscheme=QScheme.PER_TENSOR_ASYMM,
             overrides={
                 "act": {
                     "dtype": DType.int(16),

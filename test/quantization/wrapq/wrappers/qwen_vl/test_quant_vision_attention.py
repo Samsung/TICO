@@ -30,6 +30,8 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_attention import (
     QuantQwen3VLVisionAttention,
 )
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = "required transformers not installed — skipping LlamaAttention tests"
 
@@ -111,8 +113,8 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_per_projection_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "qkv": {
                     "act_in": {"dtype": DType.uint(4)},

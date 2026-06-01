@@ -27,6 +27,8 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
 from tico.quantization.wrapq.wrappers.llama.quant_attention import QuantLlamaAttention
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
+from test.quantization.quant_spec_helpers import make_affine_ptq_config
+
 
 skip_msg = "required transformers not installed — skipping LlamaAttention tests"
 
@@ -133,7 +135,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertEqual(qattn.attn_options.layout, "unrolled")
 
     def test_reference_eval_profile_selects_batched_hf_like_path(self):
-        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qcfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
         qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg)
 
         self.assertEqual(qattn.attn_options.scale_fusion, "none")
@@ -155,7 +157,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         qattn_ref = QuantLlamaAttention(
             self.fp_attn,
-            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
         )
         torch.testing.assert_close(
             qattn_ref.q_proj.wrapped.module.weight,
@@ -168,7 +170,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         qattn_q_fused = QuantLlamaAttention(
             self.fp_attn,
-            qcfg=PTQConfig(
+            qcfg=make_affine_ptq_config(
                 model_args={
                     "attention": {
                         "scale_fusion": "q_proj",
@@ -192,11 +194,11 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         qattn_ref = QuantLlamaAttention(
             self.fp_attn,
-            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
         )
         qattn_npu = QuantLlamaAttention(
             self.fp_attn,
-            qcfg=PTQConfig(model_args={"profile": "npu_export"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "npu_export"}),
         )
 
         batch_size, seq_len = 2, 5
@@ -237,7 +239,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         qattn_ref = QuantLlamaAttention(
             self.fp_attn,
-            qcfg=PTQConfig(model_args={"profile": "reference_eval"}),
+            qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
         )
         with self.assertRaises(ValueError):
             qattn_ref.as_export_module("prefill", require_npu_profile=True)
@@ -281,7 +283,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertIs(qattn._mode, Mode.QUANT)
 
     def test_forward_diff_prefill(self):
-        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qcfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
         qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg)
         qattn.enable_calibration()
         for _ in range(4):
@@ -310,7 +312,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
     def test_forward_with_float_attention_mask_prefill(self):
         torch.manual_seed(123)
 
-        qcfg = PTQConfig(model_args={"profile": "reference_eval"})
+        qcfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
         qattn = QuantLlamaAttention(self.fp_attn, qcfg=qcfg)
         batch_size, seq_len = 2, 4
         float_mask = torch.zeros(batch_size, seq_len, seq_len)
@@ -527,8 +529,8 @@ class TestQuantLlamaAttention(unittest.TestCase):
         self.assertEqual(decode_hidden.shape, (batch_size, q_len, self.hidden_size))
 
     def test_per_projection_override(self):
-        cfg = PTQConfig(
-            default_dtype=DType.uint(8),
+        cfg = make_affine_ptq_config(
+            dtype=DType.uint(8),
             overrides={
                 "q_proj": {
                     "act_in": {"dtype": DType.uint(4)},

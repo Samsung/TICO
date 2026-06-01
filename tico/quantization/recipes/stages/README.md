@@ -12,7 +12,7 @@ pipeline:
 
   - name: ptq
     enabled: true
-    activation_dtype: int16
+    activation: int16
 ```
 
 Each item in `pipeline` is dispatched to a `Stage` implementation under
@@ -128,7 +128,7 @@ pipeline:
 
   - name: ptq
     enabled: true
-    activation_dtype: int16
+    activation: int16
 ```
 
 ### 4. Add tests
