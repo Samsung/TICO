@@ -218,7 +218,7 @@ Keep these rules:
 Example:
 
 ```python
-+def build_ptq_config(self, ctx, stage_cfg):
+def build_ptq_config(self, ctx, stage_cfg):
     return build_llm_ptq_config(
         model_type="gemma",
         num_hidden_layers=len(ctx.model.model.layers),

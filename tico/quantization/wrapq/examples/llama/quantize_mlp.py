@@ -20,6 +20,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import tico
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import affine
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 from tico.quantization.wrapq.dtypes import INT16
@@ -37,8 +38,10 @@ model.eval()
 # 1. Replace layer-0’s MLP with QuantLlamaMLP
 # -------------------------------------------------------------------------
 fp32_mlp = model.model.layers[0].mlp
+int16_spec = affine(INT16, qscheme=QScheme.PER_TENSOR_SYMM)
 model.model.layers[0].mlp = prepare(
-    fp32_mlp, PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM)
+    fp32_mlp,
+    PTQConfig(activation=int16_spec, weight=int16_spec),
 )
 model.eval()
 

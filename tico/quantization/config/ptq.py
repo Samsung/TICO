@@ -117,8 +117,9 @@ def _expand_path_overrides(mapping: Mapping[str, Any]) -> Dict[str, Any]:
             _set_nested_override(expanded, _parse_path(key), value)
             continue
 
-        if isinstance(value, Mapping) and isinstance(expanded.get(key), MutableMapping):
-            _deep_merge(expanded[key], value)  # type: ignore[index,arg-type]
+        existing = expanded.get(key)
+        if isinstance(value, Mapping) and isinstance(existing, MutableMapping):
+            _deep_merge(existing, value)
         else:
             expanded[key] = deepcopy(value)
 
@@ -308,14 +309,16 @@ class PTQConfig(BaseConfig):
 
     def child(self, scope: str) -> "PTQConfig":
         """Produce a child view scoped to overrides under `scope`."""
-        sub_overrides = self.overrides.get(scope, {})
-        if isinstance(sub_overrides, QuantSpec):
-            sub_overrides = sub_overrides.to_kwargs(
+        sub_overrides_raw = self.overrides.get(scope, {})
+        if isinstance(sub_overrides_raw, QuantSpec):
+            sub_overrides = sub_overrides_raw.to_kwargs(
                 obs_name=scope,
                 context=f"PTQConfig.overrides.{scope}",
                 mark_replace=True,
             )
-        if not isinstance(sub_overrides, Mapping):
+        elif isinstance(sub_overrides_raw, Mapping):
+            sub_overrides = sub_overrides_raw  # type: ignore[assignment]
+        else:
             sub_overrides = {}
 
         return PTQConfig(

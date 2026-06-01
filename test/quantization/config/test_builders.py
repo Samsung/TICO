@@ -118,10 +118,10 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
         self.assertFalse(cfg.strict_wrap)
         self.assertEqual(cfg.model_args["profile"], DEFAULT_EXECUTION_PROFILE)
         self.assertEqual(
-            cfg.overrides["model"]["embed_tokens"]["weight"]["dtype"], DType.uint(4)
+            cfg.overrides["model"]["embed_tokens"]["weight"]["dtype"], DType.uint(4)  # type: ignore[index]
         )
         self.assertEqual(
-            cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM
+            cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM  # type: ignore[index]
         )
 
     def test_build_llm_ptq_config_supports_mx_activation(self):
@@ -134,7 +134,7 @@ class TestBuildLlmPtqConfig(unittest.TestCase):
 
         self.assertIs(cfg.activation.observer, MXObserver)
         self.assertEqual(
-            cfg.overrides["model"]["layers"]["0"]["self_attn"]["q_proj"]["weight"][
+            cfg.overrides["model"]["layers"]["0"]["self_attn"]["q_proj"]["weight"][  # type: ignore[index]
                 "dtype"
             ],
             DType.uint(4),
@@ -181,17 +181,21 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
         self.assertFalse(cfg.strict_wrap)
         self.assertEqual(cfg.model_args["vision"]["grid_thw"], (1, 2, 3))
         self.assertEqual(
-            cfg.overrides["model"]["visual"]["patch_embed"]["proj"]["weight"]["dtype"],
+            cfg.overrides["model"]["visual"]["patch_embed"]["proj"]["weight"]["dtype"],  # type: ignore[index]
             DType.uint(8),
         )
         self.assertEqual(
-            cfg.overrides["model"]["language_model"]["layers"]["2"]["self_attn"][
+            cfg.overrides["model"]["language_model"]["layers"]["2"]["self_attn"][  # type: ignore[index]
                 "q_proj"
-            ]["weight"]["dtype"],
+            ][
+                "weight"
+            ][
+                "dtype"
+            ],
             DType.uint(4),
         )
         self.assertEqual(
-            cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM
+            cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM  # type: ignore[index]
         )
 
 

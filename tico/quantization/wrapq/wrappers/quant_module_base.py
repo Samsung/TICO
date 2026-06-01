@@ -13,12 +13,13 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Iterable, Optional, Tuple
+from typing import Any, cast, Iterable, Optional, Tuple
 
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.qscheme import QScheme
@@ -172,7 +173,7 @@ class QuantModuleBase(nn.Module, ABC):
             2. wrapper defaults passed by the wrapper implementation
             3. role-level QuantSpec from PTQConfig.activation or PTQConfig.weight
         """
-        _UNSPEC = object()
+        _UNSPEC: Any = object()
 
         wrapper_defaults = default_kwargs.copy()
         role_cfg = self.qcfg.get_role_kwargs(name).copy()
@@ -181,7 +182,7 @@ class QuantModuleBase(nn.Module, ABC):
         if replace_role:
             role_cfg = {}
 
-        def pick3(user_val, wrap_val, role_val):
+        def pick3(user_val: Any, wrap_val: Any, role_val: Any) -> Any:
             return (
                 user_val
                 if user_val is not _UNSPEC
@@ -198,18 +199,26 @@ class QuantModuleBase(nn.Module, ABC):
         if obs_cls is _UNSPEC:
             raise ValueError(f"No observer class configured for observer {name!r}.")
 
+        obs_type = cast(type[ObserverBase], obs_cls)
+
         user_dtype = user_cfg.pop("dtype", _UNSPEC)
         role_dtype = role_cfg.pop("dtype", _UNSPEC)
         wrapper_dtype = wrapper_defaults.pop("dtype", _UNSPEC)
-        final_dtype = pick3(user_dtype, wrapper_dtype, role_dtype)
+        final_dtype_raw = pick3(user_dtype, wrapper_dtype, role_dtype)
+        final_dtype = (
+            None if final_dtype_raw is _UNSPEC else cast(DType, final_dtype_raw)
+        )
 
         user_qscheme = user_cfg.pop("qscheme", _UNSPEC)
         role_qscheme = role_cfg.pop("qscheme", _UNSPEC)
         wrapper_qscheme = wrapper_defaults.pop("qscheme", _UNSPEC)
-        final_qscheme = pick3(user_qscheme, wrapper_qscheme, role_qscheme)
+        final_qscheme_raw = pick3(user_qscheme, wrapper_qscheme, role_qscheme)
+        final_qscheme = (
+            None if final_qscheme_raw is _UNSPEC else cast(QScheme, final_qscheme_raw)
+        )
 
-        if final_dtype is not _UNSPEC:
-            if final_qscheme is _UNSPEC:
+        if final_dtype is not None:
+            if final_qscheme is None:
                 final_qscheme = auto_qscheme_for(final_dtype, name)
 
             if dtype_is_unsigned(final_dtype) and final_qscheme.is_symmetric():
@@ -222,8 +231,8 @@ class QuantModuleBase(nn.Module, ABC):
         if (
             user_qscheme is _UNSPEC
             and wrapper_qscheme is _UNSPEC
-            and final_dtype is not _UNSPEC
-            and final_qscheme is not _UNSPEC
+            and final_dtype is not None
+            and final_qscheme is not None
             and final_dtype.signed
             and not final_qscheme.is_symmetric()
         ):
@@ -232,12 +241,12 @@ class QuantModuleBase(nn.Module, ABC):
         final_kw = role_cfg
         final_kw.update(wrapper_defaults)
         final_kw.update(user_cfg)
-        if final_dtype is not _UNSPEC:
+        if final_dtype is not None:
             final_kw["dtype"] = final_dtype
-        if final_qscheme is not _UNSPEC:
+        if final_qscheme is not None:
             final_kw["qscheme"] = final_qscheme
 
-        return obs_cls(**final_kw, name=name)
+        return obs_type(**final_kw, name=name)
 
     def extra_repr(self) -> str:
         return f"mode={self._mode.name.lower()}"

@@ -80,10 +80,12 @@ class LlamaMLPCase(WrapperSmokeCase):
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the INT16 PTQ config used by the LLaMA MLP smoke check."""
         from tico.quantization.config.ptq import PTQConfig
+        from tico.quantization.config.specs import affine
         from tico.quantization.wrapq.dtypes import INT16
         from tico.quantization.wrapq.qscheme import QScheme
 
-        return PTQConfig(default_dtype=INT16, default_qscheme=QScheme.PER_TENSOR_SYMM)
+        int16_spec = affine(INT16, qscheme=QScheme.PER_TENSOR_SYMM)
+        return PTQConfig(activation=int16_spec, weight=int16_spec)
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny LlamaMLP and reference copy."""

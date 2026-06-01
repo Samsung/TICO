@@ -123,7 +123,8 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 
 import tico
 import tico.quantization
-import tico.quantization.config.ptq
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import affine
 from tico.quantization.wrapq.dtypes import DType, INT16, INT4, INT8, UINT4, UINT8
 from tico.quantization.wrapq.utils.introspection import (
     ArgName,
@@ -368,8 +369,10 @@ def prepare_quantized_model(
     """
     # Configure PTQ
     thw = tuple(model_inputs["image_grid_thw"].squeeze().tolist())
-    ptq_config = tico.quantization.config.ptq.PTQConfig(
-        default_dtype=dtype,
+    quant_spec = affine(dtype)
+    ptq_config = PTQConfig(
+        activation=quant_spec,
+        weight=quant_spec,
         model_args={
             "vision": {
                 "grid_thw": thw,

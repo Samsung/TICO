@@ -106,7 +106,7 @@ class TestQuantSpecBuilders(unittest.TestCase):
             pass
 
         cfg = PTQConfig(
-            activation=affine(DType.int(8), observer=CustomObserver),
+            activation=affine(DType.int(8), observer=CustomObserver),  # type: ignore[type-abstract]
             overrides={"act_out": mx("int8", axis=-1)},
         )
         wrapper = DummyWrapper(cfg)

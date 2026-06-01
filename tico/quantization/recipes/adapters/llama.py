@@ -134,9 +134,13 @@ class LlamaAdapter(ModelAdapter):
 
     def _ptq_decode_calibration_steps(self, cfg: Mapping[str, Any]) -> int:
         calib = cfg.get("calibration", {})
+        if not isinstance(calib, Mapping):
+            calib = {}
         decode_steps = int(calib.get("decode_steps", 0))
 
         for stage in cfg.get("pipeline", []):
+            if not isinstance(stage, Mapping):
+                continue
             if stage.get("name") == "ptq" and stage.get("enabled", True):
                 return int(stage.get("decode_calibration_steps", decode_steps))
 

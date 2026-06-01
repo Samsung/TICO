@@ -94,7 +94,7 @@ class TestPTQConfigRoles(unittest.TestCase):
 
     def test_user_override_wins_over_role_and_wrapper_defaults(self):
         cfg = PTQConfig(
-            activation=affine(DType.uint(8), observer=MinMaxObserver),
+            activation=affine(DType.uint(8), observer=MinMaxObserver),  # type: ignore[type-abstract]
             overrides={
                 "act_in": {
                     "dtype": DType.uint(4),
@@ -106,7 +106,7 @@ class TestPTQConfigRoles(unittest.TestCase):
         )
         wrapper = DummyWrapper(
             cfg,
-            dtype=DType.uint(6),
+            dtype=DType.uint(6),  # type: ignore[type-abstract]
             observer=DummyObserverB,
             qscheme=QScheme.PER_CHANNEL_ASYMM,
             channel_axis=0,

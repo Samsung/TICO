@@ -478,6 +478,6 @@ def _load_torch_object(path: str | None) -> Any:
 
 def _find_stage(cfg: dict[str, Any], stage_name: str) -> Mapping[str, Any] | None:
     for stage in cfg.get("pipeline", []):
-        if stage.get("name") == stage_name:
+        if isinstance(stage, Mapping) and stage.get("name") == stage_name:
             return stage
     return None
