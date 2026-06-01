@@ -1,0 +1,100 @@
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import torch.fx
+import torch
+from torch.export import ExportedProgram
+
+from tico.utils.graph import create_node
+from tico.utils.passes import PassBase, PassResult
+from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
+from tico.utils.validate_args_kwargs import RMSNormArgs
+
+
+@trace_graph_diff_on_pass
+class FuseRmsNorm(PassBase):
+    """
+    This pass fuses aten.rms_norm into circle_custom.rms_norm.
+
+    aten.rms_norm already includes the weight multiplication internally,
+    so its output is equivalent to circle_custom.rms_norm.
+
+    [before]
+
+            input (tensor, normalized_shape, weight, eps)
+                |
+           aten.rms_norm
+                |
+              output
+
+    [after]
+
+            input (tensor, weight, eps)
+                |
+        circle_custom.rms_norm
+                |
+              output
+
+    Note: normalized_shape is dropped because circle_custom.rms_norm
+    infers the normalization dimension from the weight shape.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def call(self, exported_program: ExportedProgram) -> PassResult:
+        gm = exported_program.graph_module
+        graph: torch.fx.Graph = gm.graph
+        modified = False
+
+        for node in graph.nodes:
+            if not is_target_node(node, [torch.ops.aten.rms_norm.default]):
+                continue
+
+            args = RMSNormArgs(*node.args, **node.kwargs)
+            input_ = args.input
+            weight = args.weight
+            eps = args.eps
+
+            # weight is required for circle_custom.rms_norm
+            if weight is None:
+                continue
+
+            # Use default eps if not provided (PyTorch default is 1e-5)
+            if eps is None:
+                eps = 1e-5
+
+            with gm.graph.inserting_before(node):
+                rms_norm_node = create_node(
+                    graph,
+                    torch.ops.circle_custom.rms_norm.default,
+                    (input_, weight, eps),
+                    origin=node,
+                )
+
+            # Reset meta to allow propagate_meta=True in replace_all_uses_with
+            # (same pattern as DecomposeGroupNorm)
+            rms_norm_node.meta = {}
+            node.replace_all_uses_with(rms_norm_node, propagate_meta=True)
+            modified = True
+
+        gm.graph.eliminate_dead_code()
+        gm.graph.lint()
+        gm.recompile()
+
+        return PassResult(modified)

@@ -46,6 +46,7 @@ from tico.passes.extract_dtype_kwargs import ExtractDtypeKwargsPass
 from tico.passes.fill_meta_val import FillMetaVal
 from tico.passes.fuse_leading_unsqueeze_reshape import FuseLeadingUnsqueezeReshape
 from tico.passes.fuse_redundant_reshape_to_mean import FuseRedundantReshapeToMean
+from tico.passes.fuse_rms_norm import FuseRmsNorm
 from tico.passes.legalize_causal_mask_value import LegalizeCausalMaskValue
 from tico.passes.legalize_predefined_layout_operators import (
     LegalizePreDefinedLayoutOperators,
@@ -137,6 +138,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             torch.ops.aten.prelu.default,
             torch.ops.aten.linear.default,
             torch.ops.aten.upsample_nearest2d.vec,
+            torch.ops.aten.rms_norm.default,
         )
         for op in _preserve_ops:
             if op in _decomp_table:
@@ -254,6 +256,7 @@ def convert_exported_module_to_circle(
             DecomposeSliceScatter(),
             DecomposeGroupNorm(),
             DecomposeBatchNorm(),
+            FuseRmsNorm(),
             DecomposeGroupedConv2d(),
             CastATenWhereArgType(),
             ConvertRepeatToExpandCopy(),
