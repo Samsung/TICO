@@ -22,18 +22,83 @@ from tqdm.auto import tqdm
 from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.gptq.utils import (
     find_layers,
+    find_layers_deep,
     gather_single_batch_from_dict,
     gather_single_batch_from_list,
 )
 from tico.quantization.config.llama_gptq import LlamaGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
+from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.utils.utils import move_to_device
 
 
 def move_to_cpu(obj):
     return move_to_device(obj, "cpu")
 
+def print_minmax_values(model: torch.nn.Module) -> None:
+    """
+    Print min/max values from all PTQ observers in the quantized model.
+
+    This function traverses the model hierarchy and prints the min/max statistics
+    collected by each AffineObserverBase instance. Useful for debugging and
+    inspecting quantization ranges after calibration.
+
+    For per-tensor observers, prints scalar min/max values.
+    For per-channel observers, prints the global min/max range and channel shape.
+
+    Args:
+        model: A PTQ-quantized model with observers containing min/max statistics.
+
+    Example usage:
+        # After calibration and before/after conversion:
+        print_minmax_values(q_m)
+    """
+    from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+    from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+
+    print("\n" + "=" * 80)
+    print("PTQ Model Min/Max Values")
+    print("=" * 80)
+    print(f"{'Module Name':<50} | {'Observer':<25} | Min/Max Values")
+    print("-" * 80)
+
+    count = 0
+    for module_name, module in model.named_modules():
+        if not isinstance(module, QuantModuleBase):
+            continue
+
+        for obs_name, obs in module.named_observers(recurse=True):
+            if not isinstance(obs, AffineObserverBase):
+                continue
+
+            if not hasattr(obs, "min_val") or not hasattr(obs, "max_val"):
+                continue
+
+            min_val = obs.min_val
+            max_val = obs.max_val
+
+            # Format output based on per-tensor vs per-channel
+            if min_val.numel() == 1:
+                # Per-tensor: scalar values
+                values_str = f"min={min_val.item():.6f}, max={max_val.item():.6f}"
+            else:
+                # Per-channel: show shape and range
+                values_str = (
+                    f"min={min_val.min().item():.6f}..{max_val.max().item():.6f} "
+                    f"(shape={tuple(min_val.shape)})"
+                )
+
+            print(f"{module_name:<50} | {obs_name:<25} | {values_str}")
+            count += 1
+
+    print("-" * 80)
+    print(f"Total observers: {count}")
+    print("=" * 80 + "\n")
 
 class StopForward(Exception):
     """Custom exception used to stop the forward pass after the first layer."""
@@ -107,16 +172,190 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         """Check if the model is a SpinLlamaForCausalLM (has rotate_lm_head)."""
         return hasattr(model, "rotate_lm_head") and model.rotate_lm_head is not None
 
+    @staticmethod
+    def _is_ptq_wrapped(model: torch.nn.Module) -> bool:
+        """Check if the model has been wrapped with PTQ prepare().
+
+        After PTQ prepare(), the top-level model becomes a
+        ``QuantLlamaForCausalLM`` whose ``.model`` attribute is a
+        ``PTQWrapper`` (instead of a plain ``LlamaModel``).
+        """
+        return isinstance(model, PTQWrapper)
+
     def _get_decoder_layers(self, model: torch.nn.Module):
-        """Get the decoder layers from a Llama model."""
-        return model.model.layers
+        """Get the decoder layers from a Llama model.
+
+        Handles both raw models and PTQ-wrapped models.
+
+        After PTQ prepare() the top-level model is ``QuantLlamaForCausalLM``
+        which stores the Llama body in ``self.model`` (a ``PTQWrapper``).
+        The actual ``LlamaModel`` is at ``model.model.wrapped``.
+
+        If the model is already a ``QuantLlamaModel`` (e.g. the body
+        without the CausalLM wrapper), its layers are directly at
+        ``model.layers``.
+        """
+        # Case 1: model has a .model child (LlamaForCausalLM / QuantLlamaForCausalLM)
+        if hasattr(model, "model"):
+            model_attr = model.model
+            if isinstance(model_attr, QuantModuleBase):
+                # PTQ-wrapped: .model is PTQWrapper → .wrapped is QuantLlamaModel
+                return model_attr.wrapped.layers
+            return model_attr.layers
+
+        # Case 2: model IS the LlamaModel / QuantLlamaModel directly
+        if isinstance(model, QuantModuleBase):
+            return model.wrapped.model.wrapped.layers
+
+        # Case 3: plain LlamaModel
+        return model.layers
 
     def _get_orig_decoder_layers(self, model: torch.nn.Module):
-        """Get the decoder layers from the original model copy."""
         if self.orig_model is not None:
-            return self.orig_model.model.layers
+            if hasattr(self.orig_model, "model"):
+                return self.orig_model.model.layers
+            elif hasattr(self.orig_model, "wrapped"):
+                return self.orig_model.wrapped.model.wrapped.layers
+            return self.orig_model.layers
         return None
 
+    @staticmethod
+    def _find_ptq_layers(layer: torch.nn.Module, layers=None, name=""):
+        """Find quantizable submodules inside a PTQ-wrapped decoder layer.
+
+        Navigates the ``PTQWrapper(.wrapped)`` hierarchy transparently so
+        that the returned names match the **original** model structure
+        (e.g. ``"self_attn.q_proj"`` instead of
+        ``"wrapped.self_attn.wrapped.q_proj.wrapped.module"``).
+
+        Returns a dict mapping *local* name → raw ``nn.Module``
+        (e.g. the ``nn.Linear`` inside ``QuantLinear.module``).
+        """
+        if layers is None:
+            layers = [torch.nn.Linear]
+
+        # Direct match
+        if type(layer) in layers:
+            return {name: layer}
+
+        # Unwrap QuantModuleBase that stores the original layer in .module
+        if hasattr(layer, "module") and isinstance(getattr(layer, "module"), torch.nn.Module):
+            inner = layer.module
+            if type(inner) in layers:
+                return {name: inner}
+
+        res: Dict[str, torch.nn.Module] = {}
+        for child_name, child in layer.named_children():
+            # Skip the "wrapped" level of PTQWrapper to keep names clean
+            from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
+            if child_name == "wrapped" and isinstance(layer, PTQWrapper):
+                new_name = name  # don't append "wrapped"
+            else:
+                new_name = name + "." + child_name if name != "" else child_name
+
+            res.update(
+                LlamaGPTQQuantizer._find_ptq_layers(
+                    child, layers=layers, name=new_name
+                )
+            )
+        return res
+    
+    @staticmethod
+    def reset_layer_observers(layer: torch.nn.Module, save_obs) -> None:
+        """
+        Reset all observers (weight and activation) in a layer.
+
+        This clears the min/max statistics collected by observers, allowing
+        them to collect fresh calibration data.
+
+        Args:
+            layer: A QuantModuleBase (e.g., PTQWrapper) containing observers
+        """
+        for m in layer.modules():
+            if isinstance(m, QuantModuleBase):
+                for name, obs in m.named_observers(recurse=False):
+                    if obs in save_obs:
+                        continue
+                    obs.reset()
+
+    @staticmethod
+    def remove_wrapped_substrings(s: str) -> str:
+        
+        s = s.replace(".wrapped", "")
+        s = s.replace("wrapped.", "")
+        s = s.replace("wrapped", "")
+        return s
+
+    @staticmethod
+    def _inject_gptq_qparams_into_layer(
+        layer: torch.nn.Module,
+        gptq_quantizers: Dict[str, Any],
+        *,
+        verbose: bool = False,
+    ):
+        """Inject GPTQ (scale, zero-point) into the PTQ weight observers
+        of *all* ``QuantModuleBase`` descendants inside *layer*, then call
+        ``freeze_qparams()`` to lock every observer (weight + activation).
+
+        This is used when GPTQ runs on a PTQ-prepared model: GPTQ quantizes
+        the weights, and we push the resulting qparams into the PTQ weight
+        observers so the PTQ graph uses the same quantization parameters.
+        """
+        seen = set()
+        missed_modules = []
+        saved_obs = set()
+        for m in layer.modules():
+            if not isinstance(m, QuantModuleBase):
+                continue
+            if m.fp_name is None:
+                continue
+
+            quantizer = gptq_quantizers.get(m.fp_name)
+            obs = m.get_observer("weight")
+
+            # Only care about modules that should have weight observers
+            if obs is None:
+                continue
+
+            if quantizer is None:
+                missed_modules.append(m.fp_name)
+                #saved_obs.add(obs) #not-gptq weight
+                #obs.enabled = False
+                continue
+
+            assert isinstance(obs, AffineObserverBase)
+            obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
+            seen.add(m.fp_name)
+            saved_obs.add(obs)
+            
+            #m.freeze_qparams()
+
+        unused = set(gptq_quantizers.keys()) - seen
+        LlamaGPTQQuantizer.reset_layer_observers(layer, saved_obs)
+        
+        if verbose:
+            print(f"\n  [GPTQ → PTQ injection] matched={len(seen)}, "
+                  f"missed={len(missed_modules)}, unused={len(unused)}")
+            if missed_modules:
+                print(f"    missed: {missed_modules[:5]}")
+          # if unused:
+          #     print(f"    unused: {list(unused)[:5]}")
+
+        # Freeze all observers (weight + activation) for this layer.
+        # The layer is a PTQWrapper (QuantModuleBase), and freeze_qparams()
+        # propagates to all child QuantModuleBase descendants.
+        # This transitions the layer from CALIB → QUANT mode.
+       # if isinstance(layer, QuantModuleBase):
+       #     layer.freeze_qparams()
+
+    def _get_config(self, m):
+        """Get config from model, handling PTQ wrappers."""
+        if hasattr(m, 'config'):
+            return m.config
+        if hasattr(m, 'wrapped'):
+            return self._get_config(m.wrapped)
+        return None
+    
     @torch.no_grad()
     def prepare(
         self,
@@ -170,7 +409,8 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         else:
             self.orig_model = None
         # Replace the first layer with defined function to capture calibration data.
-        self._first_layer_ref = model.model.layers[0]
+        layers = self._get_decoder_layers(model)
+        self._first_layer_ref = layers[0]
 
         assert hasattr(self._first_layer_ref, "forward")
         # Backup the original forward of the first layer
@@ -194,13 +434,137 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         model.forward = types.MethodType(model_forward_wrapper, model)
 
         # Disable use_cache during calibration
-        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-            self.orig_use_cache = model.config.use_cache
-            model.config.use_cache = False
+        # Handle PTQ-wrapped models by unwrapping to get to the config
+        config = self._get_config(model)
+        if config is not None and hasattr(config, "use_cache"):
+            self.orig_use_cache = config.use_cache
+            config.use_cache = False
         else:
             self.orig_use_cache = None
 
         return model
+    def _get_embed_tokens_ptq_wrapper(self, model: torch.nn.Module) -> Optional[QuantModuleBase]:
+        """
+        Get the PTQ wrapper for embed_tokens.
+        
+        This only handles PTQ-wrapped embed_tokens (QuantEmbedding).
+        Returns None if not found or not PTQ-wrapped.
+        """
+        for m in model.modules():
+            if isinstance(m, QuantEmbedding):
+                fp_name = getattr(m, 'fp_name', None)
+                if fp_name is not None and 'embed_tokens' in fp_name:
+                    return m
+        return None
+
+    def _get_model_norm_ptq_wrapper(self, model: torch.nn.Module) -> Optional[QuantModuleBase]:
+        """
+        Get the PTQ wrapper for model.norm.
+        
+        This only handles PTQ-wrapped model.norm (QuantRMSNorm).
+        Returns None if not found or not PTQ-wrapped.
+        """
+        from tico.quantization.wrapq.wrappers.ops.quant_rmsnorm import QuantRMSNorm
+        from tico.quantization.wrapq.wrappers.nn.quant_layernorm import QuantLayerNorm
+        
+        for m in model.modules():
+            if isinstance(m, (QuantRMSNorm, QuantLayerNorm)):
+                fp_name = getattr(m, 'fp_name', None)
+                if fp_name is not None and fp_name.endswith('.norm'):
+                    return m
+        return None
+
+    def _get_lm_head_ptq_wrapper(self, model: torch.nn.Module) -> Optional[QuantModuleBase]:
+        """
+        Get the PTQ wrapper for lm_head.
+        
+        This only handles PTQ-wrapped lm_head (QuantLinear).
+        Returns None if not found or not PTQ-wrapped.
+        """
+        for m in model.modules():
+            if isinstance(m, QuantLinear):
+                fp_name = getattr(m, 'fp_name', None)
+                if fp_name is not None and 'lm_head' in fp_name:
+                    return m
+        return None
+    
+    def _calibrate_embed_tokens_ptq(self, model: torch.nn.Module) -> None:
+        """
+        Calibrate PTQ observers for embed_tokens (PTQ-only, no GPTQ).
+        
+        Calibrates weight, input activation, and output activation observers.
+        """
+        embed_tokens = self._get_embed_tokens_ptq_wrapper(model)
+        if embed_tokens is None:
+            return
+
+        # Calibrate weight observer immediately (fixed)
+        obs_weight = embed_tokens.get_observer("weight")
+        if obs_weight is not None:
+            obs_weight.collect(embed_tokens.module.weight)
+
+        embed_tokens.freeze_qparams()
+
+    def _calibrate_model_norm_ptq(self, model: torch.nn.Module) -> None:
+        """
+        Calibrate PTQ observers for model.norm (PTQ-only, no GPTQ).
+        
+        Calibrates weight, input activation, and output activation observers.
+        """
+        model_norm = self._get_model_norm_ptq_wrapper(model)
+        if model_norm is None:
+            return
+
+        # Calibrate weight observer immediately (fixed)
+        obs_weight = model_norm.get_observer("weight")
+        if obs_weight is not None:
+            obs_weight.collect(model_norm.module.weight)
+            obs_weight.enabled = False
+            obs_weight.compute_qparams()
+
+        # Calibrate input and output activation observers
+        device = next(model.parameters()).device
+        batch_num = self.num_batches
+        
+        for batch_idx in range(batch_num):
+            hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
+            hidden_states = move_to_device(hidden_states, device)
+            model_norm(hidden_states)
+
+        # Freeze activation observers
+        #model_norm.freeze_qparams()
+
+    def _calibrate_norm_lm_head_ptq(self, model: torch.nn.Module) -> None:
+        """
+        Calibrate PTQ observers for lm_head (PTQ-only, no GPTQ).
+        
+        Calibrates weight, input activation, and output activation observers.
+        """
+        lm_head = self._get_lm_head_ptq_wrapper(model)
+        if lm_head is None:
+            return
+
+        # Calibrate weight observer immediately (fixed)
+        obs_weight = lm_head.get_observer("weight")
+        if obs_weight is not None:
+            obs_weight.collect(lm_head.module.weight)
+            obs_weight.enabled = False
+            obs_weight.compute_qparams()
+
+        # Calibrate input and output activation observers
+        device = next(model.parameters()).device
+        batch_num = self.num_batches
+        model_norm = self._get_model_norm_ptq_wrapper(model)
+        
+        for batch_idx in range(batch_num):
+            hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
+            hidden_states = move_to_device(hidden_states, device)
+            hidden_states = model_norm(hidden_states)
+            lm_head(hidden_states)
+
+        # Freeze activation observers
+        model_norm.freeze_qparams()
+        lm_head.freeze_qparams()
 
     @torch.no_grad()
     def convert(self, model):
@@ -235,15 +599,26 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         assert isinstance(gptq_conf, LlamaGPTQConfig)
         gptq_conf.validate()
 
+        ptq_wrapped = self._is_ptq_wrapped(model)
+
         # Identify layers
         target_layers = self._get_decoder_layers(model)
         orig_layers = self._get_orig_decoder_layers(model)
-
-        module_name = {}
+        
+        module_name: Dict[torch.nn.Module, str] = {}
         for name, module in model.named_modules():
             module_name[module] = name
 
+        self._calibrate_embed_tokens_ptq(model)
+        
+        # Choose the right layer-finder depending on whether the model is
+        # PTQ-wrapped.  When it is, nn.Linear modules are hidden inside
+        # QuantLinear.module and PTQWrapper.wrapped layers, so we need
+        # _find_ptq_layers which transparently skips the "wrapped" level.
+        _find = self._find_ptq_layers if ptq_wrapped else find_layers
+        
         quantizers: Dict[str, Any] = {}
+        batch_num = self.num_batches
         for l_idx, layer in enumerate(
             tqdm(
                 target_layers,
@@ -253,24 +628,44 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             )
         ):
             # 1) Identify quantizable submodules within the layer
-            full = find_layers(
+            full = _find(
                 layer,
                 layers=[
                     torch.nn.Linear,
-                    torch.nn.Conv2d,
-                    torch.nn.Conv1d,
-                    torch.nn.Conv3d,
-                    torch.nn.ConvTranspose2d,
+                    QuantLinear
                 ],
             )
 
+            sequential = True #False
             # Define groups for quantizing by internal structure (standard Llama modules)
-            all_names = [
-                ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-                ["self_attn.o_proj"],
-                ["mlp.gate_proj", "mlp.up_proj"],
-                ["mlp.down_proj"],
-            ]
+            if sequential is True:
+                #sequential processing
+                all_names = [
+                    # Wrapped paths (for PTQ-wrapped models) - must come first
+                    ["wrapped.self_attn.wrapped.q_proj.wrapped", "wrapped.self_attn.wrapped.k_proj.wrapped", "wrapped.self_attn.wrapped.v_proj.wrapped"],
+                    ["wrapped.self_attn.wrapped.o_proj.wrapped"],
+                    ["wrapped.mlp.wrapped.gate_proj.wrapped", "wrapped.mlp.wrapped.up_proj.wrapped"],
+                    ["wrapped.mlp.wrapped.down_proj.wrapped"],
+                    # Standard unwrapped paths
+                    ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+                    ["self_attn.o_proj"],
+                    ["mlp.gate_proj", "mlp.up_proj"],
+                    ["mlp.down_proj"],
+                ]
+            else:
+                #process all internal linears at once
+                all_names = [
+                    # Wrapped paths (for PTQ-wrapped models) - must come first
+                    ["wrapped.self_attn.wrapped.q_proj.wrapped", "wrapped.self_attn.wrapped.k_proj.wrapped", "wrapped.self_attn.wrapped.v_proj.wrapped",
+                    "wrapped.self_attn.wrapped.o_proj.wrapped",
+                    "wrapped.mlp.wrapped.gate_proj.wrapped", "wrapped.mlp.wrapped.up_proj.wrapped",
+                    "wrapped.mlp.wrapped.down_proj.wrapped"],
+                    # Standard unwrapped paths
+                    ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
+                    "self_attn.o_proj",
+                    "mlp.gate_proj", "mlp.up_proj",
+                    "mlp.down_proj"],
+                ]
 
             # Filter to only existing modules and group them
             existing_names = set(full.keys())
@@ -286,19 +681,22 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
-                    gptq[name] = GPTQ(subset[name])
+                    sub_layer = subset[name]
+                    nn_layer = sub_layer.module if hasattr(sub_layer, "module") else sub_layer
+                    gptq[name] = GPTQ(nn_layer)
                     full_module_name = module_name[subset[name]]
-                    weight_bits = self._resolve_weight_bits(
+                    weight_bits = 4
+                    self._resolve_weight_bits(
                         gptq_conf,
-                        full_module_name=full_module_name,
-                        local_module_name=name,
+                        full_module_name=self.remove_wrapped_substrings(full_module_name),
+                        local_module_name=self.remove_wrapped_substrings(name),
                     )
                     if (
                         gptq_conf.sensitivity is not None
                         and isinstance(gptq_conf.sensitivity, dict)
-                        and full_module_name in gptq_conf.sensitivity
+                        and self.remove_wrapped_substrings(full_module_name) in gptq_conf.sensitivity
                     ):
-                        cur_sensitivity = gptq_conf.sensitivity[full_module_name]
+                        cur_sensitivity = gptq_conf.sensitivity[self.remove_wrapped_substrings(full_module_name)]
                     else:
                         cur_sensitivity = None
                     gptq[name].quantizer.configure(
@@ -321,7 +719,6 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     handles.append(subset[name].register_forward_hook(add_batch(name)))
 
                 # Run layer forward over all cached batches to build Hessian/statistics
-                batch_num = self.num_batches
                 device = next(model.parameters()).device
                 for batch_idx in tqdm(
                     range(batch_num),
@@ -360,9 +757,41 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         static_groups=gptq_conf.static_groups,
                         verbose=gptq_conf.verbose,
                     )
-                    quantizers[full_module_name] = gptq[name].quantizer
+                    quantizers[self.remove_wrapped_substrings(full_module_name)] = gptq[name].quantizer
                     gptq[name].free()
+                    
+            # --- PTQ-wrapped: inject GPTQ qparams and freeze the layer ---
+            if ptq_wrapped:
+                self._inject_gptq_qparams_into_layer(
+                    layer,
+                    quantizers,
+                    verbose=gptq_conf.verbose,
+                )
+                layer.enable_calibration()
+                calibrated = False
+                device = next(model.parameters()).device
+                for batch_idx in tqdm(
+                    range(batch_num),
+                    desc=f"[L{l_idx}] activaions calibration",
+                    leave=False,
+                    unit="batch",
+                    disable=not gptq_conf.show_progress,
+                ):
+                    cache_args_batch = gather_single_batch_from_list(
+                        self.cache_args, batch_idx
+                    )
+                    cache_args_batch = move_to_device(cache_args_batch, device)
 
+                    cache_kwargs_batch = gather_single_batch_from_dict(
+                        self.cache_kwargs, batch_idx
+                    )
+                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+                    outs = layer(*cache_args_batch, **cache_kwargs_batch)
+                    
+                if ptq_wrapped:
+                    layer.freeze_qparams()   
+                    calibrated = True
+                    
             # 4) After quantization, re-run the layer to produce outputs for the next layer
             device = next(model.parameters()).device
             for batch_idx in tqdm(
@@ -388,6 +817,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     orig_layer = orig_layers[l_idx].to(device)
                     outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
                     orig_layer.cpu()
+                    if ptq_wrapped and not calibrated:
+                        # nevertheless we should calibrate
+                        layer(*cache_args_batch, **cache_kwargs_batch)
                 # LLaMA's decoder layer return type differs across Transformers versions:
                 # some return a tuple (hidden_states, ...), others return just a tensor.
                 # This line ensures we always take the first element when it's a tuple.
@@ -402,28 +834,29 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         )
                     else:
                         self.cache_args[0][batch_idx] = outs
+            
+            if ptq_wrapped and not calibrated:
+                layer.freeze_qparams()   
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        # Optionally quantize lm_head
-        if gptq_conf.quantize_lm_head and hasattr(model, "lm_head"):
-            self._quantize_lm_head(model, quantizers, module_name)
-
-        # Optionally quantize rotate_lm_head (SpinLlamaForCausalLM only)
-        if gptq_conf.quantize_rotate_lm_head and self._is_spinllama_model(model):
-            self._quantize_rotate_lm_head(model, quantizers, module_name)
-
+        self._calibrate_norm_lm_head_ptq(model)
+        
+        if ptq_wrapped:
+            model.freeze_qparams()
+        
         # Restore the original cache configuration.
+        config = self._get_config(model)
         if self.orig_use_cache is not None:
-            model.config.use_cache = self.orig_use_cache
+            config.use_cache = self.orig_use_cache
 
         # Clear caches to free memory
         self.cache_args.clear()
         self.cache_kwargs.clear()
         self.num_batches = 0
 
-        model.quantizers = quantizers
+       # model.quantizers = quantizers
 
         return model
 
@@ -439,9 +872,17 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         This method consumes cached decoder outputs, applies the final model
         normalization, collects GPTQ statistics for `lm_head`, and then
         quantizes the output head weights.
+
+        When the model is PTQ-wrapped, the inner ``nn.Linear`` is used for
+        GPTQ hooks and the outer PTQ wrapper is used for the forward pass
+        (so activation observers collect data).  After GPTQ quantization,
+        qparams are injected into PTQ weight observers and ``freeze_qparams()``
+        is called.
         """
         gptq_conf = self.config
         assert isinstance(gptq_conf, LlamaGPTQConfig)
+
+        ptq_wrapped = self._is_ptq_wrapped(model)
 
         # prepare data for lm_head
         batch_num = self.num_batches
@@ -456,7 +897,11 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
             hidden_states = move_to_device(hidden_states, device)
             if self.orig_model is None:
-                hidden_states = model.model.norm(hidden_states)
+                # PTQ-wrapped model has .model.wrapped.norm; raw has .model.norm
+                model_norm = model.model
+                if ptq_wrapped:
+                    model_norm = model_norm.wrapped
+                hidden_states = model_norm.norm(hidden_states)
             else:
                 norm = self.orig_model.model.norm.to(device)
                 hidden_states = norm(hidden_states)
@@ -464,8 +909,15 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             if len(self.cache_args) > 0:
                 self.cache_args[0][batch_idx] = move_to_cpu(hidden_states)
 
-        layer = model.lm_head
-        gptq = GPTQ(layer)
+        # For PTQ-wrapped models, lm_head is a PTQWrapper → need inner nn.Linear
+        lm_head_module = model.lm_head
+        if ptq_wrapped:
+            # model.lm_head is PTQWrapper → .wrapped is QuantLinear → .module is nn.Linear
+            lm_head_inner = lm_head_module.wrapped.module
+        else:
+            lm_head_inner = lm_head_module
+
+        gptq = GPTQ(lm_head_inner)
         full_module_name = "lm_head"
         weight_bits = self._resolve_weight_bits(
             gptq_conf,
@@ -495,10 +947,10 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
             return _hook
 
-        handles = [layer.register_forward_hook(add_batch())]
+        handles = [lm_head_inner.register_forward_hook(add_batch())]
 
         # Run layer forward over all cached batches to build Hessian/statistics
-        device = next(layer.parameters()).device  # in case lm_head is located on cpu
+        device = next(lm_head_inner.parameters()).device  # in case lm_head is located on cpu
         for batch_idx in tqdm(
             range(batch_num),
             desc=f"[lm_head] collecting",
@@ -509,7 +961,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
             hidden_states = move_to_device(hidden_states, device)
 
-            layer(hidden_states)
+            # Forward through the PTQ-wrapped lm_head (activates observers)
+            # or the raw lm_head.
+            lm_head_module(hidden_states)
 
         # Remove handles
         for h in handles:
@@ -527,6 +981,14 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()
+
+        # PTQ-wrapped: inject GPTQ qparams and freeze lm_head observers
+        if ptq_wrapped:
+            self._inject_gptq_qparams_into_layer(
+                lm_head_module,
+                quantizers,
+                verbose=gptq_conf.verbose,
+            )
 
     def _quantize_rotate_lm_head(
         self,
@@ -562,8 +1024,16 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             if len(self.cache_args) > 0:
                 self.cache_args[0][batch_idx] = move_to_cpu(hidden_states)
 
-        layer = model.rotate_lm_head
-        gptq = GPTQ(layer)
+        ptq_wrapped = self._is_ptq_wrapped(model)
+
+        # For PTQ-wrapped models, rotate_lm_head is a PTQWrapper → need inner nn.Linear
+        rotate_lm_head_module = model.rotate_lm_head
+        if ptq_wrapped:
+            rotate_lm_head_inner = rotate_lm_head_module.wrapped.module
+        else:
+            rotate_lm_head_inner = rotate_lm_head_module
+
+        gptq = GPTQ(rotate_lm_head_inner)
         full_module_name = "rotate_lm_head"
         weight_bits = self._resolve_weight_bits(
             gptq_conf,
@@ -593,10 +1063,10 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
             return _hook
 
-        handles = [layer.register_forward_hook(add_batch())]
+        handles = [rotate_lm_head_inner.register_forward_hook(add_batch())]
 
         # Run layer forward over all cached batches to build Hessian/statistics
-        device = next(layer.parameters()).device
+        device = next(rotate_lm_head_inner.parameters()).device
         for batch_idx in tqdm(
             range(batch_num),
             desc=f"[rotate_lm_head] collecting",
@@ -607,7 +1077,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
             hidden_states = move_to_device(hidden_states, device)
 
-            layer(hidden_states)
+            # Forward through the PTQ-wrapped rotate_lm_head (activates observers)
+            # or the raw rotate_lm_head.
+            rotate_lm_head_module(hidden_states)
 
         # Remove handles
         for h in handles:
@@ -625,3 +1097,11 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         )
         quantizers[f"rotate_lm_head"] = gptq.quantizer
         gptq.free()
+
+        # PTQ-wrapped: inject GPTQ qparams and freeze rotate_lm_head observers
+        if ptq_wrapped:
+            self._inject_gptq_qparams_into_layer(
+                rotate_lm_head_module,
+                quantizers,
+                verbose=gptq_conf.verbose,
+            )

@@ -413,6 +413,67 @@ def clear_gptq_quantizers(model: torch.nn.Module) -> None:
         delattr(model.wrapped, "quantizers")
 
 
+def print_minmax_values(model: torch.nn.Module) -> None:
+    """
+    Print min/max values from all PTQ observers in the quantized model.
+
+    This function traverses the model hierarchy and prints the min/max statistics
+    collected by each AffineObserverBase instance. Useful for debugging and
+    inspecting quantization ranges after calibration.
+
+    For per-tensor observers, prints scalar min/max values.
+    For per-channel observers, prints the global min/max range and channel shape.
+
+    Args:
+        model: A PTQ-quantized model with observers containing min/max statistics.
+
+    Example usage:
+        # After calibration and before/after conversion:
+        print_minmax_values(q_m)
+    """
+    from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+    from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+
+    print("\n" + "=" * 80)
+    print("PTQ Model Min/Max Values")
+    print("=" * 80)
+    print(f"{'Module Name':<50} | {'Observer':<25} | Min/Max Values")
+    print("-" * 80)
+
+    count = 0
+    for module_name, module in model.named_modules():
+        if not isinstance(module, QuantModuleBase):
+            continue
+
+        for obs_name, obs in module.named_observers(recurse=True):
+            if not isinstance(obs, AffineObserverBase):
+                continue
+
+            if not hasattr(obs, "min_val") or not hasattr(obs, "max_val"):
+                continue
+
+            min_val = obs.min_val
+            max_val = obs.max_val
+
+            # Format output based on per-tensor vs per-channel
+            if min_val.numel() == 1:
+                # Per-tensor: scalar values
+                values_str = f"min={min_val.item():.6f}, max={max_val.item():.6f}"
+            else:
+                # Per-channel: show shape and range
+                values_str = (
+                    f"min={min_val.min().item():.6f}..{max_val.max().item():.6f} "
+                    f"(shape={tuple(min_val.shape)})"
+                )
+
+            print(f"{module_name:<50} | {obs_name:<25} | {values_str}")
+            count += 1
+
+    print("-" * 80)
+    print(f"Total observers: {count}")
+    print("=" * 80 + "\n")
+
+
 def parse_cle_pairs(raw_pairs: list[str] | None) -> list[tuple[str, str]]:
     """
     Parse command-line CLE pairs.
@@ -559,6 +620,7 @@ def build_gptq_config(
             quantize_rotate_lm_head=not args.no_spinquant,
             use_orig_model_inference=args.gptq_use_orig_model_inference,
             percdamp=args.gptq_percdamp,
+            verbose=args.verbose,
         )
     else:
         return GPTQConfig(
@@ -570,6 +632,7 @@ def build_gptq_config(
             quantize_lm_head=args.gptq_lm_head,
             use_orig_model_inference=args.gptq_use_orig_model_inference,
             percdamp=args.gptq_percdamp,
+            verbose=args.verbose,
         )
 
 
@@ -1015,6 +1078,87 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     return q_m
 
 
+def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
+    """
+    Combined PTQ + LlamaGPTQ pipeline.
+
+    When ``--use_llama_gptq`` and PTQ are both enabled the execution order
+    changes so that LlamaGPTQ can operate on the PTQ-wrapped model:
+
+      1. PTQ ``prepare()``  — wraps every layer with PTQWrapper / observers.
+      2. LlamaGPTQ ``prepare()`` + calibration forward passes — collects
+         first-layer inputs for GPTQ while also populating activation
+         observers in CALIB mode.
+      3. LlamaGPTQ ``convert()`` — runs GPTQ weight quantization layer by
+         layer.  After each layer it injects the resulting weight qparams
+         into the PTQ weight observers and calls ``freeze_qparams()`` so
+         subsequent forward passes use fake-quantized (QUANT mode) outputs.
+      4. PTQ ``convert()`` — finalises the PTQ graph (all observers already
+         frozen).
+
+    Because LlamaGPTQ's forward passes during collection and re-forward
+    already drive the PTQ activation observers, **no separate activation
+    calibration pass is needed** for this path.
+    """
+    # Step 1: PTQ prepare
+    print("Wrapping layers with PTQWrapper …")
+    print(f"Using PTQ execution profile: {args.profile}")
+
+    qcfg = build_llm_ptq_config(
+        model_type="llama",
+        num_hidden_layers=len(model.model.layers),
+        activation_dtype=DType.int(16),
+        default_qscheme=QScheme.PER_TENSOR_SYMM,
+        linear_weight_bits=args.linear_weight_bits,
+        embedding_weight_bits=args.embedding_weight_bits,
+        lm_head_weight_bits=args.lm_head_weight_bits,
+        spin_rotation_weight_bits=(
+            None if args.no_spinquant else args.spin_rotation_weight_bits
+        ),
+        norm_weight_dtype=DType.int(16),
+        strict_wrap=True,
+        profile=args.profile,
+    )
+    q_m = prepare(model, qcfg)
+
+    # Step 2: LlamaGPTQ prepare + calibration
+    # Temporarily remove the PTQ quantizer attribute so that the second
+    # ``prepare()`` call does not raise "prepare() already has been called."
+    # We will restore it after LlamaGPTQ convert().
+    ptq_quantizer = getattr(q_m, "tico_quantizer", None)
+    if ptq_quantizer is not None:
+        delattr(q_m, "tico_quantizer")
+
+    print("Applying LlamaGPTQ on PTQ-wrapped model …")
+    sens = compute_or_load_sensitivity(model, calib_inputs, args)
+    gptq_config = build_gptq_config(args, sensitivity=sens)
+
+    q_m = prepare(q_m, gptq_config, inplace=True)
+
+    iterator = calib_inputs
+    if not args.no_tqdm:
+        iterator = tqdm.tqdm(calib_inputs, desc="LlamaGPTQ calibration")
+
+    with torch.no_grad():
+        for inp in iterator:
+            q_m(inp.to(args.device))
+
+    # Step 3: LlamaGPTQ convert (includes freeze_qparams per layer)
+    q_m = convert(q_m, inplace=True)
+    #print_minmax_values(q_m)
+    
+    # Clean up GPTQ quantizers that are no longer needed
+    clear_gptq_quantizers(q_m)
+
+    # Step 4: PTQ convert (all observers are already frozen)
+    # Restore the PTQ quantizer that was saved before LlamaGPTQ prepare()
+    # so that PTQ convert() can find it.
+    #if ptq_quantizer is not None:
+    #    setattr(q_m, "tico_quantizer", ptq_quantizer)
+    #q_m = convert(q_m)
+
+    return q_m
+
 def evaluate(q_m, tokenizer, dataset_test, args):
     """
     Evaluate the quantized model with perplexity and optional lm-eval tasks.
@@ -1440,9 +1584,17 @@ def main():
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
-    model = apply_gptq(model, calib_inputs, args)
 
-    q_m = quantize_using_PTQ(model, calib_inputs, args)
+    # When both LlamaGPTQ and PTQ are enabled, run PTQ prepare first so that
+    # LlamaGPTQ operates on the PTQ-wrapped model.  LlamaGPTQ will inject its
+    # weight qparams into PTQ observers and freeze them layer-by-layer, so no
+    # separate activation calibration pass is needed.
+    if args.use_llama_gptq and not args.no_PTQ and not args.no_GPTQ:
+        q_m = quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args)
+    else:
+        model = apply_gptq(model, calib_inputs, args)
+        q_m = quantize_using_PTQ(model, calib_inputs, args)
+      #  print_minmax_values(q_m)
 
     evaluate(q_m, tokenizer, dataset_test, args)
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
