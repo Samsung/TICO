@@ -20,8 +20,8 @@ import numpy as np
 
 import tico
 import torch
-from tico.interpreter.interpreter import Interpreter
 from tico.interpreter import infer as infer_module
+from tico.interpreter.interpreter import Interpreter
 
 from test.modules.op.add import SimpleAdd
 from test.modules.op.avg_pool2d import AvgPoolWithPaddingKwargs

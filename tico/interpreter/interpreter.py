@@ -17,6 +17,7 @@ from typing import ClassVar
 
 import numpy as np
 import torch
+
 from cffi import FFI
 
 
@@ -42,7 +43,8 @@ class Interpreter:
 
     def __init__(self, circle_binary: bytes):
         self.ffi = FFI()
-        self.ffi.cdef("""
+        self.ffi.cdef(
+            """
           typedef struct InterpreterWrapper InterpreterWrapper;
 
           const char *get_last_error(void);
@@ -52,7 +54,8 @@ class Interpreter:
           void Interpreter_interpret(InterpreterWrapper *intp);
           void Interpreter_writeInputTensor(InterpreterWrapper *intp, const int input_idx, const void *data, size_t input_size);
           void Interpreter_readOutputTensor(InterpreterWrapper *intp, const int output_idx, void *output, size_t output_size);
-        """)
+        """
+        )
         # TODO Check if one-compiler version is compatible. Whether it has .so file or not for CFFI.
         if not self.is_available():
             raise RuntimeError("Please install one-compiler for circle inference.")
