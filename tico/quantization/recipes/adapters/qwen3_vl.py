@@ -380,19 +380,6 @@ class Qwen3VLAdapter(ModelAdapter):
             )
             print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
 
-        if eval_cfg.get("llava_bench", False):
-            llava_bench_results = evaluate_coco(
-                model=ctx.model,
-                processor=ctx.processor,
-                device=str(ctx.device),
-                dataset_name="llava_bench",
-                n_samples=n_samples,
-                max_seq_len=max_seq_len,
-            )
-            print("\n=== LLaVA Bench Evaluation ===")
-            for metric, value in llava_bench_results.items():
-                print(f"{metric:<10} {value:.3f}")
-
         mmlu = eval_cfg.get("mmlu", {})
         if mmlu.get("enabled", False):
             evaluate_and_print_mmlu(
