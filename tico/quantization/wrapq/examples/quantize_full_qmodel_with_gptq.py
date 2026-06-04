@@ -62,11 +62,14 @@ from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
     SUPPORTED_EXECUTION_PROFILES,
 )
-from tico.quantization.config.specs import affine
+from tico.quantization.config.specs import affine, mx
 from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
@@ -213,6 +216,24 @@ def parse_args():
         type=int,
         default=4,
         help="Number of bits to be used in quantizer for matmul weight quantization",
+    )
+    parser.add_argument(
+        "--linear_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for matmuls for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--softmax_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for softmax for PTQ (`int16`/`mxint8` are supported for now)",
+    )
+    parser.add_argument(
+        "--norm_io_qdtype",
+        type=str,
+        default="int16",
+        help="which activation types are supposed for rmsnorm for PTQ (`int16`/`mxint8` are supported for now)",
     )
     parser.add_argument(
         "--gptq_mse",
@@ -390,6 +411,51 @@ def inject_gptq_qparams(
         _print_sample("unused GPTQ entries", unused)
 
 
+def evaluate_ppl_of_model_on_dataset(model, dataset, device: str = "cuda"):
+    if hasattr(model, "device") and model.device.type != device.type:
+        if hasattr(model, "to"):
+            model.to(device)
+    nlls = []
+    with torch.no_grad():
+        for batch in tqdm.tqdm(dataset):
+            if isinstance(batch, torch.Tensor):
+                batch = batch.to(device)
+                output = model(
+                    batch.to(device),
+                )
+            else:
+                raise RuntimeError("Unknown input in ppl_eval_on_dataset")
+
+            if hasattr(output, "logits"):
+                lm_logits = output.logits
+            elif len(output) > 1:
+                lm_logits = torch.tensor(output[0])
+            else:
+                lm_logits = torch.tensor(output)
+
+            if torch.isfinite(lm_logits).all():
+                shift_logits = lm_logits[:, :-1, :].contiguous()
+                if isinstance(batch, torch.Tensor):
+                    shift_labels = batch[:, 1:].contiguous()
+                else:
+                    assert isinstance(batch, tuple)
+                    shift_labels = batch[0][:, 1:].contiguous()
+                loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
+                loss = loss_fct(
+                    shift_logits.reshape(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                )
+                nlls.append(loss)
+                del shift_logits, shift_labels
+                shift_logits = shift_labels = None  # type: ignore[assignment]
+
+            del batch, lm_logits, output
+            lm_logits = output = batch = None  # noqa: F841
+            torch.cuda.empty_cache()
+
+    ppl = np.exp(torch.cat(nlls, dim=-1).mean().item())
+    return ppl
+
 # -------------------------------------------------------------------------
 # Helper — clear gptq quantizers after injection
 # -------------------------------------------------------------------------
@@ -547,6 +613,7 @@ def build_gptq_config(
         quantize_lm_head=args.gptq_lm_head,
         use_orig_model_inference=args.gptq_use_orig_model_inference,
         percdamp=args.gptq_percdamp,
+        verbose=args.verbose
     )
 
 
@@ -935,6 +1002,63 @@ def calibrate_ptq_observers(
                 next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
 
+
+
+# Explicit mapping from MX dtype strings to element formats
+MX_DTYPE_TO_ELEM_FORMAT = {
+    "mxint8": "int8",
+    "mxfp4": "fp4",
+    "mxfp6": "fp6",
+    "mxfp8_e4m3": "fp8_e4m3",
+    "mxfp8_e5m2": "fp8_e5m2",
+}
+
+# Explicit mapping from affine dtype strings to (bits, signed) tuples
+AFFINE_DTYPE_TO_CONFIG = {
+    "int4": (4, True),
+    "int8": (8, True),
+    "int16": (16, True),
+    "int32": (32, True),
+    "uint4": (4, False),
+    "uint8": (8, False),
+    "uint16": (16, False),
+    "uint32": (32, False),
+}
+
+
+def quant_spec_from_dtype_string(dtype_str: str):
+    """
+    Convert a dtype string to a QuantSpec (either affine or mx).
+
+    For simple data types like "int16", "int8", "uint8", returns affine(...).
+    For MX types like "mxint8", "mxfp4", returns mx(...) QuantSpec.
+
+    Args:
+        dtype_str: A dtype string such as "int16", "uint8", "mxint8", "mxfp4".
+
+    Returns:
+        A QuantSpec instance:
+          - affine(DType(...)) for simple integer types
+          - mx(...) for microscaling types
+
+    Raises:
+        ValueError: For unrecognized dtype strings.
+    """
+    if dtype_str in MX_DTYPE_TO_ELEM_FORMAT:
+        elem_format = MX_DTYPE_TO_ELEM_FORMAT[dtype_str]
+        return mx(elem_format=elem_format)
+
+    if dtype_str in AFFINE_DTYPE_TO_CONFIG:
+        bits, signed = AFFINE_DTYPE_TO_CONFIG[dtype_str]
+        return affine(DType(bits=bits, signed=signed))
+
+    raise ValueError(
+        f"Unknown dtype string {dtype_str!r}. "
+        f"Expected one of affine: {list(AFFINE_DTYPE_TO_CONFIG.keys())} "
+        f"or MX: {list(MX_DTYPE_TO_ELEM_FORMAT.keys())}."
+    )
+
+
 def quantize_using_PTQ(q_m, calib_inputs, args):
     """
     Wrap the model with PTQ wrappers, calibrate observers, and convert it.
@@ -945,10 +1069,16 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
 
+    
+    linear_spec = quant_spec_from_dtype_string(args.linear_io_qdtype)
+    norm_spec = quant_spec_from_dtype_string(args.norm_io_qdtype)
+    softmax_spec = quant_spec_from_dtype_string(args.softmax_io_qdtype)
+
     qcfg = build_llm_ptq_config(
         model_type="llama",
         num_hidden_layers=len(q_m.model.layers),
         activation=affine(DType.int(16)),
+        linear=linear_spec,
         linear_weight=affine(DType.uint(args.linear_weight_bits)),
         embedding_weight=affine(DType.uint(args.embedding_weight_bits)),
         lm_head_weight=affine(DType.uint(args.lm_head_weight_bits)),
@@ -957,7 +1087,9 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
             if args.no_spinquant
             else affine(DType.int(args.spin_rotation_weight_bits))
         ),
+        norm=norm_spec,
         norm_weight=affine(DType.int(16)),
+        softmax=softmax_spec,
         strict_wrap=True,
         profile=args.profile,
     )
@@ -1013,6 +1145,52 @@ def evaluate(q_m, tokenizer, dataset_test, args):
         )
         print("Quantized RESULTS ARE:")
         print(make_table(results))
+
+    # to prevent export errors let's evaluate ppl on exported fake_quantized model
+   # prev_use_cache = q_m.wrapped.config.use_cache
+   # q_m.wrapped.config.use_cache = False
+   # eval_exported = False
+   # if eval_exported:
+   #     with torch.no_grad():
+   #         q_m.eval()
+   #         q_m.cpu()
+   #         test_ids = enc.input_ids[0]
+   #         test_ids_batch = []
+   #         if hasattr(q_m, "config"):
+   #             assert hasattr(q_m, "config")
+   #             model_config = q_m.config
+   #         else:
+   #             assert hasattr(q_m.wrapped, "config")
+   #             model_config = q_m.wrapped.config
+   #         if hasattr(model_config, "text_config"):
+   #             model_config = model_config.text_config
+   #         assert hasattr(model_config, "max_position_embeddings")
+   #         assert isinstance(model_config.max_position_embeddings, int)
+   #         max_length = model_config.max_position_embeddings
+   #         nsamples = test_ids.numel() // max_length
+#
+   #         for i in range(nsamples):
+   #             batch = test_ids[(i * max_length) : ((i + 1) * max_length)]  # noqa E203
+   #             test_ids_batch.append(batch.unsqueeze(0))
+#
+   #         rnd_input = torch.randint_like(
+   #             test_ids_batch[0], 0, tokenizer.vocab_size - 1
+   #         )  # just random ids
+   #         device = "cuda"
+   #         exported_program = torch.export.export(
+   #             q_m.to(device),
+   #             (rnd_input.to(device),),
+   #             kwargs=None,
+   #             dynamic_shapes=None,
+   #             strict=False,
+   #         )
+   #         ppl = evaluate_ppl_of_model_on_dataset(
+   #             exported_program.module(), test_ids_batch, device=device
+   #         )
+   #         print("\n┌── Wikitext-2 test perplexity ─────────────")
+   #         print(f"│ exported_int16 : {ppl:8.2f}")
+   #         print("└───────────────────────────────────────────")
+   # q_m.wrapped.config.use_cache = prev_use_cache
 
 
 def get_sensitivities_info_name(model, dataset, seed, n_samples):

@@ -359,9 +359,16 @@ class GPTQ:
         Q = torch.zeros_like(W)
 
         H = H.double()
+        if verbose:
+            cond_number = torch.linalg.cond(H)
+            print("condition number init %.2e" % cond_number.item())
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
+        if verbose:
+            cond_number = torch.linalg.cond(H)
+            print("condition number damp %.2e" % cond_number.item())
+            
         H = torch.linalg.cholesky(H)
         assert isinstance(H, torch.Tensor)
         H = torch.cholesky_inverse(H)

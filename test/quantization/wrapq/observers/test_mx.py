@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import torch
 
-from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.dtypes import DType, MXDtype
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
@@ -30,7 +30,7 @@ class TestMXObserver(unittest.TestCase):
         """
         obs = MXObserver(
             name="mx",
-            elem_format="int8",
+            dtype=MXDtype(elem_format="int8"),
             axis=1,
             shared_exp_method="max",
             round="nearest",
@@ -49,7 +49,7 @@ class TestMXObserver(unittest.TestCase):
         """
         obs = MXObserver(
             name="mx",
-            elem_format="int8",
+            dtype=MXDtype(elem_format="int8"),
             axis=1,
             shared_exp_method="max",
             round="nearest",
@@ -79,7 +79,7 @@ class TestMXObserver(unittest.TestCase):
         """
         Even when 'enabled' is False (no more stats collection), fake_quant should still run.
         """
-        obs = MXObserver(name="mx", elem_format="int8", axis=0)
+        obs = MXObserver(name="mx", dtype=MXDtype(elem_format="int8"), axis=0)
         obs.enabled = False
         x = torch.randn(3, 3)
 
@@ -97,7 +97,7 @@ class TestMXObserver(unittest.TestCase):
         # Intentionally pass a different base channel_axis; MX should use its own 'axis=2'.
         obs = MXObserver(
             name="mx",
-            elem_format="int8",
+            dtype=MXDtype(elem_format="int8"),
             axis=2,  # expected to be passed to quantize_mx
         )
         x = torch.randn(2, 3, 4)
@@ -113,7 +113,7 @@ class TestMXObserver(unittest.TestCase):
         """
         repr() should include class name and observer name for debugging.
         """
-        obs = MXObserver(name="mx_debug", elem_format="int8", axis=0)
+        obs = MXObserver(name="mx_debug", dtype=MXDtype(elem_format="int8"), axis=0)
         s = repr(obs)
         self.assertIn("MXObserver", s)
         self.assertIn("mx_debug", s)

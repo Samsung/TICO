@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import copy
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple, Type
 
 from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
@@ -23,6 +23,10 @@ from tico.quantization.config.llama_attention import (
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.qscheme import QScheme
+
 
 
 _RMSNORM_ACTIVATION_OBSERVERS = ("act_in", "act_out")
@@ -40,6 +44,47 @@ _LAYERNORM_ACTIVATION_OBSERVERS = (
     "affine_add",
     "act_out",
 )
+
+def _weight_dtype_from_bits(bits: int) -> DType:
+    """
+    Convert a commonly used bit-width into a corresponding quantized dtype.
+
+    This helper provides a simple mapping for frequently used quantization
+    settings. It is intended as a convenience fallback when an explicit dtype
+    is not provided by the user.
+
+    Currently supported mappings:
+      - 16 → int16
+      - 8  → uint8
+      - 4  → uint4
+
+    Parameters
+    ----------
+    bits : int
+        Target bit-width for weight quantization.
+
+    Returns
+    -------
+    DType
+        Quantized dtype corresponding to the given bit-width.
+
+    Raises
+    ------
+    ValueError
+        If the provided bit-width is not supported.
+    """
+    if bits == 16:
+        return DType.int(16)
+    elif bits == 8:
+        return DType.uint(8)
+    elif bits == 4:
+        return DType.uint(4)
+
+    raise ValueError(
+        f"Unsupported bit-width: {bits}. "
+        "Supported values are {16, 8, 4}. "
+        "Please provide an explicit dtype instead."
+    )
 
 
 def _default_builder_activation() -> QuantSpec:
@@ -62,6 +107,30 @@ def _set_nested_override(
     for key in path[:-1]:
         current = current.setdefault(key, {})
     current[path[-1]] = copy.deepcopy(value)
+
+
+def _update_nested_path(
+    root: Dict[str, Any],
+    path: Tuple[str, ...],
+    value: Dict[str, Any],
+) -> None:
+    """Update a nested path with new keys without erasing existing keys.
+    
+    Unlike _set_nested_override which replaces the entire value at the target,
+    this function merges the provided value dict with any existing dict at the
+    target location, preserving existing keys.
+    
+    Args:
+        root: The root dictionary to update.
+        path: Tuple of keys representing the nested path.
+        value: Dictionary of key-value pairs to update at the target.
+    """
+    current = root
+    for key in path:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    current.update(copy.deepcopy(value))
 
 
 def _build_weight_override(weight: Optional[QuantSpec]) -> Dict[str, Any]:
@@ -107,6 +176,48 @@ def _build_activation_overrides(
     }
 
 
+def _build_linear_override(
+    *,
+    linear_activation: Optional[QuantSpec],
+    linear_weight: Optional[QuantSpec],
+) -> Dict[str, Any]:
+    """
+    Build override dictionary for a linear layer including weight and activations.
+
+    This function combines weight quantization and activation quantization
+    overrides for a linear layer, matching the observer structure used in
+    QuantLinear (obs_weight, obs_act_in, obs_act_out).
+
+    Args:
+        linear_weight: QuantSpec for weight quantization.
+        linear_activation: QuantSpec for activation quantization (act_in, act_out).
+
+    Returns:
+        Dictionary with override kwargs for weight, act_in, and act_out observers.
+    """
+    override: Dict[str, Any] = {}
+    override.update(_build_weight_override(linear_weight))
+    override.update(_build_activation_overrides(linear_activation, ("act_in", "act_out")))
+    return override
+
+
+def _observer_from_dtype(dtype: DType) -> Type[ObserverBase]:
+    """
+    Select a default observer class based on a dtype.
+
+    Parameters
+    ----------
+    dtype : DType
+        Quantization dtype used to select the observer.
+
+    Returns
+    -------
+    Type[ObserverBase]
+        ``MinMaxObserver`` for integer dtypes.
+    """
+    return MinMaxObserver
+
+
 def _build_norm_override(
     *,
     norm: Optional[QuantSpec],
@@ -117,19 +228,22 @@ def _build_norm_override(
     override.update(_build_activation_overrides(norm, _RMSNORM_ACTIVATION_OBSERVERS))
     override.update(_build_weight_override(norm_weight))
     override.update(_build_bias_override(norm_weight))
+
     return override
 
 
 def _build_llama_layer_overrides(
     *,
+    linear: Optional[QuantSpec],
     linear_weight: Optional[QuantSpec],
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
+    softmax: Optional[QuantSpec],
 ) -> Dict[str, Any]:
     """Build per-layer overrides for a Llama decoder block."""
     layer_overrides: Dict[str, Any] = {}
 
-    linear_override = _build_weight_override(linear_weight)
+    linear_override = _build_linear_override(linear_activation=linear, linear_weight=linear_weight)
     if linear_override:
         _set_nested_override(layer_overrides, ("self_attn", "q_proj"), linear_override)
         _set_nested_override(layer_overrides, ("self_attn", "k_proj"), linear_override)
@@ -139,12 +253,30 @@ def _build_llama_layer_overrides(
         _set_nested_override(layer_overrides, ("mlp", "gate_proj"), linear_override)
         _set_nested_override(layer_overrides, ("mlp", "up_proj"), linear_override)
         _set_nested_override(layer_overrides, ("mlp", "down_proj"), linear_override)
-
+    
+    sf_override =_build_activation_overrides(linear, ("hidden", "attn_mask","attn_out", "logits",))
+    if sf_override:
+        _update_nested_path(layer_overrides, ("self_attn",), sf_override)
+    
+    mlp_override =_build_activation_overrides(linear, ("act_in", "mul"))
+    if mlp_override:
+        _update_nested_path(layer_overrides, ("mlp",), mlp_override)
+    
+    ll_override =_build_activation_overrides(linear, ("attn_mask","self_attn_residual_out", "mlp_residual_out",))
+    if ll_override:
+        _update_nested_path(layer_overrides, (), ll_override)
+   
     norm_override = _build_norm_override(norm=norm, norm_weight=norm_weight)
     if norm_override:
         _set_nested_override(layer_overrides, ("input_layernorm",), norm_override)
         _set_nested_override(
             layer_overrides, ("post_attention_layernorm",), norm_override
+        )
+    
+    if softmax:
+        softmax_override = _build_activation_overrides(softmax, ("softmax", "mask_add"))
+        _update_nested_path(
+            layer_overrides, ("self_attn",), softmax_override
         )
 
     return layer_overrides
@@ -153,12 +285,14 @@ def _build_llama_layer_overrides(
 def _build_llama_overrides(
     *,
     num_hidden_layers: int,
+    linear: Optional[QuantSpec],
     linear_weight: Optional[QuantSpec],
     embedding_weight: Optional[QuantSpec],
     lm_head_weight: Optional[QuantSpec],
     spin_rotation_weight: Optional[QuantSpec],
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
+    softmax: Optional[QuantSpec],
 ) -> Dict[str, Any]:
     """Build PTQ overrides for a Llama-style causal LM."""
     overrides: Dict[str, Any] = {"model": {"layers": {}}}
@@ -167,11 +301,11 @@ def _build_llama_overrides(
     if embedding_override:
         _set_nested_override(overrides, ("model", "embed_tokens"), embedding_override)
 
-    lm_head_override = _build_weight_override(lm_head_weight)
+    lm_head_override = _build_linear_override(linear_activation=linear, linear_weight=lm_head_weight)
     if lm_head_override:
         overrides["lm_head"] = lm_head_override
 
-    spin_rotation_override = _build_weight_override(spin_rotation_weight)
+    spin_rotation_override = _build_linear_override(linear_activation=linear, linear_weight=spin_rotation_weight)
     if spin_rotation_override:
         _set_nested_override(
             overrides,
@@ -183,12 +317,18 @@ def _build_llama_overrides(
     final_norm_override = _build_norm_override(norm=norm, norm_weight=norm_weight)
     if final_norm_override:
         _set_nested_override(overrides, ("model", "norm"), final_norm_override)
+   
+    linear_spec = _build_activation_overrides(linear, ("causal_mask",))
+    _update_nested_path(overrides, ("model",), linear_spec)
 
+    # --- Decoder layers ---
     for layer_idx in range(num_hidden_layers):
         overrides["model"]["layers"][str(layer_idx)] = _build_llama_layer_overrides(
+            linear=linear,
             linear_weight=linear_weight,
             norm=norm,
             norm_weight=norm_weight,
+            softmax=softmax
         )
 
     return overrides
@@ -200,12 +340,14 @@ def build_llm_ptq_config(
     num_hidden_layers: int,
     activation: Optional[QuantSpec] = None,
     weight: Optional[QuantSpec] = None,
+    linear: Optional[QuantSpec] = None,
     linear_weight: Optional[QuantSpec] = None,
     embedding_weight: Optional[QuantSpec] = None,
     lm_head_weight: Optional[QuantSpec] = None,
     spin_rotation_weight: Optional[QuantSpec] = None,
     norm: Optional[QuantSpec] = None,
     norm_weight: Optional[QuantSpec] = None,
+    softmax: Optional[QuantSpec] = None,
     strict_wrap: bool = True,
     profile: ExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> PTQConfig:
@@ -240,12 +382,14 @@ def build_llm_ptq_config(
     if model_type == "llama":
         overrides = _build_llama_overrides(
             num_hidden_layers=num_hidden_layers,
+            linear=linear,
             linear_weight=linear_weight,
             embedding_weight=embedding_weight,
             lm_head_weight=lm_head_weight,
             spin_rotation_weight=spin_rotation_weight,
             norm=norm,
             norm_weight=norm_weight,
+            softmax=softmax,
         )
     else:
         raise NotImplementedError(
