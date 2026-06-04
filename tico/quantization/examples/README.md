@@ -59,6 +59,13 @@ python -m tico.quantization.examples.evaluate \
   --checkpoint ./out/llama/quantized_model.pt
 ```
 
+```bash
+# Generate and judge Qwen3-VL answers on a LLaVA-Bench subset.
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
+  --set evaluation.llava_bench.n_samples=50
+```
+
 ### Quantize
 
 `quantize.py` is the command that executes the recipe pipeline. It runs the
@@ -200,6 +207,74 @@ python -m tico.quantization.examples.evaluate \
   --checkpoint ./out/llama/quantized_model.pt \
   --tasks winogrande,arc_easy
 ```
+
+### LLaVA-Bench judge evaluation
+
+LLaVA-Bench-in-the-Wild is evaluated through the regular `evaluate.py` entry
+point when the Qwen3-VL config enables `evaluation.llava_bench.mode=judge`.
+This path treats LLaVA-Bench as open-ended natural QA. The generation prompt
+is only:
+
+```text
+<image>
+{question}
+```
+
+For static-runtime parity with `max_seq_len=2048`, cap the image resolution so
+the visual placeholder tokens fit before generation. The example config uses
+`image_max_pixels: 802816`, which is `1024 * 28 * 28` and targets roughly 1024
+visual tokens. Without this cap, high-resolution LLaVA-Bench images can expand
+into several thousand visual tokens and trigger an image-token mismatch during
+processor truncation.
+
+The adapter writes three artifacts:
+
+- answer JSONL containing generated candidate answers
+- review JSONL containing per-question judge scores
+- summary JSON containing average score, relative score, and win/tie counts
+
+Basic generation plus judge run:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
+  --set evaluation.llava_bench.n_samples=50 \
+  --set evaluation.llava_bench.max_new_tokens=512 \
+  --set evaluation.llava_bench.judge.model_id=meta-llama/Llama-3.2-3B-Instruct
+```
+
+Generate answers only by disabling the judge while keeping the same adapter
+flow:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
+  --set evaluation.llava_bench.judge.enabled=false \
+  --set evaluation.llava_bench.output.answers=./out/llava_bench/fp.answers.jsonl
+```
+
+Judge an existing candidate answer file against the dataset reference answers:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
+  --set evaluation.llava_bench.candidate_answers=./out/llava_bench/fp.answers.jsonl
+```
+
+Compare a quantized/runtime answer file against an FP answer file with order
+swapping to reduce judge position bias:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
+  --set evaluation.llava_bench.baseline_answers=./out/llava_bench/fp.answers.jsonl \
+  --set evaluation.llava_bench.candidate_answers=./out/llava_bench/quant.answers.jsonl \
+  --set evaluation.llava_bench.judge.swap_order=true
+```
+
+When the judge is not the official GPT-4-style judge, report the judge model ID
+with the results. The default Llama 3.2 3B judge is intended for inexpensive
+regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
 
 ### Inspect / debug
 

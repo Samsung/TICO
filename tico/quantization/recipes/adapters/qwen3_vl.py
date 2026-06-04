@@ -27,6 +27,9 @@ from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
+from tico.quantization.recipes.evaluation.llava_bench_judge import (
+    evaluate_and_print_llava_bench_judge,
+)
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
 from tico.quantization.recipes.evaluation.vlm import (
@@ -370,7 +373,45 @@ class Qwen3VLAdapter(ModelAdapter):
             )
             print_coco_score_results("\n=== COCO Evaluation ===", coco_results)
 
-        if eval_cfg.get("llava_bench", False):
+        llava_bench_cfg = eval_cfg.get("llava_bench", False)
+        if isinstance(llava_bench_cfg, Mapping):
+            if llava_bench_cfg.get("enabled", False):
+                mode = str(llava_bench_cfg.get("mode", "judge")).lower()
+                if mode in {"judge", "llm_judge"}:
+                    evaluate_and_print_llava_bench_judge(
+                        model=ctx.model,
+                        processor=ctx.processor,
+                        device=str(ctx.device),
+                        llava_cfg=llava_bench_cfg,
+                        model_cfg=ctx.cfg.get("model", {}),
+                        runtime_cfg=ctx.cfg.get("runtime", {}),
+                        default_n_samples=n_samples,
+                        default_max_seq_len=max_seq_len,
+                    )
+                elif mode in {"legacy", "coco", "caption"}:
+                    llava_results = evaluate_llava_bench(
+                        model=ctx.model,
+                        processor=ctx.processor,
+                        device=str(ctx.device),
+                        n_samples=int(llava_bench_cfg.get("n_samples", n_samples)),
+                        max_seq_len=llava_bench_cfg.get("max_seq_len", max_seq_len),
+                    )
+                    print_coco_score_results(
+                        "\n=== LLaVA Bench Legacy COCO-style Evaluation ===",
+                        llava_results,
+                    )
+                else:
+                    raise ValueError(
+                        "evaluation.llava_bench.mode must be one of "
+                        "{'judge', 'llm_judge', 'legacy', 'coco', 'caption'}, "
+                        f"got {mode!r}."
+                    )
+        elif llava_bench_cfg:
+            print(
+                "[WARNING] evaluation.llava_bench=true uses the legacy "
+                "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
+                "evaluation.llava_bench.enabled=true, mode=judge."
+            )
             llava_results = evaluate_llava_bench(
                 model=ctx.model,
                 processor=ctx.processor,
@@ -379,19 +420,6 @@ class Qwen3VLAdapter(ModelAdapter):
                 max_seq_len=max_seq_len,
             )
             print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
-
-        if eval_cfg.get("llava_bench", False):
-            llava_bench_results = evaluate_coco(
-                model=ctx.model,
-                processor=ctx.processor,
-                device=str(ctx.device),
-                dataset_name="llava_bench",
-                n_samples=n_samples,
-                max_seq_len=max_seq_len,
-            )
-            print("\n=== LLaVA Bench Evaluation ===")
-            for metric, value in llava_bench_results.items():
-                print(f"{metric:<10} {value:.3f}")
 
         mmlu = eval_cfg.get("mmlu", {})
         if mmlu.get("enabled", False):

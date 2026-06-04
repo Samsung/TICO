@@ -103,7 +103,7 @@ def evaluate_coco(
     dataset_name: str = "coco",
 ) -> dict[str, float]:
     """
-    Evaluate the COCO captioning dataset with COCO-style metrics.
+    Evaluate a COCO-score-compatible captioning dataset.
 
     Args:
         model: Model to evaluate.
@@ -111,6 +111,7 @@ def evaluate_coco(
         device: Device string used for inference.
         n_samples: Number of samples to evaluate. -1 means the full dataset.
         max_seq_len: Optional maximum text sequence length.
+        dataset_name: Dataset key accepted by the shared COCO-score helper.
 
     Returns:
         COCO-style metric values.
@@ -118,7 +119,7 @@ def evaluate_coco(
     return evaluate_coco_score_dataset(
         model=model,
         processor=processor,
-        dataset_name="coco",
+        dataset_name=dataset_name,
         device=device,
         n_samples=n_samples,
         max_seq_len=max_seq_len,
@@ -134,7 +135,11 @@ def evaluate_llava_bench(
     max_seq_len: int | None,
 ) -> dict[str, float]:
     """
-    Evaluate LLaVA-Bench-in-the-Wild with COCO-style metrics.
+    Evaluate LLaVA-Bench-in-the-Wild with legacy COCO-style metrics.
+
+    LLaVA-Bench is open-ended natural QA, so CIDEr/BLEU should only be used as
+    a legacy diagnostic signal. Use the judge-based LLaVA-Bench path for
+    benchmark-style scoring.
 
     Args:
         model: Model to evaluate.

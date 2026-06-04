@@ -23,6 +23,7 @@ llama_gptq_ptq.yaml
 llama_ptq_only.yaml
 qwen3_vl_eval_suite.yaml
 qwen3_vl_gptq_ptq.yaml
+qwen3_vl_llava_bench_judge.yaml
 qwen3_vl_ptq_only.yaml
 ```
 
@@ -253,6 +254,75 @@ Rules:
 - Evaluation helpers belong in `recipes/evaluation/`.
 - The model adapter decides which evaluation fields are meaningful.
 
+## `evaluation.llava_bench` for judge-based LLaVA-Bench scoring
+
+`qwen3_vl_llava_bench_judge.yaml` uses the standard example entry point:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml
+```
+
+It uses this schema under `evaluation`:
+
+```yaml
+evaluation:
+  enabled: true
+  llava_bench:
+    enabled: true
+    mode: judge
+    dataset: lmms-lab/llava-bench-in-the-wild
+    split: train
+    n_samples: 50
+    start_index: 0
+    max_seq_len: 2048
+    max_new_tokens: 512
+    temperature: 0.0
+    image_max_pixels: 802816  # 1024 * 28 * 28
+    image_min_pixels: null
+    resized_height: null
+    resized_width: null
+    visual_token_margin: 256
+    skip_too_long: true
+    candidate_label: Qwen/Qwen3-VL-4B-Instruct
+    baseline_label: reference
+    candidate_answers: null
+    baseline_answers: null
+    regenerate: false
+    output:
+      dir: ./out/llava_bench
+      answers: ./out/llava_bench/qwen3_vl_4b.answers.jsonl
+      reviews: ./out/llava_bench/qwen3_vl_4b.llama3_2_3b.reviews.jsonl
+      summary: ./out/llava_bench/qwen3_vl_4b.llama3_2_3b.summary.json
+    judge:
+      enabled: true
+      model_id: meta-llama/Llama-3.2-3B-Instruct
+      device: cuda
+      dtype: float16
+      max_new_tokens: 256
+      temperature: 0.0
+      swap_order: true
+```
+
+Rules:
+
+- Use the original LLaVA-Bench question for generation; do not add short-answer
+  constraints.
+- Use greedy decoding for reproducible generation and judging unless an
+  experiment explicitly requires sampling.
+- For `max_seq_len=2048`, keep `image_max_pixels` set to a bounded value such
+  as `802816` (`1024 * 28 * 28`). Otherwise high-resolution images can expand
+  beyond the static context before answer generation starts.
+- Report the judge model ID with every result. Llama 3.2 3B is useful for
+  inexpensive regression checks, not for official-score claims.
+- Use `judge.swap_order: true` for FP-vs-quant or baseline-vs-candidate
+  comparisons to reduce judge position bias.
+- Set `candidate_answers` to reuse an existing answer JSONL instead of
+  regenerating answers.
+- Set `baseline_answers` when comparing a candidate answer file against an FP or
+  runtime baseline. If `baseline_answers` is unset, the dataset reference answer
+  is used as the baseline.
+
 ## `export`
 
 ```yaml
@@ -290,7 +360,8 @@ nested model-specific structures.
 
 1. Pick an existing config that is closest to the intended workflow.
 2. Copy it and rename it using the naming convention.
-3. Keep `model.family` consistent with an existing adapter.
+3. Keep `model.family` consistent with an existing adapter unless the config is
+   for a standalone example script.
 4. Keep every stage name consistent with the stage registry.
 5. Set `evaluation.enabled` and `export.enabled` intentionally.
 6. Run a one-sample smoke test.
@@ -301,9 +372,9 @@ nested model-specific structures.
 Before committing a config:
 
 - No secrets, personal paths, or machine-specific cache directories.
-- `runtime.seed` is set.
-- `model.family` is registered.
-- Every `pipeline[*].name` is registered.
+- `runtime.seed` is set when the config uses recipe runners.
+- `model.family` is registered when the config uses recipe runners.
+- Every `pipeline[*].name` is registered when the config has a pipeline.
 - The config has a clear purpose: smoke, PTQ-only, GPTQ+PTQ, benchmark, debug,
   or export.
 - Expensive evaluation/export is disabled unless the config is explicitly a
