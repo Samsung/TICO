@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import tico.utils.register_custom_op as register_custom_op
 import torch
+from torch._subclasses.fake_tensor import FakeTensorMode
 
 
 class TestRegisterCustomOp(unittest.TestCase):
@@ -414,6 +415,74 @@ class TestRegisterCustomOp(unittest.TestCase):
             shared_exp_method="max",
             round="nearest",
         )
+
+    def test_circle_quantize_mx_decomposed_fake_tensor(self):
+        """Test CircleQuantizeMXDecomposed with FakeTensorMode"""
+        # These ops are designed to be fake ops only (assert False in impl)
+        # so test using FakeTensorMode
+        fake_mode = FakeTensorMode()
+        input_tensor = fake_mode.from_tensor(torch.randn(2, 32, 32, 3))
+        elem_format = "int8"
+        axis = -1
+
+        with fake_mode:
+            result = torch.ops.circle_custom.quantize_mx_decomposed(
+                input_tensor, elem_format, axis
+            )
+
+        # Check output shape matches input
+        self.assertEqual(list(result.shape), list(input_tensor.shape))
+
+    def test_circle_dequantize_mx_decomposed_fake_tensor(self):
+        """Test CircleDeQuantizeMXDecomposed with FakeTensorMode"""
+        # These ops are designed to be fake ops only (assert False in impl)
+        # so test using FakeTensorMode
+        fake_mode = FakeTensorMode()
+        input_tensor = fake_mode.from_tensor(torch.randn(2, 32, 32, 3))
+        elem_format = "int8"
+        axis = -1
+
+        with fake_mode:
+            result = torch.ops.circle_custom.dequantize_mx_decomposed(
+                input_tensor, elem_format, axis
+            )
+
+        # Check output shape matches input
+        self.assertEqual(list(result.shape), list(input_tensor.shape))
+
+    def test_circle_quantize_mx_decomposed_with_params_fake_tensor(self):
+        """Test CircleQuantizeMXDecomposed with all parameters using FakeTensorMode"""
+        fake_mode = FakeTensorMode()
+        input_tensor = fake_mode.from_tensor(torch.randn(2, 32, 32, 3))
+        elem_format = "int8"
+        axis = -1
+        shared_exp_method = "max"
+        round_method = "nearest"
+
+        with fake_mode:
+            result = torch.ops.circle_custom.quantize_mx_decomposed(
+                input_tensor, elem_format, axis, shared_exp_method, round_method
+            )
+
+        # Check output shape matches input
+        self.assertEqual(list(result.shape), list(input_tensor.shape))
+
+    def test_circle_dequantize_mx_decomposed_with_params_fake_tensor(self):
+        """Test CircleDeQuantizeMXDecomposed with all parameters using FakeTensorMode"""
+        fake_mode = FakeTensorMode()
+        input_tensor = fake_mode.from_tensor(torch.randn(2, 32, 32, 3))
+        elem_format = "int8"
+        axis = -1
+        shared_exp_method = "max"
+        round_method = "nearest"
+
+        with fake_mode:
+            result = torch.ops.circle_custom.dequantize_mx_decomposed(
+                input_tensor, elem_format, axis, shared_exp_method, round_method
+            )
+
+        # Check output shape matches input
+        self.assertEqual(list(result.shape), list(input_tensor.shape))
 
 
 if __name__ == "__main__":
