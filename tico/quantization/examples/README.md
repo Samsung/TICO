@@ -212,8 +212,8 @@ python -m tico.quantization.examples.evaluate \
 
 LLaVA-Bench-in-the-Wild is evaluated through the regular `evaluate.py` entry
 point when the Qwen3-VL config enables `evaluation.llava_bench.mode=judge`.
-This path treats LLaVA-Bench as open-ended natural QA. The generation prompt
-is only:
+This path treats LLaVA-Bench as open-ended natural QA. The generation prompt is
+only:
 
 ```text
 <image>
@@ -222,10 +222,8 @@ is only:
 
 For static-runtime parity with `max_seq_len=2048`, cap the image resolution so
 the visual placeholder tokens fit before generation. The example config uses
-`image_max_pixels: 802816`, which is `1024 * 28 * 28` and targets roughly 1024
-visual tokens. Without this cap, high-resolution LLaVA-Bench images can expand
-into several thousand visual tokens and trigger an image-token mismatch during
-processor truncation.
+`image_max_pixels: 602112`, which is `768 * 28 * 28`, and the evaluator
+pre-resizes PIL-like images before processor tokenization.
 
 The adapter writes three artifacts:
 
@@ -233,48 +231,96 @@ The adapter writes three artifacts:
 - review JSONL containing per-question judge scores
 - summary JSON containing average score, relative score, and win/tie counts
 
-Basic generation plus judge run:
+Use the following three-step workflow to measure regression from the floating-
+point model to a quantized checkpoint.
+
+#### 1. Evaluate the floating-point model
+
+Run `evaluate.py` first. This does not run the quantization pipeline; it only
+loads the FP model and produces the FP LLaVA-Bench answers and judge summary.
+Keep the FP answer JSONL because it is used as the regression baseline in step
+3.
 
 ```bash
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
-  --set evaluation.llava_bench.n_samples=50 \
-  --set evaluation.llava_bench.max_new_tokens=512 \
-  --set evaluation.llava_bench.judge.model_id=meta-llama/Llama-3.2-3B-Instruct
+  --set evaluation.llava_bench.output.dir=./out/llava_bench_fp \
+  --set evaluation.llava_bench.output.answers=./out/llava_bench_fp/answers.jsonl \
+  --set evaluation.llava_bench.output.reviews=./out/llava_bench_fp/reviews.jsonl \
+  --set evaluation.llava_bench.output.summary=./out/llava_bench_fp/summary.json  \
+  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml
 ```
 
-Generate answers only by disabling the judge while keeping the same adapter
-flow:
+#### 2. Quantize the model and save a checkpoint
+
+Run `quantize.py` with a config that enables the desired pipeline stages. The
+example below exports the quantized checkpoint.
 
 ```bash
-python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
-  --set evaluation.llava_bench.judge.enabled=false \
-  --set evaluation.llava_bench.output.answers=./out/llava_bench/fp.answers.jsonl
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/qwen3_vl_gptq_ptq.yaml \
+  --set export.enabled=true \
+  --set export.output_dir=./out/qwen3_vl_spinquant_gptq_ptq \
+  --set export.artifacts=[ptq_checkpoint]
 ```
 
-Judge an existing candidate answer file against the dataset reference answers:
+This writes the default checkpoint:
 
-```bash
-python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
-  --set evaluation.llava_bench.candidate_answers=./out/llava_bench/fp.answers.jsonl
+```text
+./out/qwen3_vl_spinquant_gptq_ptq/quantized_model.pt
 ```
 
-Compare a quantized/runtime answer file against an FP answer file with order
-swapping to reduce judge position bias:
+#### 3. Evaluate the quantized checkpoint against the FP answers
+
+Run `evaluate.py` again with `--checkpoint`. Leave `candidate_answers` as
+`null` so the checkpoint generates new candidate answers. Set
+`baseline_answers` to the FP answer JSONL from step 1. The judge then compares:
+
+```text
+baseline = FP answers
+candidate = quantized-checkpoint answers
+```
 
 ```bash
 python -m tico.quantization.examples.evaluate \
   --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
-  --set evaluation.llava_bench.baseline_answers=./out/llava_bench/fp.answers.jsonl \
-  --set evaluation.llava_bench.candidate_answers=./out/llava_bench/quant.answers.jsonl \
-  --set evaluation.llava_bench.judge.swap_order=true
+  --checkpoint ./out/qwen3_vl_spinquant_gptq_ptq/quantized_model.pt \
+  --set evaluation.llava_bench.baseline_answers=./out/llava_bench_fp/answers.jsonl \
+  --set evaluation.llava_bench.candidate_answers=null \
+  --set evaluation.llava_bench.baseline_label=qwen3_vl_4b_fp \
+  --set evaluation.llava_bench.candidate_label=qwen3_vl_4b_ptq \
+  --set evaluation.llava_bench.output.dir=./out/llava_bench_quant \
+  --set evaluation.llava_bench.output.answers=./out/llava_bench_quant/answers.jsonl \
+  --set evaluation.llava_bench.output.reviews=./out/llava_bench_quant/quant_vs_fp.reviews.jsonl \
+  --set evaluation.llava_bench.output.summary=./out/llava_bench_quant/quant_vs_fp.summary.json
+```
+
+The regression signal is the quantized candidate score relative to the FP
+baseline score in the summary:
+
+```text
+candidate_relative_score = mean_candidate_score / mean_baseline_score * 100
+```
+
+A value near 100 means the quantized checkpoint is close to the FP model under
+the same prompt, image cap, judge model, and sample set.
+
+#### Reusing existing answer files
+
+If `candidate_answers` points to an existing JSONL file, generation is skipped
+and that file is judged. If `candidate_answers` is `null`, the currently loaded
+model generates candidate answers and writes them to `evaluation.llava_bench.output.answers`.
+
+Per-sample answer and judge progress is controlled by `runtime.show_progress`;
+set it to `false` when you want quieter output:
+
+```bash
+--set runtime.show_progress=false
 ```
 
 When the judge is not the official GPT-4-style judge, report the judge model ID
 with the results. The default Llama 3.2 3B judge is intended for inexpensive
 regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
+
 
 ### Inspect / debug
 

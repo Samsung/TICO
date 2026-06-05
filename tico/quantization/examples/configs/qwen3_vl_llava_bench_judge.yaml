@@ -62,9 +62,9 @@ evaluation:
     regenerate: false
     output:
       dir: ./out/llava_bench
-      answers: ./out/llava_bench/qwen3_vl_4b.answers.jsonl
-      reviews: ./out/llava_bench/qwen3_vl_4b.llama3_2_3b.reviews.jsonl
-      summary: ./out/llava_bench/qwen3_vl_4b.llama3_2_3b.summary.json
+      answers: ./out/llava_bench/answers.jsonl
+      reviews: ./out/llava_bench/reviews.jsonl
+      summary: ./out/llava_bench/summary.json
     judge:
       enabled: true
       model_id: meta-llama/Llama-3.2-3B-Instruct
@@ -73,6 +73,7 @@ evaluation:
       max_new_tokens: 256
       temperature: 0.0
       swap_order: true
+
   mmlu:
     enabled: false
   hellaswag:
@@ -81,8 +82,6 @@ evaluation:
     enabled: false
   ppl:
     enabled: false
-  n_samples: 50
-  max_seq_len: 2048
 
 export:
   enabled: false
