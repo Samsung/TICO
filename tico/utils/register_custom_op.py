@@ -715,8 +715,10 @@ def CircleQuantizeMXDecomposed():
         round: str = "nearest",
     ) -> torch.Tensor:
         # this op should be fake one, so please consider different quantization scheme in case it failed here
-        assert False
-        return input_.clone()
+        raise RuntimeError(
+    "circle_custom::quantize_mx_decomposed is a fake-only op and must not be executed with real tensors"
+    )
+    return input_.new_empty(input_.size())
 
     @register_fake("circle_custom::quantize_mx_decomposed")
     def _(
@@ -731,7 +733,7 @@ def CircleQuantizeMXDecomposed():
 
 def CircleDeQuantizeMXDecomposed():
     @custom_op("circle_custom::dequantize_mx_decomposed", mutates_args=())
-    def quantize_mx(
+    def dequantize_mx(
         input_: torch.Tensor,
         elem_format: str,
         axis: int,
