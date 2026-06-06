@@ -22,6 +22,12 @@ from torch.export import ExportedProgram
 
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
+from tico.utils.mx.dtypes import (
+    assert_supported_mx_export_options,
+    is_mx_dtype,
+    mx_dtype_from_elem_format,
+    normalize_mx_elem_format,
+)
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import get_quant_dtype
@@ -29,6 +35,46 @@ from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
 )
+
+
+def _mx_op_params(node) -> tuple[str, int, str, str]:
+    """Return normalized MX quantization parameters from an FX custom op node."""
+    assert len(node.args) >= 3
+    elem_format = normalize_mx_elem_format(node.args[1])
+    axis = node.args[2]
+    assert isinstance(axis, int)
+    shared_exp_method = node.kwargs.get(
+        "shared_exp_method", node.args[3] if len(node.args) > 3 else "max"
+    )
+    round_mode = node.kwargs.get(
+        "round", node.args[4] if len(node.args) > 4 else "nearest"
+    )
+    assert isinstance(shared_exp_method, str)
+    assert isinstance(round_mode, str)
+    return elem_format, axis, shared_exp_method, round_mode
+
+
+def _mx_qparam_from_quant_node(q) -> QuantParam:
+    """Build a QuantParam from a logical MX quantize node."""
+    elem_format, axis, shared_exp_method, round_mode = _mx_op_params(q)
+    assert_supported_mx_export_options(
+        elem_format=elem_format,
+        shared_exp_method=shared_exp_method,
+        round=round_mode,
+    )
+    qparam = QuantParam()
+    qparam.dtype = mx_dtype_from_elem_format(elem_format)
+    qparam.quantized_dimension = axis
+    return qparam
+
+
+def _same_mx_qparam(lhs: QuantParam, rhs: QuantParam) -> bool:
+    """Return True when two QuantParams describe the same MX quantization."""
+    return (
+        lhs.dtype == rhs.dtype
+        and is_mx_dtype(lhs.dtype)
+        and lhs.quantized_dimension == rhs.quantized_dimension
+    )
 
 
 @trace_graph_diff_on_pass
@@ -142,6 +188,43 @@ class FoldQuantOps(PassBase):
                         op_qparam.zero_point
                         and op_qparam.zero_point[0] == q_args.zero_p
                     )
+                    dq.replace_all_uses_with(op, propagate_meta=False)
+                    logger.debug(f"Removed redundant {dq.name}")
+
+        for dq in graph.nodes:
+            if dq.op != "call_function":
+                continue
+            if dq.target != torch.ops.circle_custom.dequantize_mx.default:
+                continue
+
+            q = dq.args[0]
+            if not isinstance(q, torch.fx.Node):
+                continue
+            if q.target != torch.ops.circle_custom.quantize_mx.default:
+                continue
+
+            op = q.args[0]
+            if not isinstance(op, torch.fx.Node):
+                continue
+
+            if _mx_op_params(q) != _mx_op_params(dq):
+                continue
+
+            qparam = _mx_qparam_from_quant_node(q)
+
+            if QPARAM_KEY not in op.meta:
+                op.meta[QPARAM_KEY] = qparam
+                dq.replace_all_uses_with(op, propagate_meta=False)
+                logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
+            else:
+                op_qparam = op.meta[QPARAM_KEY]
+                if not _same_mx_qparam(op_qparam, qparam):
+                    if QPARAM_KEY not in q.meta:
+                        q.meta[QPARAM_KEY] = qparam
+                        assert len(q.users) == 1, "Fix me unless"
+                    dq.replace_all_uses_with(q, propagate_meta=False)
+                    logger.debug(f"{dq.name} is folded ({q.name} is left).")
+                else:
                     dq.replace_all_uses_with(op, propagate_meta=False)
                     logger.debug(f"Removed redundant {dq.name}")
 

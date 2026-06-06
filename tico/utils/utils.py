@@ -57,9 +57,7 @@ class SuppressWarning:
 
 
 class ArgTypeError(Exception):
-    """
-    Invalid argument type
-    """
+    """Raised when a runtime argument type does not match a type hint."""
 
     pass
 
@@ -249,32 +247,31 @@ def run_bash_cmd(command: typing.List[str]) -> subprocess.CompletedProcess[str]:
 
 
 def has_quantization_ops(graph: torch.fx.Graph):
-    """
-    Checks whether the given fx graph contains any quantization-related operations.
+    """Return True if an FX graph contains affine or MX quantization operators."""
 
-    This function inspects the provided graph to determine if it includes operations associated
-    with quantization (e.g., quantize, dequantize, fake quantize, etc.). The presence of such operations
-    can be used to decide whether to run subsequent quantization-specific passes on the graph.
+    def _maybe_custom_op(name: str):
+        """Return the default overload if the custom op exists."""
+        try:
+            return getattr(torch.ops.circle_custom, name).default
+        except AttributeError:
+            return None
 
-    Parameters:
-        graph: The fx graph to be examined. It is expected that the graph supports
-               iteration or traversal over its constituent operations.
-
-    Returns:
-        bool: True if the graph contains one or more quantization-related operations, False otherwise.
-    """
     quantized_ops = [
         torch.ops.quantized_decomposed.quantize_per_tensor.default,
         torch.ops.quantized_decomposed.quantize_per_channel.default,
         torch.ops.quantized_decomposed.dequantize_per_tensor.default,
         torch.ops.quantized_decomposed.dequantize_per_channel.default,
     ]
-    for node in graph.nodes:
-        if node.op != "call_function":
-            continue
-        if node.target in quantized_ops:
-            return True
+    for custom_op in (
+        _maybe_custom_op("quantize_mx"),
+        _maybe_custom_op("dequantize_mx"),
+    ):
+        if custom_op is not None:
+            quantized_ops.append(custom_op)
 
+    for node in graph.nodes:
+        if node.op == "call_function" and node.target in quantized_ops:
+            return True
     return False
 
 

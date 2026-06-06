@@ -71,7 +71,6 @@ class QuantizeMXTest(unittest.TestCase):
         self.assertFalse(torch.allclose(input_, output))
         self.assertLess(compute_peir(input_, output), 0.01)
 
-    # Check if exported program includes circle_custom::quantize_mx Op
     def test_export(self):
         m = SimpleMXINT8(axis=2)
         args, kwargs = m.get_example_inputs()
@@ -80,5 +79,5 @@ class QuantizeMXTest(unittest.TestCase):
             ep = export(m.eval(), args, kwargs)
 
         self.assertEqual(
-            1, num_of_ops(ep, [torch.ops.circle_custom.quantize_mx.default])
+            1, num_of_ops(ep, [torch.ops.circle_custom.mx_fake_quantize.default])
         )

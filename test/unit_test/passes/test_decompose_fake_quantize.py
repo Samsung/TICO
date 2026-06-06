@@ -74,3 +74,51 @@ class DecomposeFakeQuantizePerChannel(SinglePassValueTest):
             ),
             1,
         )
+
+
+class MXFakeQuantize(torch.nn.Module):
+    """Simple module with MX fake quantization."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return torch.ops.circle_custom.mx_fake_quantize(input, "int8", -1)
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 32),), {}
+
+
+class DecomposeMXFakeQuantizeTest(SinglePassValueTest):
+    """Tests MX fake quant decomposition into logical Q-DQ."""
+
+    def test_pass(self):
+        self.setup(MXFakeQuantize())
+        self.assertEqual(
+            num_of_ops(
+                self.exported_program(),
+                [torch.ops.circle_custom.mx_fake_quantize.default],
+            ),
+            1,
+        )
+
+        DecomposeFakeQuantize().call(self.exported_program())
+        self.assertEqual(
+            num_of_ops(
+                self.exported_program(),
+                [torch.ops.circle_custom.mx_fake_quantize.default],
+            ),
+            0,
+        )
+        self.assertEqual(
+            num_of_ops(
+                self.exported_program(), [torch.ops.circle_custom.quantize_mx.default]
+            ),
+            1,
+        )
+        self.assertEqual(
+            num_of_ops(
+                self.exported_program(), [torch.ops.circle_custom.dequantize_mx.default]
+            ),
+            1,
+        )

@@ -25,6 +25,8 @@ from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY
+from tico.utils.mx.dtypes import is_mx_dtype, mx_dtype_from_elem_format
 from tico.utils.validate_args_kwargs import QuantizePerTensorArgs
 
 
@@ -77,4 +79,39 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
         option = circle.QuantizeOptions.QuantizeOptionsT()
         operator.builtinOptions = option
 
+        return operator
+
+
+@register_node_visitor
+class QuantizeMXDefaultVisitor(NodeVisitor):
+    """Serialize a logical MX quantize node as a Circle QUANTIZE operator."""
+
+    target: List[torch._ops.OpOverload] = [
+        torch.ops.circle_custom.quantize_mx.default,
+    ]
+
+    def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
+        super().__init__(op_codes, graph)
+
+    def define_node(self, node: torch.fx.Node) -> circle.Operator.OperatorT:
+        tensor = node.args[0]
+        elem_format = node.args[1]
+        axis = node.args[2]
+        expected_dtype = mx_dtype_from_elem_format(elem_format)
+
+        output_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)
+        assert output_tensor.quantization is not None
+        assert output_tensor.quantization.quantizedDimension == axis
+        assert QPARAM_KEY in node.meta
+        assert is_mx_dtype(node.meta[QPARAM_KEY].dtype)
+        assert node.meta[QPARAM_KEY].dtype == expected_dtype
+
+        op_index = get_op_index(
+            circle.BuiltinOperator.BuiltinOperator.QUANTIZE, self._op_codes
+        )
+        operator = create_builtin_operator(self.graph, op_index, [tensor], [node])
+        operator.builtinOptionsType = (
+            circle.BuiltinOptions.BuiltinOptions.QuantizeOptions
+        )
+        operator.builtinOptions = circle.QuantizeOptions.QuantizeOptionsT()
         return operator

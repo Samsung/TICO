@@ -18,26 +18,10 @@
 Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 
-Name:    mx_ops.py
+Pytorch helpers for MX fake quantization.
 
-Pytorch methods for MX quantization.
-
-Usage Notes:
- - Use the "Exposed Methods" below to implement autograd functions
- - Use autograd functions to then implement torch.nn.Module(s)
- - Do *not* use methods in this file in Modules, they have no defined
-   backwards pass and will block gradient computation.
- - Avoid importing internal function if at all possible.
-
-Exposed Methods:
-    quantize_mx_op - quantizes a tensor to MX format.
-
-Internal Methods:
-    _safe_lshift, _safe_rshift - fp16 compatible shifts
-    _shared_exponents - Returns MX shared exponent for the passed tensor
-    _reshape_to_blocks - tiles a tensor by splitting one dim into two
-    _undo_reshape_to_blocks - undos the above reshaping
-    _quantize_mx - quantizes a tensor to MX format
+The public `quantize_mx` helper intentionally calls the eager fake-quant custom
+operator. During Circle export it is canonicalized into logical MX Q-DQ nodes.
 """
 
 import torch
@@ -265,6 +249,7 @@ def quantize_mx(
     shared_exp_method: str = "max",
     round: str = "nearest",
 ) -> torch.Tensor:
-    return torch.ops.circle_custom.quantize_mx(
+    """Call the eager MX fake-quantization custom operator."""
+    return torch.ops.circle_custom.mx_fake_quantize(
         input_, elem_format, axis, shared_exp_method=shared_exp_method, round=round
     )

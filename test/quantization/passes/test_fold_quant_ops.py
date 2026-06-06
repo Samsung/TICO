@@ -24,7 +24,6 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.serialize.quant_param import QPARAM_KEY
 
-from test.modules.op.sub import SimpleSub
 from test.support.helper import num_of_ops
 
 
@@ -50,6 +49,19 @@ class S16ToU8Relu(torch.nn.Module):
 
     def get_example_inputs(self):
         return (torch.randn(3, 3),), {}
+
+
+class MXFakeQuantize(torch.nn.Module):
+    """Module that produces an MX Q-DQ pattern after decomposition."""
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inp):
+        return torch.ops.circle_custom.mx_fake_quantize(inp, "int8", -1)
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 32),), {}
 
 
 class FoldQuantOpsTest(unittest.TestCase):
@@ -153,3 +165,33 @@ class FoldQuantOpsTest(unittest.TestCase):
                 == torch.ops.quantized_decomposed.quantize_per_tensor.default
             ):
                 self.assertTrue(QPARAM_KEY in node.meta)
+
+    def test_fold_mx_qdq_to_producer_qparam(self):
+        m = MXFakeQuantize().eval()
+        args, kwargs = m.get_example_inputs()
+        ep = torch.export.export(m, args, kwargs)
+
+        DecomposeFakeQuantize().call(ep)
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.quantize_mx.default]), 1
+        )
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.dequantize_mx.default]), 1
+        )
+
+        FoldQuantOps().call(ep)
+
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.quantize_mx.default]), 0
+        )
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.dequantize_mx.default]), 0
+        )
+
+        found_input_qparam = False
+        for node in ep.graph.nodes:
+            if node.op == "placeholder" and QPARAM_KEY in node.meta:
+                self.assertEqual(node.meta[QPARAM_KEY].dtype, "mxint8")
+                self.assertEqual(node.meta[QPARAM_KEY].quantized_dimension, -1)
+                found_input_qparam = True
+        self.assertTrue(found_input_qparam)

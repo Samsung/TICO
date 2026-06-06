@@ -18,6 +18,7 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
+from tico.utils.mx.dtypes import normalize_mx_elem_format, SUPPORTED_MX_ELEM_FORMATS
 from tico.utils.mx.mx_ops import _quantize_mx
 
 # Note that an operator assumes input tensor has NHWC format.
@@ -664,11 +665,45 @@ def CircleInstanceNorm():
         return input.new_empty(input.size())
 
 
+def CircleMXFakeQuantize():
+    """Register the eager MX fake-quantization custom operator."""
+
+    @custom_op("circle_custom::mx_fake_quantize", mutates_args=())
+    def mx_fake_quantize(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        if elem_format not in SUPPORTED_MX_ELEM_FORMATS:
+            raise RuntimeError(
+                f"Unsupported elem_format in mx_fake_quantize: {elem_format}"
+            )
+        return _quantize_mx(
+            input_,
+            scale_bits=8,
+            elem_format=normalize_mx_elem_format(elem_format),
+            axes=[axis],
+            block_size=32,
+            shared_exp_method=shared_exp_method,
+            round=round,
+        )
+
+    @register_fake("circle_custom::mx_fake_quantize")
+    def _(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        return input_
+
+
 def CircleQuantizeMX():
-    # This operator conducts fake-quantization of microscaling
-    # NOTE Why using "quantize"_mx not "fake_quantize"_mx?
-    # To align with function name of microxcaling repo.
-    # https://github.com/microsoft/microxcaling/blob/v1.1.0/mx/mx_ops.py#L173
+    """Register the internal logical MX quantize custom operator."""
+
     @custom_op("circle_custom::quantize_mx", mutates_args=())
     def quantize_mx(
         input_: torch.Tensor,
@@ -677,30 +712,46 @@ def CircleQuantizeMX():
         shared_exp_method: str = "max",
         round: str = "nearest",
     ) -> torch.Tensor:
-        if elem_format == "int8":
-            scale_bits = 8
-            block_size = 32
-        else:
-            raise RuntimeError(f"Unsupported elem_format in quantize_mx: {elem_format}")
-
-        result = _quantize_mx(
-            input_,
-            scale_bits=scale_bits,
-            elem_format=elem_format,
-            axes=[axis],
-            block_size=block_size,
-            shared_exp_method=shared_exp_method,
-            round=round,
+        raise RuntimeError(
+            "circle_custom::quantize_mx is an internal logical quantize op for "
+            "Circle export. Use circle_custom::mx_fake_quantize for eager MX "
+            "fake-quantization."
         )
-        return result
 
     @register_fake("circle_custom::quantize_mx")
     def _(
         input_: torch.Tensor,
         elem_format: str,
         axis: int,
-        shared_exp_method: str = "max",  # Fixed
-        round: str = "nearest",  # Fixed
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        return input_
+
+
+def CircleDequantizeMX():
+    """Register the internal logical MX dequantize custom operator."""
+
+    @custom_op("circle_custom::dequantize_mx", mutates_args=())
+    def dequantize_mx(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
+    ) -> torch.Tensor:
+        raise RuntimeError(
+            "circle_custom::dequantize_mx is an internal logical dequantize op "
+            "for Circle export and should be folded before eager execution."
+        )
+
+    @register_fake("circle_custom::dequantize_mx")
+    def _(
+        input_: torch.Tensor,
+        elem_format: str,
+        axis: int,
+        shared_exp_method: str = "max",
+        round: str = "nearest",
     ) -> torch.Tensor:
         return input_
 
@@ -799,7 +850,9 @@ def RegisterOps():
     CircleMaxPool2D()
     CircleAvgPool2D()
     CircleInstanceNorm()
+    CircleMXFakeQuantize()
     CircleQuantizeMX()
+    CircleDequantizeMX()
     CircleRMSNorm()
     CircleAttention()
     CircleShape()

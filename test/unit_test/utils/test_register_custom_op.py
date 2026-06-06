@@ -314,42 +314,37 @@ class TestRegisterCustomOp(unittest.TestCase):
         # Check output shape
         self.assertEqual(list(result.shape), list(input_tensor.shape))
 
-    def test_circle_quantize_mx_int8(self):
-        """Test CircleQuantizeMX with int8 format"""
+    def test_circle_mx_fake_quantize_basic(self):
+        """Test CircleMXFakeQuantize basic functionality."""
         input_tensor = torch.randn(2, 32, 32, 3)
-        elem_format = "int8"
-        axis = -1
-
-        result = torch.ops.circle_custom.quantize_mx(input_tensor, elem_format, axis)
-
-        # Check output shape
+        result = torch.ops.circle_custom.mx_fake_quantize(input_tensor, "int8", -1)
         self.assertEqual(list(result.shape), list(input_tensor.shape))
 
-    def test_circle_quantize_mx_unsupported_format(self):
-        """Test CircleQuantizeMX with unsupported format"""
+    def test_circle_mx_fake_quantize_unsupported_format(self):
+        """Test CircleMXFakeQuantize with unsupported format."""
         input_tensor = torch.randn(2, 32, 32, 3)
-        elem_format = "unsupported_format"
-        axis = -1
-
         with self.assertRaises(RuntimeError) as context:
-            torch.ops.circle_custom.quantize_mx(input_tensor, elem_format, axis)
-
-        self.assertIn("Unsupported elem_format in quantize_mx", str(context.exception))
-
-    def test_circle_quantize_mx_with_custom_params(self):
-        """Test CircleQuantizeMX with custom parameters"""
-        input_tensor = torch.randn(2, 32, 32, 3)
-        elem_format = "int8"
-        axis = -1
-        shared_exp_method = "max"
-        round_method = "nearest"
-
-        result = torch.ops.circle_custom.quantize_mx(
-            input_tensor, elem_format, axis, shared_exp_method, round_method
+            torch.ops.circle_custom.mx_fake_quantize(
+                input_tensor, "unsupported_format", -1
+            )
+        self.assertIn(
+            "Unsupported elem_format in mx_fake_quantize", str(context.exception)
         )
 
-        # Check output shape
+    def test_circle_mx_fake_quantize_with_custom_params(self):
+        """Test CircleMXFakeQuantize with custom parameters."""
+        input_tensor = torch.randn(2, 32, 32, 3)
+        result = torch.ops.circle_custom.mx_fake_quantize(
+            input_tensor, "int8", -1, "max", "nearest"
+        )
         self.assertEqual(list(result.shape), list(input_tensor.shape))
+
+    def test_circle_quantize_mx_is_logical_only(self):
+        """Test that logical MX quantize is not an eager fake-quant API."""
+        input_tensor = torch.randn(2, 32, 32, 3)
+        with self.assertRaises(RuntimeError) as context:
+            torch.ops.circle_custom.quantize_mx(input_tensor, "int8", -1)
+        self.assertIn("internal logical quantize op", str(context.exception))
 
     def test_circle_rms_norm_basic(self):
         """Test CircleRMSNorm basic functionality"""
