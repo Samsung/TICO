@@ -63,20 +63,9 @@ def str_to_circle_dtype(
         "int64": circle.TensorType.TensorType.INT64,
         "bool": circle.TensorType.TensorType.BOOL,
         "uint4": circle.TensorType.TensorType.UINT4,
-        # TODO Add more dtypes
+        "mxint8": circle.TensorType.TensorType.MXINT8,
+        "mxfp4": circle.TensorType.TensorType.MXFP4,
     }
-    optional_dtypes = {
-        "mxint8": "MXINT8",
-        "mxfp4": "MXFP4",
-        "mxfp6_e3m2": "MXFP6_E3M2",
-        "mxfp6_e2m3": "MXFP6_E2M3",
-        "mxfp8_e4m3": "MXFP8_E4M3",
-        "mxfp8_e5m2": "MXFP8_E5M2",
-    }
-    for dtype, circle_name in optional_dtypes.items():
-        circle_dtype = getattr(circle.TensorType.TensorType, circle_name, None)
-        if circle_dtype is not None:
-            dmap[dtype] = circle_dtype
     if str_dtype not in dmap:
         raise RuntimeError(f"Unsupported dtype {str_dtype}")
     circle_type = dmap[str_dtype]
