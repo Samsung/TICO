@@ -397,7 +397,9 @@ class TestRegisterCustomOp(unittest.TestCase):
         elem_format = "int8"
         axis = -1
 
-        result = torch.ops.circle_custom.quantize_mx(input_tensor, elem_format, axis)
+        result = torch.ops.circle_custom.mx_fake_quantize(
+            input_tensor, elem_format, axis
+        )
 
         # Check that _quantize_mx was called with correct parameters
         mock_quantize_mx.assert_called_once_with(
