@@ -237,6 +237,9 @@ class PTQConfig(BaseConfig):
 
     activation: QuantSpec = field(default_factory=_default_activation_spec)
     weight: QuantSpec = field(default_factory=_default_weight_spec)
+    #default_dtype: QuantDtype = DType.uint(8)
+    #default_observer: Type[ObserverBase] = MinMaxObserver  # type: ignore[type-abstract]
+    #default_qscheme: Optional[QScheme] = None
     overrides: Mapping[str, OverrideValue] = field(default_factory=dict)
     model_args: Mapping[str, Any] = field(default_factory=dict)
     strict_wrap: bool = True

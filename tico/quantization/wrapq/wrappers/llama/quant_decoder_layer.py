@@ -115,6 +115,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             fp_name=join_name(fp_name, "post_attention_layernorm"),
         )
 
+        self.obs_self_attn_residual_out = self._make_obs("self_attn_residual_out")
         self.obs_mlp_residual_out = self._make_obs("mlp_residual_out")
         self.obs_attn_mask = self._make_obs("attn_mask")
         self.obs_cos = self._make_obs("cos")
@@ -357,7 +358,8 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         )
 
         hidden_states = residual + hidden_states_attn
-
+        hidden_states = self._fq(hidden_states, self.obs_self_attn_residual_out)
+        
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
@@ -380,6 +382,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             self.obs_attn_mask,
             self.obs_cos,
             self.obs_sin,
+            self.obs_self_attn_residual_out,
             self.obs_mlp_residual_out,
         )
 

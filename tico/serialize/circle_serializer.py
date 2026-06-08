@@ -285,6 +285,8 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
             if node.target in multiple_output_ops:
                 continue
             node_val = node.meta["val"]
+            if isinstance(node_val, list):
+                continue
             if node_val.layout != torch.strided:
                 raise RuntimeError(
                     f"Only support dense tensors (node layout: {node_val.layout})"
