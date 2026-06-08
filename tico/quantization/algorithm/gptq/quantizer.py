@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import copy
+import functools
 import types
 from typing import Any, Callable, Dict, List, Optional
 
@@ -30,6 +31,41 @@ from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
 from tico.utils.utils import move_to_device
+
+
+class FPInputsCache:
+    """
+    Class for saving full-precision output in each layer (GPTQv2).
+    """
+
+    def __init__(self, sequential):
+        self.fp_cache = {}
+        self.names = tuple(name for names in sequential for name in names)
+        for name in self.names:
+            self.fp_cache[name] = []
+        self.handles = []
+
+    def cache_fp_input(self, m, inp, out, name):
+        inp = inp[0].detach()
+        self.fp_cache[name] += [inp.cpu()]
+
+    def add_hook(self, full):
+        for name in self.names:
+            self.handles.append(
+                full[name].register_forward_hook(
+                    functools.partial(self.cache_fp_input, name=name)
+                )
+            )
+
+    def clear_hook(self):
+        for h in self.handles:
+            h.remove()
+        self.handles = []
+        torch.cuda.empty_cache()
+
+    def clear_cache(self):
+        for name in self.names:
+            self.fp_cache[name] = []
 
 
 def move_to_cpu(obj):
@@ -65,6 +101,9 @@ class GPTQQuantizer(BaseQuantizer):
         self._orig_model_forward: Optional[Callable[..., Any]] = None
         self._orig_layer_forward: Optional[Callable[..., Any]] = None
         self._first_layer_ref: Optional[torch.nn.Module] = None
+
+        # Reference to original model for use_orig_model_inference and GPTQv2
+        self.orig_model: Optional[torch.nn.Module] = None
 
     def _resolve_weight_bits(
         self,
@@ -136,7 +175,7 @@ class GPTQQuantizer(BaseQuantizer):
 
         gptq_conf = self.config
         assert isinstance(gptq_conf, GPTQConfig)
-        if gptq_conf.use_orig_model_inference is True:
+        if gptq_conf.use_orig_model_inference is True or gptq_conf.gptq_v2:
             device = next(model.parameters()).device
             model = model.cpu()
             self.orig_model = copy.deepcopy(model)
@@ -237,6 +276,13 @@ class GPTQQuantizer(BaseQuantizer):
             module_name[module] = name
 
         quantizers: Dict[str, Any] = {}
+        
+        # GPTQv2: Collect FP inputs from original model before quantization
+        need_float_inference = gptq_conf.gptq_v2
+        fp_inps = None
+        if need_float_inference and orig_layers is not None:
+            fp_inps = copy.deepcopy(self.cache_args)
+        
         for l_idx, layer in enumerate(
             tqdm(
                 target_layers,
@@ -257,6 +303,37 @@ class GPTQQuantizer(BaseQuantizer):
                 ],
             )
             sequential = [list(full.keys())]
+
+            # GPTQv2: Set up FPInputsCache for collecting FP inputs per submodule
+            fp_inputs_cache = None
+            if need_float_inference and orig_layers is not None:
+                fp_inputs_cache = FPInputsCache(sequential)
+                orig_full = find_layers(
+                    orig_layers[l_idx],
+                    layers=[
+                        torch.nn.Linear,
+                        torch.nn.Conv2d,
+                        torch.nn.Conv1d,
+                        torch.nn.Conv3d,
+                        torch.nn.ConvTranspose2d,
+                    ],
+                )
+                fp_inputs_cache.add_hook(orig_full)
+                device = next(model.parameters()).device
+                batch_num = self.num_batches
+                for batch_idx in range(batch_num):
+                    cache_args_batch = gather_single_batch_from_list(fp_inps, batch_idx)
+                    cache_args_batch = move_to_device(cache_args_batch, device)
+                    cache_kwargs_batch = gather_single_batch_from_dict(
+                        self.cache_kwargs, batch_idx
+                    )
+                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+                    
+                    orig_layer = orig_layers[l_idx].to(device)
+                    orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                    orig_layer.cpu()
+                    
+                fp_inputs_cache.clear_hook()
 
             # 2) Set up GPTQ objects and gather stats
             for names in sequential:
@@ -286,6 +363,10 @@ class GPTQQuantizer(BaseQuantizer):
                         mse=gptq_conf.mse,
                         sensitivity=cur_sensitivity,
                     )
+
+                    # GPTQv2: Assign native_inp from FPInputsCache
+                    if fp_inputs_cache is not None and name in fp_inputs_cache.fp_cache:
+                        gptq[name].native_inp = fp_inputs_cache.fp_cache[name]
 
                 # Hook to collect (inp, out) for GPTQ
                 def add_batch(name):
@@ -343,6 +424,7 @@ class GPTQQuantizer(BaseQuantizer):
 
             # 4) After quantization, re-run the layer to produce outputs for the next layer
             device = next(model.parameters()).device
+            batch_num = self.num_batches
             for batch_idx in tqdm(
                 range(batch_num),
                 desc=f"[L{l_idx}] re-forward",
@@ -360,7 +442,25 @@ class GPTQQuantizer(BaseQuantizer):
                 )
                 cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
 
-                if orig_layers is None:
+                if fp_inps is not None:
+                    fp_cache_args_batch = gather_single_batch_from_list(fp_inps, batch_idx)
+                    fp_cache_args_batch = move_to_device(fp_cache_args_batch, device)
+                    orig_layer = orig_layers[l_idx].to(device)
+                    fp_outs = orig_layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                    orig_layer.cpu()
+                    fp_outs = fp_outs[0] if isinstance(fp_outs, tuple) else fp_outs
+                    # Update inputs for next iteration.
+                    if len(fp_inps) > 0:
+                        if hasattr(fp_outs, "to") and hasattr(
+                            fp_inps[0][batch_idx], "device"
+                        ):
+                            fp_inps[0][batch_idx] = fp_outs.to(
+                                fp_inps[0][batch_idx].device
+                            )
+                        else:
+                            fp_inps[0][batch_idx] = fp_outs
+                
+                if orig_layers is None or gptq_conf.gptq_v2 is True:
                     outs = layer(*cache_args_batch, **cache_kwargs_batch)
                 else:
                     orig_layer = orig_layers[l_idx].to(device)

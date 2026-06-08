@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import copy
+import functools
 import types
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,6 +36,58 @@ from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.utils.utils import move_to_device
+from transformers import Conv1D
+
+
+class FPInputsCache:
+    """
+    Class for saving full-precision output in each layer (GPTQv2).
+    """
+
+    def __init__(self, sequential):
+        self.fp_cache = {}
+        self.names = tuple(name for names in sequential for name in names)
+        for name in self.names:
+            self.fp_cache[name] = []
+        self.handles = []
+
+    def cache_fp_input(self, m, inp, out, name):
+        inp = inp[0].detach()
+
+       # if isinstance(m, (torch.nn.Linear, Conv1D)):
+       #     if len(inp.shape) == 3:
+       #         inp = inp.reshape((-1, inp.shape[-1]))
+       #     inp = inp.t()
+       # elif isinstance(m, torch.nn.Conv2d):
+       #     unfold = torch.nn.Unfold(
+       #         m.kernel_size,
+       #         dilation=m.dilation,
+       #         padding=m.padding,
+       #         stride=m.stride,
+       #     )
+       #     inp = unfold(inp)
+       #     inp = inp.permute([1, 0, 2])
+       #     inp = inp.flatten(1)
+
+        self.fp_cache[name] += [inp.cpu()]
+
+    def add_hook(self, full):
+        for name in self.names:
+            self.handles.append(
+                full[name].register_forward_hook(
+                    functools.partial(self.cache_fp_input, name=name)
+                )
+            )
+
+    def clear_hook(self):
+        for h in self.handles:
+            h.remove()
+        self.handles = []
+        torch.cuda.empty_cache()
+
+    def clear_cache(self):
+        for name in self.names:
+            self.fp_cache[name] = []
 
 
 def move_to_cpu(obj):
@@ -401,13 +454,14 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
         gptq_conf = self.config
         assert isinstance(gptq_conf, LlamaGPTQConfig)
-        if gptq_conf.use_orig_model_inference is True:
+        if gptq_conf.use_orig_model_inference is True or gptq_conf.gptq_v2:
             device = next(model.parameters()).device
             model = model.cpu()
             self.orig_model = copy.deepcopy(model)
             model = model.to(device)
         else:
             self.orig_model = None
+        
         # Replace the first layer with defined function to capture calibration data.
         layers = self._get_decoder_layers(model)
         self._first_layer_ref = layers[0]
@@ -505,40 +559,11 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
         embed_tokens.freeze_qparams()
 
-    def _calibrate_model_norm_ptq(self, model: torch.nn.Module) -> None:
-        """
-        Calibrate PTQ observers for model.norm (PTQ-only, no GPTQ).
-        
-        Calibrates weight, input activation, and output activation observers.
-        """
-        model_norm = self._get_model_norm_ptq_wrapper(model)
-        if model_norm is None:
-            return
-
-        # Calibrate weight observer immediately (fixed)
-        obs_weight = model_norm.get_observer("weight")
-        if obs_weight is not None:
-            obs_weight.collect(model_norm.module.weight)
-            obs_weight.enabled = False
-            obs_weight.compute_qparams()
-
-        # Calibrate input and output activation observers
-        device = next(model.parameters()).device
-        batch_num = self.num_batches
-        
-        for batch_idx in range(batch_num):
-            hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
-            hidden_states = move_to_device(hidden_states, device)
-            model_norm(hidden_states)
-
-        # Freeze activation observers
-        #model_norm.freeze_qparams()
-
     def _calibrate_norm_lm_head_ptq(self, model: torch.nn.Module) -> None:
         """
-        Calibrate PTQ observers for lm_head (PTQ-only, no GPTQ).
+        Calibrate PTQ observers for  norm and lm_head (PTQ-only, no GPTQ).
         
-        Calibrates weight, input activation, and output activation observers.
+        Calibrates weights, input activations, and output activations observers.
         """
         lm_head = self._get_lm_head_ptq_wrapper(model)
         if lm_head is None:
@@ -619,6 +644,12 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         
         quantizers: Dict[str, Any] = {}
         batch_num = self.num_batches
+        
+        # GPTQv2: Collect FP inputs from original model before quantization
+        need_float_inference = gptq_conf.gptq_v2 
+        fp_inps = None
+        if need_float_inference and orig_layers is not None:
+            fp_inps = copy.deepcopy(self.cache_args)
         for l_idx, layer in enumerate(
             tqdm(
                 target_layers,
@@ -636,7 +667,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 ],
             )
 
-            sequential = True #False
+            sequential = False#True #False
             # Define groups for quantizing by internal structure (standard Llama modules)
             if sequential is True:
                 #sequential processing
@@ -675,6 +706,31 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 if cur_seq:
                     sequential.append(cur_seq)
 
+            # GPTQv2: Set up FPInputsCache for collecting FP inputs per submodule
+            fp_inputs_cache = None
+            if need_float_inference and orig_layers is not None:
+                fp_inputs_cache = FPInputsCache(sequential)
+                orig_full = _find(
+                    orig_layers[l_idx],
+                    layers=[
+                        torch.nn.Linear,
+                        QuantLinear
+                    ],
+                )
+                fp_inputs_cache.add_hook(orig_full)
+                device = next(model.parameters()).device
+                for batch_idx in range(batch_num):
+                    cache_args_batch = gather_single_batch_from_list(fp_inps, batch_idx)
+                    cache_args_batch = move_to_device(cache_args_batch, device)
+                    cache_kwargs_batch = gather_single_batch_from_dict(self.cache_kwargs, batch_idx)
+                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+                    
+                    orig_layer = orig_layers[l_idx].to(device)
+                    orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                    orig_layer.cpu()
+                    
+                fp_inputs_cache.clear_hook()
+
             # 2) Set up GPTQ objects and gather stats
             for names in sequential:
                 subset = {n: full[n] for n in names}
@@ -706,6 +762,10 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         mse=gptq_conf.mse,
                         sensitivity=cur_sensitivity,
                     )
+
+                    # GPTQv2: Assign native_inp from FPInputsCache
+                    if fp_inputs_cache is not None and name in fp_inputs_cache.fp_cache:
+                        gptq[name].native_inp = fp_inputs_cache.fp_cache[name]
 
                 # Hook to collect (inp, out) for GPTQ
                 def add_batch(name):
@@ -772,7 +832,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 device = next(model.parameters()).device
                 for batch_idx in tqdm(
                     range(batch_num),
-                    desc=f"[L{l_idx}] activaions calibration",
+                    desc=f"[L{l_idx}] activations calibration",
                     leave=False,
                     unit="batch",
                     disable=not gptq_conf.show_progress,
@@ -786,7 +846,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         self.cache_kwargs, batch_idx
                     )
                     cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
-                    outs = layer(*cache_args_batch, **cache_kwargs_batch)
+                    layer(*cache_args_batch, **cache_kwargs_batch)
                     
                 if ptq_wrapped:
                     layer.freeze_qparams()   
@@ -810,8 +870,26 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     self.cache_kwargs, batch_idx
                 )
                 cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
-
-                if orig_layers is None:
+                if fp_inps is not None:
+                    fp_cache_args_batch = gather_single_batch_from_list(fp_inps, batch_idx)
+                    fp_cache_args_batch = move_to_device(fp_cache_args_batch, device)
+                    orig_layer = orig_layers[l_idx].to(device)
+                    fp_outs = orig_layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                    #fp_outs = layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                    orig_layer.cpu()
+                    fp_outs = fp_outs[0] if isinstance(fp_outs, tuple) else fp_outs
+                    # Update inputs for next iteration.
+                    if len(fp_inps) > 0:
+                        if hasattr(fp_outs, "to") and hasattr(
+                            fp_inps[0][batch_idx], "device"
+                        ):
+                            fp_inps[0][batch_idx] = fp_outs.to(
+                                fp_inps[0][batch_idx].device
+                            )
+                        else:
+                            fp_inps[0][batch_idx] = fp_outs
+                    
+                if orig_layers is None or self.config.gptq_v2 is True:
                     outs = layer(*cache_args_batch, **cache_kwargs_batch)
                 else:
                     orig_layer = orig_layers[l_idx].to(device)
@@ -840,11 +918,10 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-
-        self._calibrate_norm_lm_head_ptq(model)
         
-        if ptq_wrapped:
-            model.freeze_qparams()
+#        if ptq_wrapped:
+#            self._calibrate_norm_lm_head_ptq(model)
+#            model.freeze_qparams()
         
         # Restore the original cache configuration.
         config = self._get_config(model)

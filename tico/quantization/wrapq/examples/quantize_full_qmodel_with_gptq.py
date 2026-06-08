@@ -609,6 +609,7 @@ def build_gptq_config(
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
 
+    gptqv2 = True
     if args.use_llama_gptq:
         return LlamaGPTQConfig(
             show_progress=not args.no_tqdm,
@@ -621,6 +622,7 @@ def build_gptq_config(
             use_orig_model_inference=args.gptq_use_orig_model_inference,
             percdamp=args.gptq_percdamp,
             verbose=args.verbose,
+            gptq_v2 = gptqv2,
         )
     else:
         return GPTQConfig(
@@ -633,6 +635,7 @@ def build_gptq_config(
             use_orig_model_inference=args.gptq_use_orig_model_inference,
             percdamp=args.gptq_percdamp,
             verbose=args.verbose,
+            gptq_v2 = gptqv2,
         )
 
 
@@ -1132,7 +1135,6 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
     print("Applying LlamaGPTQ on PTQ-wrapped model …")
     sens = compute_or_load_sensitivity(model, calib_inputs, args)
     gptq_config = build_gptq_config(args, sensitivity=sens)
-
     q_m = prepare(q_m, gptq_config, inplace=True)
 
     iterator = calib_inputs
@@ -1442,7 +1444,7 @@ def build_calibration_inputs(
 
     random.seed(args.seed)
     calib_inputs = []
-    for _ in range(nsamples):
+    for k in range(nsamples):
         i = random.randint(0, train_ids.shape[1] - seqlen - 1)
         j = i + seqlen
         calib_inputs.append(train_ids[:, i:j].cpu())

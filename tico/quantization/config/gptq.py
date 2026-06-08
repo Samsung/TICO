@@ -69,6 +69,9 @@ class GPTQConfig(BaseConfig):
     # use this option to stabilize GPTQ for deep models
     use_orig_model_inference: bool = False
 
+    # GPTQv2 flag - uses FP inference for collecting inputs during quantization
+    gptq_v2: bool = False
+
     @property
     def name(self) -> str:
         return "gptq"
@@ -77,6 +80,10 @@ class GPTQConfig(BaseConfig):
         if not isinstance(self.quantize_lm_head, bool):
             raise TypeError(
                 f"quantize_lm_head must be bool. got {type(self.quantize_lm_head)}"
+            )
+        if not isinstance(self.gptq_v2, bool):
+            raise TypeError(
+                f"gptq_v2 must be bool. got {type(self.gptq_v2)}"
             )
         if self.weight_bits <= 0:
             raise ValueError(f"weight_bits must be positive. got {self.weight_bits}")

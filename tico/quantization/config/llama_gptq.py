@@ -78,6 +78,9 @@ class LlamaGPTQConfig(BaseConfig):
     # use this option to stabilize GPTQ for deep models
     use_orig_model_inference: bool = False
 
+    # GPTQv2 flag - uses FP inference for collecting inputs during quantization
+    gptq_v2: bool = False
+
     @property
     def name(self) -> str:
         return "llama_gptq"
