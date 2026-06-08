@@ -438,6 +438,82 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
     return _restore()
 
 
+def _patch_video_frame_budget(
+    *,
+    max_pixels: int,
+    min_pixels: int,
+    max_num_frames: int,
+):
+    """Patch the lmms-eval ``Qwen3_VL`` wrapper to enforce the video frame budget.
+
+    This is a safety net that overrides ``max_pixels``, ``min_pixels``, and
+    ``max_num_frames`` on the ``Qwen3_VL`` wrapper after instantiation.
+    While the primary mechanism is passing these values via ``model_args``,
+    this patch ensures the budget is enforced even if the model_args parsing
+    has edge cases.
+
+    The patch works by monkey-patching ``__init__`` to set the instance
+    attributes after the original initialization.
+
+    The patch is automatically undone when the returned context manager exits.
+
+    Args:
+        max_pixels: Maximum pixels per video frame.
+        min_pixels: Minimum pixels per video frame.
+        max_num_frames: Maximum number of video frames.
+
+    Returns:
+        A context manager that restores the original ``__init__`` on exit.
+    """
+    import contextlib
+
+    _patched_classes = []
+
+    # Patch both the simple and chat Qwen3_VL wrappers
+    for _module_path, _class_name in [
+        ("lmms_eval.models.simple.qwen3_vl", "Qwen3_VL"),
+        ("lmms_eval.models.chat.qwen3_vl", "Qwen3_VL"),
+    ]:
+        try:
+            import importlib
+
+            _module = importlib.import_module(_module_path)
+            _cls = getattr(_module, _class_name)
+            _patched_classes.append(_cls)
+        except (ImportError, AttributeError):
+            continue
+
+    if not _patched_classes:
+        return contextlib.nullcontext()
+
+    _original_inits = {cls: cls.__init__ for cls in _patched_classes}
+
+    def _make_patched_init(orig_init, max_pixels, min_pixes, max_num_frames):
+        def _patched_init(self, *args, **kwargs):
+            orig_init(self, *args, **kwargs)
+            # Override the instance attributes set by the original __init__
+            self.max_pixels = max_pixels
+            self.min_pixels = min_pixes
+            self.max_num_frames = max_num_frames
+
+        return _patched_init
+
+    for _cls in _patched_classes:
+        _cls.__init__ = _make_patched_init(
+            _original_inits[_cls], max_pixels, min_pixels, max_num_frames
+        )
+
+    @contextlib.contextmanager
+    def _restore():
+        try:
+            yield
+        finally:
+            for _cls in _patched_classes:
+                _cls.__init__ = _original_inits[_cls]
+
+    return _restore()
+
+
 def _patch_subsample_video_inputs_for_debug():
     """
     This monkey-patches the ``_subsample_video_inputs`` method on the
@@ -524,6 +600,7 @@ def evaluate_vlm_on_tasks(
             task names.  Any task registered in ``lmms-eval`` is accepted.
         device: Device string for inference (e.g. ``"cuda"``, ``"cpu"``).
         batch_size: Batch size for generation.  Defaults to 1.
+        max_num_frames: The maximum number of frames that will be extracted from the video uniformly.
         max_new_tokens: Maximum number of tokens to generate per sample.
         use_cache: Optional path to an ``lmms-eval`` results cache directory.
             When set, results are cached and can be reused across runs.
@@ -556,8 +633,28 @@ def evaluate_vlm_on_tasks(
     else:
         # Unwrap fake-quant wrapper if present
         inner_model = getattr(model, "wrapped", model)
-        # Determine the lmms-eval model name and build model_args
-        model_name, model_args_dict = _build_model_args(inner_model, max_num_frames)
+
+        # Detect if the model is a PTQ wrapper with a static context budget.
+        # Quantized models have a static causal mask of size
+        # max_position_embeddings that cannot be exceeded at runtime.
+        # When evaluating video benchmarks, the total token count
+        # (text + visual tokens from all frames) must fit within this
+        # budget, so we compute max_pixels/min_pixels per frame.
+        _max_pos_emb = _get_max_position_embeddings(inner_model)
+        _effective_max_new_tokens = max_new_tokens if max_new_tokens is not None else 30
+
+        # Determine the lmms-eval model name and build model_args.
+        # When max_position_embeddings is available, the budget-aware
+        # computation adjusts max_pixels, min_pixels, and max_num_frames
+        # so that the total token count stays within the static budget.
+        model_name, model_args_dict = _build_model_args(
+            inner_model,
+            max_num_frames=max_num_frames,
+            max_position_embeddings=_max_pos_emb,
+            max_new_tokens=_effective_max_new_tokens,
+            processor=processor,
+        )
+
         # Patch ``from_pretrained`` so that ``lmms-eval`` reuses the
         # already-loaded model and processor instead of downloading and
         # loading them a second time.
@@ -629,6 +726,22 @@ def evaluate_vlm_on_tasks(
     # Patch _subsample_video_inputs to add debug logging
     _subsample_ctx = _patch_subsample_video_inputs_for_debug()
 
+    # Apply the video frame budget safety net patch when budget parameters
+    # were computed.  This monkey-patches the Qwen3_VL wrapper's __init__
+    # to override max_pixels, min_pixels, and max_num_frames after
+    # instantiation, ensuring the budget is enforced even if model_args
+    # parsing has edge cases.
+    _budget_ctx = contextlib.nullcontext()
+    _budget_max_pixels = model_args_dict.get("max_pixels")
+    _budget_min_pixels = model_args_dict.get("min_pixels")
+    _budget_max_num_frames = model_args_dict.get("max_num_frames")
+    if _budget_max_pixels is not None and _budget_min_pixels is not None:
+        _budget_ctx = _patch_video_frame_budget(
+            max_pixels=_budget_max_pixels,
+            min_pixels=_budget_min_pixels,
+            max_num_frames=_budget_max_num_frames or max_num_frames,
+        )
+
     # Proactively download any missing Video-MME video chunk zips before
     # lmms-eval runs.  This is incremental: if some chunks are already in
     # the HF cache from a previous run (possibly with a smaller limit), only
@@ -656,7 +769,7 @@ def evaluate_vlm_on_tasks(
     if _is_videomme and limit is not None and isinstance(limit, int) and limit > 0:
         _download_ctx = _patch_snapshot_download_for_limit(limit)
 
-    with _model_ctx, _subsample_ctx:
+    with _model_ctx, _subsample_ctx, _budget_ctx:
         if _download_ctx is not None:
             with _download_ctx:
                 results = simple_evaluate(**eval_kwargs)
@@ -686,9 +799,130 @@ def _get_custom_tasks_dir() -> str | None:
     return None
 
 
+def _coerce_int_attr(value: Any, default: int) -> int:
+    """Convert scalar or one-element processor attributes to an integer."""
+    if value is None:
+        return default
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return default
+        return int(value[0])
+    return int(value)
+
+
+def _processor_vision_factor(processor: Any) -> int:
+    """Return the pixel stride of one merged visual token step.
+
+    For Qwen3-VL the vision factor is ``patch_size × merge_size`` (default
+    ``16 × 2 = 32``).  Each visual token covers a ``vision_factor ×
+    vision_factor`` pixel region, so ``tokens = pixels / vision_factor²``.
+    """
+    image_processor = getattr(processor, "image_processor", None)
+    patch_size = _coerce_int_attr(getattr(image_processor, "patch_size", None), 16)
+    merge_size = _coerce_int_attr(getattr(image_processor, "merge_size", None), 2)
+    return max(1, patch_size * merge_size)
+
+
+def _compute_video_max_pixels_for_budget(
+    *,
+    max_position_embeddings: int,
+    max_num_frames: int,
+    max_new_tokens: int,
+    processor: Any,
+    text_token_margin: int = 256,
+) -> tuple[int, int, int]:
+    """Compute ``max_pixels`` per video frame to fit within the static context budget.
+
+    Quantized (PTQ) models use a static causal mask of size
+    ``max_position_embeddings``.  When evaluating video benchmarks the total
+    token count (text + visual tokens from all frames) must not exceed this
+    budget.  This function computes the maximum number of pixels per frame
+    that keeps the total within budget, and optionally reduces
+    ``max_num_frames`` when the budget is too tight.
+
+    Args:
+        max_position_embeddings: Static context length.
+        max_num_frames: Requested maximum number of video frames.
+        max_new_tokens: Tokens reserved for generation output.
+        processor: The Hugging Face processor (used to determine the vision
+            factor).
+        text_token_margin: Extra margin for text tokens (system prompt,
+            special tokens, etc.).
+
+    Returns:
+        A ``(max_pixels, min_pixels, adjusted_max_num_frames)`` tuple where
+        ``max_pixels`` and ``min_pixels`` are the per-frame pixel caps to
+        pass to the lmms-eval model wrapper, and
+        ``adjusted_max_num_frames`` is the possibly-reduced frame count.
+    """
+    vision_factor = _processor_vision_factor(processor)
+
+    # input_budget = tokens available for input (excluding generation)
+    input_budget = max_position_embeddings - max_new_tokens
+
+    # visual_budget = tokens available for visual tokens (excluding text margin)
+    visual_budget = input_budget - text_token_margin
+    if visual_budget <= 0:
+        raise ValueError(
+            f"Not enough context budget for video frames: "
+            f"max_position_embeddings={max_position_embeddings}, "
+            f"max_new_tokens={max_new_tokens}, "
+            f"text_token_margin={text_token_margin}. "
+            f"Visual budget would be {visual_budget}."
+        )
+
+    # max tokens per frame
+    max_tokens_per_frame = visual_budget // max_num_frames
+
+    # If budget is too tight, reduce max_num_frames
+    adjusted_max_num_frames = max_num_frames
+    if max_tokens_per_frame < 1:
+        adjusted_max_num_frames = max(1, visual_budget)  # 1 token per frame minimum
+        max_tokens_per_frame = 1
+
+    # Convert tokens to pixels
+    # tokens_per_frame = (H / vision_factor) × (W / vision_factor)
+    # pixels_per_frame = H × W = tokens_per_frame × vision_factor²
+    max_pixels = max_tokens_per_frame * vision_factor * vision_factor
+
+    # Ensure min_pixels is at most max_pixels (default min_pixels=200,704
+    # can exceed the computed max_pixels for tight budgets)
+    min_pixels = min(256 * 28 * 28, max_pixels)
+
+    # Ensure max_pixels is at least min_pixels
+    max_pixels = max(max_pixels, min_pixels)
+
+    return max_pixels, min_pixels, adjusted_max_num_frames
+
+
+def _get_max_position_embeddings(model: Any) -> int | None:
+    """Extract ``max_position_embeddings`` from a model config.
+
+    Handles both plain transformers models and PTQ-wrapped models.
+    Returns ``None`` if the attribute cannot be found.
+    """
+    config = getattr(model, "config", None)
+    if config is None:
+        return None
+
+    # Qwen3-VL stores it under text_config
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and hasattr(text_config, "max_position_embeddings"):
+        return int(text_config.max_position_embeddings)
+
+    # Direct attribute
+    if hasattr(config, "max_position_embeddings"):
+        return int(config.max_position_embeddings)
+
+    return None
+
+
 def _build_model_args(
     model: Any,
     max_num_frames: int = 32,
+    max_position_embeddings: int | None = None,
+    max_new_tokens: int = 30,
+    processor: Any = None,
 ) -> tuple[str, dict[str, Any]]:
     """Build the ``model`` name and ``model_args`` dict for ``simple_evaluate``.
 
@@ -696,6 +930,23 @@ def _build_model_args(
     (from the registry) and a ``model_args`` dict that is forwarded to the
     model constructor.  This helper infers the correct model name from the
     Python model object and builds the args dict.
+
+    When *max_position_embeddings* is provided (i.e. the model has a static
+    context budget such as a PTQ-quantized model), the function computes
+    ``max_pixels`` and ``min_pixels`` per video frame so that the total
+    token count stays within budget.  It also adjusts ``max_num_frames``
+    downward if the budget is too tight for the requested frame count.
+
+    Args:
+        model: The Hugging Face model object.
+        max_num_frames: Requested maximum number of video frames.
+        max_position_embeddings: Static context length of the model.  When
+            provided, ``max_pixels`` and ``min_pixels`` are computed from
+            the budget.
+        max_new_tokens: Tokens reserved for generation output.  Only used
+            when *max_position_embeddings* is set.
+        processor: The Hugging Face processor.  Required when
+            *max_position_embeddings* is set to determine the vision factor.
 
     Returns:
         A ``(model_name, model_args_dict)`` tuple.
@@ -733,12 +984,38 @@ def _build_model_args(
     if pretrained is not None:
         model_args_dict["pretrained"] = pretrained
 
-    # Pass max_num_frames to the lmms-eval model wrapper.
-    # The Qwen3_VL wrapper accepts this in __init__ and uses it in
-    # _subsample_video_inputs to control how many frames are sampled
-    # from each video.
-    if max_num_frames is not None:
-        model_args_dict["max_num_frames"] = max_num_frames
+    # When a static context budget is provided, compute max_pixels and
+    # min_pixels per video frame so that the total token count stays within
+    # the budget.
+    if max_position_embeddings is not None and processor is not None:
+        (
+            budget_max_pixels,
+            budget_min_pixels,
+            adjusted_max_num_frames,
+        ) = _compute_video_max_pixels_for_budget(
+            max_position_embeddings=max_position_embeddings,
+            max_num_frames=max_num_frames,
+            max_new_tokens=max_new_tokens,
+            processor=processor,
+        )
+        model_args_dict["max_pixels"] = budget_max_pixels
+        model_args_dict["min_pixels"] = budget_min_pixels
+        model_args_dict["max_num_frames"] = adjusted_max_num_frames
+
+        print(
+            f"[INFO] Video frame budget computed for static context: "
+            f"max_position_embeddings={max_position_embeddings}, "
+            f"max_num_frames={max_num_frames} -> {adjusted_max_num_frames}, "
+            f"max_pixels={budget_max_pixels}, "
+            f"min_pixels={budget_min_pixels}"
+        )
+    else:
+        # Pass max_num_frames to the lmms-eval model wrapper.
+        # The Qwen3_VL wrapper accepts this in __init__ and uses it in
+        # _subsample_video_inputs to control how many frames are sampled
+        # from each video.
+        if max_num_frames is not None:
+            model_args_dict["max_num_frames"] = max_num_frames
 
     return lmms_model_name, model_args_dict
 

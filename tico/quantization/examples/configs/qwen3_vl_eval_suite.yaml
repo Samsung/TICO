@@ -116,6 +116,14 @@ evaluation:
       max_new_tokens: 256
       temperature: 0.0
       swap_order: true
+  videomme:
+    enabled: true
+    batch_size: 1
+    max_new_tokens: 30
+    n_samples: -1
+    max_num_frames: 32
+    use_cache: null
+    verbose: false
   mmlu:
     enabled: true
     subjects: null

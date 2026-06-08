@@ -37,8 +37,9 @@ def evaluate_and_print_video_mme(
     processor: Any,
     device: str,
     batch_size: int = 1,
+    max_num_frames: int = 32,
     max_new_tokens: int = 30,
-    limit: int | None = None,
+    n_samples: int | None = None,
     use_cache: str | None = None,
     verbose: bool = True,
 ) -> dict[str, Any]:
@@ -48,9 +49,9 @@ def evaluate_and_print_video_mme(
     ``tasks=["videomme"]`` (or ``tasks=["videomme_mini"]`` when *mini*
     is ``True``) and prints the results in a formatted table.
 
-    The *limit* parameter restricts the number of samples evaluated,
+    The *n_samples* parameter restricts the number of samples evaluated,
     which also limits how many videos are downloaded.  For example,
-    ``limit=10`` will only download only first zip file and evaluate
+    ``n_samples=10`` will only download only first zip file and evaluate
     the first 10 samples. This uses a custom ``videomme_mini`` task
     YAML (shipped with TICO) that specifies ``test_split: test``.
 
@@ -59,8 +60,9 @@ def evaluate_and_print_video_mme(
         processor: The matching ``AutoProcessor`` for the model.
         device: Device string for inference (e.g. ``"cuda"``, ``"cpu"``).
         batch_size: Batch size for generation.  Defaults to 1.
+        max_num_frames: The maximum number of frames that will be extracted from the video uniformly.
         max_new_tokens: Maximum number of tokens to generate per sample.
-        limit: If set, only evaluate the first *limit* samples.  This
+        n_samples: If set, only evaluate the first *n_samples* samples.  This
             also limits how many videos are downloaded.  Defaults to
             ``None`` (download and evaluate all samples).
         use_cache: Optional path to an ``lmms-eval`` results cache directory.
@@ -80,13 +82,14 @@ def evaluate_and_print_video_mme(
         tasks=["videomme"],
         device=device,
         batch_size=batch_size,
+        max_num_frames=max_num_frames,
         max_new_tokens=max_new_tokens,
-        limit=limit,
+        limit=n_samples,
         use_cache=use_cache,
         verbose=verbose,
     )
 
-    print(f"\n=== Video-MME Evaluation (limit={limit}) ===")
+    print(f"\n=== Video-MME Evaluation (limit={n_samples}) ===")
     print_lmms_eval_results(results)
 
     return results

@@ -489,28 +489,28 @@ def parse_args():
 
     # Video-MME evaluation arguments
     parser.add_argument(
-        "--video_mme",
+        "--videomme",
         action="store_true",
         default=False,
         help="Evaluate on Video-MME benchmark via lmms-eval.",
     )
     parser.add_argument(
-        "--video_mme_max_new_tokens",
+        "--videomme_max_new_tokens",
         type=int,
         default=None,
         help="Maximum number of tokens to generate per Video-MME sample.",
     )
     parser.add_argument(
-        "--video_mme_limit",
+        "--videomme_n_samples",
         type=int,
         default=None,
         help="Limit the number of Video-MME samples to evaluate (and download). "
-        "E.g. --video_mme_limit 10 evaluates only the first 10 samples.",
+        "E.g. --videomme_n_samples 10 evaluates only the first 10 samples.",
     )
     parser.add_argument(
-        "--video_mme_max_num_frames",
+        "--videomme_max_num_frames",
         type=int,
-        default=5,
+        default=32,
         help="Maximum number of frames to sample from each video for Video-MME evaluation. "
         "Default is 5 for fitting within max_position_embeddings (2048).",
     )
@@ -1270,21 +1270,21 @@ def evaluate_original_model(model, processor, args):
         )
         print_mmmu_results(original_mmmu_results)
 
-    if args.video_mme:
+    if args.videomme:
         print(
-            f"\n=== Video-MME Evaluation (Original Model) (limit={args.video_mme_limit}) ==="
+            f"\n=== Video-MME Evaluation (Original Model) (limit={args.videomme_n_samples}) ==="
         )
-        original_video_mme_results = evaluate_vlm_on_tasks(
+        original_videomme_results = evaluate_vlm_on_tasks(
             model=model,
             processor=processor,
             tasks=["videomme"],
             device=args.device,
-            max_new_tokens=args.video_mme_max_new_tokens,
-            limit=args.video_mme_limit,
+            max_new_tokens=args.videomme_max_new_tokens,
+            limit=args.videomme_n_samples,
             verbose=args.verbose,
-            max_num_frames=args.video_mme_max_num_frames,
+            max_num_frames=args.videomme_max_num_frames,
         )
-        print_lmms_eval_results(original_video_mme_results)
+        print_lmms_eval_results(original_videomme_results)
 
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Original Model) ===")
@@ -1394,21 +1394,21 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
         )
         print_mmmu_results(quantized_mmmu_results)
 
-    if args.video_mme:
+    if args.videomme:
         print(
-            f"\n=== Video-MME Evaluation (Quantized Model) (limit={args.video_mme_limit}) ==="
+            f"\n=== Video-MME Evaluation (Quantized Model) (limit={args.videomme_n_samples}) ==="
         )
-        quantized_video_mme_results = evaluate_vlm_on_tasks(
+        quantized_videomme_results = evaluate_vlm_on_tasks(
             model=model,
             processor=processor,
             tasks=["videomme"],
             device=args.device,
-            max_new_tokens=args.video_mme_max_new_tokens,
-            limit=args.video_mme_limit,
+            max_new_tokens=args.videomme_max_new_tokens,
+            limit=args.videomme_n_samples,
             verbose=args.verbose,
-            max_num_frames=args.video_mme_max_num_frames,
+            max_num_frames=args.videomme_max_num_frames,
         )
-        print_lmms_eval_results(quantized_video_mme_results)
+        print_lmms_eval_results(quantized_videomme_results)
 
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Quantized Model) ===")

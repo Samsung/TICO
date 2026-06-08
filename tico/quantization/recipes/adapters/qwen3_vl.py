@@ -32,6 +32,7 @@ from tico.quantization.recipes.evaluation.llava_bench_judge import (
 )
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
+from tico.quantization.recipes.evaluation.video_mme import evaluate_and_print_video_mme
 from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
     evaluate_llava_bench,
@@ -420,6 +421,20 @@ class Qwen3VLAdapter(ModelAdapter):
                 max_seq_len=max_seq_len,
             )
             print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
+
+        videomme = eval_cfg.get("videomme", {})
+        if videomme.get("enabled", False):
+            evaluate_and_print_video_mme(
+                model=ctx.model,
+                processor=ctx.processor,
+                device=str(ctx.device),
+                batch_size=int(videomme.get("batch_size", 1)),
+                max_new_tokens=int(videomme.get("max_new_tokens", 30)),
+                n_samples=int(videomme.get("n_samples", -1)),
+                max_num_frames=int(videomme.get("max_num_frames", -1)),
+                use_cache=videomme.get("use_cache", None),
+                verbose=bool(videomme.get("verbose", eval_cfg.get("verbose", False))),
+            )
 
         mmlu = eval_cfg.get("mmlu", {})
         if mmlu.get("enabled", False):
