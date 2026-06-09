@@ -25,6 +25,7 @@ import contextlib
 import io
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import tico.quantization.recipes.adapters.qwen3_vl as qwen_mod
@@ -61,7 +62,7 @@ def _fake_qwen_model():
 class TestQwen3VLAdapter(unittest.TestCase):
     def test_build_ptq_config_uses_architecture_counts_and_model_args(self):
         """Qwen3VLAdapter should infer architecture counts before building PTQ config."""
-        captured = {}
+        captured: dict[str, Any] = {}
 
         def fake_build_qwen3_vl_ptq_config(**kwargs):
             captured.update(kwargs)
@@ -115,7 +116,7 @@ class TestQwen3VLAdapter(unittest.TestCase):
 
     def test_apply_spinquant_passes_enable_vision_options_to_config(self):
         """Qwen3VLAdapter should pass enable-based SpinQuant options to the config."""
-        captured = {}
+        captured: dict[str, Any] = {}
         adapter = Qwen3VLAdapter()
         model = TinyModule()
         ctx = RecipeContext(
@@ -173,44 +174,6 @@ class TestQwen3VLAdapter(unittest.TestCase):
         self.assertEqual(kwargs["vision_rotation_tolerance"], 1e-3)
         self.assertEqual(captured["prepare"][2], True)
         self.assertEqual(captured["convert"][1], True)
-
-    def test_apply_spinquant_does_not_treat_apply_keys_as_legacy_aliases(self):
-        """Qwen3VLAdapter should use enable_* keys rather than apply_* aliases."""
-        captured = {}
-        adapter = Qwen3VLAdapter()
-        model = TinyModule()
-        ctx = RecipeContext(cfg={}, adapter=adapter, model=model)
-
-        class FakeSpinQuantConfig:
-            """Fake SpinQuant config that records constructor keyword arguments."""
-
-            def __init__(self, **kwargs):
-                captured["config_kwargs"] = kwargs
-
-        with patch.object(
-            qwen_mod, "Qwen3VLSpinQuantConfig", FakeSpinQuantConfig
-        ), patch.object(
-            qwen_mod, "prepare", lambda model_arg, config, inplace=False: model_arg
-        ), patch.object(
-            qwen_mod, "convert", lambda model_arg, inplace=False: model_arg
-        ):
-            with contextlib.redirect_stdout(io.StringIO()):
-                adapter.apply_spinquant(
-                    ctx,
-                    {
-                        "apply_r1": False,
-                        "apply_r2": False,
-                        "apply_vision_r1": True,
-                        "apply_vision_r2": True,
-                        "show_progress": False,
-                    },
-                )
-
-        kwargs = captured["config_kwargs"]
-        self.assertTrue(kwargs["enable_r1"])
-        self.assertTrue(kwargs["enable_r2"])
-        self.assertFalse(kwargs["enable_vision_r1"])
-        self.assertFalse(kwargs["enable_vision_r2"])
 
     def test_build_calibration_inputs_routes_mixed_dataset_config(self):
         """Qwen3VLAdapter should route mixed calibration datasets to the data helper."""

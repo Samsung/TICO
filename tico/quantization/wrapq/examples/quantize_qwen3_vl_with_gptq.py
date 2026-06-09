@@ -779,8 +779,8 @@ def apply_spinquant_if_enabled(
         init_method=args.spinquant_init_method,
         r1=r1,
         r2_map=r2_map,
-        apply_r1=not args.spinquant_disable_r1,
-        apply_r2=not args.spinquant_disable_r2,
+        enable_r1=not args.spinquant_disable_r1,
+        enable_r2=not args.spinquant_disable_r2,
         fuse_deepstack_visual_outputs=not args.spinquant_disable_deepstack_fusion,
         show_progress=not args.hide_progress,
     )
