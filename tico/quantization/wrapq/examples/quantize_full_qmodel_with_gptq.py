@@ -307,6 +307,12 @@ def parse_args():
         "ill-conditioned matrices and serve as a tradeoff between GPTQ and ordinary min-max quantizer.",
     )
     parser.add_argument(
+        "--gptq_v2",
+        action="store_true",
+        default=False,
+        help="Enable GPTQv2 (uses FP inference for collecting inputs during quantization).",
+    )
+    parser.add_argument(
         "--use_llama_gptq",
         action="store_true",
         default=False,
@@ -609,7 +615,6 @@ def build_gptq_config(
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
 
-    gptqv2 = True
     if args.use_llama_gptq:
         return LlamaGPTQConfig(
             show_progress=not args.no_tqdm,
@@ -622,7 +627,7 @@ def build_gptq_config(
             use_orig_model_inference=args.gptq_use_orig_model_inference,
             percdamp=args.gptq_percdamp,
             verbose=args.verbose,
-            gptq_v2 = gptqv2,
+            gptq_v2=args.gptq_v2,
         )
     else:
         return GPTQConfig(
@@ -635,7 +640,7 @@ def build_gptq_config(
             use_orig_model_inference=args.gptq_use_orig_model_inference,
             percdamp=args.gptq_percdamp,
             verbose=args.verbose,
-            gptq_v2 = gptqv2,
+            gptq_v2=args.gptq_v2,
         )
 
 
