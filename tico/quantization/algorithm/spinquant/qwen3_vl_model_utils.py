@@ -29,12 +29,16 @@ class Qwen3VLSpinQuantComponents:
         language_model: Qwen3-VL text model.
         text_layers: Text decoder layers.
         lm_head: Final language modeling head.
+        visual_model: Qwen3-VL vision model.
+        vision_blocks: Vision transformer blocks.
         visual_deepstack_mergers: DeepStack visual merger modules.
     """
 
     language_model: nn.Module
     text_layers: nn.ModuleList
     lm_head: nn.Linear
+    visual_model: nn.Module
+    vision_blocks: nn.ModuleList
     visual_deepstack_mergers: nn.ModuleList
 
 
@@ -107,6 +111,25 @@ def require_linear_attr(module: nn.Module, attr_name: str) -> nn.Linear:
     return value
 
 
+def _should_resolve_deepstack_mergers(config: Qwen3VLSpinQuantConfig) -> bool:
+    """
+    Return whether DeepStack merger modules are needed by the active options.
+
+    Parameters:
+        config: Qwen3-VL SpinQuant configuration.
+
+    Returns:
+        True if the conversion path needs DeepStack merger references.
+    """
+    return any(
+        (
+            bool(getattr(config, "fuse_deepstack_visual_outputs", False)),
+            bool(getattr(config, "enable_vision_r1", False)),
+            bool(getattr(config, "fuse_vision_layer_norms", False)),
+        )
+    )
+
+
 def resolve_qwen3_vl_spinquant_components(
     model: nn.Module,
     config: Qwen3VLSpinQuantConfig,
@@ -127,8 +150,10 @@ def resolve_qwen3_vl_spinquant_components(
     language_model = get_module_by_path(model, config.language_model_attr)
     text_layers = get_module_by_path(model, config.text_layers_attr)
     lm_head = get_module_by_path(model, config.lm_head_attr)
+    visual_model = get_module_by_path(model, config.visual_model_attr)
+    vision_blocks = get_module_by_path(model, config.vision_blocks_attr)
 
-    if config.fuse_deepstack_visual_outputs:
+    if _should_resolve_deepstack_mergers(config):
         visual_deepstack_mergers = get_module_by_path(
             model,
             config.visual_deepstack_mergers_attr,
@@ -154,6 +179,18 @@ def resolve_qwen3_vl_spinquant_components(
             f"got {type(lm_head).__name__}."
         )
 
+    if not isinstance(visual_model, nn.Module):
+        raise TypeError(
+            f"{config.visual_model_attr!r} must resolve to nn.Module, "
+            f"got {type(visual_model).__name__}."
+        )
+
+    if not isinstance(vision_blocks, nn.ModuleList):
+        raise TypeError(
+            f"{config.vision_blocks_attr!r} must resolve to nn.ModuleList, "
+            f"got {type(vision_blocks).__name__}."
+        )
+
     if not isinstance(visual_deepstack_mergers, nn.ModuleList):
         raise TypeError(
             f"{config.visual_deepstack_mergers_attr!r} must resolve to nn.ModuleList, "
@@ -164,6 +201,8 @@ def resolve_qwen3_vl_spinquant_components(
         language_model=language_model,
         text_layers=text_layers,
         lm_head=lm_head,
+        visual_model=visual_model,
+        vision_blocks=vision_blocks,
         visual_deepstack_mergers=visual_deepstack_mergers,
     )
 
@@ -248,6 +287,8 @@ def validate_qwen3_vl_for_spinquant(
 
     if not hasattr(model_config, "text_config"):
         raise ValueError("Qwen3-VL SpinQuant requires `model.config.text_config`.")
+    if not hasattr(model_config, "vision_config"):
+        raise ValueError("Qwen3-VL SpinQuant requires `model.config.vision_config`.")
 
     components = resolve_qwen3_vl_spinquant_components(model, config)
 
@@ -282,10 +323,22 @@ def validate_qwen3_vl_for_spinquant(
         for attr_name in ("gate_proj", "up_proj", "down_proj"):
             require_linear_attr(layer.mlp, attr_name)
 
-    if config.fuse_deepstack_visual_outputs:
+    if any(
+        (
+            bool(getattr(config, "fuse_vision_layer_norms", False)),
+            bool(getattr(config, "enable_vision_r1", False)),
+            bool(getattr(config, "enable_vision_r2", False)),
+        )
+    ):
+        _validate_qwen3_vl_vision_modules(components)
+
+    if _should_resolve_deepstack_mergers(config):
         for merger_idx, merger in enumerate(components.visual_deepstack_mergers):
             try:
+                require_linear_attr(merger, "linear_fc1")
                 require_linear_attr(merger, "linear_fc2")
+                if not hasattr(merger, "norm"):
+                    raise AttributeError("Expected merger to expose `norm`.")
             except Exception as exc:
                 raise type(exc)(
                     f"Invalid DeepStack merger {merger_idx}: {exc}"
@@ -296,3 +349,59 @@ def validate_qwen3_vl_for_spinquant(
     if require_spin_runtime:
         require_linear_attr(components.language_model, "rotate_embedding")
         require_linear_attr(model, "rotate_lm_head")
+
+
+def _validate_qwen3_vl_vision_modules(
+    components: Qwen3VLSpinQuantComponents,
+) -> None:
+    """
+    Validate vision modules used by optional vision-side SpinQuant.
+
+    Parameters:
+        components: Resolved Qwen3-VL components.
+
+    Raises:
+        AttributeError: If an expected submodule is missing.
+        TypeError: If an expected submodule has an invalid type.
+    """
+    visual = components.visual_model
+
+    if not hasattr(visual, "patch_embed"):
+        raise AttributeError("Expected vision model to expose `patch_embed`.")
+    if not hasattr(visual.patch_embed, "proj"):
+        raise AttributeError("Expected vision patch_embed to expose `proj`.")
+    if not isinstance(visual.patch_embed.proj, nn.Conv3d):
+        raise TypeError(
+            "Expected vision patch_embed.proj to be nn.Conv3d, "
+            f"got {type(visual.patch_embed.proj).__name__}."
+        )
+
+    if not hasattr(visual, "pos_embed"):
+        raise AttributeError("Expected vision model to expose `pos_embed`.")
+    if not isinstance(visual.pos_embed, nn.Embedding):
+        raise TypeError(
+            "Expected vision pos_embed to be nn.Embedding, "
+            f"got {type(visual.pos_embed).__name__}."
+        )
+
+    if not hasattr(visual, "merger"):
+        raise AttributeError("Expected vision model to expose `merger`.")
+    require_linear_attr(visual.merger, "linear_fc1")
+    require_linear_attr(visual.merger, "linear_fc2")
+    if not hasattr(visual.merger, "norm"):
+        raise AttributeError("Expected vision merger to expose `norm`.")
+
+    for block_idx, block in enumerate(components.vision_blocks):
+        if not hasattr(block, "norm1"):
+            raise AttributeError(f"Vision block {block_idx} is missing `norm1`.")
+        if not hasattr(block, "norm2"):
+            raise AttributeError(f"Vision block {block_idx} is missing `norm2`.")
+        if not hasattr(block, "attn"):
+            raise AttributeError(f"Vision block {block_idx} is missing `attn`.")
+        if not hasattr(block, "mlp"):
+            raise AttributeError(f"Vision block {block_idx} is missing `mlp`.")
+
+        require_linear_attr(block.attn, "qkv")
+        require_linear_attr(block.attn, "proj")
+        require_linear_attr(block.mlp, "linear_fc1")
+        require_linear_attr(block.mlp, "linear_fc2")

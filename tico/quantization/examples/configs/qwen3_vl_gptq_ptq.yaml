@@ -31,11 +31,19 @@ pipeline:
   - name: spinquant
     enabled: true
     init_method: random
-    disable_r1: false
-    disable_r2: false
-    disable_deepstack_fusion: false
     r1_path: null
     r2_map_path: null
+    enable_r1: true
+    enable_r2: true
+    fuse_deepstack_visual_outputs: true
+    vision_init_method: random
+    vision_r1_path: null
+    vision_r2_map_path: null
+    enable_vision_r1: true
+    enable_vision_r2: true
+    fuse_vision_layer_norms: true
+    require_vision_r1_layernorm_compatible: true
+    vision_rotation_tolerance: 1.0e-4
 
   - name: smoothquant
     enabled: false
@@ -76,6 +84,7 @@ pipeline:
     vision_patch_embed_weight: uint8
     embedding_weight: uint8
     lm_head_weight: uint8
+    spin_rotation_weight: int16
     norm: int16
     norm_weight: int16
     strict_wrap: true

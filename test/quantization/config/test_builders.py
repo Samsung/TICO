@@ -173,6 +173,7 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
             vision_patch_embed_weight=affine(DType.uint(8)),
             embedding_weight=affine(DType.uint(8)),
             lm_head_weight=affine(DType.uint(8)),
+            spin_rotation_weight=affine(DType.int(16)),
             norm=affine(DType.int(16)),
             norm_weight=affine(DType.int(16)),
             strict_wrap=False,
@@ -195,8 +196,33 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
             DType.uint(4),
         )
         self.assertEqual(
+            cfg.overrides["model"]["language_model"]["rotate_embedding"]["weight"][  # type: ignore[index]
+                "dtype"
+            ],
+            DType.int(16),
+        )
+        self.assertEqual(
+            cfg.overrides["rotate_lm_head"]["weight"]["dtype"],  # type: ignore[index]
+            DType.int(16),
+        )
+        self.assertEqual(
             cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM  # type: ignore[index]
         )
+
+    def test_build_qwen3_vl_ptq_config_omits_spin_rotation_when_not_requested(self):
+        cfg = build_qwen3_vl_ptq_config(
+            num_vision_blocks=1,
+            num_text_layers=1,
+            num_deepstack_mergers=0,
+            model_args={"vision": {"grid_thw": (1, 1, 1)}},
+            linear_weight=affine(DType.uint(4)),
+        )
+
+        self.assertNotIn(
+            "rotate_embedding",
+            cfg.overrides["model"]["language_model"],  # type: ignore[index]
+        )
+        self.assertNotIn("rotate_lm_head", cfg.overrides)  # type: ignore[operator]
 
 
 if __name__ == "__main__":

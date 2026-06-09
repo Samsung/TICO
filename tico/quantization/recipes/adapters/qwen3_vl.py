@@ -184,6 +184,9 @@ class Qwen3VLAdapter(ModelAdapter):
             ),
             embedding_weight=quant_spec_from_config(stage_cfg.get("embedding_weight")),
             lm_head_weight=quant_spec_from_config(stage_cfg.get("lm_head_weight")),
+            spin_rotation_weight=quant_spec_from_config(
+                stage_cfg.get("spin_rotation_weight")
+            ),
             norm=quant_spec_from_config(stage_cfg.get("norm")),
             norm_weight=quant_spec_from_config(stage_cfg.get("norm_weight")),
             strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
@@ -222,21 +225,43 @@ class Qwen3VLAdapter(ModelAdapter):
 
         r1 = _load_torch_object(stage_cfg.get("r1_path"))
         r2_map = _load_torch_object(stage_cfg.get("r2_map_path"))
+        vision_r1 = _load_torch_object(stage_cfg.get("vision_r1_path"))
+        vision_r2_map = _load_torch_object(stage_cfg.get("vision_r2_map_path"))
+
+        enable_r1 = bool(stage_cfg.get("enable_r1", True))
+        enable_r2 = bool(stage_cfg.get("enable_r2", True))
+        enable_vision_r1 = bool(stage_cfg.get("enable_vision_r1", False))
+        enable_vision_r2 = bool(stage_cfg.get("enable_vision_r2", False))
+        fuse_vision_layer_norms = bool(
+            stage_cfg.get("fuse_vision_layer_norms", enable_vision_r1)
+        )
 
         spinquant_config = Qwen3VLSpinQuantConfig(
             init_method=stage_cfg.get("init_method", "random"),
             r1=r1,
             r2_map=r2_map,
-            apply_r1=not bool(stage_cfg.get("disable_r1", False)),
-            apply_r2=not bool(stage_cfg.get("disable_r2", False)),
-            fuse_deepstack_visual_outputs=not bool(
-                stage_cfg.get("disable_deepstack_fusion", False)
+            enable_r1=enable_r1,
+            enable_r2=enable_r2,
+            fuse_deepstack_visual_outputs=bool(
+                stage_cfg.get("fuse_deepstack_visual_outputs", True)
             ),
             show_progress=bool(
                 stage_cfg.get(
                     "show_progress",
                     ctx.cfg.get("runtime", {}).get("show_progress", True),
                 )
+            ),
+            fuse_vision_layer_norms=fuse_vision_layer_norms,
+            enable_vision_r1=enable_vision_r1,
+            enable_vision_r2=enable_vision_r2,
+            vision_init_method=stage_cfg.get("vision_init_method"),
+            vision_r1=vision_r1,
+            vision_r2_map=vision_r2_map,
+            require_vision_r1_layernorm_compatible=bool(
+                stage_cfg.get("require_vision_r1_layernorm_compatible", True)
+            ),
+            vision_rotation_tolerance=float(
+                stage_cfg.get("vision_rotation_tolerance", 1e-4)
             ),
         )
 

@@ -28,13 +28,22 @@ from tico.quantization.algorithm.spinquant.qwen3_vl_rotation_utils import (
     apply_qwen3_vl_lm_head_side_rotation,
     build_qwen3_vl_r1,
     build_qwen3_vl_r2,
+    build_qwen3_vl_vision_r1,
+    build_qwen3_vl_vision_r2,
     extract_and_reset_qwen3_vl_final_norm_scale,
     fuse_qwen3_vl_text_layer_norms,
+    fuse_qwen3_vl_vision_layer_norms,
     get_qwen3_vl_head_dim,
     get_qwen3_vl_text_hidden_size,
+    get_qwen3_vl_vision_head_dim,
+    get_qwen3_vl_vision_hidden_size,
     rotate_qwen3_vl_deepstack_outputs,
     rotate_qwen3_vl_ov_r2,
     rotate_qwen3_vl_text_layer_r1,
+    rotate_qwen3_vl_vision_layer_r1,
+    rotate_qwen3_vl_vision_merger_inputs,
+    rotate_qwen3_vl_vision_ov_r2,
+    rotate_qwen3_vl_vision_patch_and_position_embeddings,
 )
 from tico.quantization.algorithm.spinquant.rotation_utils import (
     infer_device,
@@ -58,8 +67,8 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
         - model.language_model.rotate_embedding
         - rotate_lm_head
 
-    Decoder-layer R1/R2 rotations and DeepStack output rotations are fused into
-    weights during conversion.
+    Decoder-layer text R1/R2 rotations, optional vision-tower rotations, and
+    DeepStack output rotations are fused into weights during conversion.
     """
 
     def __init__(self, config: Qwen3VLSpinQuantConfig):
@@ -131,11 +140,13 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
         )
 
         fuse_qwen3_vl_text_layer_norms(model, self.config)
+        if self.config.fuse_vision_layer_norms:
+            fuse_qwen3_vl_vision_layer_norms(model, self.config)
 
         hidden_size = get_qwen3_vl_text_hidden_size(model)
         device = infer_device(model)
 
-        if self.config.apply_r1:
+        if self.config.enable_r1:
             r1 = build_qwen3_vl_r1(model, self.config)
         else:
             r1 = torch.eye(hidden_size, device=device, dtype=torch.float64)
@@ -162,14 +173,14 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
             iterator = tqdm(
                 iterator,
                 total=len(layers),
-                desc="Applying Qwen3-VL SpinQuant rotations",
+                desc="Applying Qwen3-VL text SpinQuant rotations",
             )
 
         for layer_idx, layer in iterator:
-            if self.config.apply_r1:
+            if self.config.enable_r1:
                 rotate_qwen3_vl_text_layer_r1(layer, r1)
 
-            if self.config.apply_r2:
+            if self.config.enable_r2:
                 r2 = build_qwen3_vl_r2(
                     init_method=self.config.init_method,
                     r2_map=self.config.r2_map,
@@ -179,11 +190,73 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
                 )
                 rotate_qwen3_vl_ov_r2(layer, r2, head_dim)
 
-        if self.config.apply_r1:
+        if self.config.enable_vision_r1 or self.config.enable_vision_r2:
+            self._convert_vision_tower(model)
+
+        if self.config.enable_r1:
             rotate_qwen3_vl_deepstack_outputs(model, self.config, r1)
 
         assert_tied_word_embedding(model, self.config)
         return model
+
+    @torch.no_grad()
+    def _convert_vision_tower(self, model: nn.Module) -> None:
+        """
+        Apply optional vision-side SpinQuant rotations to the Qwen3-VL vision tower.
+
+        Parameters:
+            model: Prepared SpinQwen3VL model.
+        """
+        assert isinstance(self.config, Qwen3VLSpinQuantConfig)
+        components = resolve_qwen3_vl_spinquant_components(model, self.config)
+        vision_layers = components.vision_blocks
+        vision_head_dim = get_qwen3_vl_vision_head_dim(model)
+        device = infer_device(model)
+
+        vision_method = self.config.vision_init_method or self.config.init_method
+
+        if self.config.enable_vision_r1:
+            vision_hidden_size = get_qwen3_vl_vision_hidden_size(model)
+            vision_r1 = build_qwen3_vl_vision_r1(model, self.config)
+        else:
+            vision_hidden_size = get_qwen3_vl_vision_hidden_size(model)
+            vision_r1 = torch.eye(
+                vision_hidden_size,
+                device=device,
+                dtype=torch.float64,
+            )
+
+        if self.config.enable_vision_r1:
+            rotate_qwen3_vl_vision_patch_and_position_embeddings(
+                model,
+                self.config,
+                vision_r1,
+            )
+
+        iterator = enumerate(vision_layers)
+        if self.config.show_progress:
+            iterator = tqdm(
+                iterator,
+                total=len(vision_layers),
+                desc="Applying Qwen3-VL vision SpinQuant rotations",
+            )
+
+        for layer_idx, layer in iterator:
+            if self.config.enable_vision_r1:
+                rotate_qwen3_vl_vision_layer_r1(layer, vision_r1)
+
+            if self.config.enable_vision_r2:
+                vision_r2 = build_qwen3_vl_vision_r2(
+                    init_method=vision_method,
+                    r2_map=self.config.vision_r2_map,
+                    layer_idx=layer_idx,
+                    head_dim=vision_head_dim,
+                    device=device,
+                )
+                rotate_qwen3_vl_vision_ov_r2(layer, vision_r2, vision_head_dim)
+
+        if self.config.enable_vision_r1:
+            rotate_qwen3_vl_vision_merger_inputs(model, self.config, vision_r1)
 
     @torch.no_grad()
     def _convert_to_spin_qwen3_vl(
@@ -255,11 +328,11 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
         """
         Force the SpinQwen3VL input embedding and LM head to share storage.
 
-        `load_state_dict` copies tensor values into existing Parameter
-        objects and does not preserve aliasing between tied parameters. Some
-        transformers versions also do not materialize Qwen3-VL ties through
-        `tie_weights()` for small synthetic configs. SpinQuant relies on the
-        tied-weight invariant, so the alias is restored explicitly here.
+        `load_state_dict` copies tensor values into existing Parameter objects
+        and does not preserve aliasing between tied parameters. Some transformers
+        versions also do not materialize Qwen3-VL ties through `tie_weights()`
+        for small synthetic configs. SpinQuant relies on the tied-weight
+        invariant, so the alias is restored explicitly here.
 
         Parameters:
             model: Prepared SpinQwen3VL model to update in-place.

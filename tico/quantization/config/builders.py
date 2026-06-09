@@ -360,6 +360,7 @@ def _build_qwen3_vl_overrides(
     vision_patch_embed_weight: Optional[QuantSpec],
     embedding_weight: Optional[QuantSpec],
     lm_head_weight: Optional[QuantSpec],
+    spin_rotation_weight: Optional[QuantSpec],
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
 ) -> Dict[str, Any]:
@@ -414,6 +415,15 @@ def _build_qwen3_vl_overrides(
     if embedding_override:
         _set_nested_override(text_overrides, ("embed_tokens",), embedding_override)
 
+    spin_rotation_override = _build_weight_override(spin_rotation_weight)
+    if spin_rotation_override:
+        _set_nested_override(
+            text_overrides,
+            ("rotate_embedding",),
+            spin_rotation_override,
+        )
+        _set_nested_override(overrides, ("rotate_lm_head",), spin_rotation_override)
+
     text_overrides["layers"] = {}
     for layer_idx in range(num_text_layers):
         text_overrides["layers"][str(layer_idx)] = _build_qwen3_vl_text_layer_overrides(
@@ -450,6 +460,7 @@ def build_qwen3_vl_ptq_config(
     vision_patch_embed_weight: Optional[QuantSpec] = None,
     embedding_weight: Optional[QuantSpec] = None,
     lm_head_weight: Optional[QuantSpec] = None,
+    spin_rotation_weight: Optional[QuantSpec] = None,
     norm: Optional[QuantSpec] = None,
     norm_weight: Optional[QuantSpec] = None,
     strict_wrap: bool = True,
@@ -467,6 +478,7 @@ def build_qwen3_vl_ptq_config(
         vision_patch_embed_weight: Weight spec for vision patch embedding.
         embedding_weight: Weight spec for token embeddings.
         lm_head_weight: Weight spec for the language modeling head.
+        spin_rotation_weight: Weight spec for Qwen3-VL SpinQuant runtime rotations.
         norm: Activation spec for norm module internals.
         norm_weight: Weight spec for norm affine parameters.
         strict_wrap: If True, unsupported modules raise during wrapping.
@@ -485,6 +497,7 @@ def build_qwen3_vl_ptq_config(
         vision_patch_embed_weight=vision_patch_embed_weight,
         embedding_weight=embedding_weight,
         lm_head_weight=lm_head_weight,
+        spin_rotation_weight=spin_rotation_weight,
         norm=norm,
         norm_weight=norm_weight,
     )

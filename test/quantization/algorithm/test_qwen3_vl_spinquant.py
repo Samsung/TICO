@@ -45,18 +45,31 @@ except (AttributeError, ImportError, ModuleNotFoundError) as exc:
 
 
 class Qwen3VLSpinQuantConfigTest(unittest.TestCase):
-    def test_config_default_is_random(self):
+    def test_config_default_is_random_and_text_enabled(self):
         cfg = Qwen3VLSpinQuantConfig()
         self.assertEqual(cfg.init_method, "random")
         self.assertEqual(cfg.name, "spinquant")
+        self.assertTrue(cfg.enable_r1)
+        self.assertTrue(cfg.enable_r2)
+        self.assertFalse(cfg.fuse_vision_layer_norms)
+        self.assertFalse(cfg.enable_vision_r1)
+        self.assertFalse(cfg.enable_vision_r2)
 
     def test_config_accepts_hadamard(self):
         cfg = Qwen3VLSpinQuantConfig(init_method="hadamard")
         self.assertEqual(cfg.init_method, "hadamard")
 
-    def test_config_requires_r1_for_external(self):
+    def test_config_requires_r1_for_external_text_r1(self):
         with self.assertRaises(ValueError):
             Qwen3VLSpinQuantConfig(init_method="external")
+
+    def test_config_allows_external_mode_when_text_r1_is_disabled(self):
+        cfg = Qwen3VLSpinQuantConfig(
+            init_method="external",
+            enable_r1=False,
+            show_progress=False,
+        )
+        self.assertFalse(cfg.enable_r1)
 
     def test_config_rejects_non_tensor_r1(self):
         with self.assertRaises(TypeError):
@@ -78,6 +91,45 @@ class Qwen3VLSpinQuantConfigTest(unittest.TestCase):
                 init_method="random",
                 r2_map={"model.language_model.layers.0.self_attn.R2": "invalid"},  # type: ignore[dict-item]
             )
+
+    def test_config_requires_vision_norm_fusion_for_vision_r1(self):
+        with self.assertRaises(ValueError):
+            Qwen3VLSpinQuantConfig(enable_vision_r1=True)
+
+    def test_config_requires_vision_r1_for_external_vision_r1(self):
+        with self.assertRaises(ValueError):
+            Qwen3VLSpinQuantConfig(
+                enable_vision_r1=True,
+                fuse_vision_layer_norms=True,
+                vision_init_method="external",
+            )
+
+    def test_config_accepts_vision_r2_without_vision_r1(self):
+        cfg = Qwen3VLSpinQuantConfig(
+            enable_vision_r2=True,
+            vision_init_method="external",
+            vision_r2_map={
+                "model.visual.blocks.0.attn.R2": torch.eye(4, dtype=torch.float64)
+            },
+        )
+        self.assertTrue(cfg.enable_vision_r2)
+        self.assertFalse(cfg.enable_vision_r1)
+
+    def test_config_rejects_non_tensor_vision_r1(self):
+        with self.assertRaises(TypeError):
+            Qwen3VLSpinQuantConfig(
+                vision_r1="invalid",  # type: ignore[arg-type]
+            )
+
+    def test_config_rejects_non_tensor_vision_r2_value(self):
+        with self.assertRaises(TypeError):
+            Qwen3VLSpinQuantConfig(
+                vision_r2_map={"model.visual.blocks.0.attn.R2": "invalid"},  # type: ignore[dict-item]
+            )
+
+    def test_config_rejects_non_positive_vision_rotation_tolerance(self):
+        with self.assertRaises(ValueError):
+            Qwen3VLSpinQuantConfig(vision_rotation_tolerance=0.0)
 
 
 @unittest.skipUnless(QWEN3_VL_AVAILABLE, QWEN3_VL_SKIP_REASON)
@@ -182,12 +234,6 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         """
         Force the synthetic Qwen3-VL model to match the requested tie setting.
 
-        Some transformers versions do not automatically tie ``lm_head`` to
-        ``model.language_model.embed_tokens`` when a model is constructed from a
-        tiny synthetic config. Real checkpoints can still be tied after loading,
-        but unit tests need the in-memory test model to expose the same storage
-        alias before SpinQuant validation runs.
-
         Parameters:
             model: Qwen3-VL model to update in-place.
             tie_word_embeddings: Whether to tie or explicitly untie the weights.
@@ -219,11 +265,6 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         """
         Patch tiny Qwen3-VL RoPE config fields for transformers version drift.
 
-        Some Qwen3-VL releases read ``text_config.rope_parameters`` while other
-        releases read ``text_config.rope_scaling`` directly. Unit tests construct
-        a tiny synthetic config, so both fields are populated to avoid depending
-        on one specific transformers minor version.
-
         Parameters:
             config: Qwen3-VL top-level configuration to patch in-place.
         """
@@ -253,12 +294,6 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     def _force_tied_qwen3_vl_word_embeddings(self, model: torch.nn.Module) -> None:
         """
         Force Qwen3-VL input embeddings and LM head to share storage.
-
-        Some transformers releases do not tie synthetic Qwen3-VL models even
-        when ``tie_word_embeddings=True`` is passed to the tiny test config.
-        The production SpinQuant path assumes tied embeddings, so the test
-        helper explicitly creates the same storage alias used by real tied
-        checkpoints.
 
         Parameters:
             model: Target Qwen3-VL model.
@@ -358,12 +393,37 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
             for idx in range(int(text_config.num_hidden_layers))
         }
 
+    def _make_identity_vision_r2_map(
+        self, model: torch.nn.Module
+    ) -> dict[str, torch.Tensor]:
+        """
+        Build an identity R2 map for all Qwen3-VL vision blocks.
+
+        Parameters:
+            model: Target Qwen3-VL model.
+
+        Returns:
+            Mapping from supported vision R2 keys to identity matrices.
+        """
+        vision_config = model.config.vision_config
+        hidden_size = int(vision_config.hidden_size)
+        num_heads = int(vision_config.num_heads)
+        head_dim = hidden_size // num_heads
+        depth = int(getattr(vision_config, "depth"))
+        return {
+            f"model.visual.blocks.{idx}.attn.R2": torch.eye(
+                head_dim,
+                dtype=torch.float64,
+            )
+            for idx in range(depth)
+        }
+
     def _make_external_config(
         self,
         model: torch.nn.Module,
         r1: torch.Tensor,
         *,
-        apply_r2: bool = True,
+        enable_r2: bool = True,
     ) -> Qwen3VLSpinQuantConfig:
         """
         Build an external-rotation Qwen3-VL SpinQuant configuration.
@@ -371,7 +431,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         Parameters:
             model: Target Qwen3-VL model.
             r1: Global hidden-dimension rotation.
-            apply_r2: Whether to apply identity R2 rotations.
+            enable_r2: Whether to apply identity R2 rotations.
 
         Returns:
             A Qwen3VLSpinQuantConfig instance.
@@ -379,9 +439,87 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         return Qwen3VLSpinQuantConfig(
             init_method="external",
             r1=r1,
-            r2_map=self._make_identity_r2_map(model) if apply_r2 else None,
-            apply_r2=apply_r2,
+            r2_map=self._make_identity_r2_map(model) if enable_r2 else None,
+            enable_r2=enable_r2,
             show_progress=False,
+        )
+
+    def _right_multiply_blockwise(
+        self,
+        weight: torch.Tensor,
+        rotation: torch.Tensor,
+        block_size: int,
+    ) -> torch.Tensor:
+        """
+        Apply the same input-axis rotation to each contiguous input block.
+
+        Parameters:
+            weight: Linear weight with shape [out_features, in_features].
+            rotation: Block rotation matrix.
+            block_size: Block size on the input axis.
+
+        Returns:
+            The rotated weight tensor.
+        """
+        out_features = weight.shape[0]
+        num_blocks = weight.shape[1] // block_size
+        working = weight.to(torch.float64).reshape(out_features, num_blocks, block_size)
+        updated = working @ rotation.to(device=weight.device, dtype=torch.float64)
+        return updated.reshape_as(weight).to(device=weight.device, dtype=weight.dtype)
+
+    def _left_multiply_conv3d_output(
+        self,
+        weight: torch.Tensor,
+        rotation_t: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply an output-channel rotation to a Conv3d weight.
+
+        Parameters:
+            weight: Conv3d weight tensor.
+            rotation_t: Transposed output rotation matrix.
+
+        Returns:
+            The rotated Conv3d weight tensor.
+        """
+        out_channels = weight.shape[0]
+        flat = weight.to(torch.float64).reshape(out_channels, -1)
+        updated = rotation_t.to(device=weight.device, dtype=torch.float64) @ flat
+        return updated.reshape_as(weight).to(device=weight.device, dtype=weight.dtype)
+
+    def _expected_qkv_v_weight_after_r2(
+        self,
+        v_weight: torch.Tensor,
+        rotation: torch.Tensor,
+        *,
+        vision_hidden_size: int,
+        head_dim: int,
+    ) -> torch.Tensor:
+        """
+        Compute the expected V-slice weight after vision R2 fusion.
+
+        Parameters:
+            v_weight: V slice of the fused QKV projection.
+            rotation: Per-head R2 matrix.
+            vision_hidden_size: Vision hidden dimension.
+            head_dim: Per-head hidden dimension.
+
+        Returns:
+            The expected rotated V-slice weight.
+        """
+        in_features = v_weight.shape[1]
+        num_heads = vision_hidden_size // head_dim
+        working_t = v_weight.to(torch.float64).T.reshape(
+            in_features,
+            num_heads,
+            head_dim,
+        )
+        updated_t = working_t @ rotation.to(
+            device=v_weight.device,
+            dtype=torch.float64,
+        )
+        return updated_t.reshape(in_features, vision_hidden_size).T.to(
+            device=v_weight.device, dtype=v_weight.dtype
         )
 
     @torch.inference_mode()
@@ -425,10 +563,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
             )
         )
         self.assertTrue(
-            torch.allclose(
-                q_m.lm_head.weight,
-                original_state["lm_head.weight"],
-            )
+            torch.allclose(q_m.lm_head.weight, original_state["lm_head.weight"])
         )
         self.assertTrue(
             torch.allclose(
@@ -525,7 +660,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model = self._build_qwen3_vl_model()
         hidden_size = int(model.config.text_config.hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
-        cfg = self._make_external_config(model, r1, apply_r2=True)
+        cfg = self._make_external_config(model, r1, enable_r2=True)
 
         input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
@@ -558,7 +693,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model = self._build_qwen3_vl_model()
         hidden_size = int(model.config.text_config.hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
-        cfg = self._make_external_config(model, r1, apply_r2=False)
+        cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
         final_norm_scale = q_m.model.language_model.norm.weight.detach().clone()
@@ -591,7 +726,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model = self._build_qwen3_vl_model()
         hidden_size = int(model.config.text_config.hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
-        cfg = self._make_external_config(model, r1, apply_r2=False)
+        cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
         q_m = convert(q_m)
@@ -622,7 +757,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model = self._build_qwen3_vl_model()
         hidden_size = int(model.config.text_config.hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
-        cfg = self._make_external_config(model, r1, apply_r2=False)
+        cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
         before_q = (
@@ -667,7 +802,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
         hidden_size = int(model.config.text_config.hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
-        cfg = self._make_external_config(model, r1, apply_r2=False)
+        cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
         main_before = q_m.model.visual.merger.linear_fc2.weight.detach().clone()
@@ -687,13 +822,218 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         self.assertTrue(torch.allclose(deep_after, expected_deep))
 
     @torch.inference_mode()
+    def test_convert_fuses_vision_norms_when_requested(self):
+        model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
+        cfg = Qwen3VLSpinQuantConfig(
+            enable_r1=False,
+            enable_r2=False,
+            fuse_deepstack_visual_outputs=False,
+            fuse_vision_layer_norms=True,
+            show_progress=False,
+        )
+
+        q_m = prepare(model, cfg)
+        block = q_m.model.visual.blocks[0]
+        with torch.no_grad():
+            block.norm1.weight.copy_(
+                torch.linspace(1.0, 2.0, block.norm1.weight.numel())
+            )
+            block.norm2.weight.copy_(
+                torch.linspace(2.0, 3.0, block.norm2.weight.numel())
+            )
+
+        qkv_before = block.attn.qkv.weight.detach().clone()
+        norm1_gamma = block.norm1.weight.detach().clone()
+
+        q_m = convert(q_m)
+
+        expected_qkv = qkv_before * norm1_gamma.to(qkv_before.dtype).unsqueeze(0)
+        self.assertTrue(torch.allclose(block.attn.qkv.weight, expected_qkv))
+        self.assertTrue(
+            torch.allclose(block.norm1.weight, torch.ones_like(block.norm1.weight))
+        )
+        self.assertTrue(
+            torch.allclose(block.norm2.weight, torch.ones_like(block.norm2.weight))
+        )
+        self.assertTrue(
+            torch.allclose(
+                q_m.model.visual.merger.norm.weight,
+                torch.ones_like(q_m.model.visual.merger.norm.weight),
+            )
+        )
+        self.assertTrue(
+            torch.allclose(
+                q_m.model.visual.deepstack_merger_list[0].norm.weight,
+                torch.ones_like(q_m.model.visual.deepstack_merger_list[0].norm.weight),
+            )
+        )
+
+    @torch.inference_mode()
+    def test_convert_vision_r1_rotates_vision_weights_and_merger_inputs(self):
+        model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
+        vision_hidden_size = int(model.config.vision_config.hidden_size)
+        vision_r1 = self._make_permutation_rotation(vision_hidden_size)
+        cfg = Qwen3VLSpinQuantConfig(
+            init_method="random",
+            enable_r1=False,
+            enable_r2=False,
+            fuse_deepstack_visual_outputs=False,
+            fuse_vision_layer_norms=True,
+            enable_vision_r1=True,
+            vision_init_method="external",
+            vision_r1=vision_r1,
+            show_progress=False,
+        )
+
+        q_m = prepare(model, cfg)
+        visual = q_m.model.visual
+        block = visual.blocks[0]
+        patch_before = visual.patch_embed.proj.weight.detach().clone()
+        pos_before = visual.pos_embed.weight.detach().clone()
+        qkv_before = block.attn.qkv.weight.detach().clone()
+        proj_before = block.attn.proj.weight.detach().clone()
+        fc1_before = block.mlp.linear_fc1.weight.detach().clone()
+        fc2_before = block.mlp.linear_fc2.weight.detach().clone()
+        merger_fc1_before = visual.merger.linear_fc1.weight.detach().clone()
+        deep_fc1_before = (
+            visual.deepstack_merger_list[0].linear_fc1.weight.detach().clone()
+        )
+
+        q_m = convert(q_m)
+
+        expected_patch = self._left_multiply_conv3d_output(patch_before, vision_r1.T)
+        expected_pos = (
+            pos_before.to(torch.float64)
+            @ vision_r1.to(device=pos_before.device, dtype=torch.float64)
+        ).to(device=pos_before.device, dtype=pos_before.dtype)
+        expected_qkv = (
+            qkv_before.to(torch.float64)
+            @ vision_r1.to(device=qkv_before.device, dtype=torch.float64)
+        ).to(
+            device=qkv_before.device,
+            dtype=qkv_before.dtype,
+        )
+        expected_proj = (
+            vision_r1.T.to(device=proj_before.device, dtype=torch.float64)
+            @ proj_before.to(torch.float64)
+        ).to(
+            device=proj_before.device,
+            dtype=proj_before.dtype,
+        )
+        expected_fc1 = (
+            fc1_before.to(torch.float64)
+            @ vision_r1.to(device=fc1_before.device, dtype=torch.float64)
+        ).to(
+            device=fc1_before.device,
+            dtype=fc1_before.dtype,
+        )
+        expected_fc2 = (
+            vision_r1.T.to(device=fc2_before.device, dtype=torch.float64)
+            @ fc2_before.to(torch.float64)
+        ).to(
+            device=fc2_before.device,
+            dtype=fc2_before.dtype,
+        )
+        expected_merger_fc1 = self._right_multiply_blockwise(
+            merger_fc1_before,
+            vision_r1,
+            vision_hidden_size,
+        )
+        expected_deep_fc1 = self._right_multiply_blockwise(
+            deep_fc1_before,
+            vision_r1,
+            vision_hidden_size,
+        )
+
+        self.assertTrue(torch.allclose(visual.patch_embed.proj.weight, expected_patch))
+        self.assertTrue(torch.allclose(visual.pos_embed.weight, expected_pos))
+        self.assertTrue(torch.allclose(block.attn.qkv.weight, expected_qkv))
+        self.assertTrue(torch.allclose(block.attn.proj.weight, expected_proj))
+        self.assertTrue(torch.allclose(block.mlp.linear_fc1.weight, expected_fc1))
+        self.assertTrue(torch.allclose(block.mlp.linear_fc2.weight, expected_fc2))
+        self.assertTrue(
+            torch.allclose(visual.merger.linear_fc1.weight, expected_merger_fc1)
+        )
+        self.assertTrue(
+            torch.allclose(
+                visual.deepstack_merger_list[0].linear_fc1.weight,
+                expected_deep_fc1,
+            )
+        )
+
+    @torch.inference_mode()
+    def test_convert_vision_r2_rotates_fused_qkv_v_slice_and_proj_input(self):
+        model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
+        vision_hidden_size = int(model.config.vision_config.hidden_size)
+        head_dim = vision_hidden_size // int(model.config.vision_config.num_heads)
+        vision_r2 = self._make_permutation_rotation(head_dim)
+        cfg = Qwen3VLSpinQuantConfig(
+            init_method="random",
+            enable_r1=False,
+            enable_r2=False,
+            fuse_deepstack_visual_outputs=False,
+            enable_vision_r2=True,
+            vision_init_method="external",
+            vision_r2_map={"model.visual.blocks.0.attn.R2": vision_r2},
+            show_progress=False,
+        )
+
+        q_m = prepare(model, cfg)
+        block = q_m.model.visual.blocks[0]
+        qkv_before = block.attn.qkv.weight.detach().clone()
+        proj_before = block.attn.proj.weight.detach().clone()
+
+        q_m = convert(q_m)
+
+        q_before = qkv_before[:vision_hidden_size]
+        k_before = qkv_before[vision_hidden_size : 2 * vision_hidden_size]
+        v_before = qkv_before[2 * vision_hidden_size : 3 * vision_hidden_size]
+        q_after = block.attn.qkv.weight[:vision_hidden_size]
+        k_after = block.attn.qkv.weight[vision_hidden_size : 2 * vision_hidden_size]
+        v_after = block.attn.qkv.weight[2 * vision_hidden_size : 3 * vision_hidden_size]
+
+        expected_v = self._expected_qkv_v_weight_after_r2(
+            v_before,
+            vision_r2,
+            vision_hidden_size=vision_hidden_size,
+            head_dim=head_dim,
+        )
+        expected_proj = self._right_multiply_blockwise(proj_before, vision_r2, head_dim)
+
+        self.assertTrue(torch.allclose(q_after, q_before))
+        self.assertTrue(torch.allclose(k_after, k_before))
+        self.assertTrue(torch.allclose(v_after, expected_v))
+        self.assertTrue(torch.allclose(block.attn.proj.weight, expected_proj))
+
+    @torch.inference_mode()
+    def test_external_vision_r1_rejects_non_layernorm_compatible_rotation(self):
+        model = self._build_qwen3_vl_model()
+        vision_hidden_size = int(model.config.vision_config.hidden_size)
+        bad_rotation = torch.eye(vision_hidden_size, dtype=torch.float64)
+        bad_rotation[0, 0] = -1.0
+        cfg = Qwen3VLSpinQuantConfig(
+            init_method="random",
+            enable_r1=False,
+            enable_r2=False,
+            fuse_vision_layer_norms=True,
+            enable_vision_r1=True,
+            vision_init_method="external",
+            vision_r1=bad_rotation,
+            show_progress=False,
+        )
+
+        q_m = prepare(model, cfg)
+        with self.assertRaises(ValueError):
+            convert(q_m)
+
+    @torch.inference_mode()
     def test_quantizer_direct_prepare_and_convert_with_identity_external_rotation(self):
         assert Qwen3VLSpinQuantQuantizer is not None
 
         model = self._build_qwen3_vl_model()
         hidden_size = int(model.config.text_config.hidden_size)
         r1 = torch.eye(hidden_size, dtype=torch.float64)
-        cfg = self._make_external_config(model, r1, apply_r2=True)
+        cfg = self._make_external_config(model, r1, enable_r2=True)
         quantizer = Qwen3VLSpinQuantQuantizer(cfg)
 
         q_m = quantizer.prepare(model)
