@@ -512,7 +512,8 @@ def parse_args():
         type=int,
         default=32,
         help="Maximum number of frames to sample from each video for Video-MME evaluation. "
-        "Default is 5 for fitting within max_position_embeddings (2048).",
+        "Keep in mind that increasing max number of frames leads to a decrease of pixels number per frame, "
+        "since the total token count should stay within the static context budget of the quantized model (max_position_embeddings=2048).",
     )
 
     return parser.parse_args()

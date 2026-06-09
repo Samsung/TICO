@@ -424,14 +424,21 @@ class Qwen3VLAdapter(ModelAdapter):
 
         videomme = eval_cfg.get("videomme", {})
         if videomme.get("enabled", False):
+            n_samples = int(videomme.get("n_samples", -1))
+            max_num_frames = int(videomme.get("max_num_frames", 32))
+            if max_num_frames <= 0:
+                raise ValueError(
+                    "evaluation.videomme.max_num_frames must be a positive integer."
+                )
+
             evaluate_and_print_video_mme(
                 model=ctx.model,
                 processor=ctx.processor,
                 device=str(ctx.device),
                 batch_size=int(videomme.get("batch_size", 1)),
                 max_new_tokens=int(videomme.get("max_new_tokens", 30)),
-                n_samples=int(videomme.get("n_samples", -1)),
-                max_num_frames=int(videomme.get("max_num_frames", -1)),
+                n_samples=n_samples if n_samples > 0 else None,
+                max_num_frames=max_num_frames,
                 use_cache=videomme.get("use_cache", None),
                 verbose=bool(videomme.get("verbose", eval_cfg.get("verbose", False))),
             )

@@ -700,9 +700,9 @@ def evaluate_vlm_on_tasks(
         eval_kwargs["limit"] = limit
     if use_cache is not None:
         eval_kwargs["use_cache"] = use_cache
-    if max_new_tokens is not None:
-        gen_kwargs = f"max_new_tokens={max_new_tokens}"
-        eval_kwargs["gen_kwargs"] = gen_kwargs
+
+    gen_kwargs = f"max_new_tokens={_effective_max_new_tokens}"
+    eval_kwargs["gen_kwargs"] = gen_kwargs
 
     # Auto-register custom task directories (e.g. videomme_mini) by
     # creating a ``TaskManager`` with ``include_path`` pointing to the
