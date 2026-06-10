@@ -143,7 +143,8 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             if op in _decomp_table:
                 del _decomp_table[op]
 
-        ep = ep.run_decompositions(decomp_table=_decomp_table)
+        with SuppressWarning(FutureWarning, ".*LeafSpec*"):
+            ep = ep.run_decompositions(decomp_table=_decomp_table)
         return ep
 
     if torch.__version__.startswith("2.5"):
