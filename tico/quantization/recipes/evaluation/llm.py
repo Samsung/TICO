@@ -14,11 +14,10 @@
 
 from typing import Any
 
-from datasets import load_dataset
-from lm_eval.utils import make_table
+from tico.quantization.evaluation.optional_deps import require_attr
 
-from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
-from tico.quantization.wrapq.utils.metrics import perplexity
+_DATASETS_INSTALL_HINT = "pip install datasets"
+_LM_EVAL_INSTALL_HINT = "pip install lm-eval"
 
 
 def evaluate_perplexity(
@@ -32,8 +31,26 @@ def evaluate_perplexity(
     dataset_config: str = "wikitext-2-raw-v1",
     split: str = "test",
 ) -> float:
+    """Evaluate text perplexity on a Hugging Face dataset.
+
+    The ``datasets`` package is imported lazily so that importing recipe modules
+    does not require optional evaluation dependencies unless this function is
+    actually used.
+    """
+    load_dataset = require_attr(
+        "datasets",
+        "load_dataset",
+        feature="LLM perplexity evaluation",
+        install_hint=_DATASETS_INSTALL_HINT,
+    )
+
+    from tico.quantization.wrapq.utils.metrics import perplexity
+
     dataset = load_dataset(
-        dataset_name, dataset_config, split=split, cache_dir=cache_dir
+        dataset_name,
+        dataset_config,
+        split=split,
+        cache_dir=cache_dir,
     )
     enc = tokenizer("\n\n".join(dataset["text"]), return_tensors="pt")
     return float(
@@ -48,6 +65,20 @@ def evaluate_lm_tasks(
     tasks: str,
     max_seq_len: int,
 ) -> Any:
+    """Evaluate text-only LM tasks through ``lm_eval``.
+
+    ``lm_eval`` is imported lazily and reports a clear error only when this
+    evaluation path is requested.
+    """
+    make_table = require_attr(
+        "lm_eval.utils",
+        "make_table",
+        feature="lm_eval task evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+
+    from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
+
     results = evaluate_llm_on_tasks(model, tokenizer, tasks, max_length=max_seq_len)
     print(make_table(results))
     return results

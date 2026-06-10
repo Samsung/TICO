@@ -30,9 +30,25 @@ from typing import Any
 
 import torch
 
-from lm_eval import evaluator
-from lm_eval.models.huggingface import HFLM
-from lm_eval.utils import make_table
+from tico.quantization.evaluation.optional_deps import require_attr, require_module
+
+_LM_EVAL_INSTALL_HINT = "pip install lm-eval"
+
+
+def _load_lm_eval_runtime() -> tuple[Any, Any]:
+    """Load ``lm_eval`` runtime pieces lazily."""
+    evaluator = require_module(
+        "lm_eval.evaluator",
+        feature="HellaSwag evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+    HFLM = require_attr(
+        "lm_eval.models.huggingface",
+        "HFLM",
+        feature="HellaSwag evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+    return evaluator, HFLM
 
 
 def evaluate_hellaswag(
@@ -65,6 +81,8 @@ def evaluate_hellaswag(
         - acc: Accuracy
         - acc_norm: Normalized accuracy (length-normalized)
     """
+    evaluator, HFLM = _load_lm_eval_runtime()
+
     # Unwrap if needed (handles PTQWrapper)
     if hasattr(model, "wrapped"):
         model = model.wrapped
@@ -98,6 +116,12 @@ def print_hellaswag_results(results: dict[str, Any]) -> None:
     Args:
         results: Results dictionary from evaluate_hellaswag().
     """
+    make_table = require_attr(
+        "lm_eval.utils",
+        "make_table",
+        feature="HellaSwag result printing",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
     print(make_table(results))
 
 

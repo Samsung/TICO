@@ -1,13 +1,27 @@
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Any
 
 import torch
 
-from lm_eval import evaluator
-from lm_eval.models.huggingface import HFLM
-from lm_eval.utils import make_table
+from tico.quantization.evaluation.optional_deps import require_attr, require_module
+
+_LM_EVAL_INSTALL_HINT = "pip install lm-eval"
 
 
-def _normalize_subject(subject: str) -> str:
+def _normalize_subject(subject: str | None) -> str | None:
     if subject is None:
         return None
 
@@ -15,6 +29,22 @@ def _normalize_subject(subject: str) -> str:
         return subject
 
     return f"mmlu_{subject}"
+
+
+def _load_lm_eval_runtime() -> tuple[Any, Any]:
+    """Load ``lm_eval`` runtime pieces lazily."""
+    evaluator = require_module(
+        "lm_eval.evaluator",
+        feature="MMLU evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+    HFLM = require_attr(
+        "lm_eval.models.huggingface",
+        "HFLM",
+        feature="MMLU evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+    return evaluator, HFLM
 
 
 def evaluate_mmlu(
@@ -47,6 +77,8 @@ def evaluate_mmlu(
     Returns:
         Aggregated results dictionary with per-subject, per-domain, and overall accuracy.
     """
+    evaluator, HFLM = _load_lm_eval_runtime()
+
     # Unwrap if needed (handles PTQWrapper)
     if hasattr(model, "wrapped"):
         model = model.wrapped
@@ -63,7 +95,9 @@ def evaluate_mmlu(
 
     # Convert subjects to lm_eval task names
     tasks: list[str] = (
-        [_normalize_subject(subject) for subject in subjects] if subjects else ["mmlu"]
+        [task for task in (_normalize_subject(subject) for subject in subjects) if task]
+        if subjects
+        else ["mmlu"]
     )
 
     # Run lm_eval evaluation
@@ -79,4 +113,10 @@ def evaluate_mmlu(
 
 
 def print_mmlu_results(results: dict[str, Any]) -> None:
+    make_table = require_attr(
+        "lm_eval.utils",
+        "make_table",
+        feature="MMLU result printing",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
     print(make_table(results))

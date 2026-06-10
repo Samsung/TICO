@@ -12,36 +12,53 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 import argparse
 from typing import Any
 
-from lm_eval import evaluator
-from lm_eval.models.huggingface import HFLM
-from lm_eval.utils import make_table
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from tico.quantization.evaluation.optional_deps import require_attr, require_module
+
+_LM_EVAL_INSTALL_HINT = "pip install lm-eval"
+_TRANSFORMERS_INSTALL_HINT = "pip install transformers"
 
 
 def evaluate_llm_on_tasks(
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
+    model: Any,
+    tokenizer: Any,
     tasks: str,
     max_length: int | None = None,
 ) -> dict[str, Any]:
+    """Evaluate a Hugging Face causal LM on one or more ``lm_eval`` tasks.
+
+    Optional third-party dependencies are loaded only when this function runs,
+    keeping recipe imports lightweight for users who only run quantization.
+    """
+    evaluator = require_module(
+        "lm_eval.evaluator",
+        feature="lm_eval task evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+    HFLM = require_attr(
+        "lm_eval.models.huggingface",
+        "HFLM",
+        feature="lm_eval task evaluation",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
+
     if hasattr(model, "wrapped"):
         model = model.wrapped
+
     model_to_evaluate = HFLM(
-        model,
-        "causal",
+        pretrained=model,
+        backend="causal",
         tokenizer=tokenizer,
         max_length=max_length,
         truncation=True,
     )
-    tasks_list: list[str] = tasks.split(",")
+    tasks_list: list[str] = [task.strip() for task in tasks.split(",") if task.strip()]
     return evaluator.simple_evaluate(model_to_evaluate, tasks=tasks_list)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--model",
@@ -53,7 +70,10 @@ def main():
         "--eval_tasks",
         type=str,
         default="arc_easy",
-        help="tasks to run evaluation, e.g `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh",
+        help=(
+            "Tasks to run evaluation, e.g. "
+            "`winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`"
+        ),
     )
     ap.add_argument(
         "--device",
@@ -79,6 +99,25 @@ def main():
     )
 
     args = ap.parse_args()
+
+    AutoTokenizer = require_attr(
+        "transformers",
+        "AutoTokenizer",
+        feature="standalone LLM evaluation script",
+        install_hint=_TRANSFORMERS_INSTALL_HINT,
+    )
+    AutoModelForCausalLM = require_attr(
+        "transformers",
+        "AutoModelForCausalLM",
+        feature="standalone LLM evaluation script",
+        install_hint=_TRANSFORMERS_INSTALL_HINT,
+    )
+    make_table = require_attr(
+        "lm_eval.utils",
+        "make_table",
+        feature="standalone LLM evaluation script",
+        install_hint=_LM_EVAL_INSTALL_HINT,
+    )
 
     print("Loading FP model …")
     tokenizer = AutoTokenizer.from_pretrained(
