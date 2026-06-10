@@ -26,7 +26,7 @@ class Gemma4NoMoeContractTest(unittest.TestCase):
         text_config = types.SimpleNamespace(enable_moe_block=False)
         config = types.SimpleNamespace(text_config=text_config)
 
-        self.assertIsNone(assert_gemma4_e2b_no_moe(config))
+        assert_gemma4_e2b_no_moe(config)
 
     def test_no_moe_contract_rejects_moe_config(self) -> None:
         """MoE configs should be rejected by the no-MoE guard."""

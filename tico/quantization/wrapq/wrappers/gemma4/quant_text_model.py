@@ -68,9 +68,11 @@ class QuantGemma4TextModel(QuantModuleBase):
         )
         self.rotary_emb = fp_model.rotary_emb
 
-        self.embed_tokens_per_layer = None
-        self.per_layer_model_projection = None
-        self.per_layer_projection_norm = None
+        self.embed_tokens_per_layer: Optional[nn.Module] = None
+        self.per_layer_model_projection: Optional[nn.Module] = None
+        self.per_layer_projection_norm: Optional[nn.Module] = None
+        self.per_layer_input_scale = 1.0
+        self.per_layer_model_projection_scale = 1.0
         if self.hidden_size_per_layer_input:
             self.embed_tokens_per_layer = PTQWrapper(
                 fp_model.embed_tokens_per_layer,
@@ -164,8 +166,12 @@ class QuantGemma4TextModel(QuantModuleBase):
             raise RuntimeError(
                 "Per-layer input projection is not enabled for this Gemma4 config."
             )
+        per_layer_model_projection = self.per_layer_model_projection
+        per_layer_projection_norm = self.per_layer_projection_norm
+        if per_layer_model_projection is None or per_layer_projection_norm is None:
+            raise RuntimeError("Gemma4 PLE projection modules are not initialized.")
         per_layer_projection = (
-            self.per_layer_model_projection(inputs_embeds)
+            per_layer_model_projection(inputs_embeds)
             * self.per_layer_model_projection_scale
         )
         per_layer_projection = per_layer_projection.reshape(
@@ -173,7 +179,7 @@ class QuantGemma4TextModel(QuantModuleBase):
             self.config.num_hidden_layers,
             self.hidden_size_per_layer_input,
         )
-        per_layer_projection = self.per_layer_projection_norm(per_layer_projection)
+        per_layer_projection = per_layer_projection_norm(per_layer_projection)
         return per_layer_projection
 
     def _all_observers(self) -> Iterable:

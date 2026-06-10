@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -84,10 +84,12 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
             fp_name=join_name(fp_name, "post_feedforward_layernorm"),
         )
 
-        self.per_layer_input_gate = None
-        self.per_layer_projection = None
-        self.post_per_layer_input_norm = None
-        self.act_fn = getattr(fp_layer, "act_fn", None)
+        self.per_layer_input_gate: Optional[nn.Module] = None
+        self.per_layer_projection: Optional[nn.Module] = None
+        self.post_per_layer_input_norm: Optional[nn.Module] = None
+        self.act_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = getattr(
+            fp_layer, "act_fn", None
+        )
         if self.hidden_size_per_layer_input:
             self.per_layer_input_gate = PTQWrapper(
                 fp_layer.per_layer_input_gate,
@@ -161,14 +163,25 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
                 raise ValueError(
                     "per_layer_input must be provided when Gemma4 PLE is enabled."
                 )
+            per_layer_input_gate = self.per_layer_input_gate
+            act_fn = self.act_fn
+            per_layer_projection = self.per_layer_projection
+            post_per_layer_input_norm = self.post_per_layer_input_norm
+            if (
+                per_layer_input_gate is None
+                or act_fn is None
+                or per_layer_projection is None
+                or post_per_layer_input_norm is None
+            ):
+                raise RuntimeError("Gemma4 PLE modules are not initialized.")
             residual = hidden_states
-            hidden_states = self.per_layer_input_gate(hidden_states)
-            hidden_states = self.act_fn(hidden_states)
+            hidden_states = per_layer_input_gate(hidden_states)
+            hidden_states = act_fn(hidden_states)
             hidden_states = self._fq(
                 hidden_states * per_layer_input, self.obs_per_layer_mul
             )
-            hidden_states = self.per_layer_projection(hidden_states)
-            hidden_states = self.post_per_layer_input_norm(hidden_states)
+            hidden_states = per_layer_projection(hidden_states)
+            hidden_states = post_per_layer_input_norm(hidden_states)
             hidden_states = residual + hidden_states
 
         hidden_states = self._fq(
