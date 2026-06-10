@@ -63,7 +63,7 @@ class EvaluateTest(unittest.TestCase):
         convert(q_m.m)
 
         # Export circle
-        with SuppressWarning(FutureWarning, ".*LeafSpec*"):
+        with SuppressWarning(FutureWarning, ".*LeafSpec"):
             ep = torch.export.export(q_m, args, kwargs)
             cm = tico.convert_from_exported_program(ep)
         results = evaluate(q_m, cm, BACKEND.TRIV24, mode="return")
@@ -78,7 +78,7 @@ class EvaluateTest(unittest.TestCase):
         inputs may produce spikes in error, and a stricter threshold might
         result in unncessary test failures.
 
-        Setting the threshold at 10 ensures robustness while still maintaining 
+        Setting the threshold at 10 ensures robustness while still maintaining
          a reasonable level of accuracy for the test.
         """
         self.assertLess(results["peir"][0], 10)
