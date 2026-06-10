@@ -135,7 +135,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         ), patch.object(
             evaluate_cli.torch,
             "load",
-            lambda path, weights_only=False: FakeCheckpoint(),
+            lambda path, **kwargs: FakeCheckpoint(),
         ), patch.object(
             sys, "argv", argv
         ):
