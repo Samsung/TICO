@@ -1,0 +1,64 @@
+# Judge-based LLaVA-Bench config for Gemma4 E2B.
+model:
+  family: gemma4
+  name_or_path: google/gemma-4-e2b-it
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  dataset: vqav2
+  split: testdev
+  n_samples: 1
+  seq_len: 2048
+
+model_args:
+  vision:
+    visual_start_idx: 0
+    num_visual_tokens: 256
+    image_height: 896
+    image_width: 896
+
+pipeline: []
+
+evaluation:
+  enabled: true
+  llava_bench:
+    enabled: true
+    mode: judge
+    dataset: lmms-lab/llava-bench-in-the-wild
+    split: train
+    n_samples: 50
+    start_index: 0
+    max_seq_len: 2048
+    max_new_tokens: 512
+    temperature: 0.0
+    candidate_label: gemma4_e2b
+    baseline_label: reference
+    candidate_answers: null
+    baseline_answers: null
+    regenerate: false
+    output:
+      dir: ./out/gemma4_e2b_llava_bench
+      answers: ./out/gemma4_e2b_llava_bench/answers.jsonl
+      reviews: ./out/gemma4_e2b_llava_bench/reviews.jsonl
+      summary: ./out/gemma4_e2b_llava_bench/summary.json
+    judge:
+      enabled: true
+      model_id: meta-llama/Llama-3.2-3B-Instruct
+      device: cuda
+      dtype: float16
+      max_new_tokens: 256
+      temperature: 0.0
+      swap_order: true
+
+export:
+  enabled: false
+  output_dir: ./out/gemma4_e2b_llava_bench
+  artifacts: []

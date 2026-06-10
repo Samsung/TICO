@@ -1,0 +1,45 @@
+# Static-shape PTQ smoke config for Gemma4 E2B.
+model:
+  family: gemma4
+  name_or_path: google/gemma-4-e2b-it
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  dataset: vqav2
+  split: testdev
+  n_samples: 8
+  seq_len: 2048
+
+model_args:
+  vision:
+    visual_start_idx: 0
+    num_visual_tokens: 256
+    image_height: 896
+    image_width: 896
+
+pipeline:
+  - name: ptq
+    enabled: true
+    activation: int16
+    weight: int16
+    linear_weight: uint4
+    embedding_weight: uint8
+    lm_head_weight: uint8
+    vision_patch_embed_weight: uint8
+    strict_wrap: true
+
+evaluation:
+  enabled: false
+
+export:
+  enabled: false
+  output_dir: ./out/gemma4_e2b_static_ptq
+  artifacts: []
