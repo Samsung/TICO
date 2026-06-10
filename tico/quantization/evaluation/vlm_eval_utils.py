@@ -653,12 +653,13 @@ def get_coco_scores_on_dataset(
 
     total_count = 0
     skipped_count = 0
+    annotation_id = 0
     for i, ex in enumerate(ds, 1):
         sample: dict[str, Any] = get_item(ex)
 
         image: Any = sample["image"]
         question: str = sample["question"]
-        id: int = sample["id"]
+        sample_id: int = sample["id"]
         image_id: str = sample["image_id"]
         file_name: str = sample["file_name"]
         gold_answers: list[str] = sample["golds"]
@@ -703,8 +704,9 @@ def get_coco_scores_on_dataset(
         images.append(img)
 
         for answer in gold_answers:
+            annotation_id += 1
             annotation: CocoAnnotation = {
-                "id": id,
+                "id": annotation_id,
                 "image_id": image_id,
                 "caption": answer,
             }
@@ -714,7 +716,7 @@ def get_coco_scores_on_dataset(
             i <= log_first_n or (log_every_n > 0 and i % log_every_n == 0)
         )
         if should_log:
-            print("id:", id)
+            print("id:", sample_id)
             print("image_id:", image_id)
             print("Q:", question)
             print("pred:", repr(pred))
