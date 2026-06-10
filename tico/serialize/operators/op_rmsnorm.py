@@ -63,7 +63,7 @@ class RMSNormVisitor(NodeVisitor):
             return args.input, args.weight, eps
 
         circle_args = CircleRMSNormArgs(*node.args, **node.kwargs)
-        return circle_args.input, args.weight, args.eps
+        return circle_args.input, circle_args.weight, circle_args.eps
 
     def define_node(
         self,
