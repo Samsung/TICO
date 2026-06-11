@@ -259,7 +259,7 @@ class Quantizer(nn.Module):
 
         self._grid_search(x, xmin, xmax, compute_error)
 
-    def update(self, x, Hinv, perm):
+    def update(self, x, Hinv, perm, P=None):
         if self.mse is None or (
             self.mse != "smse_for_gptq" and self.mse != "mse_for_gptq"
         ):
@@ -276,14 +276,14 @@ class Quantizer(nn.Module):
             if perm is not None:
                 sensitivity = sensitivity[:, perm.to(x.device)]
 
-        self._optimize_gptq_adjusted(x, Hinv, sensitivity, xmin, xmax)
+        self._optimize_gptq_adjusted(x, Hinv, sensitivity, xmin, xmax, P=P)
 
         self._reshape_scale_zero(shape, weight=True)
 
         del sensitivity
         sensitivity = None
 
-    def _optimize_gptq_adjusted(self, x, Hinv, sensitivity, xmin, xmax):
+    def _optimize_gptq_adjusted(self, x, Hinv, sensitivity, xmin, xmax, P=None):
         """Optimize scale and zero using GPTQ-aware MSE/SMSE grid search.
 
         Args:
@@ -292,6 +292,7 @@ class Quantizer(nn.Module):
             sensitivity: Sensitivity tensor for weighted MSE
             xmin: Minimum values per channel
             xmax: Maximum values per channel
+            P: GPTQv2 P correction matrix (optional)
         """
         num_of_iters = 15
 
@@ -303,6 +304,7 @@ class Quantizer(nn.Module):
                 x,
                 Hinv,
                 max_num_of_iters=num_of_iters,
+                P=P,
             )
             if sensitivity is not None:
                 assert self.mse == "smse_for_gptq"

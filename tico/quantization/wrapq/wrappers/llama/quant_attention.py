@@ -203,16 +203,8 @@ class QuantLlamaAttention(QuantModuleBase):
         self.obs_logits_raw = mk("logits_raw")
 
         # kv cache
-        self.obs_past_key = mk("past_key")
-        self.obs_past_value = mk("past_value")
-
-        # New kv delta
-        self.obs_new_k = mk("new_k")  # (B, n_kv, S, H)
-        self.obs_new_v = mk("new_v")  # (B, n_kv, S, H)
-
-        # Total KV after concat (used for matmul/attn)
-        self.obs_present_key = mk("present_key")  # (B, max_seq, H)
-        self.obs_present_value = mk("present_value")  # (B, max_seq, H)
+        self.obs_key = mk("key")
+        self.obs_value = mk("value")
 
         # Static causal mask template
         mask = torch.full(
@@ -487,14 +479,14 @@ class QuantLlamaAttention(QuantModuleBase):
             past_k, past_v = past_key_value
             if past_k is None or past_v is None:
                 return None
-            past_k = self._fq(past_k, self.obs_past_key)
-            past_v = self._fq(past_v, self.obs_past_value)
+            past_k = self._fq(past_k, self.obs_key)
+            past_v = self._fq(past_v, self.obs_value)
             return (past_k, past_v)
 
         past_key_value = self._get_layer_kv_from_cache(
             past_key_value,
-            k_obs=self.obs_past_key,
-            v_obs=self.obs_past_value,
+            k_obs=self.obs_key,
+            v_obs=self.obs_value,
         )
 
         return past_key_value
@@ -626,17 +618,17 @@ class QuantLlamaAttention(QuantModuleBase):
             A tuple `(present_k_i, present_v_i)` with shape `(B, K, H)`.
         """
         if past_k_i is None:
-            present_k_i = self._fq(new_k_i, self.obs_present_key)
-            present_v_i = self._fq(new_v_i, self.obs_present_value)
+            present_k_i = self._fq(new_k_i, self.obs_key)
+            present_v_i = self._fq(new_v_i, self.obs_value)
             return present_k_i, present_v_i
 
         present_k_i = self._fq(
             torch.cat([past_k_i, new_k_i], dim=1),
-            self.obs_present_key,
+            self.obs_key,
         )
         present_v_i = self._fq(
             torch.cat([past_v_i, new_v_i], dim=1),
-            self.obs_present_value,
+            self.obs_value,
         )
         return present_k_i, present_v_i
 
@@ -656,8 +648,8 @@ class QuantLlamaAttention(QuantModuleBase):
         if cache_output_mode not in ("present", "delta"):
             raise ValueError(f"Unsupported cache_output_mode: {cache_output_mode!r}")
 
-        new_k = self._fq(torch.stack(new_k_parts, dim=1), self.obs_new_k)
-        new_v = self._fq(torch.stack(new_v_parts, dim=1), self.obs_new_v)
+        new_k = self._fq(torch.stack(new_k_parts, dim=1), self.obs_key)
+        new_v = self._fq(torch.stack(new_v_parts, dim=1), self.obs_value)
 
         if cache_output_mode == "delta":
             if torch.compiler.is_compiling() and isinstance(past_key_value_in, Cache):
@@ -673,8 +665,8 @@ class QuantLlamaAttention(QuantModuleBase):
                 )  # set new cache
                 self._get_layer_kv_from_cache(
                     past_key_value_in,
-                    k_obs=self.obs_new_k,
-                    v_obs=self.obs_new_v,
+                    k_obs=self.obs_key,
+                    v_obs=self.obs_value,
                     write_back=True,
                 )
             return new_k, new_v
@@ -688,15 +680,15 @@ class QuantLlamaAttention(QuantModuleBase):
             if torch.compiler.is_compiling():
                 self._get_layer_kv_from_cache(
                     past_key_value_in,
-                    k_obs=self.obs_past_key,
-                    v_obs=self.obs_past_value,
+                    k_obs=self.obs_key,
+                    v_obs=self.obs_value,
                     write_back=True,
                 )
             return past_key_value_in
 
-        present_k = self._fq(torch.stack(present_k_parts, dim=1), self.obs_present_key)
+        present_k = self._fq(torch.stack(present_k_parts, dim=1), self.obs_key)
         present_v = self._fq(
-            torch.stack(present_v_parts, dim=1), self.obs_present_value
+            torch.stack(present_v_parts, dim=1), self.obs_value
         )
         return present_k, present_v
 
@@ -730,8 +722,8 @@ class QuantLlamaAttention(QuantModuleBase):
                 )
                 self._get_layer_kv_from_cache(
                     past_key_value_in,
-                    k_obs=self.obs_new_k,
-                    v_obs=self.obs_new_v,
+                    k_obs=self.obs_key,
+                    v_obs=self.obs_value,
                     write_back=True,
                 )
             return new_k, new_v
@@ -745,8 +737,8 @@ class QuantLlamaAttention(QuantModuleBase):
             if torch.compiler.is_compiling():
                 self._get_layer_kv_from_cache(
                     past_key_value_in,
-                    k_obs=self.obs_past_key,
-                    v_obs=self.obs_past_value,
+                    k_obs=self.obs_key,
+                    v_obs=self.obs_value,
                     write_back=True,
                 )
             return past_key_value_in
@@ -930,21 +922,21 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_k_rot,
         )
 
-        new_k = self._fq(k, self.obs_new_k)
-        new_v = self._fq(v, self.obs_new_v)
+        new_k = self._fq(k, self.obs_key)
+        new_v = self._fq(v, self.obs_value)
 
         if past_key_value is None:
-            present_k = self._fq(new_k, self.obs_present_key)
-            present_v = self._fq(new_v, self.obs_present_value)
+            present_k = self._fq(new_k, self.obs_key)
+            present_v = self._fq(new_v, self.obs_value)
         else:
             past_k, past_v = past_key_value
             present_k = self._fq(
                 torch.cat([past_k, new_k], dim=2),
-                self.obs_present_key,
+                self.obs_key,
             )
             present_v = self._fq(
                 torch.cat([past_v, new_v], dim=2),
-                self.obs_present_value,
+                self.obs_value,
             )
 
         if self.kv_rep != 1:
@@ -1096,12 +1088,8 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_attn_out,
             self.obs_attn_weights,
             self.obs_attn_out_h,
-            self.obs_past_key,
-            self.obs_past_value,
-            self.obs_new_k,
-            self.obs_new_v,
-            self.obs_present_key,
-            self.obs_present_value,
+            self.obs_key,
+            self.obs_value,
         )
 
     def as_export_module(

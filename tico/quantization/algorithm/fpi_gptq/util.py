@@ -28,11 +28,12 @@ def quantize(x, scale, zero, maxq):
     return scale * (q - zero)
 
 
-def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
+def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50, P=None):
 
     cur_weights = W.clone()
     mults = torch.pow(torch.diag(Hinv), -1)
     Hinv_U = torch.triu(Hinv, diagonal=1)
+    P_U = torch.triu(P, diagonal=1) if P is not None else None
 
     init_weights = W.clone()
     for _ in range(max_num_of_iters):
@@ -40,6 +41,9 @@ def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
 
         d_W = torch.mul((cur_weights - cur_Q), mults)
         cur_weights = init_weights - torch.matmul(d_W, Hinv_U)
+        # GPTQv2: Apply P correction
+        if P_U is not None:
+            cur_weights += torch.matmul(cur_Q, P_U)
         del d_W, cur_Q
         d_W = cur_Q = None
         if torch.cuda.is_available():
