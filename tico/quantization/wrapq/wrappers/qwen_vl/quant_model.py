@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from collections import namedtuple
 from typing import Iterable, Optional, Union
 
@@ -62,6 +63,11 @@ class QuantQwen3VLModel(QuantModuleBase):
 
         self.image_token_id = fp_model.config.image_token_id
         self.video_token_id = fp_model.config.video_token_id
+        self._native_get_rope_index_has_mm_token_type_ids = (
+            hasattr(fp_model, "get_rope_index")
+            and "mm_token_type_ids"
+            in inspect.signature(fp_model.get_rope_index).parameters
+        )
 
         # Wrap vision model
         self.visual = PTQWrapper(
@@ -95,6 +101,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         pixel_values_videos: torch.Tensor | None = None,
         image_grid_thw: torch.Tensor | None = None,
         video_grid_thw: torch.Tensor | None = None,
+        mm_token_type_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
         return_dict: bool | None = None,
         **kwargs,
@@ -261,6 +268,7 @@ class QuantQwen3VLModel(QuantModuleBase):
                 attention_mask=attention_mask,
                 cache_position=cache_position,
                 past_key_values=past_key_values,
+                mm_token_type_ids=mm_token_type_ids,
             )
 
         # Pass through language model (wrapped with PTQWrapper)
@@ -448,6 +456,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         attention_mask: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
         past_key_values=None,
+        mm_token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         """
         Compute 3D position IDs for multimodal RoPE.
@@ -458,13 +467,27 @@ class QuantQwen3VLModel(QuantModuleBase):
         )
 
         if self.rope_deltas is None or past_key_values_length == 0:
-            position_ids, rope_deltas = self._get_rope_index(
-                input_ids=input_ids,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                attention_mask=attention_mask,
-                inputs_embeds=inputs_embeds,
-            )
+            if (
+                input_ids is not None
+                and mm_token_type_ids is not None
+                and (image_grid_thw is not None or video_grid_thw is not None)
+                and self._native_get_rope_index_has_mm_token_type_ids
+            ):
+                position_ids, rope_deltas = self.module.get_rope_index(
+                    input_ids,
+                    mm_token_type_ids=mm_token_type_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    attention_mask=attention_mask,
+                )
+            else:
+                position_ids, rope_deltas = self._get_rope_index(
+                    input_ids=input_ids,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    attention_mask=attention_mask,
+                    inputs_embeds=inputs_embeds,
+                )
             self.rope_deltas = rope_deltas
         # then use the prev pre-calculated rope-deltas to get the correct position ids
         else:

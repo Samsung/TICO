@@ -97,6 +97,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         pixel_values_videos: torch.Tensor | None = None,
         image_grid_thw: torch.Tensor | None = None,
         video_grid_thw: torch.Tensor | None = None,
+        mm_token_type_ids: torch.Tensor | None = None,
         cache_position: torch.Tensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         return_dict: bool | None = None,
@@ -133,6 +134,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            mm_token_type_ids=mm_token_type_ids,
             position_ids=position_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -211,6 +213,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         pixel_values_videos=None,
         image_grid_thw=None,
         video_grid_thw=None,
+        mm_token_type_ids=None,
         **kwargs,
     ):
         """Prepare inputs for generation step."""
@@ -226,6 +229,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            mm_token_type_ids=mm_token_type_ids,
             **kwargs,
         )
 

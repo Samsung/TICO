@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from typing import Optional, Union
 
 import torch
@@ -33,6 +34,39 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
+
+
+_CREATE_CAUSAL_MASK_PARAMS = inspect.signature(create_causal_mask).parameters
+
+
+def _create_spin_causal_mask(
+    *,
+    config,
+    inputs_embeds,
+    attention_mask,
+    cache_position,
+    past_key_values,
+    position_ids,
+):
+    kwargs = {
+        "config": config,
+        "attention_mask": attention_mask,
+        "past_key_values": past_key_values,
+        "position_ids": position_ids,
+    }
+
+    # transformers 4.57.x: input_embeds
+    # transformers 5.x:    inputs_embeds
+    if "inputs_embeds" in _CREATE_CAUSAL_MASK_PARAMS:
+        kwargs["inputs_embeds"] = inputs_embeds
+    else:
+        kwargs["input_embeds"] = inputs_embeds
+
+    # transformers 4.57.x had cache_position; 5.x removed it from create_causal_mask.
+    if "cache_position" in _CREATE_CAUSAL_MASK_PARAMS:
+        kwargs["cache_position"] = cache_position
+
+    return create_causal_mask(**kwargs)
 
 
 class SpinLlamaPreTrainedModel(PreTrainedModel):
@@ -147,9 +181,9 @@ class SpinLlamaModel(SpinLlamaPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
-        causal_mask = create_causal_mask(
+        causal_mask = _create_spin_causal_mask(
             config=self.config,
-            input_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             cache_position=cache_position,
             past_key_values=past_key_values,
