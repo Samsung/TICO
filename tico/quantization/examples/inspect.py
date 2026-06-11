@@ -128,6 +128,8 @@ def _wrapper_smoke_case_group(case_name: str) -> str:
         return "llama"
     if case_name.startswith("qwen3_vl_"):
         return "qwen3_vl"
+    if case_name.startswith("gemma4_"):
+        return "gemma4"
     return "other"
 
 
@@ -137,13 +139,14 @@ def _print_wrapper_smoke_cases() -> None:
         "nn": [],
         "llama": [],
         "qwen3_vl": [],
+        "gemma4": [],
         "other": [],
     }
     for case in list_cases():
         groups[_wrapper_smoke_case_group(case.name)].append(case.name)
 
     print("Available wrapper smoke cases:")
-    for group_name in ("nn", "llama", "qwen3_vl", "other"):
+    for group_name in ("nn", "llama", "qwen3_vl", "gemma4", "other"):
         case_names = groups[group_name]
         if not case_names:
             continue
