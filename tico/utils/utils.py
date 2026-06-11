@@ -41,19 +41,18 @@ def get_fake_mode(exported_program: ExportedProgram):
 
 
 class SuppressWarning:
-    def __init__(self, warning_category: type[Warning], regex):
-        self.warning_category = warning_category
+    def __init__(self, category: type[Warning], regex):
+        self.ctx = warnings.catch_warnings()
+        self.category = category
         self.regex = regex
 
     def __enter__(self):
-        warnings.filterwarnings(
-            "ignore", category=self.warning_category, message=self.regex
-        )
+        self.ctx.__enter__()
+        warnings.filterwarnings("ignore", self.regex, category=self.category)
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        warnings.filterwarnings(
-            "default", category=self.warning_category, message=self.regex
-        )
+        self.ctx.__exit__(exc_type, exc_val, exc_tb)
 
 
 class ArgTypeError(Exception):
