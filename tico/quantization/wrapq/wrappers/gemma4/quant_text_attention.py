@@ -622,9 +622,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
             attention_mask=attn_mask,
         )
 
-        outputs = (attn_output, attn_weights)
         if use_cache:
-            outputs += (
+            return (
+                attn_output,
+                attn_weights,
                 self._cache_output(
                     mode=cache_output_mode_normalized,
                     new_key_value=new_key_value,
@@ -632,7 +633,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
                     cache_object_out=cache_object_out,
                 ),
             )
-        return outputs
+        return attn_output, attn_weights
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""

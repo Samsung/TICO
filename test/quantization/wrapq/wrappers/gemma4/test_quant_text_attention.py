@@ -21,6 +21,7 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+    LayerKV,
     QuantGemma4TextAttention,
 )
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
@@ -267,8 +268,8 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         rope = self._rope(batch_size, seq_len, cfg.head_dim)
         mask = self._zero_mask(batch_size, seq_len, seq_len)
 
-        fp_shared = {}
-        q_shared = {}
+        fp_shared: dict[str, LayerKV] = {}
+        q_shared: dict[str, LayerKV] = {}
         with torch.no_grad():
             fp_attn0(
                 hidden,
