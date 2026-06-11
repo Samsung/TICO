@@ -374,6 +374,8 @@ class Qwen3VLAdapter(ModelAdapter):
         max_seq_len = eval_cfg.get("max_seq_len")
         n_samples = int(eval_cfg.get("n_samples", 50))
         tasks = eval_cfg.get("vlm_tasks") or []
+        verbose = bool(eval_cfg.get("verbose", False))
+        show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
         if isinstance(tasks, str):
             tasks = [t.strip() for t in tasks.split(",") if t.strip()]
 
@@ -385,6 +387,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 device=str(ctx.device),
                 n_samples=n_samples,
                 max_seq_len=max_seq_len,
+                verbose=verbose,
+                show_progress=show_progress,
             )
             print_vqa_results("VQA evaluation", vqa_results)
 

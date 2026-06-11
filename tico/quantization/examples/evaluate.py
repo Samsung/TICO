@@ -38,6 +38,16 @@ def parse_args() -> argparse.Namespace:
         help="Override eval tasks. LLM: lm_eval_tasks, VLM: vlm_tasks.",
     )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print detailed evaluation sample logs.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm/progress bars.",
+    )
     return parser.parse_args()
 
 
@@ -49,6 +59,10 @@ def main() -> None:
         overrides.append(f"model.name_or_path={args.model}")
     if args.device:
         overrides.append(f"runtime.device={args.device}")
+    if args.verbose:
+        overrides.append("evaluation.verbose=true")
+    if args.no_progress:
+        overrides.append("runtime.show_progress=false")
 
     cfg = load_recipe_config(args.config, overrides=overrides)
     set_seed(cfg.get("runtime", {}).get("seed", 42))

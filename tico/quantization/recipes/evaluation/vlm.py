@@ -16,6 +16,8 @@ import contextlib
 import io
 from typing import Any
 
+import tqdm
+
 from tico.quantization.evaluation.vlm_eval_utils import (
     evaluate_ppl,
     get_accuracy_on_dataset,
@@ -32,22 +34,40 @@ def evaluate_vqa_tasks(
     device: str,
     n_samples: int,
     max_seq_len: int | None,
+    verbose: bool = False,
+    show_progress: bool = True,
 ) -> dict[str, tuple[int, int]]:
     results: dict[str, tuple[int, int]] = {}
     for task in tasks:
         if "vqa" not in task:
             continue
-        with io.StringIO() as buffer, contextlib.redirect_stdout(
-            buffer
-        ), contextlib.redirect_stderr(buffer):
+
+        with contextlib.ExitStack() as stack:
+            # Keep the default VQA path quiet, but leave stderr visible when
+            # progress bars are enabled because tqdm writes there by default.
+            if not verbose:
+                stdout_buffer = stack.enter_context(io.StringIO())
+                stack.enter_context(contextlib.redirect_stdout(stdout_buffer))
+                if not show_progress:
+                    stderr_buffer = stack.enter_context(io.StringIO())
+                    stack.enter_context(contextlib.redirect_stderr(stderr_buffer))
+
             dataset, adapter = get_dataset(task, n=n_samples)
+            total_for_progress = n_samples if n_samples >= 0 else None
+            dataset_iter = tqdm.tqdm(
+                dataset,
+                desc=f"{task} eval",
+                total=total_for_progress,
+                disable=not show_progress,
+            )
             correct, total = get_accuracy_on_dataset(
                 model,
                 processor,
-                dataset,
+                dataset_iter,
                 adapter,
                 device,
                 max_seq_len=max_seq_len,
+                verbose=verbose,
             )
         results[task] = (correct, total)
     return results
@@ -144,7 +164,7 @@ def evaluate_llava_bench(
     Args:
         model: Model to evaluate.
         processor: Hugging Face processor paired with the model.
-        device: Device string used for inference.
+        device: Device used for inference.
         n_samples: Number of samples to evaluate. -1 means the full dataset.
         max_seq_len: Optional maximum text sequence length.
 
