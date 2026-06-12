@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import os
 import random
@@ -546,6 +547,54 @@ class CocoImage(TypedDict):
 # - Each function computes a specific captioning metric
 # - These can be used independently or via get_coco_scores_on_dataset
 # ============================================================
+def _get_required_coco_eval_modules(metrics: Iterable[str]) -> list[str]:
+    """Return optional Python modules needed for requested COCO metrics."""
+    modules = ["pycocotools.coco"]
+    metric_modules = {
+        "CIDEr": "pycocoevalcap.cider.cider",
+        "METEOR": "pycocoevalcap.meteor.meteor",
+        "ROUGE_L": "pycocoevalcap.rouge.rouge",
+    }
+
+    for metric in metrics:
+        if metric.startswith("Bleu_"):
+            modules.append("pycocoevalcap.bleu.bleu")
+        elif metric in metric_modules:
+            modules.append(metric_modules[metric])
+
+    return list(dict.fromkeys(modules))
+
+
+def _require_coco_eval_dependencies(metrics: Iterable[str]) -> None:
+    """
+    Validate optional COCO evaluation dependencies before running inference.
+
+    COCO scoring is executed after all samples have been generated. Importing
+    the optional evaluation modules up front lets a missing dependency fail fast
+    before expensive benchmark samples are processed.
+    """
+    missing: list[str] = []
+    first_error: ImportError | None = None
+
+    for module_name in _get_required_coco_eval_modules(metrics):
+        try:
+            importlib.import_module(module_name)
+        except ImportError as exc:
+            if first_error is None:
+                first_error = exc
+            missing.append(f"{module_name}: {exc}")
+
+    if missing:
+        missing_lines = "\n".join(f"- {item}" for item in missing)
+        raise RuntimeError(
+            "COCO evaluation dependencies are missing for the requested metrics. "
+            "Install the optional COCO evaluation packages before running the "
+            "benchmark, for example: "
+            "`pip install pycocotools pycocoevalcap`.\n"
+            f"Missing imports:\n{missing_lines}"
+        ) from first_error
+
+
 def compute_bleu_scores(
     ground_truths: dict[str, list[str]],
     predictions: dict[str, list[str]],
@@ -639,6 +688,9 @@ def get_coco_scores_on_dataset(
             raise ValueError(
                 f"Unsupported metric '{m}'. Supported metrics: {supported_metrics}"
             )
+
+    _require_coco_eval_dependencies(metrics)
+
     # Collect predictions and ground truth
     results: list[CocoResult] = []
     images: list[CocoImage] = []

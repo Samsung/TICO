@@ -26,6 +26,7 @@ import io
 import unittest
 from unittest.mock import patch
 
+import tico.quantization.evaluation.vlm_eval_utils as vlm_eval_utils
 import tico.quantization.recipes.evaluation.vlm as vlm
 
 
@@ -72,6 +73,39 @@ class TestVlmEvaluation(unittest.TestCase):
         self.assertIn("total_count    2", output)
         self.assertIn("skipped_count  1", output)
         self.assertNotIn("total_count    2.000", output)
+
+    def test_coco_eval_dependencies_checked_before_consuming_dataset(self):
+        """Missing COCO eval dependencies should fail before samples run."""
+        consumed = False
+
+        def dataset():
+            nonlocal consumed
+            consumed = True
+            yield {}
+
+        def fake_import_module(module_name):
+            if module_name == "pycocotools.coco":
+                raise ModuleNotFoundError(
+                    "No module named 'pycocotools'", name="pycocotools"
+                )
+            return object()
+
+        with patch.object(
+            vlm_eval_utils.importlib,
+            "import_module",
+            side_effect=fake_import_module,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "pycocotools\\.coco"):
+                vlm_eval_utils.get_coco_scores_on_dataset(
+                    model=object(),
+                    processor=object(),
+                    dataset_name="coco",
+                    ds=dataset(),
+                    device="cpu",
+                    metrics=["CIDEr"],
+                )
+
+        self.assertFalse(consumed)
 
 
 if __name__ == "__main__":
