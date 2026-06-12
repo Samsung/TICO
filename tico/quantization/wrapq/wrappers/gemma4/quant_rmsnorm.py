@@ -39,30 +39,41 @@ class QuantGemma4RMSNorm(QuantModuleBase):
         self.eps = float(getattr(fp, "eps", getattr(fp, "variance_epsilon", 1e-6)))
         self.with_scale = hasattr(fp, "weight") and getattr(fp, "weight") is not None
 
+        self.obs_weight = self._make_obs("weight")
         self.obs_act_in = self._make_obs("act_in")
         self.obs_act_out = self._make_obs("act_out")
-        self.obs_weight = self._make_obs("weight") if self.with_scale else None
 
     def enable_calibration(self) -> None:
-        """Enable activation calibration and collect the static RMSNorm weight range."""
+        """Enable calibration and capture the static scale weight when it exists."""
         super().enable_calibration()
-        if self.obs_weight is not None:
+        if self.with_scale:
             self.obs_weight.collect(self.module.weight)
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Normalize hidden states and optionally apply a quantized scale."""
-        x = self._fq(hidden_states, self.obs_act_in)
-        variance = x.float().pow(2).mean(dim=-1, keepdim=True)
-        out = x.float() * torch.rsqrt(variance + self.eps)
+    def _raw_weight_for_rms_norm(self, x: torch.Tensor) -> torch.Tensor:
         if self.with_scale:
-            weight = self.module.weight.float()
-            if self._mode is Mode.QUANT and self.obs_weight is not None:
-                weight = self.obs_weight.fake_quant(weight)
-            out = out * weight
-        return self._fq(out.to(dtype=hidden_states.dtype), self.obs_act_out)
+            return self.module.weight
+
+        return torch.ones((x.shape[-1],), dtype=x.dtype, device=x.device)
+
+    def _weight_for_rms_norm(self, x: torch.Tensor) -> torch.Tensor:
+        """Return a calibrated or fake-quantized RMSNorm scale tensor."""
+        weight = self._raw_weight_for_rms_norm(x)
+        if self._mode is Mode.QUANT:
+            weight = self.obs_weight.fake_quant(weight)
+        return weight
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        x = self._fq(hidden_states, self.obs_act_in)
+        weight = self._weight_for_rms_norm(x)
+
+        out = torch.ops.circle_custom.rms_norm(
+            x,
+            weight=weight,
+            eps=self.eps,
+        )
+        out = out.to(dtype=hidden_states.dtype)
+        return self._fq(out, self.obs_act_out)
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""
-        if self.obs_weight is None:
-            return (self.obs_act_in, self.obs_act_out)
         return (self.obs_weight, self.obs_act_in, self.obs_act_out)
