@@ -63,7 +63,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_model",
     "tico.quantization.wrapq.wrappers.qwen_vl.quant_for_conditional_generation",
     ## gemma4 ##
-    # "tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear",
+    "tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear",
     "tico.quantization.wrapq.wrappers.gemma4.quant_rmsnorm",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_text_scaled_word_embedding",
     "tico.quantization.wrapq.wrappers.gemma4.quant_text_mlp",
@@ -74,7 +74,7 @@ _CORE_MODULES = (
     # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_patch_embedder",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_mlp",
-    # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_attention",
+    "tico.quantization.wrapq.wrappers.gemma4.quant_vision_attention",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder_layer",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_model",
