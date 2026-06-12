@@ -128,9 +128,14 @@ def suppress_tico_warnings() -> Iterator[None]:
     try:
         from tico.utils.utils import SuppressWarning
 
-        with SuppressWarning(UserWarning, ".*"):
-            yield
+        suppressor = SuppressWarning(UserWarning, ".*")
     except Exception:
+        suppressor = None
+
+    if suppressor is not None:
+        with suppressor:
+            yield
+    else:
         yield
 
 

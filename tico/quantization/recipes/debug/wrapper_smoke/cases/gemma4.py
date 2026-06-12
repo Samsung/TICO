@@ -253,6 +253,21 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         """Create the Gemma4 text attention evaluation sample."""
         return self._sample()
 
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Return export input without shared_kv_states.
+
+        shared_kv_states is a mutable dict used to pass KV tensors between
+        layers at runtime. torch.export strict mode fails when an empty dict
+        is included in kwargs because pytree traversal produces a tensor-count
+        mismatch.  The export path doesn't need this side-channel.
+        """
+        kwargs = {
+            k: v for k, v in eval_sample.kwargs.items() if k != "shared_kv_states"
+        }
+        return ForwardInput(eval_sample.args, kwargs)
+
 
 class Gemma4TextAttentionCase(Gemma4TextAttentionBaseCase):
     """Smoke case for one tiny full-attention Gemma4 text attention module."""
