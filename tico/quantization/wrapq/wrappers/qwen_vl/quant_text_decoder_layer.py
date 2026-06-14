@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -189,14 +189,14 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         # Quantize output activation
         hidden_states = self._fq(hidden_states, self.obs_act_out)
 
-        outputs = (hidden_states,)
+        outputs: list[Any] = [hidden_states]
         if output_attentions:
-            outputs += (attn_weights,)
+            outputs.append(attn_weights)
         if use_cache:
-            outputs += (present_key_value,)
+            outputs.append(present_key_value)
 
         if self.return_type == "tuple":
-            return outputs
+            return tuple(outputs)
         if self.return_type == "tensor":
             return hidden_states
         raise RuntimeError(f"Invalid return_type: {self.return_type!r}")

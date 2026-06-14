@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import copy
-from typing import Iterable, Literal, Optional, Tuple
+from typing import Any, Iterable, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -650,7 +650,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         # Final projection
         out = self.o_proj(attn_out)
 
-        outputs = (out, attn_weights)
+        outputs: list[Any] = [out, attn_weights]
         if use_cache:
             cache_out = self._finalize_cache_output(
                 past_key_values=past_key_values,
@@ -660,9 +660,9 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
                 present_v=present_v,
                 cache_output_mode=cache_output_mode,
             )
-            outputs += (cache_out,)
+            outputs.append(cache_out)
 
-        return outputs
+        return tuple(outputs)
 
     def _all_observers(self) -> Iterable:
         yield from (
