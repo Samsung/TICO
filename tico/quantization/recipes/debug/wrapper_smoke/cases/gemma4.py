@@ -638,6 +638,61 @@ class Gemma4VisionAttentionCase(Gemma4BaseCase):
         return self._sample()
 
 
+class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 vision encoder layer."""
+
+    name = "gemma4_vision_encoder_layer"
+    description = "Quantize one tiny Gemma4 vision encoder layer."
+    tags = ("gemma4", "e2b", "vision", "encoder_layer")
+    max_mean_abs_diff = 2.5
+    seq_len = 8
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 vision encoder layer and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionEncoderLayer
+
+        torch.manual_seed(123)
+        self.vision_cfg = _make_vision_config()
+        module = Gemma4VisionEncoderLayer(self.vision_cfg, layer_idx=0).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 vision encoder-layer input."""
+        batch_size = 1
+        hidden = torch.randn(batch_size, self.seq_len, self.vision_cfg.hidden_size)
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _vision_rope(
+                    batch_size,
+                    self.seq_len,
+                    self.vision_cfg.head_dim,
+                ),
+                "attention_mask": torch.zeros(
+                    batch_size, 1, self.seq_len, self.seq_len
+                ),
+                "position_ids": _vision_position_ids(batch_size, self.seq_len),
+            },
+        )
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 vision encoder-layer calibration samples."""
+        return [self._sample() for _ in range(8)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 vision encoder-layer evaluation sample."""
+        return self._sample()
+
+
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
     Gemma4TextAttentionCase(),
@@ -648,4 +703,5 @@ GEMMA4_CASES = (
     Gemma4TextDecoderLayerDecodeCase(),
     Gemma4TextDecoderLayerSharedKVCase(),
     Gemma4VisionAttentionCase(),
+    Gemma4VisionEncoderLayerCase(),
 )

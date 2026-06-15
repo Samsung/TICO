@@ -123,6 +123,40 @@ class Gemma4MMFusionExportAdapter(nn.Module):
         )
 
 
+class Gemma4VisionEncoderLayerPrefillExportAdapter(nn.Module):
+    """Export adapter for one Gemma4 vision encoder layer.
+
+    Input contract:
+        ``hidden_states`` has shape ``(1, S, vision_hidden_size)``.
+        ``attention_mask`` is a static additive or keep mask broadcastable to
+        ``(1, heads, S, S)``. ``position_embeddings`` is the ``(cos, sin)`` tuple
+        for the fixed patch layout, and ``position_ids`` is the optional static
+        2-D pixel coordinate tensor shaped ``(1, S, 2)``.
+
+    Output contract:
+        Returns output patch states with shape ``(1, S, vision_hidden_size)``.
+    """
+
+    def __init__(self, wrapped_layer: nn.Module):
+        super().__init__()
+        self.wrapped = wrapped_layer
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Run a static vision encoder-layer prefill graph."""
+        return self.wrapped(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+            position_ids=position_ids,
+        )
+
+
 class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
     """Export adapter for a Gemma4 text decoder layer in prefill mode.
 
