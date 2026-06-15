@@ -322,9 +322,13 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
         if self.hidden_size_per_layer_input:
             observers.extend(
                 [
-                    self.obs_per_layer_gate_act,
-                    self.obs_per_layer_mul,
-                    self.obs_per_layer_residual_out,
+                    obs
+                    for obs in [
+                        self.obs_per_layer_gate_act,
+                        self.obs_per_layer_mul,
+                        self.obs_per_layer_residual_out,
+                    ]
+                    if obs is not None
                 ]
             )
-        return tuple(obs for obs in observers if obs is not None)
+        return tuple(observers)

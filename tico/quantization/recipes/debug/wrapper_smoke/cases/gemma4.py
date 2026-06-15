@@ -342,7 +342,7 @@ class Gemma4TextAttentionSharedKVCase(Gemma4TextAttentionBaseCase):
 class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
     """Base class for tiny Gemma4 text decoder-layer smoke cases."""
 
-    tags = ("gemma4", "e2b", "text", "decoder_layer")
+    tags: tuple[str, ...] = ("gemma4", "e2b", "text", "decoder_layer")
     max_mean_abs_diff = 2.5
     seq_len = 8
     layer_idx = 0
