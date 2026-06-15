@@ -58,7 +58,9 @@ class QuantGemma4RMSNorm(QuantModuleBase):
     def _weight_for_rms_norm(self, x: torch.Tensor) -> torch.Tensor:
         """Return a calibrated or fake-quantized RMSNorm scale tensor."""
         weight = self._raw_weight_for_rms_norm(x)
-        if self._mode is Mode.QUANT:
+        if self._mode is Mode.CALIB and not self.with_scale:
+            self.obs_weight.collect(weight.detach())
+        elif self._mode is Mode.QUANT:
             weight = self.obs_weight.fake_quant(weight)
         return weight
 

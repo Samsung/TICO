@@ -218,6 +218,23 @@ class TestQuantGemma4RMSNorm(unittest.TestCase):
         self.assertEqual(q_rms.obs_act_in.dtype, DType.uint(4))
         self.assertEqual(q_rms.obs_act_out.dtype, DType.uint(4))
 
+    def test_unit_scale_weight_is_collected_and_preserved_in_quant_mode(self):
+        fp = _DummyGemma4RMSNorm(self.hidden, eps=1e-6, with_scale=False)
+        q_rms = QuantGemma4RMSNorm(fp)
+
+        q_rms.enable_calibration()
+        _ = q_rms(self.x)
+
+        one = torch.tensor(1.0, device=q_rms.obs_weight.min_val.device)
+        self.assertTrue(torch.allclose(q_rms.obs_weight.min_val, one))
+        self.assertTrue(torch.allclose(q_rms.obs_weight.max_val, one))
+
+        q_rms.freeze_qparams()
+
+        unit = torch.ones(self.hidden, dtype=self.x.dtype, device=self.x.device)
+        q_unit = q_rms.obs_weight.fake_quant(unit)
+        self.assertTrue(torch.allclose(q_unit, unit, atol=0, rtol=0))
+
 
 if __name__ == "__main__":
     unittest.main()
