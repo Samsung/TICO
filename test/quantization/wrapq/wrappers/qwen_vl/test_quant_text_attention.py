@@ -12,12 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import types
+import inspect
 import unittest
 
 import torch
-import torch.nn as nn
-from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
@@ -72,11 +70,59 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         cls.num_kv_heads = cfg.num_key_value_heads
 
     def _rand_rope(self, B: int, S: int):
-        # Build dummy RoPE tables with shape (B, S, head_dim),
-        # consistent with HF apply_rotary_pos_emb() expectations.
+        """Create synthetic RoPE tables with Qwen text-attention shapes."""
         h = self.head_dim
         emb = torch.randn(B, S, h)
         return emb.cos(), emb.sin()
+
+    def _collect_cache_calibration(self, qattn: QuantQwen3VLTextAttention) -> None:
+        """Collect observer statistics for static KV cache tensors."""
+        batch_size = 2
+        past_len = 2
+        q_len = 1
+        past_k = torch.randn(batch_size, self.num_kv_heads, past_len, self.head_dim)
+        past_v = torch.randn_like(past_k)
+        hidden = torch.randn(batch_size, q_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, q_len)
+        mask = torch.zeros(batch_size, 1, q_len, past_len + q_len)
+        _ = qattn(
+            hidden,
+            pos,
+            attention_mask=mask,
+            past_key_values=(past_k, past_v),
+            use_cache=True,
+            cache_output_mode="present",
+        )
+
+    def _calibrate_cache_paths(self, qattn: QuantQwen3VLTextAttention) -> None:
+        """Calibrate the no-cache and static tuple-cache execution paths."""
+        qattn.enable_calibration()
+
+        batch_size, prefill_len, decode_len = 2, 4, 1
+        for _ in range(2):
+            x0 = torch.randn(batch_size, prefill_len, self.hidden_size)
+            pos0 = self._rand_rope(batch_size, prefill_len)
+            _, _, delta0 = qattn(
+                x0,
+                pos0,
+                attention_mask=None,
+                use_cache=True,
+                cache_output_mode="delta",
+            )
+
+            past_k, past_v = delta0
+            x1 = torch.randn(batch_size, decode_len, self.hidden_size)
+            pos1 = self._rand_rope(batch_size, decode_len)
+            _ = qattn(
+                x1,
+                pos1,
+                attention_mask=None,
+                past_key_values=(past_k, past_v),
+                use_cache=True,
+                cache_output_mode="delta",
+            )
+
+        qattn.freeze_qparams()
 
     def test_mode_transitions(self):
         qattn = QuantQwen3VLTextAttention(self.fp_attn)
@@ -88,6 +134,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         x = torch.randn(2, 5, self.hidden_size)
         pos = self._rand_rope(2, 5)
         _ = qattn(x, pos)
+        self._collect_cache_calibration(qattn)
 
         qattn.freeze_qparams()
         self.assertIs(qattn._mode, Mode.QUANT)
@@ -99,6 +146,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             inp = torch.randn(2, 6, self.hidden_size)
             pos = self._rand_rope(2, 6)
             _ = qattn(inp, pos)
+        self._collect_cache_calibration(qattn)
         qattn.freeze_qparams()
 
         x = torch.randn(2, 6, self.hidden_size)
@@ -143,6 +191,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             x = torch.randn(B, S, self.hidden_size)
             pos = self._rand_rope(B, S)
             _ = qattn(x, pos, attention_mask=float_mask)
+        self._collect_cache_calibration(qattn)
         qattn.freeze_qparams()
 
         # Forward should not raise, and shapes should match
@@ -161,12 +210,122 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         self.assertEqual(attn_w.shape, (B, self.num_heads, S, S))
         self.assertEqual(fp_attn_w.shape, (B, self.num_heads, S, S))
 
+    def test_public_cache_argument_is_past_key_values(self):
+        """Verify that the public static-runtime cache argument is plural only."""
+        params = inspect.signature(QuantQwen3VLTextAttention.forward).parameters
+        self.assertIn("past_key_values", params)
+        self.assertNotIn("past_key_value", params)
+
+    def test_static_tuple_cache_returns_delta_kv_for_prefill_and_decode(self):
+        """Validate delta-only KV outputs for the static tuple-cache path."""
+        torch.manual_seed(7)
+        qattn = QuantQwen3VLTextAttention(self.fp_attn)
+        self._calibrate_cache_paths(qattn)
+
+        B, S0 = 2, 4
+        x0 = torch.randn(B, S0, self.hidden_size)
+        pos0 = self._rand_rope(B, S0)
+
+        with torch.no_grad():
+            out0, attn0, delta0 = qattn(
+                x0,
+                pos0,
+                attention_mask=None,
+                use_cache=True,
+                cache_output_mode="delta",
+            )
+
+        new_k0, new_v0 = delta0
+        self.assertEqual(out0.shape, (B, S0, self.hidden_size))
+        self.assertEqual(attn0.shape, (B, self.num_heads, S0, S0))
+        self.assertEqual(new_k0.shape, (B, self.num_kv_heads, S0, self.head_dim))
+        self.assertEqual(new_v0.shape, (B, self.num_kv_heads, S0, self.head_dim))
+
+        x1 = torch.randn(B, 1, self.hidden_size)
+        pos1 = self._rand_rope(B, 1)
+        with torch.no_grad():
+            out1, attn1, delta1 = qattn(
+                x1,
+                pos1,
+                attention_mask=None,
+                past_key_values=(new_k0, new_v0),
+                use_cache=True,
+                cache_output_mode="delta",
+            )
+
+        new_k1, new_v1 = delta1
+        self.assertEqual(out1.shape, (B, 1, self.hidden_size))
+        self.assertEqual(attn1.shape, (B, self.num_heads, 1, S0 + 1))
+        self.assertEqual(new_k1.shape, (B, self.num_kv_heads, 1, self.head_dim))
+        self.assertEqual(new_v1.shape, (B, self.num_kv_heads, 1, self.head_dim))
+
+    def test_static_tuple_cache_returns_present_kv_when_requested(self):
+        """Validate full present KV outputs for the static tuple-cache path."""
+        torch.manual_seed(9)
+        qattn = QuantQwen3VLTextAttention(self.fp_attn)
+        self._calibrate_cache_paths(qattn)
+
+        B, S0 = 1, 3
+        x0 = torch.randn(B, S0, self.hidden_size)
+        pos0 = self._rand_rope(B, S0)
+
+        with torch.no_grad():
+            _, _, present0 = qattn(
+                x0,
+                pos0,
+                attention_mask=None,
+                use_cache=True,
+                cache_output_mode="present",
+            )
+
+        present_k0, present_v0 = present0
+        self.assertEqual(present_k0.shape, (B, self.num_kv_heads, S0, self.head_dim))
+        self.assertEqual(present_v0.shape, (B, self.num_kv_heads, S0, self.head_dim))
+
+        x1 = torch.randn(B, 1, self.hidden_size)
+        pos1 = self._rand_rope(B, 1)
+        with torch.no_grad():
+            _, attn1, present1 = qattn(
+                x1,
+                pos1,
+                attention_mask=None,
+                past_key_values=(present_k0, present_v0),
+                use_cache=True,
+                cache_output_mode="present",
+            )
+
+        present_k1, present_v1 = present1
+        self.assertEqual(attn1.shape, (B, self.num_heads, 1, S0 + 1))
+        self.assertEqual(
+            present_k1.shape,
+            (B, self.num_kv_heads, S0 + 1, self.head_dim),
+        )
+        self.assertEqual(
+            present_v1.shape,
+            (B, self.num_kv_heads, S0 + 1, self.head_dim),
+        )
+
+    def test_invalid_cache_output_mode_raises(self):
+        """Reject unsupported cache output policies."""
+        qattn = QuantQwen3VLTextAttention(self.fp_attn)
+        x = torch.randn(1, 2, self.hidden_size)
+        pos = self._rand_rope(1, 2)
+
+        with self.assertRaises(ValueError):
+            _ = qattn(
+                x,
+                pos,
+                attention_mask=None,
+                use_cache=True,
+                cache_output_mode="full",  # type: ignore[arg-type]
+            )
+
     def test_cache_mock_object_update_prefill_then_decode(self):
         """
-        `QuantQwen3VLTextAttention` uses HF Cache-like update().
-        This test validates:
-          - cache grows along sequence dim (dim=2)
-          - attention weights use the grown key length
+        Validate HF Cache-like update semantics for eager wrapper execution.
+
+        The exported static runtime uses tuple caches, but full-model eager
+        execution may still pass a Cache-like object with an update method.
         """
 
         class MockCache:
@@ -193,6 +352,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             x = torch.randn(2, 3, self.hidden_size)
             pos = self._rand_rope(2, 3)
             _ = qattn(x, pos, attention_mask=None)
+        self._collect_cache_calibration(qattn)
         qattn.freeze_qparams()
 
         cache = MockCache()
@@ -238,8 +398,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
 
     def test_mask_slicing_with_cache_q_len_lt_k_len(self):
         """
-        Validate causal mask slicing when q_len < k_len due to cache growth.
-        This specifically checks that attention weights have shape (..., q_len, k_len).
+        Validate causal mask slicing when q_len is smaller than cached key length.
         """
         torch.manual_seed(2)
         qattn = QuantQwen3VLTextAttention(self.fp_attn)
@@ -250,6 +409,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             x = torch.randn(1, 5, self.hidden_size)
             pos = self._rand_rope(1, 5)
             _ = qattn(x, pos, attention_mask=None)
+        self._collect_cache_calibration(qattn)
         qattn.freeze_qparams()
 
         class MockCache:
@@ -281,7 +441,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
                 cache_position=torch.arange(3),
             )
 
-        # Now decode with q_len=2 => k_len should be 5
+        # Now decode with q_len=2, so k_len should be 5.
         x1 = torch.randn(B, 2, self.hidden_size)
         pos1 = self._rand_rope(B, 2)
         with torch.no_grad():
@@ -319,7 +479,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
 
         assert out.shape == (1, 1, 4, 4)
 
-        # Causal mask: query 0 cannot attend to keys 1,2,3.
+        # Causal mask: query 0 cannot attend to keys 1, 2, and 3.
         assert out[0, 0, 0, 0].item() == 0.0
         assert out[0, 0, 0, 1].item() == -100.0
         assert out[0, 0, 0, 2].item() == -100.0
@@ -327,7 +487,7 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         # Padding mask: key 3 is masked for all queries.
         assert torch.all(out[..., 3] == -100.0)
 
-        # Query 2 can attend to keys 0,1,2, but not key 3.
+        # Query 2 can attend to keys 0, 1, and 2, but not key 3.
         assert out[0, 0, 2, 0].item() == 0.0
         assert out[0, 0, 2, 1].item() == 0.0
         assert out[0, 0, 2, 2].item() == 0.0
