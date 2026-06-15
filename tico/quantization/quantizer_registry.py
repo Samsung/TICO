@@ -55,6 +55,9 @@ def get_quantizer(cfg: BaseConfig) -> BaseQuantizer:
     if name:
         if name == "ptq":
             importlib.import_module(f"tico.quantization.wrapq.quantizer")
+        elif name == "llama_gptq":
+            # LlamaGPTQConfig uses a separate quantizer file within the gptq module
+            importlib.import_module(f"tico.quantization.algorithm.gptq.llama_quantizer")
         else:
             try:
                 importlib.import_module(f"tico.quantization.algorithm.{name}.quantizer")

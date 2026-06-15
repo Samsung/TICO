@@ -1,4 +1,4 @@
-# Copyright (c) 2025 Samsung Electronics Co., Ltd. All Rights Reserved
+# Copyright (c) 2026 Samsung Electronics Co., Ltd. All Rights Reserved
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,9 +20,13 @@ from tico.quantization.config.base import BaseConfig
 
 
 @dataclass
-class GPTQConfig(BaseConfig):
+class LlamaGPTQConfig(BaseConfig):
     """
-    Configuration for GPTQ weight quantization.
+    Llama-specific configuration for GPTQ weight quantization.
+
+    This configuration is designed for Llama-family models (including
+    LlamaForCausalLM and SpinLlamaForCausalLM) and provides options
+    tailored to their architecture.
 
     Attributes
     ----------
@@ -43,6 +47,10 @@ class GPTQConfig(BaseConfig):
         is disabled by default because many language models tie
         `lm_head.weight` with the input embedding table, and quantizing the
         head can modify the shared embedding weights.
+    quantize_rotate_lm_head : bool
+        Whether to apply GPTQ to the `rotate_lm_head` rotation layer.
+        This option is only relevant for SpinLlamaForCausalLM models.
+        Disabled by default.
     """
 
     # general
@@ -51,6 +59,7 @@ class GPTQConfig(BaseConfig):
 
     # model-specific quantization switches
     quantize_lm_head: bool = False
+    quantize_rotate_lm_head: bool = False
 
     # quantizer.configure params (weight quantization spec)
     weight_bits: int = 8
@@ -74,16 +83,16 @@ class GPTQConfig(BaseConfig):
 
     @property
     def name(self) -> str:
-        return "gptq"
+        return "llama_gptq"
 
     def validate(self) -> None:
         if not isinstance(self.quantize_lm_head, bool):
             raise TypeError(
                 f"quantize_lm_head must be bool. got {type(self.quantize_lm_head)}"
             )
-        if not isinstance(self.gptq_v2, bool):
+        if not isinstance(self.quantize_rotate_lm_head, bool):
             raise TypeError(
-                f"gptq_v2 must be bool. got {type(self.gptq_v2)}"
+                f"quantize_rotate_lm_head must be bool. got {type(self.quantize_rotate_lm_head)}"
             )
         if self.weight_bits <= 0:
             raise ValueError(f"weight_bits must be positive. got {self.weight_bits}")

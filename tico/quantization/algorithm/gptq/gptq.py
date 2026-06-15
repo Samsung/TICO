@@ -18,8 +18,9 @@
 
 # https://github.com/IST-DASLab/gptq/blob/2d65066/gptq.py
 
+import math
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -163,7 +164,10 @@ def get_matmul_input_for_convtranspose2d(layer, inp):
 
 
 class GPTQ:
-    def __init__(self, layer):
+    """
+    GPTQ quantization class supporting both standard GPTQ and GPTQv2.
+    """
+    def __init__(self, layer, **kwargs):
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
@@ -180,8 +184,30 @@ class GPTQ:
         )
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
+        # GPTQv2: for tracking FP vs quantized input difference
+        self.dXXT: Optional[torch.Tensor] = None
+        self.native_inp: Optional[List[torch.Tensor]] = None
+        self.kwargs = kwargs
 
-    def add_batch(self, inp, out):
+    def add_batch(self, inp, out=None):
+        """
+        Add a batch of inputs to the Hessian approximation.
+        
+        For GPTQv2, also processes native_inp (FP inputs) and computes dXXT.
+        """
+        # Process native input for GPTQv2 (before reshaping inp)
+        native_inp_processed = None
+        if hasattr(self, "native_inp") and self.native_inp is not None and len(self.native_inp) > 0:
+            native = self.native_inp.pop(0)
+            if native is not None:
+                native_inp_processed = native
+            if len(native_inp_processed.shape) == 2:
+                native_inp_processed = native_inp_processed.unsqueeze(0)
+            if isinstance(self.layer, nn.Linear):
+                if len(native_inp_processed.shape) > 2:
+                    native_inp_processed = native_inp_processed.reshape((-1, native_inp_processed.shape[-1]))
+                native_inp_processed = native_inp_processed.t()
+        
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
@@ -296,6 +322,16 @@ class GPTQ:
         self.nsamples += tmp
         inp = inp.double()
         self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
+        # GPTQv2: Compute dXXT using native (FP) vs processed input difference
+        if native_inp_processed is not None:
+            if self.dXXT is None:
+                self.dXXT = torch.zeros_like(self.H)
+            
+            native_inp_processed = native_inp_processed.double()
+            dX = native_inp_processed.to(inp.device) - inp
+            self.dXXT += dX.matmul(inp.t()).float()
+            del native, native_inp_processed
+            native = native_inp_processed = None
 
     def fasterquant(
         self,
@@ -305,7 +341,20 @@ class GPTQ:
         actorder=False,
         static_groups=False,
         verbose=False,
+        just_quantize=False,
     ):
+        """
+        Perform GPTQ quantization.
+        
+        Args:
+            blocksize: Block size for GPTQ
+            percdamp: Damping factor for Hessian
+            groupsize: Group size for groupwise quantization (-1 for no grouping)
+            actorder: Whether to use activation ordering
+            static_groups: Whether to use static groups
+            verbose: Whether to print verbose output
+            just_quantize: If True, only quantize weights without GPTQ optimization
+        """
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
             W = W.flatten(1)  # reshaped to matrix (OUT_channels x the_rest)
@@ -332,6 +381,10 @@ class GPTQ:
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
+        
+        # GPTQv2: Zero out dead elements in dXXT
+        if self.dXXT is not None:
+            self.dXXT[:, dead] = 0
 
         if groupsize != -1 and self.quantizer.mse in {"mse_for_gptq", "smse_for_gptq"}:
             raise ValueError(
@@ -354,6 +407,8 @@ class GPTQ:
             W = W[:, perm]
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
+            if self.dXXT is not None:
+                self.dXXT = self.dXXT[perm][:, perm]
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
@@ -374,8 +429,14 @@ class GPTQ:
         H = torch.cholesky_inverse(H)
         H = torch.linalg.cholesky(H, upper=True).float()
         Hinv = H
+        
+        # GPTQv2: Compute P correction matrix from dXXT
+        P = None
+        if self.dXXT is not None:
+            alpha = 0.25
+            P = alpha * ((self.dXXT @ Hinv.T).triu_(diagonal=1)) @ Hinv
 
-        self.quantizer.update(W, Hinv, perm)
+        self.quantizer.update(W, Hinv, perm, P=P)
 
         assert isinstance(Hinv, torch.Tensor)
         for i1 in range(0, self.columns, blocksize):
@@ -387,6 +448,7 @@ class GPTQ:
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
+            P1 = P[i1:i2, i1:i2] if P is not None else None
 
             for i in range(count):
                 w = W1[:, i]
@@ -415,12 +477,18 @@ class GPTQ:
 
                 err1 = (w - q) / d
                 W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                # GPTQv2: Apply P correction
+                if P1 is not None:
+                    W1[:, i:] += w.unsqueeze(1).matmul(P1[i, i:].unsqueeze(0))
                 Err1[:, i] = err1
 
             Q[:, i1:i2] = Q1
             Losses[:, i1:i2] = Losses1 / 2
 
             W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+            # GPTQv2: Apply P correction to remaining weights
+            if P is not None:
+                W[:, i2:] += W1.matmul(P[i1:i2, i2:])
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -476,5 +544,6 @@ class GPTQ:
         self.H = None
         self.Losses = None
         self.Trace = None
+        self.dXXT = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

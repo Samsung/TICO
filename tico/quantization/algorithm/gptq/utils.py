@@ -30,6 +30,44 @@ def find_layers(module, layers=[torch.nn.Linear], name=""):
     return res
 
 
+def find_layers_deep(module, layers=None, name=""):
+    """Like :func:`find_layers` but also recurses into ``QuantModuleBase``
+    wrappers (e.g. ``QuantLinear``) to discover the *inner* ``nn.Linear``
+    that holds the actual weight tensor.
+
+    This is needed when GPTQ runs on a PTQ-prepared model where every
+    ``nn.Linear`` has been wrapped inside a ``QuantLinear(module=nn.Linear)``.
+
+    Returns a dict mapping *local* name → ``nn.Module`` (the raw layer,
+    e.g. the ``nn.Linear`` inside ``QuantLinear.module``).
+    """
+    if layers is None:
+        layers = [torch.nn.Linear]
+
+    # Direct match on the module itself
+    if type(module) in layers:
+        return {name: module}
+
+    # Unwrap QuantModuleBase wrappers that store the original layer
+    # in a ``.module`` attribute (e.g. QuantLinear.module is nn.Linear).
+    if hasattr(module, "module") and isinstance(getattr(module, "module"), torch.nn.Module):
+        inner = module.module
+        if type(inner) in layers:
+            # Use the same name so GPTQ hooks the inner module directly.
+            return {name: inner}
+
+    res = {}
+    for name1, child in module.named_children():
+        res.update(
+            find_layers_deep(
+                child,
+                layers=layers,
+                name=name + "." + name1 if name != "" else name1,
+            )
+        )
+    return res
+
+
 def gather_single_batch_from_dict(data_dict, idx):
     """
     Gather single batch from a dict.
