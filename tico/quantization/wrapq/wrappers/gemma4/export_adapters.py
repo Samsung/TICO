@@ -19,12 +19,39 @@ graphs. CPU runtime code owns dynamic orchestration, cache writes, sampling, and
 processor/tokenizer logic.
 """
 
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
 from tico.quantization.wrapq.wrappers.gemma4.utils import fixed_slot_fuse
+
+
+LayerKV = Tuple[torch.Tensor, torch.Tensor]
+
+
+def _flatten_hidden_and_kv(output: Any, *, return_kv: bool) -> Any:
+    """Return ``hidden`` or ``(hidden, key, value)`` from a layer-wrapper output."""
+    if isinstance(output, tuple):
+        if not output:
+            raise RuntimeError("Gemma4 decoder export adapter received an empty tuple.")
+        hidden_states = output[0]
+        key_value = output[1] if len(output) > 1 else None
+    else:
+        hidden_states = output
+        key_value = None
+
+    if not return_kv:
+        return hidden_states
+    if key_value is None:
+        return hidden_states
+    if not isinstance(key_value, tuple) or len(key_value) != 2:
+        raise RuntimeError(
+            "Gemma4 decoder export adapter expected cache output to be a "
+            "``(key, value)`` tuple."
+        )
+    key, value = key_value
+    return hidden_states, key, value
 
 
 class Gemma4TokenEmbeddingExportAdapter(nn.Module):
@@ -97,7 +124,18 @@ class Gemma4MMFusionExportAdapter(nn.Module):
 
 
 class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
-    """Export adapter for a Gemma4 text decoder layer in prefill mode."""
+    """Export adapter for a Gemma4 text decoder layer in prefill mode.
+
+    Input contract:
+        ``hidden_states`` has shape ``(1, S, hidden_size)``. ``attention_mask``
+        is a static additive or keep mask. ``position_embeddings`` is ``(cos,
+        sin)`` for the current layer type.
+
+    Output contract:
+        If ``return_kv=True`` and the wrapped layer owns K/V projection weights,
+        returns ``(hidden_states, new_key, new_value)``. Shared-KV consumer layers
+        return only ``hidden_states`` because they do not produce new K/V states.
+    """
 
     def __init__(self, wrapped_layer: nn.Module, *, return_kv: bool = True):
         super().__init__()
@@ -110,18 +148,10 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
         attention_mask: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         per_layer_input: Optional[torch.Tensor] = None,
-        shared_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        shared_key_value: Optional[LayerKV] = None,
     ):
-        """Run a static prefill layer graph.
-
-        TODO: Implement shared-KV handling in the wrapped attention module. The
-        expected return shape should be one of:
-
-        - ``hidden_states`` when the layer is KV-shared and ``return_kv=False``.
-        - ``(hidden_states, new_k, new_v)`` for non-shared layers.
-        - ``(hidden_states, shared_k, shared_v)`` for store-full-length-KV layers.
-        """
-        return self.wrapped(
+        """Run a static prefill layer graph."""
+        output = self.wrapped(
             hidden_states,
             per_layer_input=per_layer_input,
             attention_mask=attention_mask,
@@ -131,10 +161,23 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
             use_cache=self.return_kv,
             cache_output_mode="delta",
         )
+        return _flatten_hidden_and_kv(output, return_kv=self.return_kv)
 
 
 class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
-    """Export adapter for a Gemma4 text decoder layer in single-token decode mode."""
+    """Export adapter for a Gemma4 text decoder layer in single-token decode mode.
+
+    Input contract:
+        ``hidden_states`` has shape ``(1, 1, hidden_size)``. ``past_key_value``
+        is a fixed-size cache tuple for non-shared layers, and
+        ``shared_key_value`` is a fixed-size full K/V tuple for shared-KV layers.
+
+    Output contract:
+        If ``return_kv=True`` and the wrapped layer owns K/V projection weights,
+        returns ``(hidden_states, new_key, new_value)`` where ``new_key`` and
+        ``new_value`` contain only the single-token delta. Shared-KV consumer
+        layers return only ``hidden_states``.
+    """
 
     def __init__(self, wrapped_layer: nn.Module, *, return_kv: bool = True):
         super().__init__()
@@ -146,12 +189,12 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_value: Optional[LayerKV] = None,
         per_layer_input: Optional[torch.Tensor] = None,
-        shared_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        shared_key_value: Optional[LayerKV] = None,
     ):
-        """Run a static decode layer graph and return only the new KV delta."""
-        return self.wrapped(
+        """Run a static decode layer graph and optionally return the K/V delta."""
+        output = self.wrapped(
             hidden_states,
             per_layer_input=per_layer_input,
             attention_mask=attention_mask,
@@ -161,6 +204,7 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
             use_cache=self.return_kv,
             cache_output_mode="delta",
         )
+        return _flatten_hidden_and_kv(output, return_kv=self.return_kv)
 
 
 class Gemma4LMHeadExportAdapter(nn.Module):

@@ -81,6 +81,7 @@ def _make_text_config(
     layer_types: tuple[str, ...] = ("full_attention",),
     attention_k_eq_v: bool = False,
     num_kv_shared_layers: int = 0,
+    hidden_size_per_layer_input: int = 0,
 ) -> Any:
     """Create a warning-free tiny Gemma4 text config for synthetic smoke tests.
 
@@ -110,6 +111,7 @@ def _make_text_config(
         enable_moe_block=False,
         attention_k_eq_v=attention_k_eq_v,
         num_kv_shared_layers=num_kv_shared_layers,
+        hidden_size_per_layer_input=hidden_size_per_layer_input,
     )
     return _set_eager_attention(cfg)
 
@@ -261,7 +263,7 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         shared_kv_states is a mutable dict used to pass KV tensors between
         layers at runtime. torch.export strict mode fails when an empty dict
         is included in kwargs because pytree traversal produces a tensor-count
-        mismatch.  The export path doesn't need this side-channel.
+        mismatch. The export path does not need this side-channel.
         """
         kwargs = {
             k: v for k, v in eval_sample.kwargs.items() if k != "shared_kv_states"
@@ -332,6 +334,212 @@ class Gemma4TextAttentionSharedKVCase(Gemma4TextAttentionBaseCase):
                 "shared_kv_states": {"full_attention": shared_key_value},
                 # QuantGemma4TextAttention implementations may also accept this
                 # explicit tuple form for static-runtime export paths.
+                "shared_key_value": shared_key_value,
+            },
+        )
+
+
+class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
+    """Base class for tiny Gemma4 text decoder-layer smoke cases."""
+
+    tags: tuple[str, ...] = ("gemma4", "e2b", "text", "decoder_layer")
+    max_mean_abs_diff = 2.5
+    seq_len = 8
+    layer_idx = 0
+    layer_types: tuple[str, ...] = ("full_attention",)
+    attention_k_eq_v = False
+    num_kv_shared_layers = 0
+    export_mode = "prefill"
+    return_kv_on_export = True
+    compare_reference_source = "reference"
+
+    def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
+        """Build the PTQ config used by Gemma4 decoder-layer smoke checks."""
+        from tico.quantization.config.ptq import PTQConfig
+
+        return PTQConfig(model_args={"profile": "reference_eval"})
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny dense Gemma4 text decoder layer and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
+
+        torch.manual_seed(123)
+        self.text_cfg = _make_text_config(
+            layer_types=self.layer_types,
+            attention_k_eq_v=self.attention_k_eq_v,
+            num_kv_shared_layers=self.num_kv_shared_layers,
+        )
+        module = Gemma4TextDecoderLayer(self.text_cfg, layer_idx=self.layer_idx).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic prefill decoder-layer sample."""
+        hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(
+                    1, self.seq_len, self.text_cfg.head_dim
+                ),
+                "attention_mask": _attention_mask(self.seq_len),
+                "shared_kv_states": {},
+            },
+        )
+
+    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
+        """Run a Gemma4 decoder layer without sharing mutable sample state."""
+        cloned = _clone_forward_input(sample)
+        return module(*cloned.args, **dict(cloned.kwargs))
+
+    def reference_forward(
+        self, reference: torch.nn.Module, sample: ForwardInput
+    ) -> Any:
+        """Run the original Gemma4 decoder layer without wrapper-only kwargs."""
+        cloned = _clone_forward_input(sample)
+        kwargs = dict(cloned.kwargs)
+        kwargs.pop("shared_key_value", None)
+        output = reference(*cloned.args, **kwargs)
+        return output[0] if isinstance(output, tuple) else output
+
+    def calibration_inputs(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> list[ForwardInput]:
+        """Create decoder-layer calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create the decoder-layer evaluation sample."""
+        return self._sample()
+
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Export the wrapped decoder layer in the configured static mode."""
+        wrapped = getattr(quantized, "wrapped", quantized)
+        return (
+            wrapped.as_export_module(
+                self.export_mode, return_kv=self.return_kv_on_export
+            ).eval()
+            if hasattr(wrapped, "as_export_module")
+            else quantized
+        )
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create static export inputs expected by the decoder-layer adapter."""
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        hidden = kwargs["hidden_states"]
+        mask = kwargs["attention_mask"]
+        rope = kwargs["position_embeddings"]
+        shared_key_value = kwargs.get("shared_key_value")
+        export_kwargs = {}
+        if shared_key_value is not None:
+            export_kwargs["shared_key_value"] = shared_key_value
+        return ForwardInput((hidden, mask, rope), export_kwargs)
+
+
+class Gemma4TextDecoderLayerPrefillCase(Gemma4TextDecoderLayerBaseCase):
+    """Smoke case for one tiny Gemma4 text decoder layer in prefill mode."""
+
+    name = "gemma4_text_decoder_layer_prefill"
+    description = "Quantize one tiny dense Gemma4 text decoder layer in prefill mode."
+    layer_types = ("sliding_attention", "full_attention")
+    layer_idx = 1
+    export_mode = "prefill"
+
+
+class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
+    """Smoke case for one tiny Gemma4 text decoder layer in decode mode."""
+
+    name = "gemma4_text_decoder_layer_decode"
+    description = "Quantize one tiny dense Gemma4 text decoder layer in decode mode."
+    tags = ("gemma4", "e2b", "text", "decoder_layer", "decode")
+    compare_reference_source = "prepared"
+    seq_len = 1
+    max_seq = 8
+    export_mode = "decode"
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic single-token decoder-layer decode sample."""
+        hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
+        past_len = self.max_seq - 1
+        past = (
+            torch.randn(
+                1,
+                self.text_cfg.num_key_value_heads,
+                past_len,
+                self.text_cfg.head_dim,
+            ),
+            torch.randn(
+                1,
+                self.text_cfg.num_key_value_heads,
+                past_len,
+                self.text_cfg.head_dim,
+            ),
+        )
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(1, 1, self.text_cfg.head_dim),
+                "attention_mask": _attention_mask(1, self.max_seq),
+                "past_key_value": past,
+                "use_cache": True,
+            },
+        )
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create static decode inputs expected by the decoder-layer adapter."""
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        return ForwardInput(
+            (
+                kwargs["hidden_states"],
+                kwargs["attention_mask"],
+                kwargs["position_embeddings"],
+            ),
+            {"past_key_value": kwargs["past_key_value"]},
+        )
+
+
+class Gemma4TextDecoderLayerSharedKVCase(Gemma4TextDecoderLayerBaseCase):
+    """Smoke case for a Gemma4 shared-KV consumer decoder layer."""
+
+    name = "gemma4_text_decoder_layer_shared_kv"
+    description = "Quantize one tiny Gemma4 decoder layer that consumes shared K/V."
+    tags = ("gemma4", "e2b", "text", "decoder_layer", "shared_kv")
+    layer_types = ("full_attention", "full_attention")
+    layer_idx = 1
+    num_kv_shared_layers = 1
+    export_mode = "prefill"
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic shared-KV decoder-layer sample."""
+        hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
+        key_states = torch.randn(
+            1,
+            self.text_cfg.num_key_value_heads,
+            self.seq_len,
+            self.text_cfg.head_dim,
+        )
+        value_states = torch.randn_like(key_states)
+        shared_key_value = (key_states, value_states)
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(
+                    1, self.seq_len, self.text_cfg.head_dim
+                ),
+                "attention_mask": _attention_mask(self.seq_len),
+                "shared_kv_states": {"full_attention": shared_key_value},
                 "shared_key_value": shared_key_value,
             },
         )
@@ -436,5 +644,8 @@ GEMMA4_CASES = (
     Gemma4TextSlidingAttentionCase(),
     Gemma4TextAttentionKEqVCase(),
     Gemma4TextAttentionSharedKVCase(),
+    Gemma4TextDecoderLayerPrefillCase(),
+    Gemma4TextDecoderLayerDecodeCase(),
+    Gemma4TextDecoderLayerSharedKVCase(),
     Gemma4VisionAttentionCase(),
 )
