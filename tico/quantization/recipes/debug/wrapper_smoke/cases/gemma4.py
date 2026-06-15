@@ -583,6 +583,26 @@ def _vision_position_ids(batch_size: int, seq_len: int) -> torch.Tensor:
     return xy.unsqueeze(0).expand(batch_size, -1, -1).long()
 
 
+def _pixel_position_ids(batch_size: int, seq_len: int) -> torch.Tensor:
+    """Create deterministic 2-D pixel position ids for a tiny patch sequence.
+
+    The pooler requires ``pixel_position_ids`` with shape ``(B, S, 2)`` where
+    the last dimension encodes ``(x, y)`` patch coordinates.  We build a
+    simple square grid layout that is compatible with the ``output_length``
+    used in pooler tests: ``seq_len = output_length * k^2`` where ``k`` is
+    the pooling factor.
+    """
+    side = int(seq_len**0.5)
+    coords = torch.arange(seq_len)
+    xy = torch.stack((coords % side, coords // side), dim=-1)
+    return xy.unsqueeze(0).expand(batch_size, -1, -1).long()
+
+
+def _padding_positions(batch_size: int, seq_len: int) -> torch.Tensor:
+    """Create an all-False padding mask (no padding)."""
+    return torch.zeros(batch_size, seq_len, dtype=torch.bool)
+
+
 class Gemma4VisionAttentionCase(Gemma4BaseCase):
     """Smoke case for one tiny Gemma4 vision attention module."""
 
@@ -693,6 +713,108 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
         return self._sample()
 
 
+class Gemma4VisionPoolerCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 vision pooler module."""
+
+    name = "gemma4_vision_pooler"
+    description = "Quantize one tiny Gemma4 vision pooler module."
+    tags = ("gemma4", "e2b", "vision", "pooler")
+    max_mean_abs_diff = 2.0
+    # seq_len=16 and output_length=4 so that k=2 (16 / 4 = 4, sqrt(4) = 2).
+    seq_len = 16
+    output_length = 4
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 vision pooler module and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPooler
+
+        torch.manual_seed(123)
+        self.vision_cfg = _make_vision_config()
+        module = Gemma4VisionPooler(self.vision_cfg).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 vision pooler input."""
+        batch_size = 1
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": torch.randn(
+                    batch_size, self.seq_len, self.vision_cfg.hidden_size
+                ),
+                "pixel_position_ids": _pixel_position_ids(batch_size, self.seq_len),
+                "padding_positions": _padding_positions(batch_size, self.seq_len),
+                "output_length": self.output_length,
+            },
+        )
+
+    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
+        """Run a Gemma4 vision pooler without sharing mutable sample state."""
+        cloned = _clone_forward_input(sample)
+        output = module(*cloned.args, **dict(cloned.kwargs))
+        # Return only the pooled features for comparison.
+        return output[0] if isinstance(output, tuple) else output
+
+    def reference_forward(
+        self, reference: torch.nn.Module, sample: ForwardInput
+    ) -> Any:
+        """Run the original Gemma4 vision pooler without sharing mutable sample state."""
+        cloned = _clone_forward_input(sample)
+        output = reference(*cloned.args, **dict(cloned.kwargs))
+        return output[0] if isinstance(output, tuple) else output
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 vision pooler calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 vision pooler evaluation sample."""
+        return self._sample()
+
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Export the wrapped pooler in prefill mode with fixed output_length.
+
+        Passes ``pixel_position_ids`` so the export adapter precomputes the
+        pooling weight matrix and output mask at construction time, replacing
+        the dynamic ``F.one_hot`` and ``torch.div`` operations with a static
+        ``matmul``.
+        """
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if hasattr(wrapped, "as_export_module"):
+            pixel_pos_ids = _pixel_position_ids(1, self.seq_len)
+            return wrapped.as_export_module(
+                mode="prefill",
+                output_length=self.output_length,
+                pixel_position_ids=pixel_pos_ids,
+            ).eval()
+        return quantized
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create static export inputs expected by the pooler adapter.
+
+        The export adapter bakes ``output_length`` as a construction-time
+        constant, so it is not included in the forward signature.
+        """
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        hidden = kwargs["hidden_states"]
+        pixel_position_ids = kwargs["pixel_position_ids"]
+        padding_positions = kwargs["padding_positions"]
+        return ForwardInput((hidden, pixel_position_ids, padding_positions), {})
+
+
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
     Gemma4TextAttentionCase(),
@@ -704,4 +826,5 @@ GEMMA4_CASES = (
     Gemma4TextDecoderLayerSharedKVCase(),
     Gemma4VisionAttentionCase(),
     Gemma4VisionEncoderLayerCase(),
+    Gemma4VisionPoolerCase(),
 )
