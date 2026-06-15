@@ -337,10 +337,104 @@ class Gemma4TextAttentionSharedKVCase(Gemma4TextAttentionBaseCase):
         )
 
 
+def _make_vision_config() -> Any:
+    """Create a tiny Gemma4 vision config for synthetic smoke tests."""
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
+
+    cfg = Gemma4VisionConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        attention_dropout=0.0,
+        max_position_embeddings=128,
+        rms_norm_eps=1e-6,
+        use_clipped_linears=False,
+        rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+    )
+    return _set_eager_attention(cfg)
+
+
+def _vision_rope(
+    batch_size: int,
+    seq_len: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create synthetic Gemma4 vision RoPE embeddings."""
+    emb = torch.randn(batch_size, seq_len, head_dim)
+    return emb.cos(), emb.sin()
+
+
+def _vision_position_ids(batch_size: int, seq_len: int) -> torch.Tensor:
+    """Create deterministic 2-D pixel position ids for a tiny patch sequence."""
+    side = 4
+    coords = torch.arange(seq_len)
+    xy = torch.stack((coords % side, coords // side), dim=-1)
+    return xy.unsqueeze(0).expand(batch_size, -1, -1).long()
+
+
+class Gemma4VisionAttentionCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 vision attention module."""
+
+    name = "gemma4_vision_attention"
+    description = "Quantize one tiny Gemma4 vision attention module."
+    tags = ("gemma4", "e2b", "vision", "attention")
+    max_mean_abs_diff = 2.0
+    seq_len = 8
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 vision attention module and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionAttention
+
+        torch.manual_seed(123)
+        self.vision_cfg = _make_vision_config()
+        module = Gemma4VisionAttention(self.vision_cfg, layer_idx=0).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 vision attention input."""
+        batch_size = 1
+        hidden = torch.randn(batch_size, self.seq_len, self.vision_cfg.hidden_size)
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _vision_rope(
+                    batch_size,
+                    self.seq_len,
+                    self.vision_cfg.head_dim,
+                ),
+                "attention_mask": torch.zeros(
+                    batch_size, 1, self.seq_len, self.seq_len
+                ),
+                "position_ids": _vision_position_ids(batch_size, self.seq_len),
+            },
+        )
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 vision attention calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 vision attention evaluation sample."""
+        return self._sample()
+
+
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
     Gemma4TextAttentionCase(),
     Gemma4TextSlidingAttentionCase(),
     Gemma4TextAttentionKEqVCase(),
     Gemma4TextAttentionSharedKVCase(),
+    Gemma4VisionAttentionCase(),
 )
