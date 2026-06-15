@@ -15,6 +15,7 @@
 """Runner for wrapper-level quantization smoke checks."""
 
 import json
+import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -71,8 +72,20 @@ def _print_plot(
         from tico.quantization.evaluation.utils import plot_two_outputs
 
         plot = plot_two_outputs(fp_tensor, quant_tensor)
+    except ModuleNotFoundError as exc:
+        if exc.name == "plotext":
+            print(
+                "WARNING: plot requested, but optional dependency 'plotext' is not "
+                "installed; skipping plot. Install it with `pip install plotext` "
+                "or pass `--no-plot`.",
+                file=sys.stderr,
+            )
+            return
+
+        print(f"WARNING: plot_two_outputs failed: {exc}", file=sys.stderr)
+        return
     except Exception as exc:
-        result.messages.append(f"plot_two_outputs failed: {exc}")
+        print(f"WARNING: plot_two_outputs failed: {exc}", file=sys.stderr)
         return
 
     print(plot)
