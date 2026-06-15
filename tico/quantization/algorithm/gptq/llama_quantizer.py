@@ -919,9 +919,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
-#        if ptq_wrapped:
-#            self._calibrate_norm_lm_head_ptq(model)
-#            model.freeze_qparams()
+        if ptq_wrapped:
+            self._calibrate_norm_lm_head_ptq(model)
+            model.freeze_qparams()
         
         # Restore the original cache configuration.
         config = self._get_config(model)

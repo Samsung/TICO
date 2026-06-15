@@ -1441,7 +1441,8 @@ def build_calibration_inputs(
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
 
     nsamples = args.nsamples_for_qcalibration
-    seqlen = model.config.max_position_embeddings - args.decode_calibration_steps
+    seqlen_for_decode = 0 if args.use_llama_gptq else args.decode_calibration_steps
+    seqlen = model.config.max_position_embeddings - seqlen_for_decode
     if seqlen <= 0:
         raise ValueError(
             "decode_calibration_steps must be smaller than max_position_embeddings"
