@@ -27,6 +27,7 @@ class AtenOps:
         # In alphabetical order
         self.add = [torch.ops.aten.add.Tensor]
         self.alias = [torch.ops.aten.alias.default, torch.ops.aten.alias_copy.default]
+        self.arange = [torch.ops.aten.arange.start_step]
         self.cat = [torch.ops.aten.cat.default]
         self.clamp = [torch.ops.aten.clamp.default, torch.ops.aten.clamp.Tensor]
         self.clone = [torch.ops.aten.clone.default]
@@ -50,6 +51,7 @@ class AtenOps:
             torch.ops.aten.expand.default,
             torch.ops.aten.expand_copy.default,
         ]
+        self.gather = [torch.ops.aten.gather.default]
         self.index_select = [torch.ops.aten.index_select.default]
         self.mean = [torch.ops.aten.mean.dim]
         self.mul_scalar = [torch.ops.aten.mul.Scalar]
