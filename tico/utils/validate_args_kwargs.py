@@ -520,6 +520,18 @@ class FullLikeArgs:
 
 @enforce_type
 @dataclass
+class GatherArgs:
+    """
+    gather(Tensor self, int dim, Tensor index) -> Tensor
+    """
+
+    input: torch.fx.Node
+    dim: int
+    index: Union[torch.fx.Node, torch.Tensor]
+
+
+@enforce_type
+@dataclass
 class FullArgs:
     """
     full(SymInt[] size, Scalar fill_value, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None) -> Tensor
