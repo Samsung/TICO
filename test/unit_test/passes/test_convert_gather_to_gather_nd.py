@@ -20,7 +20,7 @@ from test.support.pass_value_test import SinglePassValueTest
 
 
 class GatherBasic(torch.nn.Module):
-    """Basic gather """
+    """Basic gather"""
 
     def __init__(self, dim: int):
         super().__init__()
@@ -38,8 +38,7 @@ class GatherBasic(torch.nn.Module):
 class GatherBasicTest(SinglePassValueTest):
     def test_pass(self):
         self.setup(GatherBasic(dim=3))
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.gather), 1)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.gather), 1)
         # Run conversion without actually running the model because after the
         # ConvertGatherToGatherNd pass the graph is not a valid PyTorch model
         # any more. Therefore we just check that the conversion is correct
@@ -48,15 +47,9 @@ class GatherBasicTest(SinglePassValueTest):
         # Check whether indices preprocessing nodes have been added. The number
         # of arange, reshape and expand ops should be equal to the rank of the
         # input tensor minus 1 (the original index is used for the gather dim).
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.arange), 3)
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.reshape), 3)
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.expand), 3)
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.unsqueeze), 4)
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.cat), 1)
-        self.assertEqual(num_of_ops(
-            self.exported_program(), ops.aten.gather), 1)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.arange), 3)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 3)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.expand), 3)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.unsqueeze), 4)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.cat), 1)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.gather), 1)

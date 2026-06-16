@@ -16,11 +16,11 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.utils import logging
-from tico.utils.utils import is_target_node
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
-from tico.utils.validate_args_kwargs import GatherArgs
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import is_target_node
+from tico.utils.validate_args_kwargs import GatherArgs
 
 
 @trace_graph_diff_on_pass
@@ -56,15 +56,18 @@ class ConvertGatherToGatherNd(PassBase):
             if args.dim < 0:
                 args.dim = len(args_input_shape) + args.dim
 
-            logger.debug("%s: Lowering to GATHER_ND: input=%r dim=%d",
-                         node, args_input_shape, args.dim)
+            logger.debug(
+                "%s: Lowering to GATHER_ND: input=%r dim=%d",
+                node,
+                args_input_shape,
+                args.dim,
+            )
 
             with graph.inserting_before(node):
                 # Create coordinate grids for each dimension.
 
                 indices = []
                 for i in range(len(args_input_shape)):
-
                     if i == args.dim:
                         # Use the original index tensor for the gather dimension.
                         indices.append(args.index)
@@ -93,12 +96,14 @@ class ConvertGatherToGatherNd(PassBase):
                     )
 
                     # Expand to match the output shape.
-                    indices.append(create_node(
-                        graph,
-                        torch.ops.aten.expand.default,
-                        args=(reshape_node, list(args_index_shape)),
-                        origin=node,
-                    ))
+                    indices.append(
+                        create_node(
+                            graph,
+                            torch.ops.aten.expand.default,
+                            args=(reshape_node, list(args_index_shape)),
+                            origin=node,
+                        )
+                    )
 
                 # Stack all indices along the last dimension. We have to do it
                 # manually because torch.stack is not supported for our case.

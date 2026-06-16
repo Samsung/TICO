@@ -69,10 +69,11 @@ class GatherVisitor(NodeVisitor):
         inputs = [input_tensor, index_tensor]
         outputs = [node]
 
-        operator = create_builtin_operator(
-            self.graph, op_index, inputs, outputs)
+        operator = create_builtin_operator(self.graph, op_index, inputs, outputs)
 
-        operator.builtinOptionsType = circle.BuiltinOptions.BuiltinOptions.GatherNdOptions
+        operator.builtinOptionsType = (
+            circle.BuiltinOptions.BuiltinOptions.GatherNdOptions
+        )
         operator.builtinOptions = circle.GatherNdOptions.GatherNdOptionsT()
 
         return operator
