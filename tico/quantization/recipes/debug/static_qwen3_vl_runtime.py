@@ -479,7 +479,8 @@ def _image_grid_tuple(image_grid_thw: torch.Tensor) -> tuple[int, int, int]:
             "Only one fixed image is supported. Expected image_grid_thw shape `(1, 3)`, "
             f"got {tuple(image_grid_thw.shape)}."
         )
-    return tuple(int(x) for x in image_grid_thw[0].tolist())
+    values = [int(x) for x in image_grid_thw[0].tolist()]
+    return (values[0], values[1], values[2])
 
 
 def _processor_input_keys(batch: dict[str, Any]) -> dict[str, Any]:
