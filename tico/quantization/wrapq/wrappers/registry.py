@@ -65,7 +65,7 @@ _CORE_MODULES = (
     ## gemma4 ##
     "tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear",
     "tico.quantization.wrapq.wrappers.gemma4.quant_rmsnorm",
-    # "tico.quantization.wrapq.wrappers.gemma4.quant_text_scaled_word_embedding",
+    "tico.quantization.wrapq.wrappers.gemma4.quant_text_scaled_word_embedding",
     "tico.quantization.wrapq.wrappers.gemma4.quant_text_mlp",
     "tico.quantization.wrapq.wrappers.gemma4.quant_text_attention",
     "tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer",
