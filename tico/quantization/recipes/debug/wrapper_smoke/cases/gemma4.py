@@ -561,6 +561,7 @@ def _make_vision_config() -> Any:
         rms_norm_eps=1e-6,
         use_clipped_linears=False,
         rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+        standardize=True,
     )
     return _set_eager_attention(cfg)
 
@@ -923,6 +924,114 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         return ForwardInput((hidden, pixel_position_ids, padding_positions), {})
 
 
+class Gemma4VisionModelCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 vision model."""
+
+    name = "gemma4_vision_model"
+    description = (
+        "Quantize one tiny Gemma4 vision model (patch_embedder + encoder + pooler)."
+    )
+    tags = ("gemma4", "e2b", "vision", "model")
+    max_mean_abs_diff = 3.0
+    # seq_len=36 and output_length=4 so that k=2 (36 / 3^2 = 4, sqrt(4) = 2).
+    seq_len = 36
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 vision model and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionModel
+
+        torch.manual_seed(123)
+        self.vision_cfg = _make_vision_config()
+        module = Gemma4VisionModel(self.vision_cfg).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 vision model input.
+
+        The HF Gemma4VisionModel expects pre-flattened patches:
+            pixel_values: (B, num_patches, 3*patch_size^2)
+            pixel_position_ids: (B, num_patches, 2)
+        """
+        batch_size = 1
+        patch_size = self.vision_cfg.patch_size
+        patch_dim = 3 * patch_size**2
+        pixel_values = torch.randn(batch_size, self.seq_len, patch_dim)
+        pixel_position_ids = _pixel_position_ids(batch_size, self.seq_len)
+        return ForwardInput(
+            (),
+            {
+                "pixel_values": pixel_values,
+                "pixel_position_ids": pixel_position_ids,
+                "return_dict": True,
+            },
+        )
+
+    def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
+        """Run a Gemma4 vision model without sharing mutable sample state."""
+        cloned = _clone_forward_input(sample)
+        output = module(*cloned.args, **dict(cloned.kwargs))
+        if hasattr(output, "last_hidden_state"):
+            return output.last_hidden_state
+        return output
+
+    def reference_forward(
+        self, reference: torch.nn.Module, sample: ForwardInput
+    ) -> Any:
+        """Run the original Gemma4 vision model without sharing mutable sample state."""
+        cloned = _clone_forward_input(sample)
+        output = reference(*cloned.args, **dict(cloned.kwargs))
+        if hasattr(output, "last_hidden_state"):
+            return output.last_hidden_state
+        return output
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 vision model calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 vision model evaluation sample."""
+        return self._sample()
+
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Export the wrapped vision model in prefill mode.
+
+        Passes ``pixel_position_ids`` so the pooler's export adapter can
+        precompute the pooling weight matrix and output mask at construction
+        time.
+        """
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if hasattr(wrapped, "as_export_module"):
+            pixel_pos_ids = _pixel_position_ids(1, self.seq_len)
+            return wrapped.as_export_module(
+                mode="prefill",
+                pixel_position_ids=pixel_pos_ids,
+            ).eval()
+        return quantized
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create static export inputs expected by the vision model adapter.
+
+        The export adapter's forward() takes pixel_values and pixel_position_ids.
+        """
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        pixel_values = kwargs["pixel_values"]
+        pixel_position_ids = kwargs["pixel_position_ids"]
+        return ForwardInput((pixel_values, pixel_position_ids), {})
+
+
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
     Gemma4TextAttentionCase(),
@@ -937,4 +1046,5 @@ GEMMA4_CASES = (
     Gemma4VisionAttentionCase(),
     Gemma4VisionEncoderLayerCase(),
     Gemma4VisionPoolerCase(),
+    Gemma4VisionModelCase(),
 )

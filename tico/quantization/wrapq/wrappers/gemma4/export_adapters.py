@@ -322,3 +322,40 @@ class Gemma4LMHeadExportAdapter(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Return vocabulary logits for the final hidden state."""
         return self.lm_head(self.norm(hidden_states))
+
+
+class Gemma4VisionModelPrefillExportAdapter(nn.Module):
+    """Export adapter for the Gemma4 vision model with static-shape contract.
+
+    This adapter wraps a ``QuantGemma4VisionModel`` that has been prepared
+    for export via ``as_export_module()``.  Calling ``forward()`` delegates
+    to the wrapped model's ``forward_export()`` method, which uses the
+    export-friendly submodule adapters (``patch_embedder_export``,
+    ``pooler_export``) when they are available.
+
+    Input contract:
+        ``pixel_values`` has shape ``(1, num_patches, 3*patch_size^2)``.
+        ``pixel_position_ids`` has shape ``(1, num_patches, 2)``.
+
+    Output contract:
+        Returns ``BaseModelOutputWithPast`` with ``last_hidden_state``
+        containing visual soft tokens.
+    """
+
+    def __init__(
+        self,
+        wrapped_model: nn.Module,
+    ):
+        super().__init__()
+        self.wrapped_model = wrapped_model
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        pixel_position_ids: torch.LongTensor,
+    ):
+        """Run the vision model export path via the wrapped model's forward_export."""
+        return self.wrapped_model.forward_export(
+            pixel_values=pixel_values,
+            pixel_position_ids=pixel_position_ids,
+        )

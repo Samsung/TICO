@@ -359,8 +359,10 @@ class QuantGemma4VisionAttention(QuantModuleBase):
                 dtype=dtype,
                 device=device,
             )
+            # Use ``== False`` instead of ``~`` to avoid ``aten::bitwise_not``
+            # which is not supported by the Circle conversion pipeline.
             additive = additive.masked_fill(
-                ~keep_mask,
+                keep_mask == False,
                 float(self.qcfg.attention_mask_fill_value),
             )
             return self._fq(additive, self.obs_attn_mask)
