@@ -713,6 +713,58 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
         return self._sample()
 
 
+class Gemma4TextScaledWordEmbeddingCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 text scaled word embedding module."""
+
+    name = "gemma4_text_scaled_word_embedding"
+    description = "Quantize one tiny Gemma4 text scaled word embedding module."
+    tags = ("gemma4", "e2b", "text", "embedding")
+    max_mean_abs_diff = 1.0
+    vocab_size = 256
+    embedding_dim = 64
+    seq_len = 16
+    embed_scale = 0.125
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 text scaled word embedding module and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import (
+            Gemma4TextScaledWordEmbedding,
+        )
+
+        torch.manual_seed(123)
+        module = Gemma4TextScaledWordEmbedding(
+            num_embeddings=self.vocab_size,
+            embedding_dim=self.embedding_dim,
+            padding_idx=0,
+            embed_scale=self.embed_scale,
+        ).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 text scaled word embedding input."""
+        batch_size = 1
+        input_ids = torch.randint(
+            0, self.vocab_size, (batch_size, self.seq_len), dtype=torch.long
+        )
+        return ForwardInput((input_ids,))
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 text scaled word embedding calibration samples."""
+        return [self._sample() for _ in range(8)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 text scaled word embedding evaluation sample."""
+        return self._sample()
+
+
 class Gemma4VisionPoolerCase(Gemma4BaseCase):
     """Smoke case for one tiny Gemma4 vision pooler module."""
 
@@ -824,6 +876,7 @@ GEMMA4_CASES = (
     Gemma4TextDecoderLayerPrefillCase(),
     Gemma4TextDecoderLayerDecodeCase(),
     Gemma4TextDecoderLayerSharedKVCase(),
+    Gemma4TextScaledWordEmbeddingCase(),
     Gemma4VisionAttentionCase(),
     Gemma4VisionEncoderLayerCase(),
     Gemma4VisionPoolerCase(),

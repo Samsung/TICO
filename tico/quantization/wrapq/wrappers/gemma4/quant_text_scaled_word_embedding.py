@@ -20,6 +20,7 @@ import torch.nn.functional as F
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
@@ -39,19 +40,29 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
-        self.obs_weight = self._make_obs("weight")
+
+        # Weight observer with per-channel asymmetric quantization (matches QuantEmbedding)
+        self.obs_weight = self._make_obs(
+            "weight",
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+        self.obs_embedding = self._make_obs("embedding")
         self.obs_act_out = self._make_obs("act_out")
+        self.obs_embed_scale = self._make_obs("embed_scale")
 
     def enable_calibration(self) -> None:
-        """Enable calibration and collect the static embedding weight range."""
+        """Enable calibration and collect static weight and scale ranges."""
         super().enable_calibration()
         self.obs_weight.collect(self.module.weight)
+        self.obs_embed_scale.collect(self.module.embed_scale)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return scaled token embeddings."""
         weight = self.module.weight
         if self._mode is Mode.QUANT:
             weight = self.obs_weight.fake_quant(weight)
+
         hidden_states = F.embedding(
             input_ids,
             weight,
@@ -61,13 +72,28 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
             scale_grad_by_freq=self.module.scale_grad_by_freq,
             sparse=self.module.sparse,
         )
-        scale = getattr(self.module, "embed_scale", None)
-        if scale is not None:
-            hidden_states = hidden_states * scale.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            )
+        hidden_states = self._fq(hidden_states, self.obs_embedding)
+
+        # Apply quantized embed_scale
+        scale = self.module.embed_scale
+        if self._mode is Mode.QUANT:
+            scale = self.obs_embed_scale.fake_quant(scale)
+        hidden_states = hidden_states * scale.to(
+            dtype=hidden_states.dtype, device=hidden_states.device
+        )
+
         return self._fq(hidden_states, self.obs_act_out)
+
+    def as_export_module(self, mode: str, **kwargs) -> nn.Module:
+        """Return self for export (this wrapper is already exportable)."""
+        assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
+        return self
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""
-        return (self.obs_weight, self.obs_act_out)
+        return (
+            self.obs_weight,
+            self.obs_embedding,
+            self.obs_embed_scale,
+            self.obs_act_out,
+        )
