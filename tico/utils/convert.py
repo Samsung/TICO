@@ -27,6 +27,7 @@ from tico.passes.const_prop_pass import ConstPropPass
 from tico.passes.convert_conv1d_to_conv2d import ConvertConv1dToConv2d
 from tico.passes.convert_conv3d_to_conv2d import ConvertConv3dToConv2d
 from tico.passes.convert_expand_to_slice_cat import ConvertExpandToSliceCat
+from tico.passes.convert_gather_to_gather_nd import ConvertGatherToGatherNd
 from tico.passes.convert_layout_op_to_reshape import ConvertLayoutOpToReshape
 from tico.passes.convert_matmul_to_linear import ConvertMatmulToLinear
 from tico.passes.convert_repeat_to_expand_copy import ConvertRepeatToExpandCopy
@@ -248,6 +249,7 @@ def convert_exported_module_to_circle(
             ExtractDtypeKwargsPass(),
             RemoveNop(),
             LowerCopy(),
+            ConvertGatherToGatherNd(),
             ConvertSymSizeToCircleShape(),
             ConvertLayoutOpToReshape(),
             RestoreLinear(),

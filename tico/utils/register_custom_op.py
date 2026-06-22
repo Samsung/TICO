@@ -839,6 +839,66 @@ def CircleShape():
         return torch.empty([rank], dtype=torch.int32)
 
 
+def RegisterGatherNdOp() -> None:
+    """Register the internal logical GatherNd custom operator.
+
+    This custom operator is an explicit TICO IR node for Circle GATHER_ND. It
+    exists so that the FX graph does not keep an aten.gather node with changed
+    semantics after lowering.
+    """
+
+    @custom_op("circle_custom::gather_nd", mutates_args=())
+    def gather_nd(params: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        """Gather values or slices from params using full-coordinate indices.
+
+        The output shape follows TensorFlow Lite GatherNd semantics:
+
+            indices.shape[:-1] + params.shape[indices.shape[-1]:]
+        """
+        if indices.dim() < 1:
+            raise RuntimeError("GatherNd indices must have rank greater than zero.")
+
+        indices_nd = indices.size(-1)
+        params_rank = params.dim()
+        if indices_nd < 1:
+            raise RuntimeError("GatherNd indices must contain at least one coordinate.")
+        if indices_nd > params_rank:
+            raise RuntimeError(
+                "The last dimension of GatherNd indices must be less than or "
+                "equal to the rank of params."
+            )
+
+        flat_indices = indices.reshape(-1, indices_nd).long()
+        coordinate_indices = tuple(flat_indices[:, axis] for axis in range(indices_nd))
+        gathered = params[coordinate_indices]
+        output_shape = list(indices.shape[:-1]) + list(params.shape[indices_nd:])
+        return gathered.reshape(output_shape)
+
+    @register_fake("circle_custom::gather_nd")
+    def _(params: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        """Infer the output shape of the internal GatherNd custom operator."""
+        if indices.dim() < 1:
+            raise RuntimeError("GatherNd indices must have rank greater than zero.")
+
+        indices_nd = indices.shape[-1]
+        if not isinstance(indices_nd, int):
+            raise RuntimeError(
+                "The last dimension of GatherNd indices must be statically known."
+            )
+
+        params_rank = params.dim()
+        if indices_nd < 1:
+            raise RuntimeError("GatherNd indices must contain at least one coordinate.")
+        if indices_nd > params_rank:
+            raise RuntimeError(
+                "The last dimension of GatherNd indices must be less than or "
+                "equal to the rank of params."
+            )
+
+        output_shape = list(indices.shape[:-1]) + list(params.shape[indices_nd:])
+        return params.new_empty(output_shape)
+
+
 # Add custom ops to the torch namespace
 def RegisterOps():
     CircleResizeNearestNeighbor()
@@ -856,3 +916,4 @@ def RegisterOps():
     CircleRMSNorm()
     CircleAttention()
     CircleShape()
+    RegisterGatherNdOp()
