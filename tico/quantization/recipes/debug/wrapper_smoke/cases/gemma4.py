@@ -130,6 +130,13 @@ def _attention_mask(seq_len: int, kv_len: int | None = None) -> torch.Tensor:
     return torch.zeros(1, 1, seq_len, kv_len)
 
 
+def _causal_mask(seq_len: int, fill_value: float = -120.0) -> torch.Tensor:
+    """Create an additive causal mask with a large negative upper triangle."""
+    mask = torch.zeros(1, 1, seq_len, seq_len)
+    blocked = torch.full_like(mask, float(fill_value))
+    return torch.triu(blocked, diagonal=1)
+
+
 def _clone_value(value: Any) -> Any:
     """Clone tensors nested inside a small smoke-test value."""
     if isinstance(value, torch.Tensor):
@@ -148,6 +155,62 @@ def _clone_forward_input(sample: ForwardInput) -> ForwardInput:
     return ForwardInput(
         tuple(_clone_value(arg) for arg in sample.args),
         {key: _clone_value(value) for key, value in sample.kwargs.items()},
+    )
+
+
+def _sliding_window_causal_mask(
+    seq_len: int,
+    sliding_window: int,
+    *,
+    batch_size: int = 1,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device | None = None,
+    fill_value: float = -120.0,
+) -> torch.Tensor:
+    """Create a fixed-shape additive causal sliding-window mask.
+
+    A query at position ``q`` can attend to keys in the inclusive interval
+    ``[max(0, q - sliding_window + 1), q]``. Future keys and keys older than
+    the configured window receive ``fill_value``.
+
+    Parameters
+    ----------
+    seq_len:
+        Static query and key/value sequence length.
+    sliding_window:
+        Number of visible tokens including the current query token.
+    batch_size:
+        Static batch size represented by the returned mask.
+    dtype:
+        Floating-point dtype of the additive mask.
+    device:
+        Device on which to create the mask.
+    fill_value:
+        Additive value assigned to blocked positions.
+
+    Returns
+    -------
+    torch.Tensor
+        A tensor with shape ``(batch_size, 1, seq_len, seq_len)``.
+    """
+    if seq_len <= 0:
+        raise ValueError(f"seq_len must be positive, got {seq_len}.")
+    if sliding_window <= 0:
+        raise ValueError(f"sliding_window must be positive, got {sliding_window}.")
+
+    query_positions = torch.arange(seq_len, device=device).view(seq_len, 1)
+    key_positions = torch.arange(seq_len, device=device).view(1, seq_len)
+
+    future_positions = key_positions > query_positions
+    positions_before_window = key_positions < query_positions - sliding_window + 1
+    blocked_positions = future_positions | positions_before_window
+
+    mask = torch.zeros((seq_len, seq_len), dtype=dtype, device=device)
+    mask.masked_fill_(blocked_positions, float(fill_value))
+    return (
+        mask.view(1, 1, seq_len, seq_len)
+        .expand(batch_size, 1, seq_len, seq_len)
+        .contiguous()
     )
 
 
@@ -382,7 +445,10 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
                 "position_embeddings": _text_rope(
                     1, self.seq_len, self.text_cfg.head_dim
                 ),
-                "attention_mask": _attention_mask(self.seq_len),
+                "attention_mask": _causal_mask(
+                    self.seq_len,
+                    fill_value=float(self.ptq_config({}).attention_mask_fill_value),
+                ),
                 "shared_kv_states": {},
             },
         )
@@ -451,6 +517,109 @@ class Gemma4TextDecoderLayerPrefillCase(Gemma4TextDecoderLayerBaseCase):
     layer_types = ("sliding_attention", "full_attention")
     layer_idx = 1
     export_mode = "prefill"
+
+
+class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
+    """Smoke case for one Gemma4 sliding-attention decoder layer.
+
+    The case creates a two-layer text configuration and selects layer zero.
+    This keeps layer zero as sliding attention while satisfying Gemma4's
+    requirement that the final decoder layer use full attention.
+
+    The sliding window is intentionally smaller than the sequence length so
+    the input covers both future-token masking and left-side window masking.
+    """
+
+    name = "gemma4_text_decoder_layer_sliding_prefill"
+    description = (
+        "Quantize one tiny Gemma4 sliding-attention decoder layer with "
+        "a causal sliding-window mask."
+    )
+    tags = (
+        "gemma4",
+        "e2b",
+        "text",
+        "decoder_layer",
+        "prefill",
+        "sliding",
+    )
+
+    layer_types = ("sliding_attention", "full_attention")
+    layer_idx = 0
+    export_mode = "prefill"
+
+    seq_len = 8
+    sliding_window = 4
+    mask_fill_value = -120.0
+
+    def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
+        """Build a PTQ config matching the sample mask fill value."""
+        from tico.quantization.config.ptq import PTQConfig
+
+        return PTQConfig(
+            model_args={"profile": "reference_eval"},
+            attention_mask_fill_value=self.mask_fill_value,
+        )
+
+    def build(
+        self,
+        cfg: Mapping[str, Any],
+    ) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a sliding-attention decoder layer and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
+
+        torch.manual_seed(123)
+        self.text_cfg = _make_text_config(layer_types=self.layer_types)
+        self.text_cfg.sliding_window = self.sliding_window
+
+        module = Gemma4TextDecoderLayer(
+            self.text_cfg,
+            layer_idx=self.layer_idx,
+        ).eval()
+
+        if not module.self_attn.is_sliding:
+            raise RuntimeError(
+                "The smoke case did not build a sliding-attention layer."
+            )
+        if module.self_attn.sliding_window != self.sliding_window:
+            raise RuntimeError(
+                "The decoder layer does not use the requested sliding window: "
+                f"expected {self.sliding_window}, "
+                f"got {module.self_attn.sliding_window}."
+            )
+
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one fixed-shape sliding-window prefill sample."""
+        batch_size = 1
+        hidden = torch.randn(
+            batch_size,
+            self.seq_len,
+            self.text_cfg.hidden_size,
+        )
+        attention_mask = _sliding_window_causal_mask(
+            self.seq_len,
+            self.sliding_window,
+            batch_size=batch_size,
+            dtype=hidden.dtype,
+            device=hidden.device,
+            fill_value=self.mask_fill_value,
+        )
+
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(
+                    batch_size,
+                    self.seq_len,
+                    self.text_cfg.head_dim,
+                ),
+                "attention_mask": attention_mask,
+                "shared_kv_states": {},
+            },
+        )
 
 
 class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
@@ -543,6 +712,64 @@ class Gemma4TextDecoderLayerSharedKVCase(Gemma4TextDecoderLayerBaseCase):
                 "shared_key_value": shared_key_value,
             },
         )
+
+
+class Gemma4TextModelCase(Gemma4BaseCase):
+    """Smoke case for one tiny dense Gemma4 text model."""
+
+    name = "gemma4_text_model"
+    description = (
+        "Quantize one tiny dense Gemma4 text model with full and sliding attention."
+    )
+    tags = ("gemma4", "e2b", "text", "model")
+    max_mean_abs_diff = 3.0
+    seq_len = 8
+
+    def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
+        """Build the PTQ config used by Gemma4 text-model smoke checks."""
+        from tico.quantization.config.ptq import PTQConfig
+
+        return PTQConfig(model_args={"profile": "reference_eval"})
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 text model and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
+        torch.manual_seed(123)
+        self.text_cfg = _make_text_config(
+            layer_types=("sliding_attention", "full_attention"),
+        )
+        module = Gemma4TextModel(self.text_cfg).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 text-model input."""
+        input_ids = torch.randint(0, self.text_cfg.vocab_size, (1, self.seq_len))
+        attention_mask = torch.ones_like(input_ids)
+        return ForwardInput(
+            (),
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "return_dict": True,
+            },
+        )
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 text-model calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 text-model evaluation sample."""
+        return self._sample()
 
 
 def _make_vision_config() -> Any:
@@ -930,10 +1157,12 @@ GEMMA4_CASES = (
     Gemma4TextAttentionKEqVCase(),
     Gemma4TextAttentionSharedKVCase(),
     Gemma4TextDecoderLayerPrefillCase(),
+    Gemma4TextDecoderLayerSlidingPrefillCase(),
     Gemma4TextDecoderLayerDecodeCase(),
     Gemma4TextDecoderLayerSharedKVCase(),
     Gemma4TextScaledWordEmbeddingCase(),
     Gemma4VisionPatchEmbedderCase(),
+    Gemma4TextModelCase(),
     Gemma4VisionAttentionCase(),
     Gemma4VisionEncoderLayerCase(),
     Gemma4VisionPoolerCase(),
