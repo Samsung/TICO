@@ -3,6 +3,7 @@ from tico.utils.version import package_version_is_at_least
 MIN_VERSIONS = {
     "llama": "4.36.0",  # transformers==4.31.0 supports llama but without layer_idx and position_embeddings feature
     "qwen3-vl": "4.57.0",
+    "gemma4": "5.9.0",
 }
 
 
