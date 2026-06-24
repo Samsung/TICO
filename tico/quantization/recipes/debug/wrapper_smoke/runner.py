@@ -246,6 +246,12 @@ def run_wrapper_smoke(
         if export_kind != "circle":
             result.passed = False
             result.messages.append(f"unsupported export artifact: {export_kind}")
+        elif not case.supports_circle_export:
+            result.passed = False
+            reason = case.circle_export_unsupported_reason or (
+                f"Case '{case.name}' does not support Circle export."
+            )
+            result.messages.append(reason)
         else:
             _export_circle(case, quantized, eval_sample, cfg, output_path, result)
 

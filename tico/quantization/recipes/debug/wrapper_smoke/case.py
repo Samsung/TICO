@@ -53,6 +53,8 @@ class WrapperSmokeCase:
     compare_reference_source: str = "reference"
     inplace_prepare: bool = False
     inplace_convert: bool = False
+    supports_circle_export: bool = True
+    circle_export_unsupported_reason: str | None = None
 
     def availability(self) -> CaseAvailability:
         """Return whether this case can run in the current environment."""
