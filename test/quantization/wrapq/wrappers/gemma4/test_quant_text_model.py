@@ -367,6 +367,49 @@ class TestQuantGemma4TextModel(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dense decoder layers only"):
             QuantGemma4TextModel(fp_model)
 
+    def test_quant_mode_requires_explicit_per_layer_inputs_with_inputs_embeds(self):
+        """Require explicit PLE token inputs for inputs_embeds in QUANT mode."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(
+            layer_types=["full_attention", "full_attention"],
+            hidden_size_per_layer_input=8,
+        )
+        fp_model = _make_text_model(cfg)
+        qmodel = QuantGemma4TextModel(fp_model, qcfg=PTQConfig()).eval()
+
+        input_ids = torch.randint(0, cfg.vocab_size, (1, 4))
+        inputs_embeds = fp_model.embed_tokens(input_ids)
+        per_layer_inputs = fp_model.get_per_layer_inputs(input_ids, inputs_embeds)
+
+        # Calibrate the same inputs_embeds + explicit PLE path.
+        qmodel.enable_calibration()
+        with torch.no_grad():
+            qmodel(
+                inputs_embeds=inputs_embeds,
+                per_layer_inputs=per_layer_inputs,
+                return_dict=True,
+            )
+        qmodel.freeze_qparams()
+
+        with self.assertRaisesRegex(ValueError, "explicit per_layer_inputs"):
+            qmodel(
+                inputs_embeds=inputs_embeds,
+                return_dict=True,
+            )
+
+        # The supported explicit path should still work.
+        with torch.no_grad():
+            output = qmodel(
+                inputs_embeds=inputs_embeds,
+                per_layer_inputs=per_layer_inputs,
+                return_dict=True,
+            )
+
+        self.assertTrue(torch.isfinite(output.last_hidden_state).all())
+
 
 if __name__ == "__main__":
     unittest.main()

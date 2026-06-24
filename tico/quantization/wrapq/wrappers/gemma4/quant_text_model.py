@@ -22,6 +22,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
@@ -600,14 +601,14 @@ class QuantGemma4TextModel(QuantModuleBase):
     ) -> torch.Tensor:
         """Recover input ids from exact main embeddings for PLE compatibility."""
         embedding = self._unwrap_fp_module(self.embed_tokens)
-        weight = embedding.weight.to(
-            device=inputs_embeds.device, dtype=inputs_embeds.dtype
-        )
+        weight = embedding.weight
         scale = getattr(embedding, "embed_scale", None)
         if scale is not None:
-            weight = weight * scale.to(
-                device=inputs_embeds.device, dtype=inputs_embeds.dtype
-            )
+            weight = weight * scale.to(device=weight.device, dtype=weight.dtype)
+        weight = weight.to(
+            device=inputs_embeds.device,
+            dtype=inputs_embeds.dtype,
+        )
 
         with torch.no_grad():
             matches = (inputs_embeds[:, :, None, :] == weight[None, None, :, :]).all(
@@ -722,6 +723,20 @@ class QuantGemma4TextModel(QuantModuleBase):
             )
         if per_layer_inputs is not None and not self.hidden_size_per_layer_input:
             raise ValueError("per_layer_inputs was provided, but PLE is disabled.")
+        # In QUANT mode, inputs_embeds may already be fake-quantized before PLE
+        # construction. Recovering token ids by exact floating-point comparison
+        # against the raw embedding table is therefore not a valid quantized-path
+        # contract. Require callers to pass explicit per_layer_inputs instead.
+        if (
+            self._mode is Mode.QUANT
+            and input_ids is None
+            and self.hidden_size_per_layer_input
+            and per_layer_inputs is None
+        ):
+            raise ValueError(
+                "Gemma4 PLE requires explicit per_layer_inputs when "
+                "inputs_embeds is provided in QUANT mode."
+            )
 
         return_shared_kv_states = bool(kwargs.pop("return_shared_kv_states", False))
         output_hidden_states = bool(output_hidden_states)
