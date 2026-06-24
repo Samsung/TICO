@@ -86,6 +86,22 @@ DTYPE_MAP = {
     # "float16": torch.float16,
 }
 
+_SUPPORTED_WEIGHT_BITS = (4, 8, 16)
+
+
+def _weight_dtype_from_bits(bits: int) -> DType:
+    """Return the PTQ weight dtype for a supported bit-width."""
+    if bits in (4, 8):
+        return DType.uint(bits)
+    if bits == 16:
+        return DType.int(bits)
+
+    raise ValueError(
+        f"Unsupported weight bit-width: {bits}. "
+        f"Expected one of {_SUPPORTED_WEIGHT_BITS}."
+    )
+
+
 # Hardcoded dataset settings
 DATASET_NAME = "wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
@@ -949,15 +965,16 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         model_type="llama",
         num_hidden_layers=len(q_m.model.layers),
         activation=affine(DType.int(16)),
-        linear_weight=affine(DType.uint(args.linear_weight_bits)),
-        embedding_weight=affine(DType.uint(args.embedding_weight_bits)),
-        lm_head_weight=affine(DType.uint(args.lm_head_weight_bits)),
+        weight=affine(_weight_dtype_from_bits(16)),
+        linear_weight=affine(_weight_dtype_from_bits(args.linear_weight_bits)),
+        embedding_weight=affine(_weight_dtype_from_bits(args.embedding_weight_bits)),
+        lm_head_weight=affine(_weight_dtype_from_bits(args.lm_head_weight_bits)),
         spin_rotation_weight=(
             None
             if args.no_spinquant
-            else affine(DType.int(args.spin_rotation_weight_bits))
+            else affine(_weight_dtype_from_bits(args.spin_rotation_weight_bits))
         ),
-        norm_weight=affine(DType.int(16)),
+        norm_weight=affine(_weight_dtype_from_bits(16)),
         strict_wrap=True,
         profile=args.profile,
     )
