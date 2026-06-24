@@ -724,6 +724,11 @@ class Gemma4TextModelCase(Gemma4BaseCase):
     tags = ("gemma4", "e2b", "text", "model")
     max_mean_abs_diff = 3.0
     seq_len = 8
+    supports_circle_export = False
+    circle_export_unsupported_reason = (
+        "This case validates PTQ numerical parity only. "
+        "Full Gemma4TextModel Circle export requires a dedicated static adapter."
+    )
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the PTQ config used by Gemma4 text-model smoke checks."""
