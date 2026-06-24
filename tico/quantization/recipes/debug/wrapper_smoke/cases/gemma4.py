@@ -765,6 +765,62 @@ class Gemma4TextScaledWordEmbeddingCase(Gemma4BaseCase):
         return self._sample()
 
 
+class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 vision patch embedder module."""
+
+    name = "gemma4_vision_patch_embedder"
+    description = "Quantize one tiny Gemma4 vision patch embedder module."
+    tags = ("gemma4", "e2b", "vision", "patch_embedder")
+    max_mean_abs_diff = 2.0
+    hidden_size = 32
+    patch_size = 4
+    position_embedding_size = 8
+    batch_size = 1
+    num_patches = 16
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 vision patch embedder module and reference copy."""
+        from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPatchEmbedder
+
+        torch.manual_seed(123)
+        self.vision_cfg = Gemma4VisionConfig(
+            hidden_size=self.hidden_size,
+            patch_size=self.patch_size,
+            position_embedding_size=self.position_embedding_size,
+        )
+        module = Gemma4VisionPatchEmbedder(self.vision_cfg).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 vision patch embedder input."""
+        patch_dim = 3 * self.patch_size**2
+        pixel_values = torch.randn(self.batch_size, self.num_patches, patch_dim)
+        pixel_position_ids = torch.randint(
+            0, self.position_embedding_size, (self.batch_size, self.num_patches, 2)
+        )
+        padding_positions = torch.zeros(
+            self.batch_size, self.num_patches, dtype=torch.bool
+        )
+        return ForwardInput((pixel_values, pixel_position_ids, padding_positions))
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 vision patch embedder calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 vision patch embedder evaluation sample."""
+        return self._sample()
+
+
 class Gemma4VisionPoolerCase(Gemma4BaseCase):
     """Smoke case for one tiny Gemma4 vision pooler module."""
 
@@ -877,6 +933,7 @@ GEMMA4_CASES = (
     Gemma4TextDecoderLayerDecodeCase(),
     Gemma4TextDecoderLayerSharedKVCase(),
     Gemma4TextScaledWordEmbeddingCase(),
+    Gemma4VisionPatchEmbedderCase(),
     Gemma4VisionAttentionCase(),
     Gemma4VisionEncoderLayerCase(),
     Gemma4VisionPoolerCase(),

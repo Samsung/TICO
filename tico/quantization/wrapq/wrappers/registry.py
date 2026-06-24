@@ -71,7 +71,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_text_model",
     # "tico.quantization.wrapq.wrappers.gemma4.quant_for_causal_lm",
-    # "tico.quantization.wrapq.wrappers.gemma4.quant_vision_patch_embedder",
+    "tico.quantization.wrapq.wrappers.gemma4.quant_vision_patch_embedder",
     "tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler",
     "tico.quantization.wrapq.wrappers.gemma4.quant_vision_mlp",
     "tico.quantization.wrapq.wrappers.gemma4.quant_vision_attention",
