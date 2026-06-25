@@ -28,6 +28,7 @@ import torch.nn.functional as F
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 from tico.quantization.algorithm.gptq.utils import get_numerical_padding
+from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -342,6 +343,9 @@ class GPTQ:
         static_groups=False,
         verbose=False,
         just_quantize=False,
+        adaptive_percdamp=False,
+        cond_threshold_good=100000.0,
+        use_iterate=False,
     ):
         """
         Perform GPTQ quantization.
@@ -354,6 +358,8 @@ class GPTQ:
             static_groups: Whether to use static groups
             verbose: Whether to print verbose output
             just_quantize: If True, only quantize weights without GPTQ optimization
+            adaptive_percdamp: Whether to use adaptive percdamp based on condition number
+            cond_threshold_good: Condition number threshold for good matrices in adaptive percdamp
         """
         W = self.layer.weight.data.clone()
         if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
@@ -417,6 +423,66 @@ class GPTQ:
         if verbose:
             cond_number = torch.linalg.cond(H)
             print("condition number init %.2e" % cond_number.item())
+        
+        # Adaptive percdamp: adjust damping based on Hessian condition number
+        # NEW VARIANT: piecewise linear approach with iterative binary search fallback
+        if adaptive_percdamp:
+            # Parameters for adaptive percdamp
+            COND_THRESHOLD_GOOD = cond_threshold_good      # Below: use minimal damping
+            COND_THRESHOLD_HIGH = 100000     # Above: use user percdamp
+            COND_TARGET_MAX = COND_THRESHOLD_GOOD          # Maximum allowed condition number after damping
+            MIN_PERCDAMP = 1e-06             # Minimal damping for good matrices
+            MAX_PERCDAMP = 0.5               # Maximum damping for binary search
+            
+            # Store user-provided percdamp for later use
+            user_percdamp = percdamp
+            
+            # Define diag before use
+            diag = torch.arange(self.columns, device=self.dev)
+            diag_mean = torch.mean(torch.diag(H)).item()
+            
+            # Compute condition number of H (before damping)
+            cond_H = torch.linalg.cond(H)
+            
+            # Determine initial percdamp using piecewise rule
+            if cond_H > COND_THRESHOLD_HIGH:
+                # Extremely high condition number: use user-provided percdamp
+                percdamp = user_percdamp
+            elif cond_H < COND_THRESHOLD_GOOD:
+                # Good matrices: use minimal damping
+                percdamp = MIN_PERCDAMP
+            else:
+                # Between: linear interpolation between MIN_PERCDAMP and user_percdamp
+                # percdamp = MIN_PERCDAMP + (user_percdamp - MIN_PERCDAMP) * (cond - 1000) / (100000 - 1000)
+                ratio = (cond_H - COND_THRESHOLD_GOOD) / (COND_THRESHOLD_HIGH - COND_THRESHOLD_GOOD)
+                percdamp = MIN_PERCDAMP + (user_percdamp - MIN_PERCDAMP) * ratio
+            
+            # Apply damping and verify condition number
+            damp = percdamp * diag_mean
+            H_test = H.clone()
+            H_test[diag, diag] += damp
+            cond_after_damp = torch.linalg.cond(H_test)
+            
+            # Binary search fallback if condition number still too high
+            if cond_after_damp > COND_TARGET_MAX:
+                low, high = MIN_PERCDAMP, MAX_PERCDAMP
+                for _ in range(10):  # Max iterations for binary search
+                    mid = (low + high) / 2
+                    damp_test = mid * diag_mean
+                    H_test = H.clone()
+                    H_test[diag, diag] += damp_test
+                    cond_test = torch.linalg.cond(H_test)
+                    
+                    if cond_test > COND_TARGET_MAX:
+                        low = mid  # Need more damping
+                    else:
+                        high = mid  # Can reduce damping
+                
+                percdamp = high
+            
+            if verbose:
+                print(f"adaptive_percdamp: initial cond={cond_H:.2e}, selected percdamp={percdamp:.6f}")     
+        
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
@@ -437,9 +503,31 @@ class GPTQ:
             P = alpha * ((self.dXXT @ Hinv.T).triu_(diagonal=1)) @ Hinv
 
         self.quantizer.update(W, Hinv, perm, P=P)
+        #Q = self.quantizer.quantize(W)
 
         assert isinstance(Hinv, torch.Tensor)
-        for i1 in range(0, self.columns, blocksize):
+        
+        if use_iterate:
+            # Use iterate_GPTQ approach (same as fpi_gptq.py)
+            Q, W = iterate_GPTQ(
+                self.quantizer.scale,
+                self.quantizer.zero,
+                self.quantizer.maxq,
+                W,
+                Hinv=Hinv,
+                max_num_of_iters=min(50, self.columns),
+                P=P,
+            )
+            
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if verbose:
+                print("time %.2f" % (time.time() - tick))
+                Losses = 0.5 * ((Q - W) / torch.diag(Hinv)) ** 2
+                print("error", torch.sum(Losses).item())
+        else:
+         # Original block-based GPTQ loop
+         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
             count = i2 - i1
 

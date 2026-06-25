@@ -81,6 +81,23 @@ class LlamaGPTQConfig(BaseConfig):
     # GPTQv2 flag - uses FP inference for collecting inputs during quantization
     gptq_v2: bool = False
 
+    # Adaptive percdamp based on Hessian condition number
+    adaptive_percdamp: bool = False
+
+    # Sequential processing of layer groups (True) vs all at once (False)
+    sequential: bool = True
+
+    # Condition number threshold for good matrices in adaptive percdamp
+    cond_threshold_good: float = 100000.0
+
+    # Use iterate_GPTQ instead of the main block-based loop
+    use_iterate: bool = False
+
+    # Use SubgroupRunner for efficient subgroup-level inference during quantization
+    # When True, runs only the necessary submodules for each subgroup instead of
+    # the full layer, significantly reducing redundant computation.
+    use_subgroup_runner: bool = False
+
     @property
     def name(self) -> str:
         return "llama_gptq"

@@ -72,6 +72,15 @@ class GPTQConfig(BaseConfig):
     # GPTQv2 flag - uses FP inference for collecting inputs during quantization
     gptq_v2: bool = False
 
+    # Adaptive percdamp based on Hessian condition number
+    adaptive_percdamp: bool = False
+
+    # Condition number threshold for good matrices in adaptive percdamp
+    cond_threshold_good: float = 100000.0
+
+    # Use iterate_GPTQ instead of the main block-based loop
+    use_iterate: bool = False
+
     @property
     def name(self) -> str:
         return "gptq"

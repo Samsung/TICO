@@ -418,6 +418,9 @@ class GPTQQuantizer(BaseQuantizer):
                         actorder=gptq_conf.actorder,
                         static_groups=gptq_conf.static_groups,
                         verbose=gptq_conf.verbose,
+                        adaptive_percdamp=gptq_conf.adaptive_percdamp,
+                        cond_threshold_good=gptq_conf.cond_threshold_good,
+                        use_iterate=gptq_conf.use_iterate,
                     )
                     quantizers[full_module_name] = gptq[name].quantizer
                     gptq[name].free()
@@ -605,6 +608,9 @@ class GPTQQuantizer(BaseQuantizer):
             actorder=gptq_conf.actorder,
             static_groups=gptq_conf.static_groups,
             verbose=gptq_conf.verbose,
+            adaptive_percdamp=gptq_conf.adaptive_percdamp,
+            cond_threshold_good=gptq_conf.cond_threshold_good,
+            use_iterate=gptq_conf.use_iterate,
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()

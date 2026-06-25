@@ -213,6 +213,12 @@ def parse_args():
         help="number of samples to be used in GPTQ/PTQ calibration",
     )
     parser.add_argument(
+        "--batch",
+        type=int,
+        default=1,
+        help="Batch size for calibration set preparation and processing",
+    )
+    parser.add_argument(
         "--linear_weight_bits",
         type=int,
         default=4,
@@ -334,10 +340,46 @@ def parse_args():
         help="Enable GPTQv2 (uses FP inference for collecting inputs during quantization).",
     )
     parser.add_argument(
-        "--use_llama_gptq",
+        "--llama_gptq",
         action="store_true",
         default=False,
         help="Use LlamaGPTQConfig instead of GPTQConfig for Llama-specific GPTQ quantization.",
+    )
+    parser.add_argument(
+        "--gptq_adaptive_percdamp",
+        action="store_true",
+        default=False,
+        help="Enable adaptive percdamp based on Hessian condition number.",
+    )
+    parser.add_argument(
+        "--gptq_cond_threshold_good",
+        type=float,
+        default=100000.0,
+        help="Condition number threshold for good matrices to be used in adaptive percdamp (default: 100000.0). Matrices with condition number below this threshold use minimal damping.",
+    )
+    parser.add_argument(
+        "--llama_gptq_sequential",
+        action="store_true",
+        default=False,
+        help="Enable sequential processing of layer groups in LlamaGPTQ (default: True). Very slow but more accurate.",
+    )
+    parser.add_argument(
+        "--llama_gptq_no_ptq",
+        action="store_true",
+        default=False,
+        help="Run LlamaGPTQ without PTQ wrapping (LlamaGPTQ-only path, skips activation quantization).",
+    )
+    parser.add_argument(
+        "--gptq_use_iterate",
+        action="store_true",
+        default=False,
+        help="Use iterate_GPTQ instead of the main block-based loop (same approach as fpi_gptq.py).",
+    )
+    parser.add_argument(
+        "--llama_gptq_use_subgroup_runner",
+        action="store_true",
+        default=False,
+        help="Use SubgroupRunner for efficient subgroup-level inference during LlamaGPTQ quantization (default: False). When enabled, runs only the necessary submodules for each subgroup instead of the full layer, significantly reducing redundant computation.",
     )
     return parser.parse_args()
 
@@ -673,7 +715,7 @@ def build_gptq_config(
     tie `lm_head.weight` with the input embedding table. Users can enable it
     explicitly with `--gptq_lm_head`.
 
-    If `--use_llama_gptq` is specified, returns a LlamaGPTQConfig instead of
+    If `--llama_gptq` or `--llama_gptq_sequential` is specified, returns a LlamaGPTQConfig instead of
     GPTQConfig for Llama-specific GPTQ quantization.
     """
     weight_bits_overrides: dict[str, int] = {}
@@ -681,7 +723,7 @@ def build_gptq_config(
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
 
-    if args.use_llama_gptq:
+    if args.llama_gptq or args.llama_gptq_sequential:
         return LlamaGPTQConfig(
             show_progress=not args.no_tqdm,
             weight_bits=args.linear_weight_bits,
@@ -694,6 +736,11 @@ def build_gptq_config(
             percdamp=args.gptq_percdamp,
             verbose=args.verbose,
             gptq_v2=args.gptq_v2,
+            adaptive_percdamp=args.gptq_adaptive_percdamp,
+            cond_threshold_good=args.gptq_cond_threshold_good,
+            sequential=args.llama_gptq_sequential,
+            use_iterate=args.gptq_use_iterate,
+            use_subgroup_runner=args.llama_gptq_use_subgroup_runner,
         )
     else:
         return GPTQConfig(
@@ -707,7 +754,10 @@ def build_gptq_config(
             percdamp=args.gptq_percdamp,
             verbose=args.verbose,
             gptq_v2=args.gptq_v2,
-    )
+            adaptive_percdamp=args.gptq_adaptive_percdamp,
+            cond_threshold_good=args.gptq_cond_threshold_good,
+            use_iterate=args.gptq_use_iterate,
+        )
 
 
 def save_model_to(
@@ -1617,6 +1667,9 @@ def build_calibration_inputs(
 ) -> list[torch.Tensor]:
     """
     Build random fixed-length calibration samples from the Wikitext train split.
+
+    When batch > 1, samples are grouped into batches of shape [batch_size, seq_len].
+    The last batch may be smaller if nsamples is not divisible by batch_size.
     """
     dataset_train = load_dataset(
         DATASET_NAME,
@@ -1628,8 +1681,9 @@ def build_calibration_inputs(
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
 
     nsamples = args.nsamples_for_qcalibration
-    seqlen_for_decode = 0 if args.use_llama_gptq else args.decode_calibration_steps
-    seqlen = model.config.max_position_embeddings - seqlen_for_decode 
+    batch_size = args.batch
+    seqlen_for_decode = 0 if ((args.llama_gptq or args.llama_gptq_sequential) and not args.llama_gptq_no_ptq) else args.decode_calibration_steps
+    seqlen = model.config.max_position_embeddings - seqlen_for_decode
     if seqlen <= 0:
         raise ValueError(
             "decode_calibration_steps must be smaller than max_position_embeddings"
@@ -1637,10 +1691,24 @@ def build_calibration_inputs(
 
     random.seed(args.seed)
     calib_inputs = []
-    for k in range(nsamples):
-        i = random.randint(0, train_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        calib_inputs.append(train_ids[:, i:j].cpu())
+    for k in range(0, nsamples, batch_size):
+        batch_samples = []
+        for _ in range(batch_size):
+            if len(calib_inputs) * batch_size + len(batch_samples) >= nsamples:
+                break
+            i = random.randint(0, train_ids.shape[1] - seqlen - 1)
+            j = i + seqlen
+            sample = train_ids[:, i:j].cpu()
+            if batch_size == 1:
+                # Keep original behavior for batch_size == 1: [1, seq_len] tensor
+                calib_inputs.append(sample)
+            else:
+                # Squeeze to remove batch dim before stacking
+                batch_samples.append(sample.squeeze(0))
+        if batch_samples and batch_size > 1:
+            # Stack samples into a batch tensor of shape [batch_size, seq_len]
+            batched = torch.stack(batch_samples, dim=0)
+            calib_inputs.append(batched)
 
     return calib_inputs
 
@@ -1720,7 +1788,7 @@ def get_export_input(calib_inputs, tokenizer, args) -> torch.Tensor:
     """
     Build the token tensor used for full-model export.
     """
-    example = calib_inputs[0].cpu()
+    example = calib_inputs[0][0:1, ...].cpu()
     if args.max_seq_len is None:
         return example
     return pad_input(example, get_pad_token_id(tokenizer), args.max_seq_len).cpu()
@@ -1780,11 +1848,17 @@ def main():
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
 
+    # When --llama_gptq_no_ptq is specified, run LlamaGPTQ without PTQ wrapping.
+    # This allows weight-only quantization using LlamaGPTQ improvements.
+    if args.llama_gptq_no_ptq and not args.no_GPTQ:
+        print("Running LlamaGPTQ without PTQ (weight-only quantization) ...")
+        model = apply_gptq(model, calib_inputs, args)
+        q_m = quantize_using_PTQ(model, calib_inputs, args)
     # When both LlamaGPTQ and PTQ are enabled, run PTQ prepare first so that
     # LlamaGPTQ operates on the PTQ-wrapped model.  LlamaGPTQ will inject its
     # weight qparams into PTQ observers and freeze them layer-by-layer, so no
     # separate activation calibration pass is needed.
-    if args.use_llama_gptq and not args.no_PTQ and not args.no_GPTQ:
+    elif (args.llama_gptq or args.llama_gptq_sequential) and not args.no_PTQ and not args.no_GPTQ:
         q_m = quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args)
     else:
         model = apply_gptq(model, calib_inputs, args)

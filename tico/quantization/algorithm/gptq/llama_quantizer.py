@@ -15,7 +15,7 @@
 import copy
 import functools
 import types
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from tqdm.auto import tqdm
@@ -37,6 +37,554 @@ from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.utils.utils import move_to_device
 from transformers import Conv1D
+
+
+class SubgroupRunner:
+    """
+    Runs inference at subgroup level instead of full layer level.
+    
+    This class enables efficient GPTQ quantization by running only the necessary
+    submodules for each subgroup, avoiding redundant computation when quantizing
+    subgroups sequentially.
+    
+    For a Llama decoder layer, subgroups are processed as:
+    1. [q_proj, k_proj, v_proj] - produces Q, K, V for attention
+    2. [o_proj] - attention output projection + residual
+    3. [gate_proj, up_proj] - produces intermediate MLP states
+    4. [down_proj] - final MLP projection + residual
+    
+    The runner caches intermediate results between subgroups to avoid
+    re-computing earlier submodules.
+    """
+    
+    def __init__(
+        self,
+        layer: torch.nn.Module,
+        sequential_groups: List[List[str]],
+        module_name_map: Dict[torch.nn.Module, str],
+        ptq_wrapped: bool,
+        config: Optional[Any] = None,
+    ):
+        """
+        Initialize the SubgroupRunner.
+        
+        Args:
+            layer: The LlamaDecoderLayer (or PTQ-wrapped equivalent) to run
+            sequential_groups: List of subgroup names to process sequentially
+            module_name_map: Mapping from module to its full name
+            ptq_wrapped: Whether the layer is PTQ-wrapped
+            config: Optional model config for attention parameters
+        """
+        self.layer = layer
+        self.sequential_groups = sequential_groups
+        self.module_name_map = module_name_map
+        self.ptq_wrapped = ptq_wrapped
+        self.config = config
+        
+        # Cache for intermediate results (per-batch, stored on CPU to save GPU memory)
+        self._cached_residual: Dict[int, torch.Tensor] = {}
+        self._cached_q: Dict[int, torch.Tensor] = {}
+        self._cached_k: Dict[int, torch.Tensor] = {}
+        self._cached_v: Dict[int, torch.Tensor] = {}
+        self._cached_attention_output: Dict[int, torch.Tensor] = {}
+        self._cached_gate: Dict[int, torch.Tensor] = {}
+        self._cached_up: Dict[int, torch.Tensor] = {}
+        self._current_batch_idx: int = 0
+        
+        # Store device for transferring cached values back to GPU
+        self._device = next(layer.parameters()).device if len(list(layer.parameters())) > 0 else torch.device('cuda')
+        
+        # Get submodule references
+        self._init_submodules()
+        
+        # For PTQ-wrapped models, store reference to wrapped decoder layer for
+        # position_embeddings normalization (QuantLlamaDecoderLayer has _normalize_position_embeddings)
+        self._wrapped_decoder_layer = None
+        if self.ptq_wrapped:
+            # The layer itself may be the wrapped decoder layer (QuantLlamaDecoderLayer)
+            # or we need to access it through the wrapped attribute
+            if hasattr(layer, '_normalize_position_embeddings') and callable(getattr(layer, '_normalize_position_embeddings')):
+                self._wrapped_decoder_layer = layer
+            elif hasattr(layer, 'wrapped') and hasattr(layer.wrapped, '_normalize_position_embeddings'):
+                self._wrapped_decoder_layer = layer.wrapped
+    
+    def _init_submodules(self):
+        """Initialize references to key submodules."""
+        # Find input_layernorm - use direct attribute access first (most reliable)
+        self.input_layernorm = getattr(self.layer, 'input_layernorm', None)
+        self.post_attention_layernorm = getattr(self.layer, 'post_attention_layernorm', None)
+        self.self_attn = getattr(self.layer, 'self_attn', None)
+        self.mlp = getattr(self.layer, 'mlp', None)
+        
+        # For PTQ-wrapped models, the layer may be wrapped, so try to access through wrapped
+        if self.input_layernorm is None and hasattr(self.layer, 'wrapped'):
+            self.input_layernorm = getattr(self.layer.wrapped, 'input_layernorm', None)
+        if self.post_attention_layernorm is None and hasattr(self.layer, 'wrapped'):
+            self.post_attention_layernorm = getattr(self.layer.wrapped, 'post_attention_layernorm', None)
+        if self.self_attn is None and hasattr(self.layer, 'wrapped'):
+            self.self_attn = getattr(self.layer.wrapped, 'self_attn', None)
+        if self.mlp is None and hasattr(self.layer, 'wrapped'):
+            self.mlp = getattr(self.layer.wrapped, 'mlp', None)
+        
+        # Store reference to act_fn for both wrapped and float models
+        self.act_fn = None
+        if self.mlp is not None:
+            if self.ptq_wrapped and hasattr(self.mlp, 'wrapped'):
+                # PTQ-wrapped: mlp.wrapped.act_fn.wrapped
+                if hasattr(self.mlp.wrapped, 'act_fn') and hasattr(self.mlp.wrapped.act_fn, 'wrapped'):
+                    self.act_fn = self.mlp.wrapped.act_fn.wrapped
+            elif hasattr(self.mlp, 'act_fn'):
+                # Float model: mlp.act_fn directly
+                self.act_fn = self.mlp.act_fn
+    
+    def _get_submodule(self, name: str) -> Optional[torch.nn.Module]:
+        """
+        Get a submodule by its local name, handling PTQ-wrapped models.
+        
+        For PTQ-wrapped models, all submodule names have '.wrapped' inserted
+        between each level. For example:
+        - Standard: "self_attn.q_proj" 
+        - PTQ-wrapped: "self_attn.wrapped.q_proj.wrapped"
+        
+        This method transforms the name by inserting '.wrapped' between each
+        level when ptq_wrapped is True.
+        """
+        # For PTQ-wrapped models, transform the name by inserting '.wrapped'
+        if self.ptq_wrapped:
+            # Split name by '.' and insert 'wrapped' after each part
+            parts = name.split('.')
+            # Build wrapped name: part1.wrapped.part2.wrapped....wrapped
+            wrapped_parts = []
+            for i, part in enumerate(parts):
+                wrapped_parts.append(part)
+                wrapped_parts.append('wrapped')
+            wrapped_name = '.'.join(wrapped_parts[:])
+            
+            # Try to get module with wrapped name
+            try:
+                module = self.layer.wrapped.get_submodule(wrapped_name)
+                # Unwrap QuantModuleBase to get inner module
+                #if hasattr(module, 'module') and isinstance(module.module, torch.nn.Module):
+                #    return module.module
+                return module
+            except AttributeError:
+                return None
+        else:
+            # Standard case - direct access
+            try:
+                module = self.layer.get_submodule(name)
+                return module
+            except AttributeError:
+                return None
+    
+    def _get_linear_module(self, name: str, use_wrapped: bool = False) -> Tuple[Optional[torch.nn.Module], Optional[torch.nn.Module]]:
+        """
+        Get a linear module and its inner nn.Linear.
+        
+        Args:
+            name: Module name to look up
+            use_wrapped: If True, return the wrapped module (for hook registration).
+                        If False, return the inner nn.Linear (for direct inference).
+        
+        Returns:
+            Tuple of (outer_module, inner_linear)
+            - For PTQ-wrapped: (QuantLinear, nn.Linear inside .module)
+            - For standard: (nn.Linear, nn.Linear)
+        """
+        outer = self._get_submodule(name)
+        if outer is None:
+            return None, None
+        
+        if hasattr(outer, 'module') and isinstance(outer.module, torch.nn.Linear):
+            return outer, outer.module
+        elif isinstance(outer, torch.nn.Linear):
+            return outer, outer
+        
+        return outer, None
+    
+    def _get_module_for_inference(self, name: str) -> Optional[torch.nn.Module]:
+        """
+        Get the module to use for inference.
+        
+        For PTQ-wrapped models, returns the wrapped module (QuantLinear) so that
+        hooks and observers are triggered. For standard models, returns nn.Linear.
+        """
+        outer, inner = self._get_linear_module(name)
+        # Always use the wrapped/outer module for inference to trigger hooks
+        return outer
+    
+    def _get_normalized_position_embeddings(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        past_key_values: Optional[Any] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get normalized position embeddings for PTQ-wrapped models.
+        
+        For PTQ-wrapped models, the wrapped decoder layer (QuantLlamaDecoderLayer)
+        has a _normalize_position_embeddings method that processes position embeddings
+        to match the wrapped module's RoPE convention (including pre_negated_sin handling).
+        
+        Args:
+            hidden_states: Input hidden states for shape/device info
+            position_embeddings: Raw (cos, sin) from cache
+            past_key_values: Optional KV cache for past_len calculation
+            
+        Returns:
+            Normalized (cos, sin) tuple compatible with wrapped QuantLlamaAttention
+        """
+        if self._wrapped_decoder_layer is not None:
+            # Use the wrapped decoder layer's normalization method
+            return self._wrapped_decoder_layer._normalize_position_embeddings(
+                hidden_states=hidden_states,
+                position_embeddings=position_embeddings,
+                past_key_value=past_key_values,
+            )
+        # Fallback: return as-is for non-PTQ-wrapped models
+        return position_embeddings if position_embeddings else (None, None)
+    
+    def reset_cache(self):
+        """Reset all cached intermediate results and free GPU memory."""
+        # Clear all cached tensors to free GPU memory
+        self._cached_residual.clear()
+        self._cached_q.clear()
+        self._cached_k.clear()
+        self._cached_v.clear()
+        self._cached_attention_output.clear()
+        self._cached_gate.clear()
+        self._cached_up.clear()
+        self._current_batch_idx = 0
+    
+    def clear_cache(self):
+        """Explicitly clear all caches and free GPU memory."""
+        self.reset_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
+    def run_subgroup(
+        self,
+        subgroup_idx: int,
+        hidden_states: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        past_key_values: Optional[Any] = None,
+        use_cache: bool = False,
+        batch_idx: int = 0,
+    ) -> torch.Tensor:
+        """
+        Run a specific subgroup and return the output hidden states.
+        
+        Args:
+            subgroup_idx: Index of the subgroup to run (0-based)
+            hidden_states: Input hidden states (for qkv subgroup) or 
+                          None (for subsequent subgroups, uses cached intermediate results)
+            attention_mask: Optional attention mask
+            position_ids: Optional position IDs
+            position_embeddings: Optional (cos, sin) for RoPE
+            past_key_values: Optional KV cache
+            use_cache: Whether to use KV cache
+            batch_idx: Batch index for per-batch caching
+            
+        Returns:
+            Output hidden states after running the subgroup
+        """
+        subgroup_names = self.sequential_groups[subgroup_idx]
+        self._current_batch_idx = batch_idx
+        
+        # Determine subgroup type and run appropriate computation
+        # Check if this is qkv group
+        is_qkv = any('q_proj' in n or 'k_proj' in n or 'v_proj' in n for n in subgroup_names)
+        is_o_proj = any('o_proj' in n for n in subgroup_names)
+        is_gate_up = any('gate_proj' in n or 'up_proj' in n for n in subgroup_names)
+        is_down_proj = any('down_proj' in n for n in subgroup_names)
+        
+        if is_qkv:
+            # qkv subgroup: receives original hidden_states, returns them unchanged
+            return self._run_qkv_subgroup(
+                hidden_states, attention_mask, position_embeddings, batch_idx
+            )
+        elif is_o_proj:
+            # o_proj subgroup: uses cached Q,K,V, returns attention output + residual
+            return self._run_o_proj_subgroup(
+                hidden_states, attention_mask, position_embeddings, batch_idx
+            )
+        elif is_gate_up:
+            # gate_up subgroup: uses cached attention output (from o_proj), 
+            # applies post_attention_layernorm, computes gate and up
+            # Note: hidden_states here is None, we use cached _cached_attention_output
+            return self._run_gate_up_subgroup(batch_idx)
+        elif is_down_proj:
+            # down_proj subgroup: uses cached gate, up, and attention_output
+            # Returns final output with residual
+            return self._run_down_proj_subgroup(batch_idx)
+        else:
+            raise RuntimeError(f"Unrecognized subgroup.")
+            
+    
+    def _run_qkv_subgroup(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        batch_idx: int = 0,
+    ) -> torch.Tensor:
+        """
+        Run q_proj, k_proj, v_proj and cache Q, K, V outputs.
+        
+        Returns the original hidden_states (unchanged) since attention
+        computation happens in o_proj subgroup.
+        
+        Uses wrapped modules for inference to trigger hooks/observers.
+        """
+        # Apply input layernorm
+        if self.input_layernorm is not None:
+            hidden_states = self.input_layernorm(hidden_states)
+        
+        # Get wrapped modules for inference (to trigger hooks/observers)
+        q_proj = self._get_module_for_inference('self_attn.q_proj')
+        k_proj = self._get_module_for_inference('self_attn.k_proj')
+        v_proj = self._get_module_for_inference('self_attn.v_proj')
+        
+        if q_proj is not None and k_proj is not None and v_proj is not None:
+            # Cache the projected outputs per batch (move to CPU to save GPU memory)
+            self._cached_q[batch_idx] = q_proj(hidden_states).cpu()
+            self._cached_k[batch_idx] = k_proj(hidden_states).cpu()
+            self._cached_v[batch_idx] = v_proj(hidden_states).cpu()
+        elif self.self_attn is not None:
+            # Fallback: use full attention module but only get qkv
+            # This shouldn't happen in normal operation
+            pass
+        
+        # Return hidden states unchanged - attention computation is in o_proj
+        return hidden_states
+    
+    def _run_o_proj_subgroup(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        batch_idx: int = 0,
+    ) -> torch.Tensor:
+        """
+        Run attention computation and o_proj, then add residual.
+        
+        Uses cached Q, K, V from qkv subgroup.
+        Follows the same pattern as LlamaAttention.forward in modeling_llama.py.
+        Uses wrapped modules for inference to trigger hooks/observers.
+        """
+        # Get cached Q, K, V for this batch (transfer from CPU to GPU)
+        if batch_idx not in self._cached_q or batch_idx not in self._cached_k or batch_idx not in self._cached_v:
+            # If not cached, we need to compute them
+            # This shouldn't happen if subgroups are run in order
+            raise RuntimeError(f"Q, K, V not cached for batch {batch_idx}. Run qkv subgroup first.")
+        
+        q = self._cached_q[batch_idx].to(self._device)
+        k = self._cached_k[batch_idx].to(self._device)
+        v = self._cached_v[batch_idx].to(self._device)
+        
+        # Compute attention
+        # Reshape for attention: (batch, seq_len, hidden) -> (batch, heads, seq_len, head_dim)
+        batch_size, seq_len, _ = q.shape
+        
+        if self.self_attn is not None:
+            num_heads = getattr(self.self_attn, 'num_key_value_heads', 
+                               getattr(self.config, 'num_attention_heads', 32) if self.config else 32)
+            num_kv_heads = getattr(self.self_attn, 'num_key_value_heads',
+                                  getattr(self.config, 'num_key_value_heads', num_heads) if self.config else num_heads)
+            head_dim = getattr(self.self_attn, 'head_dim', 
+                              getattr(self.config, 'hidden_size', 4096) // num_heads if self.config else 128)
+        else:
+            num_heads = getattr(self.config, 'num_attention_heads', 32) if self.config else 32
+            num_kv_heads = getattr(self.config, 'num_key_value_heads', num_heads) if self.config else num_heads
+            head_dim = getattr(self.config, 'hidden_size', 4096) // num_heads if self.config else 128
+        
+        # Reshape Q, K, V: (batch, seq_len, hidden) -> (batch, heads, seq_len, head_dim)
+        q = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, num_kv_heads, head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, num_kv_heads, head_dim).transpose(1, 2)
+        
+        # Get position embeddings
+        cos, sin = position_embeddings if position_embeddings else (None, None)
+        
+        # Apply RoPE if available (after reshaping, cos/sin shape: [batch, seq_len, head_dim])
+        if cos is not None and sin is not None:
+            q, k = self._apply_rotary_pos_emb(q, k, cos, sin)
+        
+        # Repeat KV if needed (for GQA)
+        if num_heads != num_kv_heads:
+            n_rep = num_heads // num_kv_heads
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
+        
+        # Scaled dot-product attention
+        scaling = head_dim ** -0.5
+        attn_weights = torch.matmul(q, k.transpose(2, 3))# * scaling
+        
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask
+        
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(q.dtype)
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        
+        # Apply o_proj using wrapped module for hooks/observers
+        o_proj = self._get_module_for_inference('self_attn.o_proj')
+        
+        if o_proj is not None:
+            attn_output = o_proj(attn_output)
+        
+        # Add residual connection (transfer from CPU to GPU)
+        # The residual is the original input to the layer (before input_layernorm)
+        # We need to track this from the first subgroup
+        if batch_idx in self._cached_residual:
+            attn_output = attn_output + self._cached_residual[batch_idx].to(self._device)
+        
+        # Cache attention output per batch (after o_proj AND residual)
+        # This is what gate_up subgroup expects to apply post_attention_layernorm to
+        # In Llama: post_attention_layernorm is applied AFTER the residual connection
+        self._cached_attention_output[batch_idx] = attn_output.cpu()
+        
+        return attn_output
+    
+    def _run_gate_up_subgroup(self, batch_idx: int = 0) -> torch.Tensor:
+        """
+        Run gate_proj and up_proj, cache intermediate results.
+        
+        Uses cached attention output from o_proj subgroup (after post_attention_layernorm).
+        Returns the attention output unchanged - actual MLP computation is in down_proj.
+        Uses wrapped modules for inference to trigger hooks/observers.
+        """
+        # Get cached attention output from o_proj subgroup (transfer from CPU to GPU)
+        if batch_idx not in self._cached_attention_output:
+            raise RuntimeError(f"Attention output not cached for batch {batch_idx}. Run o_proj subgroup first.")
+        
+        # Get attention output and apply post_attention_layernorm
+        attn_output = self._cached_attention_output[batch_idx].to(self._device)
+        
+        # Apply post-attention layernorm
+        if self.post_attention_layernorm is not None:
+            hidden_states = self.post_attention_layernorm(attn_output)
+        else:
+            hidden_states = attn_output
+        
+        # Get wrapped modules for inference (to trigger hooks/observers)
+        gate_proj = self._get_module_for_inference('mlp.gate_proj')
+        up_proj = self._get_module_for_inference('mlp.up_proj')
+        
+        if gate_proj is not None and up_proj is not None:
+            # Cache the projected outputs per batch (move to CPU to save GPU memory)
+            self._cached_gate[batch_idx] = gate_proj(hidden_states).cpu()
+            self._cached_up[batch_idx] = up_proj(hidden_states).cpu()
+        elif self.mlp is not None:
+            # Fallback
+            pass
+        
+        # Return attention output unchanged - MLP computation is in down_proj
+        return attn_output
+    
+    def _run_down_proj_subgroup(self, batch_idx: int = 0) -> torch.Tensor:
+        """
+        Run down_proj with activation and add residual.
+        
+        Uses cached gate and up from gate_up subgroup (transferred from CPU to GPU).
+        Uses wrapped modules for inference to trigger hooks/observers.
+        """
+        if batch_idx not in self._cached_gate or batch_idx not in self._cached_up:
+            raise RuntimeError(f"Gate and Up not cached for batch {batch_idx}. Run gate_up subgroup first.")
+        
+        # Transfer gate and up from CPU to GPU
+        gate = self._cached_gate[batch_idx].to(self._device)
+        up = self._cached_up[batch_idx].to(self._device)
+        
+        # SiLU activation (default for Llama)
+        if self.act_fn is None:
+            raise RuntimeError("act_fn not initialized. Ensure _init_submodules() was called correctly.")
+        gate = self.act_fn(gate)
+        
+        # Element-wise multiplication
+        mlp_output = gate * up
+        
+        # Apply down_proj using wrapped module for hooks/observers
+        down_proj = self._get_module_for_inference('mlp.down_proj')
+        
+        if down_proj is not None:
+            mlp_output = down_proj(mlp_output)
+        
+        # Add residual connection (transfer from CPU to GPU)
+        # The residual is the output from attention subgroup
+        if batch_idx in self._cached_attention_output:
+            mlp_output = mlp_output + self._cached_attention_output[batch_idx].to(self._device)
+        
+        return mlp_output
+    
+    def _run_generic_subgroup(
+        self,
+        subgroup_names: List[str],
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]],
+        batch_idx: int = 0,
+    ) -> torch.Tensor:
+        """
+        Generic fallback for running a subgroup.
+        
+        This runs the modules directly without special handling.
+        """
+        for name in subgroup_names:
+            module, inner = self._get_linear_module(name)
+            target = inner if inner is not None else module
+            if target is not None:
+                hidden_states = target(hidden_states)
+        
+        return hidden_states
+    
+    def set_residual(self, residual: torch.Tensor, batch_idx: int = 0):
+        """Set the residual connection from before the layer (stored on CPU)."""
+        self._cached_residual[batch_idx] = residual.cpu()
+        self._cached_attention_output[batch_idx] = residual.cpu()  # For final residual addition
+    
+    def get_attention_output(self) -> Optional[torch.Tensor]:
+        """Get the cached attention output (after o_proj, before residual)."""
+        return self._cached_attention_output
+    
+    @staticmethod
+    def _apply_rotary_pos_emb(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        unsqueeze_dim: int = 1,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply Rotary Position Embedding to query and key tensors.
+        
+        This is a local implementation of RoPE for use in SubgroupRunner
+        when the transformers utility is not available.
+        
+        Args:
+            q: Query tensor of shape (batch, seq_len, hidden)
+            k: Key tensor of shape (batch, seq_len, hidden)
+            cos: Cosine embeddings
+            sin: Sine embeddings
+            unsqueeze_dim: Dimension to unsqueeze for broadcasting
+            
+        Returns:
+            Tuple of (q_embedded, k_embedded)
+        """
+        def rotate_half(x: torch.Tensor) -> torch.Tensor:
+            """Rotates half the hidden dims of the input."""
+            x1 = x[..., : x.shape[-1] // 2]
+            x2 = x[..., x.shape[-1] // 2 :]
+            #return torch.cat((-x2, x1), dim=-1)
+            return torch.cat((x2, x1), dim=-1)
+        
+        cos = cos.unsqueeze(unsqueeze_dim)
+        sin = sin.unsqueeze(unsqueeze_dim)
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+        return q_embed, k_embed
 
 
 class FPInputsCache:
@@ -591,6 +1139,76 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         model_norm.freeze_qparams()
         lm_head.freeze_qparams()
 
+    def _run_subgroup_forward(
+        self,
+        subgroup_runner: SubgroupRunner,
+        subgroup_idx: int,
+        cache_args: List[List[Any]],
+        cache_kwargs: Dict[str, List[Any]],
+        batch_num: int,
+        device: torch.device,
+        *,
+        set_residual: bool = False,
+        reset_cache_first: bool = False,
+        description: str = "Running subgroup",
+        show_progress: bool = True,
+    ) -> None:
+        """
+        Run subgroup forward over all cached batches using SubgroupRunner.
+        
+        Args:
+            subgroup_runner: The SubgroupRunner instance
+            subgroup_idx: Index of the subgroup to run
+            cache_args: Cached positional arguments per batch
+            cache_kwargs: Cached keyword arguments per batch
+            batch_num: Number of batches
+            device: Device to move tensors to
+            set_residual: If True, set residual connections (for Hessian calibration)
+            reset_cache_first: If True, reset cache before first subgroup
+            description: Description for progress bar
+            show_progress: Whether to show progress bar
+        """
+        for batch_idx in tqdm(
+            range(batch_num),
+            desc=description,
+            leave=False,
+            unit="batch",
+            disable=not show_progress,
+        ):
+            cache_args_batch = gather_single_batch_from_list(cache_args, batch_idx)
+            cache_args_batch = move_to_device(cache_args_batch, device)
+
+            cache_kwargs_batch = gather_single_batch_from_dict(cache_kwargs, batch_idx)
+            cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+
+            hidden_states = cache_args_batch[0] if cache_args_batch else None
+            attention_mask = cache_kwargs_batch.get('attention_mask', None)
+            position_ids = cache_kwargs_batch.get('position_ids', None)
+            position_embeddings = cache_kwargs_batch.get('position_embeddings', None)
+            past_key_values = cache_kwargs_batch.get('past_key_values', None)
+            use_cache = cache_kwargs_batch.get('use_cache', False)
+
+            # Set residual for first subgroup (only once per layer)
+            if reset_cache_first and subgroup_idx == 0 and batch_idx == 0:
+                subgroup_runner.reset_cache()
+
+            # Set residual for each batch (needed for skip connection)
+            if set_residual and subgroup_idx == 0:
+                subgroup_runner.set_residual(hidden_states, batch_idx)
+
+            # Run only the current subgroup
+            # For qkv subgroup (idx=0), pass hidden_states; subsequent subgroups use cached values
+            subgroup_runner.run_subgroup(
+                subgroup_idx=subgroup_idx,
+                hidden_states=hidden_states if subgroup_idx == 0 else None,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                position_embeddings=position_embeddings,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                batch_idx=batch_idx,
+            )
+
     @torch.no_grad()
     def convert(self, model):
         """
@@ -667,7 +1285,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 ],
             )
 
-            sequential = False#True #False
+            sequential = gptq_conf.sequential
             # Define groups for quantizing by internal structure (standard Llama modules)
             if sequential is True:
                 #sequential processing
@@ -731,8 +1349,22 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     
                 fp_inputs_cache.clear_hook()
 
+            # Create SubgroupRunner for efficient subgroup-level execution (if enabled)
+            config = self._get_config(model)
+            use_subgroup_runner = getattr(gptq_conf, 'use_subgroup_runner', False)
+            
+            subgroup_runner = None
+            if use_subgroup_runner:
+                subgroup_runner = SubgroupRunner(
+                    layer=layer,
+                    sequential_groups=sequential,
+                    module_name_map=module_name,
+                    ptq_wrapped=ptq_wrapped,
+                    config=config,
+                )
+
             # 2) Set up GPTQ objects and gather stats
-            for names in sequential:
+            for subgroup_idx, names in enumerate(sequential):
                 subset = {n: full[n] for n in names}
 
                 gptq: Dict[str, GPTQ] = {}
@@ -778,26 +1410,42 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 for name in subset:
                     handles.append(subset[name].register_forward_hook(add_batch(name)))
 
-                # Run layer forward over all cached batches to build Hessian/statistics
-                device = next(model.parameters()).device
-                for batch_idx in tqdm(
-                    range(batch_num),
-                    desc=f"[L{l_idx}] collecting",
-                    leave=False,
-                    unit="batch",
-                    disable=not gptq_conf.show_progress,
-                ):
-                    cache_args_batch = gather_single_batch_from_list(
-                        self.cache_args, batch_idx
+                if use_subgroup_runner:
+                    device = next(model.parameters()).device
+                    self._run_subgroup_forward(
+                        subgroup_runner=subgroup_runner,
+                        subgroup_idx=subgroup_idx,
+                        cache_args=self.cache_args,
+                        cache_kwargs=self.cache_kwargs,
+                        batch_num=batch_num,
+                        device=device,
+                        set_residual=True,
+                        reset_cache_first=True,
+                        description=f"[L{l_idx}] collecting subgroup {subgroup_idx}",
+                        show_progress=gptq_conf.show_progress,
                     )
-                    cache_args_batch = move_to_device(cache_args_batch, device)
+                else:
+                    # Original approach: run full layer forward over all cached batches
+                    device = next(model.parameters()).device
+                    for batch_idx in tqdm(
+                        range(batch_num),
+                        desc=f"[L{l_idx}] collecting subgroup {subgroup_idx}",
+                        leave=False,
+                        unit="batch",
+                        disable=not gptq_conf.show_progress,
+                    ):
+                        cache_args_batch = gather_single_batch_from_list(
+                            self.cache_args, batch_idx
+                        )
+                        cache_args_batch = move_to_device(cache_args_batch, device)
 
-                    cache_kwargs_batch = gather_single_batch_from_dict(
-                        self.cache_kwargs, batch_idx
-                    )
-                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
-
-                    layer(*cache_args_batch, **cache_kwargs_batch)
+                        cache_kwargs_batch = gather_single_batch_from_dict(
+                            self.cache_kwargs, batch_idx
+                        )
+                        cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+                        
+                        # Run the full layer (original approach)
+                        layer(*cache_args_batch, **cache_kwargs_batch)
 
                 # Remove handles
                 for h in handles:
@@ -816,10 +1464,37 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         actorder=gptq_conf.actorder,
                         static_groups=gptq_conf.static_groups,
                         verbose=gptq_conf.verbose,
+                        adaptive_percdamp=gptq_conf.adaptive_percdamp,
+                        cond_threshold_good=gptq_conf.cond_threshold_good,
+                        use_iterate=gptq_conf.use_iterate,
                     )
                     quantizers[self.remove_wrapped_substrings(full_module_name)] = gptq[name].quantizer
                     gptq[name].free()
-                    
+
+                # 4) Re-run subgroup forward to update cache with quantized weights
+                # This is necessary because cached activations were computed with unquantized weights
+                if use_subgroup_runner:
+                    device = next(model.parameters()).device
+                    self._run_subgroup_forward(
+                        subgroup_runner=subgroup_runner,
+                        subgroup_idx=subgroup_idx,
+                        cache_args=self.cache_args,
+                        cache_kwargs=self.cache_kwargs,
+                        batch_num=batch_num,
+                        device=device,
+                        set_residual=False,
+                        reset_cache_first=False,
+                        description=f"[L{l_idx}] re-cache subgroup {subgroup_idx}",
+                        show_progress=gptq_conf.show_progress,
+                    )
+            
+            if use_subgroup_runner and subgroup_runner is not None:
+                del subgroup_runner
+                subgroup_runner = None
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+            
             # --- PTQ-wrapped: inject GPTQ qparams and freeze the layer ---
             if ptq_wrapped:
                 self._inject_gptq_qparams_into_layer(
@@ -1055,6 +1730,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             actorder=gptq_conf.actorder,
             static_groups=gptq_conf.static_groups,
             verbose=gptq_conf.verbose,
+            adaptive_percdamp=gptq_conf.adaptive_percdamp,
+            cond_threshold_good=gptq_conf.cond_threshold_good,
+            use_iterate=gptq_conf.use_iterate,
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()
@@ -1171,6 +1849,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             actorder=gptq_conf.actorder,
             static_groups=gptq_conf.static_groups,
             verbose=gptq_conf.verbose,
+            adaptive_percdamp=gptq_conf.adaptive_percdamp,
+            cond_threshold_good=gptq_conf.cond_threshold_good,
+            use_iterate=gptq_conf.use_iterate,
         )
         quantizers[f"rotate_lm_head"] = gptq.quantizer
         gptq.free()
