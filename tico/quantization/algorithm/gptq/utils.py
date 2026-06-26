@@ -179,6 +179,64 @@ class SensitivityCalibrator:
             torch.nn.ConvTranspose2d,
         ]
 
+    @staticmethod
+    def _unbatch_inputs(inputs):
+        """
+        Split batched inputs into individual samples for memory-efficient calibration.
+        
+        When DataLoader with batch_size=1 wraps already-batched inputs:
+          - Original input: [batch, seq_len]
+          - After DataLoader: [1, batch, seq_len]
+        
+        This method detects this pattern and splits along the correct dimension.
+
+        Args:
+            inputs: Input tensor or dict of tensors, possibly with batch_size > 1.
+
+        Returns:
+            List of single-sample inputs (each with batch_size = 1).
+        """
+        if isinstance(inputs, torch.Tensor):
+            # Check if DataLoader wrapped a batched input: shape [1, batch, seq_len]
+            if inputs.shape[0] == 1 and len(inputs.shape) == 3:
+                # Real batch is at dimension 1
+                real_batch = inputs.squeeze(0)  # Now [batch, seq_len]
+                return [real_batch[i:i+1].unsqueeze(0) for i in range(real_batch.shape[0])]
+            elif inputs.shape[0] > 1:
+                # Standard case: batch at dimension 0
+                return [inputs[i:i+1].unsqueeze(0) for i in range(inputs.shape[0])]
+            return [inputs]
+            
+        return None
+
+    @staticmethod
+    def _unbatch_targets(targets, num_samples):
+        """
+        Split targets to match unbatched inputs.
+        
+        When DataLoader wraps batched targets:
+          - Original targets: [batch, seq_len]  
+          - After DataLoader: [1, batch, seq_len]
+        
+        Args:
+            targets: Target tensor, possibly wrapped by DataLoader.
+            num_samples: Number of samples to split into.
+            
+        Returns:
+            List of single-sample targets.
+        """
+        if not isinstance(targets, torch.Tensor):
+            return [targets] * num_samples
+            
+        # Check for DataLoader-wrapped case: [1, batch, ...]
+        if targets.shape[0] == 1 and len(targets.shape) >= 2:
+            real_targets = targets.squeeze(0)  # Now [batch, ...]
+            return [real_targets[i:i+1].unsqueeze(0) for i in range(real_targets.shape[0])]
+        elif targets.shape[0] > 1:
+            return [targets[i:i+1].unsqueeze(0) for i in range(targets.shape[0])]
+        
+        return None
+
     def compute_sensitivity_info(self):
 
         data_loader = get_dataset_for_calibration(
@@ -201,62 +259,68 @@ class SensitivityCalibrator:
         if self.show_progress is True:
             print("Calibrating sensitivity")
         for inputs, targets in tqdm.tqdm(data_loader, disable=not self.show_progress):
-            model.zero_grad(set_to_none=True)
-            if model.device.type != "cpu":
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
-            if isinstance(inputs, torch.Tensor):
-                inp_ids = inputs.squeeze(0)  # remove redundant batch dimension
-                logits = model(inp_ids.to(model.device)).logits
-            else:
-                for item in inputs:
-                    inputs[item] = inputs[item].to(model.device).squeeze(0)
-
-                logits = model(**inputs).logits
-
-            outputs = logits.squeeze()
-            targets = targets.squeeze()
-
-            t_index = outputs.shape[0] - 1  # priority to the last token
-            outputs_el = outputs[t_index : t_index + 1, :]  # noqa E203
-            targets_el = targets[t_index : t_index + 1]  # noqa E203
-
-            model.zero_grad()
-            loss = torch.nn.CrossEntropyLoss()(
-                outputs_el, targets_el.to(model.device)
-            )  # for Fisher this must be CrossEntropy
-
-            loss.backward(retain_graph=False)
-
-            # update second order information as current weights gradients are ready
-            for name in modules_to_process:
-                cur_module = modules_to_process[name]
-                # Skip modules that didn't participate in the forward pass
-                # (e.g., vision modules when processing text-only inputs)
-                if cur_module.weight.grad is None:
-                    continue
-                cur_grad = cur_module.weight.grad.detach().clone()
-                if torch.isnan(cur_grad).any().item():
-                    print("WARNING NaN detected")
-
-                sensitivity[name] += torch.mul(cur_grad, cur_grad).cpu()
-
-                cur_grad = None
-                del cur_grad
-
+            # Unbatch inputs to process each sample individually (batch=1)
+            # This prevents high GPU memory consumption when batch > 1
+            unbatched_inputs = self._unbatch_inputs(inputs)
+            unbatched_targets = self._unbatch_targets(targets, len(unbatched_inputs))
+            
+            for single_input, single_target in zip(unbatched_inputs, unbatched_targets):
+                model.zero_grad(set_to_none=True)
                 if model.device.type != "cpu":
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
-            loss.detach()
+                if isinstance(single_input, torch.Tensor):
+                    inp_ids = single_input.squeeze(0)  # remove redundant batch dimension
+                    logits = model(inp_ids.to(model.device)).logits
+                else:
+                    for item in single_input:
+                        single_input[item] = single_input[item].to(model.device).squeeze(0)
 
-            logits = outputs = targets = loss = None
-            del loss, logits, outputs, targets
+                    logits = model(**single_input).logits
 
-            if model.device.type != "cpu":
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                outputs = logits.squeeze()
+                targets_el = single_target.squeeze()
+
+                t_index = outputs.shape[0] - 1  # priority to the last token
+                outputs_el = outputs[t_index : t_index + 1, :]  # noqa E203
+                targets_el = targets_el[t_index : t_index + 1]  # noqa E203
+
+                model.zero_grad()
+                loss = torch.nn.CrossEntropyLoss()(
+                    outputs_el, targets_el.to(model.device)
+                )  # for Fisher this must be CrossEntropy
+
+                loss.backward(retain_graph=False)
+
+                # update second order information as current weights gradients are ready
+                for name in modules_to_process:
+                    cur_module = modules_to_process[name]
+                    # Skip modules that didn't participate in the forward pass
+                    # (e.g., vision modules when processing text-only inputs)
+                    if cur_module.weight.grad is None:
+                        continue
+                    cur_grad = cur_module.weight.grad.detach().clone()
+                    if torch.isnan(cur_grad).any().item():
+                        print("WARNING NaN detected")
+
+                    sensitivity[name] += torch.mul(cur_grad, cur_grad).cpu()
+
+                    cur_grad = None
+                    del cur_grad
+
+                    if model.device.type != "cpu":
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+
+                loss.detach()
+
+                logits = outputs = targets = loss = single_input = single_target = None
+                del loss, logits, outputs, targets, single_input, single_target
+
+                if model.device.type != "cpu":
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
 
         for name in modules_to_process:
             sensitivity[name] /= len(data_loader)

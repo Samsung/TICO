@@ -290,6 +290,8 @@ def _build_llama_overrides(
     embedding_weight: Optional[QuantSpec],
     lm_head_weight: Optional[QuantSpec],
     spin_rotation_weight: Optional[QuantSpec],
+    spinquant_io: Optional[QuantSpec] = None,
+    lm_head_io: Optional[QuantSpec] = None,
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
     softmax: Optional[QuantSpec],
@@ -301,11 +303,11 @@ def _build_llama_overrides(
     if embedding_override:
         _set_nested_override(overrides, ("model", "embed_tokens"), embedding_override)
 
-    lm_head_override = _build_linear_override(linear_activation=linear, linear_weight=lm_head_weight)
+    lm_head_override = _build_linear_override(linear_activation=lm_head_io or linear, linear_weight=lm_head_weight)
     if lm_head_override:
         overrides["lm_head"] = lm_head_override
 
-    spin_rotation_override = _build_linear_override(linear_activation=linear, linear_weight=spin_rotation_weight)
+    spin_rotation_override = _build_linear_override(linear_activation=spinquant_io or linear, linear_weight=spin_rotation_weight)
     if spin_rotation_override:
         _set_nested_override(
             overrides,
@@ -314,7 +316,7 @@ def _build_llama_overrides(
         )
         _set_nested_override(overrides, ("rotate_lm_head",), spin_rotation_override)
 
-    final_norm_override = _build_norm_override(norm=norm, norm_weight=norm_weight)
+    final_norm_override = _build_norm_override(norm=lm_head_io or norm, norm_weight=norm_weight)
     if final_norm_override:
         _set_nested_override(overrides, ("model", "norm"), final_norm_override)
    
@@ -345,6 +347,8 @@ def build_llm_ptq_config(
     embedding_weight: Optional[QuantSpec] = None,
     lm_head_weight: Optional[QuantSpec] = None,
     spin_rotation_weight: Optional[QuantSpec] = None,
+    spinquant_io: Optional[QuantSpec] = None,
+    lm_head_io: Optional[QuantSpec] = None,
     norm: Optional[QuantSpec] = None,
     norm_weight: Optional[QuantSpec] = None,
     softmax: Optional[QuantSpec] = None,
@@ -387,6 +391,8 @@ def build_llm_ptq_config(
             embedding_weight=embedding_weight,
             lm_head_weight=lm_head_weight,
             spin_rotation_weight=spin_rotation_weight,
+            spinquant_io=spinquant_io,
+            lm_head_io=lm_head_io,
             norm=norm,
             norm_weight=norm_weight,
             softmax=softmax,

@@ -243,6 +243,18 @@ def parse_args():
         help="which activation types are supposed for rmsnorm for PTQ (`int16`/`mxint8` are supported for now)",
     )
     parser.add_argument(
+        "--spinquant_io_qdtype",
+        type=str,
+        default=None,
+        help="which activation types are supposed for SpinQuant rotation I/O (input/output of rotate_embedding and rotate_lm_head). Defaults to linear_io_qdtype if not specified.",
+    )
+    parser.add_argument(
+        "--lm_head_io_qdtype",
+        type=str,
+        default=None,
+        help="which activation types are supposed for output norm + lm_head I/O (input/output of final norm and lm_head). Defaults to linear_io_qdtype if not specified.",
+    )
+    parser.add_argument(
         "--gptq_mse",
         type=str,
         default=None,
@@ -1216,6 +1228,16 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     linear_spec = quant_spec_from_dtype_string(args.linear_io_qdtype)
     norm_spec = quant_spec_from_dtype_string(args.norm_io_qdtype)
     softmax_spec = quant_spec_from_dtype_string(args.softmax_io_qdtype)
+    spinquant_io_spec = (
+        quant_spec_from_dtype_string(args.spinquant_io_qdtype)
+        if args.spinquant_io_qdtype is not None
+        else linear_spec
+    )
+    lm_head_io_spec = (
+        quant_spec_from_dtype_string(args.lm_head_io_qdtype)
+        if args.lm_head_io_qdtype is not None
+        else linear_spec
+    )
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -1230,6 +1252,8 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
             if args.no_spinquant
             else affine(DType.int(args.spin_rotation_weight_bits))
         ),
+        spinquant_io=spinquant_io_spec,
+        lm_head_io=lm_head_io_spec,
         norm=norm_spec,
         norm_weight=affine(DType.int(16)),
         softmax=softmax_spec,
@@ -1298,6 +1322,16 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
     linear_spec = quant_spec_from_dtype_string(args.linear_io_qdtype)
     norm_spec = quant_spec_from_dtype_string(args.norm_io_qdtype)
     softmax_spec = quant_spec_from_dtype_string(args.softmax_io_qdtype)
+    spinquant_io_spec = (
+        quant_spec_from_dtype_string(args.spinquant_io_qdtype)
+        if args.spinquant_io_qdtype is not None
+        else linear_spec
+    )
+    lm_head_io_spec = (
+        quant_spec_from_dtype_string(args.lm_head_io_qdtype)
+        if args.lm_head_io_qdtype is not None
+        else linear_spec
+    )
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -1312,6 +1346,8 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
             if args.no_spinquant
             else affine(DType.int(args.spin_rotation_weight_bits))
         ),
+        spinquant_io=spinquant_io_spec,
+        lm_head_io=lm_head_io_spec,
         norm=norm_spec,
         norm_weight=affine(DType.int(16)),
         softmax=softmax_spec,
