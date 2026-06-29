@@ -1330,6 +1330,85 @@ class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):
         return ForwardInput((inputs_embeds,), {})
 
 
+class Gemma4VisionEncoderCase(Gemma4BaseCase):
+    """Smoke case for a tiny Gemma4 vision encoder."""
+
+    name = "gemma4_vision_encoder"
+    description = "Quantize a tiny Gemma4 vision encoder."
+    tags = ("gemma4", "e2b", "vision", "encoder")
+    max_mean_abs_diff = 3.0
+    seq_len = 8
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 vision encoder and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionEncoder
+
+        torch.manual_seed(123)
+        self.vision_cfg = _make_vision_config()
+        module = Gemma4VisionEncoder(self.vision_cfg).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 vision encoder input."""
+        batch_size = 1
+        hidden = torch.randn(batch_size, self.seq_len, self.vision_cfg.hidden_size)
+        return ForwardInput(
+            (),
+            {
+                "inputs_embeds": hidden,
+                "attention_mask": torch.ones(batch_size, self.seq_len),
+                "pixel_position_ids": _vision_position_ids(batch_size, self.seq_len),
+            },
+        )
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 vision encoder calibration samples."""
+        return [self._sample() for _ in range(8)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 vision encoder evaluation sample."""
+        return self._sample()
+
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Export the wrapped vision encoder in prefill mode.
+
+        Passes ``pixel_position_ids`` so the export adapter precomputes
+        position embeddings and the bidirectional attention mask as
+        registered buffers, replacing dynamic RoPE and mask computation
+        with static gather from precomputed tables.
+        """
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if hasattr(wrapped, "as_export_module"):
+            pixel_pos_ids = _vision_position_ids(1, self.seq_len)
+            return wrapped.as_export_module(
+                mode="prefill", pixel_position_ids=pixel_pos_ids
+            ).eval()
+        return quantized
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create static export inputs expected by the vision encoder adapter.
+
+        The export adapter's ``forward_export`` only takes ``inputs_embeds``.
+        Position embeddings and attention mask are precomputed buffers.
+        """
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        hidden = kwargs["inputs_embeds"]
+        return ForwardInput((hidden,), {})
+
+
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
     Gemma4TextAttentionCase(),
@@ -1348,4 +1427,5 @@ GEMMA4_CASES = (
     Gemma4VisionPoolerCase(),
     Gemma4VisionModelCase(),
     Gemma4MultimodalEmbedderCase(),
+    Gemma4VisionEncoderCase(),
 )

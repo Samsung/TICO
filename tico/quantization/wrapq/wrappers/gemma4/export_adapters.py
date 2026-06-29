@@ -161,6 +161,30 @@ class Gemma4VisionEncoderLayerPrefillExportAdapter(nn.Module):
         )
 
 
+class Gemma4VisionEncoderPrefillExportAdapter(nn.Module):
+    """Export adapter for the full Gemma4 vision encoder in prefill mode.
+
+    The adapter calls ``forward_export`` on the wrapped encoder, which reads
+    pre-computed ``position_embeddings`` and ``attention_mask`` from registered
+    buffers.  These buffers are materialised by ``as_export_module`` before the
+    adapter is created.
+
+    Input contract:
+        ``inputs_embeds`` has shape ``(1, S, vision_hidden_size)``.
+
+    Output contract:
+        Returns output hidden states with shape ``(1, S, vision_hidden_size)``.
+    """
+
+    def __init__(self, wrapped_encoder: nn.Module):
+        super().__init__()
+        self.wrapped = wrapped_encoder
+
+    def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
+        """Run a static vision encoder prefill graph."""
+        return self.wrapped.forward_export(inputs_embeds)
+
+
 class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
     """Export adapter for a Gemma4 text decoder layer in prefill mode.
 
