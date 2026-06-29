@@ -53,6 +53,10 @@ class QuantGemma4MultimodalEmbedder(QuantModuleBase):
             self.embedding_pre_projection_norm(inputs_embeds)
         )
 
+    def as_export_module(self, mode: str = "prefill", **kwargs) -> nn.Module:
+        """Return self for export (this wrapper is already exportable)."""
+        return self
+
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""
         return ()

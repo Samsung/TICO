@@ -1264,6 +1264,72 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
         return ForwardInput((pixel_values, pixel_position_ids), {})
 
 
+class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):
+    """Smoke case for one tiny Gemma4 multimodal embedder module."""
+
+    name = "gemma4_multimodal_embedder"
+    description = (
+        "Quantize one tiny Gemma4 multimodal embedder (RMSNorm + Linear projection)."
+    )
+    tags = ("gemma4", "e2b", "multimodal", "embedder")
+    max_mean_abs_diff = 2.0
+    seq_len = 16
+
+    def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
+        """Build a tiny Gemma4 multimodal embedder and reference copy."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4MultimodalEmbedder
+
+        torch.manual_seed(123)
+        self.vision_cfg = _make_vision_config()
+        self.text_cfg = _make_text_config()
+        module = Gemma4MultimodalEmbedder(self.vision_cfg, self.text_cfg).eval()
+        return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic Gemma4 multimodal embedder input."""
+        batch_size = 1
+        inputs_embeds = torch.randn(
+            batch_size, self.seq_len, self.vision_cfg.hidden_size
+        )
+        return ForwardInput((inputs_embeds,))
+
+    def calibration_inputs(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> list[ForwardInput]:
+        """Create Gemma4 multimodal embedder calibration samples."""
+        return [self._sample() for _ in range(3)]
+
+    def eval_input(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create the Gemma4 multimodal embedder evaluation sample."""
+        return self._sample()
+
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Export the wrapped multimodal embedder in prefill mode."""
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if hasattr(wrapped, "as_export_module"):
+            return wrapped.as_export_module(mode="prefill").eval()
+        return quantized
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create static export inputs expected by the multimodal embedder adapter.
+
+        The export adapter's forward() takes inputs_embeds.
+        """
+        cloned = _clone_forward_input(eval_sample)
+        inputs_embeds = cloned.args[0]
+        return ForwardInput((inputs_embeds,), {})
+
+
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
     Gemma4TextAttentionCase(),
@@ -1281,4 +1347,5 @@ GEMMA4_CASES = (
     Gemma4VisionEncoderLayerCase(),
     Gemma4VisionPoolerCase(),
     Gemma4VisionModelCase(),
+    Gemma4MultimodalEmbedderCase(),
 )
