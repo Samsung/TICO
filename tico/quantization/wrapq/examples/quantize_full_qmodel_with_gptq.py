@@ -197,7 +197,7 @@ def parse_args():
         "--save",
         nargs="*",
         type=str,
-        choices=["circle_full", "circle_per_layer", "ptq_checkpoint", "sensitivity"],
+        choices=["circle_full", "circle_per_layer", "ptq_checkpoint", "sensitivity", "calibration_dataset"],
         help="which artifacts should be saved to output_dir",
     )
     parser.add_argument(
@@ -326,6 +326,12 @@ def parse_args():
         "--sensitivity_path",
         type=str,
         default=None,
+    )
+    parser.add_argument(
+        "--calibration_dataset",
+        type=str,
+        default=None,
+        help="Path to a pre-saved calibration dataset (.pt file). When provided, skip wikitext loading and load calibration inputs directly.",
     )
     parser.add_argument(
         "--verbose",
@@ -1698,6 +1704,23 @@ def evaluate_original_model(
         print(make_table(results))
 
 
+def get_calibration_dataset_name(seed, n_samples) -> str:
+    """
+    Build a filename for stored calibration dataset.
+    """
+
+    name = (
+        "calibration_dataset_"
+        + "wiki"
+        + "_"
+        + str(n_samples)
+        + "_"
+        + str(seed)
+        + ".pt"
+    )
+    return name
+
+
 def build_calibration_inputs(
     model, tokenizer, args, device: torch.device
 ) -> list[torch.Tensor]:
@@ -1706,7 +1729,20 @@ def build_calibration_inputs(
 
     When batch > 1, samples are grouped into batches of shape [batch_size, seq_len].
     The last batch may be smaller if nsamples is not divisible by batch_size.
+
+    If --calibration_dataset is provided, load the calibration inputs directly
+    from the specified .pt file instead of generating it.
     """
+    if args.calibration_dataset is not None:
+        calib_path = pathlib.Path(args.calibration_dataset)
+        if calib_path.exists():
+            print(f"Loading calibration dataset from {calib_path.resolve()}")
+            return torch.load(calib_path, weights_only=False)
+        else:
+            raise FileNotFoundError(
+                f"Calibration dataset file not found: {calib_path.resolve()}"
+            )
+
     dataset_train = load_dataset(
         DATASET_NAME,
         DATASET_CONFIG,
@@ -1839,6 +1875,14 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args) -> None:
 
     output_dir = pathlib.Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if should_save(args, "calibration_dataset"):
+        save_path = output_dir / get_calibration_dataset_name(
+            args.seed,
+            args.nsamples_for_qcalibration,
+        )
+        print(f"Saving calibration dataset to {save_path.resolve()}")
+        torch.save(calib_inputs, save_path)
 
     if should_save(args, "ptq_checkpoint"):
         save_path = output_dir / get_ptq_model_name(q_m.wrapped, args)
