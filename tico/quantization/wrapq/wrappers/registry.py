@@ -80,7 +80,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.gemma4.quant_vision_model",
     "tico.quantization.wrapq.wrappers.gemma4.quant_multimodal_embedder",
     "tico.quantization.wrapq.wrappers.gemma4.quant_model",
-    # "tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation",
+    "tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation",
     # add future core wrappers here
 )
 
