@@ -348,6 +348,52 @@ class Gemma4LMHeadExportAdapter(nn.Module):
         return self.lm_head(self.norm(hidden_states))
 
 
+class Gemma4ModelPrefillExportAdapter(nn.Module):
+    """Export adapter for the Gemma4Model (image-text) with static-shape contract.
+
+    This adapter wraps a ``QuantGemma4Model`` that has been prepared for export
+    via ``as_export_module()``.  Calling ``forward()`` delegates to the wrapped
+    model's ``forward_export()`` method, which runs only the text decoder layers
+    and final norm on pre-fused ``inputs_embeds``.
+
+    The CPU runtime is responsible for:
+    - Token embedding (with placeholder replacement)
+    - Vision tower + projection
+    - Multimodal fusion (fixed-slot)
+    - PLE computation (if enabled)
+    - Mask and RoPE generation per layer type
+    - KV cache management
+
+    Input contract:
+        ``inputs_embeds`` has shape ``(1, S, hidden_size)`` — pre-fused.
+        ``per_layer_inputs`` has shape ``(1, S, num_layers, ple_dim)`` or None.
+        ``attention_masks`` is a dict mapping layer type to additive masks.
+        ``position_embeddings`` is a dict mapping layer type to (cos, sin).
+
+    Output contract:
+        Returns the final hidden states with shape ``(1, S, hidden_size)``.
+    """
+
+    def __init__(self, wrapped_model: nn.Module):
+        super().__init__()
+        self.wrapped_model = wrapped_model
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor] = None,
+        attention_masks: Optional[dict] = None,
+        position_embeddings: Optional[dict] = None,
+    ) -> torch.Tensor:
+        """Run the model export path via the wrapped model's forward_export."""
+        return self.wrapped_model.forward_export(
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            attention_masks=attention_masks,
+            position_embeddings=position_embeddings,
+        )
+
+
 class Gemma4VisionModelPrefillExportAdapter(nn.Module):
     """Export adapter for the Gemma4 vision model with static-shape contract.
 
