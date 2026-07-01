@@ -189,13 +189,30 @@ class GPTQ:
         self.dXXT: Optional[torch.Tensor] = None
         self.native_inp: Optional[List[torch.Tensor]] = None
         self.kwargs = kwargs
+        # Track batch index for weighted Hessian accumulation
+        self.batch_id = 0
+        # Sample weights for weighted Hessian accumulation
+        self.weights: Optional[List[float]] = None
 
     def add_batch(self, inp, out=None):
         """
         Add a batch of inputs to the Hessian approximation.
         
         For GPTQv2, also processes native_inp (FP inputs) and computes dXXT.
+        Uses internal self.weights and self.batch_id for weighted Hessian accumulation.
+        
+        Args:
+            inp: Input tensor
+            out: Output tensor (unused)
         """
+        # Get weight from internal weights list using batch_id
+        weight = 1.0
+        if self.weights is not None:
+            idx = self.batch_id
+            weight = self.weights[idx %len(self.weights)]
+            # Increment batch_id for next call
+            self.batch_id += 1
+        
         # Process native input for GPTQv2 (before reshaping inp)
         native_inp_processed = None
         if hasattr(self, "native_inp") and self.native_inp is not None and len(self.native_inp) > 0:
@@ -322,7 +339,8 @@ class GPTQ:
 
         self.nsamples += tmp
         inp = inp.double()
-        self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
+        # Scale Hessian contribution by weight
+        self.H += weight * inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
         # GPTQv2: Compute dXXT using native (FP) vs processed input difference
         if native_inp_processed is not None:
             if self.dXXT is None:
@@ -330,7 +348,8 @@ class GPTQ:
             
             native_inp_processed = native_inp_processed.double()
             dX = native_inp_processed.to(inp.device) - inp
-            self.dXXT += dX.matmul(inp.t()).float()
+            # Also scale dXXT by weight
+            self.dXXT += weight * dX.matmul(inp.t()).float()
             del native, native_inp_processed
             native = native_inp_processed = None
 

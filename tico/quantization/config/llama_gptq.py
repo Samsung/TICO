@@ -98,6 +98,9 @@ class LlamaGPTQConfig(BaseConfig):
     # the full layer, significantly reducing redundant computation.
     use_subgroup_runner: bool = False
 
+    # Sample weights for weighted Hessian accumulation (used with calibration set compression)
+    sample_weights: list[float] | None = None
+
     @property
     def name(self) -> str:
         return "llama_gptq"

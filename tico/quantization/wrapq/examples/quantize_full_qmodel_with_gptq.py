@@ -42,11 +42,17 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import pathlib
 import random
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.random_projection import SparseRandomProjection
+import matplotlib.pyplot as plt
 
 import torch
+from torch import Tensor
+
 import tqdm
 from datasets import load_dataset
 from lm_eval.utils import make_table
@@ -211,6 +217,12 @@ def parse_args():
         type=int,
         default=128,  # almost standard
         help="number of samples to be used in GPTQ/PTQ calibration",
+    )
+    parser.add_argument(
+        "--calibration_samples_to_use",
+        type=int,
+        default=None,
+        help="number of samples to actually use from the calibration dataset for quantization (allows compressing the dataset used). When not specified, uses all nsamples_for_qcalibration samples.",
     )
     parser.add_argument(
         "--batch",
@@ -725,6 +737,7 @@ def validate_tied_embedding_weight_bits(
 def build_gptq_config(
     args,
     sensitivity: dict[str, torch.Tensor] | None = None,
+    sample_weights: list[float] | None = None,
 ):
     """
     Build a GPTQ configuration from command-line arguments.
@@ -742,7 +755,7 @@ def build_gptq_config(
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
 
     if args.llama_gptq or args.llama_gptq_sequential:
-        return LlamaGPTQConfig(
+        config = LlamaGPTQConfig(
             show_progress=not args.no_tqdm,
             weight_bits=args.linear_weight_bits,
             weight_bits_overrides=weight_bits_overrides,
@@ -759,9 +772,11 @@ def build_gptq_config(
             sequential=args.llama_gptq_sequential,
             use_iterate=args.gptq_use_iterate,
             use_subgroup_runner=args.llama_gptq_use_subgroup_runner,
+            sample_weights=sample_weights,
         )
+        return config
     else:
-        return GPTQConfig(
+        config = GPTQConfig(
             show_progress=not args.no_tqdm,
             weight_bits=args.linear_weight_bits,
             weight_bits_overrides=weight_bits_overrides,
@@ -775,7 +790,9 @@ def build_gptq_config(
             adaptive_percdamp=args.gptq_adaptive_percdamp,
             cond_threshold_good=args.gptq_cond_threshold_good,
             use_iterate=args.gptq_use_iterate,
+            sample_weights=sample_weights,
         )
+        return config
 
 
 def save_model_to(
@@ -1163,6 +1180,412 @@ def calibrate_ptq_observers(
                 next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
 
+class CalibrationSetCompressor:
+    """
+    Compress calibration dataset using K-Means clustering.
+    
+    Uses layerwise activations from decoder layers as features for clustering,
+    providing semantically meaningful similarity metrics compared to raw token IDs.
+    Inspired by FPInputsCache in llama_quantizer.py.
+    """
+    
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        compress_to_samples: int,
+        seed: int = 42,
+        device: Optional[torch.device] = None,
+        n_layers_to_use: int = 1,  # Number of decoder layers to extract activations from
+    ):
+        self.model = model
+        self.compress_to_samples = compress_to_samples
+        self.seed = seed
+        self.device = device or next(model.parameters()).device
+        self.n_layers_to_use = n_layers_to_use
+        
+    def _get_decoder_layers(self) -> list[torch.nn.Module]:
+        """
+        Get decoder layers from the model, handling PTQ wrappers.
+        
+        Returns list of decoder layer modules.
+        """
+        # Handle PTQ-wrapped models
+        if hasattr(self.model, 'wrapped'):
+            if hasattr(self.model.wrapped, 'model'):
+                # QuantLlamaForCausalLM -> PTQWrapper -> QuantLlamaModel
+                llama_model = self.model.wrapped.model.wrapped
+                return list(llama_model.layers)
+        elif hasattr(self.model, 'model'):
+            # Standard LlamaForCausalLM
+            llama_model = self.model.model
+            return list(llama_model.layers)
+        return []
+    
+    def _extract_layerwise_features(self, calib_inputs: list[Tensor]) -> tuple[Tensor, Dict[str, list[Tensor]]]:
+        """
+        Extract features by capturing activations from decoder layers using hooks.
+        
+        For each calibration sample, runs forward pass and captures input 
+        activations from all decoder layers.
+        Features are mean-pooled over sequence dimension.
+        
+        Returns:
+            Tuple of:
+            - Tensor of shape [n_samples, n_layers * hidden_size] (concatenated across layers)
+            - Dict mapping layer_name to list of activation tensors for each sample
+        """
+        layers = self._get_decoder_layers()
+        layers_to_use = layers
+        
+        if not layers_to_use:
+            # Fallback to embedding-based features
+            print("  Warning: No decoder layers found, using embedding features")
+            return self._extract_embedding_features(calib_inputs), {}
+        
+        captured_activations: Dict[str, Tensor] = {}
+        captured_activations_all: Dict[str, list[Tensor]] = {}
+        handles: list = []
+        
+        def create_hook(layer_name: str):
+            def hook(m, inp, out):
+                # out is the layer output, shape [batch, seq_len, hidden]
+                # Using output activations instead of input to capture processed features
+                captured_activations[layer_name] = out.detach().cpu()
+                if layer_name not in captured_activations_all:
+                    captured_activations_all[layer_name] = []
+                captured_activations_all[layer_name].append(out.detach().cpu())
+            return hook
+        
+        # Register hooks on all decoder layer inputs
+        for i, layer in enumerate(layers_to_use):
+            h = layer.register_forward_hook(create_hook(f"layer_{i}"))
+            handles.append(h)
+        
+        self.model.eval()
+        features = []
+        
+        with torch.no_grad():
+            for inp in tqdm.tqdm(calib_inputs):
+                inp_device = inp.to(self.device)
+                self.model(inp_device)
+                
+                # Mean pool activations from each layer and concatenate
+                layer_feats = []
+                for layer_name in sorted(captured_activations.keys()):
+                    act = captured_activations[layer_name]  # [1, seq_len, hidden]
+                    # Mean pool over sequence dimension
+                    feat = act.mean(dim=1, keepdim=True)  # [1, hidden]
+                    layer_feats.append(feat)
+                
+                if layer_feats:
+                    combined = torch.cat(layer_feats, dim=-1).squeeze(0)  # [n_layers * hidden]
+                    features.append(combined)
+                
+                captured_activations.clear()
+        
+        # Remove hooks
+        for h in handles:
+            h.remove()
+        
+        return torch.stack(features, dim=0), captured_activations_all  # [n_samples, n_layers * hidden]
+    
+    def _extract_embedding_features(self, calib_inputs: list[Tensor]) -> Tensor:
+        """
+        Fallback: Extract features from embedding layer only.
+        """
+        self.model.eval()
+        features = []
+        
+        with torch.no_grad():
+            for inp in calib_inputs:
+                inp_device = inp.to(self.device)
+                # Get hidden states from model embeddings
+                if hasattr(self.model, 'model') and hasattr(self.model.model, 'embed_tokens'):
+                    hidden = self.model.model.embed_tokens(inp_device)
+                    feat = hidden.mean(dim=1)
+                elif hasattr(self.model, 'embed_tokens'):
+                    hidden = self.model.embed_tokens(inp_device)
+                    feat = hidden.mean(dim=1)
+                else:
+                    feat = inp_device.flatten().float()
+                features.append(feat.squeeze(0))
+        
+        return torch.stack(features, dim=0)
+        
+    def _visualize_layer_activations_2d(
+        self,
+        layer_activations: list[Tensor],
+        layer_idx: int,
+        save_path: str,
+        n_clusters: int = 8,
+    ) -> None:
+        """
+        Project layer activations to 2D using SparseRandomProjection and save as PNG.
+        
+        Args:
+            layer_activations: List of activation tensors [batch, seq_len, hidden] for each sample
+            layer_idx: Layer index for title
+            save_path: Path to save the PNG visualization
+            n_clusters: Number of clusters for K-Means visualization
+        """
+        # Flatten activations (no mean pooling)
+        features = []
+        for act in layer_activations:
+            feat = act.flatten()  # [batch * seq_len * hidden]
+            features.append(feat.cpu().numpy())
+        data_np = np.stack(features, axis=0)  # [n_samples, batch * seq_len * hidden]
+        
+        # Project to 2D using SparseRandomProjection
+        projector = SparseRandomProjection(n_components=2, random_state=self.seed)
+        data_2d = projector.fit_transform(data_np)  # [n_samples, 2]
+        
+        # Run K-Means on 2D data
+        kmeans = KMeans(n_clusters=n_clusters, random_state=self.seed, n_init=10)
+        labels = kmeans.fit_predict(data_2d)
+        from sklearn.metrics import silhouette_score
+        score = silhouette_score(data_2d, labels)
+        print(f"layer {layer_idx} score is {score}")
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Plot all points in light gray (simple background)
+        ax.scatter(
+            data_2d[:, 0],
+            data_2d[:, 1],
+            c='lightgray',
+            alpha=0.5,
+            s=50,
+            edgecolors='w',
+            linewidth=0.5,
+        )
+        
+        # Mark cluster centroids with red X
+        ax.scatter(
+            kmeans.cluster_centers_[:, 0],
+            kmeans.cluster_centers_[:, 1],
+            c='red',
+            marker='X',
+            s=200,
+            label='Centroids',
+            edgecolors='black',
+            linewidths=2,
+        )
+        
+        ax.set_xlabel('Projected Dimension 1', fontsize=12)
+        ax.set_ylabel('Projected Dimension 2', fontsize=12)
+        ax.set_title(f'Layer {layer_idx} - {n_clusters} Clusters', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved layer {layer_idx} visualization to {save_path}")
+    
+    def _visualize_compression_2d(
+        self,
+        data_2d: np.ndarray,
+        kmeans: KMeans,
+        save_path: str,
+    ) -> None:
+        """
+        Visualize 2D clustering with gray points and red centroid markers.
+        
+        Args:
+            data_2d: 2D projected data [n_samples, 2]
+            kmeans: Fitted KMeans model
+            save_path: Path to save the PNG visualization
+        """
+        fig, ax = plt.subplots(figsize=(10, 8))
+        
+        # Plot all points in light gray (simple background)
+        ax.scatter(
+            data_2d[:, 0],
+            data_2d[:, 1],
+            c='lightgray',
+            alpha=0.5,
+            s=50,
+            edgecolors='w',
+            linewidth=0.5,
+        )
+        
+        # Mark cluster centroids with red X
+        ax.scatter(
+            kmeans.cluster_centers_[:, 0],
+            kmeans.cluster_centers_[:, 1],
+            c='red',
+            marker='X',
+            s=200,
+            label='Centroids',
+            edgecolors='black',
+            linewidths=2,
+        )
+        
+        ax.set_xlabel('Projected Dimension 1', fontsize=12)
+        ax.set_ylabel('Projected Dimension 2', fontsize=12)
+        ax.set_title(f'2D Compression - {self.compress_to_samples} Clusters', fontsize=14)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"  Saved compression visualization to {save_path}")
+    
+    def _compress_using_2d_projection(
+        self,
+        captured_activations_all: Dict[str, list[Tensor]],
+        calib_inputs: list[Tensor],
+        visualize: bool = False,
+    ) -> tuple[list[Tensor], list[float]]:
+        """
+        Compress calibration dataset using 2D projection + K-Means.
+        
+        Steps:
+        1. For each layer, project activations to 2D and run K-Means
+        2. Find layer with best silhouette score
+        3. Select samples closest to centroids from best layer's clustering
+        4. Calculate weight for each sample based on cluster size
+        
+        Args:
+            captured_activations_all: Dict mapping layer_name to list of activation tensors
+            calib_inputs: Original calibration inputs
+            
+        Returns:
+            Tuple of:
+            - Compressed list of compress_to_samples representative samples
+            - List of weights (one per sample, proportional to cluster size)
+        """
+        n_samples = len(calib_inputs)
+        
+        if self.compress_to_samples >= n_samples:
+            return calib_inputs
+        
+        best_score = -1
+        best_kmeans = None
+        best_labels = None
+        best_data_2d = None
+        best_layer_name = None
+        
+        # Try clustering for each layer and find the one with best silhouette score
+        for layer_name, layer_activations in sorted(captured_activations_all.items()):
+            # Flatten activations
+            features = []
+            for act in layer_activations:
+                feat = act.flatten()  # [batch * seq_len * hidden]
+                features.append(feat.cpu().numpy())
+            layer_data_np = np.stack(features, axis=0)  # [n_samples, flattened_dim]
+            
+            # Project to 2D using SparseRandomProjection
+            projector = SparseRandomProjection(n_components=2, random_state=self.seed)
+            data_2d = projector.fit_transform(layer_data_np)  # [n_samples, 2]
+            
+            # Run K-Means on 2D data
+            kmeans = KMeans(
+                n_clusters=self.compress_to_samples,
+                random_state=self.seed,
+                n_init=10,
+                max_iter=300,
+            )
+            labels = kmeans.fit_predict(data_2d)
+            
+            # Compute silhouette score
+            if self.compress_to_samples > 1 and self.compress_to_samples < n_samples:
+                score = silhouette_score(data_2d, labels)
+                print(f"  Layer {layer_name}: silhouette_score={score:.4f}")
+                
+                if score > best_score:
+                    best_score = score
+                    best_kmeans = kmeans
+                    best_labels = labels
+                    best_data_2d = data_2d
+                    best_layer_name = layer_name
+                    
+            # Visualize if requested (use best layer's clustering)
+            if visualize and best_kmeans is not None:
+                save_path = f"calibration_layer_{layer_name}_activations_2d.png"
+                self._visualize_compression_2d(data_2d, kmeans, save_path)
+
+        print(f"Best clusterization: {best_layer_name} with silhouette_score={best_score:.4f}")
+        
+                
+        # Select representative sample (closest to centroid) for each cluster from best layer
+        # Also calculate weight for each sample based on cluster size
+        representatives = []
+        weights = []
+        
+        if best_labels is not None and best_kmeans is not None:
+            for k in range(self.compress_to_samples):
+                cluster_mask = (best_labels == k)
+                cluster_indices = np.where(cluster_mask)[0]
+                cluster_size = cluster_mask.sum()
+                
+                # Weight = proportion of samples in this cluster
+                weight = cluster_size / n_samples
+                
+                if len(cluster_indices) > 0:
+                    # Find sample closest to centroid within cluster
+                    cluster_data_2d = best_data_2d[cluster_mask]
+                    centroid = best_kmeans.cluster_centers_[k]
+                    distances = np.linalg.norm(cluster_data_2d - centroid, axis=1)
+                    best_local_idx = np.argmin(distances)
+                    best_idx = cluster_indices[best_local_idx]
+                    representatives.append(calib_inputs[best_idx])
+                    weights.append(weight)
+                else:
+                    # Fallback: just pick any sample
+                    representatives.append(calib_inputs[k % len(calib_inputs)])
+                    weights.append(weight)
+        else:
+            # Fallback if no valid clustering found
+            print("  Warning: No valid clustering found, using simple subsampling")
+            step = len(calib_inputs) // self.compress_to_samples
+            uniform_weight = 1.0 / self.compress_to_samples
+            for i in range(self.compress_to_samples):
+                idx = min(i * step, len(calib_inputs) - 1)
+                representatives.append(calib_inputs[idx])
+                weights.append(uniform_weight)
+        
+        print(f"  Sample weights: min={min(weights):.4f}, max={max(weights):.4f}")
+        
+        return representatives, weights
+    
+    def compress(
+        self,
+        calib_inputs: list[Tensor],
+    ) -> tuple[list[Tensor], list[float]]:
+        """
+        Compress calibration dataset using K-Means on 2D-projected activations.
+        
+        Args:
+            calib_inputs: List of calibration tensors [N, seq_len]
+            
+        Returns:
+            Tuple of:
+            - Compressed list of compress_to_samples representative samples
+            - List of weights (one per sample, proportional to cluster size)
+        """
+        if len(calib_inputs) <= self.compress_to_samples:
+            # Return uniform weights for uncompressed case
+            weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
+            return calib_inputs, weights
+        
+        # Extract features using layerwise activations
+        print(f"  Extracting features from {len(calib_inputs)} samples...")
+        data, captured_activations_all = self._extract_layerwise_features(calib_inputs)
+        
+        # Visualize activations in 2D for each layer (before clustering)
+        #print("  Generating per-layer visualizations...")
+        #for layer_idx, (layer_name, activations) in enumerate(sorted(captured_activations_all.items())):
+        #    save_path = f"calibration_layer_{layer_idx}_activations_2d.png"
+        #    self._visualize_layer_activations_2d(activations, layer_idx, save_path, n_clusters=self.compress_to_samples)
+        
+        # Compress using 2D projection
+        print(f"  Compressing using 2D projection with {self.compress_to_samples} clusters...")
+        representatives, weights = self._compress_using_2d_projection(captured_activations_all, calib_inputs, visualize=True)
+        
+        return representatives, weights
 
 
 # Explicit mapping from MX dtype strings to element formats
@@ -1298,7 +1721,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     return q_m
 
 
-def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
+def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=None):
     """
     Combined PTQ + LlamaGPTQ pipeline.
 
@@ -1319,6 +1742,9 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
     Because LlamaGPTQ's forward passes during collection and re-forward
     already drive the PTQ activation observers, **no separate activation
     calibration pass is needed** for this path.
+    
+    Args:
+        sample_weights: Optional list of weights for weighted Hessian accumulation
     """
     # Step 1: PTQ prepare
     print("Wrapping layers with PTQWrapper …")
@@ -1372,7 +1798,7 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args):
 
     print("Applying LlamaGPTQ on PTQ-wrapped model …")
     sens = compute_or_load_sensitivity(model, calib_inputs, args)
-    gptq_config = build_gptq_config(args, sensitivity=sens)
+    gptq_config = build_gptq_config(args, sensitivity=sens, sample_weights=sample_weights)
     q_m = prepare(q_m, gptq_config, inplace=True)
 
     iterator = calib_inputs
@@ -1820,9 +2246,12 @@ def compute_or_load_sensitivity(model, calib_inputs, args):
     return sens
 
 
-def apply_gptq(model, calib_inputs, args):
+def apply_gptq(model, calib_inputs, args, sample_weights=None):
     """
     Optionally run GPTQ weight-only quantization.
+    
+    Args:
+        sample_weights: Optional list of weights for weighted Hessian accumulation
     """
     if args.no_GPTQ:
         print("Skipping GPTQ ...")
@@ -1830,7 +2259,7 @@ def apply_gptq(model, calib_inputs, args):
 
     print("Applying GPTQ ...")
     sens = compute_or_load_sensitivity(model, calib_inputs, args)
-    gptq_config = build_gptq_config(args, sensitivity=sens)
+    gptq_config = build_gptq_config(args, sensitivity=sens, sample_weights=sample_weights)
 
     q_m = prepare(model, gptq_config, inplace=True)
 
@@ -1925,6 +2354,36 @@ def main():
 
     calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
 
+    # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
+    sample_weights = None
+    if args.calibration_samples_to_use is not None:
+        if args.calibration_samples_to_use < 1:
+            raise ValueError(
+                f"--calibration_samples_to_use must be positive, "
+                f"got {args.calibration_samples_to_use}"
+            )
+        if args.calibration_samples_to_use >= len(calib_inputs):
+            print(
+                f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
+                f"is >= available samples ({len(calib_inputs)}). "
+                f"Using all {len(calib_inputs)} samples (no compression needed)."
+            )
+        else:
+            print(
+                f"Compressing calibration dataset from {len(calib_inputs)} to "
+                f"{args.calibration_samples_to_use} samples using K-Means clustering..."
+            )
+            compressor = CalibrationSetCompressor(
+                model=model,
+                compress_to_samples=args.calibration_samples_to_use,
+                seed=args.seed,
+                device=device,
+                n_layers_to_use=1,  # Use first decoder layer's activations for clustering
+            )
+            calib_inputs, sample_weights = compressor.compress(calib_inputs)
+            print(f"Calibration dataset compressed to {len(calib_inputs)} samples.")
+            print(f"Sample weights (sum={sum(sample_weights):.4f}): min={min(sample_weights):.4f}, max={max(sample_weights):.4f}")
+
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
 
@@ -1932,16 +2391,16 @@ def main():
     # This allows weight-only quantization using LlamaGPTQ improvements.
     if args.llama_gptq_no_ptq and not args.no_GPTQ:
         print("Running LlamaGPTQ without PTQ (weight-only quantization) ...")
-        model = apply_gptq(model, calib_inputs, args)
+        model = apply_gptq(model, calib_inputs, args, sample_weights)
         q_m = quantize_using_PTQ(model, calib_inputs, args)
     # When both LlamaGPTQ and PTQ are enabled, run PTQ prepare first so that
     # LlamaGPTQ operates on the PTQ-wrapped model.  LlamaGPTQ will inject its
     # weight qparams into PTQ observers and freeze them layer-by-layer, so no
     # separate activation calibration pass is needed.
     elif (args.llama_gptq or args.llama_gptq_sequential) and not args.no_PTQ and not args.no_GPTQ:
-        q_m = quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args)
+        q_m = quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights)
     else:
-        model = apply_gptq(model, calib_inputs, args)
+        model = apply_gptq(model, calib_inputs, args, sample_weights)
         q_m = quantize_using_PTQ(model, calib_inputs, args)
       #  print_minmax_values(q_m)
 

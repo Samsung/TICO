@@ -96,6 +96,8 @@ class GPTQQuantizer(BaseQuantizer):
         # cache_kwargs[k] -> list of the value for keyword k for each batch
         self.cache_kwargs: Dict[str, List[Any]] = {}
         self.num_batches: int = 0
+        # sample_weights for weighted Hessian accumulation (default: uniform)
+        self.sample_weights: Optional[List[float]] = None
 
         # References to original forwards for restoration
         self._orig_model_forward: Optional[Callable[..., Any]] = None
@@ -258,6 +260,9 @@ class GPTQQuantizer(BaseQuantizer):
         gptq_conf = self.config
         assert isinstance(gptq_conf, GPTQConfig)
         gptq_conf.validate()
+        
+        # Set sample_weights from config for weighted Hessian accumulation
+        self.sample_weights = getattr(gptq_conf, 'sample_weights', None)
 
         # Identify layers
         orig_layers = None
@@ -368,9 +373,16 @@ class GPTQQuantizer(BaseQuantizer):
                     if fp_inputs_cache is not None and name in fp_inputs_cache.fp_cache:
                         gptq[name].native_inp = fp_inputs_cache.fp_cache[name]
 
-                # Hook to collect (inp, out) for GPTQ
+                # Hook to collect (inp, out) for GPTQ with optional weights
+                # Set weights on each GPTQ instance and reset batch_id
+                batch_weights = self.sample_weights
+                for name in subset:
+                    gptq[name].weights = batch_weights
+                    gptq[name].batch_id = 0  # Reset batch_id before collecting
+                
                 def add_batch(name):
                     def _hook(_, inp, out):
+                        # GPTQ instance internally tracks batch_id and uses its weights
                         gptq[name].add_batch(inp[0].data, out.data)
 
                     return _hook
@@ -566,7 +578,10 @@ class GPTQQuantizer(BaseQuantizer):
             sensitivity=cur_sensitivity,
         )
 
-        # Hook to collect (inp, out) for GPTQ
+        # Hook to collect (inp, out) for GPTQ with optional weights
+        gptq.weights = self.sample_weights
+        gptq.batch_id = 0
+        
         def add_batch():
             def _hook(_, inp, out):
                 gptq.add_batch(inp[0].data, out.data)

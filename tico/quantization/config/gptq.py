@@ -81,6 +81,9 @@ class GPTQConfig(BaseConfig):
     # Use iterate_GPTQ instead of the main block-based loop
     use_iterate: bool = False
 
+    # Sample weights for weighted Hessian accumulation (used with calibration set compression)
+    sample_weights: list[float] | None = None
+
     @property
     def name(self) -> str:
         return "gptq"
