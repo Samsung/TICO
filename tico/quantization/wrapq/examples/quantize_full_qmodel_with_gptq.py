@@ -1331,7 +1331,7 @@ class CalibrationSetCompressor:
         self.model.forward = orig_model_forward
         
         # Now process each layer sequentially using cached args
-        for layer_idx, layer in enumerate(tqdm.tqdm(layers, desc="Finding best layer")):
+        for layer_idx, layer in enumerate(tqdm.tqdm(layers, desc="Finding best samples")):
             # Run THIS layer on cached hidden states
             layer_outputs: list[Tensor] = []
             
@@ -1775,7 +1775,7 @@ class CalibrationSetCompressor:
             return calib_inputs, weights
         
         # Find best layer using memory-efficient layerwise approach
-        print(f"  Finding best layer from {len(calib_inputs)} samples...")
+        print(f"  Finding best compressed dataset from {len(calib_inputs)} samples...")
         best_layer_idx, best_data_2d, best_labels, best_kmeans = self._find_best_layer_layerwise(
             calib_inputs, visualize=self.visualize
         )
@@ -2348,20 +2348,27 @@ def evaluate_original_model(
         print(make_table(results))
 
 
-def get_calibration_dataset_name(seed, n_samples) -> str:
+def get_calibration_dataset_name(seed, n_samples, compressed_n_samples=None) -> str:
     """
     Build a filename for stored calibration dataset.
-    """
 
-    name = (
-        "calibration_dataset_"
-        + "wiki"
-        + "_"
-        + str(n_samples)
-        + "_"
-        + str(seed)
-        + ".pt"
-    )
+    Args:
+        seed: Random seed used for dataset generation
+        n_samples: Original number of samples for calibration
+        compressed_n_samples: Number of samples after compression (if compression was applied)
+
+    Returns:
+        Filename string for the calibration dataset
+    """
+    name_parts = ["calibration_dataset", "wiki", str(n_samples)]
+
+    # Add compression info if compression was applied
+    if compressed_n_samples is not None and compressed_n_samples < n_samples:
+        name_parts.append(f"compressed_{compressed_n_samples}")
+
+    name_parts.append(str(seed))
+    name = "_".join(name_parts) + ".pt"
+
     return name
 
 
@@ -2467,7 +2474,7 @@ def build_calibration_inputs(
     tokenizer,
     args,
     device: torch.device,
-) -> list[torch.Tensor]:
+) -> tuple[list[torch.Tensor], Optional[list[float]]]:
     """
     Build random fixed-length calibration samples from the Wikitext train split.
 
@@ -2478,16 +2485,33 @@ def build_calibration_inputs(
     from the specified .pt file instead of generating it.
 
     Returns:
-        - List of calibration tensors
+        - Tuple of (calib_inputs, sample_weights)
+          - calib_inputs: List of calibration tensors
+          - sample_weights: List of weights (only when loading from file, None when generating)
     """
     if args.calibration_dataset is not None:
         calib_path = pathlib.Path(args.calibration_dataset)
         if calib_path.exists():
             print(f"Loading calibration dataset from {calib_path.resolve()}")
-            calib_inputs = torch.load(calib_path, weights_only=False)
-            # Return uniform weights for pre-saved dataset
-            weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
-            return calib_inputs, weights
+            loaded_data = torch.load(calib_path, weights_only=False)
+            
+            # Handle both old format (just calib_inputs) and new format (dict with calib_inputs and sample_weights)
+            if isinstance(loaded_data, dict):
+                calib_inputs = loaded_data.get("calib_inputs")
+                sample_weights = loaded_data.get("sample_weights")
+            elif isinstance(loaded_data, tuple) and len(loaded_data) == 2:
+                calib_inputs, sample_weights = loaded_data
+            else:
+                # Old format: just calib_inputs list
+                calib_inputs = loaded_data
+                sample_weights = None
+            
+            if calib_inputs is None:
+                raise ValueError(
+                    f"Calibration dataset file does not contain 'calib_inputs': {calib_path.resolve()}"
+                )
+            
+            return calib_inputs, sample_weights
         else:
             raise FileNotFoundError(
                 f"Calibration dataset file not found: {calib_path.resolve()}"
@@ -2532,7 +2556,9 @@ def build_calibration_inputs(
             batched = torch.stack(batch_samples, dim=0)
             calib_inputs.append(batched)
 
-    return calib_inputs
+    # When generating (not loading), return None for sample_weights
+    # The caller should use _apply_calibration_compression if compression is needed
+    return calib_inputs, None
 
 
 def compute_or_load_sensitivity(model, calib_inputs, args):
@@ -2619,7 +2645,7 @@ def get_export_input(calib_inputs, tokenizer, args) -> torch.Tensor:
     return pad_input(example, get_pad_token_id(tokenizer), args.max_seq_len).cpu()
 
 
-def save_requested_artifacts(q_m, tokenizer, calib_inputs, args) -> None:
+def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=None) -> None:
     """
     Save requested artifacts after PTQ conversion.
     """
@@ -2630,12 +2656,20 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if should_save(args, "calibration_dataset"):
+        # Determine compressed sample count if compression was applied
+        # Compression is indicated when the number of samples differs from the original
+        compressed_n_samples = (
+            len(calib_inputs)
+            if sample_weights is not None and len(calib_inputs) != args.nsamples_for_qcalibration
+            else None
+        )
         save_path = output_dir / get_calibration_dataset_name(
             args.seed,
             args.nsamples_for_qcalibration,
+            compressed_n_samples=compressed_n_samples,
         )
         print(f"Saving calibration dataset to {save_path.resolve()}")
-        torch.save(calib_inputs, save_path)
+        torch.save({"calib_inputs": calib_inputs, "sample_weights": sample_weights}, save_path)
 
     if should_save(args, "ptq_checkpoint"):
         save_path = output_dir / get_ptq_model_name(q_m.wrapped, args)
@@ -2677,16 +2711,17 @@ def main():
     evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
     # Build calibration inputs (includes compression if --calibration_samples_to_use is specified)
-    calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
+    # Returns tuple of (calib_inputs, sample_weights) when loading from file, or (calib_inputs, None) when generating
+    calib_inputs, sample_weights = build_calibration_inputs(model, tokenizer, args, device)
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
 
-    # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
-    calib_inputs, sample_weights = _apply_calibration_compression(
-        calib_inputs, model, args, device
-    )
-
+    if args.calibration_dataset is None:
+        # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
+        calib_inputs, sample_weights = _apply_calibration_compression(
+            calib_inputs, model, args, device
+        )
 
     # When --llama_gptq_no_ptq is specified, run LlamaGPTQ without PTQ wrapping.
     # This allows weight-only quantization using LlamaGPTQ improvements.
@@ -2705,7 +2740,7 @@ def main():
         q_m = quantize_using_PTQ(model, calib_inputs, args)
 
     evaluate(q_m, tokenizer, dataset_test, args)
-    save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
+    save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights)
 
 
 if __name__ == "__main__":
