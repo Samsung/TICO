@@ -37,6 +37,7 @@
 
 import argparse
 import os
+import types
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
@@ -410,6 +411,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Use SubgroupRunner for efficient subgroup-level inference during LlamaGPTQ quantization (default: False). When enabled, runs only the necessary submodules for each subgroup instead of the full layer, significantly reducing redundant computation.",
+    )
+    parser.add_argument(
+        "--visualize_calibration_compression",
+        action="store_true",
+        default=False,
+        help="Save 2D visualization PNGs for calibration dataset compression (per-layer and final compression clustering).",
     )
     return parser.parse_args()
 
@@ -1180,6 +1187,11 @@ def calibrate_ptq_observers(
                 next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
 
+class StopForward(Exception):
+    """Custom exception used to stop the forward pass after capturing embedding outputs."""
+    pass
+
+
 class CalibrationSetCompressor:
     """
     Compress calibration dataset using K-Means clustering.
@@ -1196,12 +1208,14 @@ class CalibrationSetCompressor:
         seed: int = 42,
         device: Optional[torch.device] = None,
         n_layers_to_use: int = 1,  # Number of decoder layers to extract activations from
+        visualize: bool = False,
     ):
         self.model = model
         self.compress_to_samples = compress_to_samples
         self.seed = seed
         self.device = device or next(model.parameters()).device
         self.n_layers_to_use = n_layers_to_use
+        self.visualize = visualize
         
     def _get_decoder_layers(self) -> list[torch.nn.Module]:
         """
@@ -1221,73 +1235,203 @@ class CalibrationSetCompressor:
             return list(llama_model.layers)
         return []
     
-    def _extract_layerwise_features(self, calib_inputs: list[Tensor]) -> tuple[Tensor, Dict[str, list[Tensor]]]:
+    def _find_best_layer_layerwise(
+        self,
+        calib_inputs: list[Tensor],
+        visualize: bool = False,
+    ) -> tuple[int, np.ndarray, Any, Any]:
         """
-        Extract features by capturing activations from decoder layers using hooks.
+        Find best layer for clustering using sequential layer-by-layer inference.
         
-        For each calibration sample, runs forward pass and captures input 
-        activations from all decoder layers.
-        Features are mean-pooled over sequence dimension.
+        Memory-efficient approach following LlamaGPTQQuantizer pattern:
+        1. Override first decoder layer's forward to capture cache_args/cache_kwargs
+        2. For each layer sequentially:
+           a. Run layer with cached hidden states from cache_args
+           b. Capture output activations
+           c. Project to 2D and compute silhouette score
+           d. If best: keep 2D data + labels
+           e. Update cache_args[0] with layer output for next layer
+           f. Discard old activations
         
+        Args:
+            calib_inputs: List of calibration tensors [N, seq_len]
+            visualize: If True, save per-layer 2D clustering visualizations
+            
         Returns:
             Tuple of:
-            - Tensor of shape [n_samples, n_layers * hidden_size] (concatenated across layers)
-            - Dict mapping layer_name to list of activation tensors for each sample
+            - best_layer_idx: Index of best layer (-1 if no layers found)
+            - best_data_2d: 2D projected data for best layer [n_samples, 2]
+            - best_labels: Cluster labels for best layer
+            - best_kmeans: Fitted KMeans model for best layer
         """
         layers = self._get_decoder_layers()
-        layers_to_use = layers
         
-        if not layers_to_use:
-            # Fallback to embedding-based features
-            print("  Warning: No decoder layers found, using embedding features")
-            return self._extract_embedding_features(calib_inputs), {}
+        if not layers:
+            print("  Warning: No decoder layers found")
+            return -1, None, None, None
         
-        captured_activations: Dict[str, Tensor] = {}
-        captured_activations_all: Dict[str, list[Tensor]] = {}
-        handles: list = []
-        
-        def create_hook(layer_name: str):
-            def hook(m, inp, out):
-                # out is the layer output, shape [batch, seq_len, hidden]
-                # Using output activations instead of input to capture processed features
-                captured_activations[layer_name] = out.detach().cpu()
-                if layer_name not in captured_activations_all:
-                    captured_activations_all[layer_name] = []
-                captured_activations_all[layer_name].append(out.detach().cpu())
-            return hook
-        
-        # Register hooks on all decoder layer inputs
-        for i, layer in enumerate(layers_to_use):
-            h = layer.register_forward_hook(create_hook(f"layer_{i}"))
-            handles.append(h)
+        n_samples = len(calib_inputs)
+        best_score = -1.0
+        best_layer_idx = -1
+        best_data_2d = None
+        best_labels = None
+        best_kmeans = None
         
         self.model.eval()
-        features = []
+        
+        # Get first decoder layer (same pattern as LlamaGPTQQuantizer.prepare)
+        first_layer = layers[0]
+        
+        # Cache args and kwargs from first layer (same pattern as LlamaGPTQQuantizer.prepare)
+        cache_args: List[List[Any]] = []
+        cache_kwargs: Dict[str, List[Any]] = {}
+        
+        # Store original forwards
+        orig_layer_forward = first_layer.forward
+        orig_model_forward = self.model.forward
+        
+        # Define catcher that stores args and kwargs, then raises StopForward
+        # (same pattern as LlamaGPTQQuantizer.prepare)
+        def layer_catcher(layer, *args, **kwargs):
+            # Store positional args (hidden_states is first arg)
+            for idx, item in enumerate(args):
+                if (idx + 1) > len(cache_args):
+                    cache_args.append([])
+                cache_args[idx].append(item.detach().cpu())
+            # Store keyword args
+            for k, v in kwargs.items():
+                if k not in cache_kwargs:
+                    cache_kwargs[k] = []
+                cache_kwargs[k].append(v.detach().cpu() if hasattr(v, 'detach') else v)
+            # Raise exception to stop further execution after capturing
+            raise StopForward
+        
+        # Replace first layer forward temporarily (same pattern as LlamaGPTQQuantizer.prepare)
+        first_layer.forward = types.MethodType(layer_catcher, first_layer)
+        
+        # Wrap model.forward to catch StopForward (same pattern as LlamaGPTQQuantizer.prepare)
+        def model_forward_wrapper(_model, *m_args, **m_kwargs):
+            try:
+                return orig_model_forward(*m_args, **m_kwargs)
+            except StopForward:
+                # Stop after first layer capture; return None
+                return None
+        
+        self.model.forward = types.MethodType(model_forward_wrapper, self.model)
+        
+        # Run model to populate cache_args and cache_kwargs
+        # Execution stops after first layer due to StopForward
+        with torch.no_grad():
+            for inp in calib_inputs:
+                inp_device = inp.to(self.device)
+                self.model(inp_device, use_cache=False)
+        
+        # Restore original forwards
+        first_layer.forward = orig_layer_forward
+        self.model.forward = orig_model_forward
+        
+        # Now process each layer sequentially using cached args
+        for layer_idx, layer in enumerate(tqdm.tqdm(layers, desc="Finding best layer")):
+            # Run THIS layer on cached hidden states
+            layer_outputs: list[Tensor] = []
+            
+            with torch.no_grad():
+                for batch_idx in range(len(cache_args[0])):
+                    hs = cache_args[0][batch_idx].to(self.device)
+                    # Run layer - LlamaDecoderLayer takes hidden_states as first arg + kwargs
+                    # Use captured kwargs (attention_mask, position_embeddings, etc.)
+                    layer_kwargs = {k: v[batch_idx] for k, v in cache_kwargs.items()}
+                    out = layer(hs, **layer_kwargs)
+                    if isinstance(out, tuple):
+                        layer_outputs.append(out[0].cpu())
+                    else:
+                        layer_outputs.append(out.cpu())
+            
+            # Flatten activations and project to 2D
+            features = []
+            for act in layer_outputs:
+                feat = act.flatten()
+                features.append(feat.cpu().numpy())
+            layer_data_np = np.stack(features, axis=0)
+            
+            # Project to 2D
+            projector = SparseRandomProjection(n_components=2, random_state=self.seed)
+            data_2d = projector.fit_transform(layer_data_np)
+            
+            # K-Means
+            kmeans = KMeans(
+                n_clusters=self.compress_to_samples,
+                random_state=self.seed,
+                n_init=10,
+                max_iter=300,
+            )
+            labels = kmeans.fit_predict(data_2d)
+            
+            # Silhouette score
+            if self.compress_to_samples > 1 and self.compress_to_samples < n_samples:
+                score = silhouette_score(data_2d, labels)
+                print(f"  Layer {layer_idx}: silhouette_score={score:.4f}")
+                
+                # Visualize if requested
+                if visualize:
+                    save_path = f"calibration_layer_{layer_idx}_activations_2d.png"
+                    self._visualize_compression_2d(data_2d, kmeans, save_path)
+                
+                if score > best_score:
+                    best_score = score
+                    best_layer_idx = layer_idx
+                    best_data_2d = data_2d.copy()
+                    best_labels = labels.copy()
+                    best_kmeans = kmeans
+            
+            # Update cache_args[0] for next layer (current layer's output)
+            cache_args[0] = layer_outputs
+            
+            del layer_data_np, data_2d, labels, kmeans, features, layer_outputs
+        
+        if best_layer_idx >= 0:
+            print(f"Best layer: {best_layer_idx} with silhouette_score={best_score:.4f}")
+        
+        return best_layer_idx, best_data_2d, best_labels, best_kmeans
+    
+    def _find_best_layer_fallback(
+        self,
+        calib_inputs: list[Tensor],
+    ) -> tuple[int, np.ndarray, Any, Any]:
+        """Fallback method using original approach if embedding hook fails."""
+        # Simple fallback: just use first layer's activations
+        layers = self._get_decoder_layers()
+        if not layers:
+            return -1, None, None, None
+        
+        self.model.eval()
+        layer_outputs = []
+        
+        def hook(m, inp, out):
+            layer_outputs.append(out.detach().cpu())
+        
+        handle = layers[0].register_forward_hook(hook)
         
         with torch.no_grad():
-            for inp in tqdm.tqdm(calib_inputs):
-                inp_device = inp.to(self.device)
-                self.model(inp_device)
-                
-                # Mean pool activations from each layer and concatenate
-                layer_feats = []
-                for layer_name in sorted(captured_activations.keys()):
-                    act = captured_activations[layer_name]  # [1, seq_len, hidden]
-                    # Mean pool over sequence dimension
-                    feat = act.mean(dim=1, keepdim=True)  # [1, hidden]
-                    layer_feats.append(feat)
-                
-                if layer_feats:
-                    combined = torch.cat(layer_feats, dim=-1).squeeze(0)  # [n_layers * hidden]
-                    features.append(combined)
-                
-                captured_activations.clear()
+            for inp in calib_inputs:
+                self.model(inp.to(self.device))
         
-        # Remove hooks
-        for h in handles:
-            h.remove()
+        handle.remove()
         
-        return torch.stack(features, dim=0), captured_activations_all  # [n_samples, n_layers * hidden]
+        features = [act.flatten().cpu().numpy() for act in layer_outputs]
+        layer_data_np = np.stack(features, axis=0)
+        
+        projector = SparseRandomProjection(n_components=2, random_state=self.seed)
+        data_2d = projector.fit_transform(layer_data_np)
+        
+        kmeans = KMeans(
+            n_clusters=self.compress_to_samples,
+            random_state=self.seed,
+            n_init=10,
+        )
+        labels = kmeans.fit_predict(data_2d)
+        
+        return 0, data_2d, labels, kmeans
     
     def _extract_embedding_features(self, calib_inputs: list[Tensor]) -> Tensor:
         """
@@ -1551,12 +1695,71 @@ class CalibrationSetCompressor:
         
         return representatives, weights
     
+    def _select_representatives(
+        self,
+        data_2d: np.ndarray,
+        labels: np.ndarray,
+        kmeans: KMeans,
+        calib_inputs: list[Tensor],
+    ) -> tuple[list[Tensor], list[float]]:
+        """
+        Select representative samples from 2D clustering results.
+        
+        For each cluster:
+        1. Find all samples in the cluster
+        2. Compute weight = cluster_size / n_samples
+        3. Select sample closest to centroid as representative
+        
+        Args:
+            data_2d: 2D projected data [n_samples, 2]
+            labels: Cluster labels for each sample
+            kmeans: Fitted KMeans model
+            calib_inputs: Original calibration inputs
+            
+        Returns:
+            Tuple of:
+            - Compressed list of compress_to_samples representative samples
+            - List of weights (one per sample, proportional to cluster size)
+        """
+        n_samples = len(calib_inputs)
+        representatives = []
+        weights = []
+        
+        for k in range(self.compress_to_samples):
+            cluster_mask = (labels == k)
+            cluster_indices = np.where(cluster_mask)[0]
+            cluster_size = cluster_mask.sum()
+            
+            # Weight = proportion of samples in this cluster
+            weight = cluster_size / n_samples
+            
+            if len(cluster_indices) > 0:
+                # Find sample closest to centroid within cluster
+                cluster_data_2d = data_2d[cluster_mask]
+                centroid = kmeans.cluster_centers_[k]
+                distances = np.linalg.norm(cluster_data_2d - centroid, axis=1)
+                best_local_idx = np.argmin(distances)
+                best_idx = cluster_indices[best_local_idx]
+                representatives.append(calib_inputs[best_idx])
+                weights.append(weight)
+            else:
+                # Fallback: just pick any sample
+                representatives.append(calib_inputs[k % len(calib_inputs)])
+                weights.append(weight)
+        
+        print(f"  Sample weights: min={min(weights):.4f}, max={max(weights):.4f}")
+        
+        return representatives, weights
+    
     def compress(
         self,
         calib_inputs: list[Tensor],
     ) -> tuple[list[Tensor], list[float]]:
         """
         Compress calibration dataset using K-Means on 2D-projected activations.
+        
+        Uses memory-efficient layerwise approach: processes one layer at a time
+        instead of storing all layer activations simultaneously.
         
         Args:
             calib_inputs: List of calibration tensors [N, seq_len]
@@ -1571,19 +1774,34 @@ class CalibrationSetCompressor:
             weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
             return calib_inputs, weights
         
-        # Extract features using layerwise activations
-        print(f"  Extracting features from {len(calib_inputs)} samples...")
-        data, captured_activations_all = self._extract_layerwise_features(calib_inputs)
+        # Find best layer using memory-efficient layerwise approach
+        print(f"  Finding best layer from {len(calib_inputs)} samples...")
+        best_layer_idx, best_data_2d, best_labels, best_kmeans = self._find_best_layer_layerwise(
+            calib_inputs, visualize=self.visualize
+        )
         
-        # Visualize activations in 2D for each layer (before clustering)
-        #print("  Generating per-layer visualizations...")
-        #for layer_idx, (layer_name, activations) in enumerate(sorted(captured_activations_all.items())):
-        #    save_path = f"calibration_layer_{layer_idx}_activations_2d.png"
-        #    self._visualize_layer_activations_2d(activations, layer_idx, save_path, n_clusters=self.compress_to_samples)
+        # Visualize final compression result if requested
+        if self.visualize and best_data_2d is not None:
+            self._visualize_compression_2d(best_data_2d, best_kmeans, "calibration_compression_2d.png")
         
-        # Compress using 2D projection
-        print(f"  Compressing using 2D projection with {self.compress_to_samples} clusters...")
-        representatives, weights = self._compress_using_2d_projection(captured_activations_all, calib_inputs, visualize=True)
+        if best_layer_idx < 0 or best_data_2d is None:
+            # Fallback to simple subsampling
+            print("  Warning: Layerwise approach failed, using simple subsampling")
+            step = len(calib_inputs) // self.compress_to_samples
+            uniform_weight = 1.0 / self.compress_to_samples
+            representatives = []
+            weights = []
+            for i in range(self.compress_to_samples):
+                idx = min(i * step, len(calib_inputs) - 1)
+                representatives.append(calib_inputs[idx])
+                weights.append(uniform_weight)
+            return representatives, weights
+        
+        # Select representatives from best layer's clustering
+        print(f"  Selecting {self.compress_to_samples} representatives from best layer...")
+        representatives, weights = self._select_representatives(
+            best_data_2d, best_labels, best_kmeans, calib_inputs
+        )
         
         return representatives, weights
 
@@ -2148,8 +2366,11 @@ def get_calibration_dataset_name(seed, n_samples) -> str:
 
 
 def build_calibration_inputs(
-    model, tokenizer, args, device: torch.device
-) -> list[torch.Tensor]:
+    model,
+    tokenizer,
+    args,
+    device: torch.device,
+) -> tuple[list[torch.Tensor], Optional[list[float]]]:
     """
     Build random fixed-length calibration samples from the Wikitext train split.
 
@@ -2158,12 +2379,23 @@ def build_calibration_inputs(
 
     If --calibration_dataset is provided, load the calibration inputs directly
     from the specified .pt file instead of generating it.
+
+    If --calibration_samples_to_use is specified and less than nsamples_for_qcalibration,
+    compress the calibration dataset using K-Means clustering on layerwise activations.
+
+    Returns:
+        Tuple of:
+        - List of calibration tensors
+        - Optional list of sample weights (if compression was applied)
     """
     if args.calibration_dataset is not None:
         calib_path = pathlib.Path(args.calibration_dataset)
         if calib_path.exists():
             print(f"Loading calibration dataset from {calib_path.resolve()}")
-            return torch.load(calib_path, weights_only=False)
+            calib_inputs = torch.load(calib_path, weights_only=False)
+            # Return uniform weights for pre-saved dataset
+            weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
+            return calib_inputs, weights
         else:
             raise FileNotFoundError(
                 f"Calibration dataset file not found: {calib_path.resolve()}"
@@ -2208,7 +2440,39 @@ def build_calibration_inputs(
             batched = torch.stack(batch_samples, dim=0)
             calib_inputs.append(batched)
 
-    return calib_inputs
+    # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
+    sample_weights = None
+    if args.calibration_samples_to_use is not None:
+        if args.calibration_samples_to_use < 1:
+            raise ValueError(
+                f"--calibration_samples_to_use must be positive, "
+                f"got {args.calibration_samples_to_use}"
+            )
+        if args.calibration_samples_to_use >= len(calib_inputs):
+            print(
+                f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
+                f"is >= available samples ({len(calib_inputs)}). "
+                f"Using all {len(calib_inputs)} samples (no compression needed)."
+            )
+            sample_weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
+        else:
+            print(
+                f"Compressing calibration dataset from {len(calib_inputs)} to "
+                f"{args.calibration_samples_to_use} samples using K-Means clustering..."
+            )
+            compressor = CalibrationSetCompressor(
+                model=model,
+                compress_to_samples=args.calibration_samples_to_use,
+                seed=args.seed,
+                device=device,
+                n_layers_to_use=1,
+                visualize=args.visualize_calibration_compression,
+            )
+            calib_inputs, sample_weights = compressor.compress(calib_inputs)
+            print(f"Calibration dataset compressed to {len(calib_inputs)} samples.")
+            print(f"Sample weights (sum={sum(sample_weights):.4f}): min={min(sample_weights):.4f}, max={max(sample_weights):.4f}")
+
+    return calib_inputs, sample_weights
 
 
 def compute_or_load_sensitivity(model, calib_inputs, args):
@@ -2352,37 +2616,8 @@ def main():
     dataset_test = load_eval_dataset(args)
     evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
-    calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
-
-    # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
-    sample_weights = None
-    if args.calibration_samples_to_use is not None:
-        if args.calibration_samples_to_use < 1:
-            raise ValueError(
-                f"--calibration_samples_to_use must be positive, "
-                f"got {args.calibration_samples_to_use}"
-            )
-        if args.calibration_samples_to_use >= len(calib_inputs):
-            print(
-                f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
-                f"is >= available samples ({len(calib_inputs)}). "
-                f"Using all {len(calib_inputs)} samples (no compression needed)."
-            )
-        else:
-            print(
-                f"Compressing calibration dataset from {len(calib_inputs)} to "
-                f"{args.calibration_samples_to_use} samples using K-Means clustering..."
-            )
-            compressor = CalibrationSetCompressor(
-                model=model,
-                compress_to_samples=args.calibration_samples_to_use,
-                seed=args.seed,
-                device=device,
-                n_layers_to_use=1,  # Use first decoder layer's activations for clustering
-            )
-            calib_inputs, sample_weights = compressor.compress(calib_inputs)
-            print(f"Calibration dataset compressed to {len(calib_inputs)} samples.")
-            print(f"Sample weights (sum={sum(sample_weights):.4f}): min={min(sample_weights):.4f}, max={max(sample_weights):.4f}")
+    # Build calibration inputs (includes compression if --calibration_samples_to_use is specified)
+    calib_inputs, sample_weights = build_calibration_inputs(model, tokenizer, args, device)
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
