@@ -205,20 +205,26 @@ class GPTQ:
             inp: Input tensor
             out: Output tensor (unused)
         """
-        # Get weight from internal weights list using batch_id
-        weight = 1.0
-        if self.weights is not None:
-            idx = self.batch_id
-            weight = self.weights[idx %len(self.weights)]
-            # Increment batch_id for next call
-            self.batch_id += 1
         
+        # Apply per-sample weights before reshaping: multiply inp by sqrt(weight)
+        # so that (inp * sqrt(w)) @ (inp * sqrt(w)).T = w * inp @ inp.T
+        if self.weights is not None and isinstance(self.weights[self.batch_id], torch.Tensor):
+            # weight shape: [batch_size], inp shape: [batch, ...]
+            # broadcast sqrt(weight) to all dims except batch
+            sqrt_w = self.weights[self.batch_id].sqrt().view(-1, *[1]*(inp.dim()-1)).to(inp.device)
+            inp = inp * sqrt_w
+
         # Process native input for GPTQv2 (before reshaping inp)
         native_inp_processed = None
         if hasattr(self, "native_inp") and self.native_inp is not None and len(self.native_inp) > 0:
             native = self.native_inp.pop(0)
             if native is not None:
                 native_inp_processed = native
+            # Apply same per-sample weighting to native_inp
+            if self.weights is not None and isinstance(self.weights[self.batch_id], torch.Tensor) and native_inp_processed is not None:
+                sqrt_w = self.weights[self.batch_id].sqrt().view(-1, *[1]*(native_inp_processed.dim()-1))
+                native_inp_processed = native_inp_processed * sqrt_w
+
             if len(native_inp_processed.shape) == 2:
                 native_inp_processed = native_inp_processed.unsqueeze(0)
             if isinstance(self.layer, nn.Linear):
@@ -339,6 +345,12 @@ class GPTQ:
 
         self.nsamples += tmp
         inp = inp.double()
+        
+        # Get weight from internal weights list using batch_id
+        weight = 1.0
+        if self.weights is not None and not isinstance(self.weights[self.batch_id], torch.Tensor):
+            weight = self.weights[self.batch_id]
+            
         # Scale Hessian contribution by weight
         self.H += weight * inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
         # GPTQv2: Compute dXXT using native (FP) vs processed input difference
@@ -352,6 +364,8 @@ class GPTQ:
             self.dXXT += weight * dX.matmul(inp.t()).float()
             del native, native_inp_processed
             native = native_inp_processed = None
+        
+        self.batch_id += 1
 
     def fasterquant(
         self,

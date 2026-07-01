@@ -2365,12 +2365,109 @@ def get_calibration_dataset_name(seed, n_samples) -> str:
     return name
 
 
+def _apply_calibration_compression(
+    calib_inputs: list[torch.Tensor],
+    model: torch.nn.Module,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> tuple[list[torch.Tensor], Optional[list[float]]]:
+    """
+    Compress calibration dataset using K-Means clustering if --calibration_samples_to_use is specified.
+    
+    Args:
+        calib_inputs: List of calibration tensors (may be batched)
+        model: Model used for extracting layer activations
+        args: Parsed command-line arguments
+        device: Device to run compression on
+        
+    Returns:
+        Tuple of:
+        - Compressed list of calibration samples
+        - Optional list of sample weights (if compression was applied)
+    """
+    sample_weights = None
+    
+    if args.calibration_samples_to_use is None:
+        return calib_inputs, sample_weights
+    
+    if args.calibration_samples_to_use < 1:
+        raise ValueError(
+            f"--calibration_samples_to_use must be positive, "
+            f"got {args.calibration_samples_to_use}"
+        )
+    
+    if args.calibration_samples_to_use >= len(calib_inputs):
+        print(
+            f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
+            f"is >= available samples ({len(calib_inputs)}). "
+            f"Using all {len(calib_inputs)} samples (no compression needed)."
+        )
+        sample_weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
+        return calib_inputs, sample_weights
+    
+    # Track original batch size for rebatching after compression
+    original_batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
+    
+    # Unbatch: flatten batched inputs into individual samples (batch_size=1)
+    if original_batch_size > 1:
+        individual_inputs = []
+        for batched_input in calib_inputs:
+            for i in range(batched_input.shape[0]):
+                individual_inputs.append(batched_input[i:i+1, ...])
+        calib_inputs_for_compression = individual_inputs
+        print(f"  Unbatched {len(calib_inputs)} batches into {len(individual_inputs)} individual samples")
+    else:
+        calib_inputs_for_compression = calib_inputs
+    
+    print(
+        f"Compressing calibration dataset from {len(calib_inputs_for_compression)} to "
+        f"{args.calibration_samples_to_use} samples using K-Means clustering..."
+    )
+    
+    # Run compression on individual samples
+    compressor = CalibrationSetCompressor(
+        model=model,
+        compress_to_samples=args.calibration_samples_to_use,
+        seed=args.seed,
+        device=device,
+        n_layers_to_use=1,
+        visualize=args.visualize_calibration_compression,
+    )
+    compressed_inputs, compressed_weights = compressor.compress(calib_inputs_for_compression)
+    
+    # Rebatch: regroup compressed individual samples back to original batch_size
+    if original_batch_size > 1:
+        rebatched_inputs = []
+        rebatched_weights = []
+        for i in range(0, len(compressed_inputs), original_batch_size):
+            batch = compressed_inputs[i:i+original_batch_size]
+            batch_w = compressed_weights[i:i+original_batch_size]
+            rebatched_inputs.append(torch.stack(batch, dim=0).squeeze())
+            rebatched_weights.append(torch.tensor(batch_w))
+        calib_inputs = rebatched_inputs
+        sample_weights = rebatched_weights
+        print(f"  Rebatched {len(compressed_inputs)} individual samples into {len(rebatched_inputs)} batches")
+    else:
+        calib_inputs = compressed_inputs
+        sample_weights = compressed_weights
+    
+    print(f"Calibration dataset compressed to {len(calib_inputs)} samples.")
+    if sample_weights:
+        if isinstance(sample_weights[0], torch.Tensor):
+            all_weights = torch.cat(sample_weights).tolist()
+            print(f"Sample weights (sum={sum(all_weights):.4f}): min={min(all_weights):.4f}, max={max(all_weights):.4f}")
+        else:
+            print(f"Sample weights (sum={sum(sample_weights):.4f}): min={min(sample_weights):.4f}, max={max(sample_weights):.4f}")
+    
+    return calib_inputs, sample_weights
+
+
 def build_calibration_inputs(
     model,
     tokenizer,
     args,
     device: torch.device,
-) -> tuple[list[torch.Tensor], Optional[list[float]]]:
+) -> list[torch.Tensor]:
     """
     Build random fixed-length calibration samples from the Wikitext train split.
 
@@ -2380,13 +2477,8 @@ def build_calibration_inputs(
     If --calibration_dataset is provided, load the calibration inputs directly
     from the specified .pt file instead of generating it.
 
-    If --calibration_samples_to_use is specified and less than nsamples_for_qcalibration,
-    compress the calibration dataset using K-Means clustering on layerwise activations.
-
     Returns:
-        Tuple of:
         - List of calibration tensors
-        - Optional list of sample weights (if compression was applied)
     """
     if args.calibration_dataset is not None:
         calib_path = pathlib.Path(args.calibration_dataset)
@@ -2440,39 +2532,7 @@ def build_calibration_inputs(
             batched = torch.stack(batch_samples, dim=0)
             calib_inputs.append(batched)
 
-    # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
-    sample_weights = None
-    if args.calibration_samples_to_use is not None:
-        if args.calibration_samples_to_use < 1:
-            raise ValueError(
-                f"--calibration_samples_to_use must be positive, "
-                f"got {args.calibration_samples_to_use}"
-            )
-        if args.calibration_samples_to_use >= len(calib_inputs):
-            print(
-                f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
-                f"is >= available samples ({len(calib_inputs)}). "
-                f"Using all {len(calib_inputs)} samples (no compression needed)."
-            )
-            sample_weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
-        else:
-            print(
-                f"Compressing calibration dataset from {len(calib_inputs)} to "
-                f"{args.calibration_samples_to_use} samples using K-Means clustering..."
-            )
-            compressor = CalibrationSetCompressor(
-                model=model,
-                compress_to_samples=args.calibration_samples_to_use,
-                seed=args.seed,
-                device=device,
-                n_layers_to_use=1,
-                visualize=args.visualize_calibration_compression,
-            )
-            calib_inputs, sample_weights = compressor.compress(calib_inputs)
-            print(f"Calibration dataset compressed to {len(calib_inputs)} samples.")
-            print(f"Sample weights (sum={sum(sample_weights):.4f}): min={min(sample_weights):.4f}, max={max(sample_weights):.4f}")
-
-    return calib_inputs, sample_weights
+    return calib_inputs
 
 
 def compute_or_load_sensitivity(model, calib_inputs, args):
@@ -2617,10 +2677,16 @@ def main():
     evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
     # Build calibration inputs (includes compression if --calibration_samples_to_use is specified)
-    calib_inputs, sample_weights = build_calibration_inputs(model, tokenizer, args, device)
+    calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
+
+    # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
+    calib_inputs, sample_weights = _apply_calibration_compression(
+        calib_inputs, model, args, device
+    )
+
 
     # When --llama_gptq_no_ptq is specified, run LlamaGPTQ without PTQ wrapping.
     # This allows weight-only quantization using LlamaGPTQ improvements.
@@ -2637,7 +2703,6 @@ def main():
     else:
         model = apply_gptq(model, calib_inputs, args, sample_weights)
         q_m = quantize_using_PTQ(model, calib_inputs, args)
-      #  print_minmax_values(q_m)
 
     evaluate(q_m, tokenizer, dataset_test, args)
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
