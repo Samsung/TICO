@@ -1347,12 +1347,25 @@ class CalibrationSetCompressor:
                     else:
                         layer_outputs.append(out.cpu())
             
-            # Flatten activations and project to 2D
+            # Unbatch layer outputs and flatten to individual samples for clustering
+            # Each layer_output may have batch dimension > 1, so we split along dim 0
+            # Also build mapping from individual sample index back to (batch_idx, sub_idx)
             features = []
-            for act in layer_outputs:
-                feat = act.flatten()
-                features.append(feat.cpu().numpy())
+            sample_to_batch_map = []  # Maps individual sample index -> (batch_idx, sub_idx)
+            for batch_idx, act in enumerate(layer_outputs):
+                # Unbatch: split batch dimension into individual samples
+                if act.shape[0] > 1:
+                    for sub_idx in range(act.shape[0]):
+                        feat = act[sub_idx].flatten()
+                        features.append(feat.cpu().numpy())
+                        sample_to_batch_map.append((batch_idx, sub_idx))
+                else:
+                    feat = act.flatten()
+                    features.append(feat.cpu().numpy())
+                    sample_to_batch_map.append((batch_idx, 0))
+            
             layer_data_np = np.stack(features, axis=0)
+            n_individual_samples = len(features)
             
             # Project to 2D
             projector = SparseRandomProjection(n_components=2, random_state=self.seed)
@@ -1367,10 +1380,10 @@ class CalibrationSetCompressor:
             )
             labels = kmeans.fit_predict(data_2d)
             
-            # Silhouette score
-            if self.compress_to_samples > 1 and self.compress_to_samples < n_samples:
+            # Silhouette score - use actual individual sample count
+            if self.compress_to_samples > 1 and self.compress_to_samples < n_individual_samples:
                 score = silhouette_score(data_2d, labels)
-                print(f"  Layer {layer_idx}: silhouette_score={score:.4f}")
+                print(f"  Layer {layer_idx}: silhouette_score={score:.4f} (from {n_individual_samples} samples)")
                 
                 # Visualize if requested
                 if visualize:
@@ -1383,16 +1396,17 @@ class CalibrationSetCompressor:
                     best_data_2d = data_2d.copy()
                     best_labels = labels.copy()
                     best_kmeans = kmeans
+                    best_sample_map = sample_to_batch_map
             
             # Update cache_args[0] for next layer (current layer's output)
             cache_args[0] = layer_outputs
             
-            del layer_data_np, data_2d, labels, kmeans, features, layer_outputs
+            del layer_data_np, data_2d, labels, kmeans, features, layer_outputs, sample_to_batch_map
         
         if best_layer_idx >= 0:
             print(f"Best layer: {best_layer_idx} with silhouette_score={best_score:.4f}")
         
-        return best_layer_idx, best_data_2d, best_labels, best_kmeans
+        return best_layer_idx, best_data_2d, best_labels, best_kmeans, best_sample_map
     
     def _find_best_layer_fallback(
         self,
@@ -1701,6 +1715,7 @@ class CalibrationSetCompressor:
         labels: np.ndarray,
         kmeans: KMeans,
         calib_inputs: list[Tensor],
+        sample_to_batch_map: Optional[list[tuple[int, int]]] = None,
     ) -> tuple[list[Tensor], list[float]]:
         """
         Select representative samples from 2D clustering results.
@@ -1714,14 +1729,17 @@ class CalibrationSetCompressor:
             data_2d: 2D projected data [n_samples, 2]
             labels: Cluster labels for each sample
             kmeans: Fitted KMeans model
-            calib_inputs: Original calibration inputs
+            calib_inputs: Original calibration inputs (may be batched)
+            sample_to_batch_map: Optional mapping from individual sample index 
+                to (batch_idx, sub_idx) for extracting samples from batched inputs.
+                If None, assumes calib_inputs contains individual samples.
             
         Returns:
             Tuple of:
             - Compressed list of compress_to_samples representative samples
             - List of weights (one per sample, proportional to cluster size)
         """
-        n_samples = len(calib_inputs)
+        n_samples = len(data_2d)  # Use actual number of samples in clustering
         representatives = []
         weights = []
         
@@ -1740,11 +1758,22 @@ class CalibrationSetCompressor:
                 distances = np.linalg.norm(cluster_data_2d - centroid, axis=1)
                 best_local_idx = np.argmin(distances)
                 best_idx = cluster_indices[best_local_idx]
-                representatives.append(calib_inputs[best_idx])
+                
+                # Extract sample using the map if provided (for batched inputs)
+                if sample_to_batch_map is not None:
+                    batch_idx, sub_idx = sample_to_batch_map[best_idx]
+                    representatives.append(calib_inputs[batch_idx][sub_idx:sub_idx+1, ...])
+                else:
+                    representatives.append(calib_inputs[best_idx])
                 weights.append(weight)
             else:
                 # Fallback: just pick any sample
-                representatives.append(calib_inputs[k % len(calib_inputs)])
+                if sample_to_batch_map is not None:
+                    fallback_idx = k % len(sample_to_batch_map)
+                    batch_idx, sub_idx = sample_to_batch_map[fallback_idx]
+                    representatives.append(calib_inputs[batch_idx][sub_idx:sub_idx+1, ...])
+                else:
+                    representatives.append(calib_inputs[k % len(calib_inputs)])
                 weights.append(weight)
         
         print(f"  Sample weights: min={min(weights):.4f}, max={max(weights):.4f}")
@@ -1776,7 +1805,7 @@ class CalibrationSetCompressor:
         
         # Find best layer using memory-efficient layerwise approach
         print(f"  Finding best compressed dataset from {len(calib_inputs)} samples...")
-        best_layer_idx, best_data_2d, best_labels, best_kmeans = self._find_best_layer_layerwise(
+        best_layer_idx, best_data_2d, best_labels, best_kmeans, best_sample_map = self._find_best_layer_layerwise(
             calib_inputs, visualize=self.visualize
         )
         
@@ -1800,7 +1829,7 @@ class CalibrationSetCompressor:
         # Select representatives from best layer's clustering
         print(f"  Selecting {self.compress_to_samples} representatives from best layer...")
         representatives, weights = self._select_representatives(
-            best_data_2d, best_labels, best_kmeans, calib_inputs
+            best_data_2d, best_labels, best_kmeans, calib_inputs, best_sample_map
         )
         
         return representatives, weights
@@ -2416,20 +2445,20 @@ def _apply_calibration_compression(
     original_batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
     
     # Unbatch: flatten batched inputs into individual samples (batch_size=1)
-    if original_batch_size > 1:
-        individual_inputs = []
-        for batched_input in calib_inputs:
-            for i in range(batched_input.shape[0]):
-                individual_inputs.append(batched_input[i:i+1, ...])
-        calib_inputs_for_compression = individual_inputs
-        print(f"  Unbatched {len(calib_inputs)} batches into {len(individual_inputs)} individual samples")
-    else:
-        calib_inputs_for_compression = calib_inputs
-    
-    print(
-        f"Compressing calibration dataset from {len(calib_inputs_for_compression)} to "
-        f"{args.calibration_samples_to_use} samples using K-Means clustering..."
-    )
+  #  if original_batch_size > 1:
+  #      individual_inputs = []
+  #      for batched_input in calib_inputs:
+  #          for i in range(batched_input.shape[0]):
+  #              individual_inputs.append(batched_input[i:i+1, ...])
+  #      calib_inputs_for_compression = individual_inputs
+  #      print(f"  Unbatched {len(calib_inputs)} batches into {len(individual_inputs)} individual samples")
+  #  else:
+  #      calib_inputs_for_compression = calib_inputs
+  #  
+  #  print(
+  #      f"Compressing calibration dataset from {len(calib_inputs_for_compression)} to "
+  #      f"{args.calibration_samples_to_use} samples using K-Means clustering..."
+  #  )
     
     # Run compression on individual samples
     compressor = CalibrationSetCompressor(
@@ -2440,7 +2469,7 @@ def _apply_calibration_compression(
         n_layers_to_use=1,
         visualize=args.visualize_calibration_compression,
     )
-    compressed_inputs, compressed_weights = compressor.compress(calib_inputs_for_compression)
+    compressed_inputs, compressed_weights = compressor.compress(calib_inputs)
     
     # Rebatch: regroup compressed individual samples back to original batch_size
     if original_batch_size > 1:
