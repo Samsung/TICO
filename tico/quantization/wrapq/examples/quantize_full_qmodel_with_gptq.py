@@ -75,9 +75,6 @@ from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.observers.minmax import MinMaxObserver
-from tico.quantization.wrapq.observers.mx import MXObserver
-from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
@@ -102,6 +99,24 @@ DATASET_NAME = "wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
 TRAIN_SPLIT = "train"
 TEST_SPLIT = "test"
+
+# MMLU calibration dataset settings
+MMLU_DATASET_NAME = "cais/mmlu"
+MMLU_DATASET_CONFIG = "all"
+MMLU_CALIB_SPLIT = "test"
+
+# TruthfulQA calibration dataset settings
+TRUTHFULQA_DATASET_NAME = "truthful_qa"
+TRUTHFULQA_DATASET_CONFIG = "multiple_choice"
+TRUTHFULQA_CALIB_SPLIT = "validation"
+
+# HellaSwag calibration dataset settings
+HELLASWAG_DATASET_NAME = "Rowan/hellaswag"
+HELLASWAG_CALIB_SPLIT = "train"
+
+# PIQA calibration dataset settings
+PIQA_DATASET_NAME = "chargoddard/piqa-train-10k"
+PIQA_CALIB_SPLIT = "train"
 
 
 def parse_args():
@@ -341,10 +356,26 @@ def parse_args():
         default=None,
     )
     parser.add_argument(
-        "--calibration_dataset",
+        "--calibration_dataset_path",
         type=str,
         default=None,
-        help="Path to a pre-saved calibration dataset (.pt file). When provided, skip wikitext loading and load calibration inputs directly.",
+        help="Path to a pre-saved calibration dataset (.pt file). When provided, skip dataset loading and load calibration inputs directly.",
+    )
+    parser.add_argument(
+        "--calibration_dataset_mix",
+        nargs="+",
+        type=str,
+        default=["wikitext"],
+        help=(
+            "Calibration dataset(s) to use for calibration data generation. "
+            "Accepts one or more `name:proportion` pairs, e.g. "
+            "`--calibration_dataset_mix wikitext:0.7 mmlu:0.3`. "
+            "Proportions are optional and normalized to sum to 1.0; "
+            "a single name without a proportion uses the full dataset, e.g. "
+            "`--calibration_dataset_mix wikitext` or `--calibration_dataset_mix mmlu`. "
+            "Supported datasets: wikitext, mmlu, truthfulqa, hellaswag, piqa. "
+            "Ignored when --calibration_dataset_path is set."
+        ),
     )
     parser.add_argument(
         "--verbose",
@@ -1270,7 +1301,6 @@ class CalibrationSetCompressor:
             print("  Warning: No decoder layers found")
             return -1, None, None, None
         
-        n_samples = len(calib_inputs)
         best_score = -1.0
         best_layer_idx = -1
         best_data_2d = None
@@ -1408,139 +1438,6 @@ class CalibrationSetCompressor:
         
         return best_layer_idx, best_data_2d, best_labels, best_kmeans, best_sample_map
     
-    def _find_best_layer_fallback(
-        self,
-        calib_inputs: list[Tensor],
-    ) -> tuple[int, np.ndarray, Any, Any]:
-        """Fallback method using original approach if embedding hook fails."""
-        # Simple fallback: just use first layer's activations
-        layers = self._get_decoder_layers()
-        if not layers:
-            return -1, None, None, None
-        
-        self.model.eval()
-        layer_outputs = []
-        
-        def hook(m, inp, out):
-            layer_outputs.append(out.detach().cpu())
-        
-        handle = layers[0].register_forward_hook(hook)
-        
-        with torch.no_grad():
-            for inp in calib_inputs:
-                self.model(inp.to(self.device))
-        
-        handle.remove()
-        
-        features = [act.flatten().cpu().numpy() for act in layer_outputs]
-        layer_data_np = np.stack(features, axis=0)
-        
-        projector = SparseRandomProjection(n_components=2, random_state=self.seed)
-        data_2d = projector.fit_transform(layer_data_np)
-        
-        kmeans = KMeans(
-            n_clusters=self.compress_to_samples,
-            random_state=self.seed,
-            n_init=10,
-        )
-        labels = kmeans.fit_predict(data_2d)
-        
-        return 0, data_2d, labels, kmeans
-    
-    def _extract_embedding_features(self, calib_inputs: list[Tensor]) -> Tensor:
-        """
-        Fallback: Extract features from embedding layer only.
-        """
-        self.model.eval()
-        features = []
-        
-        with torch.no_grad():
-            for inp in calib_inputs:
-                inp_device = inp.to(self.device)
-                # Get hidden states from model embeddings
-                if hasattr(self.model, 'model') and hasattr(self.model.model, 'embed_tokens'):
-                    hidden = self.model.model.embed_tokens(inp_device)
-                    feat = hidden.mean(dim=1)
-                elif hasattr(self.model, 'embed_tokens'):
-                    hidden = self.model.embed_tokens(inp_device)
-                    feat = hidden.mean(dim=1)
-                else:
-                    feat = inp_device.flatten().float()
-                features.append(feat.squeeze(0))
-        
-        return torch.stack(features, dim=0)
-        
-    def _visualize_layer_activations_2d(
-        self,
-        layer_activations: list[Tensor],
-        layer_idx: int,
-        save_path: str,
-        n_clusters: int = 8,
-    ) -> None:
-        """
-        Project layer activations to 2D using SparseRandomProjection and save as PNG.
-        
-        Args:
-            layer_activations: List of activation tensors [batch, seq_len, hidden] for each sample
-            layer_idx: Layer index for title
-            save_path: Path to save the PNG visualization
-            n_clusters: Number of clusters for K-Means visualization
-        """
-        # Flatten activations (no mean pooling)
-        features = []
-        for act in layer_activations:
-            feat = act.flatten()  # [batch * seq_len * hidden]
-            features.append(feat.cpu().numpy())
-        data_np = np.stack(features, axis=0)  # [n_samples, batch * seq_len * hidden]
-        
-        # Project to 2D using SparseRandomProjection
-        projector = SparseRandomProjection(n_components=2, random_state=self.seed)
-        data_2d = projector.fit_transform(data_np)  # [n_samples, 2]
-        
-        # Run K-Means on 2D data
-        kmeans = KMeans(n_clusters=n_clusters, random_state=self.seed, n_init=10)
-        labels = kmeans.fit_predict(data_2d)
-        from sklearn.metrics import silhouette_score
-        score = silhouette_score(data_2d, labels)
-        print(f"layer {layer_idx} score is {score}")
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(10, 8))
-        
-        # Plot all points in light gray (simple background)
-        ax.scatter(
-            data_2d[:, 0],
-            data_2d[:, 1],
-            c='lightgray',
-            alpha=0.5,
-            s=50,
-            edgecolors='w',
-            linewidth=0.5,
-        )
-        
-        # Mark cluster centroids with red X
-        ax.scatter(
-            kmeans.cluster_centers_[:, 0],
-            kmeans.cluster_centers_[:, 1],
-            c='red',
-            marker='X',
-            s=200,
-            label='Centroids',
-            edgecolors='black',
-            linewidths=2,
-        )
-        
-        ax.set_xlabel('Projected Dimension 1', fontsize=12)
-        ax.set_ylabel('Projected Dimension 2', fontsize=12)
-        ax.set_title(f'Layer {layer_idx} - {n_clusters} Clusters', fontsize=14)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"  Saved layer {layer_idx} visualization to {save_path}")
-    
     def _visualize_compression_2d(
         self,
         data_2d: np.ndarray,
@@ -1555,7 +1452,7 @@ class CalibrationSetCompressor:
             kmeans: Fitted KMeans model
             save_path: Path to save the PNG visualization
         """
-        fig, ax = plt.subplots(figsize=(10, 8))
+        _, ax = plt.subplots(figsize=(10, 8))
         
         # Plot all points in light gray (simple background)
         ax.scatter(
@@ -1590,124 +1487,6 @@ class CalibrationSetCompressor:
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
         plt.close()
         print(f"  Saved compression visualization to {save_path}")
-    
-    def _compress_using_2d_projection(
-        self,
-        captured_activations_all: Dict[str, list[Tensor]],
-        calib_inputs: list[Tensor],
-        visualize: bool = False,
-    ) -> tuple[list[Tensor], list[float]]:
-        """
-        Compress calibration dataset using 2D projection + K-Means.
-        
-        Steps:
-        1. For each layer, project activations to 2D and run K-Means
-        2. Find layer with best silhouette score
-        3. Select samples closest to centroids from best layer's clustering
-        4. Calculate weight for each sample based on cluster size
-        
-        Args:
-            captured_activations_all: Dict mapping layer_name to list of activation tensors
-            calib_inputs: Original calibration inputs
-            
-        Returns:
-            Tuple of:
-            - Compressed list of compress_to_samples representative samples
-            - List of weights (one per sample, proportional to cluster size)
-        """
-        n_samples = len(calib_inputs)
-        
-        if self.compress_to_samples >= n_samples:
-            return calib_inputs
-        
-        best_score = -1
-        best_kmeans = None
-        best_labels = None
-        best_data_2d = None
-        best_layer_name = None
-        
-        # Try clustering for each layer and find the one with best silhouette score
-        for layer_name, layer_activations in sorted(captured_activations_all.items()):
-            # Flatten activations
-            features = []
-            for act in layer_activations:
-                feat = act.flatten()  # [batch * seq_len * hidden]
-                features.append(feat.cpu().numpy())
-            layer_data_np = np.stack(features, axis=0)  # [n_samples, flattened_dim]
-            
-            # Project to 2D using SparseRandomProjection
-            projector = SparseRandomProjection(n_components=2, random_state=self.seed)
-            data_2d = projector.fit_transform(layer_data_np)  # [n_samples, 2]
-            
-            # Run K-Means on 2D data
-            kmeans = KMeans(
-                n_clusters=self.compress_to_samples,
-                random_state=self.seed,
-                n_init=10,
-                max_iter=300,
-            )
-            labels = kmeans.fit_predict(data_2d)
-            
-            # Compute silhouette score
-            if self.compress_to_samples > 1 and self.compress_to_samples < n_samples:
-                score = silhouette_score(data_2d, labels)
-                print(f"  Layer {layer_name}: silhouette_score={score:.4f}")
-                
-                if score > best_score:
-                    best_score = score
-                    best_kmeans = kmeans
-                    best_labels = labels
-                    best_data_2d = data_2d
-                    best_layer_name = layer_name
-                    
-            # Visualize if requested (use best layer's clustering)
-            if visualize and best_kmeans is not None:
-                save_path = f"calibration_layer_{layer_name}_activations_2d.png"
-                self._visualize_compression_2d(data_2d, kmeans, save_path)
-
-        print(f"Best clusterization: {best_layer_name} with silhouette_score={best_score:.4f}")
-        
-                
-        # Select representative sample (closest to centroid) for each cluster from best layer
-        # Also calculate weight for each sample based on cluster size
-        representatives = []
-        weights = []
-        
-        if best_labels is not None and best_kmeans is not None:
-            for k in range(self.compress_to_samples):
-                cluster_mask = (best_labels == k)
-                cluster_indices = np.where(cluster_mask)[0]
-                cluster_size = cluster_mask.sum()
-                
-                # Weight = proportion of samples in this cluster
-                weight = cluster_size / n_samples
-                
-                if len(cluster_indices) > 0:
-                    # Find sample closest to centroid within cluster
-                    cluster_data_2d = best_data_2d[cluster_mask]
-                    centroid = best_kmeans.cluster_centers_[k]
-                    distances = np.linalg.norm(cluster_data_2d - centroid, axis=1)
-                    best_local_idx = np.argmin(distances)
-                    best_idx = cluster_indices[best_local_idx]
-                    representatives.append(calib_inputs[best_idx])
-                    weights.append(weight)
-                else:
-                    # Fallback: just pick any sample
-                    representatives.append(calib_inputs[k % len(calib_inputs)])
-                    weights.append(weight)
-        else:
-            # Fallback if no valid clustering found
-            print("  Warning: No valid clustering found, using simple subsampling")
-            step = len(calib_inputs) // self.compress_to_samples
-            uniform_weight = 1.0 / self.compress_to_samples
-            for i in range(self.compress_to_samples):
-                idx = min(i * step, len(calib_inputs) - 1)
-                representatives.append(calib_inputs[idx])
-                weights.append(uniform_weight)
-        
-        print(f"  Sample weights: min={min(weights):.4f}, max={max(weights):.4f}")
-        
-        return representatives, weights
     
     def _select_representatives(
         self,
@@ -2251,6 +2030,7 @@ def print_config(args, device: torch.device) -> None:
     )
     print(f"Calibration samples    : {args.nsamples_for_qcalibration}")
     print(f"Calibration seq length : {args.calibrate_seq_len}")
+    print(f"Calibration dataset    : {_get_calib_dataset_display_name(args)}")
     print(f"Max seq length         : {args.max_seq_len}")
     print(f"Profile                : {args.profile}")
     print()
@@ -2377,19 +2157,23 @@ def evaluate_original_model(
         print(make_table(results))
 
 
-def get_calibration_dataset_name(seed, n_samples, compressed_n_samples=None) -> str:
+def get_calibration_dataset_name(
+    seed, n_samples, dataset_name: str = "wiki", compressed_n_samples=None
+) -> str:
     """
     Build a filename for stored calibration dataset.
 
     Args:
         seed: Random seed used for dataset generation
         n_samples: Original number of samples for calibration
+        dataset_name: Short name of the calibration dataset (e.g. ``"wiki"``,
+            ``"mmlu"``).
         compressed_n_samples: Number of samples after compression (if compression was applied)
 
     Returns:
         Filename string for the calibration dataset
     """
-    name_parts = ["calibration_dataset", "wiki", str(n_samples)]
+    name_parts = ["calibration_dataset", dataset_name, str(n_samples)]
 
     # Add compression info if compression was applied
     if compressed_n_samples is not None and compressed_n_samples < n_samples:
@@ -2498,6 +2282,385 @@ def _apply_calibration_compression(
     return calib_inputs, sample_weights
 
 
+def format_mmlu_example(
+    question: str,
+    choices: list[str],
+    answer_idx: int,
+    subject: str,
+) -> str:
+    """
+    Format a single MMLU example into a text prompt for calibration.
+
+    The output includes the subject, the question, the lettered choices, and
+    the correct answer — so the model sees realistic instruction-like text
+    during calibration.
+
+    Args:
+        question: The question text.
+        choices: List of answer choices.
+        answer_idx: Index (0-based) of the correct answer in ``choices``.
+        subject: The MMLU subject name (e.g. ``"abstract_algebra"``).
+
+    Returns:
+        A formatted prompt string.
+    """
+    subject_display = subject.replace("_", " ").title()
+    lines = [f"The following are multiple choice questions (with answers) about {subject_display}."]
+    lines.append("")
+    lines.append(question)
+    for i, choice in enumerate(choices):
+        letter = chr(ord("A") + i)
+        lines.append(f"{letter}. {choice}")
+    answer_letter = chr(ord("A") + answer_idx)
+    lines.append(f"Answer: {answer_letter}")
+    return "\n".join(lines)
+
+
+def format_piqa_example(
+    goal: str,
+    sol1: str,
+    sol2: str,
+    answer_idx: int,
+) -> str:
+    """
+    Format a single PIQA example into a text prompt for calibration.
+
+    The output includes the goal, the two lettered solutions, and the correct
+    answer — so the model sees realistic instruction-like text during
+    calibration.
+
+    Args:
+        goal: The goal/question text.
+        sol1: The first solution.
+        sol2: The second solution.
+        answer_idx: Index (0-based) of the correct solution (0 or 1).
+
+    Returns:
+        A formatted prompt string.
+    """
+    lines = ["The following are multiple choice questions (with answers)."]
+    lines.append("")
+    lines.append(goal)
+    lines.append(f"A. {sol1}")
+    lines.append(f"B. {sol2}")
+    answer_letter = chr(ord("A") + answer_idx)
+    lines.append(f"Answer: {answer_letter}")
+    return "\n".join(lines)
+
+
+def format_hellaswag_example(
+    context: str,
+    endings: list[str],
+    answer_idx: int,
+) -> str:
+    """
+    Format a single HellaSwag example into a text prompt for calibration.
+
+    The output includes the context, the lettered sentence endings, and the
+    correct answer — so the model sees realistic instruction-like text during
+    calibration.
+
+    Args:
+        context: The context sentence (``ctx`` field).
+        endings: List of possible sentence endings.
+        answer_idx: Index (0-based) of the correct ending in ``endings``.
+
+    Returns:
+        A formatted prompt string.
+    """
+    lines = ["The following are multiple choice questions (with answers)."]
+    lines.append("")
+    lines.append(context)
+    for i, ending in enumerate(endings):
+        letter = chr(ord("A") + i)
+        lines.append(f"{letter}. {ending}")
+    answer_letter = chr(ord("A") + answer_idx)
+    lines.append(f"Answer: {answer_letter}")
+    return "\n".join(lines)
+
+
+def format_truthfulqa_example(
+    question: str,
+    choices: list[str],
+    answer_idx: int,
+) -> str:
+    """
+    Format a single TruthfulQA example into a text prompt for calibration.
+
+    The output includes the question, the lettered choices, and the correct
+    answer — so the model sees realistic instruction-like text during
+    calibration.
+
+    Args:
+        question: The question text.
+        choices: List of answer choices.
+        answer_idx: Index (0-based) of the correct answer in ``choices``.
+
+    Returns:
+        A formatted prompt string.
+    """
+    lines = ["The following are multiple choice questions (with answers)."]
+    lines.append("")
+    lines.append(question)
+    for i, choice in enumerate(choices):
+        letter = chr(ord("A") + i)
+        lines.append(f"{letter}. {choice}")
+    answer_letter = chr(ord("A") + answer_idx)
+    lines.append(f"Answer: {answer_letter}")
+    return "\n".join(lines)
+
+
+SUPPORTED_CALIB_DATASETS = ["wikitext", "mmlu", "truthfulqa", "hellaswag", "piqa"]
+
+# Short names used in filenames
+_DATASET_SHORT_NAMES = {
+    "wikitext": "wiki",
+    "mmlu": "mmlu",
+    "truthfulqa": "truthfulqa",
+    "hellaswag": "hellaswag",
+    "piqa": "piqa",
+}
+
+
+def _get_calib_dataset_short_name(args) -> str:
+    """
+    Return a short filesystem-safe name for the selected calibration dataset(s).
+
+    For a single dataset: ``"wiki"`` or ``"mmlu"``.
+    For a mix: ``"wiki0.7_mmlu0.3"`` (proportions appended).
+    """
+    mix = _parse_dataset_mix(args)
+    if len(mix) == 1:
+        return _DATASET_SHORT_NAMES.get(mix[0][0], mix[0][0])
+    parts = []
+    for name, prop in mix:
+        short = _DATASET_SHORT_NAMES.get(name, name)
+        parts.append(f"{short}{prop:.2f}")
+    return "_".join(parts)
+
+
+def _get_calib_dataset_display_name(args) -> str:
+    """
+    Return a human-readable description of the selected calibration dataset(s).
+    """
+    mix = _parse_dataset_mix(args)
+    if len(mix) == 1:
+        return mix[0][0]
+    return ", ".join(f"{name}:{prop:.2f}" for name, prop in mix)
+
+
+
+def _parse_dataset_mix(args) -> list[tuple[str, float]]:
+    """
+    Parse the calibration dataset mix from ``--calibration_dataset_mix``.
+
+    Each entry can be either:
+      - ``"name"`` — uses the full dataset (proportion 1.0)
+      - ``"name:proportion"`` — uses the dataset with the given proportion
+
+    When proportions are provided, they are normalized to sum to 1.0.
+    When no proportions are provided (all entries are bare names), each
+    dataset gets an equal share.
+
+    Returns:
+        A list of ``(dataset_name, proportion)`` tuples with proportions
+        normalized to sum to 1.0.
+    """
+    mix: list[tuple[str, float]] = []
+
+    # Allow both space-separated and comma-separated entries, e.g.:
+    #   --calibration_dataset_mix wikitext:0.7 mmlu:0.3
+    #   --calibration_dataset_mix "wikitext:0.7, mmlu:0.3"
+    raw_entries: list[str] = []
+    for entry in args.calibration_dataset_mix:
+        raw_entries.extend(part.strip() for part in entry.split(",") if part.strip())
+
+    for entry in raw_entries:
+        if ":" in entry:
+            name, prop_str = entry.rsplit(":", maxsplit=1)
+            name = name.strip()
+            prop = float(prop_str.strip())
+        else:
+            name = entry.strip()
+            prop = 1.0
+
+        if name not in SUPPORTED_CALIB_DATASETS:
+            raise ValueError(
+                f"Unknown calibration dataset {name!r}. "
+                f"Supported: {SUPPORTED_CALIB_DATASETS}"
+            )
+        if prop <= 0:
+            raise ValueError(
+                f"Proportion for {name!r} must be positive, got {prop}"
+            )
+        mix.append((name, prop))
+
+    if not mix:
+        raise ValueError("--calibration_dataset_mix must not be empty")
+
+    # Normalize proportions to sum to 1.0
+    total = sum(p for _, p in mix)
+    mix = [(name, p / total) for name, p in mix]
+    return mix
+
+
+def _load_single_dataset_text(dataset_name: str, args) -> str:
+    """
+    Load the full text for a single calibration dataset.
+
+    Args:
+        dataset_name: One of :data:`SUPPORTED_CALIB_DATASETS`.
+        args: Parsed command-line arguments (used for cache_dir).
+
+    Returns:
+        The full text string for the dataset.
+    """
+    if dataset_name == "mmlu":
+        print("Loading MMLU for calibration …")
+        dataset = load_dataset(
+            MMLU_DATASET_NAME,
+            MMLU_DATASET_CONFIG,
+            split=MMLU_CALIB_SPLIT,
+            cache_dir=args.cache_dir,
+        )
+        prompts = []
+        for ex in dataset:
+            question = ex["question"]
+            choices = ex["choices"]
+            answer_idx = ex["answer"]
+            subject = ex["subject"]
+            prompts.append(
+                format_mmlu_example(question, choices, answer_idx, subject)
+            )
+        return "\n\n".join(prompts)
+
+    if dataset_name == "truthfulqa":
+        print("Loading TruthfulQA for calibration …")
+        dataset = load_dataset(
+            TRUTHFULQA_DATASET_NAME,
+            TRUTHFULQA_DATASET_CONFIG,
+            split=TRUTHFULQA_CALIB_SPLIT,
+            cache_dir=args.cache_dir,
+        )
+        prompts = []
+        for ex in dataset:
+            question = ex["question"]
+            mc1 = ex["mc1_targets"]
+            choices = mc1["choices"]
+            labels = mc1["labels"]
+            # The correct answer is the one with label 1
+            answer_idx = labels.index(1) if 1 in labels else 0
+            prompts.append(
+                format_truthfulqa_example(question, choices, answer_idx)
+            )
+        return "\n\n".join(prompts)
+
+    if dataset_name == "piqa":
+        print("Loading PIQA for calibration …")
+        dataset = load_dataset(
+            PIQA_DATASET_NAME,
+            split=PIQA_CALIB_SPLIT,
+            cache_dir=args.cache_dir,
+        )
+        prompts = []
+        for ex in dataset:
+            goal = ex["goal"]
+            sol1 = ex["sol1"]
+            sol2 = ex["sol2"]
+            label = ex["label"]
+            answer_idx = int(label) if label is not None else 0
+            prompts.append(
+                format_piqa_example(goal, sol1, sol2, answer_idx)
+            )
+        return "\n\n".join(prompts)
+
+    if dataset_name == "hellaswag":
+        print("Loading HellaSwag for calibration …")
+        dataset = load_dataset(
+            HELLASWAG_DATASET_NAME,
+            split=HELLASWAG_CALIB_SPLIT,
+            cache_dir=args.cache_dir,
+        )
+        prompts = []
+        for ex in dataset:
+            ctx = ex["ctx"]
+            endings = ex["endings"]
+            label = ex["label"]
+            answer_idx = int(label) if label else 0
+            prompts.append(
+                format_hellaswag_example(ctx, endings, answer_idx)
+            )
+        return "\n\n".join(prompts)
+
+    # Default: wikitext
+    print("Loading Wikitext for calibration …")
+    dataset_train = load_dataset(
+        DATASET_NAME,
+        DATASET_CONFIG,
+        split=TRAIN_SPLIT,
+        cache_dir=args.cache_dir,
+    )
+    return " ".join(dataset_train["text"])
+
+
+def _load_calibration_text(args, tokenizer) -> str:
+    """
+    Load and concatenate calibration text from the selected dataset(s).
+
+    When ``--calibration_dataset_mix`` is provided, each dataset's text is
+    tokenized and truncated so that its token count is proportional to the
+    requested mix ratio.  The resulting texts are then concatenated.
+
+    When a single dataset is selected, the full text is returned without truncation.
+
+    Args:
+        args: Parsed command-line arguments.
+        tokenizer: Tokenizer used to measure token counts for proportional
+            truncation (only needed when mixing).
+
+    Returns:
+        A single string containing the concatenated calibration text.
+    """
+    mix = _parse_dataset_mix(args)
+
+    if len(mix) == 1:
+        # Single dataset — no proportional truncation needed
+        return _load_single_dataset_text(mix[0][0], args)
+
+    # Multiple datasets — truncate each to its proportional token count
+    print(f"Mixing calibration datasets: {mix}")
+
+    # Load and tokenize each dataset to get token counts
+    dataset_texts: list[str] = []
+    dataset_token_counts: list[int] = []
+    for name, _ in mix:
+        text = _load_single_dataset_text(name, args)
+        dataset_texts.append(text)
+        ids = tokenizer(text, return_tensors="pt").input_ids
+        dataset_token_counts.append(ids.shape[1])
+
+    # Target: use the minimum available tokens as the base, then allocate
+    # proportionally. This avoids one tiny dataset being over-represented.
+    total_available = sum(dataset_token_counts)
+    # Use all available tokens, distributing proportionally
+    # Each dataset gets: proportion * total_available tokens (capped by availability)
+    result_parts: list[str] = []
+    for (name, proportion), text, n_tokens in zip(mix, dataset_texts, dataset_token_counts):
+        target_tokens = int(proportion * total_available)
+        actual_tokens = min(target_tokens, n_tokens)
+        if actual_tokens < n_tokens:
+            # Truncate: tokenize, take first actual_tokens, decode back to text
+            ids = tokenizer(text, return_tensors="pt").input_ids[0]
+            truncated_text = tokenizer.decode(ids[:actual_tokens], skip_special_tokens=True)
+            result_parts.append(truncated_text)
+            print(f"  {name}: {actual_tokens}/{n_tokens} tokens ({proportion:.1%})")
+        else:
+            result_parts.append(text)
+            print(f"  {name}: {n_tokens}/{n_tokens} tokens ({proportion:.1%})")
+
+    return "\n\n".join(result_parts)
+
+
 def build_calibration_inputs(
     model,
     tokenizer,
@@ -2505,12 +2668,16 @@ def build_calibration_inputs(
     device: torch.device,
 ) -> tuple[list[torch.Tensor], Optional[list[float]]]:
     """
-    Build random fixed-length calibration samples from the Wikitext train split.
+    Build random fixed-length calibration samples from a text corpus.
+
+    The calibration dataset is selected by ``--calibration_dataset_mix`` (wikitext
+    and/or mmlu).  The text is tokenized into one long token stream, then ``nsamples``
+    random fixed-length windows of size ``seqlen`` are sampled.
 
     When batch > 1, samples are grouped into batches of shape [batch_size, seq_len].
     The last batch may be smaller if nsamples is not divisible by batch_size.
 
-    If --calibration_dataset is provided, load the calibration inputs directly
+    If --calibration_dataset_path is provided, load the calibration inputs directly
     from the specified .pt file instead of generating it.
 
     Returns:
@@ -2518,8 +2685,8 @@ def build_calibration_inputs(
           - calib_inputs: List of calibration tensors
           - sample_weights: List of weights (only when loading from file, None when generating)
     """
-    if args.calibration_dataset is not None:
-        calib_path = pathlib.Path(args.calibration_dataset)
+    if args.calibration_dataset_path is not None:
+        calib_path = pathlib.Path(args.calibration_dataset_path)
         if calib_path.exists():
             print(f"Loading calibration dataset from {calib_path.resolve()}")
             loaded_data = torch.load(calib_path, weights_only=False)
@@ -2546,13 +2713,7 @@ def build_calibration_inputs(
                 f"Calibration dataset file not found: {calib_path.resolve()}"
             )
 
-    dataset_train = load_dataset(
-        DATASET_NAME,
-        DATASET_CONFIG,
-        split=TRAIN_SPLIT,
-        cache_dir=args.cache_dir,
-    )
-    calib_txt = " ".join(dataset_train["text"])
+    calib_txt = _load_calibration_text(args, tokenizer)
     train_ids = tokenizer(calib_txt, return_tensors="pt").input_ids.to(device)
 
     nsamples = args.nsamples_for_qcalibration
@@ -2566,7 +2727,7 @@ def build_calibration_inputs(
 
     random.seed(args.seed)
     calib_inputs = []
-    for k in range(0, nsamples, batch_size):
+    for _ in range(0, nsamples, batch_size):
         batch_samples = []
         for _ in range(batch_size):
             if len(calib_inputs) * batch_size + len(batch_samples) >= nsamples:
@@ -2611,7 +2772,7 @@ def compute_or_load_sensitivity(model, calib_inputs, args):
         default_path = pathlib.Path(
             get_sensitivities_info_name(
                 model,
-                DATASET_NAME,
+                _get_calib_dataset_short_name(args),
                 args.seed,
                 args.nsamples_for_qcalibration,
             )
@@ -2695,6 +2856,7 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=
         save_path = output_dir / get_calibration_dataset_name(
             args.seed,
             args.nsamples_for_qcalibration,
+            dataset_name=_get_calib_dataset_short_name(args),
             compressed_n_samples=compressed_n_samples,
         )
         print(f"Saving calibration dataset to {save_path.resolve()}")
@@ -2746,7 +2908,7 @@ def main():
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
 
-    if args.calibration_dataset is None:
+    if args.calibration_dataset_path is None:
         # Compress calibration inputs using K-Means clustering if --calibration_samples_to_use is specified
         calib_inputs, sample_weights = _apply_calibration_compression(
             calib_inputs, model, args, device
