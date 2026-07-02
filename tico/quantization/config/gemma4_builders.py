@@ -85,9 +85,9 @@ def build_gemma4_e2b_ptq_config(
     weight = weight or _default_weight()
     linear_weight = linear_weight or weight
 
-    overrides: Dict[str, Any] = {"model": {"model": {}}}
+    overrides: Dict[str, Any] = {"model": {}}
 
-    model_overrides = overrides["model"]["model"]
+    model_overrides = overrides["model"]
     model_overrides["language_model"] = {
         "embed_tokens": _weight_override(embedding_weight),
         "layers": {},
@@ -126,7 +126,7 @@ def build_gemma4_e2b_ptq_config(
     model_overrides["embed_vision"] = {
         "embedding_projection": _weight_override(linear_weight),
     }
-    overrides["model"]["lm_head"] = _weight_override(lm_head_weight or linear_weight)
+    overrides["lm_head"] = _weight_override(lm_head_weight or linear_weight)
 
     return PTQConfig(
         activation=activation,
