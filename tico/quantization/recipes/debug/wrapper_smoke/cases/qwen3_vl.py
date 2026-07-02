@@ -292,6 +292,11 @@ def _create_image_input(
     return example
 
 
+def _causal_mask(seq_len: int, fill_value: float = -120.0) -> torch.Tensor:
+    mask = torch.full((1, 1, seq_len, seq_len), fill_value)
+    return torch.triu(mask, diagonal=1)
+
+
 class QwenBaseCase(WrapperSmokeCase):
     """Base class for Qwen3-VL wrapper smoke cases."""
 
@@ -341,7 +346,7 @@ class QwenTextAttentionCase(QwenBaseCase):
     ) -> Any:
         """Run the original text attention signature with an explicit mask."""
         hidden, rope = sample.args
-        mask = torch.zeros(1, 1, hidden.shape[1], hidden.shape[1])
+        mask = _causal_mask(hidden.shape[1])
         return reference(hidden, position_embeddings=rope, attention_mask=mask)[0]
 
     def export_input(
