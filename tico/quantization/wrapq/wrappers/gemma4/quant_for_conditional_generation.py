@@ -18,10 +18,8 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import join_name
-from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
-    Gemma4LMHeadExportAdapter,
-)
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -32,7 +30,7 @@ from tico.quantization.wrapq.wrappers.registry import try_register
     "transformers.models.gemma4.modeling_gemma4.Gemma4ForConditionalGeneration"
 )
 class QuantGemma4ForConditionalGeneration(QuantModuleBase):
-    """Top-level PTQ wrapper skeleton for Gemma4 E2B conditional generation."""
+    """Top-level PTQ wrapper for Gemma4 E2B conditional generation."""
 
     def __init__(
         self,
@@ -56,8 +54,18 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase):
             fp_name=join_name(fp_name, "lm_head"),
         )
 
+        # Observers for the logit softcapping path.
+        self.obs_logit_softcapping_div = self._make_obs("logit_softcapping_div")
+        self.obs_logit_softcapping_tanh = self._make_obs("logit_softcapping_tanh")
+        self.obs_logits = self._make_obs("logits")
+
     def forward(self, *args, logits_to_keep: int | torch.Tensor = 0, **kwargs):
-        """Run the wrapped conditional generation model.
+        """Run the wrapped conditional generation model (calibration path).
+
+        Mirrors ``Gemma4ForConditionalGeneration.forward`` including logit
+        softcapping.  Fake-quantization observers are inserted after the
+        ``tanh`` and on the final logits so that the export path carries
+        correct qparam metadata.
 
         TODO: Return ``Gemma4CausalLMOutputWithPast`` for full HF compatibility.
         """
@@ -67,20 +75,117 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase):
             if hasattr(outputs, "last_hidden_state")
             else outputs
         )
-        slice_indices = (
-            slice(-logits_to_keep, None)
-            if isinstance(logits_to_keep, int) and logits_to_keep
-            else slice(None)
-        )
+        # Match the original's logits_to_keep handling: int → slice, tensor → index.
+        if isinstance(logits_to_keep, int) and logits_to_keep:
+            slice_indices = slice(-logits_to_keep, None)
+        elif isinstance(logits_to_keep, torch.Tensor):
+            slice_indices = logits_to_keep
+        else:
+            slice_indices = slice(None)
         logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        return self._apply_logit_softcapping(logits)
+
+    def _apply_logit_softcapping(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply logit softcapping with fake-quantization observers.
+
+        Mirrors the original ``Gemma4ForConditionalGeneration`` softcapping:
+        ``logits = tanh(logits / softcap) * softcap``.
+
+        Three observers are inserted so that every graph node in the
+        softcapping chain carries quantization parameter metadata:
+        - ``obs_logit_softcapping_div``  — after the division
+        - ``obs_logit_softcapping_tanh`` — after the tanh
+        - ``obs_logits``                 — on the final logits
+        """
+        final_logit_softcapping = self.config.get_text_config().final_logit_softcapping
+        if final_logit_softcapping is not None:
+            logits = logits / final_logit_softcapping
+            logits = self._fq(logits, self.obs_logit_softcapping_div)
+            logits = torch.tanh(logits)
+            logits = self._fq(logits, self.obs_logit_softcapping_tanh)
+            logits = logits * final_logit_softcapping
+
+        logits = self._fq(logits, self.obs_logits)
         return logits
 
-    def as_export_module(self, mode: str, **kwargs):
-        """Return a static export adapter for top-level components."""
-        if mode == "lm_head":
-            return Gemma4LMHeadExportAdapter(self)
-        raise ValueError(
-            f"Unsupported Gemma4 conditional generation export mode: {mode!r}"
+    def forward_export(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor] = None,
+        attention_masks: Optional[dict] = None,
+        position_embeddings: Optional[dict] = None,
+        logits_to_keep: int = 0,
+    ) -> torch.Tensor:
+        """Run the export path for conditional generation.
+
+        Uses ``self.model_export`` (the export adapter returned by
+        ``self.model.as_export_module()``) instead of ``self.model`` directly.
+
+        Args:
+            inputs_embeds: Pre-fused text+image embeddings, shape ``(1, S, H)``.
+            per_layer_inputs: PLE tensor, shape ``(1, S, L, P)`` or None.
+            attention_masks: Dict mapping layer type to additive mask tensors.
+            position_embeddings: Dict mapping layer type to ``(cos, sin)`` tuples.
+            logits_to_keep: Number of trailing positions to compute logits for.
+
+        Returns:
+            Logits tensor with shape ``(1, S', vocab_size)`` where ``S'``
+            depends on ``logits_to_keep``.
+        """
+        # Run the model export adapter to get hidden states (already normed).
+        hidden_states = self.model_export(
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            attention_masks=attention_masks,
+            position_embeddings=position_embeddings,
+        )
+
+        # Slice hidden states for logits_to_keep.
+        slice_indices = slice(-logits_to_keep, None) if logits_to_keep else slice(None)
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        return self._apply_logit_softcapping(logits)
+
+    def as_export_module(self, mode: str = "prefill", **kwargs) -> nn.Module:
+        """Prepare the model for torch.export and return an export adapter.
+
+        This method:
+        1. Asserts that the model is in QUANT mode
+        2. Verifies all observers are calibrated
+        3. Calls ``self.model.as_export_module()`` and saves the result as
+           ``self.model_export``
+        4. Returns a ``Gemma4ForConditionalGenerationExportAdapter`` wrapping
+           this module, configured for the requested mode
+
+        Args:
+            mode: Export mode — ``"prefill"`` (logits_to_keep=0) or
+                ``"decode"`` (logits_to_keep=1).
+            **kwargs: Additional arguments forwarded to ``self.model.as_export_module()``.
+
+        Returns:
+            ``Gemma4ForConditionalGenerationExportAdapter`` wrapping this module.
+        """
+        assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
+
+        if mode not in ("prefill", "decode"):
+            raise ValueError(f"Unsupported export mode: {mode!r}")
+
+        # Make sure that all observers are calibrated.
+        for obs in self._all_observers():
+            assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+
+        # Prepare the inner model for export and save the adapter.
+        self.model_export = self.model.wrapped.as_export_module(mode=mode, **kwargs)
+
+        logits_to_keep = 0 if mode == "prefill" else 1
+
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4ForConditionalGenerationExportAdapter,
+        )
+
+        return Gemma4ForConditionalGenerationExportAdapter(
+            wrapped_model=self, logits_to_keep=logits_to_keep
         )
 
     def generate(self, *args, **kwargs):
@@ -89,4 +194,8 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase):
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""
-        return ()
+        return (
+            self.obs_logit_softcapping_div,
+            self.obs_logit_softcapping_tanh,
+            self.obs_logits,
+        )

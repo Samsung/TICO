@@ -348,6 +348,144 @@ class Gemma4LMHeadExportAdapter(nn.Module):
         return self.lm_head(self.norm(hidden_states))
 
 
+class Gemma4ForConditionalGenerationExportAdapter(nn.Module):
+    """Export adapter for the full Gemma4 conditional generation model.
+
+    This adapter wraps a ``QuantGemma4ForConditionalGeneration`` that has been
+    prepared for export via ``as_export_module()``.  Calling ``forward()``
+    delegates to the wrapped model's ``forward_export()`` method, which runs
+    the model export adapter (text decoder + final norm), then applies the LM
+    head with ``logits_to_keep`` slicing and logit softcapping.
+
+    Input contract:
+        ``inputs_embeds`` has shape ``(1, S, hidden_size)`` — pre-fused.
+        ``per_layer_inputs`` has shape ``(1, S, num_layers, ple_dim)`` or None.
+        ``attention_masks`` is a dict mapping layer type to additive masks.
+        ``position_embeddings`` is a dict mapping layer type to (cos, sin).
+
+    Output contract:
+        Returns logits with shape ``(1, S', vocab_size)`` where ``S'``
+        depends on ``logits_to_keep``.
+    """
+
+    def __init__(
+        self,
+        wrapped_model: nn.Module,
+        *,
+        logits_to_keep: int = 0,
+    ):
+        super().__init__()
+        self.wrapped_model = wrapped_model
+        self.logits_to_keep = int(logits_to_keep)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor] = None,
+        attention_masks: Optional[dict] = None,
+        position_embeddings: Optional[dict] = None,
+    ) -> torch.Tensor:
+        """Run the conditional generation export path."""
+        return self.wrapped_model.forward_export(
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            attention_masks=attention_masks,
+            position_embeddings=position_embeddings,
+            logits_to_keep=self.logits_to_keep,
+        )
+
+
+class Gemma4TextModelPrefillExportAdapter(nn.Module):
+    """Export adapter for the Gemma4TextModel (text-only) with static-shape contract.
+
+    This adapter wraps a ``QuantGemma4TextModel`` that has been prepared for
+    export via ``as_export_module()``.  Calling ``forward()`` delegates to
+    the wrapped model's ``forward_export()`` method, which runs only the text
+    decoder layers and final norm on pre-fused ``inputs_embeds``.
+
+    The CPU runtime is responsible for:
+    - Token embedding
+    - PLE computation (if enabled)
+    - Mask and RoPE generation per layer type
+    - KV cache management
+
+    Input contract:
+        ``inputs_embeds`` has shape ``(1, S, hidden_size)`` — pre-fused.
+        ``per_layer_inputs`` has shape ``(1, S, num_layers, ple_dim)`` or None.
+        ``attention_masks`` is a dict mapping layer type to additive masks.
+        ``position_embeddings`` is a dict mapping layer type to (cos, sin).
+
+    Output contract:
+        Returns the final hidden states with shape ``(1, S, hidden_size)``.
+    """
+
+    def __init__(self, wrapped_model: nn.Module):
+        super().__init__()
+        self.wrapped_model = wrapped_model
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor] = None,
+        attention_masks: Optional[dict] = None,
+        position_embeddings: Optional[dict] = None,
+    ) -> torch.Tensor:
+        """Run the text model export path via the wrapped model's forward_export."""
+        return self.wrapped_model.forward_export(
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            attention_masks=attention_masks,
+            position_embeddings=position_embeddings,
+        )
+
+
+class Gemma4ForCausalLMExportAdapter(nn.Module):
+    """Export adapter for the full Gemma4 causal LM model.
+
+    This adapter wraps a ``QuantGemma4ForCausalLM`` that has been prepared
+    for export via ``as_export_module()``.  Calling ``forward()`` delegates
+    to the wrapped model's ``forward_export()`` method, which runs the model
+    export adapter (text decoder + final norm), then applies the LM head
+    with ``logits_to_keep`` slicing and logit softcapping.
+
+    Input contract:
+        ``inputs_embeds`` has shape ``(1, S, hidden_size)`` — pre-fused.
+        ``per_layer_inputs`` has shape ``(1, S, num_layers, ple_dim)`` or None.
+        ``attention_masks`` is a dict mapping layer type to additive masks.
+        ``position_embeddings`` is a dict mapping layer type to (cos, sin).
+
+    Output contract:
+        Returns logits with shape ``(1, S', vocab_size)`` where ``S'``
+        depends on ``logits_to_keep``.
+    """
+
+    def __init__(
+        self,
+        wrapped_model: nn.Module,
+        *,
+        logits_to_keep: int = 0,
+    ):
+        super().__init__()
+        self.wrapped_model = wrapped_model
+        self.logits_to_keep = int(logits_to_keep)
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_inputs: Optional[torch.Tensor] = None,
+        attention_masks: Optional[dict] = None,
+        position_embeddings: Optional[dict] = None,
+    ) -> torch.Tensor:
+        """Run the causal LM export path."""
+        return self.wrapped_model.forward_export(
+            inputs_embeds=inputs_embeds,
+            per_layer_inputs=per_layer_inputs,
+            attention_masks=attention_masks,
+            position_embeddings=position_embeddings,
+            logits_to_keep=self.logits_to_keep,
+        )
+
+
 class Gemma4ModelPrefillExportAdapter(nn.Module):
     """Export adapter for the Gemma4Model (image-text) with static-shape contract.
 
