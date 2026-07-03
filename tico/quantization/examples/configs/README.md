@@ -198,6 +198,55 @@ pipeline:
     linear_weight: uint4
 ```
 
+### Per-module activation overrides: `linear_activation` and `softmax_activation`
+
+In addition to the global `activation` default, the PTQ stage supports two
+optional overrides that can apply different quantization scheme to specific
+module categories:
+
+- **`linear_activation`** — Overrides the activation observer for all
+  `nn.Linear` layers' act_in and act_out. When set, these layers use the
+  specified quantization scheme(e.g. MX) instead of the global `activation` default.
+- **`softmax_activation`** — Overrides the activation observer for all
+  attention softmax outputs. When set, softmax outputs use the specified
+  quantization scheme instead of the global `activation` default.
+
+Both fields accept the same spec mapping as `activation`:
+
+```yaml
+pipeline:
+  - name: ptq
+    enabled: true
+    # Global default for ALL activation observers (int16).
+    activation: int16
+    # Override: all nn.Linear act_in/act_out observers use MXINT8.
+    # Set to null to disable (fall back to global ``activation``).
+    linear_activation:
+      kind: mx
+      elem_format: int8
+      axis: -1
+      shared_exp_method: max
+      round: nearest
+    # Override: all attention softmax observers use MXINT8.
+    # Set to null to disable (fall back to global ``activation``).
+    softmax_activation:
+      kind: mx
+      elem_format: int8
+      axis: -1
+      shared_exp_method: max
+      round: nearest
+    linear_weight: uint4
+```
+
+Rules:
+
+- When `linear_activation` or `softmax_activation` is `null` or absent, the
+  corresponding modules fall back to the global `activation` spec.
+- The `kind: mx` spec requires `elem_format`, `axis`, `shared_exp_method`,
+  and `round` fields.
+- These overrides only affect activation observers; weight quantization is
+  controlled by `linear_weight` and other weight fields.
+
 Preprocessing + GPTQ + PTQ:
 
 ```yaml

@@ -42,7 +42,10 @@ from tico.quantization.recipes.evaluation.vlm import (
     print_vqa_results,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import QuantSpec
 from tico.quantization.recipes.utils import (
+
     move_to_device,
     quant_spec_from_config,
     quant_specs_equivalent,
@@ -173,7 +176,7 @@ class Qwen3VLAdapter(ModelAdapter):
         if "grid_thw" in vision_args:
             vision_args["grid_thw"] = tuple(vision_args["grid_thw"])
 
-        return build_qwen3_vl_ptq_config(
+        ptq_config = build_qwen3_vl_ptq_config(
             num_vision_blocks=num_vision_blocks,
             num_text_layers=num_text_layers,
             num_deepstack_mergers=num_deepstack_mergers,
@@ -192,6 +195,22 @@ class Qwen3VLAdapter(ModelAdapter):
             norm_weight=quant_spec_from_config(stage_cfg.get("norm_weight")),
             strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
         )
+
+        # --- Type-based activation overrides ---
+        # The YAML ``activation`` field sets a global default for all activation
+        # observers.  ``linear_activation`` and ``softmax_activation`` allow
+        # overriding the quant spec for *all* Linear-layer activations and *all*
+        # attention softmax outputs respectively.
+        linear_act_spec = quant_spec_from_config(stage_cfg.get("linear_activation"))
+        softmax_spec = quant_spec_from_config(stage_cfg.get("softmax_activation"))
+
+        if linear_act_spec is not None or softmax_spec is not None:
+            _apply_type_based_activation_overrides(
+                ctx.model, ptq_config, linear_act_spec, softmax_spec
+            )
+
+        return ptq_config
+
 
     @staticmethod
     def get_num_vision_blocks(model: Any) -> int:
@@ -560,3 +579,48 @@ def _find_stage(cfg: dict[str, Any], stage_name: str) -> Mapping[str, Any] | Non
         if isinstance(stage, Mapping) and stage.get("name") == stage_name:
             return stage
     return None
+
+
+def _apply_type_based_activation_overrides(
+    model: torch.nn.Module,
+    ptq_config: "PTQConfig",
+    linear_act_spec: "QuantSpec | None",
+    softmax_spec: "QuantSpec | None",
+) -> None:
+    """Set per-module activation overrides based on module *type*.
+
+    This helper walks the model, finds every ``nn.Linear`` and every attention module,
+    and registers an explicit override for the relevant observer names so
+    that the desired ``QuantSpec`` is used regardless of the global default.
+
+    Parameters
+    ----------
+    model
+        The (possibly already-prepared) model to inspect.
+    ptq_config
+        The ``PTQConfig`` whose overrides will be extended in-place.
+    linear_act_spec
+        If not ``None``, applied to ``act_in`` and ``act_out`` of every
+        ``nn.Linear`` in the model.
+    softmax_spec
+        If not ``None``, applied to the ``softmax`` observer of every
+        ``Qwen3VLTextAttention`` and ``Qwen3VLVisionAttention`` module.
+    """
+    # Class names that contain a ``softmax`` observer.
+    _ATTENTION_CLASS_NAMES = {
+        "Qwen3VLTextAttention",
+        "Qwen3VLVisionAttention",
+    }
+
+    for name, module in model.named_modules():
+        # --- Linear-layer activation overrides ---
+        if linear_act_spec is not None and isinstance(module, torch.nn.Linear):
+            for obs_name in ("act_in", "act_out"):
+                ptq_config.set_override(f"{name}.{obs_name}", linear_act_spec)
+
+        # --- Softmax activation overrides ---
+        if softmax_spec is not None:
+            cls_name = type(module).__name__
+            if cls_name in _ATTENTION_CLASS_NAMES:
+                ptq_config.set_override(f"{name}.softmax", softmax_spec)
+

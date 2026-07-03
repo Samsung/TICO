@@ -216,6 +216,16 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     _print_config_row("SpinQuant enabled", spinquant_enabled)
     _print_config_row("CLE enabled", _is_stage_enabled(cle_stage))
     _print_config_row("Activation", _stage_quant_spec(ptq_stage, "activation"))
+    linear_activation = _stage_value(ptq_stage, "linear_activation", None)
+    if linear_activation is not None:
+        _print_config_row(
+            "Linear activation", _format_quant_spec(linear_activation)
+        )
+    softmax_activation = _stage_value(ptq_stage, "softmax_activation", None)
+    if softmax_activation is not None:
+        _print_config_row(
+            "Softmax activation", _format_quant_spec(softmax_activation)
+        )
     _print_config_row("Linear weight", linear_weight)
     if vision_patch_embed_weight is not None:
         _print_config_row("Vision patch weight", vision_patch_embed_weight)
@@ -271,6 +281,11 @@ class QuantizationRunner:
                 continue
             stage = get_stage(stage_cfg["name"])
             ctx = stage.run(ctx, stage_cfg)
+
+            if stage_cfg.get("name") == "ptq":
+                if stage_cfg.get("print_model", False):
+                    print("=== Model after PTQ prepare ===")
+                    print(ctx.model)
 
         print("=== Evaluation ===")
         adapter.evaluate(ctx)
