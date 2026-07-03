@@ -36,6 +36,7 @@
 # =============================================================================
 
 import argparse
+import math
 import os
 import types
 
@@ -48,7 +49,6 @@ from typing import Any, Dict, Optional
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
-from sklearn.random_projection import SparseRandomProjection
 import matplotlib.pyplot as plt
 
 import torch
@@ -1265,7 +1265,107 @@ class CalibrationSetCompressor:
             llama_model = self.model.model
             return list(llama_model.layers)
         return []
-    
+
+    def _sparse_random_project_2d(self, features: list[Tensor]) -> np.ndarray:
+        """
+        Project high-dimensional activation data to 2D on GPU.
+
+        This replaces sklearn's ``SparseRandomProjection`` (which runs on CPU)
+        with an equivalent GPU-accelerated computation.  The random projection
+        matrix follows the same distribution as sklearn:
+
+          - ``+sqrt(s) / sqrt(n_components)``  with probability 1 / 2s
+          -  ``0``                             with probability 1 - 1 / s
+          - ``-sqrt(s) / sqrt(n_components)``  with probability 1 / 2s
+
+        where ``s = 1 / density`` and ``density = 1 / sqrt(n_features)`` (the
+        sklearn default for ``density='auto'``).
+
+        Projects features one at a time to keep GPU memory usage low (only one
+        feature + the projection matrix are on GPU at any time).
+
+        Args:
+            features: List of 1-D CPU tensors, each of shape ``[n_features]``.
+
+        Returns:
+            A numpy array of shape ``[n_samples, 2]`` (on CPU) suitable for
+            downstream KMeans / silhouette_score.
+        """
+        n_features = features[0].numel()
+        n_components = 2
+
+        # density = 1 / sqrt(n_features), same as sklearn's 'auto'
+        density = 1.0 / math.sqrt(n_features)
+        s = 1.0 / density  # = sqrt(n_features)
+
+        # Scale factor: sqrt(1 / density) / sqrt(n_components)
+        scale = math.sqrt(1.0 / density) / math.sqrt(n_components)
+
+        # Generate the sparse random projection matrix on GPU.
+        # Each entry is +1, -1, or 0 with probabilities matching sklearn.
+        # P(nonzero) = density, and among nonzeros P(+1) = P(-1) = 0.5.
+        # Uses the global torch RNG (seed set in compress()).
+        rand = torch.rand(n_components, n_features, device=self.device)
+
+        # +1 where rand < density/2, -1 where rand in [density/2, density), 0 otherwise
+        components = torch.zeros(
+            n_components, n_features, device=self.device, dtype=features[0].dtype
+        )
+        components[rand < density / 2.0] = 1.0
+        components[(rand >= density / 2.0) & (rand < density)] = -1.0
+        components *= scale
+
+        # Project each feature one at a time to keep GPU memory low.
+        projected = []
+        for feat in features:
+            # [n_features] @ [n_features, n_components] -> [n_components]
+            proj = feat.to(self.device) @ components.T
+            projected.append(proj.cpu())
+        data_2d = torch.stack(projected, dim=0).numpy()  # [n_samples, 2]
+
+        return data_2d
+
+    def _qr_random_project_2d(self, features: list[Tensor]) -> np.ndarray:
+        """
+        Project high-dimensional activation data to 2D on GPU via QR factorization.
+
+        Generates a random Gaussian matrix of shape ``(n_features, 2)`` and
+        computes its QR decomposition to obtain two orthonormal projection
+        directions.  This preserves pairwise distances better than a sparse
+        random projection and is simpler to compute.
+
+        Projects features one at a time to keep GPU memory usage low (only one
+        feature + the projection matrix are on GPU at any time).
+
+        Uses the global torch RNG, so ``torch.manual_seed`` should be set
+        before calling this method for reproducibility.
+
+        Args:
+            features: List of 1-D CPU tensors, each of shape ``[n_features]``.
+
+        Returns:
+            A numpy array of shape ``[n_samples, 2]`` (on CPU) suitable for
+            downstream KMeans / silhouette_score.
+        """
+        n_features = features[0].numel()
+
+        # Generate a random Gaussian matrix on GPU (uses global RNG).
+        G = torch.randn(n_features, 2, device=self.device, dtype=features[0].dtype)
+
+        # QR decomposition: Q has orthonormal columns of shape (n_features, 2).
+        Q, _ = torch.linalg.qr(G)
+
+        # Project each feature one at a time to keep GPU memory low.
+        projected = []
+        for feat in features:
+            # [n_features] @ [n_features, 2] -> [2]
+            proj = feat.to(self.device) @ Q
+            projected.append(proj.cpu())
+        data_2d = torch.stack(projected, dim=0).numpy()  # [n_samples, 2]
+
+        return data_2d
+
+
     def _find_best_layer_layerwise(
         self,
         calib_inputs: list[Tensor],
@@ -1273,8 +1373,10 @@ class CalibrationSetCompressor:
     ) -> tuple[int, np.ndarray, Any, Any]:
         """
         Find best layer for clustering using sequential layer-by-layer inference.
+
         
         Memory-efficient approach following LlamaGPTQQuantizer pattern:
+
         1. Override first decoder layer's forward to capture cache_args/cache_kwargs
         2. For each layer sequentially:
            a. Run layer with cached hidden states from cache_args
@@ -1387,20 +1489,20 @@ class CalibrationSetCompressor:
                 if act.shape[0] > 1:
                     for sub_idx in range(act.shape[0]):
                         feat = act[sub_idx].flatten()
-                        features.append(feat.cpu().numpy())
+                        features.append(feat)
                         sample_to_batch_map.append((batch_idx, sub_idx))
                 else:
                     feat = act.flatten()
-                    features.append(feat.cpu().numpy())
+                    features.append(feat)
                     sample_to_batch_map.append((batch_idx, 0))
             
-            layer_data_np = np.stack(features, axis=0)
             n_individual_samples = len(features)
             
-            # Project to 2D
-            projector = SparseRandomProjection(n_components=2, random_state=self.seed)
-            data_2d = projector.fit_transform(layer_data_np)
-            
+            # Project to 2D on GPU (features projected one at a time to save GPU memory)
+            #data_2d = self._qr_random_project_2d(features)
+            data_2d = self._sparse_random_project_2d(features)
+
+
             # K-Means
             kmeans = KMeans(
                 n_clusters=self.compress_to_samples,
@@ -1408,6 +1510,7 @@ class CalibrationSetCompressor:
                 n_init=10,
                 max_iter=300,
             )
+
             labels = kmeans.fit_predict(data_2d)
             
             # Silhouette score - use actual individual sample count
@@ -1416,6 +1519,7 @@ class CalibrationSetCompressor:
                 print(f"  Layer {layer_idx}: silhouette_score={score:.4f} (from {n_individual_samples} samples)")
                 
                 # Visualize if requested
+
                 if visualize:
                     save_path = f"calibration_layer_{layer_idx}_activations_2d.png"
                     self._visualize_compression_2d(data_2d, kmeans, save_path)
@@ -1431,7 +1535,9 @@ class CalibrationSetCompressor:
             # Update cache_args[0] for next layer (current layer's output)
             cache_args[0] = layer_outputs
             
-            del layer_data_np, data_2d, labels, kmeans, features, layer_outputs, sample_to_batch_map
+            del data_2d, labels, kmeans, features, layer_outputs, sample_to_batch_map
+
+
         
         if best_layer_idx >= 0:
             print(f"Best layer: {best_layer_idx} with silhouette_score={best_score:.4f}")
@@ -1529,31 +1635,23 @@ class CalibrationSetCompressor:
             
             # Weight = proportion of samples in this cluster
             weight = cluster_size / n_samples
+            assert(len(cluster_indices) > 0)
             
-            if len(cluster_indices) > 0:
-                # Find sample closest to centroid within cluster
-                cluster_data_2d = data_2d[cluster_mask]
-                centroid = kmeans.cluster_centers_[k]
-                distances = np.linalg.norm(cluster_data_2d - centroid, axis=1)
-                best_local_idx = np.argmin(distances)
-                best_idx = cluster_indices[best_local_idx]
-                
-                # Extract sample using the map if provided (for batched inputs)
-                if sample_to_batch_map is not None:
-                    batch_idx, sub_idx = sample_to_batch_map[best_idx]
-                    representatives.append(calib_inputs[batch_idx][sub_idx:sub_idx+1, ...])
-                else:
-                    representatives.append(calib_inputs[best_idx])
-                weights.append(weight)
+            
+            # Find sample closest to centroid within cluster
+            cluster_data_2d = data_2d[cluster_mask]
+            centroid = kmeans.cluster_centers_[k]
+            distances = np.linalg.norm(cluster_data_2d - centroid, axis=1)
+            best_local_idx = np.argmin(distances)
+            best_idx = cluster_indices[best_local_idx]
+            
+            # Extract sample using the map if provided (for batched inputs)
+            if sample_to_batch_map is not None:
+                batch_idx, sub_idx = sample_to_batch_map[best_idx]
+                representatives.append(calib_inputs[batch_idx][sub_idx:sub_idx+1, ...])
             else:
-                # Fallback: just pick any sample
-                if sample_to_batch_map is not None:
-                    fallback_idx = k % len(sample_to_batch_map)
-                    batch_idx, sub_idx = sample_to_batch_map[fallback_idx]
-                    representatives.append(calib_inputs[batch_idx][sub_idx:sub_idx+1, ...])
-                else:
-                    representatives.append(calib_inputs[k % len(calib_inputs)])
-                weights.append(weight)
+                representatives.append(calib_inputs[best_idx])
+            weights.append(weight)
         
         print(f"  Sample weights: min={min(weights):.4f}, max={max(weights):.4f}")
         
@@ -1577,10 +1675,17 @@ class CalibrationSetCompressor:
             - Compressed list of compress_to_samples representative samples
             - List of weights (one per sample, proportional to cluster size)
         """
-        if len(calib_inputs) <= self.compress_to_samples:
+        original_batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
+        n_individual_samples = len(calib_inputs) * original_batch_size
+
+        if n_individual_samples <= self.compress_to_samples:
             # Return uniform weights for uncompressed case
-            weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
+            weights = [1.0 / n_individual_samples] * n_individual_samples
             return calib_inputs, weights
+
+        
+        # Set global torch seed for reproducible random projections
+        torch.manual_seed(self.seed)
         
         # Find best layer using memory-efficient layerwise approach
         print(f"  Finding best compressed dataset from {len(calib_inputs)} samples...")
@@ -1595,15 +1700,21 @@ class CalibrationSetCompressor:
         if best_layer_idx < 0 or best_data_2d is None:
             # Fallback to simple subsampling
             print("  Warning: Layerwise approach failed, using simple subsampling")
-            step = len(calib_inputs) // self.compress_to_samples
+            # Unbatch into individual samples for subsampling
+            individual_inputs = []
+            for batched_input in calib_inputs:
+                for i in range(batched_input.shape[0]):
+                    individual_inputs.append(batched_input[i:i+1, ...])
+            step = len(individual_inputs) // self.compress_to_samples
             uniform_weight = 1.0 / self.compress_to_samples
             representatives = []
             weights = []
             for i in range(self.compress_to_samples):
-                idx = min(i * step, len(calib_inputs) - 1)
-                representatives.append(calib_inputs[idx])
+                idx = min(i * step, len(individual_inputs) - 1)
+                representatives.append(individual_inputs[idx])
                 weights.append(uniform_weight)
             return representatives, weights
+
         
         # Select representatives from best layer's clustering
         print(f"  Selecting {self.compress_to_samples} representatives from best layer...")
@@ -2216,17 +2327,19 @@ def _apply_calibration_compression(
             f"got {args.calibration_samples_to_use}"
         )
     
-    if args.calibration_samples_to_use >= len(calib_inputs):
-        print(
-            f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
-            f"is >= available samples ({len(calib_inputs)}). "
-            f"Using all {len(calib_inputs)} samples (no compression needed)."
-        )
-        sample_weights = [1.0 / len(calib_inputs)] * len(calib_inputs)
-        return calib_inputs, sample_weights
-    
     # Track original batch size for rebatching after compression
     original_batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
+    n_individual_samples = len(calib_inputs) * original_batch_size
+    
+    if args.calibration_samples_to_use >= n_individual_samples:
+        print(
+            f"[Info] --calibration_samples_to_use ({args.calibration_samples_to_use}) "
+            f"is >= available samples ({n_individual_samples}). "
+            f"Using all {n_individual_samples} samples (no compression needed)."
+        )
+        sample_weights = [1.0 / n_individual_samples] * n_individual_samples
+        return calib_inputs, sample_weights
+
     
     # Unbatch: flatten batched inputs into individual samples (batch_size=1)
   #  if original_batch_size > 1:
@@ -2848,11 +2961,15 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=
     if should_save(args, "calibration_dataset"):
         # Determine compressed sample count if compression was applied
         # Compression is indicated when the number of samples differs from the original
+        # When batch > 1, calib_inputs are batched, so count individual samples
+        batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
+        n_individual_samples = len(calib_inputs) * batch_size
         compressed_n_samples = (
-            len(calib_inputs)
-            if sample_weights is not None and len(calib_inputs) != args.nsamples_for_qcalibration
+            n_individual_samples
+            if sample_weights is not None and n_individual_samples != args.nsamples_for_qcalibration
             else None
         )
+
         save_path = output_dir / get_calibration_dataset_name(
             args.seed,
             args.nsamples_for_qcalibration,
