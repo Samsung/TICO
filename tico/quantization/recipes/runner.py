@@ -148,6 +148,62 @@ def _max_seq_len(cfg: Mapping[str, Any]) -> Any:
     return "not set"
 
 
+def _format_override_policy(policy: Mapping[str, Any]) -> str:
+    """Return a compact, human-readable description of one override policy."""
+    name = policy.get("name", "<unnamed>")
+    enabled = bool(policy.get("enabled", True))
+    spec = policy.get("spec", "not set")
+
+    target = policy.get("target", {})
+    if not isinstance(target, Mapping):
+        target = {}
+
+    component = target.get("component", "all")
+    layers = target.get("layers", "all")
+
+    module = target.get("module")
+    modules = target.get("modules")
+    op_type = target.get("op_type")
+    if module is not None:
+        module_str = f"module={module}"
+    elif modules is not None:
+        module_str = f"modules={modules}"
+    elif op_type is not None:
+        module_str = f"op_type={op_type}"
+    else:
+        module_str = "module=not set"
+
+    observers = target.get("observers")
+    observer_role = target.get("observer_role")
+    if observers is not None:
+        observer_str = f"observers={observers}"
+    elif observer_role is not None:
+        observer_str = f"observer_role={observer_role}"
+    else:
+        observer_str = "observer=not set"
+
+    status = "" if enabled else " (disabled)"
+    return (
+        f"{name}{status} -> spec={spec}, "
+        f"component={component}, layers={layers}, {module_str}, {observer_str}"
+    )
+
+
+def _print_override_policies(ptq_stage: Mapping[str, Any] | None) -> None:
+    """Print override policy summaries from the PTQ stage config."""
+    if ptq_stage is None:
+        return
+    policies = ptq_stage.get("override_policies")
+    if not policies:
+        return
+    print("--- Override policies ---")
+    for policy in policies:
+        if not isinstance(policy, Mapping):
+            continue
+        print(f"  {_format_override_policy(policy)}")
+    print()
+
+
 def _print_config_row(label: str, value: Any) -> None:
     """Print one aligned config summary row."""
     print(f"{label:<22}: {value}")
@@ -232,6 +288,7 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     if norm_weight is not None:
         _print_config_row("Norm weight", norm_weight)
     _print_config_row("Spin rotation weight", spin_rotation_weight)
+    _print_override_policies(ptq_stage)
     _print_config_row("Calibration samples", _calibration_sample_count(calibration_cfg))
     _print_config_row(
         "Calibration seq length",
@@ -271,6 +328,11 @@ class QuantizationRunner:
                 continue
             stage = get_stage(stage_cfg["name"])
             ctx = stage.run(ctx, stage_cfg)
+
+            if stage_cfg.get("name") == "ptq":
+                if stage_cfg.get("print_model", False):
+                    print("=== Model after PTQ ===")
+                    print(ctx.model)
 
         print("=== Evaluation ===")
         adapter.evaluate(ctx)
