@@ -278,6 +278,18 @@ class TestBuildGemma4E2BPtqConfig(unittest.TestCase):
             cfg.overrides["vision_tower"]["patch_embedder"]["input_proj"]["weight"]["dtype"],  # type: ignore[index]
             DType.uint(8),
         )
+        self.assertEqual(
+            cfg.overrides["vision_tower"]["encoder"]["layers"]["0"]["self_attn"]["q_norm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["vision_tower"]["encoder"]["layers"]["0"]["input_layernorm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["embed_vision"]["embedding_pre_projection_norm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
 
         # Gemma4ForConditionalGeneration path: model is Gemma4Model.
         self.assertEqual(
@@ -290,6 +302,18 @@ class TestBuildGemma4E2BPtqConfig(unittest.TestCase):
         )
         self.assertEqual(
             cfg.overrides["model"]["embed_vision"]["embedding_projection"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["vision_tower"]["encoder"]["layers"]["0"]["self_attn"]["v_norm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["vision_tower"]["encoder"]["layers"]["0"]["post_feedforward_layernorm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["embed_vision"]["embedding_pre_projection_norm"]["weight"]["dtype"],  # type: ignore[index]
             DType.uint(4),
         )
         self.assertEqual(
