@@ -60,6 +60,149 @@ def _linear_tree_override(
     return root
 
 
+def _gemma4_text_attention_override(
+    linear_weight: Optional[QuantSpec],
+    norm_weight: Optional[QuantSpec],
+) -> Dict[str, Any]:
+    """Build overrides for Gemma4TextAttention.
+
+    HF structure:
+      q_proj, q_norm, k_proj, k_norm, v_proj, v_norm, o_proj
+
+    Some modules are absent for shared-KV or attention_k_eq_v variants. Extra
+    override keys are harmless because wrappers only consume matching children.
+    """
+    result = _linear_tree_override(
+        linear_weight,
+        ("q_proj", "k_proj", "v_proj", "o_proj"),
+    )
+
+    norm_override = _weight_override(norm_weight)
+    if norm_override:
+        for name in ("q_norm", "k_norm", "v_norm"):
+            result[name] = copy.deepcopy(norm_override)
+
+    return result
+
+
+def _gemma4_text_layer_override(
+    linear_weight: Optional[QuantSpec],
+    norm_weight: Optional[QuantSpec],
+) -> Dict[str, Any]:
+    """Build overrides for one Gemma4TextDecoderLayer.
+
+    Mirrors the dense/no-MoE E2B text layer structure in HF:
+      self_attn
+      mlp
+      input_layernorm
+      post_attention_layernorm
+      pre_feedforward_layernorm
+      post_feedforward_layernorm
+      optional PLE modules
+    """
+    layer: Dict[str, Any] = {
+        "self_attn": _gemma4_text_attention_override(linear_weight, norm_weight),
+        "mlp": _linear_tree_override(
+            linear_weight,
+            ("gate_proj", "up_proj", "down_proj"),
+        ),
+    }
+
+    norm_override = _weight_override(norm_weight)
+    if norm_override:
+        for name in (
+            "input_layernorm",
+            "post_attention_layernorm",
+            "pre_feedforward_layernorm",
+            "post_feedforward_layernorm",
+            # Optional PLE norm. Ignored when PLE is disabled.
+            "post_per_layer_input_norm",
+        ):
+            layer[name] = copy.deepcopy(norm_override)
+
+    # Optional PLE linears. Ignored when hidden_size_per_layer_input == 0.
+    layer.update(
+        _linear_tree_override(
+            linear_weight,
+            ("per_layer_input_gate", "per_layer_projection"),
+        )
+    )
+
+    return layer
+
+
+def _gemma4_text_model_override(
+    *,
+    num_text_layers: int,
+    linear_weight: Optional[QuantSpec],
+    embedding_weight: Optional[QuantSpec],
+    norm_weight: Optional[QuantSpec],
+) -> Dict[str, Any]:
+    """Build overrides for Gemma4TextModel.
+
+    This tree is used directly by:
+      - Gemma4TextModel
+      - Gemma4ForCausalLM.model
+
+    It is also nested below ``language_model`` for Gemma4Model and
+    Gemma4ForConditionalGeneration.model.
+    """
+    text: Dict[str, Any] = {
+        "embed_tokens": _weight_override(embedding_weight),
+        "layers": {},
+        "norm": _weight_override(norm_weight),
+    }
+
+    for idx in range(num_text_layers):
+        text["layers"][str(idx)] = _gemma4_text_layer_override(
+            linear_weight,
+            norm_weight,
+        )
+
+    # Optional top-level PLE modules in Gemma4TextModel. These are ignored by
+    # wrappers when PLE is disabled, but let one builder follow the HF structure.
+    embedding_override = _weight_override(embedding_weight)
+    if embedding_override:
+        text["embed_tokens_per_layer"] = copy.deepcopy(embedding_override)
+
+    linear_override = _weight_override(linear_weight)
+    if linear_override:
+        text["per_layer_model_projection"] = copy.deepcopy(linear_override)
+
+    norm_override = _weight_override(norm_weight)
+    if norm_override:
+        text["per_layer_projection_norm"] = copy.deepcopy(norm_override)
+
+    return text
+
+
+def _gemma4_vision_model_override(
+    *,
+    num_vision_layers: int,
+    linear_weight: Optional[QuantSpec],
+    vision_patch_embed_weight: Optional[QuantSpec],
+) -> Dict[str, Any]:
+    """Build overrides for Gemma4VisionModel."""
+    vision: Dict[str, Any] = {
+        "patch_embedder": {
+            "input_proj": _weight_override(vision_patch_embed_weight or linear_weight)
+        },
+        "encoder": {"layers": {}},
+    }
+    for idx in range(num_vision_layers):
+        vision["encoder"]["layers"][str(idx)] = {
+            "self_attn": _linear_tree_override(
+                linear_weight,
+                ("q_proj", "k_proj", "v_proj", "o_proj"),
+            ),
+            "mlp": _linear_tree_override(
+                linear_weight,
+                ("gate_proj", "up_proj", "down_proj"),
+            ),
+        }
+    return vision
+
+
 def build_gemma4_e2b_ptq_config(
     *,
     num_text_layers: int,
@@ -85,46 +228,51 @@ def build_gemma4_e2b_ptq_config(
     weight = weight or _default_weight()
     linear_weight = linear_weight or weight
 
-    overrides: Dict[str, Any] = {"model": {}}
+    text_model_overrides = _gemma4_text_model_override(
+        num_text_layers=num_text_layers,
+        linear_weight=linear_weight,
+        embedding_weight=embedding_weight,
+        norm_weight=norm_weight,
+    )
+    vision_model_overrides = _gemma4_vision_model_override(
+        num_vision_layers=num_vision_layers,
+        linear_weight=linear_weight,
+        vision_patch_embed_weight=vision_patch_embed_weight,
+    )
 
-    model_overrides = overrides["model"]
-    model_overrides["language_model"] = {
-        "embed_tokens": _weight_override(embedding_weight),
-        "layers": {},
-        "norm": _weight_override(norm_weight),
-    }
-    for idx in range(num_text_layers):
-        model_overrides["language_model"]["layers"][str(idx)] = {
-            "self_attn": _linear_tree_override(
-                linear_weight,
-                ("q_proj", "k_proj", "v_proj", "o_proj"),
-            ),
-            "mlp": _linear_tree_override(
-                linear_weight,
-                ("gate_proj", "up_proj", "down_proj"),
-            ),
-        }
-
-    model_overrides["vision_tower"] = {
-        "patch_embedder": {
-            "input_proj": _weight_override(vision_patch_embed_weight or linear_weight)
-        },
-        "encoder": {"layers": {}},
-    }
-    for idx in range(num_vision_layers):
-        model_overrides["vision_tower"]["encoder"]["layers"][str(idx)] = {
-            "self_attn": _linear_tree_override(
-                linear_weight,
-                ("q_proj", "k_proj", "v_proj", "o_proj"),
-            ),
-            "mlp": _linear_tree_override(
-                linear_weight,
-                ("gate_proj", "up_proj", "down_proj"),
-            ),
-        }
-
-    model_overrides["embed_vision"] = {
+    multimodal_projection_overrides = {
         "embedding_projection": _weight_override(linear_weight),
+    }
+
+    # Follow the original Hugging Face structures while keeping one public API:
+    #
+    # Gemma4TextModel:
+    #   embed_tokens / layers / norm / ...
+    #
+    # Gemma4ForCausalLM:
+    #   model.(embed_tokens / layers / norm / ...)
+    #
+    # Gemma4Model:
+    #   language_model.(embed_tokens / layers / norm / ...)
+    #   vision_tower / embed_vision
+    #
+    # Gemma4ForConditionalGeneration:
+    #   model.language_model.(embed_tokens / layers / norm / ...)
+    #   model.vision_tower / model.embed_vision
+    #   lm_head
+    gemma4_model_overrides: Dict[str, Any] = {
+        "language_model": copy.deepcopy(text_model_overrides),
+        "vision_tower": copy.deepcopy(vision_model_overrides),
+        "embed_vision": copy.deepcopy(multimodal_projection_overrides),
+    }
+
+    overrides: Dict[str, Any] = {
+        **copy.deepcopy(text_model_overrides),
+        **copy.deepcopy(gemma4_model_overrides),
+        "model": {
+            **copy.deepcopy(text_model_overrides),
+            **copy.deepcopy(gemma4_model_overrides),
+        },
     }
     overrides["lm_head"] = _weight_override(lm_head_weight or linear_weight)
 

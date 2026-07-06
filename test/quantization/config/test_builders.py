@@ -22,6 +22,7 @@ from tico.quantization.config.builders import (
     build_llm_ptq_config,
     build_qwen3_vl_ptq_config,
 )
+from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.config.llama_attention import DEFAULT_EXECUTION_PROFILE
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine, mx
@@ -223,6 +224,78 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
             cfg.overrides["model"]["language_model"],  # type: ignore[index]
         )
         self.assertNotIn("rotate_lm_head", cfg.overrides)  # type: ignore[operator]
+
+
+class TestBuildGemma4E2BPtqConfig(unittest.TestCase):
+    def test_build_gemma4_e2b_ptq_config_follows_hf_text_and_model_scopes(self):
+        cfg = build_gemma4_e2b_ptq_config(
+            num_text_layers=2,
+            num_vision_layers=1,
+            linear_weight=affine(DType.uint(4)),
+            embedding_weight=affine(DType.uint(8)),
+            lm_head_weight=affine(DType.uint(8)),
+            vision_patch_embed_weight=affine(DType.uint(8)),
+            norm_weight=affine(DType.uint(4)),
+            strict_wrap=False,
+        )
+
+        self.assertFalse(cfg.strict_wrap)
+
+        # Direct Gemma4TextModel path.
+        self.assertEqual(
+            cfg.overrides["embed_tokens"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(8),
+        )
+        self.assertEqual(
+            cfg.overrides["layers"]["1"]["self_attn"]["q_proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["layers"]["1"]["self_attn"]["q_norm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["norm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+
+        # Gemma4ForCausalLM path: model is Gemma4TextModel.
+        self.assertEqual(
+            cfg.overrides["model"]["embed_tokens"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(8),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["layers"]["1"]["mlp"]["up_proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+
+        # Direct Gemma4Model path: language_model is Gemma4TextModel.
+        self.assertEqual(
+            cfg.overrides["language_model"]["layers"]["0"]["self_attn"]["o_proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["vision_tower"]["patch_embedder"]["input_proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(8),
+        )
+
+        # Gemma4ForConditionalGeneration path: model is Gemma4Model.
+        self.assertEqual(
+            cfg.overrides["model"]["language_model"]["layers"]["0"]["self_attn"]["k_proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["vision_tower"]["encoder"]["layers"]["0"]["mlp"]["down_proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["model"]["embed_vision"]["embedding_projection"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+        self.assertEqual(
+            cfg.overrides["lm_head"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(8),
+        )
 
 
 if __name__ == "__main__":
