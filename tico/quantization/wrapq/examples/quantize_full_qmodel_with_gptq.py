@@ -76,6 +76,8 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.quantizer import PTQQuantizer
+from tico.quantization.config.ptq import PTQConfig
 
 from tico.utils.utils import SuppressWarning
 
@@ -879,6 +881,7 @@ def save_layers_to(
                         },
                     )
             cm.save(save_path)
+        break
 
     # The runtime only needs logits for one token:
     #   - the last real token after prefill
@@ -1429,17 +1432,19 @@ def main():
     configure_max_position_embeddings(model, args)
 
     dataset_test = load_eval_dataset(args)
-    evaluate_original_model(model, tokenizer, dataset_test, args, device)
+    # evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
     calib_inputs = build_calibration_inputs(model, tokenizer, args, device)
 
-    model = apply_spinquant(model, args)
-    model = apply_cle(model, args)
-    model = apply_gptq(model, calib_inputs, args)
+    # model = apply_spinquant(model, args)
+    # model = apply_cle(model, args)
+    # model = apply_gptq(model, calib_inputs, args)
 
-    q_m = quantize_using_PTQ(model, calib_inputs, args)
+    # q_m = quantize_using_PTQ(model, calib_inputs, args)
+    quantizer = PTQQuantizer(PTQConfig())
+    q_m = quantizer.wrapper.wrap_supported(model, PTQConfig())
 
-    evaluate(q_m, tokenizer, dataset_test, args)
+    # evaluate(q_m, tokenizer, dataset_test, args)
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args)
 
 
