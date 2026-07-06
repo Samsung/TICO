@@ -139,6 +139,47 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         qattn.freeze_qparams()
         self.assertIs(qattn._mode, Mode.QUANT)
 
+    def test_default_attention_profile_is_unrolled(self):
+        """Verify that the default profile keeps the NPU-export-friendly layout."""
+        qattn = QuantQwen3VLTextAttention(self.fp_attn)
+
+        self.assertEqual(qattn.attn_options.layout, "unrolled")
+        self.assertEqual(qattn.attn_options.scale_fusion, "k_norm")
+
+    def test_reference_eval_profile_uses_batched_attention(self):
+        """Verify that the reference profile selects the HF-like batched path."""
+        cfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
+        qattn = QuantQwen3VLTextAttention(self.fp_attn, qcfg=cfg)
+
+        self.assertEqual(qattn.attn_options.layout, "batched")
+        self.assertEqual(qattn.attn_options.scale_fusion, "none")
+
+        x = torch.randn(2, 5, self.hidden_size)
+        pos = self._rand_rope(2, 5)
+        with torch.no_grad():
+            out, attn_weights = qattn(x, pos, attention_mask=None)
+
+        self.assertEqual(out.shape, (2, 5, self.hidden_size))
+        self.assertEqual(attn_weights.shape, (2, self.num_heads, 5, 5))
+
+    def test_batched_layout_matches_unrolled_layout_without_quantization(self):
+        """Compare batched and unrolled layouts before fake quantization is enabled."""
+        torch.manual_seed(11)
+        unrolled = QuantQwen3VLTextAttention(self.fp_attn)
+        cfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
+        batched = QuantQwen3VLTextAttention(self.fp_attn, qcfg=cfg)
+
+        x = torch.randn(2, 5, self.hidden_size)
+        pos = self._rand_rope(2, 5)
+        with torch.no_grad():
+            out_unrolled, attn_unrolled = unrolled(x, pos, attention_mask=None)
+            out_batched, attn_batched = batched(x, pos, attention_mask=None)
+
+        self.assertTrue(torch.allclose(out_unrolled, out_batched, rtol=1e-4, atol=1e-5))
+        self.assertTrue(
+            torch.allclose(attn_unrolled, attn_batched, rtol=1e-4, atol=1e-5)
+        )
+
     def test_forward_diff(self):
         qattn = QuantQwen3VLTextAttention(self.fp_attn)
         qattn.enable_calibration()

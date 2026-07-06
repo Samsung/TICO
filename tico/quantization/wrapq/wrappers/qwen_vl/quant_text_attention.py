@@ -19,6 +19,9 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.qwen3_vl_attention import (
+    get_qwen3_vl_text_attention_options,
+)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -33,6 +36,15 @@ CacheOutputMode = Literal["present", "delta"]
     "transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention",
 )
 class QuantQwen3VLTextAttention(QuantModuleBase):
+    """
+    Quantized Qwen3-VL text attention wrapper with selectable attention layout.
+
+    The default `npu_export` profile preserves the existing per-KV-head
+    unrolled graph for NPU export. Set `PTQConfig.model_args["profile"]` to
+    "reference_eval" or pass `model_args["attention"]` overrides to run a
+    Hugging Face-like batched attention graph for experiments.
+    """
+
     def __init__(
         self,
         fp_attn: nn.Module,
@@ -41,6 +53,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
+
+        self.attn_options = get_qwen3_vl_text_attention_options(self.qcfg)
 
         cfg = fp_attn.config
         self.config = cfg
@@ -52,7 +66,14 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         self.head_dim = getattr(
             cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads
         )
-        self.kv_rep = cfg.num_attention_heads // cfg.num_key_value_heads
+        self.num_heads = cfg.num_attention_heads
+        self.num_kv_heads = cfg.num_key_value_heads
+        self.kv_rep = self.num_heads // self.num_kv_heads
+
+        # Constant scale (1/sqrt(d)).
+        self.attn_scale = torch.tensor(
+            float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
+        )
 
         # --- Wrap projection + norms via PTQWrapper --------------------------
         q_cfg = qcfg.child("q_proj") if qcfg else None
@@ -90,13 +111,21 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             fp_name=join_name(fp_name, "k_norm"),
         )
 
-        # Constant scale (1/sqrt(d)).
-        scale_t = torch.tensor(
-            float(getattr(fp_attn, "scaling", self.head_dim**-0.5))
-        )
-        # Merge scale_t to k_norm, otherwise it would need to be applied to logits.
-        with torch.no_grad():
-            self.k_norm.wrapped.module.weight.mul_(scale_t)
+        if self.attn_options.scale_fusion == "k_norm":
+            # Merge the scale into k_norm, otherwise it must be applied to logits.
+            with torch.no_grad():
+                weight = getattr(self.k_norm.wrapped.module, "weight", None)
+                if weight is None:
+                    raise RuntimeError(
+                        "Qwen3-VL k_norm scale fusion requires a weight parameter."
+                    )
+                weight.mul_(
+                    self.attn_scale.to(device=weight.device, dtype=weight.dtype)
+                )
+        elif self.attn_options.scale_fusion != "none":
+            raise RuntimeError(
+                f"Invalid scale fusion option: {self.attn_options.scale_fusion!r}"
+            )
 
         mk = self._make_obs
         self.obs_hidden = mk("hidden")
@@ -127,6 +156,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
 
         # Masking and attention math
         self.obs_causal_mask = mk("causal_mask")
+        self.obs_logits_raw = mk("logits_raw")
+        self.obs_scale = mk("scale")
         self.obs_logits = mk("logits")
         self.obs_mask_add = mk("mask_add")
         self.obs_softmax = mk("softmax")
@@ -151,7 +182,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
 
-    def _rot(self, t, o_x1, o_x2, o_neg, o_cat):
+    def _rot(self, t: torch.Tensor, o_x1, o_x2, o_neg, o_cat) -> torch.Tensor:
         """Return rotate_half(t) as [-x2, x1] along the last dimension."""
         x1, x2 = torch.chunk(t, 2, dim=-1)
         x1 = self._fq(x1, o_x1)
@@ -159,7 +190,14 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         x2n = self._fq(-x2, o_neg)
         return self._fq(torch.cat((x2n, x1), dim=-1), o_cat)
 
-    def _apply_rope(self, q, k, cos, sin, unsqueeze_dim: int = 1):
+    def _apply_rope(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        unsqueeze_dim: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary position embeddings to query and key states."""
         cos_u = cos.unsqueeze(unsqueeze_dim)
         sin_u = sin.unsqueeze(unsqueeze_dim)
@@ -179,6 +217,21 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         k_rot = self._fq(k_cos + k_sin, self.obs_k_rot)
 
         return q_rot, k_rot
+
+    def _apply_attention_scale_if_needed(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply runtime attention scaling when it was not fused into k_norm."""
+        if self.attn_options.scale_fusion == "none":
+            logits = self._fq(logits, self.obs_logits_raw)
+            scale = self.attn_scale.to(device=logits.device, dtype=logits.dtype)
+            scale = self._fq(scale, self.obs_scale)
+            return logits * scale
+
+        if self.attn_options.scale_fusion == "k_norm":
+            return logits
+
+        raise RuntimeError(
+            f"Invalid scale fusion option: {self.attn_options.scale_fusion!r}"
+        )
 
     @staticmethod
     def _normalize_attention_mask_shape(
@@ -530,6 +583,146 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         # object keeps HF-style semantics.
         return past_key_values
 
+    def _forward_unrolled(
+        self,
+        *,
+        q_rot: torch.Tensor,
+        present_k: torch.Tensor,
+        present_v: torch.Tensor,
+        attention_mask: torch.Tensor,
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        past_key_values,
+        use_cache: Optional[bool],
+        cache_output_mode: CacheOutputMode,
+        batch_size: int,
+        q_len: int,
+    ):
+        """Run the NPU-export-friendly per-KV-head attention path."""
+        attn_weights_parts: list[torch.Tensor] = []
+        attn_out_parts: list[torch.Tensor] = []
+
+        n_kv = present_k.size(1)
+        kv_rep = self.kv_rep
+
+        for i in range(n_kv):
+            # (B, 1, K, H)
+            k_i = present_k[:, i : i + 1, :, :]
+            v_i = present_v[:, i : i + 1, :, :]
+
+            # (B, G, S, H) where G=kv_rep
+            h0 = i * kv_rep
+            h1 = (i + 1) * kv_rep
+            q_i = q_rot[:, h0:h1, :, :]
+
+            # logits: (B, G, S, K)
+            logits_i = q_i @ k_i.transpose(-2, -1)
+            logits_i = self._apply_attention_scale_if_needed(logits_i)
+            logits_i = self._fq(logits_i, self.obs_logits)
+
+            # mask add: broadcast on head axis (1 -> G)
+            logits_i = self._fq(logits_i + attention_mask, self.obs_mask_add)
+
+            # softmax
+            attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
+                q_rot.dtype
+            )
+            attn_i = self._fq(attn_i, self.obs_softmax)
+
+            # out: (B, G, S, H)
+            out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
+
+            attn_weights_parts.append(attn_i)
+            attn_out_parts.append(out_i)
+
+        # Concatenate heads back: (B, n_h, S, K) / (B, n_h, S, H)
+        attn_weights = self._fq(
+            torch.cat(attn_weights_parts, dim=1), self.obs_attn_weights
+        )
+        attn_out_h = self._fq(torch.cat(attn_out_parts, dim=1), self.obs_attn_out_h)
+
+        # Attention output
+        attn_out = attn_out_h.transpose(1, 2).reshape(
+            batch_size, q_len, -1
+        )  # (B, S, n_h * H)
+
+        # Final projection
+        out = self.o_proj(attn_out)
+
+        outputs: list[Any] = [out, attn_weights]
+        if use_cache:
+            cache_out = self._finalize_cache_output(
+                past_key_values=past_key_values,
+                new_k=new_k,
+                new_v=new_v,
+                present_k=present_k,
+                present_v=present_v,
+                cache_output_mode=cache_output_mode,
+            )
+            outputs.append(cache_out)
+
+        return tuple(outputs)
+
+    def _forward_batched(
+        self,
+        *,
+        q_rot: torch.Tensor,
+        present_k: torch.Tensor,
+        present_v: torch.Tensor,
+        attention_mask: torch.Tensor,
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        past_key_values,
+        use_cache: Optional[bool],
+        cache_output_mode: CacheOutputMode,
+        batch_size: int,
+        q_len: int,
+    ):
+        """Run a Hugging Face-like batched attention path for reference testing."""
+        if self.kv_rep != 1:
+            present_k_for_attn = present_k.repeat_interleave(self.kv_rep, dim=1)
+            present_v_for_attn = present_v.repeat_interleave(self.kv_rep, dim=1)
+        else:
+            present_k_for_attn = present_k
+            present_v_for_attn = present_v
+
+        logits = q_rot @ present_k_for_attn.transpose(-2, -1)
+        logits = self._apply_attention_scale_if_needed(logits)
+        logits = self._fq(logits, self.obs_logits)
+
+        logits = self._fq(logits + attention_mask, self.obs_mask_add)
+
+        attn_weights = torch.softmax(logits, dim=-1, dtype=torch.float32).to(
+            q_rot.dtype
+        )
+        attn_weights = self._fq(attn_weights, self.obs_softmax)
+        attn_weights = self._fq(attn_weights, self.obs_attn_weights)
+
+        attn_out_h = self._fq(
+            attn_weights @ present_v_for_attn,
+            self.obs_attn_out,
+        )
+        attn_out_h = self._fq(attn_out_h, self.obs_attn_out_h)
+
+        attn_out = (
+            attn_out_h.transpose(1, 2).contiguous().reshape(batch_size, q_len, -1)
+        )
+        out = self.o_proj(attn_out)
+
+        outputs: list[Any] = [out, attn_weights]
+        if use_cache:
+            cache_out = self._finalize_cache_output(
+                past_key_values=past_key_values,
+                new_k=new_k,
+                new_v=new_v,
+                present_k=present_k,
+                present_v=present_v,
+                cache_output_mode=cache_output_mode,
+            )
+            outputs.append(cache_out)
+
+        return tuple(outputs)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -603,66 +796,37 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             device=hidden.device,
         )
 
-        attn_weights_parts = []
-        attn_out_parts = []
-
-        n_kv = present_k.size(1)  # num_key_value_heads
-        kv_rep = self.kv_rep
-
-        # Process one KV-head group at a time to keep the export graph NPU-friendly.
-        for i in range(n_kv):
-            # (B, 1, K, H)
-            k_i = present_k[:, i : i + 1, :, :]
-            v_i = present_v[:, i : i + 1, :, :]
-
-            # (B, G, S, H) where G=kv_rep
-            h0 = i * kv_rep
-            h1 = (i + 1) * kv_rep
-            q_i = q_rot[:, h0:h1, :, :]
-
-            # logits: (B, G, S, K)
-            logits_i = self._fq(q_i @ k_i.transpose(-2, -1), self.obs_logits)
-
-            # mask add: broadcast on head axis (1 -> G)
-            logits_i = self._fq(logits_i + attention_mask, self.obs_mask_add)
-
-            # softmax
-            attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
-                q_rot.dtype
-            )
-            attn_i = self._fq(attn_i, self.obs_softmax)
-
-            # out: (B, G, S, H)
-            out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
-
-            attn_weights_parts.append(attn_i)
-            attn_out_parts.append(out_i)
-
-        # Concatenate heads back: (B, n_h, S, K) / (B, n_h, S, H)
-        attn_weights = self._fq(
-            torch.cat(attn_weights_parts, dim=1), self.obs_attn_weights
-        )
-        attn_out_h = self._fq(torch.cat(attn_out_parts, dim=1), self.obs_attn_out_h)
-
-        # Attention output
-        attn_out = attn_out_h.transpose(1, 2).reshape(B, S, -1)  # (B, S, n_h * H)
-
-        # Final projection
-        out = self.o_proj(attn_out)
-
-        outputs: list[Any] = [out, attn_weights]
-        if use_cache:
-            cache_out = self._finalize_cache_output(
-                past_key_values=past_key_values,
-                new_k=new_k,
-                new_v=new_v,
+        if self.attn_options.layout == "batched":
+            return self._forward_batched(
+                q_rot=q_rot,
                 present_k=present_k,
                 present_v=present_v,
+                attention_mask=attention_mask,
+                new_k=new_k,
+                new_v=new_v,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
                 cache_output_mode=cache_output_mode,
+                batch_size=B,
+                q_len=S,
             )
-            outputs.append(cache_out)
 
-        return tuple(outputs)
+        if self.attn_options.layout == "unrolled":
+            return self._forward_unrolled(
+                q_rot=q_rot,
+                present_k=present_k,
+                present_v=present_v,
+                attention_mask=attention_mask,
+                new_k=new_k,
+                new_v=new_v,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_output_mode=cache_output_mode,
+                batch_size=B,
+                q_len=S,
+            )
+
+        raise RuntimeError(f"Invalid attention layout: {self.attn_options.layout!r}")
 
     def _all_observers(self) -> Iterable:
         yield from (
@@ -684,6 +848,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             self.obs_k_sin,
             self.obs_k_rot,
             self.obs_causal_mask,
+            self.obs_logits_raw,
+            self.obs_scale,
             self.obs_logits,
             self.obs_mask_add,
             self.obs_softmax,
