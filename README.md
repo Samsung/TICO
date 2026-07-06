@@ -1,4 +1,9 @@
-# TICO
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./assets/logo/banner/tico-banner-dark.png">
+    <img src="./assets/logo/banner/tico-banner-light.png" alt="TICO — Torch IR to Circle" width="640">
+  </picture>
+</p>
 
 _TICO_ (**T**orch **I**R to **C**ircle [ONE](https://github.com/Samsung/ONE)) is a Python
 library that converts PyTorch modules into Circle models — a lightweight and efficient
