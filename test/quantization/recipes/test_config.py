@@ -30,8 +30,8 @@ from tico.quantization.recipes.config import (
 
 
 class TestRecipeConfig(unittest.TestCase):
-    def test_load_recipe_config_applies_nested_and_list_overrides(self):
-        """Recipe config loading should support dotted paths and list indices."""
+    def test_load_recipe_config_applies_nested_list_and_named_overrides(self):
+        """Recipe config loading should support dotted paths and list item names."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "recipe.yaml"
             config_path.write_text(
@@ -57,8 +57,8 @@ evaluation:
                 overrides=[
                     "model.name_or_path=new-model",
                     "runtime.device=cpu",
-                    "pipeline.0.enabled=false",
-                    "pipeline.1.linear_weight_bits=4",
+                    "pipeline.gptq.enabled=false",
+                    "pipeline.ptq.linear_weight_bits=4",
                     "evaluation.enabled=true",
                     "created.items.0.name=first",
                     "created.items.1.name=second",
@@ -111,18 +111,46 @@ evaluation:
         with self.assertRaises(ValueError):
             parse_override("runtime.device")
 
-    def test_set_by_path_requires_list_index_when_current_value_is_list(self):
-        """List traversal should reject non-numeric path segments."""
-        cfg: Config = {"pipeline": []}
+    def test_set_by_path_supports_named_list_items(self):
+        """List traversal should support unique mapping items addressed by name."""
+        cfg: Config = {
+            "pipeline": [
+                {"name": "gptq", "enabled": True},
+                {"name": "ptq", "enabled": True},
+            ]
+        }
 
-        with self.assertRaises(TypeError):
-            set_by_path(cfg, ["pipeline", "enabled"], False)
+        set_by_path(cfg, ["pipeline", "gptq", "mse"], "mse")
+        set_by_path(cfg, ["pipeline", "ptq", "linear_weight"], "uint4")
+
+        self.assertEqual(cfg["pipeline"][0]["mse"], "mse")
+        self.assertEqual(cfg["pipeline"][1]["linear_weight"], "uint4")
+
+    def test_set_by_path_rejects_missing_named_list_item(self):
+        """Named list traversal should fail when no item has the requested name."""
+        cfg: Config = {"pipeline": [{"name": "ptq"}]}
+
+        with self.assertRaises(KeyError):
+            set_by_path(cfg, ["pipeline", "gptq", "enabled"], False)
+
+    def test_set_by_path_rejects_ambiguous_named_list_item(self):
+        """Named list traversal should reject duplicate item names."""
+        cfg: Config = {
+            "pipeline": [
+                {"name": "ptq", "enabled": True},
+                {"name": "ptq", "enabled": False},
+            ]
+        }
+
+        with self.assertRaises(ValueError):
+            set_by_path(cfg, ["pipeline", "ptq", "enabled"], False)
 
     def test_get_by_path_returns_default_for_missing_values(self):
         """Nested path lookup should return the provided default when traversal fails."""
         cfg: Config = {"pipeline": [{"name": "ptq"}]}
 
         self.assertEqual(get_by_path(cfg, "pipeline.0.name"), "ptq")
+        self.assertEqual(get_by_path(cfg, "pipeline.ptq.name"), "ptq")
         self.assertEqual(get_by_path(cfg, "pipeline.1.name", "missing"), "missing")
         self.assertEqual(get_by_path(cfg, "pipeline.name", "missing"), "missing")
 
@@ -134,6 +162,26 @@ evaluation:
 
         self.assertEqual(cfg["runtime"]["device"], "cpu")
         self.assertEqual(cfg["pipeline"][0]["name"], "ptq")
+
+    def test_apply_overrides_supports_named_list_items(self):
+        """Applying overrides should support named list item traversal."""
+        cfg: Config = {
+            "pipeline": [
+                {"name": "gptq", "mse": None},
+                {"name": "ptq", "lm_head_weight": "uint8"},
+            ]
+        }
+
+        apply_overrides(
+            cfg,
+            [
+                "pipeline.gptq.mse=mse",
+                "pipeline.ptq.lm_head_weight=uint4",
+            ],
+        )
+
+        self.assertEqual(cfg["pipeline"][0]["mse"], "mse")
+        self.assertEqual(cfg["pipeline"][1]["lm_head_weight"], "uint4")
 
     def test_save_effective_config_serializes_non_yaml_values(self):
         """Effective config saving should serialize tuples and non-plain values."""

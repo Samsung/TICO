@@ -82,7 +82,9 @@ def to_plain_data(value: Any) -> Any:
 def apply_overrides(cfg: Any, overrides: Iterable[str]) -> None:
     """Apply overrides of the form ``a.b.c=value``.
 
-    List indices are supported, e.g. ``pipeline.0.enabled=false``.
+    List indices are supported, e.g. ``pipeline.0.enabled=false``. Lists whose
+    items are mappings with a ``name`` field can also be addressed by name, e.g.
+    ``pipeline.gptq.mse=mse``.
     """
     for raw in overrides:
         path, value = parse_override(raw)
@@ -123,24 +125,105 @@ def _is_index(part: str) -> bool:
     return part.isdigit()
 
 
+def _format_location(path: Sequence[str]) -> str:
+    """Return a readable dotted path for diagnostics."""
+    return ".".join(path) if path else "<root>"
+
+
+def _available_item_names(items: Sequence[Any]) -> list[str]:
+    """Return stringified names from mapping items in a list."""
+    names: list[str] = []
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        if "name" not in item:
+            continue
+        names.append(str(item["name"]))
+    return names
+
+
+def _find_named_list_item(
+    items: list[Any],
+    name: str,
+    *,
+    location: Sequence[str],
+) -> tuple[int, Mapping[str, Any]]:
+    """Find a unique mapping item whose ``name`` field matches ``name``."""
+    matches: list[tuple[int, Mapping[str, Any]]] = []
+    for idx, item in enumerate(items):
+        if isinstance(item, Mapping) and item.get("name") == name:
+            matches.append((idx, item))
+
+    loc = _format_location(location)
+    if not matches:
+        available = _available_item_names(items)
+        suffix = f" Available names: {available}." if available else ""
+        raise KeyError(f"No list item named {name!r} at {loc}.{suffix}")
+
+    if len(matches) > 1:
+        indices = ", ".join(str(idx) for idx, _ in matches)
+        raise ValueError(
+            f"Multiple list items named {name!r} at {loc} "
+            f"(indices: {indices}). Use a numeric index instead."
+        )
+
+    return matches[0]
+
+
+def _find_mutable_named_list_item(
+    items: list[Any],
+    name: str,
+    *,
+    location: Sequence[str],
+) -> tuple[int, MutableMapping[str, Any]]:
+    """Find a unique mutable mapping item whose ``name`` field matches ``name``."""
+    idx, item = _find_named_list_item(items, name, location=location)
+    if not isinstance(item, MutableMapping):
+        loc = _format_location(location)
+        raise TypeError(
+            f"List item named {name!r} at {loc} is not mutable. got {type(item)}"
+        )
+    return idx, item
+
+
 def get_by_path(cfg: Any, path: str, default: Any = None) -> Any:
+    """Read a value from a dotted path.
+
+    Mapping keys, list indices, and named list items are supported. Named list
+    items are mappings with a ``name`` field, so ``pipeline.gptq.enabled`` reads
+    the ``enabled`` field from the unique pipeline stage named ``gptq``.
+    """
     cur: Any = cfg
-    for part in path.split("."):
+    parts = path.split(".")
+    for i, part in enumerate(parts):
         if isinstance(cur, Mapping):
             if part not in cur:
                 return default
             cur = cur[part]
-        elif isinstance(cur, list) and _is_index(part):
-            idx = int(part)
-            if idx >= len(cur):
-                return default
-            cur = cur[idx]
+        elif isinstance(cur, list):
+            if _is_index(part):
+                idx = int(part)
+                if idx >= len(cur):
+                    return default
+                cur = cur[idx]
+            else:
+                try:
+                    _, cur = _find_named_list_item(cur, part, location=parts[:i])
+                except (KeyError, ValueError):
+                    return default
         else:
             return default
     return cur
 
 
 def set_by_path(cfg: Any, path: Sequence[str], value: Any) -> None:
+    """Set a value at a dotted override path.
+
+    Mapping keys and numeric list indices preserve the original override
+    semantics. Existing lists can also be traversed by matching mapping item
+    names, e.g. ``pipeline.gptq.mse=mse`` updates the unique list item with
+    ``name: gptq``.
+    """
     if not path:
         raise ValueError("Override path must not be empty.")
 
@@ -149,16 +232,15 @@ def set_by_path(cfg: Any, path: Sequence[str], value: Any) -> None:
         nxt_part = path[i + 1]
 
         if isinstance(cur, list):
-            if not _is_index(part):
-                raise TypeError(
-                    f"Expected list index at {'.'.join(path[:i+1])}, got {part!r}"
-                )
-            idx = int(part)
-            while len(cur) <= idx:
-                cur.append({} if not _is_index(nxt_part) else [])
-            if cur[idx] is None:
-                cur[idx] = {} if not _is_index(nxt_part) else []
-            cur = cur[idx]
+            if _is_index(part):
+                idx = int(part)
+                while len(cur) <= idx:
+                    cur.append({} if not _is_index(nxt_part) else [])
+                if cur[idx] is None:
+                    cur[idx] = {} if not _is_index(nxt_part) else []
+                cur = cur[idx]
+            else:
+                _, cur = _find_mutable_named_list_item(cur, part, location=path[:i])
             continue
 
         if not isinstance(cur, MutableMapping):
@@ -175,7 +257,11 @@ def set_by_path(cfg: Any, path: Sequence[str], value: Any) -> None:
     leaf = path[-1]
     if isinstance(cur, list):
         if not _is_index(leaf):
-            raise TypeError(f"Expected list index at {'.'.join(path)}, got {leaf!r}")
+            raise TypeError(
+                f"Cannot assign list item {leaf!r} directly at {'.'.join(path)}. "
+                "Use a numeric index or set a named item field such as "
+                f"{'.'.join((*path, '<field>'))}."
+            )
         idx = int(leaf)
         while len(cur) <= idx:
             cur.append(None)
