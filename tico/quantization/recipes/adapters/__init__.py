@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.adapters.llama import LlamaAdapter
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 
@@ -20,6 +21,7 @@ _ADAPTERS = {
     "llama": LlamaAdapter(),
     "qwen3_vl": Qwen3VLAdapter(),
     "qwen3-vl": Qwen3VLAdapter(),
+    "gemma4": Gemma4Adapter(),
 }
 
 

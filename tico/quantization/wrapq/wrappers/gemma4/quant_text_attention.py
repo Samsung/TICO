@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.utils.utils import join_name
+from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -75,7 +75,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self.attention_dropout = float(
             getattr(fp_attn, "attention_dropout", 0.0) or 0.0
         )
-        self.max_seq = int(getattr(self.config, "max_position_embeddings"))
+        self.max_seq = self._resolve_max_seq()
 
         self.q_proj = PTQWrapper(
             fp_attn.q_proj,
@@ -165,6 +165,53 @@ class QuantGemma4TextAttention(QuantModuleBase):
         )
         mask.triu_(1)
         self.register_buffer("causal_mask_template", mask, persistent=False)
+
+    _DEFAULT_STATIC_MAX_SEQ = 2048
+
+    def _resolve_max_seq(self) -> int:
+        """Resolve the causal mask template capacity from config or model_args.
+
+        Resolution precedence:
+        1. ``calibration.seq_len`` (from PTQ config, same as Llama/Qwen adapters)
+        2. ``model_args["text"]["max_seq"]``
+        3. ``model_args["max_seq"]``
+        4. ``min(max_position_embeddings, 2048)``
+
+        This avoids allocating a ``(1, 1, max_position_embeddings, max_position_embeddings)``
+        buffer when the model supports a very large context window (e.g. 128K)
+        but the actual calibration/export sequence length is much smaller.
+        """
+        # Try calibration.seq_len first (same as Llama/Qwen adapters)
+        from tico.quantization.recipes.config import get_by_path
+
+        try:
+            calib_seq_len = get_by_path(self.qcfg, "calibration.seq_len")
+            if calib_seq_len is not None:
+                return int(calib_seq_len)
+        except (KeyError, TypeError):
+            pass
+
+        # Fall back to model_args
+        configured = get_model_arg(self.qcfg, "text", "max_seq", default=None)
+        if configured is None:
+            configured = get_model_arg(self.qcfg, "max_seq", default=None)
+
+        model_capacity = int(getattr(self.config, "max_position_embeddings"))
+        max_seq = (
+            min(model_capacity, self._DEFAULT_STATIC_MAX_SEQ)
+            if configured is None
+            else int(configured)
+        )
+        if max_seq <= 0:
+            raise ValueError(
+                f"Gemma4 attention max_seq must be positive, got {max_seq}."
+            )
+        if max_seq > model_capacity:
+            raise ValueError(
+                "Gemma4 attention max_seq exceeds max_position_embeddings: "
+                f"max_seq={max_seq}, model_capacity={model_capacity}."
+            )
+        return max_seq
 
     @staticmethod
     def _expand_rope_table(table: torch.Tensor) -> torch.Tensor:

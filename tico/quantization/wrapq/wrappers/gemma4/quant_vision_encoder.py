@@ -91,7 +91,9 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         attention_scaling = self.rotary_emb.attention_scaling
 
         max_pos = self.config.position_embedding_size  # e.g. 10240
-        position_indices = torch.arange(max_pos, dtype=torch.float)  # [0..max_pos-1]
+        position_indices = torch.arange(
+            max_pos, dtype=torch.float, device=inv_freq.device
+        )  # [0..max_pos-1]
         # freq_table[pos, i] = inv_freq[i] * pos  — equivalent to the matmul in original forward
         freq_table = torch.outer(
             position_indices, inv_freq

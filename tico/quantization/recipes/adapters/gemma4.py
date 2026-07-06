@@ -23,6 +23,13 @@ from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
+from tico.quantization.recipes.evaluation.llava_bench_judge import (
+    evaluate_and_print_llava_bench_judge,
+)
+from tico.quantization.recipes.evaluation.vlm import (
+    evaluate_llava_bench,
+    print_coco_score_results,
+)
 from tico.quantization.recipes.utils import (
     move_to_device,
     quant_spec_from_config,
@@ -53,7 +60,12 @@ class Gemma4Adapter(ModelAdapter):
         cache_dir = model_cfg.get("cache_dir")
         device_map = runtime_cfg.get("device_map")
         if device_map is None:
-            device_map = "auto" if ctx.device.type != "cpu" else "cpu"
+            if ctx.device.type == "cpu":
+                device_map = "cpu"
+            else:
+                # Use specific device index instead of "auto" to avoid
+                # multi-GPU model split during PTQ calibration.
+                device_map = str(ctx.device)
 
         ctx.processor = AutoProcessor.from_pretrained(
             name,
@@ -174,11 +186,68 @@ class Gemma4Adapter(ModelAdapter):
         return convert(prepared, inplace=True)
 
     def evaluate(self, ctx: RecipeContext) -> None:
-        """Evaluate Gemma4 E2B.
-
-        TODO: Reuse the Qwen3-VL LLaVA-Bench judge evaluator once the adapter is
-        wired into the shared evaluation entry point.
-        """
-        if not ctx.cfg.get("evaluation", {}).get("enabled", False):
+        """Evaluate Gemma4 E2B via LLaVA-Bench judge and other VLM tasks."""
+        eval_cfg = ctx.cfg.get("evaluation", {})
+        if not eval_cfg.get("enabled", False):
             return
-        raise NotImplementedError("Gemma4 E2B evaluation adapter is not wired yet.")
+
+        max_seq_len = eval_cfg.get("max_seq_len")
+        n_samples = int(eval_cfg.get("n_samples", 50))
+
+        llava_bench_cfg = eval_cfg.get("llava_bench", False)
+        if isinstance(llava_bench_cfg, Mapping):
+            if llava_bench_cfg.get("enabled", False):
+                mode = str(llava_bench_cfg.get("mode", "judge")).lower()
+                if mode in {"judge", "llm_judge"}:
+                    evaluate_and_print_llava_bench_judge(
+                        model=ctx.model,
+                        processor=ctx.processor,
+                        device=str(ctx.device),
+                        llava_cfg=llava_bench_cfg,
+                        model_cfg=ctx.cfg.get("model", {}),
+                        runtime_cfg=ctx.cfg.get("runtime", {}),
+                        default_n_samples=n_samples,
+                        default_max_seq_len=max_seq_len,
+                    )
+                elif mode in {"legacy", "coco", "caption"}:
+                    llava_results = evaluate_llava_bench(
+                        model=ctx.model,
+                        processor=ctx.processor,
+                        device=str(ctx.device),
+                        n_samples=int(llava_bench_cfg.get("n_samples", n_samples)),
+                        max_seq_len=llava_bench_cfg.get("max_seq_len", max_seq_len),
+                    )
+                    print_coco_score_results(
+                        "\n=== LLaVA Bench Legacy COCO-style Evaluation ===",
+                        llava_results,
+                    )
+                else:
+                    raise ValueError(
+                        "evaluation.llava_bench.mode must be one of "
+                        "{'judge', 'llm_judge', 'legacy', 'coco', 'caption'}, "
+                        f"got {mode!r}."
+                    )
+        elif llava_bench_cfg:
+            print(
+                "[WARNING] evaluation.llava_bench=true uses the legacy "
+                "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
+                "evaluation.llava_bench.enabled=true, mode=judge."
+            )
+            llava_results = evaluate_llava_bench(
+                model=ctx.model,
+                processor=ctx.processor,
+                device=str(ctx.device),
+                n_samples=n_samples,
+                max_seq_len=max_seq_len,
+            )
+            print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
+
+    def export(self, ctx: RecipeContext) -> None:
+        """Export Gemma4 E2B artifacts.
+
+        TODO: Implement Circle export via the static runtime submodule adapters.
+        """
+        export_cfg = ctx.cfg.get("export", {})
+        if not export_cfg.get("enabled", False):
+            return
+        raise NotImplementedError("Gemma4 E2B export adapter is not wired yet.")

@@ -39,18 +39,30 @@ class Gemma4StaticExportAdapterUtilityTest(unittest.TestCase):
         self.assertTrue(torch.equal(fused[:, 2:4], torch.ones(1, 2, 2)))
         self.assertTrue(torch.equal(fused[:, 4:], torch.zeros(1, 2, 2)))
 
-    def test_fixed_slot_fuse_rejects_wrong_visual_length(self) -> None:
-        """Fixed-slot fusion should reject mismatched visual token counts."""
+    def test_fixed_slot_fuse_warns_on_wrong_visual_length(self) -> None:
+        """Fixed-slot fusion should warn on mismatched visual token counts but still work."""
         text = torch.zeros(1, 6, 2)
         visual = torch.ones(1, 2, 2)
 
-        with self.assertRaisesRegex(ValueError, "Expected 3 visual tokens"):
-            fixed_slot_fuse(
+        # Should warn but not raise - uses actual visual token count
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            fused = fixed_slot_fuse(
                 text,
                 visual,
                 visual_start_idx=2,
-                num_visual_tokens=3,
+                num_visual_tokens=3,  # Mismatch: visual has 2 tokens, config expects 3
             )
+            # Verify warning was issued
+            self.assertEqual(len(w), 1)
+            self.assertIn("Visual token count mismatch", str(w[0].message))
+
+        # Fusion should succeed using actual token count (2)
+        self.assertEqual(tuple(fused.shape), (1, 6, 2))
+        # Visual tokens inserted at positions [2:4] (actual count = 2)
+        self.assertTrue(torch.equal(fused[:, 2:4], torch.ones(1, 2, 2)))
 
     def test_fixed_slot_fuse_rejects_out_of_range_slot(self) -> None:
         """Fixed-slot fusion should reject visual slots that exceed max sequence length."""

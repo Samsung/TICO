@@ -39,6 +39,11 @@ evaluation:
     max_seq_len: 2048
     max_new_tokens: 512
     temperature: 0.0
+    image_max_pixels: 602112  # 768 * 28 * 28
+    image_min_pixels: null
+    resized_height: null
+    resized_width: null
+    visual_token_margin: 256
     candidate_label: gemma4_e2b
     baseline_label: reference
     candidate_answers: null

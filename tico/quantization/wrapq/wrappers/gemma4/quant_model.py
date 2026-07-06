@@ -93,10 +93,12 @@ class QuantGemma4Model(QuantModuleBase):
             qcfg=qcfg.child("embed_vision") if qcfg else None,
             fp_name=join_name(fp_name, "embed_vision"),
         )
-        if getattr(fp_model, "audio_tower", None) is not None:
-            raise NotImplementedError(
-                "Gemma4 E2B skeleton does not implement audio static runtime."
-            )
+        # Leave audio tower in FP (not quantized) - audio is not supported yet.
+        self.audio_tower = (
+            fp_model.audio_tower
+            if getattr(fp_model, "audio_tower", None) is not None
+            else None
+        )
 
         self.visual_start_idx = int(
             self.qcfg.model_args.get("vision", {}).get("visual_start_idx", 0)

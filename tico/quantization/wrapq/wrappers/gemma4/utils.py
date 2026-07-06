@@ -132,9 +132,18 @@ def fixed_slot_fuse(
         )
 
     visual_len = int(visual_embeds.shape[1])
+    # Use actual visual token count - config num_visual_tokens is a hint for
+    # static export, but calibration images may produce different token counts.
     expected_len = visual_len if num_visual_tokens is None else int(num_visual_tokens)
     if visual_len != expected_len:
-        raise ValueError(f"Expected {expected_len} visual tokens, got {visual_len}.")
+        # Warn instead of raising error - use actual token count for flexibility
+        import warnings
+
+        warnings.warn(
+            f"Visual token count mismatch: expected {expected_len}, got {visual_len}. "
+            "Using actual count. If this is unexpected, check image resolution settings."
+        )
+        expected_len = visual_len
 
     end = int(visual_start_idx) + expected_len
     if visual_start_idx < 0 or end > seq_len:
