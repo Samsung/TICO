@@ -21,7 +21,9 @@ from transformers import AutoProcessor
 
 from tico.quantization import convert, prepare
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
+from tico.quantization.config.specs import QuantSpec
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
@@ -42,10 +44,7 @@ from tico.quantization.recipes.evaluation.vlm import (
     print_vqa_results,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
-from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.specs import QuantSpec
 from tico.quantization.recipes.utils import (
-
     move_to_device,
     quant_spec_from_config,
     quant_specs_equivalent,
@@ -210,7 +209,6 @@ class Qwen3VLAdapter(ModelAdapter):
             )
 
         return ptq_config
-
 
     @staticmethod
     def get_num_vision_blocks(model: Any) -> int:
@@ -623,4 +621,3 @@ def _apply_type_based_activation_overrides(
             cls_name = type(module).__name__
             if cls_name in _ATTENTION_CLASS_NAMES:
                 ptq_config.set_override(f"{name}.softmax", softmax_spec)
-

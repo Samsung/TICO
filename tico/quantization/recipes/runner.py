@@ -218,14 +218,10 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     _print_config_row("Activation", _stage_quant_spec(ptq_stage, "activation"))
     linear_activation = _stage_value(ptq_stage, "linear_activation", None)
     if linear_activation is not None:
-        _print_config_row(
-            "Linear activation", _format_quant_spec(linear_activation)
-        )
+        _print_config_row("Linear activation", _format_quant_spec(linear_activation))
     softmax_activation = _stage_value(ptq_stage, "softmax_activation", None)
     if softmax_activation is not None:
-        _print_config_row(
-            "Softmax activation", _format_quant_spec(softmax_activation)
-        )
+        _print_config_row("Softmax activation", _format_quant_spec(softmax_activation))
     _print_config_row("Linear weight", linear_weight)
     if vision_patch_embed_weight is not None:
         _print_config_row("Vision patch weight", vision_patch_embed_weight)
