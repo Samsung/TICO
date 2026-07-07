@@ -18,6 +18,116 @@ import torch
 import torch.nn as nn
 
 
+class Qwen3VLTextAttentionPrefillExportAdapter(nn.Module):
+    """
+    Export adapter for the Qwen3-VL text attention prefill path.
+
+    Input contract:
+        hidden_states:
+            Tensor with shape `(B, S, hidden_size)`.
+        position_embeddings:
+            Tuple `(cos, sin)` where each tensor has shape `(B, S, head_dim)`.
+        attention_mask:
+            Optional additive mask with shape broadcastable to `(B, 1, S, S)`.
+
+    Return contract when `return_kv=True`:
+        `(hidden_states, new_key, new_value)`, where:
+            hidden_states has shape `(B, S, hidden_size)`;
+            new_key and new_value have shape `(B, num_kv_heads, S, head_dim)`.
+
+    Return contract when `return_kv=False`:
+        `hidden_states`.
+    """
+
+    def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
+        super().__init__()
+        self.wrapped = wrapped
+        self.return_kv = return_kv
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        """Run prefill attention and optionally return the newly produced KV tensors."""
+        outputs = self.wrapped(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            past_key_values=None,
+            use_cache=self.return_kv,
+            cache_output_mode="delta",
+            **kwargs,
+        )
+
+        hidden = outputs[0]
+
+        if not self.return_kv:
+            return hidden
+
+        new_k, new_v = outputs[2]
+        return hidden, new_k, new_v
+
+
+class Qwen3VLTextAttentionDecodeExportAdapter(nn.Module):
+    """
+    Export adapter for the Qwen3-VL text attention decode path.
+
+    Input contract:
+        hidden_states:
+            Tensor with shape `(B, 1, hidden_size)`.
+        position_embeddings:
+            Tuple `(cos, sin)` where each tensor has shape `(B, 1, head_dim)`.
+        attention_mask:
+            Optional additive mask with shape broadcastable to `(B, 1, 1, K)`.
+        past_key_values:
+            Tuple `(past_key, past_value)` where each tensor has shape
+            `(B, num_kv_heads, K - 1, head_dim)`.
+
+    Return contract when `return_kv=True`:
+        `(hidden_states, new_key, new_value)`, where new_key and new_value are
+        the KV delta for the current token with shape
+        `(B, num_kv_heads, 1, head_dim)`.
+
+    Return contract when `return_kv=False`:
+        `hidden_states`.
+    """
+
+    def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
+        super().__init__()
+        self.wrapped = wrapped
+        self.return_kv = return_kv
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        **kwargs,
+    ):
+        """Run decode attention and optionally return the current-token KV delta."""
+        outputs = self.wrapped(
+            hidden_states=hidden_states,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=self.return_kv,
+            cache_output_mode="delta",
+            **kwargs,
+        )
+
+        hidden = outputs[0]
+
+        if not self.return_kv:
+            return hidden
+
+        new_k, new_v = outputs[2]
+        return hidden, new_k, new_v
+
+
 class Qwen3VLTextDecoderLayerPrefillExportAdapter(nn.Module):
     """
     Export adapter for the Qwen3-VL text decoder-layer prefill path.

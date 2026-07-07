@@ -18,13 +18,18 @@ from typing import Any, Iterable, Literal, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.config.qwen3_vl_attention import (
     get_qwen3_vl_text_attention_options,
+    is_npu_export_text_attention_options,
 )
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
+    Qwen3VLTextAttentionDecodeExportAdapter,
+    Qwen3VLTextAttentionPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
@@ -863,3 +868,45 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             self.obs_present_key,
             self.obs_present_value,
         )
+
+    def as_export_module(
+        self,
+        mode: ExportMode = "prefill",
+        *,
+        return_kv: bool = True,
+        require_npu_profile: bool = False,
+    ) -> nn.Module:
+        """
+        Return an export adapter for the requested Qwen3-VL text attention mode.
+
+        Parameters
+        ----------
+        mode : ExportMode
+            Export mode, either ``"prefill"`` or ``"decode"``.
+        return_kv : bool
+            Whether the adapter should return the newly produced KV tensors.
+        require_npu_profile : bool
+            If True, reject configurations that do not match the NPU-export
+            profile. This protects export flows from accidentally using the
+            HF-like evaluation graph.
+        """
+        if require_npu_profile and not is_npu_export_text_attention_options(
+            self.attn_options
+        ):
+            raise ValueError(
+                "NPU export requires execution profile 'npu_export'. "
+                "Set PTQConfig.model_args['profile'] "
+                "to 'npu_export'."
+            )
+
+        if mode == "prefill":
+            return Qwen3VLTextAttentionPrefillExportAdapter(
+                self,
+                return_kv=return_kv,
+            )
+        if mode == "decode":
+            return Qwen3VLTextAttentionDecodeExportAdapter(
+                self,
+                return_kv=return_kv,
+            )
+        raise ValueError(f"Unsupported export mode: {mode!r}")
