@@ -310,7 +310,7 @@ class QwenBaseCase(WrapperSmokeCase):
 class QwenTextAttentionBaseCase(QwenBaseCase):
     """Base class for Qwen3-VL text attention smoke cases."""
 
-    tags = ("qwen3_vl", "text", "attention")
+    tags: tuple[str, ...] = ("qwen3_vl", "text", "attention")
     max_mean_abs_diff = 2.0
     seq_len = 8
     export_mode = "prefill"
