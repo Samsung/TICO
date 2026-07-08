@@ -1054,7 +1054,7 @@ def get_sensitivities_info_name(model, dataset, seed, n_samples):
     return name
 
 
-def get_ptq_model_name(model, args):
+def get_ptq_model_name(model, dataset, args):
     """
     Build a filename for a saved PTQ checkpoint.
     """
@@ -1395,7 +1395,7 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if should_save(args, "ptq_checkpoint"):
-        save_path = output_dir / get_ptq_model_name(q_m.wrapped, args)
+        save_path = output_dir / get_ptq_model_name(q_m.wrapped, DATASET_NAME, args)
         print(f"Saving PTQ checkpoint to {save_path.resolve()}")
         torch.save(q_m, save_path)
 
