@@ -79,7 +79,7 @@ pipeline:
 
   - name: ptq
     enabled: true
-    # Print the full model after PTQ prepare.
+    # Print the full model after PTQ.
     print_model: true
     # Global default for ALL activation observers (int16).
     # Observers not explicitly overridden below will use this.

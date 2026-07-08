@@ -280,7 +280,7 @@ class QuantizationRunner:
 
             if stage_cfg.get("name") == "ptq":
                 if stage_cfg.get("print_model", False):
-                    print("=== Model after PTQ prepare ===")
+                    print("=== Model after PTQ ===")
                     print(ctx.model)
 
         print("=== Evaluation ===")
