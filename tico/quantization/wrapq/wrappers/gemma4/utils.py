@@ -87,6 +87,172 @@ def assert_gemma4_e2b_no_moe(model_or_config: Any) -> None:
                 )
 
 
+def _ensure_batched_visual_embeds(visual_embeds: torch.Tensor) -> torch.Tensor:
+    """Return visual embeddings with an explicit batch dimension."""
+    if visual_embeds.dim() == 2:
+        return visual_embeds.unsqueeze(0)
+    return visual_embeds
+
+
+def _normalize_image_mask(
+    image_mask: torch.Tensor,
+    *,
+    batch: int,
+    seq_len: int,
+    device: torch.device,
+) -> torch.BoolTensor:
+    """Return an image placeholder mask with shape ``(B, S)``."""
+    if image_mask.dim() == 3:
+        image_mask = image_mask[..., 0]
+    if image_mask.dim() != 2:
+        raise ValueError(
+            "image_mask must have shape `(B, S)` or `(B, S, D)`, "
+            f"got shape={tuple(image_mask.shape)}."
+        )
+    if tuple(image_mask.shape) != (batch, seq_len):
+        raise ValueError(
+            "image_mask shape is incompatible with text_embeds: "
+            f"mask={tuple(image_mask.shape)}, expected={(batch, seq_len)}."
+        )
+    return image_mask.to(device=device, dtype=torch.bool)
+
+
+def dynamic_placeholder_fuse(
+    text_embeds: torch.Tensor,
+    visual_embeds: torch.Tensor,
+    image_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Fuse visual embeddings into the actual image placeholder positions.
+
+    This eager/PTQ helper follows the original HF-style multimodal semantics:
+    visual embeddings are written to the token positions selected by
+    ``image_mask`` instead of assuming a static contiguous visual-token slot.
+    The helper intentionally uses boolean indexing and is not meant for static
+    export graphs.
+
+    Args:
+        text_embeds: Text embedding tensor with shape ``(B, S, D)``.
+        visual_embeds: Visual embedding tensor with shape ``(B, V, D)`` or
+            ``(V, D)``. A missing batch dimension is inserted.
+        image_mask: Boolean image placeholder mask with shape ``(B, S)`` or
+            ``(B, S, D)``.
+
+    Returns:
+        Fused embedding tensor with the same shape as ``text_embeds``.
+
+    Raises:
+        ValueError: If tensor ranks, batch dimensions, hidden dimensions, or
+            placeholder counts are incompatible.
+    """
+    visual_embeds = _ensure_batched_visual_embeds(visual_embeds)
+
+    if text_embeds.dim() != 3:
+        raise ValueError(
+            f"text_embeds must be rank 3, got shape={tuple(text_embeds.shape)}."
+        )
+    if visual_embeds.dim() != 3:
+        raise ValueError(
+            f"visual_embeds must be rank 3, got shape={tuple(visual_embeds.shape)}."
+        )
+
+    batch, seq_len, hidden = text_embeds.shape
+    if visual_embeds.shape[0] != batch or visual_embeds.shape[2] != hidden:
+        raise ValueError(
+            "visual_embeds shape is incompatible with text_embeds: "
+            f"text={tuple(text_embeds.shape)}, visual={tuple(visual_embeds.shape)}."
+        )
+
+    image_mask = _normalize_image_mask(
+        image_mask,
+        batch=batch,
+        seq_len=seq_len,
+        device=text_embeds.device,
+    )
+    visual_len = int(visual_embeds.shape[1])
+    token_counts = image_mask.sum(dim=1)
+    if not torch.all(token_counts == visual_len):
+        raise ValueError(
+            "Image placeholder count must match visual embedding length for each "
+            "batch row: "
+            f"expected={visual_len}, actual={token_counts.detach().cpu().tolist()}."
+        )
+
+    fused = text_embeds.clone()
+    visual_embeds = visual_embeds.to(device=fused.device, dtype=fused.dtype)
+    for batch_idx in range(batch):
+        fused[batch_idx, image_mask[batch_idx], :] = visual_embeds[batch_idx]
+    return fused
+
+
+def validate_static_visual_layout(
+    image_mask: torch.Tensor,
+    *,
+    visual_start_idx: int,
+    num_visual_tokens: int,
+    seq_len: int | None = None,
+) -> None:
+    """Validate that image placeholders match the static visual-token span.
+
+    This validator is intended for static-runtime calibration and pre-export
+    checks. It verifies that each batch row has image placeholders exactly in
+    the range ``[visual_start_idx, visual_start_idx + num_visual_tokens)`` and
+    nowhere else.
+
+    Args:
+        image_mask: Boolean image placeholder mask with shape ``(B, S)`` or
+            ``(B, S, D)``.
+        visual_start_idx: Start index of the static visual-token span.
+        num_visual_tokens: Expected length of the static visual-token span.
+        seq_len: Optional expected sequence length. When provided, it must match
+            the mask sequence dimension.
+
+    Raises:
+        ValueError: If the static span is invalid or the placeholders do not
+            exactly match the configured span.
+    """
+    if image_mask.dim() == 3:
+        image_mask = image_mask[..., 0]
+    if image_mask.dim() != 2:
+        raise ValueError(
+            "image_mask must have shape `(B, S)` or `(B, S, D)`, "
+            f"got shape={tuple(image_mask.shape)}."
+        )
+
+    mask = image_mask.to(dtype=torch.bool)
+    _, actual_seq_len = mask.shape
+    if seq_len is not None and int(seq_len) != int(actual_seq_len):
+        raise ValueError(
+            "image_mask sequence length does not match the expected sequence "
+            f"length: mask_seq_len={actual_seq_len}, expected={int(seq_len)}."
+        )
+
+    start = int(visual_start_idx)
+    count = int(num_visual_tokens)
+    if start < 0:
+        raise ValueError(f"visual_start_idx must be non-negative, got {start}.")
+    if count < 0:
+        raise ValueError(f"num_visual_tokens must be non-negative, got {count}.")
+    end = start + count
+    if end > actual_seq_len:
+        raise ValueError(
+            "Static visual-token span exceeds the sequence length: "
+            f"visual_start_idx={start}, num_visual_tokens={count}, "
+            f"seq_len={actual_seq_len}."
+        )
+
+    expected = torch.zeros_like(mask, dtype=torch.bool)
+    if count:
+        expected[:, start:end] = True
+    if not torch.equal(mask, expected):
+        actual_counts = mask.sum(dim=1).detach().cpu().tolist()
+        raise ValueError(
+            "Image placeholder layout does not match the configured static "
+            "visual-token span: "
+            f"visual_start_idx={start}, num_visual_tokens={count}, "
+            f"seq_len={actual_seq_len}, actual_counts={actual_counts}."
+        )
+
+
 def fixed_slot_fuse(
     text_embeds: torch.Tensor,
     visual_embeds: torch.Tensor,
@@ -112,8 +278,7 @@ def fixed_slot_fuse(
         Fused embedding tensor with the same shape as ``text_embeds``.
     """
 
-    if visual_embeds.dim() == 2:
-        visual_embeds = visual_embeds.unsqueeze(0)
+    visual_embeds = _ensure_batched_visual_embeds(visual_embeds)
 
     if text_embeds.dim() != 3:
         raise ValueError(
@@ -136,14 +301,10 @@ def fixed_slot_fuse(
     # static export, but calibration images may produce different token counts.
     expected_len = visual_len if num_visual_tokens is None else int(num_visual_tokens)
     if visual_len != expected_len:
-        # Warn instead of raising error - use actual token count for flexibility
-        import warnings
-
-        warnings.warn(
-            f"Visual token count mismatch: expected {expected_len}, got {visual_len}. "
-            "Using actual count. If this is unexpected, check image resolution settings."
+        raise ValueError(
+            "Visual token count mismatch for fixed-slot fusion: "
+            f"expected {expected_len}, got {visual_len}."
         )
-        expected_len = visual_len
 
     end = int(visual_start_idx) + expected_len
     if visual_start_idx < 0 or end > seq_len:

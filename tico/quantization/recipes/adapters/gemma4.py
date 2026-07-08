@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Mapping, Sequence
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping, Sequence
 
 import torch
 import tqdm
@@ -111,19 +112,95 @@ class Gemma4Adapter(ModelAdapter):
         if text_config is not None and hasattr(text_config, "use_cache"):
             text_config.use_cache = False
 
+    @staticmethod
+    def _static_calibration_image_size(
+        cfg: Mapping[str, Any],
+    ) -> tuple[int, int] | None:
+        """Return the configured static image size for calibration samples."""
+        model_args = cfg.get("model_args", {})
+        if not isinstance(model_args, Mapping):
+            return None
+
+        vision_cfg = model_args.get("vision", {})
+        if not isinstance(vision_cfg, Mapping):
+            return None
+
+        height = vision_cfg.get("image_height")
+        width = vision_cfg.get("image_width")
+        if height is None and width is None:
+            return None
+        if height is None or width is None:
+            raise ValueError(
+                "Both model_args.vision.image_height and "
+                "model_args.vision.image_width must be set for static Gemma4 "
+                "calibration resizing."
+            )
+
+        parsed_height = int(height)
+        parsed_width = int(width)
+        if parsed_height <= 0 or parsed_width <= 0:
+            raise ValueError(
+                "Gemma4 static calibration image dimensions must be positive: "
+                f"image_height={parsed_height}, image_width={parsed_width}."
+            )
+        return parsed_height, parsed_width
+
+    @staticmethod
+    @contextmanager
+    def _fixed_image_processor_size(
+        processor: Any,
+        image_size: tuple[int, int] | None,
+    ) -> Iterator[None]:
+        """Temporarily force processor image resizing for static calibration."""
+        if image_size is None:
+            yield
+            return
+
+        image_processor = getattr(processor, "image_processor", None)
+        if image_processor is None:
+            yield
+            return
+
+        height, width = image_size
+        updates: dict[str, Any] = {
+            "do_resize": True,
+            "size": {"height": height, "width": width},
+        }
+        if hasattr(image_processor, "crop_size"):
+            updates["crop_size"] = {"height": height, "width": width}
+
+        originals: dict[str, tuple[bool, Any]] = {}
+        for attr, value in updates.items():
+            originals[attr] = (
+                hasattr(image_processor, attr),
+                getattr(image_processor, attr, None),
+            )
+            setattr(image_processor, attr, value)
+
+        try:
+            yield
+        finally:
+            for attr, (had_attr, original) in originals.items():
+                if had_attr:
+                    setattr(image_processor, attr, original)
+                elif hasattr(image_processor, attr):
+                    delattr(image_processor, attr)
+
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[dict]:
         """Build VLM calibration inputs for fixed image-text PTQ."""
         calib = ctx.cfg.get("calibration", {})
         runtime = ctx.cfg.get("runtime", {})
-        return build_vlm_calibration_inputs(
-            processor=ctx.processor,
-            dataset=calib.get("dataset", "vqav2"),
-            datasets=calib.get("datasets"),
-            n_samples=int(calib.get("n_samples", 128)),
-            split=calib.get("split", "testdev"),
-            max_seq_len=calib.get("seq_len"),
-            seed=int(runtime.get("seed", 42)),
-        )
+        image_size = self._static_calibration_image_size(ctx.cfg)
+        with self._fixed_image_processor_size(ctx.processor, image_size):
+            return build_vlm_calibration_inputs(
+                processor=ctx.processor,
+                dataset=calib.get("dataset", "vqav2"),
+                datasets=calib.get("datasets"),
+                n_samples=int(calib.get("n_samples", 128)),
+                split=calib.get("split", "testdev"),
+                max_seq_len=calib.get("seq_len"),
+                seed=int(runtime.get("seed", 42)),
+            )
 
     def forward_calibration(
         self,

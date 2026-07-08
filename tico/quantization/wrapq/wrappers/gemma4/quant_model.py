@@ -22,7 +22,9 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
+    dynamic_placeholder_fuse,
     fixed_slot_fuse,
+    validate_static_visual_layout,
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -64,6 +66,10 @@ def _get_placeholder_mask(
 class QuantGemma4Model(QuantModuleBase):
     """PTQ wrapper skeleton for image-text Gemma4 E2B."""
 
+    # This boolean flag is used by unit tests to exercise the static fusion path
+    # without running torch.export.
+    force_export: bool = False
+
     def __init__(
         self,
         fp_model: nn.Module,
@@ -100,11 +106,11 @@ class QuantGemma4Model(QuantModuleBase):
             else None
         )
 
-        self.visual_start_idx = int(
-            self.qcfg.model_args.get("vision", {}).get("visual_start_idx", 0)
-        )
-        self.num_visual_tokens = int(
-            self.qcfg.model_args.get("vision", {}).get("num_visual_tokens", 0)
+        vision_args = self.qcfg.model_args.get("vision", {})
+        self.visual_start_idx = int(vision_args.get("visual_start_idx", 0))
+        self.num_visual_tokens = int(vision_args.get("num_visual_tokens", 0))
+        self.validate_static_layout = bool(
+            vision_args.get("validate_static_layout", self.num_visual_tokens > 0)
         )
         self.obs_mm_fusion = self._make_obs("mm_fusion")
         self.obs_per_layer_inputs = self._make_obs("per_layer_inputs")
@@ -123,6 +129,44 @@ class QuantGemma4Model(QuantModuleBase):
         )
         return self.embed_vision(vision_outputs.last_hidden_state)
 
+    def _uses_static_fusion(self) -> bool:
+        """Return whether the current call should use static fixed-slot fusion."""
+        return bool(torch.compiler.is_compiling() or self.force_export)
+
+    def _validate_runtime_multimodal_masks(
+        self,
+        *,
+        image_mask: torch.Tensor,
+        video_mask: torch.Tensor,
+        audio_mask: torch.Tensor,
+        pixel_values: Optional[torch.Tensor],
+    ) -> None:
+        """Reject unsupported or incomplete multimodal eager inputs."""
+        if video_mask.any() or audio_mask.any():
+            raise NotImplementedError(
+                "Gemma4 PTQ wrapper supports image-text inputs only. "
+                "Video and audio placeholder tokens are not supported."
+            )
+        if pixel_values is None and image_mask.any():
+            raise ValueError(
+                "pixel_values must be provided when input_ids contain image placeholders."
+            )
+
+    def _validate_static_image_layout(
+        self,
+        image_mask: torch.Tensor,
+        seq_len: int,
+    ) -> None:
+        """Validate image placeholders against the configured static layout."""
+        if not self.validate_static_layout:
+            return
+        validate_static_visual_layout(
+            image_mask,
+            visual_start_idx=self.visual_start_idx,
+            num_visual_tokens=self.num_visual_tokens,
+            seq_len=seq_len,
+        )
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -134,22 +178,22 @@ class QuantGemma4Model(QuantModuleBase):
         per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        """Run Gemma4 image-text forward with fixed-slot fusion.
+        """Run Gemma4 image-text forward with separated eager and static fusion.
 
         Mirrors ``Gemma4Model.forward`` with the following adaptations for
-        quantized calibration:
+        quantized calibration and static export:
 
-        * Multimodal placeholder token IDs (image / video / audio) are replaced
-          with ``pad_token_id`` before the token-embedding lookup so that the
-          embedding at those positions is a neutral pad embedding (the real
-          features will be fused in later).
-        * The dynamic ``masked_scatter`` used by the original model is replaced
-          by ``fixed_slot_fuse`` which writes image features into a static,
-          pre-determined position range.
+        * Multimodal placeholder token IDs are replaced with ``pad_token_id``
+          before token-embedding lookup so placeholder positions start from a
+          neutral pad embedding.
+        * The eager/PTQ path uses dynamic placeholder-mask fusion, preserving HF
+          multimodal semantics during calibration.
+        * The static/export path uses strict fixed-slot fusion, preserving the
+          static runtime contract and avoiding data-dependent scatter operations.
+        * Optional static-layout validation checks that eager calibration inputs
+          are equivalent to the fixed visual-token span required by export.
         * Per-Layer Embeddings (PLE) are computed when the text config has
-          ``hidden_size_per_layer_input > 0`` (E2B / E4B models).  The PLE
-          token-identity and context-projection paths are both exercised so
-          their observers collect statistics during calibration.
+          ``hidden_size_per_layer_input > 0`` (E2B / E4B models).
         * Video and audio paths are not supported in the v0 scope.
 
         TODO: Implement full HF-compatible output objects after the static layer
@@ -169,16 +213,24 @@ class QuantGemma4Model(QuantModuleBase):
         # QuantGemma4TextModel is the concrete type behind the PTQWrapper.
         text_model = self.language_model.wrapped  # QuantGemma4TextModel
         llm_input_ids: Optional[torch.Tensor] = None
+        image_mask: Optional[torch.BoolTensor] = None
 
         if inputs_embeds is None:
             assert input_ids is not None  # guaranteed by validation above
             # Replace multimodal placeholder token IDs with pad_token_id so
             # the embedding lookup returns a neutral pad embedding at those
-            # positions.  The real features will be fused in by fixed_slot_fuse.
+            # positions.  Image features are fused later.
             llm_input_ids = input_ids.clone()
             image_mask, video_mask, audio_mask = _get_placeholder_mask(
                 input_ids, self.config
             )
+            if not torch.compiler.is_compiling():
+                self._validate_runtime_multimodal_masks(
+                    image_mask=image_mask,
+                    video_mask=video_mask,
+                    audio_mask=audio_mask,
+                    pixel_values=pixel_values,
+                )
             multimodal_mask = image_mask | video_mask | audio_mask
             if multimodal_mask.any():
                 pad_token_id = self.config.text_config.pad_token_id
@@ -241,12 +293,38 @@ class QuantGemma4Model(QuantModuleBase):
             image_embeds = image_embeds.to(
                 device=inputs_embeds.device, dtype=inputs_embeds.dtype
             )
-            inputs_embeds = fixed_slot_fuse(
-                inputs_embeds,
-                image_embeds,
-                visual_start_idx=self.visual_start_idx,
-                num_visual_tokens=self.num_visual_tokens,
-            )
+
+            if self._uses_static_fusion():
+                if (
+                    image_mask is not None
+                    and self.validate_static_layout
+                    and not torch.compiler.is_compiling()
+                ):
+                    self._validate_static_image_layout(
+                        image_mask,
+                        seq_len=int(inputs_embeds.shape[1]),
+                    )
+                inputs_embeds = fixed_slot_fuse(
+                    inputs_embeds,
+                    image_embeds,
+                    visual_start_idx=self.visual_start_idx,
+                    num_visual_tokens=self.num_visual_tokens,
+                )
+            else:
+                if image_mask is None:
+                    raise ValueError(
+                        "input_ids must be provided with pixel_values when running "
+                        "Gemma4 eager/PTQ dynamic placeholder fusion."
+                    )
+                self._validate_static_image_layout(
+                    image_mask,
+                    seq_len=int(inputs_embeds.shape[1]),
+                )
+                inputs_embeds = dynamic_placeholder_fuse(
+                    inputs_embeds,
+                    image_embeds,
+                    image_mask,
+                )
             inputs_embeds = self._fq(inputs_embeds, self.obs_mm_fusion)
 
         # --- Language model -----------------------------------------------
