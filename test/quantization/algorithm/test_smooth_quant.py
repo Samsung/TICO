@@ -49,7 +49,9 @@ class SmoothQuantTest(unittest.TestCase):
         )
 
         # Load data
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        dataset = load_dataset(
+            "Salesforce/wikitext", "wikitext-2-raw-v1", split="train"
+        )
         sample_input = tokenizer(dataset[0]["text"], return_tensors="pt").input_ids
 
         # base

@@ -212,7 +212,7 @@ class LlamaAdapter(ModelAdapter):
             seq_len=seq_len,
             seed=int(runtime.get("seed", 42)),
             device=ctx.device,
-            dataset_name=calib.get("dataset", "wikitext"),
+            dataset_name=calib.get("dataset", "Salesforce/wikitext"),
             dataset_config=calib.get("dataset_config", "wikitext-2-raw-v1"),
             split=calib.get("split", "train"),
         )
@@ -326,7 +326,7 @@ class LlamaAdapter(ModelAdapter):
                 device=str(ctx.device),
                 cache_dir=ctx.cfg.get("model", {}).get("cache_dir"),
                 max_seq_len=max_seq_len,
-                dataset_name=ppl_cfg.get("dataset", "wikitext"),
+                dataset_name=ppl_cfg.get("dataset", "Salesforce/wikitext"),
                 dataset_config=ppl_cfg.get("dataset_config", "wikitext-2-raw-v1"),
                 split=ppl_cfg.get("split", "test"),
             )

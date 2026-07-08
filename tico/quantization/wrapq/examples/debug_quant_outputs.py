@@ -65,7 +65,7 @@ DTYPE_MAP = {
 }
 
 # Hardcoded dataset settings
-DATASET_NAME = "wikitext"
+DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-2-raw-v1"
 TRAIN_SPLIT = "train"
 

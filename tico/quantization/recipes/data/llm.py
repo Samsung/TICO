@@ -27,7 +27,7 @@ def build_wikitext_calibration_inputs(
     seq_len: int,
     seed: int,
     device: torch.device | str,
-    dataset_name: str = "wikitext",
+    dataset_name: str = "Salesforce/wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     split: str = "train",
 ) -> list[torch.Tensor]:

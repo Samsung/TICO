@@ -15,7 +15,7 @@ model_args:
   profile: reference_eval
 
 calibration:
-  dataset: wikitext
+  dataset: Salesforce/wikitext
   dataset_config: wikitext-2-raw-v1
   split: train
   n_samples: 8
@@ -36,7 +36,7 @@ pipeline:
 evaluation:
   enabled: false
   perplexity:
-    dataset: wikitext
+    dataset: Salesforce/wikitext
     dataset_config: wikitext-2-raw-v1
     split: test
   lm_eval_tasks: null

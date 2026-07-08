@@ -136,7 +136,7 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
 
         # SmoothQuant calibration
         sq_model = prepare(fp_model, SmoothQuantConfig(), inplace=True)
-        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
         with torch.inference_mode():
             for i in range(5):
                 ids = tokenizer(ds[i]["text"], return_tensors="pt").input_ids.to(

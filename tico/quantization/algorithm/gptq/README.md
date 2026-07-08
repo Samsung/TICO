@@ -76,7 +76,7 @@ prepare(model, gptq_config, inplace=True)
 
 # 2. Calibration: run as many batches as you like.
 #    Each call caches one batch of first-layer inputs and stops early.
-dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
 for i in range(16):
     input_ids = tokenizer(dataset[i]["text"], return_tensors="pt").input_ids
     if input_ids.numel() == 0:

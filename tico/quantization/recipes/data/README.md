@@ -74,7 +74,7 @@ def build_wikitext_calibration_inputs(
     seq_len: int,
     seed: int,
     device: torch.device | str,
-    dataset_name: str = "wikitext",
+    dataset_name: str = "Salesforce/wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     split: str = "train",
 ) -> list[torch.Tensor]:
@@ -113,10 +113,10 @@ def build_c4_calibration_inputs(
 Then call it from the relevant adapter:
 
 ```python
-dataset = calib.get("dataset", "wikitext")
+dataset = calib.get("dataset", "Salesforce/wikitext")
 if dataset == "c4":
     return build_c4_calibration_inputs(...)
-if dataset == "wikitext":
+if dataset == "Salesforce/wikitext":
     return build_wikitext_calibration_inputs(...)
 raise ValueError(f"Unsupported calibration dataset for llama: {dataset}")
 ```

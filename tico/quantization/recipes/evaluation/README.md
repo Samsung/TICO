@@ -66,7 +66,7 @@ def evaluate_perplexity(
     device: str,
     cache_dir: str | None,
     max_seq_len: int,
-    dataset_name: str = "wikitext",
+    dataset_name: str = "Salesforce/wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     split: str = "test",
 ) -> float:

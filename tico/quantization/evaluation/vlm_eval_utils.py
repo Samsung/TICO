@@ -273,7 +273,7 @@ DATASETS: dict[str, dict[str, Any]] = {
     "wikitext2": {
         "default_split": "test",
         "adapter": get_item_wikitext2,
-        "candidates": ["wikitext"],
+        "candidates": ["Salesforce/wikitext"],
         "config": "wikitext-2-raw-v1",
         "is_text_only": True,
     },

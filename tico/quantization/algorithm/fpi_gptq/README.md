@@ -78,7 +78,7 @@ model.eval()
 prepare(model, FPIGPTQConfig(), inplace=True)
 
 # 2. Calibration: run any number of batches; each stops after the first layer.
-dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
 for i in range(16):
     input_ids = tokenizer(dataset[i]["text"], return_tensors="pt").input_ids
     if input_ids.numel() == 0:

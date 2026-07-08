@@ -30,7 +30,7 @@ tokenizer = AutoTokenizer.from_pretrained("Maykeye/TinyLLama-v0")
 model = AutoModelForCausalLM.from_pretrained("Maykeye/TinyLLama-v0")
 
 # Load data
-dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train")
 sample_input = tokenizer(dataset[0]["text"], return_tensors="pt").input_ids
 
 device = next(model.parameters()).device

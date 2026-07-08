@@ -87,7 +87,7 @@ LLM example:
 
 ```yaml
 calibration:
-  dataset: wikitext
+  dataset: Salesforce/wikitext
   dataset_config: wikitext-2-raw-v1
   split: train
   n_samples: 128
@@ -221,7 +221,7 @@ LLM example:
 evaluation:
   enabled: true
   perplexity:
-    dataset: wikitext
+    dataset: Salesforce/wikitext
     dataset_config: wikitext-2-raw-v1
     split: test
   lm_eval_tasks: null
