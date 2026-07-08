@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI tests for inspect.py wrapper-smoke dispatch."""
+"""CLI tests for inspector.py wrapper-smoke dispatch."""
 
 try:
     from quantization.recipes.optional_dependency_stubs import (
@@ -30,17 +30,17 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import tico.quantization.examples.inspect as inspect_cli
+import tico.quantization.examples.inspector as inspect_cli
 
 
 class TestInspectWrapperSmokeCLI(unittest.TestCase):
     """Validate wrapper-smoke command-line dispatch without running quantization."""
 
     def test_wrapper_smoke_dispatches_single_case(self):
-        """inspect.py should route wrapper-smoke arguments to the shared runner."""
+        """inspector.py should route wrapper-smoke arguments to the shared runner."""
         calls = {}
         argv = [
-            "inspect.py",
+            "inspector.py",
             "--mode",
             "wrapper-smoke",
             "--config",
@@ -87,7 +87,7 @@ class TestInspectWrapperSmokeCLI(unittest.TestCase):
     def test_wrapper_smoke_list_cases_does_not_require_config(self):
         """Case listing should not require loading a recipe config."""
         calls: dict[str, bool] = {}
-        argv = ["inspect.py", "--mode", "wrapper-smoke", "--list-cases"]
+        argv = ["inspector.py", "--mode", "wrapper-smoke", "--list-cases"]
 
         with patch.object(
             inspect_cli,

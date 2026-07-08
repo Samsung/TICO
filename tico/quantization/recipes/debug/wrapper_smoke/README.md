@@ -20,7 +20,7 @@ real runtime contract of the wrapper.
 List available cases:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --mode wrapper-smoke \
   --list-cases
 ```
@@ -28,7 +28,7 @@ python -m tico.quantization.examples.inspect \
 Run one wrapper smoke check:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case llama_attention_prefill
@@ -37,7 +37,7 @@ python -m tico.quantization.examples.inspect \
 Run with Circle export:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case qwen3_vl_vision_attention \
@@ -48,7 +48,7 @@ python -m tico.quantization.examples.inspect \
 Run all registered cases:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case all
@@ -57,7 +57,7 @@ python -m tico.quantization.examples.inspect \
 Fail immediately if parity thresholds are exceeded:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case llama_decoder_layer_prefill \
@@ -67,7 +67,7 @@ python -m tico.quantization.examples.inspect \
 Disable scatter-plot visualization:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
 --config tico/quantization/examples/configs/wrapper_smoke.yaml \
 --mode wrapper-smoke \
 --case nn_linear \
@@ -128,7 +128,7 @@ registry.py
 After registration, the case automatically becomes available through:
 
 ```bash
-python -m tico.quantization.examples.inspect   --mode wrapper-smoke   --case <new_case>
+python -m tico.quantization.examples.inspector   --mode wrapper-smoke   --case <new_case>
 ```
 
 ## Main Features
@@ -142,12 +142,12 @@ Wrapper smoke check supports:
 - Circle export for wrapped modules
 - deterministic synthetic calibration data
 - reusable shared runner infrastructure
-- CLI integration through `examples/inspect.py`
+- CLI integration through `examples/inspector.py`
 
 ## Architecture
 
 ```text
-examples/inspect.py
+examples/inspector.py
     └── wrapper_smoke runner
             ├── registry
             ├── shared utilities

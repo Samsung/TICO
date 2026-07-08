@@ -109,7 +109,7 @@ On top of these, two layers make the toolkit usable end-to-end from the command 
   - The reusable pipeline layer: model-family adapters, algorithm stages, calibration
     data builders, evaluation, export, and debug helpers.
 - Examples ([`quantization/examples/`](./examples/README.md))
-  - Thin CLI entry points (`quantize.py`, `evaluate.py`, `inspect.py`) driven by YAML
+  - Thin CLI entry points (`quantize.py`, `evaluate.py`, `inspector.py`) driven by YAML
     presets in [`examples/configs/`](./examples/configs/README.md).
 
 ## Documentation Map

@@ -28,7 +28,7 @@ from typing import Any
 from unittest.mock import patch
 
 import tico.quantization.examples.evaluate as evaluate_cli
-import tico.quantization.examples.inspect as inspect_cli
+import tico.quantization.examples.inspector as inspect_cli
 import tico.quantization.examples.quantize as quantize_cli
 
 import torch
@@ -148,11 +148,11 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         )
 
     def test_inspect_cli_dispatches_static_llama_runtime(self):
-        """inspect.py should dispatch static LLaMA runtime mode without loading adapters."""
+        """inspector.py should dispatch static LLaMA runtime mode without loading adapters."""
         calls: dict[str, Any] = {}
 
         argv = [
-            "inspect.py",
+            "inspector.py",
             "--config",
             "recipe.yaml",
             "--mode",
@@ -178,11 +178,11 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         self.assertEqual(calls["cfg"].model, "tiny")
 
     def test_inspect_cli_dispatches_tied_embedding_smoke(self):
-        """inspect.py should dispatch tied embedding smoke mode."""
+        """inspector.py should dispatch tied embedding smoke mode."""
         calls: dict[str, Any] = {}
 
         argv = [
-            "inspect.py",
+            "inspector.py",
             "--config",
             "recipe.yaml",
             "--mode",
@@ -208,7 +208,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         self.assertEqual(calls["cfg"].vocab_size, 7)
 
     def test_inspect_cli_trace_mode_loads_adapter_and_runs_trace(self):
-        """inspect.py should run the trace helper for trace mode."""
+        """inspector.py should run the trace helper for trace mode."""
         calls: dict[str, Any] = {}
 
         class FakeAdapter:
@@ -224,7 +224,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
                 return [torch.ones(1, 2)]
 
         argv = [
-            "inspect.py",
+            "inspector.py",
             "--config",
             "recipe.yaml",
             "--mode",

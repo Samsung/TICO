@@ -39,7 +39,7 @@ evaluation tasks, and export targets.
 7. **Developer workflows and public examples are separated.**
    Layer-level parity checks, tensor tracing, breakpoint-heavy debugging, and
    synthetic smoke tools should live under `recipes/debug` and be exposed through
-   `examples/inspect.py`, not as one-off public example scripts.
+   `examples/inspector.py`, not as one-off public example scripts.
 
 ## Directory layout
 
@@ -78,7 +78,7 @@ examples/quantize.py
        └─ save effective_config.yaml
 ```
 
-`evaluate.py` and `inspect.py` reuse the same adapters and config format, but do
+`evaluate.py` and `inspector.py` reuse the same adapters and config format, but do
 not run the full quantization pipeline unless the debug mode explicitly needs a
 prepared/converted model.
 
@@ -91,7 +91,7 @@ prepared/converted model.
 | New calibration dataset or synthetic data generator | `recipes/data/*.py` |
 | New benchmark or metric | `recipes/evaluation/*.py` |
 | New checkpoint, Circle, or artifact output | `recipes/export/*.py` |
-| New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspect.py` |
+| New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspector.py` |
 | New common command-line workflow | Usually a config file under `examples/configs/` |
 | New public top-level user action not covered by quantize/evaluate/inspect | A new script under `examples/`, only after design review |
 

@@ -1,7 +1,7 @@
 # Debug and Inspect Developer Guide
 
 Debug utilities live in `tico.quantization.recipes.debug` and are exposed through
-`tico/quantization/examples/inspect.py`.
+`tico/quantization/examples/inspector.py`.
 
 The purpose of this package is to avoid accumulating one-off debug scripts under
 `examples/`.
@@ -9,13 +9,13 @@ The purpose of this package is to avoid accumulating one-off debug scripts under
 ## Current pattern
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual
 ```
 
-`inspect.py` should stay thin. It should parse arguments, load a config, create a
+`inspector.py` should stay thin. It should parse arguments, load a config, create a
 `RecipeContext`, and dispatch to a reusable debug function.
 
 ## Existing trace mode
@@ -37,7 +37,7 @@ It performs this flow:
 Typical command:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual \
@@ -95,7 +95,7 @@ recipes/debug/<mode>.py
 and expose it through:
 
 ```text
-examples/inspect.py --mode <mode>
+examples/inspector.py --mode <mode>
 ```
 
 ## Step-by-step: adding a new inspect mode
@@ -125,7 +125,7 @@ def run_layer_parity(ctx: RecipeContext, *, module_name: str) -> None:
 
 ### 2. Add an inspect mode
 
-Edit `examples/inspect.py`:
+Edit `examples/inspector.py`:
 
 ```python
 from tico.quantization.recipes.debug.layer_parity import run_layer_parity
@@ -194,7 +194,7 @@ breakpoint()
 Before merging a new debug utility:
 
 - It lives under `recipes/debug/`.
-- It is exposed through `examples/inspect.py` if it is useful to other
+- It is exposed through `examples/inspector.py` if it is useful to other
   developers.
 - It does not require editing source code to choose modules or breakpoints.
 - It prints compact summaries, not full large tensors.

@@ -13,7 +13,7 @@ tico/quantization/examples/
 ├── README.md
 ├── quantize.py          # Run a config-driven quantization pipeline
 ├── evaluate.py          # Evaluate an FP model or saved checkpoint
-├── inspect.py           # Run trace/parity/debug tools
+├── inspector.py           # Run trace/parity/debug tools
 └── configs/             # Reusable recipe presets
 ```
 
@@ -31,7 +31,7 @@ already saved checkpoint. `evaluate.py` does **not** run `pipeline` stages from
 the config. If the config contains enabled stages such as `gptq` or `ptq`, they
 are ignored by `evaluate.py`.
 
-Use `inspect.py` for debug-oriented workflows such as trace, parity, runtime
+Use `inspector.py` for debug-oriented workflows such as trace, parity, runtime
 inspection, and wrapper-level smoke checks.
 
 Summary:
@@ -40,7 +40,7 @@ Summary:
 |---|---:|---:|---:|---:|
 | `quantize.py` | Yes | Yes | If `evaluation.enabled=true` | If `export.enabled=true` |
 | `evaluate.py` | No | No | Yes | No |
-| `inspect.py` | Mode-dependent | Mode-dependent | Debug only | Debug only |
+| `inspector.py` | Mode-dependent | Mode-dependent | Debug only | Debug only |
 
 Common usage patterns:
 
@@ -325,20 +325,20 @@ regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
 ### Inspect / debug
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual
 ```
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/static_llama_runtime.yaml \
   --mode static-llama-runtime
 ```
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/tied_embedding_smoke.yaml \
   --mode tied-embedding-smoke
 ```
@@ -352,7 +352,7 @@ calibration, or fake quantization changes the model output.
 Basic Qwen3-VL trace:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace
 ```
@@ -360,7 +360,7 @@ python -m tico.quantization.examples.inspect \
 Trace only selected module subtrees:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual
@@ -372,7 +372,7 @@ differences. To inspect the numerical error introduced by fake quantization,
 enable conversion explicitly:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace \
   --enable-quantization \
@@ -406,7 +406,7 @@ module.
 List available wrapper smoke cases:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --mode wrapper-smoke \
   --list-cases
 ```
@@ -438,7 +438,7 @@ Available wrapper smoke cases:
 Run one case:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case llama_attention_prefill
@@ -447,7 +447,7 @@ python -m tico.quantization.examples.inspect \
 Run one case with Circle export:
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case llama_attention_prefill \
@@ -652,7 +652,7 @@ Use:
 
 ```bash
 python -m tico.quantization.examples.quantize --config configs/<preset>.yaml
-python -m tico.quantization.examples.inspect --config configs/<preset>.yaml --mode <mode>
+python -m tico.quantization.examples.inspector --config configs/<preset>.yaml --mode <mode>
 ```
 
 ## When a new Python example is allowed
@@ -664,7 +664,7 @@ these commands:
 ```text
 quantize.py
 evaluate.py
-inspect.py
+inspector.py
 ```
 
 Before adding a new example script, check whether the feature should instead be:
@@ -676,7 +676,7 @@ Before adding a new example script, check whether the feature should instead be:
 | New config combination | `examples/configs/` |
 | New benchmark | `recipes/evaluation/` |
 | New export artifact | `recipes/export/` |
-| New debug trace/parity tool | `recipes/debug/` + `inspect.py` mode |
+| New debug trace/parity tool | `recipes/debug/` + `inspector.py` mode |
 
 ## Adding a new model-family example
 
@@ -732,14 +732,14 @@ python -m tico.quantization.examples.quantize \
 ```
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
   --mode trace \
   --set calibration.n_samples=1
 ```
 
 ```bash
-python -m tico.quantization.examples.inspect \
+python -m tico.quantization.examples.inspector \
   --config tico/quantization/examples/configs/wrapper_smoke.yaml \
   --mode wrapper-smoke \
   --case nn_linear \
