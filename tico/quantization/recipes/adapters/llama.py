@@ -390,6 +390,7 @@ class LlamaAdapter(ModelAdapter):
                 max_seq_len=max_seq_len,
                 output_dir=output_dir,
                 prefill_decode=bool(export_cfg.get("prefill_decode", False)),
+                append_prefill_buckets=export_cfg.get("append_prefill_buckets"),
             )
 
 

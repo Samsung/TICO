@@ -23,6 +23,7 @@ from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+    LlamaDecoderLayerAppendPrefillExportAdapter,
     LlamaDecoderLayerDecodeExportAdapter,
     LlamaDecoderLayerPrefillExportAdapter,
 )
@@ -391,4 +392,8 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             return LlamaDecoderLayerPrefillExportAdapter(self, return_kv=return_kv)
         if mode == "decode":
             return LlamaDecoderLayerDecodeExportAdapter(self, return_kv=return_kv)
+        if mode == "append_prefill":
+            return LlamaDecoderLayerAppendPrefillExportAdapter(
+                self, return_kv=return_kv
+            )
         raise ValueError(f"Unsupported export mode: {mode!r}")

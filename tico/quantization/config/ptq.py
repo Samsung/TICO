@@ -32,7 +32,7 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
 
-ExportMode = Literal["prefill", "decode"]
+ExportMode = Literal["prefill", "decode", "append_prefill"]
 OverridePath = Union[str, Iterable[str]]
 OverrideValue = Union[QuantSpec, Mapping[str, Any]]
 _PARAMETER_OBSERVER_NAMES = {"weight", "bias"}

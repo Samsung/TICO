@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 
@@ -51,21 +51,65 @@ def _convert_and_save(
     cm.save(save_path)
 
 
-def _make_random_position_embeddings(batch: int, head_dim: int, device: str):
-    cos = torch.randn(batch, 1, head_dim, device=device)
-    sin = torch.randn(batch, 1, head_dim, device=device)
+def _make_random_position_embeddings(
+    batch: int, seq_len: int, head_dim: int, device: str
+):
+    """Create example RoPE position embeddings with static export shapes."""
+    cos = torch.randn(batch, seq_len, head_dim, device=device)
+    sin = torch.randn(batch, seq_len, head_dim, device=device)
     return cos, sin
 
 
 def _make_random_decode_attn_mask(batch: int, max_seq: int, device: str):
+    """Create an example static additive attention mask for decode export."""
     effective_len = torch.randint(low=1, high=max_seq + 1, size=(1,)).item()
     mask = torch.zeros(batch, 1, max_seq, device=device, dtype=torch.float32)
     if effective_len < max_seq:
-        mask[:, :, effective_len:] = float("-120")
+        mask[:, :, effective_len:] = -120.0
+    return mask
+
+
+def _make_random_append_prefill_attn_mask(
+    batch: int,
+    max_seq: int,
+    append_seq: int,
+    device: str,
+):
+    """Create an example static additive attention mask for append-prefill export."""
+    if append_seq < 1:
+        raise ValueError(f"append_seq must be positive, got {append_seq}.")
+    if append_seq > max_seq:
+        raise ValueError(
+            f"append_seq must be less than or equal to max_seq. "
+            f"Got append_seq={append_seq}, max_seq={max_seq}."
+        )
+
+    max_past_len = max_seq - append_seq
+    if max_past_len > 0:
+        effective_past_len = torch.randint(
+            low=0, high=max_past_len + 1, size=(1,)
+        ).item()
+    else:
+        effective_past_len = 0
+
+    mask = torch.full(
+        (batch, append_seq, max_seq), -120.0, device=device, dtype=torch.float32
+    )
+    if effective_past_len > 0:
+        mask[:, :, :effective_past_len] = 0.0
+
+    tail_start = max_seq - append_seq
+    causal = torch.tril(
+        torch.ones(append_seq, append_seq, device=device, dtype=torch.bool)
+    )
+    tail_mask = torch.zeros(append_seq, append_seq, device=device, dtype=torch.float32)
+    tail_mask = tail_mask.masked_fill(~causal, -120.0)
+    mask[:, :, tail_start:max_seq] = tail_mask.unsqueeze(0).expand(batch, -1, -1)
     return mask
 
 
 def _make_random_decode_batch(model, batch: int, device: str, max_seq: int):
+    """Create example inputs for a static single-token decode graph."""
     hidden_size = model.config.hidden_size
     head_dim = getattr(
         model.config, "head_dim", hidden_size // model.config.num_attention_heads
@@ -73,11 +117,62 @@ def _make_random_decode_batch(model, batch: int, device: str, max_seq: int):
     n_kv = model.config.num_key_value_heads
 
     hidden = torch.randn(batch, 1, hidden_size, device=device)
-    pos = _make_random_position_embeddings(batch, head_dim, device)
+    pos = _make_random_position_embeddings(batch, 1, head_dim, device)
     mask = _make_random_decode_attn_mask(batch, max_seq, device)
     past_k = torch.randn(batch, n_kv, max_seq - 1, head_dim, device=device)
     past_v = torch.randn(batch, n_kv, max_seq - 1, head_dim, device=device)
     return hidden, pos, mask, (past_k, past_v)
+
+
+def _make_random_append_prefill_batch(
+    model,
+    batch: int,
+    device: str,
+    max_seq: int,
+    append_seq: int,
+):
+    """Create example inputs for a static append-prefill graph."""
+    hidden_size = model.config.hidden_size
+    head_dim = getattr(
+        model.config, "head_dim", hidden_size // model.config.num_attention_heads
+    )
+    n_kv = model.config.num_key_value_heads
+
+    if append_seq < 1:
+        raise ValueError(f"append_seq must be positive, got {append_seq}.")
+    if append_seq > max_seq:
+        raise ValueError(
+            f"append_seq must be less than or equal to max_seq. "
+            f"Got append_seq={append_seq}, max_seq={max_seq}."
+        )
+
+    hidden = torch.randn(batch, append_seq, hidden_size, device=device)
+    pos = _make_random_position_embeddings(batch, append_seq, head_dim, device)
+    mask = _make_random_append_prefill_attn_mask(batch, max_seq, append_seq, device)
+    past_len = max_seq - append_seq
+    past_k = torch.randn(batch, n_kv, past_len, head_dim, device=device)
+    past_v = torch.randn(batch, n_kv, past_len, head_dim, device=device)
+    return hidden, pos, mask, (past_k, past_v)
+
+
+def _normalize_append_prefill_buckets(
+    append_prefill_buckets: Sequence[int] | None,
+    max_seq_len: int,
+) -> tuple[int, ...]:
+    """Validate and normalize append-prefill bucket sizes."""
+    if append_prefill_buckets is None:
+        return ()
+
+    buckets = tuple(sorted({int(bucket) for bucket in append_prefill_buckets}))
+    for bucket in buckets:
+        if bucket < 1:
+            raise ValueError(f"append-prefill bucket size must be positive: {bucket}")
+        if bucket > max_seq_len:
+            raise ValueError(
+                f"append-prefill bucket size {bucket} exceeds max_seq_len "
+                f"{max_seq_len}."
+            )
+    return buckets
 
 
 def _is_wrapped_export_model(model: torch.nn.Module) -> bool:
@@ -181,8 +276,20 @@ def export_llama_per_layer(
     max_seq_len: int,
     output_dir: str | Path,
     prefill_decode: bool = False,
+    append_prefill_buckets: Sequence[int] | None = None,
 ) -> None:
-    """Export a floating-point or PTQ-wrapped LLaMA model by stage and layer."""
+    """Export a floating-point or PTQ-wrapped LLaMA model by stage and layer.
+
+    Args:
+        q_model: Floating-point or PTQ-wrapped LLaMA model.
+        max_seq_len: Static attention key length used for exported decoder graphs.
+        output_dir: Directory where Circle artifacts are saved.
+        prefill_decode: If True, export both prefill and single-token decode graphs.
+        append_prefill_buckets: Optional fixed block sizes `Q` for multi-turn
+            append-prefill graphs. Each graph consumes `(B, Q, D)` hidden states,
+            `(B, Q, max_seq_len)` additive masks, `(B, Q, head_dim)` RoPE tensors,
+            and `(B, num_kv_heads, max_seq_len - Q, head_dim)` past KV tensors.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -194,6 +301,9 @@ def export_llama_per_layer(
     qmodel = export_model.wrapped
     layers = qmodel.model.wrapped.layers
     config = qmodel.config
+    append_buckets = _normalize_append_prefill_buckets(
+        append_prefill_buckets, max_seq_len
+    )
 
     export_token_embedding(
         qmodel,
@@ -237,6 +347,22 @@ def export_llama_per_layer(
             )
             _convert_and_save(
                 qlayer.wrapped.as_export_module("decode"),
+                (hidden,),
+                output_dir / _circle_name(layer_name, artifact_tag),
+                kwargs={
+                    "attention_mask": mask,
+                    "past_key_value": past,
+                    "position_embeddings": pos,
+                },
+            )
+
+        for append_seq in append_buckets:
+            layer_name = f"decoder_layer_append_prefill_q{append_seq}_{i}"
+            hidden, pos, mask, past = _make_random_append_prefill_batch(
+                qmodel, 1, "cpu", max_seq_len, append_seq
+            )
+            _convert_and_save(
+                qlayer.wrapped.as_export_module("append_prefill"),
                 (hidden,),
                 output_dir / _circle_name(layer_name, artifact_tag),
                 kwargs={

@@ -43,6 +43,14 @@ class StaticLlamaRuntimeConfig:
     prompt: str = "The capital of France is"
     verify_steps: int = 6
     gen_steps: int = 16
+    run_baseline: bool = True
+    run_multiturn: bool = False
+    multiturn_first_prompt: str = "User: What is the capital of France?\nAssistant:"
+    multiturn_second_turn: str = "\nUser: What country is that city in?\nAssistant:"
+    multiturn_decode_steps_before_append: int = 4
+    multiturn_decode_steps_after_append: int = 4
+    append_bucket: int = 16
+    compare_append_prefill_with_decode_loop: bool = True
 
 
 def _clone_quant_layer(layer: nn.Module) -> nn.Module:
@@ -188,6 +196,43 @@ def _slice_rope(
     return cos, sin
 
 
+def _slice_rope_range(
+    rope_cos: torch.Tensor,
+    rope_sin: torch.Tensor,
+    start: int,
+    seq_len: int,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return RoPE tensors for an absolute position range."""
+    end = start + seq_len
+    if start < 0 or end > rope_cos.size(1):
+        raise ValueError(
+            f"RoPE range [{start}, {end}) exceeds available table length "
+            f"{rope_cos.size(1)}."
+        )
+    cos = rope_cos[:, start:end, :].to(device=device, dtype=dtype)
+    sin = rope_sin[:, start:end, :].to(device=device, dtype=dtype)
+    if batch_size != 1:
+        cos = cos.expand(batch_size, -1, -1).contiguous()
+        sin = sin.expand(batch_size, -1, -1).contiguous()
+    return cos, sin
+
+
+def _compact_valid_tokens(
+    input_ids: torch.LongTensor,
+    valid_token_mask: torch.Tensor,
+) -> torch.LongTensor:
+    """Compact equally sized valid token rows into a dense token tensor."""
+    valid_lengths = valid_token_mask.sum(dim=1)
+    if torch.unique(valid_lengths).numel() != 1:
+        raise ValueError("All batch rows must have the same valid token length.")
+    return input_ids.to(valid_token_mask.device)[valid_token_mask].reshape(
+        input_ids.size(0), int(valid_lengths[0].item())
+    )
+
+
 def _build_prefill_attention_mask(
     valid_token_mask: torch.Tensor,
     device: torch.device,
@@ -216,6 +261,51 @@ def _build_decode_attention_mask(
     if past_len > 0:
         mask[:, :, :past_len] = 0.0
     mask[:, :, max_seq - 1] = 0.0
+    return mask
+
+
+def _build_append_prefill_attention_mask(
+    batch_size: int,
+    past_len: int,
+    actual_len: int,
+    bucket_size: int,
+    max_seq: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    mask_value: float = -120.0,
+) -> torch.Tensor:
+    """Build a static additive mask for one append-prefill bucket."""
+    if actual_len < 1:
+        raise ValueError(f"actual_len must be positive, got {actual_len}.")
+    if actual_len > bucket_size:
+        raise ValueError(
+            f"actual_len must not exceed bucket_size. Got actual_len={actual_len}, "
+            f"bucket_size={bucket_size}."
+        )
+    if past_len > max_seq - bucket_size:
+        raise ValueError(
+            f"past_len={past_len} does not fit an append bucket of size "
+            f"{bucket_size} with max_seq={max_seq}."
+        )
+
+    mask = torch.full(
+        (batch_size, bucket_size, max_seq),
+        mask_value,
+        device=device,
+        dtype=dtype,
+    )
+    if past_len > 0:
+        mask[:, :actual_len, :past_len] = 0.0
+
+    tail_start = max_seq - bucket_size
+    causal = torch.tril(
+        torch.ones(bucket_size, bucket_size, device=device, dtype=torch.bool)
+    )
+    tail_mask = torch.zeros(bucket_size, bucket_size, device=device, dtype=dtype)
+    tail_mask = tail_mask.masked_fill(~causal, mask_value)
+    mask[:, :actual_len, tail_start:max_seq] = (
+        tail_mask[:actual_len, :].unsqueeze(0).expand(batch_size, -1, -1)
+    )
     return mask
 
 
@@ -262,6 +352,12 @@ class StaticLlamaLayerRuntime:
         self.decode_layers = nn.ModuleList(
             [
                 layer.wrapped.as_export_module("decode", return_kv=True)
+                for layer in self.layers
+            ]
+        ).to(self.device)
+        self.append_prefill_layers = nn.ModuleList(
+            [
+                layer.wrapped.as_export_module("append_prefill", return_kv=True)
                 for layer in self.layers
             ]
         ).to(self.device)
@@ -376,10 +472,204 @@ class StaticLlamaLayerRuntime:
         return _gather_last_token_logits(logits, valid)
 
     @torch.no_grad()
+    def append_prefill(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        *,
+        bucket_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        """
+        Append a multi-token user-turn block to the existing external KV cache.
+
+        The method mirrors the proposed static append-prefill NPU contract. The
+        runtime owns the dynamic metadata (`past_len`, actual token count,
+        position selection, mask construction, and compact cache write-back),
+        while every decoder-layer call receives static tensor shapes based on the
+        selected `bucket_size`.
+        """
+        assert (
+            input_ids.dim() == 2
+        ), f"Expected input_ids as (B, T), got {tuple(input_ids.shape)}"
+        assert len(self.layer_caches) == self.num_hidden_layers, "Call prefill() first."
+
+        batch_size = input_ids.size(0)
+        if batch_size != self.layer_caches[0].past_k.size(0):
+            raise ValueError(
+                "append_prefill batch size must match the existing cache batch size. "
+                f"Got input batch={batch_size}, cache batch="
+                f"{self.layer_caches[0].past_k.size(0)}."
+            )
+
+        valid = _normalize_valid_token_mask(
+            input_ids,
+            attention_mask,
+            pad_token_id=self.tokenizer.pad_token_id,
+            device=self.device,
+        )
+        _validate_padding_layout(valid, self.padding_side)
+        compact_input_ids = _compact_valid_tokens(input_ids, valid)
+        actual_len = compact_input_ids.size(1)
+
+        if bucket_size is None:
+            bucket_size = actual_len
+        bucket_size = int(bucket_size)
+        if bucket_size < actual_len:
+            raise ValueError(
+                f"bucket_size must cover all valid tokens. Got bucket_size="
+                f"{bucket_size}, actual_len={actual_len}."
+            )
+        if bucket_size < 1:
+            raise ValueError(f"bucket_size must be positive, got {bucket_size}.")
+
+        start_pos = self.past_len
+        if start_pos + actual_len > self.max_seq - 1:
+            raise ValueError(
+                "Not enough compact KV-cache capacity for append_prefill. "
+                f"past_len={start_pos}, actual_len={actual_len}, "
+                f"cache_capacity={self.max_seq - 1}."
+            )
+        if start_pos + bucket_size > self.max_seq:
+            raise ValueError(
+                "The selected append_prefill bucket does not fit the static "
+                f"attention window. past_len={start_pos}, bucket_size={bucket_size}, "
+                f"max_seq={self.max_seq}."
+            )
+
+        pad_token_id = self.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = 0
+        padded_input_ids = torch.full(
+            (batch_size, bucket_size),
+            int(pad_token_id),
+            device=self.device,
+            dtype=torch.long,
+        )
+        padded_input_ids[:, :actual_len] = compact_input_ids.to(self.device)
+
+        hidden_states = self.embed_tokens(padded_input_ids)
+        runtime_dtype = hidden_states.dtype
+
+        attention_mask_for_append = _build_append_prefill_attention_mask(
+            batch_size=batch_size,
+            past_len=start_pos,
+            actual_len=actual_len,
+            bucket_size=bucket_size,
+            max_seq=self.max_seq,
+            device=self.device,
+            dtype=runtime_dtype,
+        )
+        position_embeddings = _slice_rope_range(
+            self.rope_cos,
+            self.rope_sin,
+            start=start_pos,
+            seq_len=bucket_size,
+            batch_size=batch_size,
+            device=self.device,
+            dtype=runtime_dtype,
+        )
+
+        past_storage_len_for_attn = self.max_seq - bucket_size
+        for layer_idx, layer in enumerate(self.append_prefill_layers):
+            cache = self.layer_caches[layer_idx]
+            past_key_value = (
+                cache.past_k[:, :, :past_storage_len_for_attn, :],
+                cache.past_v[:, :, :past_storage_len_for_attn, :],
+            )
+            out = layer(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask_for_append,
+                past_key_value=past_key_value,
+                position_embeddings=position_embeddings,
+            )
+            if not isinstance(out, tuple) or len(out) != 3:
+                raise RuntimeError(
+                    "Expected append-prefill adapter output as "
+                    "(hidden_states, new_k, new_v)."
+                )
+            hidden_states, new_k, new_v = out
+            cache.past_k[:, :, start_pos : start_pos + actual_len, :] = new_k[
+                :, :, :actual_len, :
+            ]
+            cache.past_v[:, :, start_pos : start_pos + actual_len, :] = new_v[
+                :, :, :actual_len, :
+            ]
+
+        self.past_len = start_pos + actual_len
+        hidden_states = self.final_norm(hidden_states)
+        logits = self.lm_head(hidden_states)
+        return logits[:, actual_len - 1, :]
+
+    @torch.no_grad()
+    def append_prefill_chunked(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        *,
+        bucket_size: int,
+    ) -> torch.Tensor:
+        """Append a token block using one or more static append-prefill buckets."""
+        if bucket_size < 1:
+            raise ValueError(f"bucket_size must be positive, got {bucket_size}.")
+
+        valid = _normalize_valid_token_mask(
+            input_ids,
+            attention_mask,
+            pad_token_id=self.tokenizer.pad_token_id,
+            device=self.device,
+        )
+        _validate_padding_layout(valid, self.padding_side)
+        compact_input_ids = _compact_valid_tokens(input_ids, valid)
+
+        logits = None
+        for start in range(0, compact_input_ids.size(1), bucket_size):
+            chunk = compact_input_ids[:, start : start + bucket_size].to(self.device)
+            chunk_mask = torch.ones_like(chunk, dtype=torch.long, device=self.device)
+            logits = self.append_prefill(
+                chunk,
+                chunk_mask,
+                bucket_size=bucket_size,
+            )
+
+        if logits is None:
+            raise RuntimeError("append_prefill_chunked received no valid token.")
+        return logits
+
+    @torch.no_grad()
+    def append_turn_by_decode_loop(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Append a user turn by repeatedly invoking the single-token decode path.
+
+        This is a correctness fallback for comparing the append-prefill path
+        against the existing decode contract. It is not the preferred serving
+        path because it runs one graph invocation per user token.
+        """
+        valid = _normalize_valid_token_mask(
+            input_ids,
+            attention_mask,
+            pad_token_id=self.tokenizer.pad_token_id,
+            device=self.device,
+        )
+        _validate_padding_layout(valid, self.padding_side)
+        compact_input_ids = _compact_valid_tokens(input_ids, valid)
+        if self.past_len + compact_input_ids.size(1) > self.max_seq - 1:
+            raise ValueError("Not enough KV-cache capacity for decode-loop append.")
+
+        logits = None
+        for i in range(compact_input_ids.size(1)):
+            logits = self.decode_one(compact_input_ids[:, i : i + 1].to(self.device))
+        assert logits is not None
+        return logits
+
+    @torch.no_grad()
     def decode_one(self, input_ids: torch.LongTensor) -> torch.Tensor:
         assert input_ids.dim() == 2 and input_ids.size(1) == 1
         assert len(self.layer_caches) == self.num_hidden_layers, "Call prefill() first."
-        assert self.past_len < self.max_seq
+        assert self.past_len < self.max_seq - 1
 
         batch_size = input_ids.size(0)
         hidden_states = self.embed_tokens(input_ids.to(self.device))
@@ -510,9 +800,9 @@ class StaticLlamaLayerRuntime:
 
             next_token = torch.argmax(logits_rt, dim=-1, keepdim=True)
             generated = torch.cat([generated, next_token], dim=1)
-            if generated.size(1) >= self.max_seq:
+            if generated.size(1) >= self.max_seq - 1:
                 if verbose:
-                    print("Stopped because the static decode window is full.")
+                    print("Stopped because the static decode cache window is full.")
                 break
 
     @staticmethod
@@ -527,6 +817,186 @@ class StaticLlamaLayerRuntime:
         print(f"mean|diff| = {diff.mean().item():.8f}")
         print(f" max|diff| = {diff.max().item():.8f}")
         print(f"PEIR       = {compute_peir(actual, expected) * 100:.6f} %")
+
+
+def _clone_layer_caches(caches: Sequence[LayerCache]) -> list[LayerCache]:
+    """Return detached copies of per-layer KV cache tensors."""
+    return [
+        LayerCache(past_k=cache.past_k.clone(), past_v=cache.past_v.clone())
+        for cache in caches
+    ]
+
+
+def _tokenize_to_device(
+    tokenizer: AutoTokenizer,
+    text: str,
+    *,
+    device: torch.device,
+    add_special_tokens: bool,
+    padding: bool | str = False,
+    truncation: bool = False,
+    max_length: Optional[int] = None,
+) -> tuple[torch.LongTensor, Optional[torch.Tensor]]:
+    """Tokenize text and move token tensors to the requested device."""
+    batch = tokenizer(
+        text,
+        return_tensors="pt",
+        add_special_tokens=add_special_tokens,
+        padding=padding,
+        truncation=truncation,
+        max_length=max_length,
+    )
+    input_ids = batch["input_ids"].to(device)
+    attention_mask = batch.get("attention_mask")
+    if attention_mask is not None:
+        attention_mask = attention_mask.to(device)
+    return input_ids, attention_mask
+
+
+def _run_decode_steps_against_reference(
+    runtime: StaticLlamaLayerRuntime,
+    generated: torch.LongTensor,
+    logits: torch.Tensor,
+    *,
+    steps: int,
+    title_prefix: str,
+    verbose: bool,
+) -> tuple[torch.LongTensor, torch.Tensor]:
+    """Run greedy decode steps and compare each step with the reference model."""
+    for step in range(1, steps + 1):
+        if generated.size(1) >= runtime.max_seq - 1:
+            if verbose:
+                print("Stopped because the static decode cache window is full.")
+            break
+
+        next_token = torch.argmax(logits, dim=-1, keepdim=True)
+        generated = torch.cat([generated, next_token], dim=1)
+        logits = runtime.decode_one(next_token)
+        ref_out = runtime.model(input_ids=generated)
+        logits_ref = ref_out.logits[:, -1, :]
+        runtime._print_diff(
+            f"{title_prefix} step {step}",
+            logits,
+            logits_ref,
+            verbose,
+        )
+
+    return generated, logits
+
+
+def _run_multiturn_append_prefill_check(
+    runtime: StaticLlamaLayerRuntime,
+    cfg: StaticLlamaRuntimeConfig,
+    *,
+    verbose: bool = True,
+) -> torch.LongTensor:
+    """Validate append-prefill in a two-turn static runtime scenario.
+
+    Returns:
+        Compact token IDs containing the full generated multi-turn sequence.
+    """
+    if cfg.append_bucket < 1:
+        raise ValueError(f"append_bucket must be positive, got {cfg.append_bucket}.")
+
+    first_input_ids, first_attention_mask = _tokenize_to_device(
+        runtime.tokenizer,
+        cfg.multiturn_first_prompt,
+        device=runtime.device,
+        add_special_tokens=True,
+        padding="max_length",
+        truncation=True,
+        max_length=runtime.max_seq,
+    )
+
+    runtime.reset_cache()
+    logits = runtime.prefill(first_input_ids, first_attention_mask)
+    first_valid = _normalize_valid_token_mask(
+        first_input_ids,
+        first_attention_mask,
+        pad_token_id=runtime.tokenizer.pad_token_id,
+        device=runtime.device,
+    )
+    generated = _compact_valid_tokens(first_input_ids, first_valid)
+    ref_out = runtime.model(input_ids=generated)
+    runtime._print_diff(
+        "Multi-turn step 0: first prefill last-token logits",
+        logits,
+        ref_out.logits[:, -1, :],
+        verbose,
+    )
+
+    generated, logits = _run_decode_steps_against_reference(
+        runtime,
+        generated,
+        logits,
+        steps=cfg.multiturn_decode_steps_before_append,
+        title_prefix="Multi-turn pre-append decode logits",
+        verbose=verbose,
+    )
+
+    second_input_ids, second_attention_mask = _tokenize_to_device(
+        runtime.tokenizer,
+        cfg.multiturn_second_turn,
+        device=runtime.device,
+        add_special_tokens=False,
+    )
+    second_valid = _normalize_valid_token_mask(
+        second_input_ids,
+        second_attention_mask,
+        pad_token_id=runtime.tokenizer.pad_token_id,
+        device=runtime.device,
+    )
+    compact_second_input_ids = _compact_valid_tokens(second_input_ids, second_valid)
+
+    before_append_caches = _clone_layer_caches(runtime.layer_caches)
+    before_append_past_len = runtime.past_len
+
+    logits = runtime.append_prefill_chunked(
+        second_input_ids,
+        second_attention_mask,
+        bucket_size=cfg.append_bucket,
+    )
+    generated = torch.cat(
+        [generated, compact_second_input_ids.to(runtime.device)], dim=1
+    )
+    ref_out = runtime.model(input_ids=generated)
+    runtime._print_diff(
+        f"Multi-turn append-prefill logits (bucket={cfg.append_bucket})",
+        logits,
+        ref_out.logits[:, -1, :],
+        verbose,
+    )
+
+    if cfg.compare_append_prefill_with_decode_loop:
+        append_prefill_caches = _clone_layer_caches(runtime.layer_caches)
+        append_prefill_past_len = runtime.past_len
+
+        runtime.layer_caches = _clone_layer_caches(before_append_caches)
+        runtime.past_len = before_append_past_len
+        logits_loop = runtime.append_turn_by_decode_loop(
+            second_input_ids,
+            second_attention_mask,
+        )
+        runtime._print_diff(
+            "Multi-turn append-prefill vs decode-loop append logits",
+            logits,
+            logits_loop,
+            verbose,
+        )
+
+        runtime.layer_caches = append_prefill_caches
+        runtime.past_len = append_prefill_past_len
+
+    generated, logits = _run_decode_steps_against_reference(
+        runtime,
+        generated,
+        logits,
+        steps=cfg.multiturn_decode_steps_after_append,
+        title_prefix="Multi-turn post-append decode logits",
+        verbose=verbose,
+    )
+
+    return generated
 
 
 def run_static_llama_runtime(cfg: StaticLlamaRuntimeConfig) -> None:
@@ -551,31 +1021,47 @@ def run_static_llama_runtime(cfg: StaticLlamaRuntimeConfig) -> None:
         padding_side=cfg.padding_side,
     )
 
-    runtime.verify_against_reference(
-        prompt=cfg.prompt,
-        steps=cfg.verify_steps,
-        verbose=True,
-    )
-
-    out_ids = runtime.generate_greedy(
-        prompt=cfg.prompt,
-        max_new_tokens=cfg.gen_steps,
-        eos_token_id=tokenizer.eos_token_id,
-    )
-
-    print("=" * 100)
-    print("Generated text:")
-    print(
-        tokenizer.decode(
-            out_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=False
+    if cfg.run_baseline:
+        runtime.verify_against_reference(
+            prompt=cfg.prompt,
+            steps=cfg.verify_steps,
+            verbose=True,
         )
-    )
+
+        out_ids = runtime.generate_greedy(
+            prompt=cfg.prompt,
+            max_new_tokens=cfg.gen_steps,
+            eos_token_id=tokenizer.eos_token_id,
+        )
+
+        print("=" * 100)
+        print("Generated text:")
+        print(
+            tokenizer.decode(
+                out_ids[0],
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )
+        )
+
+    if cfg.run_multiturn:
+        out_ids = _run_multiturn_append_prefill_check(runtime, cfg, verbose=True)
+        print("=" * 100)
+        print("Multi-turn generated text:")
+        print(
+            tokenizer.decode(
+                out_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )
+        )
 
 
 def _parse_args() -> StaticLlamaRuntimeConfig:
     """Parse command-line arguments for the static runtime smoke test."""
     parser = argparse.ArgumentParser(
-        description="Run the static LLaMA prefill/decode runtime."
+        description=(
+            "Run the static LLaMA prefill/decode runtime, including the optional "
+            "multi-turn append-prefill check."
+        )
     )
     parser.add_argument(
         "--model",
@@ -587,7 +1073,7 @@ def _parse_args() -> StaticLlamaRuntimeConfig:
         "--max-seq",
         type=int,
         default=StaticLlamaRuntimeConfig.max_seq,
-        help="Static sequence length used by prefill and decode.",
+        help="Static sequence length used by prefill, append-prefill, and decode.",
     )
     parser.add_argument(
         "--padding-side",
@@ -606,19 +1092,67 @@ def _parse_args() -> StaticLlamaRuntimeConfig:
         "--prompt",
         type=str,
         default=StaticLlamaRuntimeConfig.prompt,
-        help="Prompt used for verification and greedy generation.",
+        help="Prompt used for baseline verification and greedy generation.",
     )
     parser.add_argument(
         "--verify-steps",
         type=int,
         default=StaticLlamaRuntimeConfig.verify_steps,
-        help="Number of decode steps for reference verification.",
+        help="Number of decode steps for baseline reference verification.",
     )
     parser.add_argument(
         "--gen-steps",
         type=int,
         default=StaticLlamaRuntimeConfig.gen_steps,
-        help="Maximum number of generated tokens.",
+        help="Maximum number of generated tokens in the baseline workflow.",
+    )
+    parser.add_argument(
+        "--run-baseline",
+        action=argparse.BooleanOptionalAction,
+        default=StaticLlamaRuntimeConfig.run_baseline,
+        help="Run baseline reference verification and greedy generation.",
+    )
+    parser.add_argument(
+        "--run-multiturn",
+        action=argparse.BooleanOptionalAction,
+        default=StaticLlamaRuntimeConfig.run_multiturn,
+        help="Run the multi-turn append-prefill validation workflow.",
+    )
+    parser.add_argument(
+        "--multiturn-first-prompt",
+        type=str,
+        default=StaticLlamaRuntimeConfig.multiturn_first_prompt,
+        help="Initial prompt used to populate the multi-turn KV cache.",
+    )
+    parser.add_argument(
+        "--multiturn-second-turn",
+        type=str,
+        default=StaticLlamaRuntimeConfig.multiturn_second_turn,
+        help="Second-turn text appended without special tokens.",
+    )
+    parser.add_argument(
+        "--multiturn-decode-steps-before-append",
+        type=int,
+        default=StaticLlamaRuntimeConfig.multiturn_decode_steps_before_append,
+        help="Greedy decode steps to run before appending the second turn.",
+    )
+    parser.add_argument(
+        "--multiturn-decode-steps-after-append",
+        type=int,
+        default=StaticLlamaRuntimeConfig.multiturn_decode_steps_after_append,
+        help="Greedy decode steps to run after appending the second turn.",
+    )
+    parser.add_argument(
+        "--append-bucket",
+        type=int,
+        default=StaticLlamaRuntimeConfig.append_bucket,
+        help="Static append-prefill bucket size.",
+    )
+    parser.add_argument(
+        "--compare-append-prefill-with-decode-loop",
+        action=argparse.BooleanOptionalAction,
+        default=StaticLlamaRuntimeConfig.compare_append_prefill_with_decode_loop,
+        help="Compare append-prefill logits with the single-token decode-loop path.",
     )
     args = parser.parse_args()
 
@@ -630,6 +1164,18 @@ def _parse_args() -> StaticLlamaRuntimeConfig:
         prompt=args.prompt,
         verify_steps=args.verify_steps,
         gen_steps=args.gen_steps,
+        run_baseline=args.run_baseline,
+        run_multiturn=args.run_multiturn,
+        multiturn_first_prompt=args.multiturn_first_prompt,
+        multiturn_second_turn=args.multiturn_second_turn,
+        multiturn_decode_steps_before_append=(
+            args.multiturn_decode_steps_before_append
+        ),
+        multiturn_decode_steps_after_append=(args.multiturn_decode_steps_after_append),
+        append_bucket=args.append_bucket,
+        compare_append_prefill_with_decode_loop=(
+            args.compare_append_prefill_with_decode_loop
+        ),
     )
 
 
