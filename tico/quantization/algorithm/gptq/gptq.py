@@ -164,6 +164,249 @@ def get_matmul_input_for_convtranspose2d(layer, inp):
     return inp
 
 
+def estimate_max_singular_value(A, n_iter=30):
+    n = A.shape[0]
+    v = torch.randn(n, device=A.device, dtype=A.dtype)
+    for _ in range(n_iter):
+        v = A.T @ (A @ v)
+        v = v / v.norm()
+    return (A @ v).norm().item()
+
+def estimate_sigma_min_lanczos(H, n_iter=15):
+    """Estimate σ_min of SPD H via Lanczos. Only needs H @ v matmuls."""
+    n = H.shape[0]
+    device, dtype = H.device, H.dtype
+
+    # Lanczos with full reorthogonalization
+    V = torch.zeros(n, n_iter, device=device, dtype=dtype)
+    alphas = torch.zeros(n_iter, device=device, dtype=dtype)
+    betas = torch.zeros(n_iter, device=device, dtype=dtype)
+
+    v = torch.randn(n, device=device, dtype=dtype)
+    v = v / v.norm()
+    V[:, 0] = v
+
+    for j in range(n_iter):
+        w = H @ V[:, j]                    # ← the only matmul with H
+        alphas[j] = V[:, j] @ w
+        w = w - alphas[j] * V[:, j]
+        if j > 0:
+            w = w - betas[j] * V[:, j-1]
+        # Reorthogonalize against all previous
+        w = w - V[:, :j+1] @ (V[:, :j+1].T @ w)
+        if j < n_iter - 1:
+            betas[j+1] = w.norm()
+            if betas[j+1] < 1e-12:
+                break
+            V[:, j+1] = w / betas[j+1]
+
+    # Build tridiagonal T and get its eigenvalues
+    m = j + 1
+    T = torch.diag(alphas[:m]) + torch.diag(betas[1:m], 1) + torch.diag(betas[1:m], -1)
+    eigvals = torch.linalg.eigvalsh(T)
+    return eigvals[0].item()  # ≈ σ_min(H)
+
+
+def estimate_sigma_min_randomized_blocked_lanczos(
+    H,
+    block_size: int = 4,
+    n_iter: int = 15,
+    use_sketch: bool = False,
+    sketch_dim: int | None = None,
+):
+    """Estimate σ_min of SPD H via randomized blocked Lanczos.
+
+    Generalises the single-vector Lanczos (:func:`estimate_sigma_min_lanczos`)
+    to a *block* of ``block_size`` vectors and optionally applies a random
+    Gaussian sketch to reduce the effective dimension before running the
+    iteration.
+
+    Advantages over single-vector Lanczos:
+      * BLAS-3 ``H @ V`` matmul (better cache / GPU utilisation).
+      * Captures clustered / degenerate small eigenvalues more reliably.
+      * Random sketching (when ``use_sketch=True``) reduces cost for very
+        large *n*.
+
+    Args:
+        H:          Symmetric positive-definite matrix (n × n).
+        block_size: Number of vectors per block (b).
+        n_iter:     Number of block Lanczos iterations (total Krylov dim = block_size × n_iter).
+        use_sketch: If True, apply a Gaussian random sketch to reduce dimension.
+        sketch_dim: Sketch dimension l (only used when use_sketch=True).
+                    Defaults to min(n, 4 * block_size * n_iter).
+
+    Returns:
+        Estimated σ_min(H) (float).
+    """
+    n = H.shape[0]
+    device, dtype = H.device, H.dtype
+    b = min(block_size, n)
+
+    # ------------------------------------------------------------------ #
+    # Optional random sketching:  project H → S H Sᵀ  (l × l, l ≪ n)
+    # ------------------------------------------------------------------ #
+    if use_sketch:
+        l = sketch_dim if sketch_dim is not None else min(n, 4 * b * n_iter)
+        l = min(l, n)
+        # Gaussian random sketch matrix (l × n)
+        S = torch.randn(l, n, device=device, dtype=dtype) / math.sqrt(l)
+        # Sketched operator: H_s = S (H Sᵀ)   — only matmuls with H
+        HS = H @ S.T                      # (n × l)
+        H_s = S @ HS                      # (l × l)  — symmetric PSD
+        # Symmetrise to kill round-off asymmetry
+        H_s = 0.5 * (H_s + H_s.T)
+        # Recurse on the smaller sketched operator (no further sketching)
+        return estimate_sigma_min_randomized_blocked_lanczos(
+            H_s, block_size=b, n_iter=n_iter, use_sketch=False
+        )
+
+    # ------------------------------------------------------------------ #
+    # Randomized blocked Lanczos with full reorthogonalisation
+    # ------------------------------------------------------------------ #
+    # Random start block → orthonormalise
+    V_block = torch.randn(n, b, device=device, dtype=dtype)
+    V_block, _ = torch.linalg.qr(V_block)          # columns orthonormal
+
+    # Storage for all Krylov basis vectors:  (n × (n_iter * b))
+    m_total = n_iter * b
+    V_all = torch.zeros(n, m_total, device=device, dtype=dtype)
+    V_all[:, :b] = V_block
+
+    # Block tridiagonal pieces
+    #   α[j] : b × b diagonal block   (j = 0 .. n_iter-1)
+    #   β[j] : b × b off-diagonal block (j = 0 .. n_iter-2)
+    alphas = [None] * n_iter
+    betas = [None] * (n_iter - 1) if n_iter > 1 else []
+
+    prev_block = None      # V_{j-1}
+    prev_beta = None       # β_{j-1}
+
+    actual_iter = 0
+    for j in range(n_iter):
+        # W = H @ V_j   — single BLAS-3 matmul
+        W = H @ V_block                              # (n × b)
+
+        # α_j = V_jᵀ W
+        alpha_j = V_block.T @ W                       # (b × b)
+        alpha_j = 0.5 * (alpha_j + alpha_j.T)         # symmetrise
+        alphas[j] = alpha_j
+
+        # W -= V_j @ α_j
+        W -= V_block @ alpha_j
+
+        # W -= V_{j-1} @ β_{j-1}ᵀ
+        if prev_block is not None and prev_beta is not None:
+            W -= prev_block @ prev_beta.T
+
+        # Full reorthogonalisation against ALL previous basis vectors
+        if j > 0:
+            V_prev = V_all[:, : j * b]                # (n × j*b)
+            # Modified Gram-Schmidt (two passes for stability)
+            for _pass in range(2):
+                W -= V_prev @ (V_prev.T @ W)
+
+        # QR of W → V_{j+1}, β_j
+        if j < n_iter - 1:
+            Q, R = torch.linalg.qr(W)                 # Q: (n × b), R: (b × b)
+            # Detect rank deficiency (R has near-zero diagonal)
+            diag_r = torch.diagonal(R)
+            if diag_r.abs().min() < 1e-12:
+                # Block has deflated — stop early
+                actual_iter = j + 1
+                break
+            betas[j] = R[:b, :b]                      # upper-triangular β_j
+            V_all[:, (j + 1) * b : (j + 2) * b] = Q
+            prev_block = V_block
+            prev_beta = betas[j]
+            V_block = Q
+            actual_iter = j + 2
+        else:
+            actual_iter = j + 1
+
+    # ------------------------------------------------------------------ #
+    # Build block-tridiagonal T  (actual_iter * b  ×  actual_iter * b)
+    # and compute its smallest eigenvalue
+    # ------------------------------------------------------------------ #
+    k = actual_iter
+    dim_T = k * b
+    T = torch.zeros(dim_T, dim_T, device=device, dtype=dtype)
+
+    for j in range(k):
+        s = j * b
+        e = s + b
+        T[s:e, s:e] = alphas[j]
+        if j < k - 1:
+            beta = betas[j]
+            # T[j, j+1] = β_j^T  and  T[j+1, j] = β_j  (NOT the other way around)
+            # because T_m = V_m^T H V_m is symmetric and
+            #   (j, j+1) block = V_j^T H V_{j+1} = (V_{j+1}^T H V_j)^T = β_j^T
+            #   (j+1, j) block = V_{j+1}^T H V_j = β_j
+            T[s:e, e:e + b] = beta.T
+            T[e:e + b, s:e] = beta
+
+    eigvals = torch.linalg.eigvalsh(T)
+    # Ritz values can slightly undershoot the true smallest eigenvalue;
+    # clamp to 0 since H is SPD (σ_min ≥ 0).
+    return max(0.0, eigvals[0].item())  # ≈ σ_min(H)
+
+
+def cg(matvec, b, max_iter=50, tol=1e-8):
+    x = torch.zeros_like(b)
+    r = b.clone()
+    p = b.clone()
+    rs_old = (r * r).sum()
+    for _ in range(max_iter):
+        Ap = matvec(p)                    # ← the only matmul
+        alpha = rs_old / (p * Ap).sum()
+        x += alpha * p
+        r -= alpha * Ap
+        rs_new = (r * r).sum()
+        if rs_new.sqrt() < tol:
+            break
+        p = r + (rs_new / rs_old) * p
+        rs_old = rs_new
+    return x
+
+def estimate_min_singular_value(A, max_iter=20, tol=1e-5):
+    """
+    Estimates the minimum singular value of matrix A 
+    using inverse iteration
+    """
+    device = A.device
+    n = A.shape[-1]
+    
+    # Initialize random vector
+    v = torch.randn(n, 1, device=device, dtype=A.dtype)
+    v = v / torch.norm(v)
+    
+    AtA = A.T @ A
+    def AtA_matmul(x):
+        return AtA @ x
+    
+    for _ in range(max_iter):
+        # Solve (A^T A) x = v
+        x = torch.linalg.lstsq(AtA, v).solution
+        #x = cg(AtA_matmul, v, max_iter=100) #slow convergence on ill-conditioned matrices
+        # Power iteration step
+        v_new = x / torch.norm(x)
+        
+        # Check convergence
+        if torch.norm(v_new - v) < tol:
+            break
+        v = v_new
+        
+    # Rayleigh quotient for the eigenvalue of (A^T A)^-1
+    AtA_v = AtA @ v
+    min_eigval = (v.T @ AtA_v).item()
+    return torch.sqrt(torch.tensor(min_eigval))
+
+def estimate_cond(A):
+    s_max = estimate_max_singular_value(A)
+    #s_min = estimate_min_singular_value(A) #slow
+    #s_min = estimate_sigma_min_lanczos(A, n_iter=150)
+    s_min = estimate_sigma_min_randomized_blocked_lanczos(A, block_size=8, n_iter=50)
+    return s_max / s_min
+
 class GPTQ:
     """
     GPTQ quantization class supporting both standard GPTQ and GPTQv2.
@@ -367,6 +610,98 @@ class GPTQ:
         
         self.batch_id += 1
 
+    def _adaptive_percdamp(
+        self,
+        H: torch.Tensor,
+        user_percdamp: float,
+        cond_threshold_good: float,
+        verbose: bool,
+    ) -> float:
+        """Compute adaptive percdamp based on the Hessian condition number.
+
+        Uses a piecewise-linear rule with an iterative binary-search fallback.
+        Falls back to ``user_percdamp`` if the condition number is nan/inf.
+
+        Note: callers should wrap this in a try/except to also fall back to
+        ``user_percdamp`` in case of any exception.
+
+        Args:
+            H:                   Hessian matrix (double precision, pre-damping).
+            user_percdamp:       User-provided damping factor to fall back to.
+            cond_threshold_good: Condition number threshold below which minimal
+                                 damping is used.
+            verbose:             Whether to print diagnostic information.
+
+        Returns:
+            Selected percdamp value.
+        """
+        # Parameters for adaptive percdamp
+        COND_THRESHOLD_GOOD = cond_threshold_good      # Below: use minimal damping
+        COND_THRESHOLD_HIGH = 100000     # Above: use user percdamp
+        COND_TARGET_MAX = COND_THRESHOLD_GOOD          # Maximum allowed condition number after damping
+        MIN_PERCDAMP = 1e-06             # Minimal damping for good matrices
+        MAX_PERCDAMP = 0.5               # Maximum damping for binary search
+
+        # Define diag before use
+        diag = torch.arange(self.columns, device=self.dev)
+        diag_mean = torch.mean(torch.diag(H)).item()
+
+        # Compute condition number of H (before damping)
+        cond_H = estimate_cond(H)
+
+        if math.isnan(cond_H) or math.isinf(cond_H):
+            if verbose:
+                print(
+                    f"adaptive_percdamp: cond_H is {cond_H}, "
+                    f"using user_percdamp={user_percdamp:.6f}"
+                )
+            return user_percdamp
+
+        # Determine initial percdamp using piecewise rule
+        if cond_H > COND_THRESHOLD_HIGH:
+            # Extremely high condition number: use user-provided percdamp
+            percdamp = user_percdamp
+        elif cond_H < COND_THRESHOLD_GOOD:
+            # Good matrices: use minimal damping
+            percdamp = MIN_PERCDAMP
+        else:
+            # Between: linear interpolation between MIN_PERCDAMP and user_percdamp
+            ratio = (cond_H - COND_THRESHOLD_GOOD) / (
+                COND_THRESHOLD_HIGH - COND_THRESHOLD_GOOD
+            )
+            percdamp = MIN_PERCDAMP + (user_percdamp - MIN_PERCDAMP) * ratio
+
+        # Apply damping and verify condition number
+        damp = percdamp * diag_mean
+        H_test = H.clone()
+        H_test[diag, diag] += damp
+        cond_after_damp = estimate_cond(H_test)
+
+        # Binary search fallback if condition number still too high
+        if cond_after_damp > COND_TARGET_MAX:
+            low, high = MIN_PERCDAMP, MAX_PERCDAMP
+            for _ in range(10):  # Max iterations for binary search
+                mid = (low + high) / 2
+                damp_test = mid * diag_mean
+                H_test = H.clone()
+                H_test[diag, diag] += damp_test
+                cond_test = estimate_cond(H_test)
+
+                if cond_test > COND_TARGET_MAX:
+                    low = mid  # Need more damping
+                else:
+                    high = mid  # Can reduce damping
+
+            percdamp = high
+
+        if verbose:
+            print(
+                f"adaptive_percdamp: initial cond={cond_H:.2e}, "
+                f"selected percdamp={percdamp:.6f}"
+            )
+
+        return percdamp
+
     def fasterquant(
         self,
         blocksize=128,
@@ -410,6 +745,7 @@ class GPTQ:
                 self.quantizer.sensitivity = self.quantizer.sensitivity.flatten(1)
 
         W = W.float()
+        user_percdamp = percdamp  # save before adaptive_percdamp may modify it
         tick = time.time()
         if not self.quantizer.ready():
             self.quantizer.find_params(W, weight=True)
@@ -458,64 +794,19 @@ class GPTQ:
             print("condition number init %.2e" % cond_number.item())
         
         # Adaptive percdamp: adjust damping based on Hessian condition number
-        # NEW VARIANT: piecewise linear approach with iterative binary search fallback
         if adaptive_percdamp:
-            # Parameters for adaptive percdamp
-            COND_THRESHOLD_GOOD = cond_threshold_good      # Below: use minimal damping
-            COND_THRESHOLD_HIGH = 100000     # Above: use user percdamp
-            COND_TARGET_MAX = COND_THRESHOLD_GOOD          # Maximum allowed condition number after damping
-            MIN_PERCDAMP = 1e-06             # Minimal damping for good matrices
-            MAX_PERCDAMP = 0.5               # Maximum damping for binary search
-            
-            # Store user-provided percdamp for later use
-            user_percdamp = percdamp
-            
-            # Define diag before use
-            diag = torch.arange(self.columns, device=self.dev)
-            diag_mean = torch.mean(torch.diag(H)).item()
-            
-            # Compute condition number of H (before damping)
-            cond_H = torch.linalg.cond(H)
-            
-            # Determine initial percdamp using piecewise rule
-            if cond_H > COND_THRESHOLD_HIGH:
-                # Extremely high condition number: use user-provided percdamp
+            try:
+                percdamp = self._adaptive_percdamp(
+                    H, user_percdamp, cond_threshold_good, verbose
+                )
+            except Exception as e:
+                if verbose:
+                    print(
+                        f"adaptive_percdamp: exception {e}, "
+                        f"falling back to user_percdamp={user_percdamp:.6f}"
+                    )
                 percdamp = user_percdamp
-            elif cond_H < COND_THRESHOLD_GOOD:
-                # Good matrices: use minimal damping
-                percdamp = MIN_PERCDAMP
-            else:
-                # Between: linear interpolation between MIN_PERCDAMP and user_percdamp
-                # percdamp = MIN_PERCDAMP + (user_percdamp - MIN_PERCDAMP) * (cond - 1000) / (100000 - 1000)
-                ratio = (cond_H - COND_THRESHOLD_GOOD) / (COND_THRESHOLD_HIGH - COND_THRESHOLD_GOOD)
-                percdamp = MIN_PERCDAMP + (user_percdamp - MIN_PERCDAMP) * ratio
-            
-            # Apply damping and verify condition number
-            damp = percdamp * diag_mean
-            H_test = H.clone()
-            H_test[diag, diag] += damp
-            cond_after_damp = torch.linalg.cond(H_test)
-            
-            # Binary search fallback if condition number still too high
-            if cond_after_damp > COND_TARGET_MAX:
-                low, high = MIN_PERCDAMP, MAX_PERCDAMP
-                for _ in range(10):  # Max iterations for binary search
-                    mid = (low + high) / 2
-                    damp_test = mid * diag_mean
-                    H_test = H.clone()
-                    H_test[diag, diag] += damp_test
-                    cond_test = torch.linalg.cond(H_test)
-                    
-                    if cond_test > COND_TARGET_MAX:
-                        low = mid  # Need more damping
-                    else:
-                        high = mid  # Can reduce damping
-                
-                percdamp = high
-            
-            if verbose:
-                print(f"adaptive_percdamp: initial cond={cond_H:.2e}, selected percdamp={percdamp:.6f}")     
-        
+
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
@@ -523,11 +814,28 @@ class GPTQ:
             cond_number = torch.linalg.cond(H)
             print("condition number damp %.2e" % cond_number.item())
             
-        H = torch.linalg.cholesky(H)
-        assert isinstance(H, torch.Tensor)
-        H = torch.cholesky_inverse(H)
-        H = torch.linalg.cholesky(H, upper=True).float()
-        Hinv = H
+        try:
+            H = torch.linalg.cholesky(H)
+            assert isinstance(H, torch.Tensor)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True).float()
+            Hinv = H
+        except torch._C._LinAlgError:
+            if verbose:
+                print(
+                    f"Cholesky failed with percdamp={percdamp:.6f}, "
+                    f"retrying with user_percdamp={user_percdamp:.6f}"
+                )
+            # Undo current damping and apply user_percdamp
+            H[diag, diag] -= damp
+            damp = user_percdamp * torch.mean(torch.diag(H))
+            H[diag, diag] += damp
+            # This will raise if it still fails — no further fallback
+            H = torch.linalg.cholesky(H)
+            assert isinstance(H, torch.Tensor)
+            H = torch.cholesky_inverse(H)
+            H = torch.linalg.cholesky(H, upper=True).float()
+            Hinv = H
         
         # GPTQv2: Compute P correction matrix from dXXT
         P = None

@@ -1240,6 +1240,7 @@ class CalibrationSetCompressor:
         device: Optional[torch.device] = None,
         n_layers_to_use: int = 1,  # Number of decoder layers to extract activations from
         visualize: bool = False,
+        output_dir: Optional[str | pathlib.Path] = None,
     ):
         self.model = model
         self.compress_to_samples = compress_to_samples
@@ -1247,6 +1248,8 @@ class CalibrationSetCompressor:
         self.device = device or next(model.parameters()).device
         self.n_layers_to_use = n_layers_to_use
         self.visualize = visualize
+        self.output_dir = pathlib.Path(output_dir) if output_dir is not None else None
+
         
     def _get_decoder_layers(self) -> list[torch.nn.Module]:
         """
@@ -1558,6 +1561,11 @@ class CalibrationSetCompressor:
             kmeans: Fitted KMeans model
             save_path: Path to save the PNG visualization
         """
+        # Resolve save_path against output_dir when set
+        if self.output_dir is not None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            save_path = pathlib.Path(self.output_dir, save_path)
+
         _, ax = plt.subplots(figsize=(10, 8))
         
         # Plot all points in light gray (simple background)
@@ -2030,45 +2038,141 @@ def evaluate(q_m, tokenizer, dataset_test, args):
    # q_m.wrapped.config.use_cache = prev_use_cache
 
 
-def get_sensitivities_info_name(model, dataset, seed, n_samples):
+def get_sensitivities_info_name(
+    model,
+    dataset,
+    seed,
+    n_samples,
+    *,
+    seq_len: int | None = None,
+    spinquant: bool = False,
+    compressed_n_samples: int | None = None,
+) -> str:
     """
     Build a filename for stored sensitivity calibration results.
+
+    Args:
+        model: Model whose sensitivity was computed.
+        dataset: Short name of the calibration dataset.
+        seed: Random seed used for dataset generation.
+        n_samples: Original number of samples for calibration.
+        seq_len: Calibration sequence length used when generating samples.
+        spinquant: Whether SpinQuant preprocessing was applied before
+            sensitivity computation.  SpinQuant changes model weights, which
+            changes activations and thus sensitivity values.
+        compressed_n_samples: Number of samples actually used after compression
+            (only included when compression was applied).
+
+    Returns:
+        Filename string for the sensitivity results.
     """
     model_name = model.config.name_or_path.replace("/", "_")
 
-    name = (
-        "."
-        + "/sensitivities_for_"
-        + model_name
-        + "_"
-        + dataset
-        + "_"
-        + str(n_samples)
-        + "_"
-        + str(seed)
-        + ".pt"
-    )
+    parts = ["sensitivities_for", model_name, dataset, str(n_samples)]
+
+    if compressed_n_samples is not None and compressed_n_samples < n_samples:
+        parts.append(f"compressed_{compressed_n_samples}")
+
+    if seq_len is not None:
+        parts.append(f"sl{seq_len}")
+
+    if spinquant:
+        parts.append("SQ")
+
+    parts.append(str(seed))
+
+    name = "_".join(parts) + ".pt"
     return name
+
+
+def _io_qdtype_short(dtype_str: str | None) -> str:
+    """
+    Return a short name for an I/O quantization dtype.
+
+    MX-family dtypes (``mxint8``, ``mxfp4``, …) are collapsed to ``MX``.
+    All other (affine integer) dtypes are represented as ``int16``.
+    """
+    if dtype_str is None:
+        return "int16"
+    if dtype_str.startswith("mx"):
+        return "MX"
+    return "int16"
 
 
 def get_ptq_model_name(model, args):
     """
     Build a filename for a saved PTQ checkpoint.
+
+    The name encodes every option that can change the quantized model output
+    so that two runs with different settings never collide on the same file.
     """
     model_name = model.config.name_or_path.replace("/", "_")
 
-    name = (
-        f"PTQ_{model_name}_"
-        + ("SpinQuant_" if args.no_spinquant is False else "")
-        + ("CLE_" if args.enable_CLE else "")
-        + ("GPTQ_" if args.no_GPTQ is False else "")
-        + (f"{args.gptq_mse}_" if args.no_GPTQ is False else "")
-        + str(args.nsamples_for_qcalibration)
-        + "_"
-        + str(args.seed)
-        + ".pt"
-    )
+    parts: list[str] = [f"PTQ_{model_name}"]
+
+    # --- Preprocessing / algorithm flags -----------------------------------
+    if not args.no_spinquant:
+        parts.append("SQ")
+    if args.enable_CLE:
+        parts.append("CLE")
+    if not args.no_GPTQ:
+        parts.append("GPTQ")
+        if args.gptq_mse:
+            parts.append(args.gptq_mse)
+        # GPTQ numeric / variant options
+        parts.append(f"pd{args.gptq_percdamp}")
+        if args.gptq_adaptive_percdamp:
+            parts.append("ad")
+            parts.append(f"ctg{args.gptq_cond_threshold_good}")
+        if args.gptq_v2:
+            parts.append("v2")
+        if args.gptq_lm_head:
+            parts.append("lmh")
+        if args.gptq_use_orig_model_inference:
+            parts.append("orig")
+        if args.gptq_use_iterate:
+            parts.append("iter")
+        if args.llama_gptq:
+            parts.append("lgptq")
+        if args.llama_gptq_sequential:
+            parts.append("seq")
+        if args.llama_gptq_no_ptq:
+            parts.append("noptq")
+        if args.llama_gptq_use_subgroup_runner:
+            parts.append("sgr")
+
+    # --- Weight / activation bit-widths -------------------------------------
+    parts.append(f"wb{args.linear_weight_bits}")
+    parts.append(f"eb{args.embedding_weight_bits}")
+    parts.append(f"lhb{args.lm_head_weight_bits}")
+    if not args.no_spinquant:
+        parts.append(f"spqb{args.spin_rotation_weight_bits}")
+
+    # --- I/O quantization dtype (single representative) --------------------
+    parts.append(_io_qdtype_short(args.linear_io_qdtype))
+
+
+    # --- Calibration options ------------------------------------------------
+    parts.append(str(args.nsamples_for_qcalibration))
+    if (
+        args.calibration_samples_to_use is not None
+        and args.calibration_samples_to_use != args.nsamples_for_qcalibration
+    ):
+        parts.append(f"used{args.calibration_samples_to_use}")
+    parts.append(f"sl{args.calibrate_seq_len}")
+    parts.append(_get_calib_dataset_short_name(args))
+    if args.decode_calibration_steps > 0:
+        parts.append(f"dc{args.decode_calibration_steps}")
+
+    # --- Execution profile --------------------------------------------------
+    parts.append(args.profile)
+
+    # --- Seed ---------------------------------------------------------------
+    parts.append(str(args.seed))
+
+    name = "_".join(parts) + ".pt"
     return name
+
 
 
 def should_save(args, artifact: str) -> bool:
@@ -2145,6 +2249,33 @@ def print_config(args, device: torch.device) -> None:
     print(f"Max seq length         : {args.max_seq_len}")
     print(f"Profile                : {args.profile}")
     print()
+    print("--- GPTQ ---")
+    print(f"GPTQ MSE               : {args.gptq_mse}")
+    print(f"GPTQ percdamp          : {args.gptq_percdamp}")
+    print(f"GPTQv2                 : {args.gptq_v2}")
+    print(f"GPTQ orig model infer  : {args.gptq_use_orig_model_inference}")
+    print(f"GPTQ adaptive percdamp : {args.gptq_adaptive_percdamp}")
+    print(f"GPTQ cond threshold    : {args.gptq_cond_threshold_good}")
+    print(f"GPTQ use iterate       : {args.gptq_use_iterate}")
+    print(f"LlamaGPTQ              : {args.llama_gptq}")
+    print(f"LlamaGPTQ sequential   : {args.llama_gptq_sequential}")
+    print(f"LlamaGPTQ no PTQ       : {args.llama_gptq_no_ptq}")
+    print()
+    print("--- Activation quantization ---")
+    print(f"Linear IO qdtype       : {args.linear_io_qdtype}")
+    print()
+    print("--- Calibration ---")
+    print(f"Batch size             : {args.batch}")
+    print(f"Calibration samples    : {args.calibration_samples_to_use}")
+    print(f"Decode calibration     : {args.decode_calibration_steps}")
+    print(f"Calibration dataset    : {args.calibration_dataset_path}")
+    print(f"Calibration dataset mix: {args.calibration_dataset_mix}")
+    print()
+    print("--- Output ---")
+    print(f"Output dir             : {args.output_dir}")
+    print(f"Save artifacts         : {args.save}")
+    print()
+
 
 
 def load_model_and_tokenizer(args, dtype: torch.dtype):
@@ -2269,7 +2400,13 @@ def evaluate_original_model(
 
 
 def get_calibration_dataset_name(
-    seed, n_samples, dataset_name: str = "wiki", compressed_n_samples=None
+    seed,
+    n_samples,
+    dataset_name: str = "wiki",
+    compressed_n_samples=None,
+    *,
+    seq_len: int | None = None,
+    spinquant: bool = False,
 ) -> str:
     """
     Build a filename for stored calibration dataset.
@@ -2280,6 +2417,11 @@ def get_calibration_dataset_name(
         dataset_name: Short name of the calibration dataset (e.g. ``"wiki"``,
             ``"mmlu"``).
         compressed_n_samples: Number of samples after compression (if compression was applied)
+        seq_len: Calibration sequence length used when generating samples.
+        spinquant: Whether SpinQuant preprocessing was applied before
+            compression.  SpinQuant changes model weights, which affects the
+            K-Means clustering used for compression, so the selected
+            representative samples differ.
 
     Returns:
         Filename string for the calibration dataset
@@ -2290,10 +2432,20 @@ def get_calibration_dataset_name(
     if compressed_n_samples is not None and compressed_n_samples < n_samples:
         name_parts.append(f"compressed_{compressed_n_samples}")
 
+    # Sequence length affects which token windows are sampled
+    if seq_len is not None:
+        name_parts.append(f"sl{seq_len}")
+
+    # SpinQuant changes model weights, affecting K-Means compression results
+    if spinquant:
+        name_parts.append("SQ")
+
     name_parts.append(str(seed))
     name = "_".join(name_parts) + ".pt"
 
     return name
+
+
 
 
 def _apply_calibration_compression(
@@ -2365,7 +2517,9 @@ def _apply_calibration_compression(
         device=device,
         n_layers_to_use=1,
         visualize=args.visualize_calibration_compression,
+        output_dir=args.output_dir,
     )
+
     compressed_inputs, compressed_weights = compressor.compress(calib_inputs)
     
     # Rebatch: regroup compressed individual samples back to original batch_size
@@ -2539,9 +2693,15 @@ def _get_calib_dataset_short_name(args) -> str:
     """
     Return a short filesystem-safe name for the selected calibration dataset(s).
 
+    When ``--calibration_dataset_path`` is set, the name is derived from the
+    file stem so that different loaded datasets produce different filenames.
+
     For a single dataset: ``"wiki"`` or ``"mmlu"``.
     For a mix: ``"wiki0.7_mmlu0.3"`` (proportions appended).
     """
+    if args.calibration_dataset_path is not None:
+        return pathlib.Path(args.calibration_dataset_path).stem
+
     mix = _parse_dataset_mix(args)
     if len(mix) == 1:
         return _DATASET_SHORT_NAMES.get(mix[0][0], mix[0][0])
@@ -2555,7 +2715,12 @@ def _get_calib_dataset_short_name(args) -> str:
 def _get_calib_dataset_display_name(args) -> str:
     """
     Return a human-readable description of the selected calibration dataset(s).
+
+    When ``--calibration_dataset_path`` is set, returns the file path.
     """
+    if args.calibration_dataset_path is not None:
+        return args.calibration_dataset_path
+
     mix = _parse_dataset_mix(args)
     if len(mix) == 1:
         return mix[0][0]
@@ -2774,6 +2939,79 @@ def _load_calibration_text(args, tokenizer) -> str:
     return "\n\n".join(result_parts)
 
 
+def rebatch_calibration_inputs(
+    calib_inputs: list[torch.Tensor],
+    sample_weights: Optional[list[float]],
+    desired_batch_size: int,
+) -> tuple[list[torch.Tensor], Optional[list[float]]]:
+    """
+    Rebatch calibration inputs (and optional sample weights) to a new batch size.
+
+    The saved dataset may have been created with a different ``--batch`` value
+    than the current run.  This helper flattens all tensors into individual
+    ``[1, seq_len]`` samples and regroups them into batches of
+    ``desired_batch_size``.  The last batch may be smaller if the total sample
+    count is not divisible by ``desired_batch_size``.
+
+    When ``desired_batch_size`` already matches the saved batch size, the
+    inputs and weights are returned unchanged.
+
+    Args:
+        calib_inputs: List of calibration tensors (may be batched).
+        sample_weights: Optional list of per-sample weights (may be ``None``).
+        desired_batch_size: Target batch size to regroup into.
+
+    Returns:
+        Tuple of (rebatched_inputs, rebatched_weights).
+    """
+    saved_batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
+
+    if desired_batch_size == saved_batch_size:
+        return calib_inputs, sample_weights
+
+    print(
+        f"Rebatching loaded calibration dataset from batch_size={saved_batch_size} "
+        f"to batch_size={desired_batch_size}"
+    )
+
+    # Flatten all inputs into individual samples [1, seq_len]
+    individual_inputs = []
+    for batched_input in calib_inputs:
+        for i in range(batched_input.shape[0]):
+            individual_inputs.append(batched_input[i:i+1, ...])
+
+    # Flatten sample_weights to individual-sample level (if present)
+    flat_weights = None
+    if sample_weights is not None:
+        flat_weights = []
+        for w in sample_weights:
+            if isinstance(w, torch.Tensor):
+                flat_weights.extend(w.reshape(-1).tolist())
+            elif isinstance(w, (list, tuple)):
+                flat_weights.extend(w)
+            else:
+                flat_weights.append(w)
+
+    # Regroup into batches of desired_batch_size (same pattern as compression)
+    rebatched_inputs = []
+    rebatched_weights = []
+    for i in range(0, len(individual_inputs), desired_batch_size):
+        batch = individual_inputs[i:i+desired_batch_size]
+        if desired_batch_size == 1:
+            # Keep [1, seq_len] shape (individual inputs already have batch dim)
+            rebatched_inputs.append(batch[0])
+        else:
+            rebatched_inputs.append(torch.stack(batch, dim=0).squeeze())
+        if flat_weights is not None:
+            batch_w = flat_weights[i:i+desired_batch_size]
+            rebatched_weights.append(torch.tensor(batch_w))
+
+    if flat_weights is None:
+        rebatched_weights = None
+
+    return rebatched_inputs, rebatched_weights
+
+
 def build_calibration_inputs(
     model,
     tokenizer,
@@ -2819,7 +3057,13 @@ def build_calibration_inputs(
                 raise ValueError(
                     f"Calibration dataset file does not contain 'calib_inputs': {calib_path.resolve()}"
                 )
-            
+
+            # Rebatch loaded inputs to match the current --batch setting.
+            # The saved dataset may have been created with a different batch size.
+            calib_inputs, sample_weights = rebatch_calibration_inputs(
+                calib_inputs, sample_weights, args.batch
+            )
+
             return calib_inputs, sample_weights
         else:
             raise FileNotFoundError(
@@ -2882,14 +3126,27 @@ def compute_or_load_sensitivity(model, calib_inputs, args):
     sens = calibrator.compute_sensitivity_info()
 
     if should_save(args, "sensitivity"):
+        # Determine compressed sample count if compression was applied
+        batch_size = calib_inputs[0].shape[0] if len(calib_inputs) > 0 else 1
+        n_individual_samples = len(calib_inputs) * batch_size
+        compressed_n_samples = (
+            n_individual_samples
+            if n_individual_samples != args.nsamples_for_qcalibration
+            else None
+        )
+
         default_path = pathlib.Path(
             get_sensitivities_info_name(
                 model,
                 _get_calib_dataset_short_name(args),
                 args.seed,
                 args.nsamples_for_qcalibration,
+                seq_len=args.calibrate_seq_len,
+                spinquant=not args.no_spinquant,
+                compressed_n_samples=compressed_n_samples,
             )
         )
+
         output_dir = pathlib.Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         save_path = output_dir / default_path.name
@@ -2975,7 +3232,10 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=
             args.nsamples_for_qcalibration,
             dataset_name=_get_calib_dataset_short_name(args),
             compressed_n_samples=compressed_n_samples,
+            seq_len=args.calibrate_seq_len,
+            spinquant=not args.no_spinquant,
         )
+
         print(f"Saving calibration dataset to {save_path.resolve()}")
         torch.save({"calib_inputs": calib_inputs, "sample_weights": sample_weights}, save_path)
 
