@@ -38,6 +38,7 @@
 import argparse
 import math
 import os
+import sys
 import types
 
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -119,7 +120,7 @@ PIQA_DATASET_NAME = "chargoddard/piqa-train-10k"
 PIQA_CALIB_SPLIT = "train"
 
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="GPTQ+PTQ pipeline (weight-only + activation)",
     )
@@ -449,7 +450,58 @@ def parse_args():
         default=False,
         help="Save 2D visualization PNGs for calibration dataset compression (per-layer and final compression clustering).",
     )
+    return parser
+
+
+def parse_args():
+    parser = build_parser()
     return parser.parse_args()
+
+
+def print_cmd(args) -> None:
+    """
+    Print the command-line invocation that reproduces the current run.
+
+    Only non-default arguments are shown so the output stays concise and
+    focused on what the user actually changed.  ``store_true`` flags are
+    included only when enabled.  List-valued arguments (e.g. ``--save``,
+    ``--calibration_dataset_mix``) are space-joined.
+    """
+    parser = build_parser()
+    script = sys.argv[0]
+    parts = [f"python {script}"]
+
+    for action in parser._actions:
+        if action.dest == "help":
+            continue
+
+        value = getattr(args, action.dest, None)
+        default = action.default
+
+        # store_true flags: include only when True (i.e. explicitly passed)
+        if isinstance(action, argparse._StoreTrueAction):
+            if value is True:
+                parts.append(action.option_strings[0])
+            continue
+
+        # Skip arguments still at their default
+        if value == default:
+            continue
+
+        # Skip None values that default to None
+        if value is None:
+            continue
+
+        flag = action.option_strings[0]
+        if isinstance(value, list):
+            parts.append(f"{flag} {' '.join(str(v) for v in value)}")
+        else:
+            parts.append(f"{flag} {value}")
+
+    cmd = " \\\n  ".join(parts)
+    print("\n=== Reproduce with: ===")
+    print(cmd)
+    print("=" * 40)
 
 
 # -------------------------------------------------------------------------
@@ -3266,6 +3318,7 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=
 def main():
     args = parse_args()
     print(args)
+    print_cmd(args)
     validate_export_profile(args)
 
     device, dtype = setup_runtime(args)
