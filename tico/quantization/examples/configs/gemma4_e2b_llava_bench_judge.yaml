@@ -24,6 +24,7 @@ model_args:
     num_visual_tokens: 256
     image_height: 896
     image_width: 896
+    validate_static_layout: false
 
 pipeline: []
 

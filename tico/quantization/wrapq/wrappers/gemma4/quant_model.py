@@ -64,10 +64,19 @@ def _get_placeholder_mask(
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4Model")
 class QuantGemma4Model(QuantModuleBase):
-    """PTQ wrapper skeleton for image-text Gemma4 E2B."""
+    """PTQ wrapper skeleton for image-text Gemma4 E2B.
 
-    # This boolean flag is used by unit tests to exercise the static fusion path
-    # without running torch.export.
+    The default eager/PTQ path uses dynamic placeholder-mask fusion so natural
+    PyTorch benchmarks and general calibration follow HF-style placeholder
+    positions. The static export/runtime path uses strict fixed-slot fusion.
+
+    ``validate_static_layout`` is opt-in because benchmark prompts may differ
+    from deployment/NPU prompts. Enable it only for deployment-style calibration
+    or NPU-proxy benchmarks whose inputs follow the static runtime layout.
+    """
+
+    # Test-only override that exercises the static fusion branch without running
+    # torch.export. Unit tests should reset it after use.
     force_export: bool = False
 
     def __init__(
@@ -110,7 +119,7 @@ class QuantGemma4Model(QuantModuleBase):
         self.visual_start_idx = int(vision_args.get("visual_start_idx", 0))
         self.num_visual_tokens = int(vision_args.get("num_visual_tokens", 0))
         self.validate_static_layout = bool(
-            vision_args.get("validate_static_layout", self.num_visual_tokens > 0)
+            vision_args.get("validate_static_layout", False)
         )
         self.obs_mm_fusion = self._make_obs("mm_fusion")
         self.obs_per_layer_inputs = self._make_obs("per_layer_inputs")
@@ -157,7 +166,11 @@ class QuantGemma4Model(QuantModuleBase):
         image_mask: torch.Tensor,
         seq_len: int,
     ) -> None:
-        """Validate image placeholders against the configured static layout."""
+        """Validate image placeholders against the static layout when enabled.
+
+        This is opt-in for eager/PTQ because benchmark prompts may not match
+        deployment/NPU prompt layouts.
+        """
         if not self.validate_static_layout:
             return
         validate_static_visual_layout(
@@ -166,6 +179,24 @@ class QuantGemma4Model(QuantModuleBase):
             num_visual_tokens=self.num_visual_tokens,
             seq_len=seq_len,
         )
+
+    def _validate_static_visual_token_count(self, image_embeds: torch.Tensor) -> None:
+        """Validate vision output length for static export/runtime layouts."""
+        expected = int(self.num_visual_tokens)
+        actual = int(image_embeds.shape[1])
+        if expected <= 0:
+            raise ValueError(
+                "Static Gemma4 visual-token validation requires "
+                "model_args.vision.num_visual_tokens to be positive."
+            )
+        if actual != expected:
+            raise ValueError(
+                "Vision tower produced "
+                f"{actual} visual tokens, but static Gemma4 config expects "
+                f"{expected}. Check model_args.vision.image_height, "
+                "model_args.vision.image_width, and "
+                "model_args.vision.num_visual_tokens."
+            )
 
     def forward(
         self,
@@ -178,26 +209,17 @@ class QuantGemma4Model(QuantModuleBase):
         per_layer_inputs: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        """Run Gemma4 image-text forward with separated eager and static fusion.
+        """Run Gemma4 image-text forward with eager and static fusion paths.
 
-        Mirrors ``Gemma4Model.forward`` with the following adaptations for
-        quantized calibration and static export:
+        Eager/PTQ uses dynamic placeholder-mask fusion by default, matching
+        HF-style image placeholder positions. Static export/runtime uses strict
+        fixed-slot fusion. Static layout validation is opt-in in eager mode and
+        should be enabled only for deployment-style calibration or NPU-proxy
+        benchmarks whose prompts follow the final static runtime layout.
 
-        * Multimodal placeholder token IDs are replaced with ``pad_token_id``
-          before token-embedding lookup so placeholder positions start from a
-          neutral pad embedding.
-        * The eager/PTQ path uses dynamic placeholder-mask fusion, preserving HF
-          multimodal semantics during calibration.
-        * The static/export path uses strict fixed-slot fusion, preserving the
-          static runtime contract and avoiding data-dependent scatter operations.
-        * Optional static-layout validation checks that eager calibration inputs
-          are equivalent to the fixed visual-token span required by export.
-        * Per-Layer Embeddings (PLE) are computed when the text config has
-          ``hidden_size_per_layer_input > 0`` (E2B / E4B models).
-        * Video and audio paths are not supported in the v0 scope.
-
-        TODO: Implement full HF-compatible output objects after the static layer
-        wrappers are complete.
+        Image-size alignment and static-layout validation solve different
+        problems: resizing stabilizes visual-token count, while layout
+        validation checks visual-token positions in the sequence.
         """
         # --- Input validation (matches original Gemma4Model.forward) ------
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -295,13 +317,12 @@ class QuantGemma4Model(QuantModuleBase):
             )
 
             if self._uses_static_fusion():
-                if (
-                    image_mask is not None
-                    and self.validate_static_layout
-                    and not torch.compiler.is_compiling()
-                ):
-                    self._validate_static_image_layout(
+                self._validate_static_visual_token_count(image_embeds)
+                if image_mask is not None and not torch.compiler.is_compiling():
+                    validate_static_visual_layout(
                         image_mask,
+                        visual_start_idx=self.visual_start_idx,
+                        num_visual_tokens=self.num_visual_tokens,
                         seq_len=int(inputs_embeds.shape[1]),
                     )
                 inputs_embeds = fixed_slot_fuse(
@@ -316,10 +337,12 @@ class QuantGemma4Model(QuantModuleBase):
                         "input_ids must be provided with pixel_values when running "
                         "Gemma4 eager/PTQ dynamic placeholder fusion."
                     )
-                self._validate_static_image_layout(
-                    image_mask,
-                    seq_len=int(inputs_embeds.shape[1]),
-                )
+                if self.validate_static_layout:
+                    self._validate_static_visual_token_count(image_embeds)
+                    self._validate_static_image_layout(
+                        image_mask,
+                        seq_len=int(inputs_embeds.shape[1]),
+                    )
                 inputs_embeds = dynamic_placeholder_fuse(
                     inputs_embeds,
                     image_embeds,

@@ -16,6 +16,7 @@ import unittest
 
 import torch
 
+from tico.quantization.wrapq.wrappers.gemma4.quant_model import QuantGemma4Model
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     dynamic_placeholder_fuse,
     fixed_slot_fuse,
@@ -124,6 +125,46 @@ class Gemma4StaticExportAdapterUtilityTest(unittest.TestCase):
                 num_visual_tokens=2,
                 seq_len=6,
             )
+
+    def test_force_export_flag_enables_static_branch_for_unit_tests(self) -> None:
+        """force_export should allow tests to exercise the static fusion branch."""
+        model = object.__new__(QuantGemma4Model)
+
+        model.force_export = False
+        self.assertFalse(model._uses_static_fusion())
+
+        model.force_export = True
+        self.assertTrue(model._uses_static_fusion())
+
+    def test_static_layout_validation_is_opt_in_for_eager_path(self) -> None:
+        """Dynamic eager validation should not enforce static spans by default."""
+        model = object.__new__(QuantGemma4Model)
+        model.validate_static_layout = False
+        model.visual_start_idx = 2
+        model.num_visual_tokens = 2
+        image_mask = torch.tensor([[False, True, False, True, False, False]])
+
+        model._validate_static_image_layout(image_mask, seq_len=6)
+
+    def test_static_layout_validation_rejects_wrong_span_when_enabled(self) -> None:
+        """Opt-in static validation should reject non-static eager inputs."""
+        model = object.__new__(QuantGemma4Model)
+        model.validate_static_layout = True
+        model.visual_start_idx = 2
+        model.num_visual_tokens = 2
+        image_mask = torch.tensor([[False, True, False, True, False, False]])
+
+        with self.assertRaisesRegex(ValueError, "static visual-token span"):
+            model._validate_static_image_layout(image_mask, seq_len=6)
+
+    def test_static_visual_token_count_validation_has_clear_error(self) -> None:
+        """Static token-count validation should report image-size config hints."""
+        model = object.__new__(QuantGemma4Model)
+        model.num_visual_tokens = 3
+        image_embeds = torch.zeros(1, 2, 4)
+
+        with self.assertRaisesRegex(ValueError, "image_height"):
+            model._validate_static_visual_token_count(image_embeds)
 
 
 if __name__ == "__main__":
