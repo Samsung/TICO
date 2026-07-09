@@ -186,7 +186,7 @@ evaluation:
     batch_size: 1
   mmmu:
     enabled: true
-    dataset: MMMU/MMMU
+    dataset: MMMU/MMMU_Pro
     subjects: null
     n_shots: 5
     n_samples: -1

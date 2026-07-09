@@ -235,7 +235,7 @@ class TestPtqOverridePolicies(unittest.TestCase):
         with self.assertRaises(ValueError):
             apply_ptq_override_policies_to_config(qcfg, stage_cfg, self._text_context())
 
-        stage_cfg["override_policies"][0]["allow_empty"] = True
+        stage_cfg["override_policies"][0]["allow_empty"] = True  # type: ignore[assignment]
         apply_ptq_override_policies_to_config(qcfg, stage_cfg, self._text_context())
         self.assertEqual(qcfg.overrides, {})
 
