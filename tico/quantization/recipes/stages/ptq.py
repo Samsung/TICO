@@ -16,6 +16,7 @@ from typing import Any, Mapping
 
 from tico.quantization import convert, prepare
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.override_policies import apply_ptq_override_policies
 from tico.quantization.recipes.qparams import (
     clear_gptq_quantizers,
     find_gptq_quantizers,
@@ -62,6 +63,12 @@ class PTQStage(Stage):
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         print("Wrapping model with PTQ wrappers …")
         ptq_config = ctx.adapter.build_ptq_config(ctx, stage_cfg)
+        ptq_config = apply_ptq_override_policies(
+            ptq_config,
+            stage_cfg,
+            family=ctx.adapter.family,
+            model=ctx.require_model(),
+        )
         q_model = prepare(ctx.require_model(), ptq_config)
 
         owner, quantizers = find_gptq_quantizers(q_model)

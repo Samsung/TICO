@@ -1,0 +1,79 @@
+model:
+  family: llama
+  name_or_path: Maykeye/TinyLLama-v0
+  trust_remote_code: false
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cpu
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+model_args:
+  profile: reference_eval
+
+calibration:
+  dataset: Salesforce/wikitext
+  dataset_config: wikitext-2-raw-v1
+  split: train
+  n_samples: 8
+  seq_len: 256
+  decode_steps: 0
+
+pipeline:
+  - name: ptq
+    enabled: true
+    profile: reference_eval
+    activation: int16
+    linear_weight: uint8
+    embedding_weight: uint8
+    lm_head_weight: uint8
+    norm_weight: int16
+    strict_wrap: true
+
+    specs:
+      mx_fp8_act:
+        kind: mx
+        elem_format: fp8_e4m3
+        axis: -1
+      int16_act:
+        kind: affine
+        dtype: int16
+
+    override_policies:
+      - name: all_text_linear_activations_mx
+        target:
+          component: text
+          layers: all
+          op_type: linear
+          observer_role: activation
+        spec: mx_fp8_act
+
+      - name: layer_1_down_proj_output_int16
+        target:
+          component: text
+          layers: [1]
+          module: mlp.down_proj
+          observers: [act_out]
+        spec: int16_act
+
+    raw_overrides:
+      model.layers.0.self_attn.q_proj.act_in: int16
+
+evaluation:
+  enabled: false
+  perplexity:
+    dataset: Salesforce/wikitext
+    dataset_config: wikitext-2-raw-v1
+    split: test
+  lm_eval_tasks: null
+  max_seq_len: 256
+
+export:
+  enabled: false
+  output_dir: ./out/llama_ptq_override_policies
+  max_seq_len: 256
+  artifacts:
+    - ptq_checkpoint
