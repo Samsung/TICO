@@ -38,7 +38,8 @@ class TestWrapperSmokeRegistry(unittest.TestCase):
             "qwen3_vl_text_attention_prefill",
             "qwen3_vl_text_attention_decode",
             "qwen3_vl_text_mlp",
-            "qwen3_vl_text_decoder_layer",
+            "qwen3_vl_text_decoder_layer_prefill",
+            "qwen3_vl_text_decoder_layer_decode",
             "qwen3_vl_text_model",
             "qwen3_vl_vision_attention",
             "qwen3_vl_vision_mlp",
@@ -54,6 +55,14 @@ class TestWrapperSmokeRegistry(unittest.TestCase):
     def test_get_case_returns_named_case(self):
         """Registry lookup should return the requested case object."""
         self.assertEqual(get_case("nn_linear").name, "nn_linear")
+        self.assertEqual(
+            get_case("qwen3_vl_text_decoder_layer_prefill").name,
+            "qwen3_vl_text_decoder_layer_prefill",
+        )
+        self.assertEqual(
+            get_case("qwen3_vl_text_decoder_layer_decode").name,
+            "qwen3_vl_text_decoder_layer_decode",
+        )
 
 
 if __name__ == "__main__":
