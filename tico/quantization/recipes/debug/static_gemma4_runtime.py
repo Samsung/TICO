@@ -488,6 +488,14 @@ class StaticGemma4Runtime:
         # Get sliding window config
         self.sliding_window = getattr(self.text_config, "sliding_window", None)
 
+        # Check if PLE (Per-Layer Embeddings) is enabled
+        self.hidden_size_per_layer_input = int(
+            getattr(self.text_config, "hidden_size_per_layer_input", 0) or 0
+        )
+
+        # Store reference to wrapped text model for PLE computation
+        self._wrapped_text_model = wrapped_model.language_model.wrapped
+
         self.layer_caches: list[LayerCache] = []
         self.past_len = 0
 
@@ -687,12 +695,29 @@ class StaticGemma4Runtime:
             batch["attention_mask"].to(self.device),
         )
 
+        # Compute PLE (Per-Layer Embeddings) if enabled
+        per_layer_inputs = None
+        if self.hidden_size_per_layer_input:
+            text_model = self._wrapped_text_model
+            ple = text_model.get_per_layer_inputs(
+                input_ids=llm_input_ids, inputs_embeds=hidden_states
+            )
+            per_layer_inputs = text_model.project_per_layer_inputs(
+                inputs_embeds=hidden_states, per_layer_inputs=ple
+            )
+
         for layer_idx, layer in enumerate(self.prefill_layers):
             layer_type = self.text_config.layer_types[layer_idx]
+            per_layer_input = (
+                per_layer_inputs[:, :, layer_idx, :]
+                if per_layer_inputs is not None
+                else None
+            )
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_masks[layer_type],
                 position_embeddings=position_embeddings[layer_type],
+                per_layer_input=per_layer_input,
             )
             hidden_states, new_k, new_v = out
             self.layer_caches[layer_idx].past_k[:, :, : self.layout.max_seq, :] = new_k
@@ -756,13 +781,30 @@ class StaticGemma4Runtime:
             dtype=hidden_states.dtype,
         )
 
+        # Compute PLE (Per-Layer Embeddings) for the single decode token if enabled
+        per_layer_inputs = None
+        if self.hidden_size_per_layer_input:
+            text_model = self._wrapped_text_model
+            ple = text_model.get_per_layer_inputs(
+                input_ids=input_ids.to(self.device), inputs_embeds=hidden_states
+            )
+            per_layer_inputs = text_model.project_per_layer_inputs(
+                inputs_embeds=hidden_states, per_layer_inputs=ple
+            )
+
         for layer_idx, layer in enumerate(self.decode_layers):
             cache = self.layer_caches[layer_idx]
             layer_type = self.text_config.layer_types[layer_idx]
+            per_layer_input = (
+                per_layer_inputs[:, :, layer_idx, :]
+                if per_layer_inputs is not None
+                else None
+            )
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_masks[layer_type],
                 position_embeddings=position_embeddings[layer_type],
+                per_layer_input=per_layer_input,
                 past_key_value=(cache.past_k, cache.past_v),
             )
             hidden_states, new_k, new_v = out
