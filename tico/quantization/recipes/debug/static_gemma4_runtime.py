@@ -408,7 +408,7 @@ class StaticGemma4RuntimeConfig:
     num_visual_tokens: int = 256
     padding_side: str = "right"
     device: str = "cpu"
-    prompt: str = "Describe the image."
+    prompt: str = "<|image|>Describe the image."
     verify_steps: int = 4
     gen_steps: int = 16
 

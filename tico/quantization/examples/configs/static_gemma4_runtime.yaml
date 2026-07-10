@@ -8,6 +8,6 @@ debug:
     num_visual_tokens: 256
     padding_side: right
     device: cpu
-    prompt: "Describe the image."
+    prompt: "<|image|>Describe the image."
     verify_steps: 4
     gen_steps: 16
