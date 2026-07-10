@@ -852,6 +852,7 @@ def verify_against_reference(
         ref_outputs = runtime.model(
             input_ids=llm_input_ids[:, :valid_length],
             pixel_values=batch["pixel_values"],
+            image_position_ids=batch.get("image_position_ids"),
             return_dict=True,
         )
         ref_logits = ref_outputs.logits[:, -1, :]  # Last token logits
@@ -892,6 +893,7 @@ def verify_against_reference(
             ref_outputs = runtime.model(
                 input_ids=extended_input_ids,
                 pixel_values=batch["pixel_values"],
+                image_position_ids=batch.get("image_position_ids"),
                 return_dict=True,
             )
             ref_logits = ref_outputs.logits[:, -1, :]
