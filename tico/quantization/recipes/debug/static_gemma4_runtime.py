@@ -732,7 +732,7 @@ class StaticGemma4Runtime:
             )
 
             # Determine if this layer needs shared KV
-            attn = layer.wrapped.wrapped.self_attn
+            attn = layer.wrapped.self_attn.wrapped
             shared_key_value = None
             if getattr(attn, "is_kv_shared_layer", False):
                 shared_key_value = shared_kv_states.get(layer_type)
@@ -835,7 +835,7 @@ class StaticGemma4Runtime:
             )
 
             # Determine if this layer needs shared KV
-            attn = layer.wrapped.wrapped.self_attn
+            attn = layer.wrapped.self_attn.wrapped
             shared_key_value = None
             if getattr(attn, "is_kv_shared_layer", False):
                 shared_key_value = shared_kv_states.get(layer_type)
