@@ -70,30 +70,34 @@ def _build_gemma4_rope_templates(
     head_dim = getattr(config, "head_dim", None) or (
         config.hidden_size // config.num_attention_heads
     )
+    global_head_dim = getattr(config, "global_head_dim", None) or head_dim
     layer_types = getattr(config, "layer_types", ["full_attention"])
 
     # Get rope parameters
     rope_params = getattr(config, "rope_parameters", {}) or {}
-    rope_theta = float(rope_params.get("rope_theta", 10000.0))
-    partial_rotary_factor = float(rope_params.get("partial_rotary_factor", 1.0))
 
     # Build RoPE for each unique layer type
     result: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
 
     for layer_type in set(layer_types):
+        # Determine head_dim for this layer type:
+        # full_attention uses global_head_dim, sliding_attention uses head_dim
+        if layer_type == "full_attention" and global_head_dim:
+            dim = int(global_head_dim)
+        else:
+            dim = int(head_dim)
+
         # Determine RoPE config for this layer type
         layer_rope_params = rope_params.get(layer_type, {})
         if isinstance(layer_rope_params, dict):
-            theta = float(layer_rope_params.get("rope_theta", rope_theta))
-            factor = float(
-                layer_rope_params.get("partial_rotary_factor", partial_rotary_factor)
-            )
+            theta = float(layer_rope_params.get("rope_theta", 10000.0))
+            factor = float(layer_rope_params.get("partial_rotary_factor", 1.0))
         else:
-            theta = rope_theta
-            factor = partial_rotary_factor
+            theta = 10000.0
+            factor = 1.0
 
         # Compute rotary frequency
-        rotary_dim = int(head_dim * factor)
+        rotary_dim = int(dim * factor)
         inv_freq = 1.0 / (
             theta
             ** (
@@ -105,18 +109,15 @@ def _build_gemma4_rope_templates(
         freqs = torch.outer(pos, inv_freq)
         emb = torch.cat([freqs, freqs], dim=-1)
 
-        # Pad to full head_dim if rotary_dim < head_dim
-        if rotary_dim < head_dim:
+        # Pad to full dim if rotary_dim < dim (partial rotary)
+        if rotary_dim < dim:
             padding = torch.zeros(
-                max_seq, head_dim - rotary_dim, device=device, dtype=torch.float32
+                max_seq, dim - rotary_dim, device=device, dtype=torch.float32
             )
             emb = torch.cat([emb, padding], dim=-1)
 
         cos = emb.cos().unsqueeze(0).to(dtype=dtype)
         sin = emb.sin().unsqueeze(0).to(dtype=dtype)
-        # Gemma4 uses negative sin for the second half in rotate_half
-        half_dim = head_dim // 2
-        sin[..., :half_dim] = -sin[..., :half_dim]
 
         result[layer_type] = (cos, sin)
 
