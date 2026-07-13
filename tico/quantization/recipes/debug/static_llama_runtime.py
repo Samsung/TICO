@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 from dataclasses import dataclass
 from typing import Optional, Sequence, Tuple
 
@@ -564,4 +565,73 @@ def run_static_llama_runtime(cfg: StaticLlamaRuntimeConfig) -> None:
 
     print("=" * 100)
     print("Generated text:")
-    print(tokenizer.decode(out_ids[0], skip_special_tokens=True))
+    print(
+        tokenizer.decode(
+            out_ids[0], skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+    )
+
+
+def _parse_args() -> StaticLlamaRuntimeConfig:
+    """Parse command-line arguments for the static runtime smoke test."""
+    parser = argparse.ArgumentParser(
+        description="Run the static LLaMA prefill/decode runtime."
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=StaticLlamaRuntimeConfig.model,
+        help="HF model name or local model path.",
+    )
+    parser.add_argument(
+        "--max-seq",
+        type=int,
+        default=StaticLlamaRuntimeConfig.max_seq,
+        help="Static sequence length used by prefill and decode.",
+    )
+    parser.add_argument(
+        "--padding-side",
+        type=str,
+        choices=("left", "right"),
+        default=StaticLlamaRuntimeConfig.padding_side,
+        help="Padding direction for static prefill inputs.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=StaticLlamaRuntimeConfig.device,
+        help="Execution device, such as cpu or cuda.",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=StaticLlamaRuntimeConfig.prompt,
+        help="Prompt used for verification and greedy generation.",
+    )
+    parser.add_argument(
+        "--verify-steps",
+        type=int,
+        default=StaticLlamaRuntimeConfig.verify_steps,
+        help="Number of decode steps for reference verification.",
+    )
+    parser.add_argument(
+        "--gen-steps",
+        type=int,
+        default=StaticLlamaRuntimeConfig.gen_steps,
+        help="Maximum number of generated tokens.",
+    )
+    args = parser.parse_args()
+
+    return StaticLlamaRuntimeConfig(
+        model=args.model,
+        max_seq=args.max_seq,
+        padding_side=args.padding_side,
+        device=args.device,
+        prompt=args.prompt,
+        verify_steps=args.verify_steps,
+        gen_steps=args.gen_steps,
+    )
+
+
+if __name__ == "__main__":
+    run_static_llama_runtime(_parse_args())
