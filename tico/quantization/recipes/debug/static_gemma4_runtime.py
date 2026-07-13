@@ -744,14 +744,18 @@ class StaticGemma4Runtime:
                 per_layer_input=per_layer_input,
                 shared_key_value=shared_key_value,
             )
-            hidden_states, new_k, new_v = out
 
-            # Store full-length KV for sharing with later shared-KV layers
-            if getattr(attn, "store_full_length_kv", False):
-                shared_kv_states[layer_type] = (new_k, new_v)
-
-            self.layer_caches[layer_idx].past_k[:, :, : self.layout.max_seq, :] = new_k
-            self.layer_caches[layer_idx].past_v[:, :, : self.layout.max_seq, :] = new_v
+            # Shared-KV layers return only hidden_states (no K/V);
+            # non-shared layers return (hidden_states, key, value)
+            if isinstance(out, tuple) and len(out) == 3:
+                hidden_states, new_k, new_v = out
+                # Store full-length KV for sharing with later shared-KV layers
+                if getattr(attn, "store_full_length_kv", False):
+                    shared_kv_states[layer_type] = (new_k, new_v)
+                self.layer_caches[layer_idx].past_k[:, :, : self.layout.max_seq, :] = new_k
+                self.layer_caches[layer_idx].past_v[:, :, : self.layout.max_seq, :] = new_v
+            else:
+                hidden_states = out
 
         self.past_len = int(batch["valid_length"].item())
         hidden_last = hidden_states[:, self.past_len - 1 : self.past_len, :]
@@ -848,14 +852,18 @@ class StaticGemma4Runtime:
                 shared_key_value=shared_key_value,
                 past_key_value=(cache.past_k, cache.past_v),
             )
-            hidden_states, new_k, new_v = out
 
-            # Store full-length KV for sharing with later shared-KV layers
-            if getattr(attn, "store_full_length_kv", False):
-                shared_kv_states[layer_type] = (new_k, new_v)
-
-            cache.past_k[:, :, self.past_len : self.past_len + 1, :] = new_k
-            cache.past_v[:, :, self.past_len : self.past_len + 1, :] = new_v
+            # Shared-KV layers return only hidden_states (no K/V);
+            # non-shared layers return (hidden_states, key, value)
+            if isinstance(out, tuple) and len(out) == 3:
+                hidden_states, new_k, new_v = out
+                # Store full-length KV for sharing with later shared-KV layers
+                if getattr(attn, "store_full_length_kv", False):
+                    shared_kv_states[layer_type] = (new_k, new_v)
+                cache.past_k[:, :, self.past_len : self.past_len + 1, :] = new_k
+                cache.past_v[:, :, self.past_len : self.past_len + 1, :] = new_v
+            else:
+                hidden_states = out
 
         self.past_len += 1
         logits = self.lm_head(hidden_states)
