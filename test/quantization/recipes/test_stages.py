@@ -26,9 +26,12 @@ import tico.quantization.recipes.stages.ptq as ptq_mod
 
 import torch
 
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import affine
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.stages.gptq import GPTQStage
 from tico.quantization.recipes.stages.ptq import PTQStage
+from tico.quantization.wrapq.dtypes import DType
 
 
 class DummyAdapter:
@@ -61,6 +64,7 @@ class TestRecipeStages(unittest.TestCase):
         ctx = RecipeContext(cfg={}, adapter=adapter, model=source_model)
         prepared_model = SimpleNamespace(name="prepared")
         calls: dict[str, Any] = {}
+        stdout = io.StringIO()
 
         def fake_prepare(model, config):
             calls["prepare"] = (model, config)
@@ -85,7 +89,7 @@ class TestRecipeStages(unittest.TestCase):
             "clear_gptq_quantizers",
             lambda model: calls.setdefault("clear", model),
         ):
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(stdout):
                 result = PTQStage().run(ctx, {"name": "ptq", "verbose": True})
 
         self.assertEqual(result.model, "converted")
@@ -99,6 +103,102 @@ class TestRecipeStages(unittest.TestCase):
         assert calibrated is not None
         self.assertIs(calibrated[1], prepared_model)
         self.assertIs(calls["convert"], prepared_model)
+        self.assertNotIn("=== Effective PTQ overrides ===", stdout.getvalue())
+        self.assertNotIn("=== Model after PTQ ===", stdout.getvalue())
+
+    def test_ptq_stage_prints_final_overrides_and_converted_model(self):
+        """PTQStage should print final overrides and the converted model on request."""
+
+        class EffectiveOverrideAdapter(DummyAdapter):
+            """Adapter fake that returns a real PTQ config."""
+
+            def build_ptq_config(self, ctx, stage_cfg):
+                """Return a PTQ config containing an unrelated adapter override."""
+                config = PTQConfig()
+                config.set_override(
+                    (
+                        "model",
+                        "layers",
+                        "0",
+                        "self_attn",
+                        "q_proj",
+                        "weight",
+                    ),
+                    affine(DType.uint(4)),
+                )
+                return config
+
+        adapter = EffectiveOverrideAdapter()
+        source_model = SimpleNamespace(model=SimpleNamespace(layers=[object()]))
+        ctx = RecipeContext(cfg={}, adapter=adapter, model=source_model)
+        prepared_model = SimpleNamespace(name="prepared")
+        calls: dict[str, Any] = {}
+
+        def fake_prepare(model, config):
+            calls["prepare"] = (model, config)
+            return prepared_model
+
+        def fake_convert(model):
+            calls["convert"] = model
+            return "converted-model"
+
+        stage_cfg = {
+            "name": "ptq",
+            "print_overrides": True,
+            "print_model": True,
+            "specs": {
+                "mx_int8": {
+                    "kind": "mx",
+                    "elem_format": "int8",
+                    "axis": -1,
+                }
+            },
+            "override_policies": [
+                {
+                    "name": "all_down_proj_outputs_mx",
+                    "target": {
+                        "component": "text",
+                        "layers": "all",
+                        "module": "mlp.down_proj",
+                        "observers": ["act_out"],
+                    },
+                    "spec": "mx_int8",
+                }
+            ],
+            "raw_overrides": {
+                "model.layers.0.mlp.down_proj.act_out": "int16",
+            },
+        }
+
+        stdout = io.StringIO()
+        with patch.object(ptq_mod, "prepare", fake_prepare), patch.object(
+            ptq_mod, "convert", fake_convert
+        ), patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)):
+            with contextlib.redirect_stdout(stdout):
+                result = PTQStage().run(ctx, stage_cfg)
+
+        output = stdout.getvalue()
+        override_path = "model.layers.0.mlp.down_proj.act_out"
+        matching_lines = [line for line in output.splitlines() if override_path in line]
+
+        self.assertEqual(result.model, "converted-model")
+        self.assertIs(calls["convert"], prepared_model)
+        self.assertIsInstance(calls["prepare"][1], PTQConfig)
+        self.assertEqual(len(matching_lines), 1)
+        self.assertIn("observer=MinMaxObserver", matching_lines[0])
+        self.assertIn("dtype=int16", matching_lines[0])
+        self.assertNotIn("MXObserver", matching_lines[0])
+        self.assertNotIn("elem_format=int8", matching_lines[0])
+        self.assertNotIn("__quant_spec_replace_role__", output)
+        self.assertNotIn(
+            "model.layers.0.self_attn.q_proj.weight",
+            output,
+        )
+        self.assertIn("=== Model after PTQ ===\nconverted-model", output)
+        self.assertLess(
+            output.index("=== Effective PTQ overrides ==="),
+            output.index("=== Model after PTQ ==="),
+        )
 
     def test_ptq_stage_allows_missing_gptq_quantizers(self):
         """PTQStage should continue when no GPTQ quantizers are attached."""

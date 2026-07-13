@@ -172,6 +172,18 @@ class QuantModuleBase(nn.Module, ABC):
             1. explicit observer override in PTQConfig.overrides
             2. wrapper defaults passed by the wrapper implementation
             3. role-level QuantSpec from PTQConfig.activation or PTQConfig.weight
+
+        ``QuantSpec.to_kwargs(mark_replace=True)`` adds the internal
+        ``__quant_spec_replace_role__`` marker to an explicit observer override.
+        This method removes the marker before observer construction. When the
+        marker is set, the role-level activation or weight QuantSpec is discarded
+        entirely, while wrapper defaults may still fill fields omitted from the
+        explicit observer override.
+
+        For example, an MX activation override must not inherit the ``dtype`` or
+        ``qscheme`` from an affine role-level activation policy. Clearing
+        ``role_cfg`` prevents incompatible affine settings from being passed to
+        the MX observer.
         """
         _UNSPEC: Any = object()
 

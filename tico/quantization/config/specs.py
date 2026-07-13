@@ -75,8 +75,14 @@ class QuantSpec:
             infer_qscheme: If True, missing affine qscheme values are inferred
                 immediately. If False, only explicitly configured qschemes are
                 emitted so wrapper defaults may still participate in precedence.
-            mark_replace: If True, mark the returned mapping as a full policy
-                override so role-level defaults are not inherited later.
+            mark_replace: If True, add the internal
+                ``__quant_spec_replace_role__`` marker to the returned mapping.
+                ``QuantModuleBase`` consumes and removes the marker before
+                constructing the observer. A marked QuantSpec is treated as a
+                complete observer-level policy, so fields omitted from the
+                role-level activation or weight QuantSpec are not inherited.
+                Wrapper-provided defaults may still supply fields omitted from
+                the explicit observer override.
         """
         out: dict[str, Any] = {"observer": self.observer}
         if mark_replace:

@@ -79,6 +79,7 @@ pipeline:
 
   - name: ptq
     enabled: true
+    print_overrides: true
     print_model: true
 
     # Global default for activation observers that are not matched by a policy.

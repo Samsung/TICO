@@ -100,3 +100,25 @@ a `component: vision` policy with `allow_empty: true`.
 
 Do not use `allow_empty: true` for required overrides, because it can hide
 configuration mistakes.
+
+## Diagnostics
+
+Set `print_overrides: true` on the PTQ stage to print the normalized final
+values only for observer paths targeted by enabled `override_policies` or
+`raw_overrides`. Values are read after all precedence rules have been applied,
+so each targeted path is printed once with the final value passed to
+`prepare()`. Model-family defaults and unrelated adapter override paths are not
+printed. The internal `__quant_spec_replace_role__` merge marker is omitted.
+
+Set `print_model: true` to print the converted model immediately after the PTQ
+`convert()` call.
+
+```yaml
+pipeline:
+  - name: ptq
+    enabled: true
+    print_overrides: true
+    print_model: true
+```
+
+Both options default to `false`.
