@@ -1,7 +1,7 @@
 # Examples
 
 This directory contains thin command-line examples for running quantization,
-evaluation, and debugging workflows.
+evaluation, export, and debugging workflows.
 
 The examples are intentionally small. Real implementation code lives in
 `tico.quantization.recipes`.
@@ -13,7 +13,8 @@ tico/quantization/examples/
 ├── README.md
 ├── quantize.py          # Run a config-driven quantization pipeline
 ├── evaluate.py          # Evaluate an FP model or saved checkpoint
-├── inspector.py           # Run trace/parity/debug tools
+├── export.py            # Export artifacts from a saved checkpoint
+├── inspector.py         # Run trace/parity/debug tools
 └── configs/             # Reusable recipe presets
 ```
 
@@ -31,6 +32,10 @@ already saved checkpoint. `evaluate.py` does **not** run `pipeline` stages from
 the config. If the config contains enabled stages such as `gptq` or `ptq`, they
 are ignored by `evaluate.py`.
 
+Use `export.py` when you only want to load an already saved checkpoint and write
+configured artifacts such as LLaMA per-layer Circle files. `export.py` does
+**not** run `pipeline` stages from the config.
+
 Use `inspector.py` for debug-oriented workflows such as trace, parity, runtime
 inspection, and wrapper-level smoke checks.
 
@@ -40,23 +45,29 @@ Summary:
 |---|---:|---:|---:|---:|
 | `quantize.py` | Yes | Yes | If `evaluation.enabled=true` | If `export.enabled=true` |
 | `evaluate.py` | No | No | Yes | No |
+| `export.py` | No | No | No | Yes |
 | `inspector.py` | Mode-dependent | Mode-dependent | Debug only | Debug only |
 
 Common usage patterns:
 
 ```bash
-# Run GPTQ/PTQ and evaluate the quantized model in the same process.
+# Quantize LLaMA and save the configured checkpoint.
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --set evaluation.enabled=true \
-  --set export.enabled=false
+  --config tico/quantization/examples/configs/llama_quantize.yaml
 ```
 
 ```bash
-# Evaluate a saved checkpoint without running quantization again.
+# Evaluate a saved LLaMA checkpoint without running quantization again.
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --checkpoint ./out/llama/quantized_model.pt
+  --config tico/quantization/examples/configs/llama_eval_suite.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt
+```
+
+```bash
+# Export per-layer Circle artifacts from a saved LLaMA checkpoint.
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt
 ```
 
 ```bash
@@ -66,6 +77,33 @@ python -m tico.quantization.examples.evaluate \
   --set evaluation.llava_bench.n_samples=50
 ```
 
+### LLaMA benchmark flow
+
+Use this three-step loop for the common LLaMA post-quantization benchmark flow.
+
+1. Quantize the model and save the configured checkpoint.
+
+   ```bash
+   python -m tico.quantization.examples.quantize \
+     --config tico/quantization/examples/configs/llama_quantize.yaml
+   ```
+
+2. Evaluate the saved checkpoint with the configured LLM evaluation suite.
+
+   ```bash
+   python -m tico.quantization.examples.evaluate \
+     --config tico/quantization/examples/configs/llama_eval_suite.yaml \
+     --checkpoint ./out/llama_quantized/quantized_model.pt
+   ```
+
+3. Export per-layer Circle artifacts from the saved checkpoint.
+
+   ```bash
+   python -m tico.quantization.examples.export \
+     --config tico/quantization/examples/configs/llama_export.yaml \
+     --checkpoint ./out/llama_quantized/quantized_model.pt
+   ```
+
 ### Quantize
 
 `quantize.py` is the command that executes the recipe pipeline. It runs the
@@ -73,8 +111,7 @@ enabled stages under `pipeline` in the order they appear in the config.
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --model Maykeye/TinyLLama-v0
+  --config tico/quantization/examples/configs/llama_quantize.yaml
 ```
 
 ```bash
@@ -92,27 +129,23 @@ python -m tico.quantization.examples.quantize \
 Examples:
 
 ```bash
-# Run quantization only. Skip evaluation and export.
+# Run the default LLaMA benchmark quantization and save a checkpoint.
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --set evaluation.enabled=false \
+  --config tico/quantization/examples/configs/llama_quantize.yaml
+```
+
+```bash
+# Run a smaller calibration smoke without exporting artifacts.
+python -m tico.quantization.examples.quantize \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
+  --set calibration.n_samples=1 \
   --set export.enabled=false
 ```
 
 ```bash
-# Run quantization and evaluate the quantized model. Skip export.
+# Run quantization and write the checkpoint to another output directory.
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --set evaluation.enabled=true \
-  --set export.enabled=false
-```
-
-```bash
-# Run quantization and export configured artifacts. Skip evaluation.
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --set evaluation.enabled=false \
-  --set export.enabled=true \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --output-dir ./out/llama
 ```
 
@@ -138,7 +171,7 @@ Activation            : int16
 Linear weight         : uint4
 Embedding weight      : uint8
 LM head weight        : uint8
-Spin rotation weight  : int8
+Spin rotation weight  : int16
 Calibration samples   : 128
 Calibration seq length: 2048
 Max seq length        : 2048
@@ -149,7 +182,7 @@ Disable the summary when needed:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set runtime.print_config=false
 ```
 
@@ -157,7 +190,7 @@ Print the GPTQ-to-PTQ qparam injection summary with `runtime.verbose=true`:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set runtime.verbose=true
 ```
 
@@ -183,29 +216,59 @@ weight observers:
 from `--checkpoint` when one is provided. It does not prepare, calibrate,
 convert, or export the model.
 
-Running this command with a GPTQ/PTQ config evaluates the floating-point model,
+Running this command without `--checkpoint` evaluates the floating-point model,
 because the `pipeline` section is not executed by `evaluate.py`:
 
 ```bash
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml
+  --config tico/quantization/examples/configs/llama_eval_suite.yaml
 ```
 
 To evaluate a quantized result, pass a saved checkpoint:
 
 ```bash
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --checkpoint ./out/llama/quantized_model.pt
+  --config tico/quantization/examples/configs/llama_eval_suite.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt
 ```
 
 Task overrides are supported:
 
 ```bash
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --checkpoint ./out/llama/quantized_model.pt \
+  --config tico/quantization/examples/configs/llama_eval_suite.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt \
   --tasks winogrande,arc_easy
+```
+
+### Export
+
+`export.py` exports artifacts from an already saved checkpoint. It does not load
+calibration data or run quantization stages.
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt
+```
+
+`llama_export.yaml` exports both prefill and decode layer artifacts by default.
+Use an override only when decode layer export is not needed:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt \
+  --set export.prefill_decode=false
+```
+
+Export to another directory:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt \
+  --output-dir ./out/llama_layers
 ```
 
 ### LLaVA-Bench judge evaluation
@@ -320,7 +383,6 @@ set it to `false` when you want quieter output:
 When the judge is not the official GPT-4-style judge, report the judge model ID
 with the results. The default Llama 3.2 3B judge is intended for inexpensive
 regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
-
 
 ### Inspect / debug
 
@@ -462,7 +524,7 @@ All example CLIs accept `--set KEY=VALUE` for simple dotted overrides:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_ptq_only.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set runtime.device=cpu \
   --set calibration.n_samples=1 \
   --set export.enabled=false
@@ -483,7 +545,7 @@ List indices are zero-based. This is most useful for toggling entries in the
 ```yaml
 pipeline:
   - name: spinquant       # pipeline.0
-    enabled: false
+    enabled: true
 
   - name: cle             # pipeline.1
     enabled: false
@@ -495,12 +557,13 @@ pipeline:
     enabled: true
 ```
 
-For the example above, enable SpinQuant from the command line with:
+`llama_quantize.yaml` already enables SpinQuant. Disable it from the command
+line with:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --set pipeline.0.enabled=true
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
+  --set pipeline.0.enabled=false
 ```
 
 You can also override fields inside later stages by index. For example, if the
@@ -508,8 +571,7 @@ PTQ stage is `pipeline.3`, change its SpinQuant rotation weight spec with:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
-  --set pipeline.0.enabled=true \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set pipeline.3.spin_rotation_weight=int8
 ```
 
@@ -518,36 +580,7 @@ Convenience aliases are also available:
 ```bash
 --model       # overrides model.name_or_path
 --device      # overrides runtime.device
---output-dir  # overrides export.output_dir, quantize.py only
-```
-
-Prefer adding a dedicated config preset when the change adds, removes, or
-reorders list-valued sections such as `pipeline`. Command-line list overrides
-are convenient for toggling existing stages or changing simple scalar fields,
-but they are easy to misuse when the stage order differs between configs.
-
-Good command-line overrides:
-
-```bash
---set pipeline.0.enabled=true
---set pipeline.2.weight_bits=4
---set pipeline.3.activation=int16
-```
-
-Prefer a new config file for structural changes:
-
-```yaml
-pipeline:
-  - name: spinquant
-    enabled: true
-
-  - name: gptq
-    enabled: true
-    weight_bits: 4
-
-  - name: ptq
-    enabled: true
-    activation: int16
+--output-dir  # overrides export.output_dir, quantize.py/export.py only
 ```
 
 ## GPTQ SMSE sensitivity
@@ -575,13 +608,13 @@ Supported modes:
 | `compute` | Compute sensitivity for the current run only. `path` must be `null`. |
 | `save` | Compute sensitivity, use it for this run, and save it to `path`. |
 | `load` | Load sensitivity from `path` and use it for this run. |
-| `cache` | Load from `path` if it exists; otherwise compute and save to `path`. |
+| `cache` | Load from `path` if it exists; otherwise compute and save it. |
 
 Compute sensitivity without saving it:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set pipeline.2.mse=smse \
   --set pipeline.2.sensitivity.mode=compute
 ```
@@ -590,7 +623,7 @@ Compute and save sensitivity:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set pipeline.2.mse=smse \
   --set pipeline.2.sensitivity.mode=save \
   --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
@@ -600,7 +633,7 @@ Load a saved sensitivity file:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set pipeline.2.mse=smse \
   --set pipeline.2.sensitivity.mode=load \
   --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
@@ -610,7 +643,7 @@ Use a cache file when available, otherwise compute and save it:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_gptq_ptq.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set pipeline.2.mse=smse \
   --set pipeline.2.sensitivity.mode=cache \
   --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
@@ -633,8 +666,9 @@ Add a config when:
 Examples:
 
 ```text
-configs/llama_gptq_ptq.yaml
-configs/llama_ptq_only.yaml
+configs/llama_quantize.yaml
+configs/llama_eval_suite.yaml
+configs/llama_export.yaml
 configs/qwen3_vl_gptq_ptq.yaml
 configs/qwen3_vl_ptq_only.yaml
 ```
@@ -725,8 +759,13 @@ Use these commands for quick sanity checks after changing examples or recipes:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_ptq_only.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set calibration.n_samples=1 \
+  --set calibration.seq_len=64 \
+  --set calibration.decode_steps=0 \
+  --set pipeline.spinquant.enabled=false \
+  --set pipeline.gptq.enabled=false \
+  --set pipeline.ptq.decode_calibration_steps=0 \
   --set evaluation.enabled=false \
   --set export.enabled=false
 ```

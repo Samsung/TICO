@@ -14,8 +14,9 @@ evaluation tasks, and export targets.
    config, and call recipe code. They should not own quantization logic.
 
 2. **Configurations describe workflows.**
-   A new LLaMA GPTQ preset, a Qwen3-VL PTQ-only preset, or a small smoke-test
-   preset should usually be added as a YAML file, not as a new Python script.
+   A new LLaMA quantization preset, a Qwen3-VL PTQ-only preset, or a small
+   smoke-test preset should usually be added as a YAML file, not as a new Python
+   script.
 
 3. **Model-specific behavior lives in adapters.**
    Tokenization, processors, calibration input format, model-family PTQ config
@@ -80,7 +81,9 @@ examples/quantize.py
 
 `evaluate.py` and `inspector.py` reuse the same adapters and config format, but do
 not run the full quantization pipeline unless the debug mode explicitly needs a
-prepared/converted model.
+prepared/converted model. `export.py` also reuses adapters and config format, but
+loads a saved checkpoint and calls the adapter export path without building
+calibration inputs or running quantization stages.
 
 ## Responsibility boundaries
 
@@ -93,7 +96,7 @@ prepared/converted model.
 | New checkpoint, Circle, or artifact output | `recipes/export/*.py` |
 | New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspector.py` |
 | New common command-line workflow | Usually a config file under `examples/configs/` |
-| New public top-level user action not covered by quantize/evaluate/inspect | A new script under `examples/`, only after design review |
+| New public top-level user action not covered by quantize/evaluate/inspector | A new script under `examples/`, only after design review |
 
 ## Core abstractions
 
@@ -181,14 +184,15 @@ inspect mode: layer_parity
 Config presets should follow this pattern:
 
 ```text
-<family>_<pipeline>[_purpose].yaml
+<family>_<workflow>[_purpose].yaml
 ```
 
 Examples:
 
 ```text
-llama_gptq_ptq.yaml
-llama_ptq_only.yaml
+llama_quantize.yaml
+llama_eval_suite.yaml
+llama_export.yaml
 qwen3_vl_gptq_ptq.yaml
 qwen3_vl_synthetic_smoke.yaml
 ```

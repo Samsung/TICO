@@ -6,34 +6,34 @@ model:
   cache_dir: null
 
 runtime:
-  device: cuda
+  device: cpu
   dtype: float32
   seed: 42
   show_progress: true
 
 model_args:
-  profile: reference_eval
+  profile: npu_export
 
 calibration:
   dataset: Salesforce/wikitext
   dataset_config: wikitext-2-raw-v1
   split: train
-  n_samples: 128
+  n_samples: 1
   seq_len: 2048
   decode_steps: 8
 
 pipeline: []
 
 evaluation:
-  enabled: true
+  enabled: false
   perplexity: null
-  lm_eval_tasks: mmlu,hellaswag,piqa,truthfulqa_mc1,truthfulqa_mc2,race,triviaqa
+  lm_eval_tasks: null
   max_seq_len: 2048
 
 export:
-  enabled: false
-  output_dir: ./out/llama_eval
+  enabled: true
+  output_dir: ./out/llama_quantized/circle_layers
   max_seq_len: 2048
   prefill_decode: true
   artifacts:
-    - ptq_checkpoint
+    - circle_per_layer

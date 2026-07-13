@@ -20,11 +20,11 @@ calibration:
   split: train
   n_samples: 128
   seq_len: 2048
-  decode_steps: 0
+  decode_steps: 8
 
 pipeline:
   - name: spinquant
-    enabled: false
+    enabled: true
 
   - name: cle
     enabled: false
@@ -39,7 +39,7 @@ pipeline:
     weight_bits_overrides: {}
     perchannel: true
     symmetric: false
-    mse: null
+    mse: mse
     sensitivity:
       mode: compute
       path: null
@@ -62,21 +62,18 @@ pipeline:
     spin_rotation_weight: int16
     norm_weight: int16
     strict_wrap: true
-    decode_calibration_steps: 0
+    decode_calibration_steps: 8
 
 evaluation:
-  enabled: true
-  perplexity:
-    dataset: Salesforce/wikitext
-    dataset_config: wikitext-2-raw-v1
-    split: test
+  enabled: false
+  perplexity: null
   lm_eval_tasks: null
   max_seq_len: 2048
 
 export:
-  enabled: false
-  output_dir: ./out/llama
+  enabled: true
+  output_dir: ./out/llama_quantized
   max_seq_len: 2048
-  prefill_decode: false
+  prefill_decode: true
   artifacts:
     - ptq_checkpoint
