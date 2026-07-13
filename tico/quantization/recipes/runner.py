@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -100,6 +101,84 @@ def _stage_quant_spec(
 ) -> Any:
     """Read and format a quantization spec from a stage config."""
     return _format_quant_spec(_stage_value(stage_cfg, key, None), default)
+
+
+def _format_override_policy_spec(
+    policy: Mapping[str, Any],
+    specs: Mapping[str, Any],
+) -> str:
+    """Format a policy spec and expand a referenced named spec."""
+    spec = policy.get("spec", "not set")
+    if isinstance(spec, str) and spec in specs:
+        return f"{spec} [{_format_quant_spec(specs[spec])}]"
+    return str(_format_quant_spec(spec))
+
+
+def _format_override_policy(
+    policy: Mapping[str, Any],
+    specs: Mapping[str, Any],
+) -> str:
+    """Format one PTQ override policy for the config summary."""
+    name = str(policy.get("name", "<unnamed>"))
+    status = "" if bool(policy.get("enabled", True)) else " (disabled)"
+
+    target = policy.get("target", {})
+    if not isinstance(target, Mapping):
+        target = {}
+
+    fields = [
+        f"spec={_format_override_policy_spec(policy, specs)}",
+        f"component={target.get('component', 'all')}",
+        f"layers={target.get('layers', 'all')}",
+    ]
+
+    for key in ("module", "modules", "op_type"):
+        value = target.get(key)
+        if value is not None:
+            fields.append(f"{key}={value}")
+
+    for key in ("observers", "observer_role"):
+        value = target.get(key)
+        if value is not None:
+            fields.append(f"{key}={value}")
+
+    if bool(policy.get("allow_empty", False)):
+        fields.append("allow_empty=True")
+
+    return f"{name}{status} -> {', '.join(fields)}"
+
+
+def _print_override_policy_summary(
+    ptq_stage: Mapping[str, Any] | None,
+) -> None:
+    """Print PTQ override policies as part of the config summary."""
+    if ptq_stage is None:
+        return
+
+    policies = ptq_stage.get("override_policies")
+    if (
+        not isinstance(policies, Sequence)
+        or isinstance(policies, (str, bytes))
+        or not policies
+    ):
+        return
+
+    specs = ptq_stage.get("specs", {})
+    if not isinstance(specs, Mapping):
+        specs = {}
+
+    formatted = [
+        _format_override_policy(policy, specs)
+        for policy in policies
+        if isinstance(policy, Mapping)
+    ]
+    if not formatted:
+        return
+
+    print()
+    print("=== PTQ override policies ===")
+    for policy in formatted:
+        print(f"  {policy}")
 
 
 def _gptq_weight_bits(gptq_stage: Mapping[str, Any] | None) -> Any:
@@ -239,6 +318,7 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     )
     _print_config_row("Max seq length", _max_seq_len(cfg))
     _print_config_row("Profile", profile)
+    _print_override_policy_summary(ptq_stage)
     print()
 
 
