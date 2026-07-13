@@ -720,6 +720,9 @@ class StaticGemma4Runtime:
                 inputs_embeds=hidden_states, per_layer_inputs=ple
             )
 
+        # Track shared KV state for shared-KV layers
+        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
         for layer_idx, layer in enumerate(self.prefill_layers):
             layer_type = self.text_config.layer_types[layer_idx]
             per_layer_input = (
@@ -727,13 +730,26 @@ class StaticGemma4Runtime:
                 if per_layer_inputs is not None
                 else None
             )
+
+            # Determine if this layer needs shared KV
+            attn = layer.wrapped.wrapped.self_attn
+            shared_key_value = None
+            if getattr(attn, "is_kv_shared_layer", False):
+                shared_key_value = shared_kv_states.get(layer_type)
+
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_masks[layer_type],
                 position_embeddings=position_embeddings[layer_type],
                 per_layer_input=per_layer_input,
+                shared_key_value=shared_key_value,
             )
             hidden_states, new_k, new_v = out
+
+            # Store full-length KV for sharing with later shared-KV layers
+            if getattr(attn, "store_full_length_kv", False):
+                shared_kv_states[layer_type] = (new_k, new_v)
+
             self.layer_caches[layer_idx].past_k[:, :, : self.layout.max_seq, :] = new_k
             self.layer_caches[layer_idx].past_v[:, :, : self.layout.max_seq, :] = new_v
 
@@ -806,6 +822,9 @@ class StaticGemma4Runtime:
                 inputs_embeds=hidden_states, per_layer_inputs=ple
             )
 
+        # Track shared KV state for shared-KV layers
+        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
         for layer_idx, layer in enumerate(self.decode_layers):
             cache = self.layer_caches[layer_idx]
             layer_type = self.text_config.layer_types[layer_idx]
@@ -814,14 +833,27 @@ class StaticGemma4Runtime:
                 if per_layer_inputs is not None
                 else None
             )
+
+            # Determine if this layer needs shared KV
+            attn = layer.wrapped.wrapped.self_attn
+            shared_key_value = None
+            if getattr(attn, "is_kv_shared_layer", False):
+                shared_key_value = shared_kv_states.get(layer_type)
+
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_masks[layer_type],
                 position_embeddings=position_embeddings[layer_type],
                 per_layer_input=per_layer_input,
+                shared_key_value=shared_key_value,
                 past_key_value=(cache.past_k, cache.past_v),
             )
             hidden_states, new_k, new_v = out
+
+            # Store full-length KV for sharing with later shared-KV layers
+            if getattr(attn, "store_full_length_kv", False):
+                shared_kv_states[layer_type] = (new_k, new_v)
+
             cache.past_k[:, :, self.past_len : self.past_len + 1, :] = new_k
             cache.past_v[:, :, self.past_len : self.past_len + 1, :] = new_v
 
