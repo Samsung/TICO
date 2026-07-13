@@ -203,9 +203,10 @@ def _build_gemma4_decode_masks(
         mask_value: Value for masked positions.
 
     Returns:
-        Dict mapping layer_type -> additive attention mask of shape (B, 1, max_seq).
+        Dict mapping layer_type -> additive attention mask of shape (B, 1, past_len+1).
     """
     result: Dict[str, torch.Tensor] = {}
+    k_len = past_len + 1  # past keys + new key
 
     for layer_type in set(layer_types):
         if layer_type == "sliding_attention" and sliding_window is not None:
@@ -215,9 +216,9 @@ def _build_gemma4_decode_masks(
             # Full attention: all past tokens are visible
             start_idx = 0
 
-        # Build mask: positions [0: start_idx] are masked, [start_len: past_len+1] are visible
-        mask = torch.ones(batch_size, 1, max_seq, device=device, dtype=dtype)
-        mask[:, :, start_idx : past_len + 1] = 0.0
+        # Build mask sized to actual key length (past_len + 1)
+        mask = torch.ones(batch_size, 1, k_len, device=device, dtype=dtype)
+        mask[:, :, start_idx:] = 0.0
         mask = mask * mask_value
 
         result[layer_type] = mask
@@ -749,11 +750,13 @@ class StaticGemma4Runtime:
             # non-shared layers return (hidden_states, key, value)
             if isinstance(out, tuple) and len(out) == 3:
                 hidden_states, new_k, new_v = out
+                valid_length = int(batch["valid_length"].item())
                 # Store full-length KV for sharing with later shared-KV layers
                 if getattr(attn, "store_full_length_kv", False):
-                    shared_kv_states[layer_type] = (new_k, new_v)
-                self.layer_caches[layer_idx].past_k[:, :, : self.layout.max_seq, :] = new_k
-                self.layer_caches[layer_idx].past_v[:, :, : self.layout.max_seq, :] = new_v
+                    shared_kv_states[layer_type] = (new_k[:, :, :valid_length, :], new_v[:, :, :valid_length, :])
+                # Only cache valid (non-padding) tokens
+                self.layer_caches[layer_idx].past_k[:, :, :valid_length, :] = new_k[:, :, :valid_length, :]
+                self.layer_caches[layer_idx].past_v[:, :, :valid_length, :] = new_v[:, :, :valid_length, :]
             else:
                 hidden_states = out
 
@@ -850,7 +853,10 @@ class StaticGemma4Runtime:
                 position_embeddings=position_embeddings[layer_type],
                 per_layer_input=per_layer_input,
                 shared_key_value=shared_key_value,
-                past_key_value=(cache.past_k, cache.past_v),
+                past_key_value=(
+                    cache.past_k[:, :, : self.past_len, :],
+                    cache.past_v[:, :, : self.past_len, :],
+                ),
             )
 
             # Shared-KV layers return only hidden_states (no K/V);
