@@ -508,16 +508,29 @@ class StaticGemma4Runtime:
     def _allocate_empty_cache(
         self, batch_size: int, dtype: torch.dtype
     ) -> list[LayerCache]:
-        """Allocate fixed-size empty KV cache tensors."""
+        """Allocate fixed-size empty KV cache tensors.
+
+        Each layer may have a different head_dim: full_attention layers use
+        global_head_dim while sliding_attention layers use head_dim.
+        """
         num_kv_heads = int(self.text_config.num_key_value_heads)
         head_dim = int(self.text_config.head_dim)
+        global_head_dim = int(
+            getattr(self.text_config, "global_head_dim", None) or head_dim
+        )
+        layer_types = getattr(self.text_config, "layer_types", ["full_attention"])
         caches = []
-        for _ in range(int(self.text_config.num_hidden_layers)):
+        for i in range(int(self.text_config.num_hidden_layers)):
+            layer_type = layer_types[i] if i < len(layer_types) else "full_attention"
+            if layer_type == "full_attention" and global_head_dim:
+                layer_head_dim = global_head_dim
+            else:
+                layer_head_dim = head_dim
             past_k = torch.zeros(
                 batch_size,
                 num_kv_heads,
                 self.layout.max_seq,
-                head_dim,
+                layer_head_dim,
                 device=self.device,
                 dtype=dtype,
             )
