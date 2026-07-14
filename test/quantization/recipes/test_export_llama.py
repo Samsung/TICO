@@ -227,7 +227,7 @@ class TestResolveExportSource(unittest.TestCase):
 
 class TestExportMain(unittest.TestCase):
     def _args(self, **overrides):
-        values = {
+        values: dict[str, str | None | bool | list] = {
             "config": "config.yaml",
             "source": "model",
             "checkpoint": None,
