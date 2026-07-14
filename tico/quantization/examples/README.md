@@ -13,7 +13,7 @@ tico/quantization/examples/
 ├── README.md
 ├── quantize.py          # Run a config-driven quantization pipeline
 ├── evaluate.py          # Evaluate an FP model or saved checkpoint
-├── export.py            # Export artifacts from a saved checkpoint
+├── export.py            # Export artifacts from a model or saved checkpoint
 ├── inspector.py         # Run trace/parity/debug tools
 └── configs/             # Reusable recipe presets
 ```
@@ -32,9 +32,9 @@ already saved checkpoint. `evaluate.py` does **not** run `pipeline` stages from
 the config. If the config contains enabled stages such as `gptq` or `ptq`, they
 are ignored by `evaluate.py`.
 
-Use `export.py` when you only want to load an already saved checkpoint and write
-configured artifacts such as LLaMA per-layer Circle files. `export.py` does
-**not** run `pipeline` stages from the config.
+Use `export.py` to export either a floating-point model loaded through its
+adapter or an already saved checkpoint. It writes configured artifacts such as
+LLaMA per-layer Circle files and does **not** run `pipeline` stages.
 
 Use `inspector.py` for debug-oriented workflows such as trace, parity, runtime
 inspection, and wrapper-level smoke checks.
@@ -243,8 +243,23 @@ python -m tico.quantization.examples.evaluate \
 
 ### Export
 
-`export.py` exports artifacts from an already saved checkpoint. It does not load
-calibration data or run quantization stages.
+`export.py` exports configured artifacts from a floating-point model or an
+already saved checkpoint. It does not load calibration data or run quantization
+stages.
+
+Export the floating-point model on CPU while preserving the NPU-facing
+per-layer input/output contract:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --source model \
+  --device cpu \
+  --output-dir ./out/llama_float/circle_layers
+```
+
+Floating-point artifacts use the `.f32.circle` suffix. To export an already
+saved quantized checkpoint instead:
 
 ```bash
 python -m tico.quantization.examples.export \
@@ -517,7 +532,6 @@ python -m tico.quantization.examples.inspector \
   --output-dir ./out/wrapper_smoke \
   --strict
 ```
-
 ## CLI overrides
 
 All example CLIs accept `--set KEY=VALUE` for simple dotted overrides:

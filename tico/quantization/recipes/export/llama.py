@@ -18,6 +18,8 @@ from typing import Any
 import torch
 
 import tico
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
     LlamaTokenEmbeddingExportAdapter,
@@ -78,26 +80,98 @@ def _make_random_decode_batch(model, batch: int, device: str, max_seq: int):
     return hidden, pos, mask, (past_k, past_v)
 
 
+def _is_wrapped_export_model(model: torch.nn.Module) -> bool:
+    """Return whether the model already exposes the PTQ wrapper export layout."""
+    wrapped = getattr(model, "wrapped", None)
+    return wrapped is not None and hasattr(wrapped, "model")
+
+
+def _float_artifact_tag(model: torch.nn.Module) -> str:
+    """Validate a float32 model and return its artifact tag."""
+    try:
+        dtype = next(model.parameters()).dtype
+    except StopIteration:
+        dtype = torch.float32
+
+    if dtype is not torch.float32:
+        raise TypeError(
+            "Floating-point LLaMA export currently supports float32 only. "
+            f"Got parameter dtype {dtype}."
+        )
+    return "f32"
+
+
+def _prepare_llama_export_model(
+    model: torch.nn.Module,
+) -> tuple[torch.nn.Module, str, bool]:
+    """Normalize a checkpoint or floating-point model for per-layer export.
+
+    Floating-point models are wrapped structurally with the NPU export profile.
+    The wrapper remains in its default NO_QUANT mode, so no calibration or
+    fake-quantization is introduced. Already wrapped checkpoints are preserved.
+
+    Returns:
+        A tuple containing the export model, artifact tag, and whether fake-quant
+        meta kernels may be required during dynamic export.
+    """
+    model = model.eval().cpu()
+    if _is_wrapped_export_model(model):
+        return model, "q", True
+
+    artifact_tag = _float_artifact_tag(model)
+    wrapper_config = PTQConfig(
+        model_args={"profile": "npu_export"},
+        strict_wrap=True,
+    )
+    export_model = PTQWrapHelper(strict_wrap=wrapper_config.strict_wrap).wrap_supported(
+        model, wrapper_config
+    )
+    if not _is_wrapped_export_model(export_model):
+        raise TypeError(
+            "Floating-point LLaMA export requires a top-level wrapper with a "
+            "wrapped model."
+        )
+    return export_model, artifact_tag, False
+
+
+def _circle_name(stem: str, artifact_tag: str) -> str:
+    """Build a Circle artifact name with an explicit precision tag."""
+    return f"{stem}.{artifact_tag}.circle"
+
+
 def export_token_embedding(
-    qmodel: torch.nn.Module, max_seq_len: int, output_dir: Path
+    qmodel: torch.nn.Module,
+    max_seq_len: int,
+    output_dir: Path,
+    *,
+    artifact_tag: str = "q",
+    register_fake_quant_kernels: bool = True,
 ) -> None:
-    register_fake_quant_meta_kernels_for_dynamic_export()
+    """Export the token embedding stage with the configured precision tag."""
+    if register_fake_quant_kernels:
+        register_fake_quant_meta_kernels_for_dynamic_export()
     example = make_token_embedding_example_input(qmodel=qmodel, max_seq_len=max_seq_len)
     dynamic_shapes = make_token_embedding_dynamic_shapes(max_seq_len)
     _convert_and_save(
         LlamaTokenEmbeddingExportAdapter(qmodel),
         (example,),
-        output_dir / "token_embedding.q.circle",
+        output_dir / _circle_name("token_embedding", artifact_tag),
         dynamic_shapes=dynamic_shapes,
     )
 
 
-def export_lm_head(qmodel: torch.nn.Module, output_dir: Path) -> None:
+def export_lm_head(
+    qmodel: torch.nn.Module,
+    output_dir: Path,
+    *,
+    artifact_tag: str = "q",
+) -> None:
+    """Export the final normalization and LM head stage."""
     example_hidden = torch.randn(1, 1, int(qmodel.config.hidden_size), device="cpu")
     _convert_and_save(
         LlamaLMHeadExportAdapter(qmodel),
         (example_hidden,),
-        output_dir / "lm_head.q.circle",
+        output_dir / _circle_name("lm_head", artifact_tag),
     )
 
 
@@ -108,24 +182,31 @@ def export_llama_per_layer(
     output_dir: str | Path,
     prefill_decode: bool = False,
 ) -> None:
-    """Export token embedding, decoder layers, and LM head as Circle artifacts."""
+    """Export a floating-point or PTQ-wrapped LLaMA model by stage and layer."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    q_model.eval().cpu()
-    if not hasattr(q_model, "wrapped"):
-        raise TypeError("Per-layer LLaMA export requires a PTQ-wrapped model.")
-
-    qmodel = q_model.wrapped
+    (
+        export_model,
+        artifact_tag,
+        register_fake_quant_kernels,
+    ) = _prepare_llama_export_model(q_model)
+    qmodel = export_model.wrapped
     layers = qmodel.model.wrapped.layers
     config = qmodel.config
 
-    export_token_embedding(qmodel, max_seq_len, output_dir)
+    export_token_embedding(
+        qmodel,
+        max_seq_len,
+        output_dir,
+        artifact_tag=artifact_tag,
+        register_fake_quant_kernels=register_fake_quant_kernels,
+    )
 
     for i, qlayer in enumerate(layers):
         suffix = "prefill_" if prefill_decode else ""
         layer_name = f"decoder_layer_{suffix}{i}"
-        save_path = output_dir / f"{layer_name}.q.circle"
+        save_path = output_dir / _circle_name(layer_name, artifact_tag)
 
         batch, seq, hidden_size = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(batch, seq, hidden_size, device="cpu")
@@ -157,7 +238,7 @@ def export_llama_per_layer(
             _convert_and_save(
                 qlayer.wrapped.as_export_module("decode"),
                 (hidden,),
-                output_dir / f"{layer_name}.q.circle",
+                output_dir / _circle_name(layer_name, artifact_tag),
                 kwargs={
                     "attention_mask": mask,
                     "past_key_value": past,
@@ -165,4 +246,4 @@ def export_llama_per_layer(
                 },
             )
 
-    export_lm_head(qmodel, output_dir)
+    export_lm_head(qmodel, output_dir, artifact_tag=artifact_tag)
