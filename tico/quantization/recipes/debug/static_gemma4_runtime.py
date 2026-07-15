@@ -96,25 +96,40 @@ def _build_gemma4_rope_templates(
             theta = 10000.0
             factor = 1.0
 
-        # Compute rotary frequency
+        # Compute rotary frequency.
+        # For proportional RoPE (partial_rotary_factor < 1.0), HF computes
+        # inv_freq with head_dim in the denominator (NOT rotary_dim), then pads
+        # inv_freq with zeros to head_dim//2 elements. This ensures non-rotary
+        # dimensions get cos=1, sin=0 (identity rotation) via cos(0)=1, sin(0)=0.
         rotary_dim = int(dim * factor)
-        inv_freq = 1.0 / (
+        rope_angles = rotary_dim // 2  # number of rotary frequency components
+
+        # inv_freq for rotary dimensions: divide by dim (head_dim), NOT rotary_dim
+        inv_freq_rotated = 1.0 / (
             theta
             ** (
-                torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device)
-                / rotary_dim
+                torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32, device=device)
+                / dim
             )
         )
-        pos = torch.arange(max_seq, dtype=torch.float32, device=device)
-        freqs = torch.outer(pos, inv_freq)
-        emb = torch.cat([freqs, freqs], dim=-1)
 
-        # Pad to full dim if rotary_dim < dim (partial rotary)
-        if rotary_dim < dim:
-            padding = torch.zeros(
-                max_seq, dim - rotary_dim, device=device, dtype=torch.float32
+        # Pad inv_freq with zeros for non-rotary dimensions
+        nope_angles = dim // 2 - rope_angles
+        if nope_angles > 0:
+            inv_freq = torch.cat(
+                (
+                    inv_freq_rotated,
+                    torch.zeros(nope_angles, dtype=torch.float32, device=device),
+                ),
+                dim=0,
             )
-            emb = torch.cat([emb, padding], dim=-1)
+        else:
+            inv_freq = inv_freq_rotated
+
+        # Compute freqs and emb: cat(freqs, freqs) gives head_dim elements
+        pos = torch.arange(max_seq, dtype=torch.float32, device=device)
+        freqs = torch.outer(pos, inv_freq)  # (max_seq, head_dim // 2)
+        emb = torch.cat([freqs, freqs], dim=-1)  # (max_seq, head_dim)
 
         cos = emb.cos().unsqueeze(0).to(dtype=dtype)
         sin = emb.sin().unsqueeze(0).to(dtype=dtype)
@@ -609,6 +624,18 @@ class StaticGemma4Runtime:
         )
         padded_input_ids[:seq_len] = input_ids
 
+        # Replace image placeholder token IDs with pad_token_id to create
+        # llm_input_ids.  The visual embeddings are fused separately via
+        # mm_fusion, so the text embedding path should not see image placeholder
+        # tokens.  This follows the spec in .clinerules/Gemma.md:
+        #   "Create llm_input_ids: replace image/video/audio placeholder token
+        #    IDs with pad_token_id."
+        # Note: image_token_id lives on the top-level model config, not on
+        # text_config.
+        image_token_id = getattr(self.config, "image_token_id", None)
+        if image_token_id is not None:
+            padded_input_ids[padded_input_ids == image_token_id] = pad_token_id
+
         # Pad attention mask
         padded_attention_mask = torch.zeros(
             max_seq, dtype=torch.bool, device=self.device
@@ -689,8 +716,16 @@ class StaticGemma4Runtime:
         return attention_masks, position_embeddings
 
     @torch.no_grad()
-    def prefill(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Run static prefill and return last-token logits."""
+    def prefill(
+        self,
+        batch: dict[str, torch.Tensor],
+        collect_hidden_states: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        """Run static prefill and return last-token logits.
+
+        If collect_hidden_states is True, also returns a list of per-layer
+        hidden_states (last valid token) for divergence analysis.
+        """
         llm_input_ids = batch["llm_input_ids"].to(self.device)
         pixel_values = batch["pixel_values"].to(self.device)
         image_position_ids = batch.get("image_position_ids")
@@ -723,6 +758,7 @@ class StaticGemma4Runtime:
 
         # Track shared KV state for shared-KV layers
         shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        collected_hidden: list[torch.Tensor] = []
 
         for layer_idx, layer in enumerate(self.prefill_layers):
             layer_type = self.text_config.layer_types[layer_idx]
@@ -760,9 +796,15 @@ class StaticGemma4Runtime:
             else:
                 hidden_states = out
 
+            if collect_hidden_states:
+                vl = int(batch["valid_length"].item())
+                collected_hidden.append(hidden_states[:, vl - 1, :].clone())
+
         self.past_len = int(batch["valid_length"].item())
         hidden_last = hidden_states[:, self.past_len - 1 : self.past_len, :]
         logits = self.lm_head(hidden_last)
+        if collect_hidden_states:
+            return logits[:, -1, :], collected_hidden
         return logits[:, -1, :]
 
     def build_decode_masks_and_rope(
@@ -936,6 +978,7 @@ def verify_against_reference(
 ) -> None:
     """Verify runtime outputs against HF reference model.
 
+
     Args:
         runtime: StaticGemma4Runtime instance.
         prompt: Text prompt string.
@@ -949,10 +992,20 @@ def verify_against_reference(
     llm_input_ids = batch["llm_input_ids"]
     valid_length = int(batch["valid_length"].item())
 
-    # Run reference model (full HF forward)
+    # Get raw input_ids (with image placeholder tokens intact) for HF reference.
+    # The runtime's llm_input_ids has image tokens replaced with pad_token_id,
+    # but HF's Gemma4Model.forward() expects the original input_ids with image
+    # placeholder tokens — it does the replacement internally via
+    # get_placeholder_mask() + torch.where().
+    raw_inputs = runtime.processor(
+        text=prompt, images=image, return_tensors="pt", padding=False
+    )
+    raw_input_ids = raw_inputs["input_ids"]
+
+    # Run reference model (full HF forward) — pass raw_input_ids
     with torch.no_grad():
         ref_outputs = runtime.model(
-            input_ids=llm_input_ids[:, :valid_length],
+            input_ids=raw_input_ids,
             pixel_values=batch["pixel_values"],
             image_position_ids=batch.get("image_position_ids"),
             return_dict=True,
@@ -984,13 +1037,16 @@ def verify_against_reference(
         runtime_logits = runtime.decode_one(input_ids)
 
         # Run reference decode (append token to input)
+        # Use raw_input_ids (with image tokens intact) — HF does the
+        # replacement internally.
         extended_input_ids = torch.cat(
             [
-                llm_input_ids[:, :valid_length],
+                raw_input_ids,
                 torch.tensor([[next_token_id]], device=runtime.device),
             ],
             dim=1,
         )
+
         with torch.no_grad():
             ref_outputs = runtime.model(
                 input_ids=extended_input_ids,
@@ -1006,6 +1062,317 @@ def verify_against_reference(
         print(
             f"  Step {step + 1}: Mean|diff|={decode_diff.mean().item():.6f}, "
             f"Max|diff|={decode_diff.max().item():.6f}, PEIR={decode_peir:.6f}"
+        )
+
+
+def verify_step_build_static_inputs(
+    runtime: StaticGemma4Runtime,
+    prompt: str,
+    image,
+    *,
+    verbose: bool = True,
+) -> dict:
+    """Side-by-side validation of ``build_static_inputs()`` against HF reference.
+
+    This function validates the first runtime workflow step in isolation:
+
+    1. **llm_input_ids**: Compares the runtime's padded + image-placeholder-replaced
+       input IDs against the HF reference computed via
+       ``Gemma4Model.get_placeholder_mask()`` + ``torch.where(multimodal_mask, pad_token_id, input_ids)``.
+    2. **valid_token_mask**: Compares the runtime's attention mask against the HF
+       processor's attention mask (extended to max_seq with padding).
+    3. **pixel_values**: Compares the pixel values from the processor (should be identical).
+    4. **image_position_ids**: Compares image position IDs from the processor (should be identical).
+    5. **valid_length**: Compares the valid token count.
+
+    The runtime pads to ``max_seq`` and replaces image placeholder tokens with
+    ``pad_token_id``. The HF reference does not pad, so we compare only the
+    valid (non-padding) prefix.
+
+    Args:
+        runtime: ``StaticGemma4Runtime`` instance (wraps the HF model).
+        prompt: Text prompt string.
+        image: PIL Image or numpy array.
+        verbose: If True, print per-step comparison details.
+
+    Returns:
+        Dict with keys:
+            - ``"passed"``: bool, True if all sub-steps passed.
+            - ``"batch"``: The runtime's ``build_static_inputs()`` output dict.
+            - ``"ref_llm_input_ids"``: HF reference llm_input_ids (unpadded).
+            - ``"results"``: Dict of per-sub-step pass/fail booleans.
+    """
+    # ------------------------------------------------------------------
+    # Step 1a: Run the runtime's build_static_inputs
+    # ------------------------------------------------------------------
+    batch = runtime.build_static_inputs(prompt, image)
+    rt_llm_input_ids = batch["llm_input_ids"]  # (1, max_seq)
+    rt_attention_mask = batch["attention_mask"]  # (1, max_seq)
+    rt_pixel_values = batch["pixel_values"]
+    rt_image_position_ids = batch.get("image_position_ids")
+    valid_length = int(batch["valid_length"].item())
+
+    # ------------------------------------------------------------------
+    # Step 1b: Compute HF reference
+    # ------------------------------------------------------------------
+    # Re-run the processor to get raw input_ids (before padding/replacement)
+    inputs = runtime.processor(
+        text=prompt,
+        images=image,
+        return_tensors="pt",
+        padding=False,
+    )
+    raw_input_ids = inputs["input_ids"]  # (1, seq_len)
+
+    # Access the HF Gemma4Model (runtime.model is Gemma4ForConditionalGeneration)
+    hf_model = runtime.model  # Gemma4ForConditionalGeneration
+    hf_gemma4_model = hf_model.model  # Gemma4Model
+
+    # HF get_placeholder_mask: returns (image_mask, video_mask, audio_mask)
+    image_mask, video_mask, audio_mask = hf_gemma4_model.get_placeholder_mask(
+        input_ids=raw_input_ids
+    )
+    multimodal_mask = image_mask | video_mask | audio_mask
+
+    # HF llm_input_ids: replace multimodal placeholder tokens with pad_token_id
+    pad_token_id = getattr(runtime.text_config, "pad_token_id", 0)
+    ref_llm_input_ids = torch.where(
+        multimodal_mask, torch.tensor(pad_token_id, dtype=raw_input_ids.dtype), raw_input_ids
+    )
+
+    # HF attention mask from processor (if available)
+    raw_attention_mask = inputs.get("attention_mask", None)
+
+    # ------------------------------------------------------------------
+    # Step 1c: Compare
+    # ------------------------------------------------------------------
+    results: dict[str, bool] = {}
+
+    # 1. llm_input_ids: compare valid prefix only (runtime is padded to max_seq)
+    rt_valid_ids = rt_llm_input_ids[0, :valid_length]
+    ref_valid_ids = ref_llm_input_ids[0]
+    # Both should be long tensors with identical values
+    ids_match = torch.equal(rt_valid_ids, ref_valid_ids)
+    if verbose:
+        print(f"\n{'=' * 80}")
+        print(f"  Step 1.1: llm_input_ids (valid prefix, len={valid_length})")
+        print(f"  Runtime shape:  {tuple(rt_valid_ids.shape)}")
+        print(f"  HF shape:       {tuple(ref_valid_ids.shape)}")
+        if ids_match:
+            print(f"  Exact match: True")
+            print(f"  [PASS]")
+        else:
+            diff_count = (rt_valid_ids != ref_valid_ids).sum().item()
+            print(f"  Exact match: False ({diff_count} mismatches)")
+            # Show first few mismatches
+            mismatch_idx = (rt_valid_ids != ref_valid_ids).nonzero(as_tuple=True)[0]
+            for idx in mismatch_idx[:5]:
+                i = idx.item()
+                print(f"    pos {i}: runtime={rt_valid_ids[i].item()} hf={ref_valid_ids[i].item()}")
+            print(f"  [FAIL]")
+    results["llm_input_ids"] = ids_match
+
+    # 2. valid_token_mask: compare runtime's attention mask against HF's
+    # Runtime pads to max_seq; HF's raw attention mask is unpadded.
+    # Compare the valid prefix.
+    if raw_attention_mask is not None:
+        rt_valid_mask = rt_attention_mask[0, :valid_length]
+        ref_valid_mask = raw_attention_mask[0].bool()
+        mask_match = torch.equal(rt_valid_mask, ref_valid_mask)
+        if verbose:
+            print(f"\n{'=' * 80}")
+            print(f"  Step 1.2: valid_token_mask (valid prefix, len={valid_length})")
+            print(f"  Runtime shape:  {tuple(rt_valid_mask.shape)}")
+            print(f"  HF shape:       {tuple(ref_valid_mask.shape)}")
+            if mask_match:
+                print(f"  Exact match: True")
+                print(f"  [PASS]")
+            else:
+                print(f"  Exact match: False")
+                print(f"  [FAIL]")
+        results["valid_token_mask"] = mask_match
+    else:
+        if verbose:
+            print(f"\n  Step 1.2: valid_token_mask — SKIPPED (no HF attention_mask)")
+        results["valid_token_mask"] = True
+
+    # 3. pixel_values: should be identical (both from same processor call)
+    rt_pv = rt_pixel_values
+    ref_pv = inputs.get("pixel_values", None)
+    if ref_pv is not None:
+        pv_match = torch.equal(rt_pv, ref_pv)
+        if verbose:
+            print(f"\n{'=' * 80}")
+            print(f"  Step 1.3: pixel_values")
+            print(f"  Runtime shape:  {tuple(rt_pv.shape)}")
+            print(f"  HF shape:       {tuple(ref_pv.shape)}")
+            if pv_match:
+                print(f"  Exact match: True")
+                print(f"  [PASS]")
+            else:
+                diff = (rt_pv - ref_pv).abs()
+                print(f"  Exact match: False")
+                print(f"  Max|diff|: {diff.max().item():.8f}")
+                print(f"  [FAIL]")
+        results["pixel_values"] = pv_match
+    else:
+        if verbose:
+            print(f"\n  Step 1.3: pixel_values — SKIPPED (no HF pixel_values)")
+        results["pixel_values"] = True
+
+    # 4. image_position_ids: should be identical (both from same processor call)
+    ref_ipids = inputs.get("image_position_ids", None)
+    if rt_image_position_ids is not None and ref_ipids is not None:
+        ipids_match = torch.equal(rt_image_position_ids, ref_ipids)
+        if verbose:
+            print(f"\n{'=' * 80}")
+            print(f"  Step 1.4: image_position_ids")
+            print(f"  Runtime shape:  {tuple(rt_image_position_ids.shape)}")
+            print(f"  HF shape:       {tuple(ref_ipids.shape)}")
+            if ipids_match:
+                print(f"  Exact match: True")
+                print(f"  [PASS]")
+            else:
+                diff = (rt_image_position_ids - ref_ipids).abs()
+                print(f"  Exact match: False")
+                print(f"  Max|diff|: {diff.max().item():.8f}")
+                print(f"  [FAIL]")
+        results["image_position_ids"] = ipids_match
+    else:
+        if verbose:
+            print(f"\n  Step 1.4: image_position_ids — SKIPPED (not available)")
+        results["image_position_ids"] = True
+
+    # 5. valid_length: sanity check
+    if raw_attention_mask is not None:
+        ref_valid_length = int(raw_attention_mask[0].sum().item())
+    else:
+        ref_valid_length = raw_input_ids.shape[1]
+    vl_match = valid_length == ref_valid_length
+    if verbose:
+        print(f"\n{'=' * 80}")
+        print(f"  Step 1.5: valid_length")
+        print(f"  Runtime:  {valid_length}")
+        print(f"  HF:       {ref_valid_length}")
+        if vl_match:
+            print(f"  [PASS]")
+        else:
+            print(f"  [FAIL]")
+    results["valid_length"] = vl_match
+
+    # 6. Padding check: verify runtime padded the rest with pad_token_id
+    if valid_length < rt_llm_input_ids.shape[1]:
+        padding_part = rt_llm_input_ids[0, valid_length:]
+        all_pad = torch.all(padding_part == pad_token_id).item()
+        if verbose:
+            print(f"\n{'=' * 80}")
+            print(f"  Step 1.6: padding (positions {valid_length}:{rt_llm_input_ids.shape[1]})")
+            print(f"  All pad_token_id ({pad_token_id}): {all_pad}")
+            if all_pad:
+                print(f"  [PASS]")
+            else:
+                print(f"  [FAIL]")
+        results["padding"] = all_pad
+    else:
+        results["padding"] = True
+
+    # Summary
+    all_passed = all(results.values())
+    if verbose:
+        print(f"\n{'=' * 80}")
+        print(f"  Step 1 Summary: build_static_inputs")
+        for name, passed in results.items():
+            status = "PASS" if passed else "FAIL"
+            print(f"    {name:25s} [{status}]")
+        overall = "PASS" if all_passed else "FAIL"
+        print(f"  Overall: [{overall}]")
+
+    return {
+        "passed": all_passed,
+        "batch": batch,
+        "ref_llm_input_ids": ref_llm_input_ids,
+        "results": results,
+    }
+
+
+def verify_per_layer_divergence(
+    runtime: StaticGemma4Runtime,
+    prompt: str,
+    image,
+) -> None:
+    """Compare per-layer hidden_states between static runtime and HF reference.
+
+    Registers forward hooks on the HF model's decoder layers to capture
+    reference hidden_states, then compares against the static runtime's
+    per-layer hidden_states (last valid token only).
+    """
+    batch = runtime.build_static_inputs(prompt, image)
+    llm_input_ids = batch["llm_input_ids"]
+    valid_length = int(batch["valid_length"].item())
+
+    # Get raw input_ids (with image placeholder tokens intact) for HF reference.
+    # The runtime's llm_input_ids has image tokens replaced with pad_token_id,
+    # but HF's Gemma4Model.forward() expects the original input_ids with image
+    # placeholder tokens — it does the replacement internally via
+    # get_placeholder_mask() + torch.where().
+    raw_inputs = runtime.processor(
+        text=prompt, images=image, return_tensors="pt", padding=False
+    )
+    raw_input_ids = raw_inputs["input_ids"]
+
+    # --- Capture reference per-layer hidden_states via hooks ---
+    ref_hidden_states: list[torch.Tensor] = []
+
+    # Access the HF model's text decoder layers
+    text_model = runtime.model.model.language_model
+    num_layers = len(text_model.layers)
+
+    hooks = []
+    for i, layer in enumerate(text_model.layers):
+        def make_hook(idx):
+            def hook_fn(module, input, output):
+                # output is typically a tuple; hidden_states is output[0]
+                if isinstance(output, tuple):
+                    hs = output[0]
+                else:
+                    hs = output
+                # Capture last valid token
+                ref_hidden_states.append(hs[:, valid_length - 1, :].detach().clone())
+            return hook_fn
+        h = layer.register_forward_hook(make_hook(i))
+        hooks.append(h)
+
+    # Run reference model — pass raw_input_ids (with image tokens intact)
+    with torch.no_grad():
+        _ = runtime.model(
+            input_ids=raw_input_ids,
+            pixel_values=batch["pixel_values"],
+            image_position_ids=batch.get("image_position_ids"),
+            return_dict=True,
+        )
+
+    # Remove hooks
+    for h in hooks:
+        h.remove()
+
+    # --- Run static runtime with hidden_states collection ---
+    runtime.reset_cache()
+    runtime_logits, runtime_hidden = runtime.prefill(
+        batch, collect_hidden_states=True
+    )
+
+    # --- Compare per-layer ---
+    print(f"\n=== Per-Layer Hidden States Divergence (last valid token) ===")
+    print(f"  {'Layer':>5}  {'Type':>20}  {'Mean|diff|':>12}  {'Max|diff|':>12}  {'Ref|mean|':>12}  {'Rt|mean|':>12}")
+    for i in range(min(num_layers, len(runtime_hidden), len(ref_hidden_states))):
+        layer_type = runtime.text_config.layer_types[i]
+        ref_hs = ref_hidden_states[i].float()
+        rt_hs = runtime_hidden[i].float()
+        diff = (rt_hs - ref_hs).abs()
+        print(
+            f"  {i:5d}  {layer_type:>20}  {diff.mean().item():12.6f}  "
+            f"{diff.max().item():12.6f}  {ref_hs.abs().mean().item():12.6f}  "
+            f"{rt_hs.abs().mean().item():12.6f}"
         )
 
 
@@ -1054,6 +1421,19 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     dummy_image = np.random.randint(
         0, 255, (cfg.image_height, cfg.image_width, 3), dtype=np.uint8
     )
+
+    # Verify build_static_inputs
+    result = verify_step_build_static_inputs(
+        runtime, cfg.prompt, dummy_image, verbose=True
+    )
+    assert result["passed"], f"Step validation failed: {result['results']}"
+    assert "batch" in result
+    assert "ref_llm_input_ids" in result
+    assert "results" in result
+
+    # Per-layer divergence analysis
+    print(f"\n=== Per-Layer Divergence Analysis ===")
+    verify_per_layer_divergence(runtime, cfg.prompt, dummy_image)
 
     # Verify against reference
     if cfg.verify_steps > 0:
