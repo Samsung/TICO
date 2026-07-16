@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     args = parser.parse_args()
     try:
-        _resolve_source(args.source, args.checkpoint)
+        args.source = _resolve_source(args.source, args.checkpoint)
     except ValueError as exc:
         parser.error(str(exc))
     return args
@@ -108,7 +108,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    source = _resolve_source(args.source, args.checkpoint)
 
     overrides = list(args.set)
     overrides.append("export.enabled=true")
@@ -127,7 +126,7 @@ def main() -> None:
     set_seed(cfg.get("runtime", {}).get("seed", 42))
 
     adapter = get_adapter(cfg["model"]["family"])
-    if source == "model":
+    if args.source == "model":
         ctx = RecipeContext(cfg=cfg, adapter=adapter)
         ctx = adapter.load_model(ctx)
     else:

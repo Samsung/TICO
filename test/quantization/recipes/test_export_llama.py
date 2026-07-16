@@ -284,7 +284,7 @@ class TestExportMain(unittest.TestCase):
         with patch.object(
             export_example,
             "parse_args",
-            return_value=self._args(source=None, checkpoint="model.pt"),
+            return_value=self._args(source="checkpoint", checkpoint="model.pt"),
         ), patch.object(
             export_example, "load_recipe_config", return_value=cfg
         ), patch.object(
