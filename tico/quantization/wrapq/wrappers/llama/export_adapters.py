@@ -277,7 +277,7 @@ class LlamaAttentionDecodeExportAdapter(nn.Module):
     Return contract
     ---------------
     - return_kv=True:
-        (hidden_states, (new_key, new_value))
+        (hidden_states, new_key, new_value)
       where new_key/new_value are the KV delta for the current token.
 
     - return_kv=False:
@@ -304,65 +304,6 @@ class LlamaAttentionDecodeExportAdapter(nn.Module):
         attention computation, but only the newly produced K/V tensors are
         returned to the caller.
         """
-        outputs = self.wrapped(
-            hidden_states=hidden_states,
-            position_embeddings=position_embeddings,
-            attention_mask=attention_mask,
-            past_key_value=past_key_value,
-            use_cache=self.return_kv,
-            cache_output_mode="delta",
-            **kwargs,
-        )
-
-        hidden = outputs[0]
-
-        if not self.return_kv:
-            return hidden
-
-        new_k, new_v = outputs[2]
-        return hidden, new_k, new_v
-
-
-class LlamaAttentionAppendPrefillExportAdapter(nn.Module):
-    """
-    Export adapter for append-prefill attention.
-
-    Append-prefill consumes a fixed-size block of new tokens and attends to a
-    runtime-managed static past buffer. The runtime must prepare the additive
-    attention mask and RoPE position embeddings outside the exported graph.
-
-    Input contract
-    --------------
-    - hidden_states:        (B, Q, D)
-    - position_embeddings:  (B, Q, head_dim)
-    - attention_mask:       (B, Q, K)
-    - past_key_value:       (B, num_kv_heads, K - Q, head_dim)
-
-    Return contract
-    ---------------
-    - return_kv=True:
-        (hidden_states, (new_key, new_value))
-      where new_key/new_value are the KV delta for the appended block with
-      shape `(B, num_kv_heads, Q, head_dim)`.
-
-    - return_kv=False:
-        hidden_states
-    """
-
-    def __init__(self, wrapped, *, return_kv: bool = True):
-        super().__init__()
-        self.wrapped = wrapped
-        self.return_kv = return_kv
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        **kwargs,
-    ):
-        """Run append-prefill attention and return delta-only K/V tensors."""
         outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -428,71 +369,12 @@ class LlamaDecoderLayerPrefillExportAdapter(nn.Module):
 
 class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
     """
-    Export adapter for decode.
+    Export adapter for cache-aware decoder-layer execution.
 
-    Input contract
-    --------------
-    - hidden_states:     (B, 1, D)
-    - attention_mask:    additive mask, typically (B, 1, K)
-    - past_key / past_value:
-                        (B, num_kv_heads, K-1, head_dim)
-    - cos / sin:         (B, 1, head_dim)
-
-    Return contract
-    ---------------
-    - return_kv=True:
-        (hidden_states, new_key, new_value)
-      where new_key/new_value are the delta KV for the current token.
-
-    - return_kv=False:
-        hidden_states
-    """
-
-    def __init__(self, wrapped, *, return_kv: bool = True):
-        super().__init__()
-        self.wrapped = wrapped
-        self.wrapped.return_type = "tuple"
-        self.return_kv = return_kv
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor],
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]],
-        **kwargs,
-    ):
-        """
-        Run the decoder layer decode path and return delta-only K/V tensors
-        when caching is enabled.
-        """
-        outputs = self.wrapped(
-            hidden_states,
-            attention_mask=attention_mask,
-            position_embeddings=position_embeddings,
-            past_key_value=past_key_value,
-            use_cache=self.return_kv,
-            cache_output_mode="delta",
-            **kwargs,
-        )
-
-        hidden = outputs[0]
-
-        if not self.return_kv:
-            return hidden
-
-        new_k, new_v = outputs[1]
-        return hidden, new_k, new_v
-
-
-class LlamaDecoderLayerAppendPrefillExportAdapter(nn.Module):
-    """
-    Export adapter for append-prefill.
-
-    Append-prefill is the multi-token cache-append path used for multi-turn
-    serving. It keeps the exported graph static by requiring the runtime to
-    prepare position embeddings, additive attention masks, and static past-cache
-    slices before calling the graph.
+    The adapter is query-length agnostic. Single-token decode uses `Q = 1`,
+    while append-prefill uses a fixed multi-token block `Q > 1`. In both cases,
+    the runtime supplies static attention masks, RoPE position embeddings, and
+    past-cache tensors.
 
     Input contract
     --------------
@@ -523,11 +405,12 @@ class LlamaDecoderLayerAppendPrefillExportAdapter(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        past_key_value: Tuple[torch.Tensor, torch.Tensor],
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]],
         **kwargs,
     ):
         """
-        Run the decoder layer append-prefill path and return delta-only K/V tensors.
+        Run a cache-aware decoder-layer block and return delta-only K/V tensors
+        when caching is enabled.
         """
         outputs = self.wrapped(
             hidden_states,
