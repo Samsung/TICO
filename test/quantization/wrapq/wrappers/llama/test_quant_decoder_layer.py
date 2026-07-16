@@ -427,6 +427,30 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertEqual(new_k.shape, (batch_size, self.n_kv, 1, self.head_dim))
         self.assertEqual(new_v.shape, (batch_size, self.n_kv, 1, self.head_dim))
 
+    def test_export_decode_adapter_supports_multi_token_block(self):
+        qlayer = QuantLlamaDecoderLayer(self.fp_layer)
+        adapter = qlayer.as_export_module(mode="decode", return_kv=True)
+        self.assertIsInstance(adapter, LlamaDecoderLayerDecodeExportAdapter)
+
+        batch_size = 1
+        query_len = 4
+        hidden = torch.randn(batch_size, query_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, query_len)
+        mask = torch.zeros(batch_size, query_len, self.max_seq)
+        past = self._rand_past(batch_size, self.max_seq - query_len)
+
+        with torch.no_grad():
+            hidden_out, new_k, new_v = adapter(
+                hidden_states=hidden,
+                attention_mask=mask,
+                position_embeddings=pos,
+                past_key_value=past,
+            )
+
+        self.assertEqual(hidden_out.shape, (batch_size, query_len, self.hidden_size))
+        self.assertEqual(new_k.shape, (batch_size, self.n_kv, query_len, self.head_dim))
+        self.assertEqual(new_v.shape, (batch_size, self.n_kv, query_len, self.head_dim))
+
     def test_export_adapter_without_kv_returns_hidden_only(self):
         qlayer = QuantLlamaDecoderLayer(self.fp_layer)
         adapter = qlayer.as_export_module(mode="decode", return_kv=False)

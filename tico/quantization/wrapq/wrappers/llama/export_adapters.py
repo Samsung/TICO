@@ -334,6 +334,7 @@ class LlamaDecoderLayerPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
+        # TODO: Replace this shared-state mutation with a per-call return-type override.
         self.wrapped.return_type = "tuple"
         self.return_kv = return_kv
 

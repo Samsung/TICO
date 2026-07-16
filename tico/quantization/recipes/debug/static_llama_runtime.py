@@ -621,6 +621,9 @@ class StaticLlamaLayerRuntime:
         _validate_padding_layout(valid, self.padding_side)
         compact_input_ids = _compact_valid_tokens(input_ids, valid)
 
+        # TODO Select the smallest exported bucket satisfying
+        # chunk_len <= Q and self.past_len + Q <= self.max_seq. Define the
+        # context-length policy to use when no exported bucket fits.
         logits = None
         for start in range(0, compact_input_ids.size(1), bucket_size):
             chunk = compact_input_ids[:, start : start + bucket_size].to(self.device)
