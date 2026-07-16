@@ -18,6 +18,10 @@ from pathlib import Path
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.debug.static_gemma4_runtime import (
+    run_static_gemma4_runtime,
+    StaticGemma4RuntimeConfig,
+)
 from tico.quantization.recipes.debug.static_llama_runtime import (
     run_static_llama_runtime,
     StaticLlamaRuntimeConfig,
@@ -43,6 +47,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "trace",
             "static-llama-runtime",
+            "static-gemma4-runtime",
             "tied-embedding-smoke",
             "wrapper-smoke",
         ],
@@ -213,6 +218,13 @@ def main() -> None:
             **cfg.get("debug", {}).get("static_llama_runtime", {})
         )
         run_static_llama_runtime(runtime_cfg)
+        return
+
+    if args.mode == "static-gemma4-runtime":
+        gemma4_runtime_cfg = StaticGemma4RuntimeConfig(
+            **cfg.get("debug", {}).get("static_gemma4_runtime", {})
+        )
+        run_static_gemma4_runtime(gemma4_runtime_cfg)
         return
 
     adapter = get_adapter(cfg["model"]["family"])

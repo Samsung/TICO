@@ -21,6 +21,7 @@ NPU-exportable subgraphs own quantized tensor compute.
 """
 
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -41,6 +42,67 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
 )
 
 
+# =============================================================================
+# CPU Helper Functions (pure Python, no model needed)
+# =============================================================================
+
+
+def _normalize_valid_token_mask(
+    input_ids: torch.LongTensor,
+    attention_mask: Optional[torch.Tensor],
+    *,
+    pad_token_id: Optional[int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Normalize attention mask to a boolean valid-token mask.
+
+    If attention_mask is provided, convert it to boolean.
+    If not, derive from input_ids by comparing against pad_token_id.
+    """
+    if attention_mask is None:
+        if pad_token_id is None:
+            valid = torch.ones(input_ids.shape, device=device, dtype=torch.bool)
+        else:
+            valid = input_ids.to(device).ne(int(pad_token_id))
+    else:
+        if tuple(attention_mask.shape) != tuple(input_ids.shape):
+            raise ValueError(
+                f"attention_mask shape {tuple(attention_mask.shape)} != input_ids shape {tuple(input_ids.shape)}"
+            )
+        valid = attention_mask.to(device).bool()
+    return valid
+
+
+def _validate_padding_layout(
+    input_ids: torch.LongTensor,
+    valid_token_mask: torch.Tensor,
+    *,
+    padding_side: str,
+) -> None:
+    """Validate that padding is on the expected side.
+
+    Currently only 'right' padding is supported: valid tokens first, then
+    padding. Raises ValueError if the layout doesn't match or if an
+    unsupported padding_side is requested.
+    """
+    if padding_side != "right":
+        raise ValueError(
+            f"Unsupported padding_side={padding_side!r}, only 'right' is supported."
+        )
+    for i in range(valid_token_mask.size(0)):
+        row = valid_token_mask[i]
+        false_indices = torch.where(~row)[0]
+        if len(false_indices) > 0:
+            first_false = int(false_indices[0].item())
+            if not torch.all(~row[first_false:]):
+                raise ValueError("Right padding expected but not found")
+
+
+# =============================================================================
+# Data Classes
+# =============================================================================
+
+
 @dataclass
 class LayerCache:
     """Static per-layer KV cache."""
@@ -57,7 +119,7 @@ class StaticGemma4RuntimeConfig:
     max_seq: int = 2048
     image_height: int = 896
     image_width: int = 896
-    visual_start_idx: int = 0
+    visual_start_idx: int = 1
     num_visual_tokens: int = 256
     padding_side: str = "right"
     device: str = "cpu"
@@ -157,14 +219,127 @@ class StaticGemma4Runtime:
             caches.append(LayerCache(past_k=past_k, past_v=torch.zeros_like(past_k)))
         return caches
 
-    def build_static_inputs(self, prompt: str, image) -> dict[str, torch.Tensor]:
+    def build_static_inputs(
+        self, prompt: str, image, max_seq: Optional[int] = None
+    ) -> dict[str, torch.Tensor]:
         """Build static padded processor inputs.
 
-        TODO: Implement exact Gemma4 processor calls and visual slot validation.
+        Processes the prompt+image through the HF processor, pads to
+        ``max_seq``, and replaces image placeholder tokens with
+        ``pad_token_id`` to create ``llm_input_ids``.
+
+        Args:
+            prompt: Text prompt string.
+            image: PIL image or tensor to feed to the processor.
+            max_seq: Override for ``self.layout.max_seq``.
+
+        Returns:
+            Dict with keys: ``llm_input_ids``, ``pixel_values``,
+            ``image_position_ids``, ``attention_mask``, ``valid_length``.
         """
-        raise NotImplementedError(
-            "Static Gemma4 processor input builder is not wired yet."
+        if max_seq is None:
+            max_seq = self.layout.max_seq
+        pad_token_id = getattr(self.text_config, "pad_token_id", 0)
+
+        inputs = self.processor(
+            text=prompt, images=image, return_tensors="pt", padding=False
         )
+        input_ids = inputs["input_ids"].squeeze(0)
+        attention_mask = inputs.get("attention_mask", None)
+        if attention_mask is not None:
+            attention_mask = attention_mask.squeeze(0)
+
+        valid_token_mask = _normalize_valid_token_mask(
+            input_ids.unsqueeze(0),
+            attention_mask.unsqueeze(0) if attention_mask is not None else None,
+            pad_token_id=pad_token_id,
+            device=self.device,
+        ).squeeze(0)
+
+        _validate_padding_layout(
+            input_ids.unsqueeze(0),
+            valid_token_mask.unsqueeze(0),
+            padding_side=(
+                self.layout.padding_side
+                if hasattr(self.layout, "padding_side")
+                else "right"
+            ),
+        )
+
+        seq_len = input_ids.shape[0]
+        if seq_len > max_seq:
+            raise ValueError(
+                f"Input sequence length {seq_len} exceeds max_seq {max_seq}"
+            )
+
+        # CRITICAL: image_token_id from self.config, NOT self.text_config
+        image_token_id = getattr(self.config, "image_token_id", None)
+
+        # Validate that image placeholder positions match the static export profile
+        if image_token_id is not None:
+            raw_input_ids = inputs["input_ids"]  # (1, seq_len)
+            image_mask = raw_input_ids[0] == image_token_id
+            image_positions = torch.nonzero(image_mask, as_tuple=True)[0]
+            if image_positions.numel() == 0:
+                raise ValueError(
+                    "No image placeholder tokens found in processor output"
+                )
+            actual_start = int(image_positions[0].item())
+            actual_count = int(image_positions.numel())
+            expected_positions = torch.arange(
+                actual_start,
+                actual_start + actual_count,
+                device=image_positions.device,
+            )
+            if not torch.equal(image_positions, expected_positions):
+                raise ValueError(
+                    "Image placeholder tokens must form one contiguous span. "
+                    f"positions={image_positions.tolist()}"
+                )
+            if actual_start != self.layout.visual_start_idx:
+                raise ValueError(
+                    "Processor output does not match the static export profile: "
+                    f"expected visual_start_idx={self.layout.visual_start_idx}, "
+                    f"actual={actual_start}"
+                )
+            if actual_count != self.layout.num_visual_tokens:
+                raise ValueError(
+                    "Processor output does not match the static export profile: "
+                    f"expected num_visual_tokens={self.layout.num_visual_tokens}, "
+                    f"actual={actual_count}"
+                )
+
+        padded_input_ids = torch.full(
+            (max_seq,), pad_token_id, dtype=input_ids.dtype, device=self.device
+        )
+        padded_input_ids[:seq_len] = input_ids.to(self.device)
+
+        if image_token_id is not None:
+            padded_input_ids[padded_input_ids == image_token_id] = pad_token_id
+
+        padded_attention_mask = torch.zeros(
+            max_seq, dtype=torch.bool, device=self.device
+        )
+        padded_attention_mask[:seq_len] = True
+
+        pixel_values = inputs.get("pixel_values", None)
+        if pixel_values is None:
+            raise ValueError("Processor did not return pixel_values")
+        pixel_values = pixel_values.to(self.device)
+
+        image_position_ids = inputs.get("image_position_ids", None)
+        if image_position_ids is not None:
+            image_position_ids = image_position_ids.to(self.device)
+
+        valid_length = torch.tensor([seq_len], dtype=torch.long, device=self.device)
+
+        return {
+            "llm_input_ids": padded_input_ids.unsqueeze(0),
+            "pixel_values": pixel_values,
+            "image_position_ids": image_position_ids,
+            "attention_mask": padded_attention_mask.unsqueeze(0),
+            "valid_length": valid_length,
+        }
 
     def build_prefill_masks_and_rope(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
@@ -302,11 +477,162 @@ class StaticGemma4Runtime:
         return self.lm_head(hidden_states)[:, -1, :]
 
 
+@torch.no_grad()
+def verify_step_build_static_inputs(
+    runtime: StaticGemma4Runtime,
+    prompt: str,
+    image,
+) -> bool:
+    """Side-by-side validation of ``build_static_inputs`` against HF reference.
+
+    This function re-derives each sub-step of ``build_static_inputs`` using the
+    raw HF processor output and the HF model's internal logic, then compares
+    against what the runtime produced. It validates:
+
+    1. ``llm_input_ids`` — image placeholder replacement + padding
+    2. ``valid_token_mask`` / ``attention_mask`` — boolean valid-token mask
+    3. ``pixel_values`` — exact match with processor output
+    4. ``image_position_ids`` — exact match with processor output
+    5. ``valid_length`` — correct unpadded sequence length
+    6. ``padding`` — right-padded layout with pad_token_id fill
+
+    Returns ``True`` if all checks pass.
+    """
+    import torch.testing
+
+    layout = runtime.layout
+    max_seq = layout.max_seq
+    pad_token_id = getattr(runtime.text_config, "pad_token_id", 0)
+    image_token_id = getattr(runtime.config, "image_token_id", None)
+
+    # --- Runtime output ---
+    batch = runtime.build_static_inputs(prompt, image)
+    rt_llm_input_ids = batch["llm_input_ids"]
+    rt_attention_mask = batch["attention_mask"]
+    rt_pixel_values = batch["pixel_values"]
+    rt_image_position_ids = batch.get("image_position_ids")
+    rt_valid_length = batch["valid_length"]
+
+    # --- HF reference: raw processor output ---
+    inputs = runtime.processor(
+        text=prompt, images=image, return_tensors="pt", padding=False
+    )
+    ref_input_ids = inputs["input_ids"].squeeze(0)
+    seq_len = ref_input_ids.shape[0]
+
+    # 1. llm_input_ids: pad + replace image tokens
+    ref_padded = torch.full(
+        (max_seq,), pad_token_id, dtype=ref_input_ids.dtype, device=runtime.device
+    )
+    ref_padded[:seq_len] = ref_input_ids.to(runtime.device)
+    if image_token_id is not None:
+        ref_padded[ref_padded == image_token_id] = pad_token_id
+
+    torch.testing.assert_close(
+        rt_llm_input_ids.squeeze(0),
+        ref_padded,
+        msg="llm_input_ids mismatch: image placeholder replacement or padding",
+    )
+
+    # 2. valid_token_mask / attention_mask
+    ref_attention_mask = torch.zeros(max_seq, dtype=torch.bool, device=runtime.device)
+    ref_attention_mask[:seq_len] = True
+    torch.testing.assert_close(
+        rt_attention_mask.squeeze(0),
+        ref_attention_mask,
+        msg="attention_mask mismatch",
+    )
+
+    # 3. pixel_values
+    ref_pixel_values = inputs.get("pixel_values", None)
+    if ref_pixel_values is None:
+        raise ValueError("HF processor did not return pixel_values")
+    ref_pixel_values = ref_pixel_values.to(runtime.device)
+    torch.testing.assert_close(
+        rt_pixel_values,
+        ref_pixel_values,
+        msg="pixel_values mismatch",
+    )
+
+    # 4. image_position_ids
+    ref_image_position_ids = inputs.get("image_position_ids", None)
+    if ref_image_position_ids is not None:
+        ref_image_position_ids = ref_image_position_ids.to(runtime.device)
+    if rt_image_position_ids is not None and ref_image_position_ids is not None:
+        torch.testing.assert_close(
+            rt_image_position_ids,
+            ref_image_position_ids,
+            msg="image_position_ids mismatch",
+        )
+    elif rt_image_position_ids is not None or ref_image_position_ids is not None:
+        raise ValueError(
+            "image_position_ids presence mismatch: "
+            f"runtime={rt_image_position_ids is not None}, "
+            f"reference={ref_image_position_ids is not None}"
+        )
+
+    # 5. valid_length
+    ref_valid_length = torch.tensor([seq_len], dtype=torch.long, device=runtime.device)
+    torch.testing.assert_close(
+        rt_valid_length,
+        ref_valid_length,
+        msg="valid_length mismatch",
+    )
+
+    # 6. padding layout: right-padded with pad_token_id
+    #    All positions >= seq_len must be pad_token_id
+    if seq_len < max_seq:
+        padding_region = rt_llm_input_ids.squeeze(0)[seq_len:]
+        if not torch.all(padding_region == pad_token_id):
+            raise ValueError("Padding region does not consist entirely of pad_token_id")
+
+    print("[verify_step_build_static_inputs] All checks passed.")
+    return True
+
+
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     """Run the Gemma4 E2B static runtime smoke flow.
 
-    TODO: Load a real image input and wire reference parity checks.
+    This entry point currently runs only the ``build_static_inputs`` validation
+    step. Prefill, decode, and generation are skipped with clear messages.
     """
-    raise NotImplementedError(
-        "Gemma4 static runtime entry point is not fully implemented yet."
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    if cfg.padding_side != "right":
+        raise ValueError(
+            "StaticGemma4Runtime currently supports right padding only, "
+            f"got padding_side={cfg.padding_side!r}."
+        )
+
+    print(f"[run_static_gemma4_runtime] Loading model: {cfg.model}")
+    model = AutoModelForImageTextToText.from_pretrained(cfg.model)
+    processor = AutoProcessor.from_pretrained(cfg.model)
+
+    layout = StaticGemma4Layout(
+        max_seq=cfg.max_seq,
+        visual_start_idx=cfg.visual_start_idx,
+        num_visual_tokens=cfg.num_visual_tokens,
     )
+
+    print("[run_static_gemma4_runtime] Creating StaticGemma4Runtime ...")
+    runtime = StaticGemma4Runtime(
+        model=model,
+        processor=processor,
+        layout=layout,
+        device=cfg.device,
+    )
+
+    # --- Load a test image ---
+    from PIL import Image
+
+    image = Image.new("RGB", (cfg.image_width, cfg.image_height), color="white")
+
+    # --- Step 1: build_static_inputs validation ---
+    print("[run_static_gemma4_runtime] Step 1: verify build_static_inputs")
+    verify_step_build_static_inputs(runtime, cfg.prompt, image)
+
+    # --- Steps 2-4: prefill / decode / generation (not yet implemented) ---
+    print("[run_static_gemma4_runtime] SKIP: prefill (not implemented in this PR)")
+    print("[run_static_gemma4_runtime] SKIP: decode (not implemented in this PR)")
+    print("[run_static_gemma4_runtime] SKIP: generation (not implemented in this PR)")
+    print("[run_static_gemma4_runtime] Done.")

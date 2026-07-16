@@ -1,0 +1,13 @@
+debug:
+  static_gemma4_runtime:
+    model: google/gemma-4-e2b-it
+    max_seq: 2048
+    image_height: 896
+    image_width: 896
+    visual_start_idx: 1
+    num_visual_tokens: 256
+    padding_side: right
+    device: cpu
+    prompt: "<|image|>Describe the image."
+    verify_steps: 4
+    gen_steps: 16
