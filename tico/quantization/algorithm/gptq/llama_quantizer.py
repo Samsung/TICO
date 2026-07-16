@@ -1377,9 +1377,10 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     sub_layer = subset[name]
                     nn_layer = sub_layer.module if hasattr(sub_layer, "module") else sub_layer
                     gptq[name] = GPTQ(nn_layer)
+                    gptq[name].saturation_threshold = gptq_conf.saturation_threshold
+                    gptq[name].saturation_min_batches = gptq_conf.saturation_min_batches
                     full_module_name = module_name[subset[name]]
-                    weight_bits = 4
-                    self._resolve_weight_bits(
+                    weight_bits = self._resolve_weight_bits(
                         gptq_conf,
                         full_module_name=self.remove_wrapped_substrings(full_module_name),
                         local_module_name=self.remove_wrapped_substrings(name),
@@ -1682,6 +1683,8 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             lm_head_inner = lm_head_module
 
         gptq = GPTQ(lm_head_inner)
+        gptq.saturation_threshold = gptq_conf.saturation_threshold
+        gptq.saturation_min_batches = gptq_conf.saturation_min_batches
         full_module_name = "lm_head"
         weight_bits = self._resolve_weight_bits(
             gptq_conf,
@@ -1804,6 +1807,8 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             rotate_lm_head_inner = rotate_lm_head_module
 
         gptq = GPTQ(rotate_lm_head_inner)
+        gptq.saturation_threshold = gptq_conf.saturation_threshold
+        gptq.saturation_min_batches = gptq_conf.saturation_min_batches
         full_module_name = "rotate_lm_head"
         weight_bits = self._resolve_weight_bits(
             gptq_conf,

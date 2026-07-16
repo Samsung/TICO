@@ -167,10 +167,17 @@ class SensitivityCalibrator:
     Please see https://arxiv.org/abs/1905.12558?ref=inference.vc for a discussion.
     """
 
-    def __init__(self, model, dataset, show_progress: bool = True):
+    def __init__(
+        self,
+        model,
+        dataset,
+        show_progress: bool = True,
+        sample_weights=None,
+    ):
         self.model = model
         self.dataset = dataset
         self.show_progress = show_progress
+        self.sample_weights = self._flatten_sample_weights(sample_weights)
         self.calibrated_types = [
             torch.nn.Linear,
             torch.nn.Conv2d,
@@ -180,7 +187,40 @@ class SensitivityCalibrator:
         ]
 
     @staticmethod
+    def _flatten_sample_weights(sample_weights):
+        """
+        Flatten per-batch sample weights into a flat per-sample list of floats.
+
+        When the calibration dataset is packed with ``batch > 1``, weights may
+        be provided per batch (e.g. ``[tensor([w0, w1]), tensor([w2, w3]), ...]``
+        for ``batch=2``).  ``compute_sensitivity_info`` iterates over individual
+        samples and indexes weights with a per-sample index, so the weights must
+        be flattened to one scalar per sample.
+
+        Args:
+            sample_weights: ``None`` or a list whose entries may be scalars,
+                lists/tuples, or ``torch.Tensor`` with one element per sample.
+
+        Returns:
+            ``None`` when ``sample_weights is None``, otherwise a flat list of
+            Python floats (one per individual sample).
+        """
+        if sample_weights is None:
+            return None
+
+        flat_weights = []
+        for w in sample_weights:
+            if isinstance(w, torch.Tensor):
+                flat_weights.extend(w.reshape(-1).tolist())
+            elif isinstance(w, (list, tuple)):
+                flat_weights.extend(w)
+            else:
+                flat_weights.append(float(w))
+        return flat_weights
+
+    @staticmethod
     def _unbatch_inputs(inputs):
+
         """
         Split batched inputs into individual samples for memory-efficient calibration.
         
@@ -258,6 +298,7 @@ class SensitivityCalibrator:
 
         if self.show_progress is True:
             print("Calibrating sensitivity")
+        global_sample_idx = 0
         for inputs, targets in tqdm.tqdm(data_loader, disable=not self.show_progress):
             # Unbatch inputs to process each sample individually (batch=1)
             # This prevents high GPU memory consumption when batch > 1
@@ -265,6 +306,14 @@ class SensitivityCalibrator:
             unbatched_targets = self._unbatch_targets(targets, len(unbatched_inputs))
             
             for single_input, single_target in zip(unbatched_inputs, unbatched_targets):
+                # Determine weight for this sample (used for weighted Fisher accumulation)
+                if self.sample_weights is not None:
+                    weight = self.sample_weights[global_sample_idx]
+                    if isinstance(weight, torch.Tensor):
+                        weight = weight.item()
+                else:
+                    weight = 1.0
+                global_sample_idx += 1
                 model.zero_grad(set_to_none=True)
                 if model.device.type != "cpu":
                     torch.cuda.empty_cache()
@@ -304,7 +353,7 @@ class SensitivityCalibrator:
                     if torch.isnan(cur_grad).any().item():
                         print("WARNING NaN detected")
 
-                    sensitivity[name] += torch.mul(cur_grad, cur_grad).cpu()
+                    sensitivity[name] += weight * torch.mul(cur_grad, cur_grad).cpu()
 
                     cur_grad = None
                     del cur_grad
@@ -322,8 +371,14 @@ class SensitivityCalibrator:
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
+        if self.sample_weights is not None:
+            total_weight = sum(self.sample_weights) * global_sample_idx
+        else:
+            total_weight = float(global_sample_idx)
+
+
         for name in modules_to_process:
-            sensitivity[name] /= len(data_loader)
+            sensitivity[name] /= total_weight
 
         model.zero_grad(set_to_none=True)
         if model.device.type != "cpu":

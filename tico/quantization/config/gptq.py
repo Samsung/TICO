@@ -84,6 +84,16 @@ class GPTQConfig(BaseConfig):
     # Sample weights for weighted Hessian accumulation (used with calibration set compression)
     sample_weights: list[float] | None = None
 
+    # Early stopping: stop collecting Hessian when the effective rank
+    # (participation ratio) r_eff = trace(H)²/||H||_F² converges.
+    # The relative change |Δr_eff|/r_eff is dimension-agnostic, so the same
+    # threshold works across model sizes. None = disabled. Typical value: 1e-3.
+    saturation_threshold: float | None = None
+
+    # Minimum number of batches to process before saturation early-stopping
+    # is checked. Ensures r_eff has stabilized past the initial transient.
+    saturation_min_batches: int = 4
+
     @property
     def name(self) -> str:
         return "gptq"

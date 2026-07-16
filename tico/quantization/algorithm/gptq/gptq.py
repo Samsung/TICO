@@ -401,11 +401,15 @@ def estimate_min_singular_value(A, max_iter=20, tol=1e-5):
     return torch.sqrt(torch.tensor(min_eigval))
 
 def estimate_cond(A):
-    s_max = estimate_max_singular_value(A)
-    #s_min = estimate_min_singular_value(A) #slow
-    #s_min = estimate_sigma_min_lanczos(A, n_iter=150)
-    s_min = estimate_sigma_min_randomized_blocked_lanczos(A, block_size=8, n_iter=50)
-    return s_max / s_min
+    fast = True
+    if fast is True:
+        s_max = estimate_max_singular_value(A)
+        #s_min = estimate_min_singular_value(A) #slow
+        #s_min = estimate_sigma_min_lanczos(A, n_iter=150)
+        s_min = estimate_sigma_min_randomized_blocked_lanczos(A, block_size=8, n_iter=50)
+        return s_max / s_min
+    
+    return torch.linalg.cond(A)
 
 class GPTQ:
     """
@@ -436,6 +440,25 @@ class GPTQ:
         self.batch_id = 0
         # Sample weights for weighted Hessian accumulation
         self.weights: Optional[List[float]] = None
+        # Hessian saturation tracking via effective rank (participation ratio)
+        # r_eff = trace(H)² / ||H||_F²  ∈ [1, d]
+        # r_eff measures how many eigenvalues are "active". When the relative
+        # change in r_eff between batches drops below the threshold, the Hessian
+        # shape has converged and more samples won't change GPTQ.
+        # Unlike the previous Frobenius-norm approach, r_eff is dimension-agnostic:
+        # the relative change |Δr_eff| / r_eff is comparable across model sizes.
+        self._prev_r_eff: Optional[float] = None
+        self.h_saturation: Optional[float] = None
+        # dXXT saturation tracking (GPTQv2 only)
+        self._prev_r_eff_dXXT: Optional[float] = None
+        self.dXXT_saturation: Optional[float] = None
+        # Per-matrix saturated flags
+        self._h_saturated: bool = False
+        self._dXXT_saturated: bool = False
+        # Early stopping: when saturated, add_batch skips further processing
+        self.saturated: bool = False
+        self.saturation_threshold: Optional[float] = None
+        self.saturation_min_batches: int = 4
 
     def add_batch(self, inp, out=None):
         """
@@ -448,7 +471,10 @@ class GPTQ:
             inp: Input tensor
             out: Output tensor (unused)
         """
-        
+        # Early exit: Hessian has saturated, skip further processing
+        if self.saturated:
+            return
+
         # Apply per-sample weights before reshaping: multiply inp by sqrt(weight)
         # so that (inp * sqrt(w)) @ (inp * sqrt(w)).T = w * inp @ inp.T
         if self.weights is not None and isinstance(self.weights[self.batch_id], torch.Tensor):
@@ -607,7 +633,82 @@ class GPTQ:
             self.dXXT += weight * dX.matmul(inp.t()).float()
             del native, native_inp_processed
             native = native_inp_processed = None
-        
+
+        # --- Hessian saturation tracking via effective rank (participation ratio) ---
+        # r_eff = trace(H)² / ||H||_F²  ∈ [1, d]
+        # r_eff is the "participation ratio" — it counts how many eigenvalues
+        # of H are effectively non-zero.  It is cheap to compute (one BLAS-3
+        # Frobenius norm + one trace, both O(d²) but negligible vs. the
+        # Hessian accumulation itself) and, crucially, the *relative* change
+        # |Δr_eff| / r_eff is dimension-agnostic: the same threshold works
+        # for models of different sizes because r_eff is always in [1, d].
+        #
+        # When the relative change in r_eff drops below the threshold, the
+        # Hessian's eigenvalue distribution has converged — more calibration
+        # samples won't meaningfully change the GPTQ solution.
+        trace_H = self.H.trace().item()
+        if self.saturation_threshold is not None and trace_H > 0:
+            frob_H = self.H.float().norm().item()
+            r_eff = (trace_H * trace_H) / (frob_H * frob_H + 1e-9)
+            if self._prev_r_eff is not None:
+                self.h_saturation = abs(r_eff - self._prev_r_eff) / (r_eff + 1e-30)
+          #      print(
+          #          f"  [GPTQ sat] layer={self.layer.__class__.__name__} "
+          #          f"batch={self.batch_id} r_eff={r_eff:.4f} "
+          #          f"h_saturation={self.h_saturation:.6e}"
+          #      )
+                # Check saturation threshold for H
+                if (self.batch_id + 1 >= self.saturation_min_batches
+                    and self.h_saturation < self.saturation_threshold
+                ):
+                    if not self._h_saturated:
+                        self._h_saturated = True
+                       #s print(
+                       #s     f"  [GPTQ sat] layer={self.layer.__class__.__name__} "
+                       #s     f"H saturated at batch={self.batch_id}, "
+                       #s     f"r_eff={r_eff:.4f}"
+                       #s )
+            self._prev_r_eff = r_eff
+
+        # --- dXXT saturation tracking (GPTQv2 only) ---
+        # Same effective-rank metric applied to dXXT.  When GPTQv2 is enabled,
+        # both H and dXXT must converge before early-stopping.
+        if self.dXXT is not None and self.saturation_threshold is not None:
+            trace_dXXT = self.dXXT.trace().item()
+            if trace_dXXT > 0:
+                frob_dXXT = self.dXXT.float().norm().item()
+                r_eff_dXXT = (trace_dXXT * trace_dXXT) / (frob_dXXT * frob_dXXT + 1e-9)
+                if self._prev_r_eff_dXXT is not None:
+                    self.dXXT_saturation = abs(r_eff_dXXT - self._prev_r_eff_dXXT) / (r_eff_dXXT + 1e-30)
+                 #   print(
+                 #       f"  [GPTQ sat] layer={self.layer.__class__.__name__} "
+                 #       f"batch={self.batch_id} r_eff_dXXT={r_eff_dXXT:.4f} "
+                 #       f"dXXT_saturation={self.dXXT_saturation:.6e}"
+                 #   )
+                    if (self.batch_id + 1 >= self.saturation_min_batches
+                        and self.dXXT_saturation < self.saturation_threshold
+                    ):
+                        if not self._dXXT_saturated:
+                            self._dXXT_saturated = True
+                            #print(
+                            #    f"  [GPTQ sat] layer={self.layer.__class__.__name__} "
+                            #    f"dXXT saturated at batch={self.batch_id}, "
+                            #    f"r_eff_dXXT={r_eff_dXXT:.4f}"
+                            #)
+                self._prev_r_eff_dXXT = r_eff_dXXT
+
+        # Set saturated when both H and dXXT (if used) have saturated
+        if self._h_saturated:
+            if self.dXXT is not None:
+                self.saturated = self._dXXT_saturated
+            else:
+                self.saturated = True
+            if self.saturated:
+                print(
+                    f"  [GPTQ sat] layer={self.layer.__class__.__name__} "
+                    f"SATURATED at batch={self.batch_id}, stopping collection"
+                )
+
         self.batch_id += 1
 
     def _adaptive_percdamp(
@@ -974,5 +1075,8 @@ class GPTQ:
         self.Losses = None
         self.Trace = None
         self.dXXT = None
+        self._prev_r_eff = None
+        self._prev_r_eff_dXXT = None
+        self.native_inp = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

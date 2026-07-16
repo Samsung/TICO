@@ -347,6 +347,8 @@ class GPTQQuantizer(BaseQuantizer):
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
                     gptq[name] = GPTQ(subset[name])
+                    gptq[name].saturation_threshold = gptq_conf.saturation_threshold
+                    gptq[name].saturation_min_batches = gptq_conf.saturation_min_batches
                     full_module_name = module_name[subset[name]]
                     weight_bits = self._resolve_weight_bits(
                         gptq_conf,
