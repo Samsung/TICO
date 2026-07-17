@@ -422,6 +422,222 @@ def cg(matvec, b, max_iter=50, tol=1e-8):
         rs_old = rs_new
     return x
 
+def estimate_sigma_min_shift_invert_lanczos(
+    H,
+    n_iter: int = 15,
+    damping: float = 0.0,
+    tol: float = 1e-6,
+    check_interval: int = 3,
+):
+    """Estimate σ_min of SPD H via shift-invert Lanczos.
+
+    Runs single-vector Lanczos on ``(H + λI)⁻¹`` whose LARGEST eigenvalue
+    is ``1/(σ_min + λ)``.  Because Lanczos converges rapidly to the
+    *largest* eigenvalue (well-separated gap ratio), this approach is robust
+    even for severely ill-conditioned matrices (κ > 1e8) where plain
+    Lanczos on H fails to converge to σ_min.
+
+    The cost is one Cholesky factorisation O(n³/3) plus O(n²) per Lanczos
+    iteration (two triangular solves).  For GPTQ, this Cholesky can be
+    reused from the GPTQ solver itself.
+
+    Convergence-based adaptive stopping: the largest Ritz value of the
+    inverse operator is monitored every ``check_interval`` iterations.
+    When its relative change drops below ``tol``, iteration stops early
+    (typically after 5–10 iterations).
+
+    Args:
+        H:              Symmetric positive-definite matrix (n × n).
+        n_iter:         Max number of Lanczos iterations.
+        damping:        Shift λ added to the diagonal (``H + λI``) before
+                        inversion.  Use a tiny positive value if H may be
+                        numerically singular.  Defaults to 0 (no shift).
+        tol:            Relative tolerance for convergence stopping.
+        check_interval: Check convergence every N iterations (from j=2).
+
+    Returns:
+        Estimated σ_min(H) (float).
+    """
+    n = H.shape[0]
+    device, dtype = H.device, H.dtype
+
+    # One-time Cholesky: L Lᵀ = H + λI
+    H_shifted = H.clone()
+    if damping > 0:
+        H_shifted.diagonal().add_(damping)
+    L = torch.linalg.cholesky(H_shifted)
+
+    def inverse_matvec(v):
+        """Solve (H + λI) x = v via two triangular solves — O(n²)."""
+        return torch.cholesky_solve(v.unsqueeze(-1), L).squeeze(-1)
+
+    # Single-vector Lanczos on the inverse operator (H + λI)⁻¹
+    V = torch.zeros(n, n_iter, device=device, dtype=dtype)
+    alphas = torch.zeros(n_iter, device=device, dtype=dtype)
+    betas = torch.zeros(n_iter, device=device, dtype=dtype)
+
+    v = torch.randn(n, device=device, dtype=dtype)
+    v = v / v.norm()
+    V[:, 0] = v
+
+    prev_theta_max = None   # for convergence-based adaptive stopping
+    m = n_iter
+    for j in range(n_iter):
+        w = inverse_matvec(V[:, j])               # ← the only matvec
+        alphas[j] = V[:, j] @ w
+        w = w - alphas[j] * V[:, j]
+        if j > 0:
+            w = w - betas[j] * V[:, j - 1]
+        # Two-pass Classical Gram-Schmidt reorthogonalisation (BLAS-3)
+        V_prev = V[:, : j + 1]
+        for _ in range(2):
+            w -= V_prev @ (V_prev.T @ w)
+        if j < n_iter - 1:
+            betas[j + 1] = w.norm()
+            if betas[j + 1] < 1e-14:
+                m = j + 1
+                break
+            V[:, j + 1] = w / betas[j + 1]
+        else:
+            m = n_iter
+
+        # --- Convergence check: monitor largest Ritz value of inverse ---
+        if j >= 2 and (j - 2) % check_interval == 0:
+            m_check = j + 1
+            T_check = (
+                torch.diag(alphas[:m_check])
+                + torch.diag(betas[1:m_check], 1)
+                + torch.diag(betas[1:m_check], -1)
+            )
+            eigvals_inv = torch.linalg.eigvalsh(T_check)
+            theta_max = eigvals_inv[-1].item()   # largest Ritz value of (H+λI)⁻¹
+            if prev_theta_max is not None and theta_max > 0:
+                rel_change = abs(theta_max - prev_theta_max) / (
+                    abs(theta_max) + 1e-30
+                )
+                if rel_change < tol:
+                    m = m_check
+                    break
+            prev_theta_max = theta_max
+
+    # Build final tridiagonal T and get its largest eigenvalue
+    T = (
+        torch.diag(alphas[:m])
+        + torch.diag(betas[1:m], 1)
+        + torch.diag(betas[1:m], -1)
+    )
+    eigvals_inv = torch.linalg.eigvalsh(T)
+
+    theta_max = eigvals_inv[-1].item()    # ≈ 1/(σ_min + λ)
+    if theta_max <= 0:
+        return 0.0
+    # μ_max = 1/(σ_min + λ)  →  σ_min = 1/μ_max - λ
+    return max(0.0, 1.0 / theta_max - damping)
+
+
+def estimate_sigma_min_shift_invert_cg_lanczos(
+    H,
+    n_iter: int = 15,
+    cg_iters: int = 100,
+    cg_tol: float = 1e-4,
+    tol: float = 1e-6,
+    check_interval: int = 3,
+):
+    """Estimate σ_min of SPD H via shift-invert Lanczos with CG inner solves.
+
+    Same mathematical principle as
+    :func:`estimate_sigma_min_shift_invert_lanczos` — run Lanczos on
+    ``H⁻¹`` to find its largest eigenvalue ``1/σ_min`` — but uses
+    **Conjugate Gradient** instead of Cholesky for the inverse matvec.
+
+    This avoids the O(n³) Cholesky factorisation, making it suitable for
+    very large n (e.g. n > 4096) where the factorisation is prohibitive.
+
+    CG converges fastest for large-eigenvalue components of H; the residual
+    after ``cg_iters`` iterations is dominated by small-eigenvalue
+    components — precisely the signal needed for shift-invert.  Even an
+    inexact CG solve gives a matvec that approximates H⁻¹ well enough for
+    Lanczos to find μ_max with ~3–4 digits of accuracy.
+
+    Args:
+        H:              Symmetric positive-definite matrix (n × n).
+        n_iter:         Max number of Lanczos iterations.
+        cg_iters:       Max CG iterations per inverse matvec.
+        cg_tol:         CG convergence tolerance (relative residual).
+        tol:            Relative tolerance for Lanczos convergence stopping.
+        check_interval: Check convergence every N iterations (from j=2).
+
+    Returns:
+        Estimated σ_min(H) (float).
+    """
+    n = H.shape[0]
+    device, dtype = H.device, H.dtype
+
+    def inverse_matvec(v):
+        """Inexact H⁻¹ v via CG — amplifies small-eigenvalue components."""
+        return cg(lambda x: H @ x, v, max_iter=cg_iters, tol=cg_tol)
+
+    # Single-vector Lanczos on the inverse operator H⁻¹
+    V = torch.zeros(n, n_iter, device=device, dtype=dtype)
+    alphas = torch.zeros(n_iter, device=device, dtype=dtype)
+    betas = torch.zeros(n_iter, device=device, dtype=dtype)
+
+    v = torch.randn(n, device=device, dtype=dtype)
+    v = v / v.norm()
+    V[:, 0] = v
+
+    prev_theta_max = None
+    m = n_iter
+    for j in range(n_iter):
+        w = inverse_matvec(V[:, j])               # ← inexact H⁻¹ v
+        alphas[j] = V[:, j] @ w
+        w = w - alphas[j] * V[:, j]
+        if j > 0:
+            w = w - betas[j] * V[:, j - 1]
+        V_prev = V[:, : j + 1]
+        for _ in range(2):
+            w -= V_prev @ (V_prev.T @ w)
+        if j < n_iter - 1:
+            betas[j + 1] = w.norm()
+            if betas[j + 1] < 1e-14:
+                m = j + 1
+                break
+            V[:, j + 1] = w / betas[j + 1]
+        else:
+            m = n_iter
+
+        # --- Convergence check ---
+        if j >= 2 and (j - 2) % check_interval == 0:
+            m_check = j + 1
+            T_check = (
+                torch.diag(alphas[:m_check])
+                + torch.diag(betas[1:m_check], 1)
+                + torch.diag(betas[1:m_check], -1)
+            )
+            eigvals_inv = torch.linalg.eigvalsh(T_check)
+            theta_max = eigvals_inv[-1].item()
+            if prev_theta_max is not None and theta_max > 0:
+                rel_change = abs(theta_max - prev_theta_max) / (
+                    abs(theta_max) + 1e-30
+                )
+                if rel_change < tol:
+                    m = m_check
+                    break
+            prev_theta_max = theta_max
+
+    T = (
+        torch.diag(alphas[:m])
+        + torch.diag(betas[1:m], 1)
+        + torch.diag(betas[1:m], -1)
+    )
+    eigvals_inv = torch.linalg.eigvalsh(T)
+
+    theta_max = eigvals_inv[-1].item()    # ≈ 1/σ_min
+    if theta_max <= 0:
+        return 0.0
+    return max(0.0, 1.0 / theta_max)
+
+
 def estimate_min_singular_value(A, max_iter=20, tol=1e-5):
     """
     Estimates the minimum singular value of matrix A 
@@ -455,17 +671,57 @@ def estimate_min_singular_value(A, max_iter=20, tol=1e-5):
     min_eigval = (v.T @ AtA_v).item()
     return torch.sqrt(torch.tensor(min_eigval))
 
-def estimate_cond(A):
-    fast = True
-    if fast is True:
-        s_max = estimate_max_singular_value(A)
-        #s_min = estimate_min_singular_value(A) #slow
-        #s_min = estimate_sigma_min_lanczos(A, n_iter=150)
-        s_min = estimate_sigma_min_randomized_blocked_lanczos(A, block_size=8, n_iter=100)
-        cond_ref = torch.linalg.cond(A)
-        return s_max / s_min
+def estimate_cond(A, cholesky_threshold: int = 4096):
+    """Estimate the condition number κ(A) = σ_max / σ_min.
+
+    Uses power iteration for σ_max (fast, robust) and shift-invert Lanczos
+    for σ_min (robust even for severely ill-conditioned matrices).
+
+    For n ≤ ``cholesky_threshold``, uses the Cholesky-based shift-invert
+    (exact inverse, machine-precision accuracy).  For larger n, falls back
+    to CG-based shift-invert (inexact but avoids O(n³) factorisation).
+
+    Args:
+        A:                    Symmetric positive-definite matrix (n × n).
+        cholesky_threshold:   Matrix dimension above which CG is used
+                              instead of Cholesky.
+
+    Returns:
+        Estimated condition number (float).
+    """
+    n = A.shape[0]
+    s_max = estimate_max_singular_value(A)
+
+    # Tiny damping to ensure Cholesky/CG stability if H is near-singular
+    damping = 1e-10 * A.diagonal().mean().item()
+
+    if n <= cholesky_threshold:
+        try:
+            s_min = estimate_sigma_min_shift_invert_lanczos(
+                A, n_iter=15, damping=damping
+            )
+        except torch._C._LinAlgError:
+            # Cholesky failed — fall back to CG-based shift-invert
+            s_min = estimate_sigma_min_shift_invert_cg_lanczos(
+                A, n_iter=15, cg_iters=min(200, n)
+            )
+    else:
+        s_min = estimate_sigma_min_shift_invert_cg_lanczos(
+            A, n_iter=15, cg_iters=min(200, n)
+        )
+
+    if s_min <= 0 or math.isnan(s_min) or math.isinf(s_min):
+        return float("inf")
     
-    return torch.linalg.cond(A)
+   # cond_ref = torch.linalg.cond(A)
+   # cond_our = s_max / s_min
+   # rel_error = abs((cond_ref - cond_our)/cond_ref)
+   # if rel_error > 0.5:
+   #     print(f"fast estimation failed {rel_error}")
+   # print(rel_error)
+    
+    return s_max / s_min
+
 
 class GPTQ:
     """
@@ -804,6 +1060,7 @@ class GPTQ:
         diag_mean = torch.mean(torch.diag(H)).item()
 
         # Compute condition number of H (before damping)
+        #cond_H_1 = torch.linalg.cond(H)
         cond_H = estimate_cond(H)
 
         if math.isnan(cond_H) or math.isinf(cond_H):
