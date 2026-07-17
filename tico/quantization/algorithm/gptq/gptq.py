@@ -207,12 +207,43 @@ def estimate_sigma_min_lanczos(H, n_iter=15):
     return eigvals[0].item()  # ≈ σ_min(H)
 
 
+def _build_block_tridiagonal(alphas, betas, k, b, device, dtype):
+    """Build the (k*b × k*b) block-tridiagonal T from the first k Lanczos blocks.
+
+    Args:
+        alphas: list of k   diagonal  blocks (each b × b).
+        betas:  list of k-1 off-diag blocks (each b × b).
+        k:      number of completed Lanczos blocks.
+        b:      block size.
+
+    Returns:
+        Dense symmetric block-tridiagonal matrix T.
+    """
+    dim_T = k * b
+    T = torch.zeros(dim_T, dim_T, device=device, dtype=dtype)
+    for j in range(k):
+        s = j * b
+        e = s + b
+        T[s:e, s:e] = alphas[j]
+        if j < k - 1:
+            beta = betas[j]
+            # T[j, j+1] = β_j^T  and  T[j+1, j] = β_j  (NOT the other way around)
+            # because T_m = V_m^T H V_m is symmetric and
+            #   (j, j+1) block = V_j^T H V_{j+1} = (V_{j+1}^T H V_j)^T = β_j^T
+            #   (j+1, j) block = V_{j+1}^T H V_j = β_j
+            T[s:e, e : e + b] = beta.T
+            T[e : e + b, s:e] = beta
+    return T
+
+
 def estimate_sigma_min_randomized_blocked_lanczos(
     H,
     block_size: int = 4,
     n_iter: int = 15,
     use_sketch: bool = False,
     sketch_dim: int | None = None,
+    tol: float = 1e-4,
+    check_interval: int = 3,
 ):
     """Estimate σ_min of SPD H via randomized blocked Lanczos.
 
@@ -227,13 +258,24 @@ def estimate_sigma_min_randomized_blocked_lanczos(
       * Random sketching (when ``use_sketch=True``) reduces cost for very
         large *n*.
 
+    Convergence-based adaptive stopping: the smallest Ritz value (σ_min
+    estimate) is monitored every ``check_interval`` iterations starting from
+    iteration 2.  When its relative change drops below ``tol``, the iteration
+    stops early — saving time on well-conditioned matrices and avoiding
+    wasted iterations on ill-conditioned ones where the estimate plateaus.
+
     Args:
-        H:          Symmetric positive-definite matrix (n × n).
-        block_size: Number of vectors per block (b).
-        n_iter:     Number of block Lanczos iterations (total Krylov dim = block_size × n_iter).
-        use_sketch: If True, apply a Gaussian random sketch to reduce dimension.
-        sketch_dim: Sketch dimension l (only used when use_sketch=True).
-                    Defaults to min(n, 4 * block_size * n_iter).
+        H:              Symmetric positive-definite matrix (n × n).
+        block_size:     Number of vectors per block (b).
+        n_iter:         Max number of block Lanczos iterations (total Krylov
+                        dim = block_size × n_iter).
+        use_sketch:     If True, apply a Gaussian random sketch to reduce
+                        dimension.
+        sketch_dim:     Sketch dimension l (only used when use_sketch=True).
+                        Defaults to min(n, 4 * block_size * n_iter).
+        tol:            Relative tolerance for convergence.  Iteration stops
+                        when |Δσ_min| / (|σ_min| + ε) < tol.
+        check_interval: Check convergence every N iterations (starting at j=2).
 
     Returns:
         Estimated σ_min(H) (float).
@@ -257,7 +299,12 @@ def estimate_sigma_min_randomized_blocked_lanczos(
         H_s = 0.5 * (H_s + H_s.T)
         # Recurse on the smaller sketched operator (no further sketching)
         return estimate_sigma_min_randomized_blocked_lanczos(
-            H_s, block_size=b, n_iter=n_iter, use_sketch=False
+            H_s,
+            block_size=b,
+            n_iter=n_iter,
+            use_sketch=False,
+            tol=tol,
+            check_interval=check_interval,
         )
 
     # ------------------------------------------------------------------ #
@@ -282,6 +329,7 @@ def estimate_sigma_min_randomized_blocked_lanczos(
     prev_beta = None       # β_{j-1}
 
     actual_iter = 0
+    prev_sigma_min = None   # for convergence-based adaptive stopping
     for j in range(n_iter):
         # W = H @ V_j   — single BLAS-3 matmul
         W = H @ V_block                              # (n × b)
@@ -323,31 +371,38 @@ def estimate_sigma_min_randomized_blocked_lanczos(
         else:
             actual_iter = j + 1
 
+        # --- Convergence check: monitor smallest Ritz value ---
+        # Every check_interval iterations (starting at j=2), build a
+        # partial T from the completed blocks and compute its smallest
+        # eigenvalue.  Stop early if the relative change < tol.
+        if j >= 2 and (j - 2) % check_interval == 0:
+            k_check = j + 1   # number of completed diagonal blocks
+            T_check = _build_block_tridiagonal(
+                alphas, betas, k_check, b, device, dtype
+            )
+            eigvals_check = torch.linalg.eigvalsh(T_check)
+            sigma_min_check = max(0.0, eigvals_check[0].item())
+            if prev_sigma_min is not None:
+                rel_change = abs(sigma_min_check - prev_sigma_min) / (
+                    abs(sigma_min_check) + 1e-30
+                )
+                if rel_change < tol:
+                    actual_iter = k_check
+                    break
+            prev_sigma_min = sigma_min_check
+
     # ------------------------------------------------------------------ #
     # Build block-tridiagonal T  (actual_iter * b  ×  actual_iter * b)
     # and compute its smallest eigenvalue
     # ------------------------------------------------------------------ #
     k = actual_iter
-    dim_T = k * b
-    T = torch.zeros(dim_T, dim_T, device=device, dtype=dtype)
-
-    for j in range(k):
-        s = j * b
-        e = s + b
-        T[s:e, s:e] = alphas[j]
-        if j < k - 1:
-            beta = betas[j]
-            # T[j, j+1] = β_j^T  and  T[j+1, j] = β_j  (NOT the other way around)
-            # because T_m = V_m^T H V_m is symmetric and
-            #   (j, j+1) block = V_j^T H V_{j+1} = (V_{j+1}^T H V_j)^T = β_j^T
-            #   (j+1, j) block = V_{j+1}^T H V_j = β_j
-            T[s:e, e:e + b] = beta.T
-            T[e:e + b, s:e] = beta
+    T = _build_block_tridiagonal(alphas, betas, k, b, device, dtype)
 
     eigvals = torch.linalg.eigvalsh(T)
     # Ritz values can slightly undershoot the true smallest eigenvalue;
     # clamp to 0 since H is SPD (σ_min ≥ 0).
     return max(0.0, eigvals[0].item())  # ≈ σ_min(H)
+
 
 
 def cg(matvec, b, max_iter=50, tol=1e-8):
@@ -406,7 +461,8 @@ def estimate_cond(A):
         s_max = estimate_max_singular_value(A)
         #s_min = estimate_min_singular_value(A) #slow
         #s_min = estimate_sigma_min_lanczos(A, n_iter=150)
-        s_min = estimate_sigma_min_randomized_blocked_lanczos(A, block_size=8, n_iter=50)
+        s_min = estimate_sigma_min_randomized_blocked_lanczos(A, block_size=8, n_iter=100)
+        cond_ref = torch.linalg.cond(A)
         return s_max / s_min
     
     return torch.linalg.cond(A)
