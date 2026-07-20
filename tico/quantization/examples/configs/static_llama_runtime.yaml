@@ -10,3 +10,11 @@ debug:
     prompt: The capital of France is
     verify_steps: 6
     gen_steps: 16
+    run_baseline: false
+    run_multiturn: true
+    multiturn_first_prompt: "User: What is the capital of France?\nAssistant:"
+    multiturn_second_turn: "\nUser: What country is that city in?\nAssistant:"
+    multiturn_decode_steps_before_append: 4
+    multiturn_decode_steps_after_append: 4
+    append_bucket: 16
+    compare_append_prefill_with_decode_loop: true
