@@ -151,21 +151,34 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         """inspector.py should dispatch static LLaMA runtime mode without loading adapters."""
         calls: dict[str, Any] = {}
 
+        def fake_load_recipe_config(path, overrides):
+            calls["load"] = (path, overrides)
+            return {
+                "runtime": {},
+                "debug": {
+                    "static_llama_runtime": {
+                        "model": "new-model",
+                        "device": "cuda",
+                    }
+                },
+            }
+
         argv = [
             "inspector.py",
             "--config",
             "recipe.yaml",
             "--mode",
             "static-llama-runtime",
+            "--model",
+            "new-model",
+            "--device",
+            "cuda",
         ]
 
         with patch.object(
             inspect_cli,
             "load_recipe_config",
-            lambda path, overrides: {
-                "runtime": {},
-                "debug": {"static_llama_runtime": {"model": "tiny"}},
-            },
+            fake_load_recipe_config,
         ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
             inspect_cli,
             "run_static_llama_runtime",
@@ -175,7 +188,18 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         ):
             inspect_cli.main()
 
-        self.assertEqual(calls["cfg"].model, "tiny")
+        self.assertEqual(
+            calls["load"],
+            (
+                "recipe.yaml",
+                [
+                    "debug.static_llama_runtime.model=new-model",
+                    "debug.static_llama_runtime.device=cuda",
+                ],
+            ),
+        )
+        self.assertEqual(calls["cfg"].model, "new-model")
+        self.assertEqual(calls["cfg"].device, "cuda")
 
     def test_inspect_cli_dispatches_tied_embedding_smoke(self):
         """inspector.py should dispatch tied embedding smoke mode."""

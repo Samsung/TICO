@@ -107,10 +107,21 @@ def parse_args() -> argparse.Namespace:
 def _build_overrides(args: argparse.Namespace) -> list[str]:
     """Translate convenience CLI arguments into recipe config overrides."""
     overrides = list(args.set)
+
     if args.model:
-        overrides.append(f"model.name_or_path={args.model}")
+        model_key = (
+            "debug.static_llama_runtime.model"
+            if args.mode == "static-llama-runtime"
+            else "model.name_or_path"
+        )
+        overrides.append(f"{model_key}={args.model}")
     if args.device:
-        overrides.append(f"runtime.device={args.device}")
+        device_key = (
+            "debug.static_llama_runtime.device"
+            if args.mode == "static-llama-runtime"
+            else "runtime.device"
+        )
+        overrides.append(f"{device_key}={args.device}")
     if args.output_dir:
         overrides.append(f"debug.wrapper_smoke.output_dir={args.output_dir}")
     return overrides
