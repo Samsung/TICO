@@ -41,7 +41,6 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     StaticGemma4Layout,
 )
 
-
 # =============================================================================
 # CPU Helper Functions (pure Python, no model needed)
 # =============================================================================
@@ -482,7 +481,7 @@ def verify_step_build_static_inputs(
     runtime: StaticGemma4Runtime,
     prompt: str,
     image,
-) -> bool:
+) -> dict[str, torch.Tensor]:
     """Side-by-side validation of ``build_static_inputs`` against HF reference.
 
     This function re-derives each sub-step of ``build_static_inputs`` using the
@@ -496,8 +495,9 @@ def verify_step_build_static_inputs(
     5. ``valid_length`` — correct unpadded sequence length
     6. ``padding`` — right-padded layout with pad_token_id fill
 
-    Returns ``True`` if all checks pass.
+    Returns the batch dict from ``build_static_inputs``.
     """
+
     import torch.testing
 
     layout = runtime.layout
@@ -587,15 +587,275 @@ def verify_step_build_static_inputs(
             raise ValueError("Padding region does not consist entirely of pad_token_id")
 
     print("[verify_step_build_static_inputs] All checks passed.")
-    return True
+    return batch
+
+
+@torch.no_grad()
+def verify_step_token_embedding(
+    runtime: StaticGemma4Runtime,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Side-by-side validation of ``token_embedding`` against HF reference.
+
+    The runtime's ``Gemma4TokenEmbeddingExportAdapter`` wraps the same
+    ``Gemma4TextScaledWordEmbedding`` that HF uses internally.  This function
+    feeds ``llm_input_ids`` through both paths and asserts that the output
+    embeddings match exactly.
+
+    HF reference (modeling_gemma4.py L1468):
+        ``Gemma4TextScaledWordEmbedding.forward`` returns
+        ``nn.Embedding.forward(input_ids) * embed_scale`` where
+        ``embed_scale = hidden_size ** 0.5``.
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        batch: The batch dict returned by ``build_static_inputs``.
+
+    Returns the token embeddings tensor (shape ``(1, S, hidden_size)``).
+    """
+    import torch.testing
+
+    llm_input_ids = batch["llm_input_ids"].to(runtime.device)
+
+    # --- Runtime side ---
+    rt_embeds = runtime.token_embedding(llm_input_ids)
+
+    # --- HF reference ---
+
+    # model.get_input_embeddings() returns Gemma4TextScaledWordEmbedding,
+    # which multiplies by sqrt(hidden_size) internally.
+    ref_embeds = runtime.model.get_input_embeddings()(llm_input_ids)
+
+    torch.testing.assert_close(
+        rt_embeds,
+        ref_embeds,
+        msg="token_embedding mismatch: runtime vs HF Gemma4TextScaledWordEmbedding",
+    )
+
+    # Sanity: verify the embedding scale is applied (not a plain nn.Embedding)
+    hidden_size = int(runtime.text_config.hidden_size)
+    raw_lookup = nn.functional.embedding(
+        llm_input_ids, runtime.model.get_input_embeddings().weight
+    )
+    expected_scale = float(hidden_size) ** 0.5
+    torch.testing.assert_close(
+        ref_embeds,
+        raw_lookup * expected_scale,
+        msg="HF embedding does not apply sqrt(hidden_size) scale as expected",
+    )
+
+    print("[verify_step_token_embedding] All checks passed.")
+    return rt_embeds
+
+
+@torch.no_grad()
+def verify_step_vision_prefill(
+    runtime: StaticGemma4Runtime,
+    batch: dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Side-by-side validation of ``vision_prefill`` against references.
+
+    The runtime's ``Gemma4VisionPrefillExportAdapter`` runs the vision tower
+    followed by the ``embed_vision`` projection.  This function feeds
+    ``pixel_values`` and ``image_position_ids`` through the runtime adapter
+    and two reference paths:
+
+    1. **HF (FP) reference** — ``runtime.model.get_image_features(...)``:
+       Compared via PEIR (Peak-Error-to-Interval Ratio) as an informational
+       metric only, because the runtime adapter wraps a quantized vision tower
+       (with fake Q-DQ ops), so exact equality against the FP model is not
+       expected.
+
+    2. **Quantized reference** — ``wrapped_top.model.wrapped.get_image_features(...)``:
+       Asserted via ``torch.testing.assert_close`` to confirm the adapter
+       introduces no error beyond quantization.
+
+    HF reference (modeling_gemma4.py L2150–2167):
+        ``get_image_features`` runs ``self.vision_tower(pixel_values,
+        pixel_position_ids=image_position_ids)`` then
+        ``self.embed_vision(last_hidden_state)`` and stores the result in
+        ``pooler_output``.
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        batch: The batch dict returned by ``build_static_inputs``.
+
+    Returns the visual embeddings tensor (shape ``(1, V, hidden_size)``).
+    """
+
+    import torch.testing
+
+    # Cast pixel_values to the model's dtype (BFloat16) to match the
+    # quantized vision tower weights.  The HF processor outputs float32.
+    model_dtype = runtime.model.dtype
+    pixel_values = batch["pixel_values"].to(runtime.device).to(model_dtype)
+    image_position_ids = batch.get("image_position_ids")
+    if image_position_ids is not None:
+        image_position_ids = image_position_ids.to(runtime.device)
+
+    # --- Runtime side ---
+    rt_visual_embeds = runtime.vision_prefill(pixel_values, image_position_ids)
+
+    # --- HF reference ---
+    # model.get_image_features() returns BaseModelOutputWithPooling whose
+    # .pooler_output contains the embed_vision projection of the vision
+    # tower's last_hidden_state.
+    hf_visual_embeds = runtime.model.get_image_features(
+        pixel_values=pixel_values,
+        image_position_ids=image_position_ids,
+        return_dict=True,
+    ).pooler_output
+
+    # --- Shape check ---
+    if rt_visual_embeds.shape != hf_visual_embeds.shape:
+        raise ValueError(
+            "vision_prefill shape mismatch: "
+            f"runtime={tuple(rt_visual_embeds.shape)}, "
+            f"reference={tuple(hf_visual_embeds.shape)}"
+        )
+
+    # --- PEIR (Peak-Error-to-Interval Ratio) ---
+    from tico.quantization.evaluation.metric import compute_peir
+
+    peir = compute_peir(hf_visual_embeds, rt_visual_embeds)
+    print(f"[verify_step_vision_prefill] PEIR = {peir:.6e}")
+
+    # --- Quantized reference (quantized model) ---
+    # Use the quantized model's get_image_features, not the original model's,
+    # because the runtime's vision_prefill adapter wraps the quantized vision
+    # tower (with fake Q-DQ ops).  The quantized QuantGemma4Model.get_image_features
+    # returns the projected visual soft tokens directly (not wrapped in
+    # BaseModelOutputWithPooling).
+    wrapped_top = (
+        runtime.qmodel.wrapped if hasattr(runtime.qmodel, "wrapped") else runtime.qmodel
+    )
+    ref_visual_embeds = wrapped_top.model.wrapped.get_image_features(
+        pixel_values=pixel_values,
+        image_position_ids=image_position_ids,
+    )
+
+    torch.testing.assert_close(
+        rt_visual_embeds,
+        ref_visual_embeds,
+        msg="vision_prefill mismatch: runtime vs quantized get_image_features",
+    )
+
+    print("[verify_step_vision_prefill] All checks passed.")
+    return rt_visual_embeds
+
+
+@torch.no_grad()
+def verify_step_mm_fusion(
+    runtime: StaticGemma4Runtime,
+    text_embeds: torch.Tensor,
+    visual_embeds: torch.Tensor,
+    prompt: str,
+    image,
+) -> torch.Tensor:
+    """Side-by-side validation of ``mm_fusion`` against HF's ``masked_scatter``.
+
+    The runtime's ``Gemma4MMFusionExportAdapter`` calls ``fixed_slot_fuse``,
+    which replaces a contiguous slot range ``[visual_start_idx,
+    visual_start_idx + num_visual_tokens)`` with visual embeddings via
+    ``torch.cat``.  HF's reference path uses ``masked_scatter`` to write
+    visual embeddings into the positions selected by the image-token mask.
+
+    This function feeds the same ``text_embeds`` and ``visual_embeds``
+    through both paths and asserts that the fused outputs match exactly.
+
+    HF reference (modeling_gemma4.py):
+        ``image_mask = input_ids == image_token_id``
+        ``image_mask = image_mask.unsqueeze(-1).expand_as(inputs_embeds)``
+        ``inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_features)``
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        text_embeds: Token embeddings from ``verify_step_token_embedding``.
+        visual_embeds: Visual embeddings from ``verify_step_vision_prefill``.
+        prompt: The original prompt string (needed to re-run the processor
+            and recover the raw input_ids with image tokens).
+        image: The original image (needed to re-run the processor).
+
+    Returns the fused embeddings tensor (shape ``(1, S, hidden_size)``).
+    """
+    import torch.testing
+
+    layout = runtime.layout
+    image_token_id = getattr(runtime.config, "image_token_id", None)
+    if image_token_id is None:
+        raise ValueError("config.image_token_id is required for mm_fusion verification")
+
+    # --- Runtime side: fixed_slot_fuse via adapter ---
+    rt_fused = runtime.mm_fusion(text_embeds, visual_embeds)
+
+    # --- HF reference: masked_scatter ---
+    # Re-run the processor to recover raw input_ids with image tokens intact.
+    raw_inputs = runtime.processor(
+        text=prompt, images=image, return_tensors="pt", padding=False
+    )
+    raw_input_ids = raw_inputs["input_ids"].to(runtime.device)  # (1, seq_len_raw)
+
+    # Build the image mask from raw input_ids
+    image_mask = raw_input_ids == image_token_id  # (1, seq_len_raw)
+
+    # Validate that image token positions match the static layout used by
+    # fixed_slot_fuse.  Without this check, a layout mismatch would surface
+    # as a confusing "mm_fusion mismatch" assertion error rather than a
+    # clear diagnostic.
+    image_positions = torch.nonzero(image_mask.squeeze(0), as_tuple=True)[0]
+    if image_positions.numel() == 0:
+        raise ValueError("No image placeholder tokens found in raw input_ids")
+    actual_start = int(image_positions[0].item())
+    actual_count = int(image_positions.numel())
+    if actual_start != layout.visual_start_idx:
+        raise ValueError(
+            "Image token start position does not match static layout: "
+            f"expected visual_start_idx={layout.visual_start_idx}, "
+            f"actual={actual_start}"
+        )
+    if actual_count != layout.num_visual_tokens:
+        raise ValueError(
+            "Image token count does not match static layout: "
+            f"expected num_visual_tokens={layout.num_visual_tokens}, "
+            f"actual={actual_count}"
+        )
+
+    # Pad the mask to max_seq to match the runtime's static shape
+    max_seq = layout.max_seq
+    seq_len_raw = raw_input_ids.shape[1]
+    if seq_len_raw > max_seq:
+        raise ValueError(f"Raw sequence length {seq_len_raw} exceeds max_seq {max_seq}")
+
+    padded_mask = torch.zeros((1, max_seq), dtype=torch.bool, device=runtime.device)
+    padded_mask[:, :seq_len_raw] = image_mask
+
+    # Expand mask to match text_embeds shape: (1, max_seq, hidden_size)
+    image_mask_expanded = padded_mask.unsqueeze(-1).expand_as(text_embeds)
+
+    # masked_scatter: write visual_embeds into the image-token positions
+    ref_fused = text_embeds.clone()
+    ref_fused = ref_fused.masked_scatter(
+        image_mask_expanded, visual_embeds.to(ref_fused.dtype)
+    )
+
+    torch.testing.assert_close(
+        rt_fused,
+        ref_fused,
+        msg="mm_fusion mismatch: runtime fixed_slot_fuse vs HF masked_scatter",
+    )
+
+    print("[verify_step_mm_fusion] All checks passed.")
+    return rt_fused
 
 
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     """Run the Gemma4 E2B static runtime smoke flow.
 
-    This entry point currently runs only the ``build_static_inputs`` validation
-    step. Prefill, decode, and generation are skipped with clear messages.
+    This entry point runs the ``build_static_inputs``, ``token_embedding``,
+    and ``vision_prefill`` validation steps. Prefill, decode, and generation
+    are skipped with clear messages.
     """
+
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
     if cfg.padding_side != "right":
@@ -629,9 +889,23 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
 
     # --- Step 1: build_static_inputs validation ---
     print("[run_static_gemma4_runtime] Step 1: verify build_static_inputs")
-    verify_step_build_static_inputs(runtime, cfg.prompt, image)
+    batch = verify_step_build_static_inputs(runtime, cfg.prompt, image)
 
-    # --- Steps 2-4: prefill / decode / generation (not yet implemented) ---
+    # --- Step 2: token_embedding validation ---
+    print("[run_static_gemma4_runtime] Step 2: verify token_embedding")
+    text_embeds = verify_step_token_embedding(runtime, batch)
+
+    # --- Step 3: vision_prefill validation ---
+    print("[run_static_gemma4_runtime] Step 3: verify vision_prefill")
+    visual_embeds = verify_step_vision_prefill(runtime, batch)
+
+    # --- Step 4: mm_fusion validation ---
+    print("[run_static_gemma4_runtime] Step 4: verify mm_fusion")
+    fused_embeds = verify_step_mm_fusion(
+        runtime, text_embeds, visual_embeds, cfg.prompt, image
+    )
+
+    # --- Steps 5+: prefill / decode / generation (not yet implemented) ---
     print("[run_static_gemma4_runtime] SKIP: prefill (not implemented in this PR)")
     print("[run_static_gemma4_runtime] SKIP: decode (not implemented in this PR)")
     print("[run_static_gemma4_runtime] SKIP: generation (not implemented in this PR)")
