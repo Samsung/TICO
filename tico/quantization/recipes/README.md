@@ -177,7 +177,7 @@ Use lower snake case for model families, stages, config files, and modes:
 ```text
 model.family: qwen3_vl
 stage name: smoothquant
-config file: qwen3_vl_gptq_ptq.yaml
+config file: qwen3_vl_quantize.yaml
 inspect mode: layer_parity
 ```
 
@@ -193,7 +193,10 @@ Examples:
 llama_quantize.yaml
 llama_eval_suite.yaml
 llama_export.yaml
-qwen3_vl_gptq_ptq.yaml
+qwen3_vl_quantize.yaml
+qwen3_vl_eval_suite.yaml
+qwen3_vl_eval_suite_mx_override_polices.yaml
+qwen3_vl_export.yaml
 qwen3_vl_synthetic_smoke.yaml
 ```
 

@@ -1,6 +1,6 @@
 model:
   family: qwen3_vl
-  name_or_path: Qwen/Qwen3-VL-2B-Instruct
+  name_or_path: Qwen/Qwen3-VL-4B-Instruct
   trust_remote_code: true
   hf_token: null
   cache_dir: null
@@ -30,52 +30,15 @@ model_args:
 pipeline:
   - name: spinquant
     enabled: true
-    init_method: random
-    r1_path: null
-    r2_map_path: null
-    enable_r1: true
-    enable_r2: true
-    fuse_deepstack_visual_outputs: true
-    vision_init_method: random
-    vision_r1_path: null
-    vision_r2_map_path: null
     enable_vision_r1: true
     enable_vision_r2: true
-    fuse_vision_layer_norms: true
-    require_vision_r1_layernorm_compatible: true
-    vision_rotation_tolerance: 1.0e-4
 
   - name: smoothquant
     enabled: false
-    alpha: 0.5
-    components: both
-    custom_alpha_map: null
 
   - name: gptq
     enabled: true
     weight_bits: 4
-    weight_bits_overrides: {}
-    perchannel: true
-    symmetric: false
-    mse: null
-    sensitivity:
-      mode: compute
-      path: null
-    percdamp: 0.01
-    groupsize: -1
-    actorder: true
-    static_groups: false
-    verbose: false
-    show_progress: true
-    quantize_vision: true
-    quantize_text: true
-    quantize_lm_head: false
-    quantize_vision_patch_embed: true
-    quantize_vision_blocks: true
-    quantize_vision_merger: true
-    quantize_vision_deepstack_mergers: true
-    quantize_text_layers: true
-    move_cache_to_cpu: false
 
   - name: ptq
     enabled: true
@@ -93,12 +56,9 @@ evaluation:
   enabled: true
   vlm_tasks:
     - vqav2
-    - textvqa
   coco: true
-  # LLaVA-Bench is open-ended natural QA. The legacy CIDEr/BLEU path is not
-  # enabled by default here. Use mode=judge for benchmark-style scoring.
   llava_bench:
-    enabled: false
+    enabled: true
     mode: judge
     dataset: lmms-lab/llava-bench-in-the-wild
     split: train
@@ -107,16 +67,21 @@ evaluation:
     max_seq_len: 2048
     max_new_tokens: 512
     temperature: 0.0
-    candidate_label: Qwen/Qwen3-VL-2B-Instruct
+    image_max_pixels: 602112  # 768 * 28 * 28
+    image_min_pixels: null
+    resized_height: null
+    resized_width: null
+    visual_token_margin: 256
+    candidate_label: Qwen3-VL-4B-Instruct
     baseline_label: reference
     candidate_answers: null
     baseline_answers: null
     regenerate: false
     output:
-      dir: ./out/llava_bench
-      answers: ./out/llava_bench/qwen3_vl_2b.answers.jsonl
-      reviews: ./out/llava_bench/qwen3_vl_2b.llama3_2_3b.reviews.jsonl
-      summary: ./out/llava_bench/qwen3_vl_2b.llama3_2_3b.summary.json
+      dir: ./out/qwen3_vl_eval_suite/llava_bench
+      answers: ./out/qwen3_vl_eval_suite/llava_bench/qwen3_vl_4b.answers.jsonl
+      reviews: ./out/qwen3_vl_eval_suite/llava_bench/qwen3_vl_4b.llama3_2_3b.reviews.jsonl
+      summary: ./out/qwen3_vl_eval_suite/llava_bench/qwen3_vl_4b.llama3_2_3b.summary.json
     judge:
       enabled: true
       model_id: meta-llama/Llama-3.2-3B-Instruct
@@ -129,10 +94,10 @@ evaluation:
     enabled: true
     batch_size: 1
     max_new_tokens: 30
-    n_samples: -1
+    n_samples: 1000
     max_num_frames: 32
     use_cache: null
-    verbose: false
+    verbose: true
   mmlu:
     enabled: true
     subjects: null
@@ -142,14 +107,15 @@ evaluation:
   hellaswag:
     enabled: true
     n_shots: 10
-    n_samples: -1
+    n_samples: 1000
     batch_size: 1
   mmmu:
     enabled: true
-    dataset: MMMU/MMMU
-    subjects: null
+    dataset: MMMU/MMMU_Pro
+    subjects:
+      - vision
     n_shots: 5
-    n_samples: -1
+    n_samples: 1000
     max_new_tokens: 16
     temperature: 0.0
     verbose: false
@@ -158,7 +124,7 @@ evaluation:
     dataset: wikitext2
     split: test
     stride: 512
-  n_samples: -1
+  n_samples: 1000
   max_seq_len: 2048
 
 export:

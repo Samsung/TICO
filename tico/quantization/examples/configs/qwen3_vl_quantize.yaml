@@ -1,0 +1,79 @@
+# Quantize Qwen3-VL and save the resulting checkpoint.
+model:
+  family: qwen3_vl
+  name_or_path: Qwen/Qwen3-VL-4B-Instruct
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  datasets:
+    - dataset: vqav2
+      split: testdev
+      n_samples: 128
+    - dataset: wikitext2
+      split: train
+      n_samples: 128
+  seq_len: 2048
+
+model_args:
+  vision:
+    grid_thw: [8, 24, 24]
+    visual_start_idx: 0
+    spatial_merge_size: 2
+
+pipeline:
+  - name: spinquant
+    enabled: true
+    enable_vision_r1: true
+    enable_vision_r2: true
+
+  - name: smoothquant
+    enabled: false
+
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+
+  - name: ptq
+    enabled: true
+    activation: int16
+    linear_weight: uint4
+    vision_patch_embed_weight: uint8
+    embedding_weight: uint8
+    lm_head_weight: uint8
+    spin_rotation_weight: int16
+    norm: int16
+    norm_weight: int16
+    strict_wrap: true
+
+evaluation:
+  enabled: false
+  vlm_tasks: []
+  coco: false
+  llava_bench:
+    enabled: false
+  videomme:
+    enabled: false
+  mmlu:
+    enabled: false
+  hellaswag:
+    enabled: false
+  mmmu:
+    enabled: false
+  ppl:
+    enabled: false
+  n_samples: -1
+  max_seq_len: 2048
+
+export:
+  enabled: true
+  output_dir: ./out/qwen3_vl_quantized
+  artifacts:
+    - ptq_checkpoint

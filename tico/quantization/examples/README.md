@@ -70,13 +70,6 @@ python -m tico.quantization.examples.export \
   --checkpoint ./out/llama_quantized/quantized_model.pt
 ```
 
-```bash
-# Generate and judge Qwen3-VL answers on a LLaVA-Bench subset.
-python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
-  --set evaluation.llava_bench.n_samples=50
-```
-
 ### LLaMA benchmark flow
 
 Use this three-step loop for the common LLaMA post-quantization benchmark flow.
@@ -116,13 +109,7 @@ python -m tico.quantization.examples.quantize \
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/qwen3_vl_gptq_ptq.yaml \
-  --model Qwen/Qwen3-VL-2B-Instruct
-```
-
-```bash
-python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --model Qwen/Qwen3-VL-2B-Instruct
 ```
 
@@ -288,6 +275,12 @@ python -m tico.quantization.examples.export \
 
 ### LLaVA-Bench judge evaluation
 
+> [!NOTE]
+> `qwen3_vl_eval_suite.yaml` and
+> `qwen3_vl_eval_suite_mx_override_polices.yaml` enable the other evaluation
+> tasks by default. Disable them with `--set` overrides when running only
+> LLaVA-Bench.
+
 LLaVA-Bench-in-the-Wild is evaluated through the regular `evaluate.py` entry
 point when the Qwen3-VL config enables `evaluation.llava_bench.mode=judge`.
 This path treats LLaVA-Bench as open-ended natural QA. The generation prompt is
@@ -325,7 +318,7 @@ python -m tico.quantization.examples.evaluate \
   --set evaluation.llava_bench.output.answers=./out/llava_bench_fp/answers.jsonl \
   --set evaluation.llava_bench.output.reviews=./out/llava_bench_fp/reviews.jsonl \
   --set evaluation.llava_bench.output.summary=./out/llava_bench_fp/summary.json  \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml
 ```
 
 #### 2. Quantize the model and save a checkpoint
@@ -335,16 +328,14 @@ example below exports the quantized checkpoint.
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/qwen3_vl_gptq_ptq.yaml \
-  --set export.enabled=true \
-  --set export.output_dir=./out/qwen3_vl_spinquant_gptq_ptq \
-  --set export.artifacts=[ptq_checkpoint]
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
+  --set export.output_dir=./out/qwen3_vl_quantized
 ```
 
 This writes the default checkpoint:
 
 ```text
-./out/qwen3_vl_spinquant_gptq_ptq/quantized_model.pt
+./out/qwen3_vl_quantized/quantized_model.pt
 ```
 
 #### 3. Evaluate the quantized checkpoint against the FP answers
@@ -360,8 +351,8 @@ candidate = quantized-checkpoint answers
 
 ```bash
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml \
-  --checkpoint ./out/qwen3_vl_spinquant_gptq_ptq/quantized_model.pt \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --checkpoint ./out/qwen3_vl_quantized/quantized_model.pt \
   --set evaluation.llava_bench.baseline_answers=./out/llava_bench_fp/answers.jsonl \
   --set evaluation.llava_bench.candidate_answers=null \
   --set evaluation.llava_bench.baseline_label=qwen3_vl_4b_fp \
@@ -403,7 +394,7 @@ regression checks, not for leaderboard-compatible LLaVA-Bench reporting.
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual
 ```
@@ -430,7 +421,7 @@ Basic Qwen3-VL trace:
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace
 ```
 
@@ -438,7 +429,7 @@ Trace only selected module subtrees:
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual
 ```
@@ -450,7 +441,7 @@ enable conversion explicitly:
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --enable-quantization \
   --interesting-modules model.language_model model.visual
@@ -663,7 +654,7 @@ python -m tico.quantization.examples.quantize \
   --set pipeline.2.sensitivity.path=./out/llama/gptq_sensitivity.pt
 ```
 
-For `qwen3_vl_gptq_ptq.yaml`, the GPTQ stage is also `pipeline.2`, so the same
+For `qwen3_vl_quantize.yaml`, the GPTQ stage is also `pipeline.2`, so the same
 override pattern applies.
 
 ## Developer rule: do not add one script per model or algorithm
@@ -683,8 +674,10 @@ Examples:
 configs/llama_quantize.yaml
 configs/llama_eval_suite.yaml
 configs/llama_export.yaml
-configs/qwen3_vl_gptq_ptq.yaml
-configs/qwen3_vl_ptq_only.yaml
+configs/qwen3_vl_quantize.yaml
+configs/qwen3_vl_eval_suite.yaml
+configs/qwen3_vl_eval_suite_mx_override_polices.yaml
+configs/qwen3_vl_export.yaml
 ```
 
 Do not add scripts like:
@@ -786,7 +779,7 @@ python -m tico.quantization.examples.quantize \
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --set calibration.n_samples=1
 ```

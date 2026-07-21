@@ -18,13 +18,13 @@ Use:
 Examples:
 
 ```text
+llama_quantize.yaml
 llama_eval_suite.yaml
-llama_gptq_ptq.yaml
-llama_ptq_only.yaml
+llama_export.yaml
+qwen3_vl_quantize.yaml
 qwen3_vl_eval_suite.yaml
-qwen3_vl_gptq_ptq.yaml
-qwen3_vl_llava_bench_judge.yaml
-qwen3_vl_ptq_only.yaml
+qwen3_vl_eval_suite_mx_override_polices.yaml
+qwen3_vl_export.yaml
 ```
 
 Use lower snake case. Keep names descriptive but short.
@@ -256,11 +256,11 @@ Rules:
 
 ## `evaluation.llava_bench` for judge-based LLaVA-Bench scoring
 
-`qwen3_vl_llava_bench_judge.yaml` uses the standard example entry point:
+`qwen3_vl_eval_suite.yaml` uses the standard example entry point:
 
 ```bash
 python -m tico.quantization.examples.evaluate \
-  --config tico/quantization/examples/configs/qwen3_vl_llava_bench_judge.yaml
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml
 ```
 
 It uses this schema under `evaluation`:
@@ -347,7 +347,7 @@ Simple values can be overridden with `--set`:
 
 ```bash
 python -m tico.quantization.examples.quantize \
-  --config tico/quantization/examples/configs/llama_ptq_only.yaml \
+  --config tico/quantization/examples/configs/llama_quantize.yaml \
   --set runtime.device=cpu \
   --set calibration.n_samples=1 \
   --set evaluation.enabled=false

@@ -10,7 +10,7 @@ The purpose of this package is to avoid accumulating one-off debug scripts under
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual
 ```
@@ -38,7 +38,7 @@ Typical command:
 
 ```bash
 python -m tico.quantization.examples.inspector \
-  --config tico/quantization/examples/configs/qwen3_vl_ptq_only.yaml \
+  --config tico/quantization/examples/configs/qwen3_vl_quantize.yaml \
   --mode trace \
   --interesting-modules model.language_model model.visual \
   --set calibration.n_samples=1
