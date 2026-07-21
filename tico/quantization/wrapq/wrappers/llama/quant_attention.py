@@ -859,11 +859,11 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_attn_weights,
         )
         attn_out_h = self._fq(
-            torch.stack(attn_out_parts, dim=1),
+            torch.stack(attn_out_parts, dim=2),
             self.obs_attn_out_h,
         )
 
-        attn_out = attn_out_h.transpose(1, 2).reshape(B, S, -1)
+        attn_out = attn_out_h.reshape(B, S, -1)
         out = self.o_proj(attn_out)
 
         outputs = (out, attn_weights)
