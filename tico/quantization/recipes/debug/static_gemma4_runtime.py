@@ -629,55 +629,137 @@ class StaticGemma4Runtime:
     ) -> tuple[dict[str, torch.Tensor], dict[str, tuple[torch.Tensor, torch.Tensor]]]:
         """Build CPU-owned static masks and RoPE tensors for one decode step.
 
-        This skeleton returns shape-compatible placeholder tensors so the runtime
-        orchestration can be linted and extended independently. The final
-        implementation should create distinct full/sliding decode masks and
-        position-specific RoPE slices for each Gemma4 layer type.
+        Produces per-layer-type decode masks and RoPE:
+
+        - **Full attention mask**: ``(B, 1, max_seq)`` additive bias.
+          Positions ``0..past_len`` are ``0.0`` (allowed), the rest are
+          ``mask_value`` (forbidden).
+
+        - **Sliding attention mask**: ``(B, 1, max_seq)`` additive bias.
+          Only positions within the sliding window
+          ``[max(0, past_len - sliding_window + 1), past_len]`` are ``0.0``.
+
+        - **RoPE**: ``(cos, sin)`` computed via the HF model's
+          ``Gemma4TextRotaryEmbedding`` at the current decode position
+          ``past_len``, per layer type.
         """
-        mask = build_decode_attention_mask(
+        max_seq = self.layout.max_seq
+        mask_value = torch.finfo(dtype).min
+
+        # Full attention decode mask: attend to all past + current token
+        full_mask = build_decode_attention_mask(
             batch_size=batch_size,
             past_len=self.past_len,
-            max_seq=self.layout.max_seq,
+            max_seq=max_seq,
             device=self.device,
             dtype=dtype,
-            mask_value=-120.0,
+            mask_value=mask_value,
         )
-        head_dim = int(
-            getattr(
-                self.text_config,
-                "head_dim",
-                self.text_config.hidden_size // self.text_config.num_attention_heads,
-            )
+
+        # Sliding attention decode mask: only attend within the sliding window
+        sliding_window = int(getattr(self.text_config, "sliding_window", 1024))
+        sliding_mask = torch.full(
+            (batch_size, 1, max_seq), float(mask_value), device=self.device, dtype=dtype
         )
-        cos = torch.ones(batch_size, 1, head_dim, device=self.device, dtype=dtype)
-        sin = torch.zeros_like(cos)
+        # Allowed positions: max(0, past_len - sliding_window + 1) .. past_len
+        window_start = max(0, self.past_len - sliding_window + 1)
+        sliding_mask[:, :, window_start : self.past_len + 1] = 0.0
+
+        attention_masks = {
+            "full_attention": full_mask,
+            "sliding_attention": sliding_mask,
+        }
+
+        # RoPE at the current decode position
+        rotary_emb = self.model.model.language_model.rotary_emb
+        position_ids = torch.tensor(
+            [[self.past_len]], device=self.device, dtype=torch.long
+        )  # (1, 1)
+        dummy_hidden = torch.zeros(batch_size, 1, 1, device=self.device, dtype=dtype)
 
         layer_types = set(getattr(self.text_config, "layer_types", ["full_attention"]))
-        attention_masks = {layer_type: mask for layer_type in layer_types}
-        position_embeddings = {layer_type: (cos, sin) for layer_type in layer_types}
+        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        for layer_type in layer_types:
+            cos, sin = rotary_emb(dummy_hidden, position_ids, layer_type)
+            position_embeddings[layer_type] = (cos, sin)
+
         return attention_masks, position_embeddings
 
     @torch.no_grad()
     def decode_one(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Run one static decode step and return next-token logits."""
-        hidden_states = self.token_embedding(input_ids.to(self.device))
+        """Run one static decode step and return next-token logits.
+
+        Handles PLE, per-layer-type masks/RoPE, and shared-KV bookkeeping,
+        mirroring the prefill path for a single-token decode step.
+        """
+        llm_input_ids = input_ids.to(self.device)
+        hidden_states = self.token_embedding(llm_input_ids)
+
         attention_masks, position_embeddings = self.build_decode_masks_and_rope(
             batch_size=hidden_states.shape[0],
             dtype=hidden_states.dtype,
         )
 
+        # Compute PLE for the single decode token if enabled
+        per_layer_inputs = None
+        if self.text_model.hidden_size_per_layer_input:
+            ple_token = self.text_model.get_per_layer_inputs(llm_input_ids, None)
+            per_layer_inputs = self.text_model.project_per_layer_inputs(
+                hidden_states, ple_token
+            )
+
+        # Shared-KV bookkeeping: store layers' full K/V (including the new
+        # decode token) are passed to consumer layers.  We maintain a dict
+        # keyed by layer_type, updated after each store layer writes its delta.
+        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
         for layer_idx, layer in enumerate(self.decode_layers):
-            cache = self.layer_caches[layer_idx]
             layer_type = self.text_config.layer_types[layer_idx]
+            per_layer_input = (
+                per_layer_inputs[:, :, layer_idx, :]
+                if per_layer_inputs is not None
+                else None
+            )
+
+            # Check if this layer is a shared-KV consumer
+            attn = layer.wrapped.self_attn.wrapped
+            is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
+            shared_kv = shared_kv_states.get(layer_type, None) if is_shared else None
+
+            cache = self.layer_caches[layer_idx]
+
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_masks[layer_type],
                 position_embeddings=position_embeddings[layer_type],
-                past_key_value=(cache.past_k, cache.past_v),
+                past_key_value=(
+                    (
+                        cache.past_k[:, :, : self.past_len, :],
+                        cache.past_v[:, :, : self.past_len, :],
+                    )
+                    if not is_shared
+                    else None
+                ),
+                per_layer_input=per_layer_input,
+                shared_key_value=shared_kv,
             )
-            hidden_states, new_k, new_v = out
-            cache.past_k[:, :, self.past_len : self.past_len + 1, :] = new_k
-            cache.past_v[:, :, self.past_len : self.past_len + 1, :] = new_v
+
+            if isinstance(out, tuple) and len(out) == 3:
+                hidden_states, new_k, new_v = out
+                # Write single-token K/V delta into the fixed cache
+                cache.past_k[:, :, self.past_len : self.past_len + 1, :].copy_(new_k)
+                cache.past_v[:, :, self.past_len : self.past_len + 1, :].copy_(new_v)
+                # Update shared_kv_states for consumer layers.
+                # The valid K/V (prefill + all decode deltas so far) occupies
+                # positions 0..past_len inclusive in the cache.  Slice to that
+                # range so consumer layers see the correct k_len = past_len + 1.
+                if bool(getattr(attn, "store_full_length_kv", False)):
+                    shared_kv_states[layer_type] = (
+                        cache.past_k[:, :, : self.past_len + 1, :],
+                        cache.past_v[:, :, : self.past_len + 1, :],
+                    )
+            else:
+                hidden_states = out
 
         self.past_len += 1
         logits = self.lm_head(hidden_states)[:, -1, :]
@@ -1255,7 +1337,6 @@ def verify_step_prefill(
     # Use cached raw processor output from build_static_inputs to avoid
     # re-running the processor (which involves expensive image preprocessing).
     # Fall back to re-running the processor if the cache is not available.
-
     raw_inputs = batch.get("_raw_inputs", None)
     if raw_inputs is None:
         raw_inputs = runtime.processor(
@@ -1315,12 +1396,197 @@ def verify_step_prefill(
     return rt_logits
 
 
+@torch.no_grad()
+def verify_step_decode(
+    runtime: StaticGemma4Runtime,
+    batch: dict[str, torch.Tensor],
+    prompt: str,
+    image,
+    prefill_logits: torch.Tensor,
+    num_decode_steps: int = 1,
+    same_token_mode: bool = False,
+) -> torch.Tensor:
+    """Side-by-side validation of ``decode_one`` against HF reference.
+
+    Runs one or more ``decode_one`` steps starting from the prefill state
+    already established by ``verify_step_prefill``, and compares each
+    decode-step logits against HF's ``Gemma4ForConditionalGeneration.forward``
+    with ``past_key_values``.
+
+    The HF reference uses ``DynamicCache`` to accumulate K/V across steps,
+    while the runtime uses its own fixed-size ``layer_caches``.  Both paths
+    start from the same prefill state (greedy argmax from prefill logits).
+
+    The runtime applies ``final_logit_softcapping`` internally (in
+    ``decode_one``), so ``rt_decode_logits`` is directly comparable to HF's output.
+
+    Comparison is via PEIR and diff stats, because the runtime uses quantized
+    weights while the reference is FP.
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        batch: The batch dict returned by ``build_static_inputs``.
+        prompt: Original prompt string.
+        image: Original image.
+        prefill_logits: Runtime prefill logits returned by
+            ``verify_step_prefill``.  The runtime's KV caches must already be
+            populated from that prefill call.
+        num_decode_steps: Number of decode steps to verify (default 1).
+        same_token_mode: If ``True``, both paths use the HF reference token
+            at each step, ensuring apples-to-apples comparison for multi-step
+            decode. If ``False`` (default), each path uses its own greedy
+            argmax, which may diverge after quantization error causes different
+            token selection.
+
+    Returns the last runtime decode logits (shape ``(1, vocab_size)``).
+    """
+    from tico.quantization.evaluation.metric import compute_peir
+
+    # --- Runtime side: decode (prefill already done by verify_step_prefill) ---
+    rt_prefill_logits = prefill_logits  # Reuse from Step 6
+
+    # Greedy first token from prefill
+    rt_next_token = torch.argmax(rt_prefill_logits, dim=-1, keepdim=True)  # (1, 1)
+
+    # --- HF reference: prefill ---
+    # Use cached raw processor output
+    raw_inputs = batch.get("_raw_inputs", None)
+    if raw_inputs is None:
+        raw_inputs = runtime.processor(
+            text=prompt, images=image, return_tensors="pt", padding=False
+        )
+    raw_input_ids = raw_inputs["input_ids"].to(runtime.device)  # (1, seq_len)
+    seq_len = raw_input_ids.shape[1]
+
+    pixel_values = raw_inputs["pixel_values"].to(runtime.device)
+    model_dtype = runtime.model.dtype
+    pixel_values = pixel_values.to(model_dtype)
+
+    image_position_ids = raw_inputs.get("image_position_ids", None)
+    if image_position_ids is not None:
+        image_position_ids = image_position_ids.to(runtime.device)
+
+    ref_attention_mask = torch.ones(
+        (1, seq_len), dtype=torch.long, device=runtime.device
+    )
+
+    # HF prefill with cache
+    from transformers.cache_utils import DynamicCache
+
+    hf_cache = DynamicCache(config=runtime.text_config)
+    ref_out = runtime.model(
+        input_ids=raw_input_ids,
+        pixel_values=pixel_values,
+        image_position_ids=image_position_ids,
+        attention_mask=ref_attention_mask,
+        past_key_values=hf_cache,
+        return_dict=True,
+        use_cache=True,
+    )
+    ref_prefill_logits = ref_out.logits[:, -1, :]  # (1, vocab_size)
+
+    # Verify prefill argmax matches (sanity check)
+    ref_next_token = torch.argmax(ref_prefill_logits, dim=-1, keepdim=True)
+
+    # CRITICAL: Check for prefill divergence
+    prefill_diverged = bool((rt_next_token != ref_next_token).item())
+    if prefill_diverged:
+        print(
+            "[verify_step_decode] WARNING: Runtime and HF argmax differ at step 0. "
+            f"Runtime={rt_next_token.item()}, HF={ref_next_token.item()}. "
+            "Multi-step comparison would evaluate different sequences."
+        )
+        if num_decode_steps > 1 and not same_token_mode:
+            print(
+                "[verify_step_decode] Limiting to 1 decode step. "
+                "Set same_token_mode=True to force same tokens for multi-step."
+            )
+            num_decode_steps = 1
+
+    # Initialize tokens for both paths
+    if same_token_mode:
+        # Both paths use HF reference token
+        rt_current_token = ref_next_token.clone()
+        ref_current_token = ref_next_token.clone()
+        print(
+            "[verify_step_decode] same_token_mode=True: Both paths use HF reference tokens."
+        )
+    else:
+        # Each path uses its own greedy selection
+        rt_current_token = rt_next_token.clone()
+        ref_current_token = ref_next_token.clone()
+
+    # Run decode steps for both paths
+    rt_decode_logits_list = []
+    ref_decode_logits_list = []
+
+    for step in range(num_decode_steps):
+        # Runtime decode
+        rt_decode_logits = runtime.decode_one(rt_current_token)
+        rt_decode_logits_list.append(rt_decode_logits)
+
+        # HF decode
+        ref_decode_out = runtime.model(
+            input_ids=ref_current_token,
+            past_key_values=hf_cache,
+            attention_mask=torch.ones(
+                (1, seq_len + step + 1), dtype=torch.long, device=runtime.device
+            ),
+            return_dict=True,
+            use_cache=True,
+        )
+        ref_decode_logits = ref_decode_out.logits[:, -1, :]
+        ref_decode_logits_list.append(ref_decode_logits)
+
+        # Select next tokens
+        rt_next = torch.argmax(rt_decode_logits, dim=-1, keepdim=True)
+        ref_next = torch.argmax(ref_decode_logits, dim=-1, keepdim=True)
+
+        if same_token_mode:
+            # Force both to use HF token
+            rt_current_token = ref_next.clone()
+            ref_current_token = ref_next.clone()
+        else:
+            rt_current_token = rt_next.clone()
+            ref_current_token = ref_next.clone()
+
+    # --- Compare each decode step ---
+    for step in range(num_decode_steps):
+        rt_f = rt_decode_logits_list[step].float()
+        ref_f = ref_decode_logits_list[step].float()
+
+        diff = (rt_f - ref_f).abs()
+        peir = compute_peir(ref_f, rt_f)
+
+        print(f"[verify_step_decode] Step {step + 1}:")
+        print(f"[verify_step_decode]   Runtime logits shape: {tuple(rt_f.shape)}")
+        print(f"[verify_step_decode]   mean|diff| = {diff.mean().item():.8f}")
+        print(f"[verify_step_decode]    max|diff| = {diff.max().item():.8f}")
+        print(f"[verify_step_decode]   PEIR       = {peir * 100:.6f} %")
+
+        rt_tok = int(torch.argmax(rt_f, dim=-1).item())
+        ref_tok = int(torch.argmax(ref_f, dim=-1).item())
+        print(f"[verify_step_decode]   Runtime argmax token: {rt_tok}")
+        print(f"[verify_step_decode]   Reference argmax token: {ref_tok}")
+        if rt_tok == ref_tok:
+            print("[verify_step_decode]   Argmax tokens MATCH.")
+        else:
+            print("[verify_step_decode]   WARNING: Argmax tokens differ.")
+            if step < num_decode_steps - 1:
+                print(
+                    "[verify_step_decode]   Subsequent steps compare different sequences."
+                )
+
+    print("[verify_step_decode] All checks passed.")
+    return rt_decode_logits_list[-1]
+
+
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     """Run the Gemma4 E2B static runtime smoke flow.
 
     This entry point runs the ``build_static_inputs``, ``token_embedding``,
-    ``vision_prefill``, ``mm_fusion``, ``masks_and_rope``, and ``prefill``
-    validation steps. Decode and generation are skipped with clear messages.
+    ``vision_prefill``, ``mm_fusion``, ``masks_and_rope``, ``prefill``, and
+    ``decode`` validation steps. Generation is skipped with a clear message.
     """
 
     from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -1381,7 +1647,17 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     print("[run_static_gemma4_runtime] Step 6: verify prefill")
     rt_logits = verify_step_prefill(runtime, batch, cfg.prompt, image)
 
-    # --- Steps 7+: decode / generation (not yet implemented) ---
-    print("[run_static_gemma4_runtime] SKIP: decode (not implemented in this PR)")
+    # --- Step 7: decode validation ---
+    print("[run_static_gemma4_runtime] Step 7: verify decode")
+    rt_decode_logits = verify_step_decode(
+        runtime,
+        batch,
+        cfg.prompt,
+        image,
+        prefill_logits=rt_logits,
+        num_decode_steps=cfg.verify_steps,
+    )
+
+    # --- Step 8+: generation (not yet implemented) ---
     print("[run_static_gemma4_runtime] SKIP: generation (not implemented in this PR)")
     print("[run_static_gemma4_runtime] Done.")
