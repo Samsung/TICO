@@ -97,6 +97,90 @@ def _validate_padding_layout(
                 raise ValueError("Right padding expected but not found")
 
 
+def _build_full_attention_mask(
+    valid_token_mask: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+    mask_value: float,
+) -> torch.Tensor:
+    """Build a standard causal attention mask with padding.
+
+    Args:
+        valid_token_mask: Boolean mask of shape ``(B, S)`` — True for real
+            tokens, False for padding.
+        device: Target device.
+        dtype: Target dtype for the output mask.
+        mask_value: Value used to mask forbidden positions (typically
+            ``torch.finfo(dtype).min``).
+
+    Returns:
+        Additive attention bias of shape ``(B, 1, S, S)``.  ``0.0`` allows
+        attention, ``mask_value`` forbids it.
+    """
+    batch_size, seq_len = valid_token_mask.shape
+    # Causal: kv_idx <= q_idx
+    causal = torch.tril(
+        torch.ones(seq_len, seq_len, device=device, dtype=torch.bool)
+    )  # (S, S)
+    causal = causal.unsqueeze(0).expand(batch_size, -1, -1)  # (B, S, S)
+
+    key_valid = valid_token_mask.to(device).unsqueeze(1).expand(-1, seq_len, -1)
+
+    valid = causal & key_valid
+    mask = torch.zeros(batch_size, seq_len, seq_len, device=device, dtype=dtype)
+    mask = mask.masked_fill(~valid, mask_value)
+    return mask.unsqueeze(1)  # (B, 1, S, S)
+
+
+def _build_sliding_window_attention_mask(
+    valid_token_mask: torch.Tensor,
+    sliding_window: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    mask_value: float,
+) -> torch.Tensor:
+    """Build a sliding-window causal attention mask with padding.
+
+    A token at position ``q`` can attend to position ``k`` if:
+    - ``k <= q`` (causal), AND
+    - ``k > q - sliding_window`` (within the sliding window)
+
+    This matches HF's ``sliding_window_causal_mask_function`` which is
+    ``and_masks(sliding_window_overlay, causal_mask_function)`` where
+    ``sliding_window_overlay`` returns ``kv_idx > q_idx - sliding_window``.
+
+    Args:
+        valid_token_mask: Boolean mask of shape ``(B, S)``.
+        sliding_window: Window size (number of past tokens visible, inclusive
+            of the current token).
+        device: Target device.
+        dtype: Target dtype.
+        mask_value: Value for masked positions.
+
+    Returns:
+        Additive attention bias of shape ``(B, 1, S, S)``.
+    """
+    batch_size, seq_len = valid_token_mask.shape
+
+    q_idx = torch.arange(seq_len, device=device).view(seq_len, 1)  # (S, 1)
+    kv_idx = torch.arange(seq_len, device=device).view(1, seq_len)  # (1, S)
+
+    # Causal: kv_idx <= q_idx
+    causal = kv_idx <= q_idx  # (S, S) broadcast
+    # Sliding window: kv_idx > q_idx - sliding_window
+    window = kv_idx > (q_idx - sliding_window)  # (S, S) broadcast
+
+    valid_pattern = causal & window  # (S, S)
+    valid_pattern = valid_pattern.unsqueeze(0).expand(batch_size, -1, -1)  # (B, S, S)
+
+    key_valid = valid_token_mask.to(device).unsqueeze(1).expand(-1, seq_len, -1)
+
+    valid = valid_pattern & key_valid
+    mask = torch.zeros(batch_size, seq_len, seq_len, device=device, dtype=dtype)
+    mask = mask.masked_fill(~valid, mask_value)
+    return mask.unsqueeze(1)  # (B, 1, S, S)
+
+
 # =============================================================================
 # Data Classes
 # =============================================================================
@@ -144,6 +228,7 @@ class StaticGemma4Runtime:
 
         self.model = model.eval().to(device)
         self.processor = processor
+
         self.layout = layout
         self.device = torch.device(device)
         self.config = model.config
@@ -345,40 +430,75 @@ class StaticGemma4Runtime:
     ) -> tuple[dict[str, torch.Tensor], dict[str, tuple[torch.Tensor, torch.Tensor]]]:
         """Build CPU-owned static masks and RoPE tensors for prefill.
 
-        This skeleton returns shape-compatible placeholder tensors so downstream
-        runtime code and linters can type-check while the exact Gemma4 mask and
-        RoPE implementation is developed. The final implementation should
-        replace this method with full/sliding attention masks and layer-type
-        specific RoPE generated from the Gemma4 text configuration.
+        Produces two dictionaries keyed by layer type
+        (``"full_attention"``, ``"sliding_attention"``):
+
+        - ``attention_masks``: 4D additive bias tensors of shape
+          ``(batch, 1, seq_len, seq_len)``.  ``0.0`` allows attention,
+          ``mask_value`` forbids it.  Full-attention layers get a standard
+          causal mask; sliding-attention layers get a sliding-window causal
+          mask.  Both masks also zero out padding positions.
+
+        - ``position_embeddings``: ``(cos, sin)`` pairs of shape
+          ``(batch, seq_len, head_dim)`` per layer type, computed via the HF
+          model's ``Gemma4TextRotaryEmbedding`` module.  Full-attention layers
+          use proportional RoPE (partial_rotary_factor=0.25, global_head_dim);
+          sliding-attention layers use default RoPE (head_dim).
         """
         batch_size, seq_len = input_ids.shape
-        runtime_dtype = torch.float32
-        if attention_mask.is_floating_point():
-            runtime_dtype = attention_mask.dtype
 
-        full_mask = torch.zeros(
-            batch_size,
-            1,
-            seq_len,
-            seq_len,
-            device=self.device,
-            dtype=runtime_dtype,
+        # --- Determine runtime dtype from model weights ---
+        runtime_dtype = next(self.model.parameters()).dtype
+
+        # --- Valid token mask (boolean) ---
+        valid_token_mask = attention_mask.to(self.device).bool()  # (B, S)
+
+        # --- Position IDs: arange(seq_len) for prefill (no past cache) ---
+        position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0)  # (1, S)
+
+        # --- Attention masks ---
+        mask_value = torch.finfo(runtime_dtype).min
+
+        # Full attention: standard causal + padding
+        full_mask = _build_full_attention_mask(
+            valid_token_mask, self.device, runtime_dtype, mask_value
         )
-        head_dim = int(
-            getattr(
-                self.text_config,
-                "head_dim",
-                self.text_config.hidden_size // self.text_config.num_attention_heads,
-            )
+
+        # Sliding attention: sliding-window causal + padding
+        sliding_window = int(getattr(self.text_config, "sliding_window", 1024))
+        sliding_mask = _build_sliding_window_attention_mask(
+            valid_token_mask,
+            sliding_window,
+            self.device,
+            runtime_dtype,
+            mask_value,
         )
-        cos = torch.ones(
-            batch_size, seq_len, head_dim, device=self.device, dtype=runtime_dtype
-        )
-        sin = torch.zeros_like(cos)
 
         layer_types = set(getattr(self.text_config, "layer_types", ["full_attention"]))
-        attention_masks = {layer_type: full_mask for layer_type in layer_types}
-        position_embeddings = {layer_type: (cos, sin) for layer_type in layer_types}
+        attention_masks = {
+            "full_attention": full_mask,
+            "sliding_attention": sliding_mask,
+        }
+        # If the model only has one layer type, keep only that entry
+        if not hasattr(self.text_config, "layer_types"):
+            attention_masks = {"full_attention": full_mask}
+
+        # --- RoPE (per layer type) ---
+        # Use the HF model's Gemma4TextRotaryEmbedding module directly.
+        # It has per-layer-type inv_freq buffers and attention_scaling.
+        rotary_emb = self.model.model.language_model.rotary_emb
+
+        # Dummy hidden states for shape/dtype inference (rotary_emb only uses
+        # x.device and x.dtype)
+        dummy_hidden = torch.zeros(
+            batch_size, seq_len, 1, device=self.device, dtype=runtime_dtype
+        )
+
+        position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+        for layer_type in layer_types:
+            cos, sin = rotary_emb(dummy_hidden, position_ids, layer_type)
+            position_embeddings[layer_type] = (cos, sin)
+
         return attention_masks, position_embeddings
 
     @torch.no_grad()
@@ -848,6 +968,146 @@ def verify_step_mm_fusion(
     return rt_fused
 
 
+@torch.no_grad()
+def verify_step_masks_and_rope(
+    runtime: StaticGemma4Runtime,
+    batch: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], dict[str, tuple[torch.Tensor, torch.Tensor]]]:
+    """Side-by-side validation of ``build_prefill_masks_and_rope`` against HF.
+
+    Validates two things:
+
+    1. **Attention masks**: The runtime's full-causal and sliding-window-causal
+       masks are compared against HF's ``create_masks_for_generate``.  Since HF
+       may return ``None`` (for sdpa) or use a different ``mask_value``, we
+       compare boolean attention patterns (allowed vs. forbidden) rather than
+       exact float values.
+
+    2. **RoPE (cos, sin)**: The runtime's per-layer-type RoPE is compared
+       against HF's ``Gemma4TextRotaryEmbedding.forward`` — the same module the
+       runtime uses internally.  This is an exact-match check.
+
+    HF reference (modeling_gemma4.py L1688–1707):
+        ``causal_mask_mapping = {``
+        ``    "full_attention": create_causal_mask(...),``
+        ``    "sliding_attention": create_sliding_window_causal_mask(...),``
+        ``}``
+        ``position_embeddings[layer_type] = self.rotary_emb(hidden_states, position_ids, layer_type)``
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        batch: The batch dict returned by ``build_static_inputs``.
+
+    Returns the ``(attention_masks, position_embeddings)`` tuple from
+    ``build_prefill_masks_and_rope``.
+    """
+    import torch.testing
+
+    from transformers.masking_utils import create_masks_for_generate
+
+    llm_input_ids = batch["llm_input_ids"].to(runtime.device)
+    attention_mask = batch["attention_mask"].to(runtime.device)
+    max_seq = llm_input_ids.shape[1]
+    runtime_dtype = next(runtime.model.parameters()).dtype
+
+    # --- Runtime side ---
+    rt_masks, rt_rope = runtime.build_prefill_masks_and_rope(
+        llm_input_ids, attention_mask
+    )
+
+    # --- HF reference: RoPE ---
+    # Use the HF model's rotary_emb directly (same module the runtime uses)
+    rotary_emb = runtime.model.model.language_model.rotary_emb
+    position_ids = torch.arange(max_seq, device=runtime.device).unsqueeze(0)
+    dummy_hidden = torch.zeros(
+        1, max_seq, 1, device=runtime.device, dtype=runtime_dtype
+    )
+
+    layer_types = set(runtime.text_config.layer_types)
+    for layer_type in layer_types:
+        ref_cos, ref_sin = rotary_emb(dummy_hidden, position_ids, layer_type)
+        rt_cos, rt_sin = rt_rope[layer_type]
+
+        torch.testing.assert_close(
+            rt_cos,
+            ref_cos,
+            msg=f"RoPE cos mismatch for layer_type={layer_type!r}",
+        )
+        torch.testing.assert_close(
+            rt_sin,
+            ref_sin,
+            msg=f"RoPE sin mismatch for layer_type={layer_type!r}",
+        )
+
+    print(
+        f"[verify_step_masks_and_rope] RoPE exact match for {len(layer_types)} layer types."
+    )
+
+    # --- HF reference: masks ---
+    # Build dummy inputs_embeds for shape inference
+    hidden_size = int(runtime.text_config.hidden_size)
+    dummy_embeds = torch.zeros(
+        1, max_seq, hidden_size, device=runtime.device, dtype=runtime_dtype
+    )
+
+    # create_masks_for_generate needs a 2D attention mask (1=valid, 0=padding)
+    attn_mask_2d = attention_mask.to(runtime.device).long()  # (1, max_seq)
+
+    # Temporarily force eager attention to get 4D float masks from HF
+    original_attn_impl = getattr(runtime.text_config, "_attn_implementation", "sdpa")
+    runtime.text_config._attn_implementation = "eager"
+    try:
+        ref_masks = create_masks_for_generate(
+            config=runtime.text_config,
+            inputs_embeds=dummy_embeds,
+            attention_mask=attn_mask_2d,
+            past_key_values=None,
+            position_ids=position_ids,
+        )
+    finally:
+        runtime.text_config._attn_implementation = original_attn_impl
+
+    # --- Compare masks as boolean patterns ---
+    # HF may return None for some layer types (e.g. if no masking needed).
+    # We compare the allowed/forbidden pattern, not exact float values.
+    for layer_type in layer_types:
+        rt_mask = rt_masks[layer_type]  # (1, 1, S, S)
+
+        if isinstance(ref_masks, dict):
+            ref_mask = ref_masks.get(layer_type, None)
+        else:
+            # Single mask (all layers same type)
+            ref_mask = ref_masks
+
+        if ref_mask is None:
+            # HF returned None — means no masking (all positions allowed).
+            # This happens when there's no padding and sdpa handles causality
+            # internally.  Compare against our mask's "allowed" pattern.
+            # For prefill with no padding, all causal positions should be 0.0.
+            print(
+                f"[verify_step_masks_and_rope] HF returned None mask for "
+                f"{layer_type!r}, skipping mask comparison (RoPE still verified)."
+            )
+            continue
+
+        # Convert to boolean: True = allowed (not mask_value), False = masked
+        mask_value = torch.finfo(runtime_dtype).min
+        rt_allowed = rt_mask.squeeze(1).squeeze(0) > (mask_value / 2)  # (S, S)
+        ref_allowed = ref_mask.squeeze(1).squeeze(0) > (mask_value / 2)  # (S, S)
+
+        torch.testing.assert_close(
+            rt_allowed,
+            ref_allowed,
+            msg=f"Attention mask pattern mismatch for layer_type={layer_type!r}",
+        )
+
+    print(
+        f"[verify_step_masks_and_rope] Mask patterns match for {len(layer_types)} layer types."
+    )
+    print("[verify_step_masks_and_rope] All checks passed.")
+    return rt_masks, rt_rope
+
+
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     """Run the Gemma4 E2B static runtime smoke flow.
 
@@ -905,7 +1165,11 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         runtime, text_embeds, visual_embeds, cfg.prompt, image
     )
 
-    # --- Steps 5+: prefill / decode / generation (not yet implemented) ---
+    # --- Step 5: masks_and_rope validation ---
+    print("[run_static_gemma4_runtime] Step 5: verify masks_and_rope")
+    masks, rope = verify_step_masks_and_rope(runtime, batch)
+
+    # --- Steps 6+: prefill / decode / generation (not yet implemented) ---
     print("[run_static_gemma4_runtime] SKIP: prefill (not implemented in this PR)")
     print("[run_static_gemma4_runtime] SKIP: decode (not implemented in this PR)")
     print("[run_static_gemma4_runtime] SKIP: generation (not implemented in this PR)")
