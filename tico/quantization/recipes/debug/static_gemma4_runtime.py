@@ -21,7 +21,7 @@ NPU-exportable subgraphs own quantized tensor compute.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -251,9 +251,11 @@ class StaticGemma4Runtime:
         )
         wrapped_model = wrapped_top.model.wrapped
 
-        self.token_embedding = Gemma4TokenEmbeddingExportAdapter(
-            wrapped_model.language_model.wrapped
-        ).to(self.device)
+        self.text_model = wrapped_model.language_model.wrapped
+        self.token_embedding = Gemma4TokenEmbeddingExportAdapter(self.text_model).to(
+            self.device
+        )
+
         self.vision_prefill = Gemma4VisionPrefillExportAdapter(wrapped_model).to(
             self.device
         )
@@ -287,11 +289,42 @@ class StaticGemma4Runtime:
     def _allocate_empty_cache(
         self, batch_size: int, dtype: torch.dtype
     ) -> list[LayerCache]:
-        """Allocate fixed-size empty KV cache tensors."""
-        num_kv_heads = int(self.text_config.num_key_value_heads)
-        head_dim = int(self.text_config.head_dim)
+        """Allocate fixed-size empty KV cache tensors.
+
+        Gemma4 has per-layer-type head dimensions:
+        - Sliding attention layers: ``head_dim = config.head_dim``
+        - Full attention layers: ``head_dim = config.global_head_dim``
+
+        The number of KV heads may also differ when
+        ``num_global_key_value_heads`` is set, but for E2B it defaults to
+        ``num_key_value_heads`` for all layers.
+        """
         caches = []
-        for _ in range(int(self.text_config.num_hidden_layers)):
+        for layer_idx in range(int(self.text_config.num_hidden_layers)):
+            layer_type = self.text_config.layer_types[layer_idx]
+            is_sliding = layer_type == "sliding_attention"
+
+            # Per-layer-type head_dim (HF Gemma4TextAttention.__init__)
+            global_head_dim = getattr(self.text_config, "global_head_dim", None)
+            if not is_sliding and global_head_dim:
+                head_dim = int(global_head_dim)
+            else:
+                head_dim = int(self.text_config.head_dim)
+
+            # Per-layer-type num_kv_heads
+            # use_alternative_attention = attention_k_eq_v and not is_sliding
+            # For E2B, attention_k_eq_v=False, so num_kv_heads is always
+            # config.num_key_value_heads.  But we handle the general case.
+            attention_k_eq_v = getattr(self.text_config, "attention_k_eq_v", False)
+            use_alternative_attention = attention_k_eq_v and not is_sliding
+            if use_alternative_attention:
+                num_kv_heads = int(
+                    getattr(self.text_config, "num_global_key_value_heads", None)
+                    or self.text_config.num_key_value_heads
+                )
+            else:
+                num_kv_heads = int(self.text_config.num_key_value_heads)
+
             past_k = torch.zeros(
                 batch_size,
                 num_kv_heads,
@@ -305,8 +338,9 @@ class StaticGemma4Runtime:
 
     def build_static_inputs(
         self, prompt: str, image, max_seq: Optional[int] = None
-    ) -> dict[str, torch.Tensor]:
-        """Build static padded processor inputs.
+    ) -> dict[str, Any]:
+        """
+        Build static padded processor inputs.
 
         Processes the prompt+image through the HF processor, pads to
         ``max_seq``, and replaces image placeholder tokens with
@@ -417,12 +451,22 @@ class StaticGemma4Runtime:
 
         valid_length = torch.tensor([seq_len], dtype=torch.long, device=self.device)
 
+        # Cache raw (unpadded) processor output so that verification steps
+        # (e.g. verify_step_prefill) can reuse it without re-running the
+        # processor, which involves expensive image preprocessing.
+        raw_inputs = {
+            "input_ids": inputs["input_ids"],
+            "pixel_values": inputs["pixel_values"],
+            "image_position_ids": inputs.get("image_position_ids", None),
+        }
+
         return {
             "llm_input_ids": padded_input_ids.unsqueeze(0),
             "pixel_values": pixel_values,
             "image_position_ids": image_position_ids,
             "attention_mask": padded_attention_mask.unsqueeze(0),
             "valid_length": valid_length,
+            "_raw_inputs": raw_inputs,
         }
 
     def build_prefill_masks_and_rope(
@@ -505,7 +549,7 @@ class StaticGemma4Runtime:
     def prefill(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """Run static prefill and return last-token logits."""
         llm_input_ids = batch["llm_input_ids"].to(self.device)
-        pixel_values = batch["pixel_values"].to(self.device)
+        pixel_values = batch["pixel_values"].to(self.device).to(self.model.dtype)
         image_position_ids = batch.get("image_position_ids")
         if image_position_ids is not None:
             image_position_ids = image_position_ids.to(self.device)
@@ -522,20 +566,63 @@ class StaticGemma4Runtime:
             batch["attention_mask"].to(self.device),
         )
 
+        # Compute Per-Layer Embeddings (PLE) if enabled.
+        # PLE has two components:
+        #   1. Token-identity: embed_tokens_per_layer(llm_input_ids) → (B, S, L, P)
+        #   2. Context projection: per_layer_model_projection(hidden_states) → (B, S, L, P)
+        # Combined: (projection + token_identity) * per_layer_input_scale
+        # Each layer receives its slice: per_layer_inputs[:, :, i, :]
+        per_layer_inputs = None
+        if self.text_model.hidden_size_per_layer_input:
+            ple_token = self.text_model.get_per_layer_inputs(llm_input_ids, None)
+            per_layer_inputs = self.text_model.project_per_layer_inputs(
+                hidden_states, ple_token
+            )
+
+        # Shared-KV bookkeeping: some layers share K/V states with earlier
+        # layers of the same layer_type.  Store layers write their full-length
+        # K/V into shared_kv_states; consumer layers read from it.
+        shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
         for layer_idx, layer in enumerate(self.prefill_layers):
             layer_type = self.text_config.layer_types[layer_idx]
+            per_layer_input = (
+                per_layer_inputs[:, :, layer_idx, :]
+                if per_layer_inputs is not None
+                else None
+            )
+
+            # Check if this layer is a shared-KV consumer
+            attn = layer.wrapped.self_attn.wrapped
+            is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
+            shared_kv = shared_kv_states.get(layer_type, None) if is_shared else None
+
             out = layer(
                 hidden_states=hidden_states,
                 attention_mask=attention_masks[layer_type],
                 position_embeddings=position_embeddings[layer_type],
+                per_layer_input=per_layer_input,
+                shared_key_value=shared_kv,
             )
-            hidden_states, new_k, new_v = out
-            self.layer_caches[layer_idx].past_k[:, :, : self.layout.max_seq, :] = new_k
-            self.layer_caches[layer_idx].past_v[:, :, : self.layout.max_seq, :] = new_v
+
+            if isinstance(out, tuple) and len(out) == 3:
+                hidden_states, new_k, new_v = out
+                # Write full-sequence K/V into the pre-allocated fixed cache.
+                # For prefill, new_k/new_v cover the entire max_seq, so no
+                # positional slicing is needed — copy_ preserves the buffer.
+                self.layer_caches[layer_idx].past_k.copy_(new_k)
+                self.layer_caches[layer_idx].past_v.copy_(new_v)
+                # Store full-length K/V for shared-KV consumer layers
+                if bool(getattr(attn, "store_full_length_kv", False)):
+                    shared_kv_states[layer_type] = (new_k, new_v)
+            else:
+                hidden_states = out
 
         self.past_len = int(batch["valid_length"].item())
+
         logits = self.lm_head(hidden_states[:, self.past_len - 1 : self.past_len, :])
-        return logits[:, -1, :]
+        logits = logits[:, -1, :]
+        return self._apply_final_logit_softcapping(logits)
 
     def build_decode_masks_and_rope(
         self, batch_size: int, dtype: torch.dtype
@@ -593,7 +680,23 @@ class StaticGemma4Runtime:
             cache.past_v[:, :, self.past_len : self.past_len + 1, :] = new_v
 
         self.past_len += 1
-        return self.lm_head(hidden_states)[:, -1, :]
+        logits = self.lm_head(hidden_states)[:, -1, :]
+        return self._apply_final_logit_softcapping(logits)
+
+    def _apply_final_logit_softcapping(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply Gemma4 final logit softcapping.
+
+        HF's ``Gemma4ForConditionalGeneration`` applies
+        ``tanh(logits / softcap) * softcap`` when
+        ``config.final_logit_softcapping`` is set.  The
+        ``Gemma4LMHeadExportAdapter`` does not apply it (to stay clean
+        for NPU export), so the runtime applies it here on the CPU side.
+        """
+        softcap = getattr(self.text_config, "final_logit_softcapping", None)
+        if softcap is None:
+            return logits
+        softcap = float(softcap)
+        return torch.tanh(logits / softcap) * softcap
 
 
 @torch.no_grad()
@@ -617,7 +720,6 @@ def verify_step_build_static_inputs(
 
     Returns the batch dict from ``build_static_inputs``.
     """
-
     import torch.testing
 
     layout = runtime.layout
@@ -627,7 +729,9 @@ def verify_step_build_static_inputs(
 
     # --- Runtime output ---
     batch = runtime.build_static_inputs(prompt, image)
+
     rt_llm_input_ids = batch["llm_input_ids"]
+
     rt_attention_mask = batch["attention_mask"]
     rt_pixel_values = batch["pixel_values"]
     rt_image_position_ids = batch.get("image_position_ids")
@@ -838,7 +942,7 @@ def verify_step_vision_prefill(
     from tico.quantization.evaluation.metric import compute_peir
 
     peir = compute_peir(hf_visual_embeds, rt_visual_embeds)
-    print(f"[verify_step_vision_prefill] PEIR = {peir:.6e}")
+    print(f"[verify_step_vision_prefill] PEIR = {peir * 100:.6f} %")
 
     # --- Quantized reference (quantized model) ---
     # Use the quantized model's get_image_features, not the original model's,
@@ -1108,12 +1212,115 @@ def verify_step_masks_and_rope(
     return rt_masks, rt_rope
 
 
+@torch.no_grad()
+def verify_step_prefill(
+    runtime: StaticGemma4Runtime,
+    batch: dict[str, torch.Tensor],
+    prompt: str,
+    image,
+) -> torch.Tensor:
+    """Side-by-side validation of ``prefill`` against HF reference.
+
+    Runs the runtime's ``prefill`` (quantized, static-shape) and compares
+    last-token logits against HF's ``Gemma4ForConditionalGeneration.forward``
+    (FP, dynamic-shape).
+
+    The runtime applies ``final_logit_softcapping`` internally (in
+    ``prefill``), so ``rt_logits`` is directly comparable to HF's output.
+
+    Comparison is via PEIR (Peak-Error-to-Interval Ratio) and diff stats,
+    because the runtime uses quantized weights while the reference is FP.
+
+    HF reference (modeling_gemma4.py L2508–2535):
+        ``outputs = self.model(input_ids=..., pixel_values=..., ...)``
+        ``logits = self.lm_head(hidden_states[:, slice_indices, :])``
+        ``if final_logit_softcapping is not None:``
+        ``    logits = tanh(logits / sc) * sc``
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        batch: The batch dict returned by ``build_static_inputs``.
+        prompt: Original prompt string (to re-run processor for raw input_ids).
+        image: Original image (to re-run processor).
+
+    Returns the runtime logits (shape ``(1, vocab_size)``).
+    """
+    from tico.quantization.evaluation.metric import compute_peir
+
+    # --- Runtime side ---
+    runtime.reset_cache()
+    rt_logits = runtime.prefill(batch)  # (1, vocab_size)
+
+    # --- HF reference ---
+    # Use cached raw processor output from build_static_inputs to avoid
+    # re-running the processor (which involves expensive image preprocessing).
+    # Fall back to re-running the processor if the cache is not available.
+
+    raw_inputs = batch.get("_raw_inputs", None)
+    if raw_inputs is None:
+        raw_inputs = runtime.processor(
+            text=prompt, images=image, return_tensors="pt", padding=False
+        )
+    raw_input_ids = raw_inputs["input_ids"].to(runtime.device)  # (1, seq_len)
+    seq_len = raw_input_ids.shape[1]
+
+    pixel_values = raw_inputs["pixel_values"].to(runtime.device)
+    # Cast to model dtype to match HF's internal casting
+    model_dtype = runtime.model.dtype
+    pixel_values = pixel_values.to(model_dtype)
+
+    image_position_ids = raw_inputs.get("image_position_ids", None)
+    if image_position_ids is not None:
+        image_position_ids = image_position_ids.to(runtime.device)
+
+    # Unpadded attention mask (all ones)
+    ref_attention_mask = torch.ones(
+        (1, seq_len), dtype=torch.long, device=runtime.device
+    )
+
+    ref_out = runtime.model(
+        input_ids=raw_input_ids,
+        pixel_values=pixel_values,
+        image_position_ids=image_position_ids,
+        attention_mask=ref_attention_mask,
+        logits_to_keep=1,
+        use_cache=False,
+        return_dict=True,
+    )
+    ref_logits = ref_out.logits[:, -1, :]
+
+    # --- Compare ---
+    rt_f = rt_logits.float()
+    ref_f = ref_logits.float()
+
+    diff = (rt_f - ref_f).abs()
+    peir = compute_peir(ref_f, rt_f)
+
+    print(f"[verify_step_prefill] Runtime logits shape: {tuple(rt_logits.shape)}")
+    print(f"[verify_step_prefill] Reference logits shape: {tuple(ref_logits.shape)}")
+    print(f"[verify_step_prefill] mean|diff| = {diff.mean().item():.8f}")
+    print(f"[verify_step_prefill]  max|diff| = {diff.max().item():.8f}")
+    print(f"[verify_step_prefill] PEIR       = {peir * 100:.6f} %")
+
+    rt_next = int(torch.argmax(rt_f, dim=-1).item())
+    ref_next = int(torch.argmax(ref_f, dim=-1).item())
+    print(f"[verify_step_prefill] Runtime argmax token: {rt_next}")
+    print(f"[verify_step_prefill] Reference argmax token: {ref_next}")
+    if rt_next == ref_next:
+        print("[verify_step_prefill] Argmax tokens MATCH.")
+    else:
+        print("[verify_step_prefill] WARNING: Argmax tokens differ.")
+
+    print("[verify_step_prefill] All checks passed.")
+    return rt_logits
+
+
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     """Run the Gemma4 E2B static runtime smoke flow.
 
     This entry point runs the ``build_static_inputs``, ``token_embedding``,
-    and ``vision_prefill`` validation steps. Prefill, decode, and generation
-    are skipped with clear messages.
+    ``vision_prefill``, ``mm_fusion``, ``masks_and_rope``, and ``prefill``
+    validation steps. Decode and generation are skipped with clear messages.
     """
 
     from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -1125,6 +1332,7 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         )
 
     print(f"[run_static_gemma4_runtime] Loading model: {cfg.model}")
+
     model = AutoModelForImageTextToText.from_pretrained(cfg.model)
     processor = AutoProcessor.from_pretrained(cfg.model)
 
@@ -1169,8 +1377,11 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     print("[run_static_gemma4_runtime] Step 5: verify masks_and_rope")
     masks, rope = verify_step_masks_and_rope(runtime, batch)
 
-    # --- Steps 6+: prefill / decode / generation (not yet implemented) ---
-    print("[run_static_gemma4_runtime] SKIP: prefill (not implemented in this PR)")
+    # --- Step 6: prefill validation ---
+    print("[run_static_gemma4_runtime] Step 6: verify prefill")
+    rt_logits = verify_step_prefill(runtime, batch, cfg.prompt, image)
+
+    # --- Steps 7+: decode / generation (not yet implemented) ---
     print("[run_static_gemma4_runtime] SKIP: decode (not implemented in this PR)")
     print("[run_static_gemma4_runtime] SKIP: generation (not implemented in this PR)")
     print("[run_static_gemma4_runtime] Done.")
