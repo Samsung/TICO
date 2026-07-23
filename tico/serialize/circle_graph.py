@@ -70,7 +70,9 @@ class CircleModel(circle.Model.ModelT):
     def __init__(self):
         super().__init__()
         self.subgraphs: List[circle.SubGraph.SubGraphT] = []
-        self.buffers: List[circle.Buffer.BufferT] = []
+        # Circle reserves buffer 0 for tensors without embedded data, such as
+        # graph inputs, intermediate activations, and operator outputs.
+        self.buffers: List[circle.Buffer.BufferT] = [circle.Buffer.BufferT()]
 
     def add_subgraph(self, graph: circle.SubGraph.SubGraphT) -> None:
         self.subgraphs.append(graph)
@@ -159,20 +161,21 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
             tensor.quantization = to_circle_qparam(node.meta[QPARAM_KEY])
             tensor.type = str_to_circle_dtype(node.meta[QPARAM_KEY].dtype)
 
-        buffer = circle.Buffer.BufferT()
-        if data is not None and isinstance(data, np.ndarray):
+        if data is None:
+            tensor.buffer = 0
+        else:
+            assert isinstance(data, np.ndarray)
             data = to_flat_contiguous_numpy(data)
 
             if QPARAM_KEY in node.meta:
                 if node.meta[QPARAM_KEY].dtype == "uint4":
                     data = pack_buffer(data, "uint4")
 
+            buffer = circle.Buffer.BufferT()
             # Packing np.ndarray is faster than packing bytes
             buffer.data = data.view(np.uint8)  # type: ignore[assignment]
-        else:
-            assert data is None
-        bid = self.model.add_buffer(buffer)
-        tensor.buffer = bid
+            tensor.buffer = self.model.add_buffer(buffer)
+
         self._add_tensor(tensor)
 
     def add_const_tensor(
@@ -257,9 +260,7 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         else:
             tensor.type = dtype
 
-        buffer = circle.Buffer.BufferT()
-        bid = self.model.add_buffer(buffer)
-        tensor.buffer = bid
+        tensor.buffer = 0
         self._add_tensor(tensor)
 
         return tensor

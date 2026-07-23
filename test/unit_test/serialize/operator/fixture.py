@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch.fx
-from circle_schema import circle
+import torch
 
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.node_visitor import get_node_visitor
@@ -27,7 +26,6 @@ class SingleOpGraphFixture:
         self.torch_target = torch_target
 
         self._circle_model = CircleModel()
-        self._circle_model.add_buffer(circle.Buffer.BufferT())
         self.circle_graph = CircleSubgraph(self._circle_model)
 
         self.forward_args, self.forward_kwargs = torch_module.get_example_inputs()  # type: ignore[operator]

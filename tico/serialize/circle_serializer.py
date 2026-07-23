@@ -17,17 +17,16 @@ from typing import Dict, Optional
 
 import flatbuffers
 import torch
-from circle_schema import circle
 from torch.export.exported_program import ConstantArgument, ExportedProgram, InputKind
 
 from tico.config import CompileConfigBase, get_default_config
-from tico.serialize.circle_mapping import to_circle_dtype, to_circle_shape
 from tico.serialize.operators import *
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import get_node_visitors
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
+from tico.utils.errors import NotYetSupportedError
 from tico.utils.serialize import finalise_tensor_names, validate_tensor_shapes
 
 
@@ -65,7 +64,6 @@ def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
         Tuple containing the model and subgraph
     """
     model = CircleModel()
-    model.add_buffer(circle.Buffer.BufferT())  # Add empty buffer at the front
     graph = CircleSubgraph(model)
     return model, graph
 
@@ -296,7 +294,7 @@ def _export_tensors(graph: CircleSubgraph, ep: ExportedProgram) -> None:
             _handle_placeholder_node(graph, node, ep, buf_name_to_data, shared_tensors)
 
         elif node.op == "get_attr":
-            _handle_get_attr_node(graph, node)
+            _handle_get_attr_node(node)
 
         elif node.op == "output":
             for output in node.args[0]:
@@ -476,31 +474,46 @@ def _handle_user_input_node(
     logger.debug(f"Exported user input tensor: {node.name}")
 
 
-def _handle_get_attr_node(
-    graph: CircleSubgraph,
-    node: torch.fx.Node,
-) -> None:
-    """Handle a get_attr node by exporting its tensor data.
+def _handle_get_attr_node(node: torch.fx.Node) -> None:
+    """
+    Reject unsupported attributes in the top-level ExportedProgram graph.
+
+    Parameters, buffers, and tensor constants in a valid top-level
+    ExportedProgram graph must be lifted to placeholder nodes. A get_attr node
+    therefore represents either an unsupported auxiliary object, such as a
+    nested GraphModule used by a higher-order operator, or an ExportedProgram
+    invariant violation.
 
     Args:
-        graph: CircleSubgraph to add tensor to
-        node: The get_attr node to process
+        node: The get_attr node to inspect.
+
+    Raises:
+        RuntimeError: If the get_attr node is malformed or references a tensor
+            that should have been lifted.
+        NotYetSupportedError: If the node references an unsupported non-tensor
+            attribute such as a nested GraphModule.
     """
-    assert isinstance(node.target, str)
-    attr_tensor = getattr(node.graph.owning_module, node.target)
+    if not isinstance(node.target, str):
+        raise RuntimeError(
+            "Expected get_attr target to be a string, "
+            f"but got {type(node.target).__name__}."
+        )
 
-    if not isinstance(attr_tensor, torch.Tensor):
-        raise ValueError(f"Attribute {node.target} is not a tensor")
+    attr = getattr(node.graph.owning_module, node.target)
 
-    attr_shape, attr_shape_signature = to_circle_shape(attr_tensor.shape)
+    if isinstance(attr, torch.Tensor):
+        raise RuntimeError(
+            f"Unexpected tensor get_attr '{node.target}'. Parameters, buffers, "
+            "and tensor constants must be lifted as ExportedProgram inputs."
+        )
 
-    graph.add_tensor_from_scratch(
-        prefix=node.name,
-        shape=attr_shape,
-        shape_signature=attr_shape_signature,
-        dtype=to_circle_dtype(attr_tensor.dtype),
-        source_node=node,
+    if isinstance(attr, torch.fx.GraphModule):
+        raise NotYetSupportedError(
+            f"ExportedProgram contains nested GraphModule '{node.target}'. "
+            "Higher-order operators and control-flow subgraphs are not supported."
+        )
+
+    raise NotYetSupportedError(
+        f"Unsupported top-level get_attr '{node.target}' with type "
+        f"{type(attr).__name__}."
     )
-
-    logger = logging.getLogger(__name__)
-    logger.debug(f"Exported attribute tensor: {node.name}")
