@@ -14,6 +14,7 @@ representation in ONE designed for optimized on-device neural network inference.
 - **One-call conversion** — `tico.convert()` turns an `nn.Module` into a ready-to-deploy `.circle` binary.
 - **`.pt2` support** — convert saved `torch.export` programs via the Python API or the `pt2-to-circle` command-line tool.
 - **Run Circle models in Python** — execute converted models directly for quick parity checks against PyTorch.
+- **Circle artifact tools** — inspect, check, extract, and clean up exported `.circle` graphs with the `tico.circle` API or `tico-circle` CLI.
 - **Quantization toolkit** — a unified `prepare`/`convert` API with GPTQ, PTQ (WrapQ), SmoothQuant, SpinQuant, and CLE, plus config-driven CLI recipes for LLMs and VLMs.
 
 ## Installation
@@ -82,6 +83,25 @@ pt2-to-circle -i add.pt2 -o add.circle
 See the [Getting Started guide](./docs/getting_started.md) for compile configurations,
 `.pt2` conversion, and running Circle models directly in Python.
 
+## Circle artifact tools
+
+`tico.circle` provides Python APIs and the `tico-circle` CLI for inspecting and
+transforming exported `.circle` files.
+
+```bash
+tico-circle inspect model.circle --tensors --operators
+tico-circle verify model.circle
+tico-circle extract model.circle --ops 20-64 -o region.circle
+```
+
+`verify` performs a static internal-consistency check of the Circle artifact itself, including
+indices, graph connections, buffers, signatures, and subgraph references. It does not
+run inference or validate numerical accuracy or backend compatibility.
+
+See the [Circle artifact tools guide](./tico/circle/README.md) for the Python API,
+exact verification rules, extraction semantics, cleanup passes, multi-subgraph and
+signature behavior, and standard-input/standard-output pipelines.
+
 ## Quantization
 
 The [`tico.quantization`](./tico/quantization/README.md) module provides a unified,
@@ -110,7 +130,8 @@ quantized_model = convert(prepared_model, GPTQConfig())
 
 | Document | Description |
 |---|---|
-| [Getting Started](./docs/getting_started.md) | Converting modules and `.pt2` files, compile configuration, running Circle models in Python |
+| [Getting Started](./docs/getting_started.md) | Converting modules and `.pt2` files, compile configuration, running Circle models directly in Python |
+| [Circle artifact tools](./tico/circle/README.md) | Inspecting, verifying, extracting, and cleaning up exported Circle models |
 | [Quantization](./tico/quantization/README.md) | The `prepare`/`convert` quantization API and toolkit |
 | [Quantization examples](./tico/quantization/examples/README.md) | Command-line quantization, evaluation, and debugging workflows |
 
@@ -120,6 +141,7 @@ quantized_model = convert(prepared_model, GPTQConfig())
 |---|---|
 | [Development guide](./docs/development.md) | Environment setup, testing, and code formatting with `./ccex` |
 | [System design](./docs/design.md) | Architecture, pass pipeline, invariants, and behavior design |
+| [Circle artifact tools](./tico/circle/README.md#writing-a-new-circle-pass) | Circle pass contracts, index rewriting, verification, and test expectations |
 | [Requirements](./docs/requirements.md) | Functional and non-functional requirements |
 | [System tests](./docs/system_test.md) | System-level test coverage |
 

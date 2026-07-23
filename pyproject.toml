@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 pt2-to-circle = "tico.pt2_to_circle:main"
+tico-circle = "tico.circle.cli.main:main"
 
 [tool.setuptools]
 # Automatic package discovery (replaces the old find_packages role)
