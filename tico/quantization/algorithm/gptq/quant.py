@@ -49,6 +49,7 @@ class Quantizer(nn.Module):
         maxshrink=0.8,
         trits=False,
         sensitivity=None,
+        mse_tolerance=1e-5,
     ):
         self.maxq = torch.tensor(2**bits - 1)
         self.perchannel = perchannel
@@ -58,6 +59,7 @@ class Quantizer(nn.Module):
         self.grid = grid
         self.maxshrink = maxshrink
         self.sensitivity = sensitivity
+        self.mse_tolerance = mse_tolerance
         if trits:
             self.maxq = torch.tensor(-1)
 
@@ -209,7 +211,10 @@ class Quantizer(nn.Module):
         Returns:
             Updated best error values
         """
-        tmp = err < best
+        # Relative tolerance: only update if new error is significantly better.
+        # This prevents tiny float noise (from batch-size-dependent Hessian
+        # rounding) from flipping the winning scale/zero.
+        tmp = err < best * (1 - self.mse_tolerance)
         if torch.any(tmp):
             best[tmp] = err[tmp]
             self.scale[tmp] = scale1[tmp]
@@ -226,7 +231,7 @@ class Quantizer(nn.Module):
             compute_error_fn: Function that takes (x, scale1, zero1) and returns error tensor
         """
         dev = x.device
-        best = torch.full([x.shape[0]], float("inf"), device=dev)
+        best = torch.full([x.shape[0]], float("inf"), device=dev, dtype=x.dtype)
         for i in range(int(self.maxshrink * self.grid)):
             p = 1 - i / self.grid
             scale1, zero1 = self._compute_shrink_params(p, xmin, xmax)

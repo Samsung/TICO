@@ -15,10 +15,12 @@
 import copy
 import functools
 import types
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from tqdm.auto import tqdm
+
 
 from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.gptq.utils import (
@@ -1004,6 +1006,42 @@ class LlamaGPTQQuantizer(BaseQuantizer):
 
         gptq_conf = self.config
         assert isinstance(gptq_conf, LlamaGPTQConfig)
+
+        # When double_precision=True, force eager attention so our F.softmax patch
+        # takes effect. SDPA uses F.scaled_dot_product_attention which
+        # handles softmax internally and may force float32, bypassing
+        # our monkey-patch. Eager attention calls F.softmax explicitly.
+        if gptq_conf.double_precision:
+            config = self._get_config(model)
+            if config is not None and hasattr(config, "_attn_implementation"):
+                self._orig_attn_impl = config._attn_implementation
+                config._attn_implementation = "eager"
+            else:
+                self._orig_attn_impl = None
+
+            # Cast embed_tokens to float64 so that calibration inputs captured
+            # by the forward hook are already in double precision. This avoids
+            # casting the entire model — only the embedding lookup is done in
+            # float64, which is the source of the inputs to the first decoder
+            # layer.
+            embed_tokens = model.get_input_embeddings()
+            self._orig_embed_dtype = embed_tokens.weight.dtype
+            embed_tokens.to(torch.float64)
+
+            # For SpinQuant models, rotate_embedding is a Linear layer that
+            # processes the embed_tokens output. Cast it to float64 too so the
+            # dtype chain stays consistent: embed_tokens (fp64) → rotate_embedding (fp64).
+            self._orig_rotate_embed_dtype = None
+            model_inner = getattr(model, "model", model)
+            if hasattr(model_inner, "rotate_embedding"):
+                rotate_embed = model_inner.rotate_embedding
+                self._orig_rotate_embed_dtype = rotate_embed.weight.dtype
+                rotate_embed.to(torch.float64)
+        else:
+            self._orig_attn_impl = None
+            self._orig_embed_dtype = None
+            self._orig_rotate_embed_dtype = None
+
         if gptq_conf.use_orig_model_inference is True or gptq_conf.gptq_v2:
             device = next(model.parameters()).device
             model = model.cpu()
@@ -1211,6 +1249,148 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 batch_idx=batch_idx,
             )
 
+    @staticmethod
+    def _cast_to_double(obj):
+        """Recursively cast all tensors in a list/dict/tensor to float64."""
+        if isinstance(obj, torch.Tensor):
+            return obj.double()
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(LlamaGPTQQuantizer._cast_to_double(o) for o in obj)
+        if isinstance(obj, dict):
+            return {k: LlamaGPTQQuantizer._cast_to_double(v) for k, v in obj.items()}
+        return obj
+
+    @staticmethod
+    @contextmanager
+    def _double_precision_forward_ctx():
+        """Patch HF Llama ops to not downcast to float32 during double_precision forward.
+
+        HuggingFace's LlamaRMSNorm and eager_attention_forward force float32
+        computation even when inputs are float64. This causes batch-size-dependent
+        results because float32 accumulation order differs for different batch
+        sizes. This context manager patches:
+        1. LlamaRMSNorm.forward: use input dtype (float64) instead of float32
+        2. F.softmax: don't force dtype=float32 when input is float64
+
+        RoPE is left as-is because it only uses element-wise ops (cos, sin, mul)
+        which are batch-size-independent even in float32.
+        """
+        from transformers.models.llama.modeling_llama import (
+            LlamaRMSNorm,
+            LlamaRotaryEmbedding,
+        )
+
+        orig_rms_forward = LlamaRMSNorm.forward
+
+        def exact_rms_forward(self, hidden_states):
+            input_dtype = hidden_states.dtype
+            compute_dtype = input_dtype if input_dtype == torch.float64 else torch.float32
+            hidden_states = hidden_states.to(compute_dtype)
+            variance = hidden_states.pow(2).mean(-1, keepdim=True)
+            hidden_states = hidden_states * torch.rsqrt(
+                variance + self.variance_epsilon
+            )
+            return self.weight * hidden_states.to(input_dtype)
+
+        orig_softmax = torch.nn.functional.softmax
+
+        def exact_softmax(input, *args, **kwargs):
+            if (
+                kwargs.get("dtype") == torch.float32
+                and input.dtype == torch.float64
+            ):
+                kwargs["dtype"] = torch.float64
+            return orig_softmax(input, *args, **kwargs)
+
+        orig_rope_forward = LlamaRotaryEmbedding.forward
+
+        def exact_rope_forward(self, x, position_ids):
+            # Replicate HF's RoPE forward but keep float64 if input is float64
+            inv_freq_expanded = (
+                self.inv_freq[None, :, None]
+                .to(x.dtype)
+                .expand(position_ids.shape[0], -1, 1)
+                .to(x.device)
+            )
+            position_ids_expanded = position_ids[:, None, :].to(x.dtype)
+            # No maybe_autocast / forced float32 — use input dtype directly
+            freqs = (
+                inv_freq_expanded @ position_ids_expanded
+            ).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos() * self.attention_scaling
+            sin = emb.sin() * self.attention_scaling
+            return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+        LlamaRMSNorm.forward = exact_rms_forward
+        torch.nn.functional.softmax = exact_softmax
+        LlamaRotaryEmbedding.forward = exact_rope_forward
+
+        try:
+            yield
+        finally:
+            LlamaRMSNorm.forward = orig_rms_forward
+            torch.nn.functional.softmax = orig_softmax
+            LlamaRotaryEmbedding.forward = orig_rope_forward
+
+    def _run_layer_forward_double_precision(
+        self,
+        layer: torch.nn.Module,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+        double_precision: bool,
+    ):
+        """Run a layer forward, optionally in float64 for batch-size-independence.
+
+        When double_precision=True, temporarily casts the layer and its inputs to float64
+        so that GPU matmul tiling differences don't produce different results
+        for different batch sizes. Outputs are kept in float64 to avoid losing
+        precision when they become the next layer's input.
+
+        Args:
+            layer: The decoder layer to run.
+            args: Positional arguments (list of tensors).
+            kwargs: Keyword arguments (dict of tensors).
+            double_precision: Whether to run in float64.
+
+        Returns:
+            Layer output (first element if tuple), in float64 when
+            double_precision=True, otherwise in the layer's native dtype.
+        """
+        if not double_precision:
+            return layer(*args, **kwargs)
+
+        # Save original dtypes and cast layer to double
+        orig_dtypes: Dict[str, torch.dtype] = {}
+        for name, param in layer.named_parameters():
+            orig_dtypes[name] = param.dtype
+            param.data = param.data.double()
+        # Also cast buffers (e.g. norm buffers)
+        for name, buf in layer.named_buffers():
+            orig_dtypes[f"buf:{name}"] = buf.dtype
+            buf.data = buf.data.double()
+
+        # Cast inputs to double
+        args_d = self._cast_to_double(args)
+        kwargs_d = self._cast_to_double(kwargs)
+
+        with self._double_precision_forward_ctx():
+            outs = layer(*args_d, **kwargs_d)
+
+        # Keep outputs in float64 — casting to float32 would introduce
+        # batch-size-dependent rounding when these outputs become the
+        # next layer's input, defeating the purpose of double precision.
+        if isinstance(outs, tuple):
+            outs = outs[0]
+
+        # Restore original dtypes
+        for name, param in layer.named_parameters():
+            param.data = param.data.to(orig_dtypes[name])
+        for name, buf in layer.named_buffers():
+            buf.data = buf.data.to(orig_dtypes[f"buf:{name}"])
+
+        return outs
+
     @torch.no_grad()
     def convert(self, model):
         """
@@ -1349,7 +1529,12 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
                     
                     orig_layer = orig_layers[l_idx].to(device)
-                    orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        self._run_layer_forward_double_precision(
+                            orig_layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        orig_layer(*cache_args_batch, **cache_kwargs_batch)
                     orig_layer.cpu()
                     
                 fp_inputs_cache.clear_hook()
@@ -1376,10 +1561,10 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                 for name in subset:
                     sub_layer = subset[name]
                     nn_layer = sub_layer.module if hasattr(sub_layer, "module") else sub_layer
-                    gptq[name] = GPTQ(nn_layer)
+                    full_module_name = module_name[subset[name]]
+                    gptq[name] = GPTQ(nn_layer, double_precision=gptq_conf.double_precision, layer_name=full_module_name)
                     gptq[name].saturation_threshold = gptq_conf.saturation_threshold
                     gptq[name].saturation_min_batches = gptq_conf.saturation_min_batches
-                    full_module_name = module_name[subset[name]]
                     weight_bits = self._resolve_weight_bits(
                         gptq_conf,
                         full_module_name=self.remove_wrapped_substrings(full_module_name),
@@ -1399,6 +1584,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         sym=gptq_conf.symmetric,
                         mse=gptq_conf.mse,
                         sensitivity=cur_sensitivity,
+                        mse_tolerance=gptq_conf.mse_tolerance,
                     )
 
                     # GPTQv2: Assign native_inp from FPInputsCache
@@ -1458,7 +1644,13 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
                         
                         # Run the full layer (original approach)
-                        layer(*cache_args_batch, **cache_kwargs_batch)
+                        # When double_precision=True, run in float64 for batch-size-independence
+                        if gptq_conf.double_precision:
+                            self._run_layer_forward_double_precision(
+                                layer, cache_args_batch, cache_kwargs_batch, True
+                            )
+                        else:
+                            layer(*cache_args_batch, **cache_kwargs_batch)
 
                 # Remove handles
                 for h in handles:
@@ -1480,6 +1672,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         adaptive_percdamp=gptq_conf.adaptive_percdamp,
                         cond_threshold_good=gptq_conf.cond_threshold_good,
                         use_iterate=gptq_conf.use_iterate,
+                        actorder_precision=gptq_conf.actorder_precision,
                     )
                     quantizers[self.remove_wrapped_substrings(full_module_name)] = gptq[name].quantizer
                     gptq[name].free()
@@ -1534,7 +1727,12 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         self.cache_kwargs, batch_idx
                     )
                     cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
-                    layer(*cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        self._run_layer_forward_double_precision(
+                            layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        layer(*cache_args_batch, **cache_kwargs_batch)
                     
                 if ptq_wrapped:
                     layer.freeze_qparams()   
@@ -1562,10 +1760,15 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     fp_cache_args_batch = gather_single_batch_from_list(fp_inps, batch_idx)
                     fp_cache_args_batch = move_to_device(fp_cache_args_batch, device)
                     orig_layer = orig_layers[l_idx].to(device)
-                    fp_outs = orig_layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        fp_outs = self._run_layer_forward_double_precision(
+                            orig_layer, fp_cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        fp_outs = orig_layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                        fp_outs = fp_outs[0] if isinstance(fp_outs, tuple) else fp_outs
                     #fp_outs = layer(*fp_cache_args_batch, **cache_kwargs_batch)
                     orig_layer.cpu()
-                    fp_outs = fp_outs[0] if isinstance(fp_outs, tuple) else fp_outs
                     # Update inputs for next iteration.
                     if len(fp_inps) > 0:
                         if hasattr(fp_outs, "to") and hasattr(
@@ -1578,18 +1781,28 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                             fp_inps[0][batch_idx] = fp_outs
                     
                 if orig_layers is None or self.config.gptq_v2 is True:
-                    outs = layer(*cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        outs = self._run_layer_forward_double_precision(
+                            layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        outs = layer(*cache_args_batch, **cache_kwargs_batch)
                 else:
                     orig_layer = orig_layers[l_idx].to(device)
-                    outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        outs = self._run_layer_forward_double_precision(
+                            orig_layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
                     orig_layer.cpu()
                     if ptq_wrapped and not calibrated:
                         # nevertheless we should calibrate
                         layer(*cache_args_batch, **cache_kwargs_batch)
-                # LLaMA's decoder layer return type differs across Transformers versions:
-                # some return a tuple (hidden_states, ...), others return just a tensor.
-                # This line ensures we always take the first element when it's a tuple.
-                outs = outs[0] if isinstance(outs, tuple) else outs
+                # _run_layer_forward_double_precision already returns a single tensor (float64).
+                # For the non-double_precision path, take first element if tuple.
+                if not gptq_conf.double_precision:
+                    outs = outs[0] if isinstance(outs, tuple) else outs
                 # Update inputs for next iteration.
                 if len(self.cache_args) > 0:
                     if hasattr(outs, "to") and hasattr(
@@ -1615,6 +1828,21 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         config = self._get_config(model)
         if self.orig_use_cache is not None:
             config.use_cache = self.orig_use_cache
+
+        # Restore original attention implementation if we changed it
+        if self._orig_attn_impl is not None and config is not None:
+            config._attn_implementation = self._orig_attn_impl
+
+        # Restore embed_tokens to original dtype if we cast it to float64
+        if self._orig_embed_dtype is not None:
+            embed_tokens = model.get_input_embeddings()
+            embed_tokens.to(self._orig_embed_dtype)
+
+        # Restore rotate_embedding to original dtype if we cast it to float64
+        if self._orig_rotate_embed_dtype is not None:
+            model_inner = getattr(model, "model", model)
+            if hasattr(model_inner, "rotate_embedding"):
+                model_inner.rotate_embedding.to(self._orig_rotate_embed_dtype)
 
         # Clear caches to free memory
         self.cache_args.clear()
@@ -1682,7 +1910,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         else:
             lm_head_inner = lm_head_module
 
-        gptq = GPTQ(lm_head_inner)
+        gptq = GPTQ(lm_head_inner, double_precision=gptq_conf.double_precision, layer_name="lm_head")
         gptq.saturation_threshold = gptq_conf.saturation_threshold
         gptq.saturation_min_batches = gptq_conf.saturation_min_batches
         full_module_name = "lm_head"
@@ -1705,6 +1933,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             sym=gptq_conf.symmetric,
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
+                        mse_tolerance=gptq_conf.mse_tolerance,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -1751,6 +1980,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             adaptive_percdamp=gptq_conf.adaptive_percdamp,
             cond_threshold_good=gptq_conf.cond_threshold_good,
             use_iterate=gptq_conf.use_iterate,
+                        actorder_precision=gptq_conf.actorder_precision,
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()
@@ -1806,7 +2036,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         else:
             rotate_lm_head_inner = rotate_lm_head_module
 
-        gptq = GPTQ(rotate_lm_head_inner)
+        gptq = GPTQ(rotate_lm_head_inner, double_precision=gptq_conf.double_precision, layer_name="rotate_lm_head")
         gptq.saturation_threshold = gptq_conf.saturation_threshold
         gptq.saturation_min_batches = gptq_conf.saturation_min_batches
         full_module_name = "rotate_lm_head"
@@ -1829,6 +2059,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             sym=gptq_conf.symmetric,
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
+                        mse_tolerance=gptq_conf.mse_tolerance,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -1875,6 +2106,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             adaptive_percdamp=gptq_conf.adaptive_percdamp,
             cond_threshold_good=gptq_conf.cond_threshold_good,
             use_iterate=gptq_conf.use_iterate,
+                        actorder_precision=gptq_conf.actorder_precision,
         )
         quantizers[f"rotate_lm_head"] = gptq.quantizer
         gptq.free()

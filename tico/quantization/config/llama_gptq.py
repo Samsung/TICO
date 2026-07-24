@@ -69,11 +69,23 @@ class LlamaGPTQConfig(BaseConfig):
     mse: str | None = None
     sensitivity: dict[str, torch.Tensor] | None = None
 
+    # Relative tolerance for MSE grid search: a new scale/zero candidate only
+    # wins if its error is at least mse_tolerance better (relatively) than the
+    # current best. Prevents tiny float noise from flipping the winning
+    # scale/zero, making results more batch-size-independent.
+    mse_tolerance: float = 1e-5
+
     # GPTQ.fasterquant params (algorithm hyperparams)
     percdamp: float = 0.01
     groupsize: int = -1
     actorder: bool = True
     static_groups: bool = False
+
+    # Precision threshold for actorder sorting. Diagonal values of the Hessian
+    # are rounded to this precision grid before argsort, so differences smaller
+    # than this threshold are treated as noise (ties broken by original index
+    # via stable=True). This makes actorder more stable
+    actorder_precision: float = 1e-2
 
     # use this option to stabilize GPTQ for deep models
     use_orig_model_inference: bool = False
@@ -110,6 +122,12 @@ class LlamaGPTQConfig(BaseConfig):
     # Minimum number of batches to process before saturation early-stopping
     # is checked. Ensures r_eff has stabilized past the initial transient.
     saturation_min_batches: int = 4
+
+    # Use float64 (double) for Hessian accumulation to make GPTQ results
+    # batch-size-independent. Float32 accumulation causes different rounding
+    # depending on how samples are grouped into batches. Default: False
+    # (float32, backward compatible). Enable for reproducible results.
+    double_precision: bool = False
 
     @property
     def name(self) -> str:

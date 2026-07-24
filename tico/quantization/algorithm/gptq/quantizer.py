@@ -107,6 +107,63 @@ class GPTQQuantizer(BaseQuantizer):
         # Reference to original model for use_orig_model_inference and GPTQv2
         self.orig_model: Optional[torch.nn.Module] = None
 
+    @staticmethod
+    def _cast_to_double(obj):
+        """Recursively cast all tensors in a list/dict/tensor to float64."""
+        if isinstance(obj, torch.Tensor):
+            return obj.double()
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(GPTQQuantizer._cast_to_double(o) for o in obj)
+        if isinstance(obj, dict):
+            return {k: GPTQQuantizer._cast_to_double(v) for k, v in obj.items()}
+        return obj
+
+    def _run_layer_forward_double_precision(
+        self,
+        layer: torch.nn.Module,
+        args: List[Any],
+        kwargs: Dict[str, Any],
+        double_precision: bool,
+    ):
+        """Run a layer forward, optionally in float64 for batch-size-independence.
+
+        When double_precision=True, temporarily casts the layer and its inputs to float64
+        so that GPU matmul tiling differences don't produce different results
+        for different batch sizes. Outputs are kept in float64 to avoid losing
+        precision when they become the next layer's input.
+        """
+        if not double_precision:
+            return layer(*args, **kwargs)
+
+        # Save original dtypes and cast layer to double
+        orig_dtypes: Dict[str, torch.dtype] = {}
+        for name, param in layer.named_parameters():
+            orig_dtypes[name] = param.dtype
+            param.data = param.data.double()
+        for name, buf in layer.named_buffers():
+            orig_dtypes[f"buf:{name}"] = buf.dtype
+            buf.data = buf.data.double()
+
+        # Cast inputs to double
+        args_d = self._cast_to_double(args)
+        kwargs_d = self._cast_to_double(kwargs)
+
+        outs = layer(*args_d, **kwargs_d)
+
+        # Keep outputs in float64 — casting to float32 would introduce
+        # batch-size-dependent rounding when these outputs become the
+        # next layer's input, defeating the purpose of double precision.
+        if isinstance(outs, tuple):
+            outs = outs[0]
+
+        # Restore original dtypes
+        for name, param in layer.named_parameters():
+            param.data = param.data.to(orig_dtypes[name])
+        for name, buf in layer.named_buffers():
+            buf.data = buf.data.to(orig_dtypes[f"buf:{name}"])
+
+        return outs
+
     def _resolve_weight_bits(
         self,
         gptq_conf: GPTQConfig,
@@ -335,7 +392,12 @@ class GPTQQuantizer(BaseQuantizer):
                     cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
                     
                     orig_layer = orig_layers[l_idx].to(device)
-                    orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        self._run_layer_forward_double_precision(
+                            orig_layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        orig_layer(*cache_args_batch, **cache_kwargs_batch)
                     orig_layer.cpu()
                     
                 fp_inputs_cache.clear_hook()
@@ -346,10 +408,10 @@ class GPTQQuantizer(BaseQuantizer):
 
                 gptq: Dict[str, GPTQ] = {}
                 for name in subset:
-                    gptq[name] = GPTQ(subset[name])
+                    full_module_name = module_name[subset[name]]
+                    gptq[name] = GPTQ(subset[name], double_precision=gptq_conf.double_precision, layer_name=full_module_name)
                     gptq[name].saturation_threshold = gptq_conf.saturation_threshold
                     gptq[name].saturation_min_batches = gptq_conf.saturation_min_batches
-                    full_module_name = module_name[subset[name]]
                     weight_bits = self._resolve_weight_bits(
                         gptq_conf,
                         full_module_name=full_module_name,
@@ -369,6 +431,7 @@ class GPTQQuantizer(BaseQuantizer):
                         sym=gptq_conf.symmetric,
                         mse=gptq_conf.mse,
                         sensitivity=cur_sensitivity,
+                        mse_tolerance=gptq_conf.mse_tolerance,
                     )
 
                     # GPTQv2: Assign native_inp from FPInputsCache
@@ -413,7 +476,12 @@ class GPTQQuantizer(BaseQuantizer):
                     )
                     cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
 
-                    layer(*cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        self._run_layer_forward_double_precision(
+                            layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        layer(*cache_args_batch, **cache_kwargs_batch)
 
                 # Remove handles
                 for h in handles:
@@ -435,6 +503,7 @@ class GPTQQuantizer(BaseQuantizer):
                         adaptive_percdamp=gptq_conf.adaptive_percdamp,
                         cond_threshold_good=gptq_conf.cond_threshold_good,
                         use_iterate=gptq_conf.use_iterate,
+                        actorder_precision=gptq_conf.actorder_precision,
                     )
                     quantizers[full_module_name] = gptq[name].quantizer
                     gptq[name].free()
@@ -463,9 +532,14 @@ class GPTQQuantizer(BaseQuantizer):
                     fp_cache_args_batch = gather_single_batch_from_list(fp_inps, batch_idx)
                     fp_cache_args_batch = move_to_device(fp_cache_args_batch, device)
                     orig_layer = orig_layers[l_idx].to(device)
-                    fp_outs = orig_layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                    if gptq_conf.double_precision:
+                        fp_outs = self._run_layer_forward_double_precision(
+                            orig_layer, fp_cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        fp_outs = orig_layer(*fp_cache_args_batch, **cache_kwargs_batch)
+                        fp_outs = fp_outs[0] if isinstance(fp_outs, tuple) else fp_outs
                     orig_layer.cpu()
-                    fp_outs = fp_outs[0] if isinstance(fp_outs, tuple) else fp_outs
                     # Update inputs for next iteration.
                     if len(fp_inps) > 0:
                         if hasattr(fp_outs, "to") and hasattr(
@@ -477,16 +551,28 @@ class GPTQQuantizer(BaseQuantizer):
                         else:
                             fp_inps[0][batch_idx] = fp_outs
                 
-                if orig_layers is None or gptq_conf.gptq_v2 is True:
-                    outs = layer(*cache_args_batch, **cache_kwargs_batch)
+                if gptq_conf.double_precision:
+                    if orig_layers is None or gptq_conf.gptq_v2 is True:
+                        outs = self._run_layer_forward_double_precision(
+                            layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        orig_layer = orig_layers[l_idx].to(device)
+                        outs = self._run_layer_forward_double_precision(
+                            orig_layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                        orig_layer.cpu()
                 else:
-                    orig_layer = orig_layers[l_idx].to(device)
-                    outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
-                    orig_layer.cpu()
-                # LLaMA's decoder layer return type differs across Transformers versions:
-                # some return a tuple (hidden_states, ...), others return just a tensor.
-                # This line ensures we always take the first element when it's a tuple.
-                outs = outs[0] if isinstance(outs, tuple) else outs
+                    if orig_layers is None or gptq_conf.gptq_v2 is True:
+                        outs = layer(*cache_args_batch, **cache_kwargs_batch)
+                    else:
+                        orig_layer = orig_layers[l_idx].to(device)
+                        outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                        orig_layer.cpu()
+                    # LLaMA's decoder layer return type differs across Transformers versions:
+                    # some return a tuple (hidden_states, ...), others return just a tensor.
+                    # This line ensures we always take the first element when it's a tuple.
+                    outs = outs[0] if isinstance(outs, tuple) else outs
                 # Update inputs for next iteration.
                 if len(self.cache_args) > 0:
                     if hasattr(outs, "to") and hasattr(
@@ -557,8 +643,8 @@ class GPTQQuantizer(BaseQuantizer):
                 self.cache_args[0][batch_idx] = move_to_cpu(hidden_states)
 
         layer = model.lm_head
-        gptq = GPTQ(layer)
         full_module_name = "lm_head"
+        gptq = GPTQ(layer, double_precision=gptq_conf.double_precision, layer_name=full_module_name)
         weight_bits = self._resolve_weight_bits(
             gptq_conf,
             full_module_name=full_module_name,
@@ -578,6 +664,7 @@ class GPTQQuantizer(BaseQuantizer):
             sym=gptq_conf.symmetric,
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
+                        mse_tolerance=gptq_conf.mse_tolerance,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -628,6 +715,7 @@ class GPTQQuantizer(BaseQuantizer):
             adaptive_percdamp=gptq_conf.adaptive_percdamp,
             cond_threshold_good=gptq_conf.cond_threshold_good,
             use_iterate=gptq_conf.use_iterate,
+                        actorder_precision=gptq_conf.actorder_precision,
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()

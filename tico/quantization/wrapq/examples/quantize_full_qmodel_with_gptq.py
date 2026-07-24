@@ -481,6 +481,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--gptq_double_precision",
+        action="store_true",
+        default=False,
+        help=(
+            "Use float64 (double) for Hessian accumulation to make GPTQ results "
+            "stable. Float32 accumulation causes different rounding "
+            "depending on how samples are grouped into batches. Default: False "
+            "(float32, backward compatible). Enable for exact/reproducible results."
+        ),
+    )
+    parser.add_argument(
         "--gptq_saturation_threshold",
         type=float,
         default=None,
@@ -972,6 +983,7 @@ def build_gptq_config(
             use_subgroup_runner=args.llama_gptq_use_subgroup_runner,
             sample_weights=sample_weights,
             saturation_threshold=args.gptq_saturation_threshold,
+            double_precision=args.gptq_double_precision,
         )
         return config
     else:
@@ -991,6 +1003,7 @@ def build_gptq_config(
             use_iterate=args.gptq_use_iterate,
             sample_weights=sample_weights,
             saturation_threshold=args.gptq_saturation_threshold,
+            double_precision=args.gptq_double_precision,
         )
         return config
 
@@ -1001,6 +1014,10 @@ def save_model_to(
     """
     Export and save the whole quantized model in circle format.
     """
+    if not hasattr(q_m, "wrapped"):
+        print("Saving whole model circle is supported only for PTQ quantized model")
+        return
+
     q_m.eval()
     q_m.cpu()
     model_name = "model_prefill" if prefill_decode else "model"
@@ -3184,6 +3201,7 @@ def get_ptq_model_name(model, args):
 
     # --- Calibration options ------------------------------------------------
     parts.append(str(args.nsamples_for_qcalibration))
+    parts.append(f"bs{args.batch}")
     if (
         args.calibration_samples_to_use is not None
         and args.calibration_samples_to_use != args.nsamples_for_qcalibration
@@ -4513,8 +4531,12 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=
         print(f"Saving calibration dataset to {save_path.resolve()}")
         torch.save({"calib_inputs": calib_inputs, "sample_weights": sample_weights}, save_path)
 
+    # When --no_PTQ is used, q_m has no PTQ wrapper so there is no .wrapped
+    # attribute.  Use q_m directly in that case.
+    inner = q_m if args.no_PTQ else q_m.wrapped
+
     if should_save(args, "ptq_checkpoint"):
-        save_path = output_dir / get_ptq_model_name(q_m.wrapped, args)
+        save_path = output_dir / get_ptq_model_name(inner, args)
         print(f"Saving PTQ checkpoint to {save_path.resolve()}")
         torch.save(q_m, save_path)
 
@@ -4528,7 +4550,7 @@ def save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights=
         )
 
     if should_save(args, "circle_per_layer"):
-        max_seq_len = args.max_seq_len or q_m.wrapped.config.max_position_embeddings
+        max_seq_len = args.max_seq_len or inner.config.max_position_embeddings
         save_layers_to(
             q_m,
             max_seq_len,

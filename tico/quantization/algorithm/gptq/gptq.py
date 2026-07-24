@@ -166,7 +166,7 @@ def get_matmul_input_for_convtranspose2d(layer, inp):
 
 def estimate_max_singular_value(A, n_iter=30):
     n = A.shape[0]
-    v = torch.randn(n, device=A.device, dtype=A.dtype)
+    v = torch.randn(n, device="cpu", dtype=A.dtype).to(A.device)
     for _ in range(n_iter):
         v = A.T @ (A @ v)
         v = v / v.norm()
@@ -182,7 +182,7 @@ def estimate_sigma_min_lanczos(H, n_iter=15):
     alphas = torch.zeros(n_iter, device=device, dtype=dtype)
     betas = torch.zeros(n_iter, device=device, dtype=dtype)
 
-    v = torch.randn(n, device=device, dtype=dtype)
+    v = torch.randn(n, device="cpu", dtype=dtype).to(device)
     v = v / v.norm()
     V[:, 0] = v
 
@@ -291,7 +291,7 @@ def estimate_sigma_min_randomized_blocked_lanczos(
         l = sketch_dim if sketch_dim is not None else min(n, 4 * b * n_iter)
         l = min(l, n)
         # Gaussian random sketch matrix (l × n)
-        S = torch.randn(l, n, device=device, dtype=dtype) / math.sqrt(l)
+        S = torch.randn(l, n, device="cpu", dtype=dtype).to(device) / math.sqrt(l)
         # Sketched operator: H_s = S (H Sᵀ)   — only matmuls with H
         HS = H @ S.T                      # (n × l)
         H_s = S @ HS                      # (l × l)  — symmetric PSD
@@ -311,7 +311,7 @@ def estimate_sigma_min_randomized_blocked_lanczos(
     # Randomized blocked Lanczos with full reorthogonalisation
     # ------------------------------------------------------------------ #
     # Random start block → orthonormalise
-    V_block = torch.randn(n, b, device=device, dtype=dtype)
+    V_block = torch.randn(n, b, device="cpu", dtype=dtype).to(device)
     V_block, _ = torch.linalg.qr(V_block)          # columns orthonormal
 
     # Storage for all Krylov basis vectors:  (n × (n_iter * b))
@@ -476,7 +476,7 @@ def estimate_sigma_min_shift_invert_lanczos(
     alphas = torch.zeros(n_iter, device=device, dtype=dtype)
     betas = torch.zeros(n_iter, device=device, dtype=dtype)
 
-    v = torch.randn(n, device=device, dtype=dtype)
+    v = torch.randn(n, device="cpu", dtype=dtype).to(device)
     v = v / v.norm()
     V[:, 0] = v
 
@@ -582,7 +582,7 @@ def estimate_sigma_min_shift_invert_cg_lanczos(
     alphas = torch.zeros(n_iter, device=device, dtype=dtype)
     betas = torch.zeros(n_iter, device=device, dtype=dtype)
 
-    v = torch.randn(n, device=device, dtype=dtype)
+    v = torch.randn(n, device="cpu", dtype=dtype).to(device)
     v = v / v.norm()
     V[:, 0] = v
 
@@ -647,7 +647,7 @@ def estimate_min_singular_value(A, max_iter=20, tol=1e-5):
     n = A.shape[-1]
     
     # Initialize random vector
-    v = torch.randn(n, 1, device=device, dtype=A.dtype)
+    v = torch.randn(n, 1, device="cpu", dtype=A.dtype).to(device)
     v = v / torch.norm(v)
     
     AtA = A.T @ A
@@ -681,6 +681,14 @@ def estimate_cond(A, cholesky_threshold: int = 4096):
     (exact inverse, machine-precision accuracy).  For larger n, falls back
     to CG-based shift-invert (inexact but avoids O(n³) factorisation).
 
+    The estimate is made **deterministic** by saving and restoring the
+    global RNG state and seeding with a fixed value before the internal
+    random initialisations (power iteration, Lanczos).  This is critical
+    for ``_adaptive_percdamp``: the condition number estimate must be
+    reproducible so that the percdamp decision does not depend on the
+    random state, which would otherwise make GPTQ results vary across
+    batch sizes.
+
     Args:
         A:                    Symmetric positive-definite matrix (n × n).
         cholesky_threshold:   Matrix dimension above which CG is used
@@ -689,38 +697,51 @@ def estimate_cond(A, cholesky_threshold: int = 4096):
     Returns:
         Estimated condition number (float).
     """
-    n = A.shape[0]
-    s_max = estimate_max_singular_value(A)
+    # Save RNG state and seed deterministically so that the internal
+    # random initialisations in power iteration / Lanczos are reproducible.
+    # Without this, estimate_cond() returns different values on each call
+    # (even for the same matrix), causing _adaptive_percdamp to make
+    # different percdamp decisions for different batch sizes.
+    rng_state = torch.get_rng_state()
+    if torch.cuda.is_available():
+        cuda_rng_state = torch.cuda.get_rng_state()
+    torch.manual_seed(0)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(0)
 
-    # Tiny damping to ensure Cholesky/CG stability if H is near-singular
-    damping = 1e-10 * A.diagonal().mean().item()
+    try:
+        n = A.shape[0]
+        s_max = estimate_max_singular_value(A)
 
-    if n <= cholesky_threshold:
-        try:
-            s_min = estimate_sigma_min_shift_invert_lanczos(
-                A, n_iter=15, damping=damping
-            )
-        except torch._C._LinAlgError:
-            # Cholesky failed — fall back to CG-based shift-invert
+        # Tiny damping to ensure Cholesky/CG stability if H is near-singular
+        damping = 1e-10 * A.diagonal().mean().item()
+
+        if n <= cholesky_threshold:
+            try:
+                s_min = estimate_sigma_min_shift_invert_lanczos(
+                    A, n_iter=15, damping=damping
+                )
+            except torch._C._LinAlgError:
+                # Cholesky failed — fall back to CG-based shift-invert
+                s_min = estimate_sigma_min_shift_invert_cg_lanczos(
+                    A, n_iter=15, cg_iters=min(200, n)
+                )
+        else:
             s_min = estimate_sigma_min_shift_invert_cg_lanczos(
                 A, n_iter=15, cg_iters=min(200, n)
             )
-    else:
-        s_min = estimate_sigma_min_shift_invert_cg_lanczos(
-            A, n_iter=15, cg_iters=min(200, n)
-        )
 
-    if s_min <= 0 or math.isnan(s_min) or math.isinf(s_min):
-        return float("inf")
-    
-   # cond_ref = torch.linalg.cond(A)
-   # cond_our = s_max / s_min
-   # rel_error = abs((cond_ref - cond_our)/cond_ref)
-   # if rel_error > 0.5:
-   #     print(f"fast estimation failed {rel_error}")
-   # print(rel_error)
-    
-    return s_max / s_min
+        if s_min <= 0 or math.isnan(s_min) or math.isinf(s_min):
+            return float("inf")
+
+        return s_max / s_min
+    finally:
+        # Restore RNG state so estimate_cond() doesn't perturb the
+        # global random state used by the rest of the pipeline.
+        torch.set_rng_state(rng_state)
+        if torch.cuda.is_available():
+            torch.cuda.set_rng_state(cuda_rng_state)
+
 
 
 class GPTQ:
@@ -729,6 +750,7 @@ class GPTQ:
     """
     def __init__(self, layer, **kwargs):
         self.layer = layer
+        self.layer_name: str = kwargs.get("layer_name", f"layer_{id(layer)}")
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
         if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
@@ -739,8 +761,10 @@ class GPTQ:
 
         self.rows = W.shape[0]
         self.columns = W.shape[1]
+        self.double_precision: bool = kwargs.get("double_precision", False)
+        h_dtype = torch.float64 if self.double_precision else torch.float32
         self.H: Optional[torch.Tensor] = torch.zeros(
-            (self.columns, self.columns), device=self.dev
+            (self.columns, self.columns), device=self.dev, dtype=h_dtype
         )
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
@@ -942,7 +966,7 @@ class GPTQ:
             native_inp_processed = native_inp_processed.double()
             dX = native_inp_processed.to(inp.device) - inp
             # Also scale dXXT by weight
-            self.dXXT += weight * dX.matmul(inp.t()).float()
+            self.dXXT += weight * dX.matmul(inp.t()).to(dtype=self.H.dtype)
             del native, native_inp_processed
             native = native_inp_processed = None
 
@@ -1128,6 +1152,7 @@ class GPTQ:
         adaptive_percdamp=False,
         cond_threshold_good=100000.0,
         use_iterate=False,
+        actorder_precision=1e-5,
     ):
         """
         Perform GPTQ quantization.
@@ -1167,6 +1192,40 @@ class GPTQ:
         H = self.H
         del self.H
         assert isinstance(H, torch.Tensor)
+
+        # Save H statistics at the very beginning (before any processing)
+        if verbose:
+            import os as _os
+            import json as _json
+            _debug_dir = _os.environ.get(
+                "GPTQ_DEBUG_DIR",
+                f"/tmp/gptq_debug_bs{self.nsamples // self.batch_id if self.batch_id > 0 else 0}",
+            )
+            _os.makedirs(_debug_dir, exist_ok=True)
+            _layer_name = self.layer_name
+            _debug_tag = _layer_name.replace(".", "_")
+            torch.save(H.cpu(), _os.path.join(_debug_dir, f"H_raw_{_debug_tag}.pt"))
+            _h_meta = {
+                "layer_name": _layer_name,
+                "nsamples": self.nsamples,
+                "num_batches": self.batch_id,
+                "batch_size": self.nsamples // self.batch_id if self.batch_id > 0 else 0,
+                "H_shape": list(H.shape),
+                "H_dtype": str(H.dtype),
+                "H_diag_min": H.diag().min().item(),
+                "H_diag_max": H.diag().max().item(),
+                "H_diag_mean": H.diag().mean().item(),
+                "H_norm": H.float().norm().item(),
+                "H_cond": (H.diag().max().item() / (H.diag().min().abs().item() + 1e-30)),
+                "double_precision": self.double_precision,
+            }
+            with open(_os.path.join(_debug_dir, f"H_raw_meta_{_debug_tag}.json"), "w") as f:
+                _json.dump(_h_meta, f, indent=2)
+            print(
+                f"  [GPTQ debug] Saved H_raw to {_debug_dir}/H_raw_{_debug_tag}.pt "
+                f"(nsamples={self.nsamples}, num_batches={self.batch_id})"
+            )
+
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
         W[:, dead] = 0
@@ -1192,7 +1251,16 @@ class GPTQ:
         perm = None
         invperm = None
         if actorder:
-            perm = torch.argsort(torch.diag(H), descending=True)
+            # Round Hessian diagonal to a precision grid before sorting so that
+            # differences smaller than the precision threshold are treated as
+            # noise. The threshold is relative to the max diagonal value:
+            # precision = max(diag_H) * actorder_precision
+            # This makes actorder more stable across batch sizes. stable=True
+            # ensures ties are broken by original index (deterministic).
+            diag_H = torch.diag(H)
+            precision = diag_H.max().abs() * actorder_precision
+            diag_H = torch.round(diag_H / precision) * precision
+            perm = torch.argsort(diag_H, descending=True, stable=True)
             W = W[:, perm]
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
@@ -1201,11 +1269,18 @@ class GPTQ:
 
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
-
+        
+        #H_old = torch.clone(H)
+        precision = max(H.abs().mean() * 1.e-02, 1.e-02)
+        use_precision = False
+        if use_precision is True:
+            H = torch.round(H / precision) * precision
+        # When double_precision=False, H is float32 — upcast to float64 for
+        # Cholesky stability.
         H = H.double()
-        if verbose:
-            cond_number = torch.linalg.cond(H)
-            print("condition number init %.2e" % cond_number.item())
+        #if verbose:
+        #    cond_number = torch.linalg.cond(H)
+        #    print("condition number init %.2e" % cond_number.item())
         
         # Adaptive percdamp: adjust damping based on Hessian condition number
         if adaptive_percdamp:
@@ -1220,19 +1295,22 @@ class GPTQ:
                         f"falling back to user_percdamp={user_percdamp:.6f}"
                     )
                 percdamp = user_percdamp
-
+        
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=self.dev)
         H[diag, diag] += damp
-        if verbose:
-            cond_number = torch.linalg.cond(H)
-            print("condition number damp %.2e" % cond_number.item())
+        #if verbose:
+        #    cond_number = torch.linalg.cond(H)
+        #    print("condition number damp %.2e" % cond_number.item())
             
+        # Track whether Cholesky failed — if so, fall back to plain
+        # MSE/SMSE quantization (RTN, no GPTQ optimization).
+        cholesky_failed = False
         try:
             H = torch.linalg.cholesky(H)
             assert isinstance(H, torch.Tensor)
             H = torch.cholesky_inverse(H)
-            H = torch.linalg.cholesky(H, upper=True).float()
+            H = torch.linalg.cholesky(H, upper=True)
             Hinv = H
         except torch._C._LinAlgError:
             if verbose:
@@ -1244,18 +1322,114 @@ class GPTQ:
             H[diag, diag] -= damp
             damp = user_percdamp * torch.mean(torch.diag(H))
             H[diag, diag] += damp
-            # This will raise if it still fails — no further fallback
-            H = torch.linalg.cholesky(H)
-            assert isinstance(H, torch.Tensor)
-            H = torch.cholesky_inverse(H)
-            H = torch.linalg.cholesky(H, upper=True).float()
-            Hinv = H
-        
+            try:
+                H = torch.linalg.cholesky(H)
+                assert isinstance(H, torch.Tensor)
+                H = torch.cholesky_inverse(H)
+                H = torch.linalg.cholesky(H, upper=True)
+                Hinv = H
+            except torch._C._LinAlgError:
+                # Cholesky still fails — fall back to plain MSE/SMSE
+                # quantization (RTN) without GPTQ optimization.
+                cholesky_failed = True
+                if verbose:
+                    print(
+                        f"Cholesky failed even with user_percdamp={user_percdamp:.6f}, "
+                        f"falling back to plain MSE/SMSE quantization (no GPTQ)"
+                    )
+                Hinv = None
+
+        # If Cholesky failed, just quantize W with mse/smse (RTN, no GPTQ).
+        # Undo actorder permutation so W and sensitivity are in original order.
+        if cholesky_failed:
+            if actorder:
+                W = W[:, invperm]
+            if self.quantizer.mse in {"mse_for_gptq", "smse_for_gptq"}:
+                self.quantizer.mse = "smse" if self.quantizer.mse == "smse_for_gptq" else "mse"
+                self.quantizer.find_params(W, weight=True)
+            Q = self.quantizer.quantize(W)
+            
+            if isinstance(self.layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                if groupsize == -1:
+                    Q[:, dead] = quantize(
+                        self.layer.weight.flatten(1)[:, dead],
+                        self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq,
+                    )
+            elif isinstance(self.layer, nn.ConvTranspose2d):
+                if groupsize == -1:
+                    Q[:, dead] = quantize(
+                        convtranspose2d_weights_to_conv2d_weights(self.layer, self.layer.weight.data).flatten(1)[:, dead],
+                        self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq,
+                    )
+            else:
+                if groupsize == -1:
+                    Q[:, dead] = quantize(
+                        self.layer.weight[:, dead],
+                        self.quantizer.scale, self.quantizer.zero, self.quantizer.maxq,
+                    )
+            if isinstance(self.layer, nn.ConvTranspose2d):
+                Q_conv2d = Q.reshape(conv2d_shape).to(self.layer.weight.data.dtype)
+                self.layer.weight.data = conv2d_weights_to_convtranspose2d_weights(self.layer, Q_conv2d)
+            else:
+                self.layer.weight.data = Q.reshape(self.layer.weight.shape).to(self.layer.weight.data.dtype)
+            if verbose:
+                print("time %.2f" % (time.time() - tick))
+                print("error (RTN fallback)", torch.sum((W - Q) ** 2).item())
+            return
+
         # GPTQv2: Compute P correction matrix from dXXT
         P = None
         if self.dXXT is not None:
             alpha = 0.25
-            P = alpha * ((self.dXXT @ Hinv.T).triu_(diagonal=1)) @ Hinv
+            if use_precision is True:
+                dXXT = torch.round(self.dXXT / precision) * precision
+            else:
+                dXXT = self.dXXT
+            # When double_precision=True, dXXT is already float64 — keep it
+            # (same reasoning as H: avoid float64→float32 precision loss).
+            dXXT = dXXT.to(Hinv.dtype)
+            P = alpha * ((dXXT @ Hinv.T).triu_(diagonal=1)) @ Hinv
+
+        # DEBUG: Save H (after damping+Cholesky), Hinv, P, perm, and metadata
+        # for verification. The metadata includes nsamples and batch_id so
+        # that results from different batch sizes can be compared.
+        if verbose:
+            import os
+            import json
+            debug_dir = os.environ.get(
+                "GPTQ_DEBUG_DIR",
+                f"/tmp/gptq_debug_bs{self.nsamples // self.batch_id if self.batch_id > 0 else 0}",
+            )
+            os.makedirs(debug_dir, exist_ok=True)
+            layer_name = self.layer_name
+            debug_tag = layer_name.replace(".", "_")
+            torch.save(H.cpu(), os.path.join(debug_dir, f"H_{debug_tag}.pt"))
+            torch.save(Hinv.cpu(), os.path.join(debug_dir, f"Hinv_{debug_tag}.pt"))
+            if P is not None:
+                torch.save(P.cpu(), os.path.join(debug_dir, f"P_{debug_tag}.pt"))
+            if perm is not None:
+                torch.save(perm.cpu(), os.path.join(debug_dir, f"perm_{debug_tag}.pt"))
+            # Save metadata: nsamples (total), batch_id (num batches), percdamp
+            meta = {
+                "layer_name": layer_name,
+                "nsamples": self.nsamples,
+                "num_batches": self.batch_id,
+                "batch_size": self.nsamples // self.batch_id if self.batch_id > 0 else 0,
+                "percdamp": percdamp,
+                "double_precision": self.double_precision,
+            }
+            with open(os.path.join(debug_dir, f"meta_{debug_tag}.json"), "w") as f:
+                json.dump(meta, f, indent=2)
+            print(
+                f"  [GPTQ debug] Saved H, Hinv, P, perm, meta to {debug_dir}/{debug_tag}_*.pt "
+                f"(nsamples={self.nsamples}, num_batches={self.batch_id})"
+            )
+
+        # Cast Hinv, P to float32
+        Hinv = Hinv.float()
+        if P is not None:
+            P = P.float()
+        #self.quantizer.to(torch.float32)
 
         self.quantizer.update(W, Hinv, perm, P=P)
         #Q = self.quantizer.quantize(W)
@@ -1372,6 +1546,19 @@ class GPTQ:
         assert (
             groupsize == -1 or torch.sum(dead) == 0
         )  # TODO `dead` elements should be RTN quantized for groupwise
+
+        # Save quantized weights Q for cross-batch-size comparison
+        if verbose:
+            import os as _os2
+            _debug_dir2 = _os2.environ.get(
+                "GPTQ_DEBUG_DIR",
+                f"/tmp/gptq_debug_bs{self.nsamples // self.batch_id if self.batch_id > 0 else 0}",
+            )
+            _debug_tag2 = self.layer_name.replace(".", "_")
+            torch.save(Q.cpu(), _os2.path.join(_debug_dir2, f"Q_{_debug_tag2}.pt"))
+            print(
+                f"  [GPTQ debug] Saved Q to {_debug_dir2}/Q_{_debug_tag2}.pt"
+            )
 
         if isinstance(self.layer, nn.ConvTranspose2d):
             Q_conv2d = Q.reshape(conv2d_shape).to(self.layer.weight.data.dtype)
