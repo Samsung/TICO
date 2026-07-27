@@ -12,22 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
-from tico.circle.passes.manager import (
-    CirclePassExecution,
-    CirclePassManager,
-    CirclePassManagerResult,
-    CirclePassStrategy,
+from tico.circle.passes.optimization.remove.layout_ops import (
+    RemoveRedundantLayoutOpsPass,
 )
-from tico.circle.passes.optimization import RemoveRedundantLayoutOpsPass
 
 __all__ = [
-    "CirclePass",
-    "CirclePassContext",
-    "CirclePassExecution",
-    "CirclePassManager",
-    "CirclePassManagerResult",
-    "CirclePassResult",
-    "CirclePassStrategy",
     "RemoveRedundantLayoutOpsPass",
 ]
