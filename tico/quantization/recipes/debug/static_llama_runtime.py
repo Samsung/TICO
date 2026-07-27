@@ -154,12 +154,30 @@ def _last_valid_token_indices(valid_token_mask: torch.Tensor) -> torch.LongTenso
     return positions.masked_fill(~valid_token_mask, 0).max(dim=1).values
 
 
+def _gather_last_valid_token(
+    tensor: torch.Tensor, valid_token_mask: torch.Tensor
+) -> torch.Tensor:
+    """Gather each batch row's final valid item and keep the sequence dimension."""
+    if tensor.dim() < 2:
+        raise ValueError(
+            f"Expected tensor rank >= 2 with [batch, sequence, ...], got {tensor.dim()}."
+        )
+    if tuple(tensor.shape[:2]) != tuple(valid_token_mask.shape):
+        raise ValueError(
+            "tensor and valid_token_mask must share [batch, sequence] dimensions. "
+            f"Got tensor={tuple(tensor.shape)}, "
+            f"valid_token_mask={tuple(valid_token_mask.shape)}."
+        )
+
+    last_indices = _last_valid_token_indices(valid_token_mask).to(tensor.device)
+    batch_indices = torch.arange(tensor.size(0), device=tensor.device)
+    return tensor[batch_indices, last_indices, ...].unsqueeze(1)
+
+
 def _gather_last_token_logits(
     logits: torch.Tensor, valid_token_mask: torch.Tensor
 ) -> torch.Tensor:
-    last_indices = _last_valid_token_indices(valid_token_mask).to(logits.device)
-    batch_indices = torch.arange(logits.size(0), device=logits.device)
-    return logits[batch_indices, last_indices, :]
+    return _gather_last_valid_token(logits, valid_token_mask).squeeze(1)
 
 
 def _gather_rope_by_position_ids(
@@ -467,8 +485,11 @@ class StaticLlamaLayerRuntime:
         self.past_len = int(valid.sum(dim=1)[0].item())
 
         hidden_states = self.final_norm(hidden_states)
-        logits = self.lm_head(hidden_states)
-        return _gather_last_token_logits(logits, valid)
+        # LM head is token-wise. Gather first so prefill does not materialize a
+        # [batch, sequence, vocab] logits tensor.
+        last_hidden_state = _gather_last_valid_token(hidden_states, valid)
+        logits = self.lm_head(last_hidden_state)
+        return logits[:, 0, :]
 
     @torch.no_grad()
     def append_prefill(
@@ -596,8 +617,11 @@ class StaticLlamaLayerRuntime:
 
         self.past_len = start_pos + actual_len
         hidden_states = self.final_norm(hidden_states)
-        logits = self.lm_head(hidden_states)
-        return logits[:, actual_len - 1, :]
+        # Compact valid tokens occupy the bucket prefix. Project only the final
+        # valid token instead of producing logits for every bucket position.
+        last_hidden_state = hidden_states[:, actual_len - 1 : actual_len, :]
+        logits = self.lm_head(last_hidden_state)
+        return logits[:, 0, :]
 
     @torch.no_grad()
     def append_prefill_chunked(
@@ -714,6 +738,18 @@ class StaticLlamaLayerRuntime:
         return logits[:, -1, :]
 
     @torch.no_grad()
+    def _reference_last_token_logits(self, input_ids: torch.LongTensor) -> torch.Tensor:
+        """Compute reference logits without materializing all sequence positions."""
+        base_outputs = self.model.model(
+            input_ids=input_ids,
+            use_cache=False,
+            return_dict=False,
+        )
+        last_hidden_state = base_outputs[0][:, -1:, :]
+        logits = self.model.lm_head(last_hidden_state)
+        return logits[:, 0, :]
+
+    @torch.no_grad()
     def generate_greedy(
         self,
         prompt: str,
@@ -781,8 +817,7 @@ class StaticLlamaLayerRuntime:
             device=self.device,
         )
         compact_input_ids = input_ids[valid].reshape(input_ids.size(0), -1)
-        ref_out = self.model(input_ids=compact_input_ids)
-        logits_ref = ref_out.logits[:, -1, :]
+        logits_ref = self._reference_last_token_logits(compact_input_ids)
 
         self._print_diff(
             "Step 0: prefill last-token logits", logits_rt, logits_ref, verbose
@@ -794,8 +829,7 @@ class StaticLlamaLayerRuntime:
 
         for step in range(1, steps + 1):
             logits_rt = self.decode_one(next_token)
-            ref_out = self.model(input_ids=generated)
-            logits_ref = ref_out.logits[:, -1, :]
+            logits_ref = self._reference_last_token_logits(generated)
             self._print_diff(
                 f"Step {step}: decode logits", logits_rt, logits_ref, verbose
             )
@@ -874,8 +908,7 @@ def _run_decode_steps_against_reference(
         next_token = torch.argmax(logits, dim=-1, keepdim=True)
         generated = torch.cat([generated, next_token], dim=1)
         logits = runtime.decode_one(next_token)
-        ref_out = runtime.model(input_ids=generated)
-        logits_ref = ref_out.logits[:, -1, :]
+        logits_ref = runtime._reference_last_token_logits(generated)
         runtime._print_diff(
             f"{title_prefix} step {step}",
             logits,
@@ -919,11 +952,10 @@ def _run_multiturn_append_prefill_check(
         device=runtime.device,
     )
     generated = _compact_valid_tokens(first_input_ids, first_valid)
-    ref_out = runtime.model(input_ids=generated)
     runtime._print_diff(
         "Multi-turn step 0: first prefill last-token logits",
         logits,
-        ref_out.logits[:, -1, :],
+        runtime._reference_last_token_logits(generated),
         verbose,
     )
 
@@ -961,11 +993,10 @@ def _run_multiturn_append_prefill_check(
     generated = torch.cat(
         [generated, compact_second_input_ids.to(runtime.device)], dim=1
     )
-    ref_out = runtime.model(input_ids=generated)
     runtime._print_diff(
         f"Multi-turn append-prefill logits (bucket={cfg.append_bucket})",
         logits,
-        ref_out.logits[:, -1, :],
+        runtime._reference_last_token_logits(generated),
         verbose,
     )
 
