@@ -179,11 +179,11 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
         graph = Mock()
         graph.subgraph = Mock()
         # Make operators iterable for as_list()
-        operators = []
+        operators: list[object] = []
         graph.subgraph.operators = operators
 
         # Make operatorCodes iterable
-        operator_codes = []
+        operator_codes: list[object] = []
         model = Mock()
         model.operatorCodes = operator_codes
         document.model = model

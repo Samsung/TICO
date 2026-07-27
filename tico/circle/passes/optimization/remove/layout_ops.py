@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from tico.circle.graph import as_indices, as_list
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from tico.circle.document import CircleDocument
 
 
-def _get_builtin_code(operator: any) -> int:
+def _get_builtin_code(operator: Any) -> int:
     """Extract the builtin operator code from an operator."""
     builtin_options = getattr(operator, "builtinOptions", None)
     if builtin_options is None:
@@ -34,7 +34,7 @@ def _get_builtin_code(operator: any) -> int:
     return int(builtin_ops) if builtin_ops is not None else -1
 
 
-def _is_reshape_op(operator: any, operator_codes: list[any]) -> bool:
+def _is_reshape_op(operator: Any, operator_codes: list[Any]) -> bool:
     """Check if operator is a Reshape operation."""
     try:
         opcode_index = int(getattr(operator, "opcodeIndex", -1))
@@ -48,7 +48,7 @@ def _is_reshape_op(operator: any, operator_codes: list[any]) -> bool:
         return False
 
 
-def _is_transpose_op(operator: any, operator_codes: list[any]) -> bool:
+def _is_transpose_op(operator: Any, operator_codes: list[Any]) -> bool:
     """Check if operator is a Transpose operation."""
     try:
         opcode_index = int(getattr(operator, "opcodeIndex", -1))
@@ -75,7 +75,7 @@ def _check_perm(first_perm: list[int], second_perm: list[int]) -> bool:
     return True
 
 
-def _get_const_data(graph: any, tensor_index: int) -> list[int] | None:
+def _get_const_data(graph: Any, tensor_index: int) -> list[int] | None:
     """Extract constant data from a tensor, returns list of ints or None."""
     tensors = as_list(graph.subgraph.tensors)
     if tensor_index < 0 or tensor_index >= len(tensors):
@@ -164,7 +164,7 @@ class RemoveRedundantLayoutOpsPass(CirclePass):
             changes=changes,
         )
 
-    def _remove_redundant_reshape(self, graph: any, reshape_op: any) -> bool:
+    def _remove_redundant_reshape(self, graph: Any, reshape_op: Any) -> bool:
         """Remove redundant consecutive Reshape operations.
 
         Pattern:
@@ -212,7 +212,7 @@ class RemoveRedundantLayoutOpsPass(CirclePass):
         return True
 
     def _remove_redundant_transpose(
-        self, graph: any, transpose_op: any, operator_codes: list[any]
+        self, graph: Any, transpose_op: Any, operator_codes: list[Any]
     ) -> bool:
         """Remove or fuse consecutive Transpose operations.
 
