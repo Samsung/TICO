@@ -15,7 +15,7 @@
 import unittest
 
 from tico.circle.errors import CircleRewriteError
-from tico.circle.rewrite import compact_model, keep_subgraphs
+from tico.circle.rewrite import compact_model, keep_subgraphs, replace_tensor_uses
 
 from test.unit_test.circle.fixture import make_test_document
 
@@ -34,6 +34,31 @@ class CircleRewriteTest(unittest.TestCase):
         self.assertEqual(len(document.model.buffers), 2)
         self.assertEqual(document.subgraph(1).tensors[1].buffer, 1)
         self.assertEqual(len(document.model.operatorCodes), 2)
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+
+    def test_replace_tensor_uses_remaps_consumers_outputs_and_signatures(self):
+        """Test remapping consumer and output-interface tensor references."""
+        document = make_test_document()
+        subgraph = document.subgraph(0)
+        subgraph.outputs = [2]
+        document.model.signatureDefs[0].outputs[0].tensorIndex = 2
+
+        stats = replace_tensor_uses(
+            document.model,
+            subgraph_index=0,
+            old_tensor_index=2,
+            new_tensor_index=0,
+        )
+
+        self.assertTrue(stats.modified)
+        self.assertEqual(stats.remapped_references, 3)
+        self.assertEqual(subgraph.operators[0].outputs, [2])
+        self.assertEqual(subgraph.operators[1].inputs, [0, 1])
+        self.assertEqual(subgraph.outputs, [0])
+        self.assertEqual(
+            document.model.signatureDefs[0].outputs[0].tensorIndex,
+            0,
+        )
         self.assertTrue(document.verify(raise_on_error=False).ok)
 
     def test_retained_control_flow_reference_to_dropped_subgraph_is_rejected(self):

@@ -18,6 +18,7 @@ from typing import Any, TYPE_CHECKING
 
 from tico.circle.graph import as_indices, as_list
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
+from tico.circle.rewrite import replace_tensor_uses
 
 if TYPE_CHECKING:
     from tico.circle.document import CircleDocument
@@ -235,6 +236,10 @@ class RemoveRedundantLayoutOpsPass(CirclePass):
         if len(inputs) < 2:
             return False
 
+        outputs = as_indices(getattr(transpose_op, "outputs", None))
+        if len(outputs) != 1:
+            return False
+
         input_tensor = inputs[0]
         perm_tensor = inputs[1]
 
@@ -269,10 +274,16 @@ class RemoveRedundantLayoutOpsPass(CirclePass):
 
         # Check if the composition is identity (inverse transpose)
         if _check_perm(perm_data, producer_perm_data):
-            # The two transposes cancel out, connect to producer's input
-            main_input = producer_inputs[0]
-            transpose_op.inputs = [main_input] + list(inputs[1:])
-            return True
+            # Bypass the inverse pair at the second Transpose output. Dead-code
+            # elimination removes the second Transpose and removes the first one
+            # when it has no other consumers.
+            replacement = replace_tensor_uses(
+                graph.model,
+                subgraph_index=graph.subgraph_index,
+                old_tensor_index=outputs[0],
+                new_tensor_index=producer_inputs[0],
+            )
+            return replacement.modified
 
         # TODO: Implement general composition optimization
         # This would create a new permutation constant for the composite transpose

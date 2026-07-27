@@ -16,6 +16,9 @@ import struct
 import unittest
 from unittest.mock import Mock
 
+from tico.circle.document import CircleDocument
+from tico.circle.passes.base import CirclePassContext
+from tico.circle.passes.cleanup import DeadCodeEliminationPass
 from tico.circle.passes.optimization.remove.layout_ops import (
     _check_perm,
     _get_const_data,
@@ -23,6 +26,56 @@ from tico.circle.passes.optimization.remove.layout_ops import (
     _is_transpose_op,
     RemoveRedundantLayoutOpsPass,
 )
+
+from test.unit_test.circle.fixture import (
+    FakeBuffer,
+    FakeModel,
+    FakeOperator,
+    FakeOperatorCode,
+    FakeSignatureDef,
+    FakeSubGraph,
+    FakeTensor,
+    FakeTensorMap,
+)
+
+
+def _make_inverse_transpose_document() -> CircleDocument:
+    """Create a non-square graph containing two inverse transposes."""
+    permutation = struct.pack("<ii", 1, 0)
+    subgraph = FakeSubGraph(
+        name="main",
+        tensors=[
+            FakeTensor("input", shape=[2, 3]),
+            FakeTensor("first_perm", buffer=1, shape=[2]),
+            FakeTensor("first_transpose", shape=[3, 2]),
+            FakeTensor("second_perm", buffer=2, shape=[2]),
+            FakeTensor("second_transpose", shape=[2, 3]),
+        ],
+        inputs=[0],
+        outputs=[4],
+        operators=[
+            FakeOperator(opcodeIndex=0, inputs=[0, 1], outputs=[2]),
+            FakeOperator(opcodeIndex=0, inputs=[2, 3], outputs=[4]),
+        ],
+    )
+    model = FakeModel(
+        subgraphs=[subgraph],
+        buffers=[
+            FakeBuffer(),
+            FakeBuffer(data=permutation),
+            FakeBuffer(data=permutation),
+        ],
+        operatorCodes=[FakeOperatorCode(builtinCode=54)],
+        signatureDefs=[
+            FakeSignatureDef(
+                signatureKey="main",
+                subgraphIndex=0,
+                inputs=[FakeTensorMap("input", 0)],
+                outputs=[FakeTensorMap("output", 4)],
+            )
+        ],
+    )
+    return CircleDocument(model)
 
 
 class TestPermutationHelpers(unittest.TestCase):
@@ -244,57 +297,55 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
         self.assertFalse(result)
 
     def test_remove_redundant_transpose_inverse(self):
-        """Test inverse Transpose cancellation."""
-        pass_obj = RemoveRedundantLayoutOpsPass()
+        """Test inverse Transpose cancellation and dead-code removal."""
+        document = _make_inverse_transpose_document()
+        subgraph = document.subgraph()
+        second_transpose = subgraph.operators[1]
+        context = CirclePassContext()
 
-        graph = Mock()
+        result = RemoveRedundantLayoutOpsPass().run(document, context)
 
-        # Create permutation data [1, 0]
-        perm_data = struct.pack("<ii", 1, 0)
+        self.assertTrue(result.modified)
+        self.assertEqual(result.changes, 1)
+        self.assertEqual(second_transpose.inputs, [2, 3])
+        self.assertEqual(subgraph.outputs, [0])
+        self.assertEqual(
+            document.model.signatureDefs[0].outputs[0].tensorIndex,
+            0,
+        )
+        self.assertEqual(subgraph.tensors[subgraph.outputs[0]].shape, [2, 3])
+        self.assertTrue(document.verify(raise_on_error=False).ok)
 
-        # tensor 0: input to transpose1
-        # tensor 1: permutation for transpose1
-        # tensor 2: output of transpose1 (input to transpose2)
-        # tensor 3: permutation for transpose2
-        tensor0 = Mock()
-        tensor1 = Mock()
-        tensor1.buffer = 1
-        tensor2 = Mock()
-        tensor3 = Mock()
-        tensor3.buffer = 2
+        dce_result = DeadCodeEliminationPass().run(document, context)
 
-        graph.subgraph = Mock()
-        graph.subgraph.tensors = [tensor0, tensor1, tensor2, tensor3]
+        self.assertTrue(dce_result.modified)
+        self.assertEqual(subgraph.operators, [])
+        self.assertTrue(document.verify(raise_on_error=False).ok)
 
-        buffer1 = Mock()
-        buffer1.data = perm_data
-        buffer2 = Mock()
-        buffer2.data = perm_data
+    def test_inverse_transpose_preserves_shared_first_transpose(self):
+        """Test that a shared first Transpose remains live after cancellation."""
+        document = _make_inverse_transpose_document()
+        subgraph = document.subgraph()
+        first_transpose = subgraph.operators[0]
 
-        graph.model = Mock()
-        graph.model.buffers = [None, buffer1, buffer2]
+        fanout_operator = FakeOperator(opcodeIndex=1, inputs=[2], outputs=[5])
+        subgraph.tensors.append(FakeTensor("fanout_output", shape=[3, 2]))
+        subgraph.operators.append(fanout_operator)
+        subgraph.outputs.append(5)
+        document.model.operatorCodes.append(FakeOperatorCode(builtinCode=0))
+        document.model.signatureDefs[0].outputs.append(
+            FakeTensorMap("fanout_output", 5)
+        )
 
-        # transpose1: input=0, perm=1 -> output=2
-        transpose1 = Mock()
-        transpose1.inputs = [0, 1]
-        transpose1.opcodeIndex = 0
+        context = CirclePassContext()
+        RemoveRedundantLayoutOpsPass().run(document, context)
+        DeadCodeEliminationPass().run(document, context)
 
-        # transpose2: input=2, perm=3 -> should cancel with transpose1
-        transpose2 = Mock()
-        transpose2.inputs = [2, 3]
-        transpose2.opcodeIndex = 0
-
-        graph.subgraph.operators = [transpose1, transpose2]
-        graph.producer = Mock(return_value=0)
-
-        opcode = Mock()
-        opcode.builtinCode = 54  # TRANSPOSE
-        graph.model.operatorCodes = [opcode]
-
-        result = pass_obj._remove_redundant_transpose(graph, transpose2, [opcode])
-
-        self.assertTrue(result)
-        self.assertEqual(transpose2.inputs[0], 0)
+        self.assertEqual(len(subgraph.operators), 2)
+        self.assertIs(subgraph.operators[0], first_transpose)
+        self.assertIs(subgraph.operators[1], fanout_operator)
+        self.assertEqual(subgraph.outputs, [0, 5])
+        self.assertTrue(document.verify(raise_on_error=False).ok)
 
     def test_remove_redundant_transpose_missing_perm(self):
         """Test Transpose with missing permutation data."""
@@ -311,6 +362,7 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
 
         transpose = Mock()
         transpose.inputs = [0, 1]
+        transpose.outputs = [2]
         graph.producer = Mock(return_value=None)
 
         result = pass_obj._remove_redundant_transpose(graph, transpose, [])
