@@ -192,5 +192,170 @@ class TestValidatePaddingLayout(unittest.TestCase):
             _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")
 
 
+class TestAllocateEmptyCache(unittest.TestCase):
+    """Tests for StaticGemma4Runtime._allocate_empty_cache.
+
+    Verifies that per-layer-type head_dim and num_kv_heads are correctly
+    selected when allocating KV caches.  Gemma4 uses different head dimensions
+    for sliding vs. full-attention layers.
+    """
+
+    def test_per_layer_type_head_dim(self):
+        """Sliding layers use head_dim; full-attention layers use global_head_dim."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        # Build a minimal mock runtime with just the attributes
+        # _allocate_empty_cache accesses.
+        text_config = SimpleNamespace(
+            num_hidden_layers=4,
+            layer_types=[
+                "sliding_attention",
+                "full_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+            head_dim=256,
+            global_head_dim=512,
+            num_key_value_heads=4,
+            attention_k_eq_v=False,  # E2B default
+        )
+        layout = SimpleNamespace(max_seq=64)
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+        )
+
+        # Call the unbound method with our mock
+        caches = StaticGemma4Runtime._allocate_empty_cache(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(len(caches), 4)
+
+        for layer_idx, cache in enumerate(caches):
+            layer_type = text_config.layer_types[layer_idx]
+            is_sliding = layer_type == "sliding_attention"
+
+            if not is_sliding and text_config.global_head_dim:
+                expected_head_dim = int(text_config.global_head_dim)
+            else:
+                expected_head_dim = int(text_config.head_dim)
+
+            expected_num_kv_heads = int(text_config.num_key_value_heads)
+
+            expected_shape = (
+                1,
+                expected_num_kv_heads,
+                layout.max_seq,
+                expected_head_dim,
+            )
+            self.assertEqual(
+                tuple(cache.past_k.shape),
+                expected_shape,
+                f"Layer {layer_idx} (type={layer_type}): "
+                f"expected past_k shape {expected_shape}, "
+                f"got {tuple(cache.past_k.shape)}",
+            )
+            self.assertEqual(tuple(cache.past_v.shape), expected_shape)
+
+    def test_all_sliding_layers(self):
+        """When all layers are sliding, all caches use head_dim."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        text_config = SimpleNamespace(
+            num_hidden_layers=2,
+            layer_types=["sliding_attention", "sliding_attention"],
+            head_dim=256,
+            global_head_dim=512,
+            num_key_value_heads=4,
+            attention_k_eq_v=False,
+        )
+        layout = SimpleNamespace(max_seq=32)
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+        )
+
+        caches = StaticGemma4Runtime._allocate_empty_cache(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        for cache in caches:
+            self.assertEqual(cache.past_k.shape[-1], 256)
+            self.assertEqual(cache.past_v.shape[-1], 256)
+
+    def test_all_full_attention_layers(self):
+        """When all layers are full_attention, all caches use global_head_dim."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        text_config = SimpleNamespace(
+            num_hidden_layers=2,
+            layer_types=["full_attention", "full_attention"],
+            head_dim=256,
+            global_head_dim=512,
+            num_key_value_heads=4,
+            attention_k_eq_v=False,
+        )
+        layout = SimpleNamespace(max_seq=32)
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+        )
+
+        caches = StaticGemma4Runtime._allocate_empty_cache(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        for cache in caches:
+            self.assertEqual(cache.past_k.shape[-1], 512)
+            self.assertEqual(cache.past_v.shape[-1], 512)
+
+    def test_no_global_head_dim_falls_back(self):
+        """When global_head_dim is None, all layers use head_dim."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        text_config = SimpleNamespace(
+            num_hidden_layers=2,
+            layer_types=["sliding_attention", "full_attention"],
+            head_dim=256,
+            global_head_dim=None,
+            num_key_value_heads=4,
+            attention_k_eq_v=False,
+        )
+        layout = SimpleNamespace(max_seq=32)
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+        )
+
+        caches = StaticGemma4Runtime._allocate_empty_cache(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        for cache in caches:
+            self.assertEqual(cache.past_k.shape[-1], 256)
+            self.assertEqual(cache.past_v.shape[-1], 256)
+
+
 if __name__ == "__main__":
     unittest.main()
