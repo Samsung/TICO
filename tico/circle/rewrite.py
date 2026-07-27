@@ -103,6 +103,82 @@ def _remap_vector(
     return remapped, changes
 
 
+def _replace_tensor_index(
+    value: Any,
+    old_index: int,
+    new_index: int,
+) -> tuple[list[int], int]:
+    """Replace a tensor index in a vector and return the number of changes."""
+    original = as_indices(value)
+    remapped = [new_index if index == old_index else index for index in original]
+    return remapped, sum(old != new for old, new in zip(original, remapped))
+
+
+def replace_tensor_uses(
+    model: Any,
+    *,
+    subgraph_index: int,
+    old_tensor_index: int,
+    new_tensor_index: int,
+) -> RewriteStats:
+    """Replace consumer and output-boundary uses of a tensor.
+
+    Operator outputs, subgraph inputs, and intermediates are left unchanged so
+    dead-code elimination can remove producers that become unreachable.
+    Existing ``CircleGraph`` consumer indexes must be rebuilt after this rewrite.
+    """
+    subgraphs = as_list(model.subgraphs)
+    subgraph_index = _valid_index(
+        int(subgraph_index),
+        len(subgraphs),
+        "tensor-use replacement subgraph",
+    )
+    subgraph = subgraphs[subgraph_index]
+    tensor_count = len(as_list(subgraph.tensors))
+    old_tensor_index = _valid_index(
+        int(old_tensor_index),
+        tensor_count,
+        f"subgraphs[{subgraph_index}].old_tensor_index",
+    )
+    new_tensor_index = _valid_index(
+        int(new_tensor_index),
+        tensor_count,
+        f"subgraphs[{subgraph_index}].new_tensor_index",
+    )
+    if old_tensor_index == new_tensor_index:
+        return RewriteStats()
+
+    replacements = 0
+    for operator in as_list(subgraph.operators):
+        inputs, changes = _replace_tensor_index(
+            getattr(operator, "inputs", None),
+            old_tensor_index,
+            new_tensor_index,
+        )
+        if changes:
+            operator.inputs = inputs
+            replacements += changes
+
+    outputs, changes = _replace_tensor_index(
+        getattr(subgraph, "outputs", None),
+        old_tensor_index,
+        new_tensor_index,
+    )
+    if changes:
+        subgraph.outputs = outputs
+        replacements += changes
+
+    for signature in as_list(getattr(model, "signatureDefs", None)):
+        if int(getattr(signature, "subgraphIndex", -1)) != subgraph_index:
+            continue
+        for tensor_map in as_list(getattr(signature, "outputs", None)):
+            if int(getattr(tensor_map, "tensorIndex", -1)) == old_tensor_index:
+                tensor_map.tensorIndex = new_tensor_index
+                replacements += 1
+
+    return RewriteStats(remapped_references=replacements)
+
+
 def _signature_tensor_maps(signature: Any) -> Iterator[tuple[str, Any]]:
     for field_name in ("inputs", "outputs"):
         for tensor_map in as_list(getattr(signature, field_name, None)):
