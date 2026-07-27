@@ -22,6 +22,44 @@ import torch
 HAS_TRANSFORMERS = importlib.util.find_spec("transformers") is not None
 
 
+class _RecordingIdentity(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input_shape: Optional[tuple[int, ...]] = None
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        self.input_shape = tuple(tensor.shape)
+        return tensor
+
+
+class _PassThroughPrefillLayer(torch.nn.Module):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    ):
+        del attention_mask, position_embeddings
+        batch_size, seq_len, _ = hidden_states.shape
+        new_k = hidden_states.new_zeros(batch_size, 1, seq_len, 1)
+        new_v = hidden_states.new_zeros(batch_size, 1, seq_len, 1)
+        return hidden_states, new_k, new_v
+
+
+class _FakeReferenceBackbone(torch.nn.Module):
+    def forward(
+        self,
+        input_ids: torch.LongTensor,
+        *,
+        use_cache: bool,
+        return_dict: bool,
+    ):
+        assert not use_cache
+        assert not return_dict
+        hidden_states = input_ids.to(torch.float32).unsqueeze(-1).repeat(1, 1, 2)
+        return (hidden_states,)
+
+
 class _FixedDeltaAppendLayer(torch.nn.Module):
     def __init__(self, new_k: torch.Tensor, new_v: torch.Tensor):
         super().__init__()
@@ -92,6 +130,82 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
         self.assertTrue(torch.equal(gathered[0], logits[0, 1]))
         self.assertTrue(torch.equal(gathered[1], logits[1, 3]))
 
+    def test_static_llama_gather_last_valid_token_keeps_sequence_axis(self):
+        """Hidden-state gathering should retain a singleton sequence dimension."""
+        from tico.quantization.recipes.debug.static_llama_runtime import (
+            _gather_last_valid_token,
+        )
+
+        hidden_states = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3)
+        valid = torch.tensor(
+            [
+                [True, True, False, False],
+                [False, False, True, True],
+            ]
+        )
+
+        gathered = _gather_last_valid_token(hidden_states, valid)
+
+        self.assertEqual(tuple(gathered.shape), (2, 1, 3))
+        torch.testing.assert_close(gathered[0, 0], hidden_states[0, 1])
+        torch.testing.assert_close(gathered[1, 0], hidden_states[1, 3])
+
+    def test_prefill_projects_only_last_valid_hidden_state(self):
+        """Prefill should run final norm and LM head on one sequence position."""
+        from tico.quantization.recipes.debug.static_llama_runtime import (
+            StaticLlamaLayerRuntime,
+        )
+
+        runtime = StaticLlamaLayerRuntime.__new__(StaticLlamaLayerRuntime)
+        runtime.device = torch.device("cpu")
+        runtime.padding_side = "right"
+        runtime.tokenizer = SimpleNamespace(pad_token_id=0)
+        runtime.max_seq = 4
+        runtime.num_hidden_layers = 1
+        runtime.num_kv_heads = 1
+        runtime.head_dim = 1
+        runtime.past_len = 0
+        runtime.embed_tokens = torch.nn.Embedding(32, 2)
+        with torch.no_grad():
+            runtime.embed_tokens.weight.copy_(
+                torch.arange(64, dtype=torch.float32).reshape(32, 2)
+            )
+        runtime.final_norm = _RecordingIdentity()
+        runtime.lm_head = _RecordingIdentity()
+        runtime.rope_cos = torch.zeros(1, runtime.max_seq, 1)
+        runtime.rope_sin = torch.zeros_like(runtime.rope_cos)
+        runtime.layer_caches = []
+        runtime.prefill_layers = torch.nn.ModuleList([_PassThroughPrefillLayer()])
+
+        input_ids = torch.tensor([[5, 6, 0, 0]])
+        attention_mask = torch.tensor([[1, 1, 0, 0]])
+        logits = runtime.prefill(input_ids, attention_mask)
+
+        expected = runtime.embed_tokens(torch.tensor([[6]]))[:, 0, :]
+        self.assertEqual(runtime.past_len, 2)
+        self.assertEqual(runtime.final_norm.input_shape, (1, 4, 2))
+        self.assertEqual(runtime.lm_head.input_shape, (1, 1, 2))
+        self.assertEqual(tuple(logits.shape), (1, 2))
+        torch.testing.assert_close(logits, expected)
+
+    def test_reference_projects_only_last_hidden_state(self):
+        """Reference checks should avoid producing logits for the full sequence."""
+        from tico.quantization.recipes.debug.static_llama_runtime import (
+            StaticLlamaLayerRuntime,
+        )
+
+        runtime = StaticLlamaLayerRuntime.__new__(StaticLlamaLayerRuntime)
+        runtime.model = SimpleNamespace(
+            model=_FakeReferenceBackbone(),
+            lm_head=_RecordingIdentity(),
+        )
+
+        logits = runtime._reference_last_token_logits(torch.tensor([[3, 4, 5]]))
+
+        self.assertEqual(runtime.model.lm_head.input_shape, (1, 1, 2))
+        self.assertEqual(tuple(logits.shape), (1, 2))
+        torch.testing.assert_close(logits, torch.tensor([[5.0, 5.0]]))
+
     def test_append_prefill_attention_mask_layout(self):
         """Append mask should expose valid past and causal tail slots only."""
         from tico.quantization.recipes.debug.static_llama_runtime import (
@@ -131,8 +245,8 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
         runtime.num_hidden_layers = 1
         runtime.past_len = 2
         runtime.embed_tokens = torch.nn.Embedding(32, 2)
-        runtime.final_norm = torch.nn.Identity()
-        runtime.lm_head = torch.nn.Identity()
+        runtime.final_norm = _RecordingIdentity()
+        runtime.lm_head = _RecordingIdentity()
         runtime.rope_cos = torch.zeros(1, runtime.max_seq, 1)
         runtime.rope_sin = torch.zeros_like(runtime.rope_cos)
 
@@ -158,6 +272,8 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
 
         self.assertEqual(runtime.past_len, 4)
         self.assertEqual(tuple(logits.shape), (1, 2))
+        self.assertEqual(runtime.final_norm.input_shape, (1, 3, 2))
+        self.assertEqual(runtime.lm_head.input_shape, (1, 1, 2))
         torch.testing.assert_close(cache.past_k[:, :, :2, :], before_k[:, :, :2, :])
         torch.testing.assert_close(cache.past_v[:, :, :2, :], before_v[:, :, :2, :])
         torch.testing.assert_close(cache.past_k[:, :, 2:4, :], new_k[:, :, :2, :])
