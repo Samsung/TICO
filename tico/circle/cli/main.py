@@ -29,11 +29,22 @@ from tico.circle.operations import (
     extract_by_tensor_patterns,
     SignaturePolicy,
 )
-from tico.circle.passes import CirclePass, CirclePassContext, CirclePassManager
+from tico.circle.passes import (
+    CirclePass,
+    CirclePassContext,
+    CirclePassManager,
+    RemoveRedundantLayoutOpsPass,
+)
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
 from tico.circle.selector import parse_operator_spec
 
 LOGGER = logging.getLogger("tico.circle.cli")
+
+_PASS_REGISTRY: dict[str, type[CirclePass]] = {
+    "remove-redundant-layout-ops": RemoveRedundantLayoutOpsPass,
+    "dce": DeadCodeEliminationPass,
+    "compact": CompactIndicesPass,
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -137,7 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
     extract_parser.set_defaults(handler=_extract_command)
 
     optimize_parser = subparsers.add_parser(
-        "optimize", help="Run cleanup passes over a Circle model."
+        "optimize", help="Run optimization and cleanup passes over a Circle model."
     )
     optimize_parser.add_argument("input", help="Input .circle path or '-' for stdin.")
     optimize_parser.add_argument(
@@ -146,7 +157,9 @@ def _build_parser() -> argparse.ArgumentParser:
     optimize_parser.add_argument(
         "--passes",
         default="dce,compact",
-        help="Comma-separated passes. Available values: dce, compact.",
+        help=(
+            "Comma-separated passes. Available values: " f"{', '.join(_PASS_REGISTRY)}."
+        ),
     )
     optimize_parser.add_argument(
         "--no-verify",
@@ -238,21 +251,17 @@ def _extract_command(args: argparse.Namespace) -> int:
 
 
 def _parse_passes(value: str) -> list[CirclePass]:
-    registry: dict[str, type[CirclePass]] = {
-        "dce": DeadCodeEliminationPass,
-        "compact": CompactIndicesPass,
-    }
     passes: list[CirclePass] = []
     for raw_name in value.split(","):
         name = raw_name.strip().lower()
         if not name:
             continue
         try:
-            passes.append(registry[name]())
+            passes.append(_PASS_REGISTRY[name]())
         except KeyError as error:
             raise ValueError(
                 f"Unknown Circle pass {name!r}; available passes are "
-                f"{sorted(registry)}."
+                f"{sorted(_PASS_REGISTRY)}."
             ) from error
     if not passes:
         raise ValueError("At least one Circle pass must be selected.")

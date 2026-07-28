@@ -16,6 +16,7 @@ import unittest
 
 from tico.circle.cli.main import _build_parser, _parse_passes
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
+from tico.circle.passes.optimization import RemoveRedundantLayoutOpsPass
 
 
 class CircleCLITest(unittest.TestCase):
@@ -38,8 +39,9 @@ class CircleCLITest(unittest.TestCase):
         self.assertEqual(args.from_tensor, ["input"])
         self.assertEqual(args.to_tensor, ["output"])
 
-    def test_cleanup_pass_names_are_resolved(self):
-        passes = _parse_passes("dce,compact")
+    def test_optimization_and_cleanup_pass_names_are_resolved(self):
+        passes = _parse_passes("remove-redundant-layout-ops,dce,compact")
 
-        self.assertIsInstance(passes[0], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[1], CompactIndicesPass)
+        self.assertIsInstance(passes[0], RemoveRedundantLayoutOpsPass)
+        self.assertIsInstance(passes[1], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[2], CompactIndicesPass)
