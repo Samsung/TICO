@@ -584,6 +584,9 @@ class StaticGemma4Runtime:
         # K/V into shared_kv_states; consumer layers read from it.
         shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
+        # Extract valid length once before the loop to avoid GPU→CPU sync per layer.
+        valid_len = int(batch["valid_length"].item())
+
         for layer_idx, layer in enumerate(self.prefill_layers):
             layer_type = self.text_config.layer_types[layer_idx]
             per_layer_input = (
@@ -607,14 +610,21 @@ class StaticGemma4Runtime:
 
             if isinstance(out, tuple) and len(out) == 3:
                 hidden_states, new_k, new_v = out
-                # Write full-sequence K/V into the pre-allocated fixed cache.
-                # For prefill, new_k/new_v cover the entire max_seq, so no
-                # positional slicing is needed — copy_ preserves the buffer.
-                self.layer_caches[layer_idx].past_k.copy_(new_k)
-                self.layer_caches[layer_idx].past_v.copy_(new_v)
-                # Store full-length K/V for shared-KV consumer layers
+                # Write only valid K/V (excluding padding) into the cache.
+                # new_k/new_v from prefill have shape (B, kv_heads, max_seq, head_dim)
+                # but positions >= valid_length contain garbage from padding tokens.
+                self.layer_caches[layer_idx].past_k[:, :, :valid_len, :].copy_(
+                    new_k[:, :, :valid_len, :]
+                )
+                self.layer_caches[layer_idx].past_v[:, :, :valid_len, :].copy_(
+                    new_v[:, :, :valid_len, :]
+                )
+                # Store valid-length K/V for shared-KV consumer layers
                 if bool(getattr(attn, "store_full_length_kv", False)):
-                    shared_kv_states[layer_type] = (new_k, new_v)
+                    shared_kv_states[layer_type] = (
+                        new_k[:, :, :valid_len, :],
+                        new_v[:, :, :valid_len, :],
+                    )
             else:
                 hidden_states = out
 
@@ -713,6 +723,21 @@ class StaticGemma4Runtime:
         # keyed by layer_type, updated after each store layer writes its delta.
         shared_kv_states: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
+        # Pre-populate shared_kv_states from layer_caches for shared consumer layers.
+        # This ensures consumer layers have access to KV cache from previous tokens
+        # before store layers update it in this decode step.
+        for layer_idx, layer_type in enumerate(self.text_config.layer_types):
+            if layer_type not in shared_kv_states:
+                attn = self.decode_layers[layer_idx].wrapped.self_attn.wrapped
+                is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
+
+                if is_shared:
+                    cache = self.layer_caches[layer_idx]
+                    shared_kv_states[layer_type] = (
+                        cache.past_k[:, :, : self.past_len, :],
+                        cache.past_v[:, :, : self.past_len, :],
+                    )
+
         for layer_idx, layer in enumerate(self.decode_layers):
             layer_type = self.text_config.layer_types[layer_idx]
             per_layer_input = (
@@ -746,9 +771,11 @@ class StaticGemma4Runtime:
 
             if isinstance(out, tuple) and len(out) == 3:
                 hidden_states, new_k, new_v = out
+
                 # Write single-token K/V delta into the fixed cache
                 cache.past_k[:, :, self.past_len : self.past_len + 1, :].copy_(new_k)
                 cache.past_v[:, :, self.past_len : self.past_len + 1, :].copy_(new_v)
+
                 # Update shared_kv_states for consumer layers.
                 # The valid K/V (prefill + all decode deltas so far) occupies
                 # positions 0..past_len inclusive in the cache.  Slice to that
@@ -764,6 +791,55 @@ class StaticGemma4Runtime:
         self.past_len += 1
         logits = self.lm_head(hidden_states)[:, -1, :]
         return self._apply_final_logit_softcapping(logits)
+
+    @torch.no_grad()
+    def generate_greedy(
+        self,
+        batch: dict[str, torch.Tensor],
+        max_new_tokens: int,
+        eos_token_id: Optional[int] = None,
+    ) -> torch.LongTensor:
+        """Generate tokens greedily from a preprocessed static batch.
+
+        Args:
+            batch: The batch dict returned by ``build_static_inputs``.
+            max_new_tokens: Maximum number of new tokens to generate.
+            eos_token_id: Optional EOS token ID to stop generation early.
+                If not provided, uses ``text_config.eos_token_id``.
+
+        Returns:
+            Generated token IDs of shape ``(1, prompt_len + num_generated)``.
+        """
+        # Run prefill
+        logits = self.prefill(batch)
+
+        # Get prompt length
+        prompt_len = int(batch["valid_length"].item())
+
+        # Extract valid input_ids from _raw_inputs (preserves image tokens)
+        raw_inputs = batch.get("_raw_inputs", None)
+        if raw_inputs is not None:
+            input_ids = raw_inputs["input_ids"][0].clone()  # Original with image tokens
+        else:
+            input_ids = batch["llm_input_ids"][0, :prompt_len].clone()  # Fallback
+
+        if eos_token_id is None:
+            eos_token_id = int(getattr(self.text_config, "eos_token_id", -1))
+
+        # Generate loop
+        for _ in range(max_new_tokens):
+            next_token = torch.argmax(logits, dim=-1)  # (1,)
+            print(f"[generate_greedy] Next token: {next_token}")
+            input_ids = torch.cat([input_ids, next_token], dim=0)
+
+            # Check EOS
+            if eos_token_id >= 0 and next_token.item() == eos_token_id:
+                break
+
+            # Decode step: next_token is (1,), need (1, 1) for decode_one
+            logits = self.decode_one(next_token.unsqueeze(0))
+
+        return input_ids.unsqueeze(0)  # (1, generated_len)
 
     def _apply_final_logit_softcapping(self, logits: torch.Tensor) -> torch.Tensor:
         """Apply Gemma4 final logit softcapping.
@@ -1581,6 +1657,101 @@ def verify_step_decode(
     return rt_decode_logits_list[-1]
 
 
+@torch.no_grad()
+def verify_step_generation(
+    runtime: StaticGemma4Runtime,
+    batch: dict[str, torch.Tensor],
+    prompt: str,
+    image,
+    max_new_tokens: int = 16,
+) -> torch.LongTensor:
+    """Side-by-side validation of ``generate_greedy`` against HF reference.
+
+    Runs greedy generation from the runtime and HF reference, comparing
+    generated token sequences.  The runtime uses quantized weights while
+    HF uses FP, so exact match is not expected — we report token-level
+    accuracy and first mismatch position.
+
+    Args:
+        runtime: The ``StaticGemma4Runtime`` instance.
+        batch: The batch dict returned by ``build_static_inputs``.
+        prompt: Original prompt string.
+        image: Original image.
+        max_new_tokens: Maximum number of new tokens to generate.
+
+    Returns:
+        Runtime-generated token IDs of shape ``(1, prompt_len + num_generated)``.
+    """
+    # Runtime generation
+    runtime.reset_cache()
+    rt_generated = runtime.generate_greedy(batch, max_new_tokens, eos_token_id=None)
+
+    # HF reference generation
+    raw_inputs = batch.get("_raw_inputs", None)
+    if raw_inputs is None:
+        raw_inputs = runtime.processor(
+            text=prompt, images=image, return_tensors="pt", padding=False
+        )
+    raw_input_ids = raw_inputs["input_ids"].to(runtime.device)
+    pixel_values = raw_inputs["pixel_values"].to(runtime.device).to(runtime.model.dtype)
+    image_position_ids = raw_inputs.get("image_position_ids", None)
+    if image_position_ids is not None:
+        image_position_ids = image_position_ids.to(runtime.device)
+
+    # HF generate with explicit max_new_tokens
+    hf_generated = runtime.model.generate(
+        input_ids=raw_input_ids,
+        pixel_values=pixel_values,
+        image_position_ids=image_position_ids,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        pad_token_id=runtime.processor.tokenizer.pad_token_id,
+        eos_token_id=getattr(runtime.text_config, "eos_token_id", None),
+    )
+
+    # Compare sequences
+    rt_len = rt_generated.shape[1]
+    hf_len = hf_generated.shape[1]
+    min_len = min(rt_len, hf_len)
+
+    # Count matching tokens
+    matches = (rt_generated[:, :min_len] == hf_generated[:, :min_len]).sum().item()
+    accuracy = matches / min_len if min_len > 0 else 0.0
+
+    # Find first mismatch
+    first_mismatch = None
+    for i in range(min_len):
+        if rt_generated[0, i] != hf_generated[0, i]:
+            first_mismatch = i
+            break
+
+    print(f"[verify_step_generation] Runtime generated {rt_len} tokens")
+    print(f"[verify_step_generation] HF generated {hf_len} tokens")
+    print(
+        f"[verify_step_generation] Token accuracy: {accuracy * 100:.2f}% ({matches}/{min_len})"
+    )
+    if first_mismatch is not None:
+        print(f"[verify_step_generation] First mismatch at position {first_mismatch}")
+    else:
+        print("[verify_step_generation] All tokens match!")
+
+    # Print runtime generated text
+    rt_text = runtime.processor.decode(
+        rt_generated[0].tolist(), skip_special_tokens=False
+    )
+    hf_text = runtime.processor.decode(
+        hf_generated[0].tolist(), skip_special_tokens=False
+    )
+    print(f"[verify_step_generation] Runtime text: {rt_text}")
+    print(f"[verify_step_generation] HF text: {hf_text}")
+
+    if first_mismatch is None:
+        print("[verify_step_generation] All checks passed.")
+    else:
+        print("[verify_step_generation] Mismatches detected.")
+    return rt_generated
+
+
 def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     """Run the Gemma4 E2B static runtime smoke flow.
 
@@ -1658,6 +1829,19 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         num_decode_steps=cfg.verify_steps,
     )
 
-    # --- Step 8+: generation (not yet implemented) ---
-    print("[run_static_gemma4_runtime] SKIP: generation (not implemented in this PR)")
+    # --- Step 8: generation validation ---
+    print("[run_static_gemma4_runtime] Step 8: verify generation")
+    rt_generated = verify_step_generation(
+        runtime,
+        batch,
+        cfg.prompt,
+        image,
+        max_new_tokens=cfg.gen_steps,
+    )
+    # Detokenize and print generated text
+    rt_generated_text = processor.decode(
+        rt_generated[0].tolist(), skip_special_tokens=False
+    )
+    print(f"[run_static_gemma4_runtime] Generated text: {rt_generated_text}")
+
     print("[run_static_gemma4_runtime] Done.")
