@@ -24,6 +24,8 @@ from tico.circle.passes.optimization.remove.layout_ops import (
     _get_const_data,
     _is_reshape_op,
     _is_transpose_op,
+    _RESHAPE_BUILTIN_CODE,
+    _TRANSPOSE_BUILTIN_CODE,
     RemoveRedundantLayoutOpsPass,
 )
 
@@ -41,6 +43,7 @@ from test.unit_test.circle.fixture import (
 
 def _make_inverse_transpose_document() -> CircleDocument:
     """Create a non-square graph containing two inverse transposes."""
+
     permutation = struct.pack("<ii", 1, 0)
     subgraph = FakeSubGraph(
         name="main",
@@ -65,7 +68,7 @@ def _make_inverse_transpose_document() -> CircleDocument:
             FakeBuffer(data=permutation),
             FakeBuffer(data=permutation),
         ],
-        operatorCodes=[FakeOperatorCode(builtinCode=54)],
+        operatorCodes=[FakeOperatorCode(builtinCode=_TRANSPOSE_BUILTIN_CODE)],
         signatureDefs=[
             FakeSignatureDef(
                 signatureKey="main",
@@ -83,29 +86,31 @@ class TestPermutationHelpers(unittest.TestCase):
 
     def test_check_perm_identity(self):
         """Test identity permutation."""
-        # perm = [0, 1, 2]
+
         result = _check_perm([0, 1, 2], [0, 1, 2])
         self.assertTrue(result)
 
     def test_check_perm_inverse_2d(self):
-        """Test 2D inverse permutation (swap)."""
-        # perm1 = [1, 0], perm2 = [1, 0]
+        """Test a self-inverse 2D permutation."""
+
         result = _check_perm([1, 0], [1, 0])
         self.assertTrue(result)
 
     def test_check_perm_inverse_3d(self):
-        """Test 3D inverse permutation."""
-        # perm1 = [0, 2, 1], perm2 = [0, 2, 1]
-        result = _check_perm([0, 2, 1], [0, 2, 1])
+        """Test two non-self-inverse 3D permutations."""
+
+        result = _check_perm([2, 0, 1], [1, 2, 0])
         self.assertTrue(result)
 
     def test_check_perm_non_inverse(self):
         """Test non-inverse permutations."""
+
         result = _check_perm([1, 0, 2], [0, 2, 1])
         self.assertFalse(result)
 
     def test_check_perm_length_mismatch(self):
         """Test permutations of different lengths."""
+
         result = _check_perm([1, 0], [0, 2, 1])
         self.assertFalse(result)
 
@@ -115,28 +120,31 @@ class TestOperatorDetection(unittest.TestCase):
 
     def test_is_reshape_valid(self):
         """Test valid Reshape operator detection."""
+
         operator = Mock()
         operator.opcodeIndex = 0
 
         opcode = Mock()
-        opcode.builtinCode = 26  # RESHAPE
+        opcode.builtinCode = _RESHAPE_BUILTIN_CODE
 
         result = _is_reshape_op(operator, [opcode])
         self.assertTrue(result)
 
     def test_is_reshape_invalid_type(self):
-        """Test non-Reshape operator."""
+        """Test non-Reshape operator detection."""
+
         operator = Mock()
         operator.opcodeIndex = 0
 
         opcode = Mock()
-        opcode.builtinCode = 1  # ADD
+        opcode.builtinCode = 0  # ADD
 
         result = _is_reshape_op(operator, [opcode])
         self.assertFalse(result)
 
     def test_is_reshape_invalid_index(self):
         """Test Reshape with invalid opcode index."""
+
         operator = Mock()
         operator.opcodeIndex = 5
 
@@ -145,22 +153,24 @@ class TestOperatorDetection(unittest.TestCase):
 
     def test_is_transpose_valid(self):
         """Test valid Transpose operator detection."""
+
         operator = Mock()
         operator.opcodeIndex = 0
 
         opcode = Mock()
-        opcode.builtinCode = 54  # TRANSPOSE
+        opcode.builtinCode = _TRANSPOSE_BUILTIN_CODE
 
         result = _is_transpose_op(operator, [opcode])
         self.assertTrue(result)
 
     def test_is_transpose_invalid_type(self):
-        """Test non-Transpose operator."""
+        """Test non-Transpose operator detection."""
+
         operator = Mock()
         operator.opcodeIndex = 0
 
         opcode = Mock()
-        opcode.builtinCode = 26  # RESHAPE
+        opcode.builtinCode = _RESHAPE_BUILTIN_CODE
 
         result = _is_transpose_op(operator, [opcode])
         self.assertFalse(result)
@@ -171,6 +181,7 @@ class TestConstDataExtraction(unittest.TestCase):
 
     def test_get_const_data_valid(self):
         """Test extracting valid int32 constant data."""
+
         graph = Mock()
 
         tensor = Mock()
@@ -190,7 +201,8 @@ class TestConstDataExtraction(unittest.TestCase):
         self.assertEqual(result, [1, 0])
 
     def test_get_const_data_invalid_tensor_index(self):
-        """Test with invalid tensor index."""
+        """Test constant extraction with an invalid tensor index."""
+
         graph = Mock()
         graph.subgraph = Mock()
         graph.subgraph.tensors = []
@@ -199,7 +211,8 @@ class TestConstDataExtraction(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_get_const_data_no_buffer(self):
-        """Test with missing buffer data."""
+        """Test constant extraction without buffer data."""
+
         graph = Mock()
 
         tensor = Mock()
@@ -221,21 +234,21 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
 
     def test_pass_name(self):
         """Test pass name property."""
+
         pass_obj = RemoveRedundantLayoutOpsPass()
         self.assertEqual(pass_obj.name, "RemoveRedundantLayoutOpsPass")
 
     def test_run_with_mock_document(self):
-        """Test pass run method with minimal mock."""
+        """Test pass execution with a minimal mock document."""
+
         document = Mock()
         document.subgraph_count = 1
 
         graph = Mock()
         graph.subgraph = Mock()
-        # Make operators iterable for as_list()
         operators: list[object] = []
         graph.subgraph.operators = operators
 
-        # Make operatorCodes iterable
         operator_codes: list[object] = []
         model = Mock()
         model.operatorCodes = operator_codes
@@ -253,27 +266,25 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
         self.assertEqual(result.changes, 0)
 
     def test_remove_redundant_reshape_simple(self):
-        """Test removing redundant Reshape operation."""
+        """Test bypassing the first of two consecutive Reshape operators."""
+
         pass_obj = RemoveRedundantLayoutOpsPass()
 
         graph = Mock()
-
-        # reshape1 is a Reshape operation
         reshape1 = Mock()
-        reshape1.inputs = [0, 1]  # input=0, shape=1
+        reshape1.inputs = [0, 1]
         reshape1.opcodeIndex = 0
 
-        # reshape2 is also a Reshape operation that takes reshape1's output as input
         reshape2 = Mock()
-        reshape2.inputs = [2, 3]  # input=2 (reshape1's output), shape=3
+        reshape2.inputs = [2, 3]
         reshape2.opcodeIndex = 0
 
         graph.subgraph = Mock()
         graph.subgraph.operators = [reshape1, reshape2]
-        graph.producer = Mock(return_value=0)  # reshape1 produces tensor 2
+        graph.producer = Mock(return_value=0)
 
         opcode = Mock()
-        opcode.builtinCode = 26  # RESHAPE
+        opcode.builtinCode = _RESHAPE_BUILTIN_CODE
 
         graph.model = Mock()
         graph.model.operatorCodes = [opcode]
@@ -284,7 +295,8 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
         self.assertEqual(reshape2.inputs[0], 0)
 
     def test_remove_redundant_reshape_no_producer(self):
-        """Test Reshape with no producer (graph input)."""
+        """Test a Reshape whose input is a graph input."""
+
         pass_obj = RemoveRedundantLayoutOpsPass()
 
         graph = Mock()
@@ -298,6 +310,7 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
 
     def test_remove_redundant_transpose_inverse(self):
         """Test inverse Transpose cancellation and dead-code removal."""
+
         document = _make_inverse_transpose_document()
         subgraph = document.subgraph()
         second_transpose = subgraph.operators[1]
@@ -324,6 +337,7 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
 
     def test_inverse_transpose_preserves_shared_first_transpose(self):
         """Test that a shared first Transpose remains live after cancellation."""
+
         document = _make_inverse_transpose_document()
         subgraph = document.subgraph()
         first_transpose = subgraph.operators[0]
@@ -348,16 +362,17 @@ class TestRemoveRedundantLayoutOpsPass(unittest.TestCase):
         self.assertTrue(document.verify(raise_on_error=False).ok)
 
     def test_remove_redundant_transpose_missing_perm(self):
-        """Test Transpose with missing permutation data."""
+        """Test Transpose handling when permutation data is missing."""
+
         pass_obj = RemoveRedundantLayoutOpsPass()
 
         graph = Mock()
         graph.subgraph = Mock()
-        graph.subgraph.tensors = [None]  # Minimal tensors list
+        graph.subgraph.tensors = [None]
         graph.subgraph.operators = [Mock()]
 
         graph.model = Mock()
-        graph.model.buffers = [None]  # Minimal buffers list
+        graph.model.buffers = [None]
         graph.model.operatorCodes = []
 
         transpose = Mock()
