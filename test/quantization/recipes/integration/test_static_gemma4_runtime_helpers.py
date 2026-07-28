@@ -357,5 +357,277 @@ class TestAllocateEmptyCache(unittest.TestCase):
             self.assertEqual(cache.past_v.shape[-1], 256)
 
 
+class TestBuildDecodeMasksAndRope(unittest.TestCase):
+    """Tests for StaticGemma4Runtime.build_decode_masks_and_rope.
+
+    Verifies that decode masks have correct shapes, values, and sliding
+    window boundaries at various decode positions.
+    """
+
+    def test_full_attention_mask_shape(self):
+        """Full attention mask should have shape (batch_size, 1, max_seq)."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        text_config = SimpleNamespace(
+            layer_types=["full_attention"],
+            sliding_window=1024,
+        )
+        layout = SimpleNamespace(max_seq=64)
+
+        def mock_rotary_emb(x, pos_ids, layer_type):
+            return torch.ones(1, 1, 256), torch.zeros(1, 1, 256)
+
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+            ),
+        )
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+            past_len=10,
+            model=model,
+        )
+
+        masks, rope = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=2, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        self.assertIn("full_attention", masks)
+        self.assertEqual(masks["full_attention"].shape, (2, 1, 64))
+
+    def test_full_attention_mask_values(self):
+        """Full attention mask should allow positions 0..past_len."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        past_len = 10
+        max_seq = 64
+        text_config = SimpleNamespace(
+            layer_types=["full_attention"],
+            sliding_window=1024,
+        )
+        layout = SimpleNamespace(max_seq=max_seq)
+
+        def mock_rotary_emb(x, pos_ids, layer_type):
+            return torch.ones(1, 1, 256), torch.zeros(1, 1, 256)
+
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+            ),
+        )
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+            past_len=past_len,
+            model=model,
+        )
+
+        masks, _ = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        mask = masks["full_attention"][0, 0, :]  # (max_seq,)
+        mask_value = torch.finfo(torch.float32).min
+
+        # Positions 0..past_len should be 0.0 (allowed)
+        self.assertTrue(torch.all(mask[: past_len + 1] == 0.0))
+        # Positions past_len+1..max_seq-1 should be mask_value (forbidden)
+        self.assertTrue(torch.all(mask[past_len + 1 :] == mask_value))
+
+    def test_sliding_window_mask_boundary_early_decode(self):
+        """Sliding window should cover [0, past_len] when past_len < sliding_window."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        past_len = 5
+        sliding_window = 1024
+        max_seq = 64
+        text_config = SimpleNamespace(
+            layer_types=["sliding_attention"],
+            sliding_window=sliding_window,
+        )
+        layout = SimpleNamespace(max_seq=max_seq)
+
+        def mock_rotary_emb(x, pos_ids, layer_type):
+            return torch.ones(1, 1, 256), torch.zeros(1, 1, 256)
+
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+            ),
+        )
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+            past_len=past_len,
+            model=model,
+        )
+
+        masks, _ = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
+        mask_value = torch.finfo(torch.float32).min
+
+        # When past_len < sliding_window, window_start = 0
+        # Allowed: positions 0..past_len
+        self.assertTrue(torch.all(mask[: past_len + 1] == 0.0))
+        self.assertTrue(torch.all(mask[past_len + 1 :] == mask_value))
+
+    def test_sliding_window_mask_boundary_late_decode(self):
+        """Sliding window should cover [past_len-sw+1, past_len] when past_len >= sw."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        past_len = 100
+        sliding_window = 32
+        max_seq = 128
+        text_config = SimpleNamespace(
+            layer_types=["sliding_attention"],
+            sliding_window=sliding_window,
+        )
+        layout = SimpleNamespace(max_seq=max_seq)
+
+        def mock_rotary_emb(x, pos_ids, layer_type):
+            return torch.ones(1, 1, 256), torch.zeros(1, 1, 256)
+
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+            ),
+        )
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+            past_len=past_len,
+            model=model,
+        )
+
+        masks, _ = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
+        mask_value = torch.finfo(torch.float32).min
+
+        # window_start = max(0, past_len - sliding_window + 1) = 100 - 32 + 1 = 69
+        window_start = max(0, past_len - sliding_window + 1)
+
+        # Allowed: positions window_start..past_len
+        self.assertTrue(torch.all(mask[window_start : past_len + 1] == 0.0))
+        # Forbidden: positions 0..window_start-1 and past_len+1..max_seq-1
+        self.assertTrue(torch.all(mask[:window_start] == mask_value))
+        self.assertTrue(torch.all(mask[past_len + 1 :] == mask_value))
+
+    def test_sliding_window_mask_first_step(self):
+        """Sliding window at past_len=0 should allow only position 0."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        past_len = 0
+        sliding_window = 32
+        max_seq = 64
+        text_config = SimpleNamespace(
+            layer_types=["sliding_attention"],
+            sliding_window=sliding_window,
+        )
+        layout = SimpleNamespace(max_seq=max_seq)
+
+        def mock_rotary_emb(x, pos_ids, layer_type):
+            return torch.ones(1, 1, 256), torch.zeros(1, 1, 256)
+
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+            ),
+        )
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+            past_len=past_len,
+            model=model,
+        )
+
+        masks, _ = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
+        mask_value = torch.finfo(torch.float32).min
+
+        # At past_len=0, only position 0 should be allowed
+        self.assertEqual(mask[0].item(), 0.0)
+        self.assertTrue(torch.all(mask[1:] == mask_value))
+
+    def test_rope_computed_at_past_len(self):
+        """RoPE should be computed at position past_len."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        past_len = 42
+        max_seq = 64
+        text_config = SimpleNamespace(
+            layer_types=["full_attention"],
+            sliding_window=1024,
+        )
+        layout = SimpleNamespace(max_seq=max_seq)
+
+        # Track the position_ids passed to rotary_emb
+        captured_pos_ids = []
+
+        def mock_rotary_emb(x, pos_ids, layer_type):
+            captured_pos_ids.append(pos_ids.clone())
+            return torch.ones(1, 1, 256), torch.zeros(1, 1, 256)
+
+        model = SimpleNamespace(
+            model=SimpleNamespace(
+                language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+            ),
+        )
+        runtime = SimpleNamespace(
+            text_config=text_config,
+            layout=layout,
+            device=torch.device("cpu"),
+            past_len=past_len,
+            model=model,
+        )
+
+        _, _ = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime, batch_size=1, dtype=torch.float32  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(len(captured_pos_ids), 1)
+        pos_ids = captured_pos_ids[0]
+        self.assertEqual(pos_ids.shape, (1, 1))
+        self.assertEqual(pos_ids[0, 0].item(), past_len)
+
+
 if __name__ == "__main__":
     unittest.main()
