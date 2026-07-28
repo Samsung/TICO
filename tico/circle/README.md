@@ -20,6 +20,7 @@ CircleDocument
     ├── inspect                 stable summaries and text output
     ├── operations.extract      workflow-level graph extraction
     └── passes                  composable Circle-to-Circle rewrites
+            ├── RemoveRedundantLayoutOpsPass
             ├── DeadCodeEliminationPass
             └── CompactIndicesPass
 ```
@@ -124,10 +125,10 @@ result = extract_by_tensor_patterns(
 result.document.save("attention.circle")
 ```
 
-### Run cleanup passes
+### Run optimization and cleanup passes
 
 ```python
-from tico.circle.passes import CirclePassManager
+from tico.circle.passes import CirclePassManager, RemoveRedundantLayoutOpsPass
 from tico.circle.passes.cleanup import (
     CompactIndicesPass,
     DeadCodeEliminationPass,
@@ -135,14 +136,20 @@ from tico.circle.passes.cleanup import (
 
 pipeline = CirclePassManager(
     [
+        RemoveRedundantLayoutOpsPass(),
         DeadCodeEliminationPass(),
         CompactIndicesPass(),
     ]
 )
 result = pipeline.run(model)
 print(result.changes)
-model.save("model.cleaned.circle")
+model.save("model.optimized.circle")
 ```
+
+`RemoveRedundantLayoutOpsPass` rewires consecutive Reshape operations and inverse
+Transpose pairs so their redundant operators become dead. Run dead-code elimination
+after it to remove those operators, then compact the remaining tensor, buffer, and
+operator-code indices.
 
 By default, `CirclePassManager` verifies the document after every pass. 
 Set `CirclePassContext(verify_after_each_pass=False)` only when a multi-step 
@@ -265,16 +272,21 @@ Signatures for untouched subgraphs remain intact when `--keep-other-subgraphs` i
 
 ```bash
 tico-circle optimize model.circle \
-  --passes dce,compact \
-  -o model.cleaned.circle
+  --passes remove-redundant-layout-ops,dce,compact \
+  -o model.optimized.circle
 ```
 
-Available first-stage passes:
+Available passes:
 
 | Name | Implementation | Behavior |
 |---|---|---|
+| `remove-redundant-layout-ops` | `RemoveRedundantLayoutOpsPass` | Rewires consecutive Reshape operations and consecutive inverse Transpose pairs so redundant operators can be removed |
 | `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
+
+`--passes` defaults to `dce,compact`. To remove redundant layout patterns, select the
+three-pass pipeline shown above. Its order matters: the layout pass rewires dataflow,
+`dce` removes the newly dead operators, and `compact` removes and remaps unused objects.
 
 ### Standard input and output
 
@@ -282,7 +294,9 @@ Use `-` for a binary stream:
 
 ```bash
 tico-circle extract model.circle --ops 0-100 -o - \
-  | tico-circle optimize - --passes dce,compact -o output.circle
+  | tico-circle optimize - \
+      --passes remove-redundant-layout-ops,dce,compact \
+      -o output.circle
 ```
 
 Do not redirect `inspect` text into a Circle transformation command; `inspect` writes text by design.
@@ -346,6 +360,7 @@ Important test scenarios include:
 
 - graph producer and consumer indexing
 - operator and tensor-boundary selection
+- redundant Reshape and inverse Transpose elimination
 - dead branch elimination
 - signature tensor-map remapping
 - shared buffer preservation across two subgraphs
