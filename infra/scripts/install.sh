@@ -23,9 +23,7 @@
 # Helpers & constants
 ###############################################################################
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-SUPPORTED_FAMILIES=("2.5" "2.6" "2.7" "2.8" "2.9" "2.10")
-DEFAULT_FAMILY="2.7"
+source "${SCRIPTS_DIR}/pytorch_package_utils.sh" || exit 1
 
 show_help() {
 cat <<EOF_HELP
@@ -34,46 +32,74 @@ Usage: ./ccex install [OPTIONS]
 --dist                 Install from wheel in ./dist instead of editable mode
 --torch_ver VER        Torch version or family to install.
                        Accepts:
-                         • 2.5 ~ 2.10                 (family, installs latest)
-                         • 2.6.3, 2.7.0+cu118 ...   (exact)
+                         • 2.5 ~ 2.10                 (family, installs latest supported patch)
+                         • 2.6.0, 2.7.1+cu126 ...   (exact)
                          • nightly
-                       Default: ${DEFAULT_FAMILY}
---cuda_ver MAJ.MIN     Override detected CUDA version (e.g. 12.1)
+                       Default: ${PYTORCH_DEFAULT_FAMILY}
+--cuda_ver MAJ.MIN     Override detected host CUDA capability (e.g. 12.1)
 --cpu_only             Force CPU-only Torch installation
                        (disables CUDA detection / --cuda_ver)
 -h | --help            Show this help
 EOF_HELP
 }
 
-version_le() {
-  local a="$1" b="$2"
-  [[ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" == "$a" ]]
+install_torch() {
+  local index_url
+  local -a pip_args=("$@")
+
+  for index_url in "${PYTORCH_INDEX_URLS[@]}"; do
+    echo "[INFO] Installing ${pip_args[*]} from ${index_url}"
+    if python3 -m pip install "${pip_args[@]}" --index-url "${index_url}"; then
+      echo "[INFO] Successfully installed torch from ${index_url}"
+      return 0
+    fi
+
+    echo "[WARN] Failed to install ${pip_args[*]} from ${index_url}; trying next candidate..." >&2
+  done
+
+  echo "[ERROR] Could not install torch from any candidate PyTorch index." >&2
+  return 1
 }
 
-add_unique_index_url() {
-  local candidate="$1" existing
-  for existing in "${INDEX_URLS[@]}"; do
-    [[ "$existing" == "$candidate" ]] && return 0
-  done
-  INDEX_URLS+=("$candidate")
+installed_compute_matches_request() {
+  local installed_wheel_tag="$1"
+  local installed_cuda=""
+
+  if [[ "${_CPU_ONLY}" == "1" ]]; then
+    [[ "${installed_wheel_tag}" == "cpu" ]]
+    return
+  fi
+
+  if [[ -n "${_USER_CUDA}" ]]; then
+    if [[ "${installed_wheel_tag}" == "cpu" ]]; then
+      return 1
+    fi
+
+    installed_cuda="$(pytorch_cuda_tag_to_version "${installed_wheel_tag}")" || return 1
+    pytorch_version_le "${installed_cuda}" "${_USER_CUDA}"
+    return
+  fi
+
+  return 0
 }
 
 ###############################################################################
 # Option parsing
 ###############################################################################
 _DIST=0
-_TORCH_VER="${DEFAULT_FAMILY}"
+_TORCH_VER="${PYTORCH_DEFAULT_FAMILY}"
+_TORCH_VER_WAS_SET=0
 _USER_CUDA=""
-_CPU_ONLY=""
+_CPU_ONLY=0
 
 options=$(getopt -o h --long dist,torch_ver:,cuda_ver:,cpu_only,help -- "$@") || {
   echo "[ERROR] Invalid command-line options" >&2; exit 1; }
-eval set -- "$options"
+eval set -- "${options}"
 
 while true; do
   case "$1" in
       --dist)        _DIST=1 ;;
-      --torch_ver)   _TORCH_VER="$2"; shift ;;
+      --torch_ver)   _TORCH_VER="$2"; _TORCH_VER_WAS_SET=1; shift ;;
       --cuda_ver)    _USER_CUDA="$2"; shift ;;
       --cpu_only)    _CPU_ONLY=1 ;;
       -h|--help)     show_help; exit 0 ;;
@@ -83,157 +109,207 @@ while true; do
   shift
 done
 
+if [[ "${_CPU_ONLY}" == "1" && -n "${_USER_CUDA}" ]]; then
+  echo "[ERROR] --cpu_only and --cuda_ver cannot be used together." >&2
+  exit 1
+fi
+
+if [[ -n "${_USER_CUDA}" && ! "${_USER_CUDA}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  echo "[ERROR] Invalid --cuda_ver value '${_USER_CUDA}'. Expected MAJ.MIN." >&2
+  exit 1
+fi
+
 ###############################################################################
-# Detect (and maybe keep) any existing torch installation
+# Normalize the requested Torch version
+###############################################################################
+REQUEST_IS_NIGHTLY=0
+REQUEST_IS_EXACT=0
+REQUESTED_FAMILY=""
+REQUESTED_EXACT_VERSION=""
+REQUESTED_BUILD_TAG=""
+RESOLVED_TORCH_VERSION=""
+
+if [[ "${_TORCH_VER}" == "nightly" ]]; then
+  REQUEST_IS_NIGHTLY=1
+elif [[ "${_TORCH_VER}" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  REQUESTED_FAMILY="${_TORCH_VER}"
+  if ! pytorch_is_supported_family "${REQUESTED_FAMILY}"; then
+    echo "[ERROR] Unsupported --torch_ver family '${_TORCH_VER}'" >&2
+    exit 1
+  fi
+  RESOLVED_TORCH_VERSION="$(pytorch_resolve_latest_stable_version "${REQUESTED_FAMILY}")" || exit 1
+elif [[ "${_TORCH_VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[A-Za-z0-9._-]+)?$ ]]; then
+  REQUEST_IS_EXACT=1
+  REQUESTED_EXACT_VERSION="${_TORCH_VER}"
+  REQUESTED_FAMILY="$(pytorch_version_family "${_TORCH_VER}")" || exit 1
+  REQUESTED_BUILD_TAG="$(pytorch_local_build_tag "${_TORCH_VER}")"
+  if ! pytorch_is_supported_family "${REQUESTED_FAMILY}"; then
+    echo "[ERROR] Unsupported --torch_ver value '${_TORCH_VER}'" >&2
+    exit 1
+  fi
+  if [[ -n "${REQUESTED_BUILD_TAG}" ]] && ! pytorch_is_supported_wheel_tag "${REQUESTED_BUILD_TAG}"; then
+    echo "[ERROR] Unsupported Torch build tag '+${REQUESTED_BUILD_TAG}'" >&2
+    exit 1
+  fi
+  RESOLVED_TORCH_VERSION="${REQUESTED_EXACT_VERSION}"
+else
+  echo "[ERROR] Unsupported --torch_ver value '${_TORCH_VER}'" >&2
+  exit 1
+fi
+
+###############################################################################
+# Detect and possibly keep an existing Torch installation
 ###############################################################################
 INSTALLED_TORCH_FULL=""
+INSTALLED_TORCH_BASE=""
 INSTALLED_TORCH_FAMILY=""
-read -r INSTALLED_TORCH_FULL < <(
-  python3 - <<'PY'
-import importlib.util, re, sys
-spec = importlib.util.find_spec("torch")
-if spec is None:                       # Torch not found → just print blanks
-    print()
-    sys.exit(0)
-import torch
-print(torch.__version__)
-PY
-)
+INSTALLED_TORCH_WHEEL_TAG=""
+INSTALLED_TORCH_IS_NIGHTLY="0"
 
-if [[ -n "$INSTALLED_TORCH_FULL" ]]; then
-  INSTALLED_TORCH_FAMILY=$(echo "$INSTALLED_TORCH_FULL" | cut -d. -f1,2)
+if TORCH_INFO="$(pytorch_get_installed_torch_info 2>/dev/null)"; then
+  IFS=$'\t' read -r \
+    INSTALLED_TORCH_FULL \
+    INSTALLED_TORCH_BASE \
+    INSTALLED_TORCH_FAMILY \
+    INSTALLED_TORCH_WHEEL_TAG \
+    INSTALLED_TORCH_IS_NIGHTLY <<< "${TORCH_INFO}"
 fi
 
-# Normalise requested spec to family / exact
-REQUEST_IS_NIGHTLY=""
-REQUEST_IS_EXACT=""
-if [[ "$_TORCH_VER" == "nightly" ]]; then
-  REQUEST_IS_NIGHTLY=1
-elif [[ "$_TORCH_VER" =~ ^[0-9]+\.[0-9]+$ ]]; then
-  : # family only
-elif [[ "$_TORCH_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-  REQUEST_IS_EXACT=1
-else
-  echo "[ERROR] Unsupported --torch_ver value '${_TORCH_VER}'"; exit 1
-fi
+SKIP_TORCH_INSTALL=0
+if [[ -n "${INSTALLED_TORCH_FULL}" ]]; then
+  # With no explicit Torch version, preserve any supported stable family. If a
+  # compute-platform option requires reinstalling the wheel, reinstall the same
+  # family at its latest supported patch rather than falling back to the default.
+  if [[ "${_TORCH_VER_WAS_SET}" == "0" && \
+        "${INSTALLED_TORCH_IS_NIGHTLY}" == "0" ]] && \
+     pytorch_is_supported_family "${INSTALLED_TORCH_FAMILY}"; then
+    REQUESTED_FAMILY="${INSTALLED_TORCH_FAMILY}"
+    RESOLVED_TORCH_VERSION="$(pytorch_resolve_latest_stable_version \
+      "${REQUESTED_FAMILY}")" || exit 1
+  fi
 
-# Respect pre-installed Torch if allowed
-SKIP_TORCH_INSTALL=""
-if [[ -n "$INSTALLED_TORCH_FULL" ]]; then
-  if [[ " ${SUPPORTED_FAMILIES[*]} " =~ " ${INSTALLED_TORCH_FAMILY} " ]]; then
-    if [[ -z "$REQUEST_IS_NIGHTLY" && -z "$REQUEST_IS_EXACT" ]]; then
-      echo "[INFO] Supported torch ${INSTALLED_TORCH_FULL} already present — keeping it"
+  if installed_compute_matches_request "${INSTALLED_TORCH_WHEEL_TAG}"; then
+    if [[ "${_TORCH_VER_WAS_SET}" == "0" ]]; then
+      if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" == "0" ]] && \
+         pytorch_is_supported_family "${INSTALLED_TORCH_FAMILY}"; then
+        echo "[INFO] Supported torch ${INSTALLED_TORCH_FULL} already present — keeping it"
+        SKIP_TORCH_INSTALL=1
+        RESOLVED_TORCH_VERSION="${INSTALLED_TORCH_BASE}"
+      fi
+    elif [[ "${REQUEST_IS_NIGHTLY}" == "1" && "${INSTALLED_TORCH_IS_NIGHTLY}" == "1" ]]; then
+      echo "[INFO] Requested nightly torch ${INSTALLED_TORCH_FULL} already present — keeping it"
       SKIP_TORCH_INSTALL=1
-      _TORCH_VER="$INSTALLED_TORCH_FAMILY"   # for later requirements file pick
-    else
-      echo "[INFO] '--torch_ver' explicitly requests ${_TORCH_VER}; will override existing ${INSTALLED_TORCH_FULL}"
+    elif [[ "${REQUEST_IS_EXACT}" == "1" ]]; then
+      REQUESTED_BASE="$(pytorch_strip_local_version "${REQUESTED_EXACT_VERSION}")"
+      if [[ "${INSTALLED_TORCH_BASE}" == "${REQUESTED_BASE}" ]]; then
+        if [[ -z "${REQUESTED_BUILD_TAG}" || \
+              "${INSTALLED_TORCH_WHEEL_TAG}" == "${REQUESTED_BUILD_TAG}" ]]; then
+          echo "[INFO] Requested torch ${INSTALLED_TORCH_FULL} already present — keeping it"
+          SKIP_TORCH_INSTALL=1
+        fi
+      fi
+    elif [[ "${INSTALLED_TORCH_IS_NIGHTLY}" == "0" && \
+            "${INSTALLED_TORCH_BASE}" == "${RESOLVED_TORCH_VERSION}" ]]; then
+      echo "[INFO] Requested torch ${INSTALLED_TORCH_FULL} already present — keeping it"
+      SKIP_TORCH_INSTALL=1
     fi
+  fi
+
+  if [[ "${SKIP_TORCH_INSTALL}" == "0" ]]; then
+    echo "[INFO] Requested torch '${_TORCH_VER}' will replace existing ${INSTALLED_TORCH_FULL}"
+  fi
+fi
+
+###############################################################################
+# Resolve candidate wheel indices and install Torch
+###############################################################################
+if [[ "${SKIP_TORCH_INSTALL}" == "0" ]]; then
+  HOST_CUDA=""
+  PINNED_BUILD_TAG=""
+
+  if [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
+    TORCH_DEV_FILE="${SCRIPTS_DIR}/../dependency/torch_dev.txt"
+    PINNED_TORCH_VERSION="$(pytorch_get_pinned_requirement_version "${TORCH_DEV_FILE}" torch)"
+    if [[ -z "${PINNED_TORCH_VERSION}" ]]; then
+      echo "[ERROR] ${TORCH_DEV_FILE} must pin torch with 'torch==VERSION'." >&2
+      exit 1
+    fi
+    PINNED_BUILD_TAG="$(pytorch_local_build_tag "${PINNED_TORCH_VERSION}")"
+  fi
+
+  if [[ "${_CPU_ONLY}" == "1" ]]; then
+    if [[ -n "${REQUESTED_BUILD_TAG}" && "${REQUESTED_BUILD_TAG}" != "cpu" ]]; then
+      echo "[ERROR] --cpu_only conflicts with torch build '+${REQUESTED_BUILD_TAG}'." >&2
+      exit 1
+    fi
+    if [[ -n "${PINNED_BUILD_TAG}" && "${PINNED_BUILD_TAG}" != "cpu" ]]; then
+      echo "[ERROR] --cpu_only conflicts with nightly torch build '+${PINNED_BUILD_TAG}'." >&2
+      exit 1
+    fi
+    REQUESTED_BUILD_TAG="cpu"
+    echo "[INFO] Forcing CPU-only Torch installation"
+  elif [[ -n "${REQUESTED_BUILD_TAG}" ]]; then
+    echo "[INFO] Using explicitly requested Torch wheel ${REQUESTED_BUILD_TAG}"
+  elif [[ -n "${PINNED_BUILD_TAG}" ]]; then
+    REQUESTED_BUILD_TAG="${PINNED_BUILD_TAG}"
+    echo "[INFO] Using Torch wheel ${REQUESTED_BUILD_TAG} pinned by torch_dev.txt"
+  elif [[ -n "${_USER_CUDA}" ]]; then
+    HOST_CUDA="${_USER_CUDA}"
+    echo "[INFO] Using CUDA ${HOST_CUDA} specified with --cuda_ver"
+  elif HOST_CUDA="$(pytorch_detect_host_cuda_version)"; then
+    echo "[INFO] Detected CUDA ${HOST_CUDA}"
   else
-    echo "[WARN] Found unsupported torch ${INSTALLED_TORCH_FULL}; will install supported default"
-  fi
-fi
-
-###############################################################################
-# CUDA index-URL logic
-###############################################################################
-get_index_url_for_cuda_version() {
-  local cuda_ver="$1" nightly="$2"
-  local maj=${cuda_ver%.*} min=${cuda_ver#*.}
-  echo "https://download.pytorch.org/whl${nightly:+/nightly}/cu${maj}${min}"
-}
-
-INDEX_URL="https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
-CUDA_TO_USE=""
-
-if [[ -n "$_CPU_ONLY" ]]; then
-  echo "[INFO] Forcing CPU-only Torch installation"
-else
-  if [[ -n "$_USER_CUDA" ]]; then
-    CUDA_TO_USE="$_USER_CUDA"
-    echo "[INFO] Using CUDA ${CUDA_TO_USE} specified with --cuda_ver"
-  elif command -v nvcc &>/dev/null; then
-    CUDA_TO_USE=$(nvcc --version | grep -oP "release \K[0-9]+\.[0-9]+")
-    echo "[INFO] Detected CUDA ${CUDA_TO_USE}"
-  elif command -v nvidia-smi &>/dev/null; then
-    CUDA_TO_USE=$(nvidia-smi | grep -oP "CUDA Version: \K[0-9]+\.[0-9]+")
-    echo "[INFO] Detected CUDA ${CUDA_TO_USE}"
+    HOST_CUDA=""
+    echo "[INFO] CUDA was not detected; using a CPU Torch wheel"
   fi
 
-  if [[ -n "$CUDA_TO_USE" ]]; then
-    INDEX_URL=$(get_index_url_for_cuda_version "$CUDA_TO_USE" "$REQUEST_IS_NIGHTLY")
-  fi
-fi
-
-INDEX_URLS=()
-add_unique_index_url "$INDEX_URL"
-
-if [[ -z "$_CPU_ONLY" && -n "$CUDA_TO_USE" ]]; then
-  # PyTorch does not publish wheels for every CUDA minor version.
-  # Example: CUDA 13.1 maps to cu131, but cu131 may not exist.
-  # Try the detected/requested CUDA first, then fall back to known PyTorch
-  # CUDA wheel indices that are <= the detected/requested CUDA version.
-  PYTORCH_CUDA_FALLBACKS=("13.0" "12.8" "12.6" "12.4" "12.1" "11.8")
-  for cuda_fb in "${PYTORCH_CUDA_FALLBACKS[@]}"; do
-    if version_le "$cuda_fb" "$CUDA_TO_USE"; then
-      add_unique_index_url "$(get_index_url_for_cuda_version "$cuda_fb" "$REQUEST_IS_NIGHTLY")"
-    fi
-  done
-
-  # Last resort: keep install working on machines without a matching CUDA wheel.
-  add_unique_index_url "https://download.pytorch.org/whl${REQUEST_IS_NIGHTLY:+/nightly}/cpu"
-fi
-
-###############################################################################
-# Torch installation (may be skipped)
-###############################################################################
-install_torch() {
-  local spec="$1"
-  local index_url
-
-  for index_url in "${INDEX_URLS[@]}"; do
-    echo "[INFO] Installing torch (${spec}) from ${index_url}"
-    if python3 -m pip install ${spec} --index-url "${index_url}"; then
-      INDEX_URL="${index_url}"
-      echo "[INFO] Successfully installed torch from ${index_url}"
-      return 0
-    fi
-
-    echo "[WARN] Failed to install torch (${spec}) from ${index_url}; trying next candidate..." >&2
-  done
-
-  echo "[ERROR] Could not install torch (${spec}) from any candidate PyTorch index." >&2
-  return 1
-}
-
-if [[ -z "$SKIP_TORCH_INSTALL" ]]; then
-  if [[ -n "$REQUEST_IS_NIGHTLY" ]]; then
-    install_torch "-r ${SCRIPTS_DIR}/../dependency/torch_dev.txt" || exit 1
+  if [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
+    pytorch_build_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
+    install_torch -r "${TORCH_DEV_FILE}" || exit 1
   else
-    if [[ -n "$REQUEST_IS_EXACT" ]]; then
-      install_torch "torch==${_TORCH_VER}" || exit 1
-    else
-      # family only → pip’s ~= spec picks the newest patch in the family
-      install_torch "torch==${_TORCH_VER}.*" || exit 1
-    fi
+    pytorch_build_index_urls \
+      "${REQUESTED_FAMILY}" "${HOST_CUDA}" 0 "${REQUESTED_BUILD_TAG}" || exit 1
+    echo "[INFO] Resolved torch ${_TORCH_VER} to ${RESOLVED_TORCH_VERSION}"
+    install_torch "torch==${RESOLVED_TORCH_VERSION}" || exit 1
   fi
 fi
+
+###############################################################################
+# Verify the installed Torch package
+###############################################################################
+TORCH_INFO="$(pytorch_get_installed_torch_info)" || {
+  echo "[ERROR] Torch is not importable after installation." >&2
+  exit 1
+}
+IFS=$'\t' read -r \
+  INSTALLED_TORCH_FULL \
+  INSTALLED_TORCH_BASE \
+  INSTALLED_TORCH_FAMILY \
+  INSTALLED_TORCH_WHEEL_TAG \
+  INSTALLED_TORCH_IS_NIGHTLY <<< "${TORCH_INFO}"
+
+echo "[INFO] Installed torch: ${INSTALLED_TORCH_FULL}"
+echo "[INFO] Torch wheel build: ${INSTALLED_TORCH_WHEEL_TAG}"
 
 ###############################################################################
 # Install the auxiliary Python requirements
 ###############################################################################
 REQ_FILE="${SCRIPTS_DIR}/install_requirements.txt"
 echo "[INFO] Installing auxiliary requirements from ${REQ_FILE##*/}"
-python3 -m pip install -r "$REQ_FILE"
+python3 -m pip install -r "${REQ_FILE}" || exit 1
 
 ###############################################################################
 # TICO itself
 ###############################################################################
-if [[ $_DIST -eq 1 ]]; then
+if [[ "${_DIST}" -eq 1 ]]; then
   echo "[INFO] Installing TICO wheel from ./dist"
-  python3 -m pip install --force-reinstall --no-deps "${CCEX_PROJECT_PATH}"/dist/tico*.whl
+  python3 -m pip install --force-reinstall --no-deps \
+    "${CCEX_PROJECT_PATH}"/dist/tico*.whl || exit 1
 else
   echo "[INFO] Installing TICO in editable mode"
-  python3 -m pip install --editable "${CCEX_PROJECT_PATH}"
+  python3 -m pip install --editable "${CCEX_PROJECT_PATH}" || exit 1
 fi
 
+# TorchVision is installed by `./ccex configure test`, so a global `pip check`
+# belongs at the end of that command rather than between the two setup stages.
 echo "[SUCCESS] ./ccex install completed"
