@@ -28,3 +28,17 @@ class SimplePReLU(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(1, 2, 3, 3),), {}
+
+
+class ChannelWisePReLU(TestModuleBase):
+    """Exercise PReLU with one learned slope per NCHW channel."""
+
+    def __init__(self):
+        super().__init__()
+        self.prelu = torch.nn.PReLU(num_parameters=2)
+
+    def forward(self, x):
+        return self.prelu(x)
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 2, 3, 3),), {}

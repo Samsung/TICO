@@ -113,6 +113,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
             torch.ops.aten.instance_norm.default,
             torch.ops.aten._safe_softmax.default,
             torch.ops.aten.relu6.default,  # Do not decompose to hardtanh
+            torch.ops.aten.prelu.default,
             torch.ops.aten.linear.default,
             torch.ops.aten.upsample_nearest2d.vec,
             torch.ops.aten.rms_norm.default,

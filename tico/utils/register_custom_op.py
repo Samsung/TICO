@@ -46,6 +46,66 @@ def CircleResizeNearestNeighbor():
         return result
 
 
+def CirclePReLU():
+    """Register a channel-last PReLU operator for Circle lowering.
+
+    PyTorch PReLU treats dimension 1 as the channel dimension, while Circle
+    PReLU applies regular right-aligned broadcasting. This internal operator
+    makes the channel-last contract explicit after layout legalization.
+    """
+
+    @custom_op("circle_custom::prelu", mutates_args=())
+    def prelu(input_: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Apply PReLU with channel-last broadcasting semantics."""
+        if input_.dim() == 0:
+            raise RuntimeError(
+                "CirclePReLU requires an input tensor with rank greater than zero."
+            )
+        if weight.dim() != 1:
+            raise RuntimeError(
+                "CirclePReLU requires a rank-1 weight tensor, "
+                f"but received rank {weight.dim()}."
+            )
+
+        channels = input_.size(-1)
+        num_parameters = weight.numel()
+        if num_parameters not in (1, channels):
+            raise RuntimeError(
+                "CirclePReLU weight must contain one value or match the last "
+                "input dimension: "
+                f"weight={num_parameters}, channels={channels}."
+            )
+
+        broadcast_shape = [1] * (input_.dim() - 1) + [num_parameters]
+        alpha = weight.reshape(broadcast_shape)
+        return torch.where(input_ >= 0, input_, input_ * alpha)
+
+    @register_fake("circle_custom::prelu")
+    def _(input_: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Infer metadata for the internal channel-last PReLU operator."""
+        if input_.dim() == 0:
+            raise RuntimeError(
+                "CirclePReLU requires an input tensor with rank greater than zero."
+            )
+        if weight.dim() != 1:
+            raise RuntimeError(
+                "CirclePReLU requires a rank-1 weight tensor, "
+                f"but received rank {weight.dim()}."
+            )
+
+        channels = input_.shape[-1]
+        num_parameters = weight.shape[0]
+        if isinstance(channels, int) and isinstance(num_parameters, int):
+            if num_parameters not in (1, channels):
+                raise RuntimeError(
+                    "CirclePReLU weight must contain one value or match the last "
+                    "input dimension: "
+                    f"weight={num_parameters}, channels={channels}."
+                )
+
+        return input_.new_empty(input_.size())
+
+
 def CircleConv2d():
     """
     Note that this op follows the input spec of `aten.conv2d.default` whose number
@@ -902,6 +962,7 @@ def RegisterGatherNdOp() -> None:
 # Add custom ops to the torch namespace
 def RegisterOps():
     CircleResizeNearestNeighbor()
+    CirclePReLU()
     CircleDepthwiseConv2d()
     CircleDepthwiseConv2dPadding()
     CircleConv2d()

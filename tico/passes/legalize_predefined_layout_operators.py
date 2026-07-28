@@ -35,6 +35,8 @@ from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     InstanceNormArgs,
     MaxPool2dWithIndicesArgs,
+    PermuteArgs,
+    PReLUArgs,
 )
 
 
@@ -94,10 +96,111 @@ class LegalizePreDefinedLayoutOperators(PassBase):
           Input[NCHW] ---- aten.permute(NCHW_to_NHWC) ---- circle_cumstom.depthwise_conv2d[NHWC] ---- aten.permute(NHWC_to_NCHW) ---- OUTPUT[NCHW]
           Weight[CNHW] - (aten.dequantize) - aten.permute(CNHW_to_NHWC) ---/
           Bias ----------(aten.dequantize) -------------------------------/
+
+    [3] aten.prelu with one slope per PyTorch channel
+
+        [BEFORE PASS]
+          Input[N,C,...] ---- aten.prelu[N,C,...] ---- OUTPUT[N,C,...]
+          Weight[C] --------/
+
+        [AFTER PASS]
+          Input[N,C,...] ---- aten.permute(channel_first_to_last) ---- circle_custom.prelu[N,...,C] ---- aten.permute(channel_last_to_first) ---- OUTPUT[N,C,...]
+          Weight[C] --------------------------------------------------/
     """
 
     def __init__(self):
         super().__init__()
+
+    def legalize_prelu(
+        self, exported_program: ExportedProgram, node: torch.fx.Node
+    ) -> bool:
+        """Lower channel-wise PyTorch PReLU to Circle PReLU.
+
+        PyTorch applies a rank-1 PReLU weight along input dimension 1. Circle
+        PReLU follows regular right-aligned broadcasting, so this pass moves
+        dimension 1 to the last position before lowering the operation. The
+        output is permuted back to preserve the PyTorch-visible layout.
+
+        A shared one-element slope does not require legalization. Rank-2 input
+        also needs no transformation because its channel dimension is already
+        the last dimension.
+        """
+        logger = logging.getLogger(__name__)
+
+        graph_module = exported_program.graph_module
+        graph = graph_module.graph
+
+        args = PReLUArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
+        input_ = args.input
+        weight = args.weight
+
+        input_shape = extract_shape(input_)
+        weight_shape = extract_shape(weight)
+
+        if len(weight_shape) != 1:
+            raise NotYetSupportedError(
+                "Only rank-1 PReLU weights are supported: "
+                f"weight shape={weight_shape}."
+            )
+
+        num_parameters = weight_shape[0]
+        if num_parameters == 1 or len(input_shape) <= 2:
+            return False
+
+        input_channels = input_shape[1]
+        if isinstance(input_channels, int) and isinstance(num_parameters, int):
+            if input_channels != num_parameters:
+                raise NotYetSupportedError(
+                    "PReLU weight size must match input dimension 1: "
+                    f"input shape={input_shape}, weight shape={weight_shape}."
+                )
+
+        rank = len(input_shape)
+        channel_first_to_last = [0, *range(2, rank), 1]
+        channel_last_to_first = [0, rank - 1, *range(1, rank - 1)]
+
+        # Reuse an already channel-last producer when the input is the output
+        # permutation inserted for another predefined-layout operator.
+        prelu_input = input_
+        if is_target_node(input_, [torch.ops.aten.permute.default]):
+            input_permute_args = PermuteArgs(
+                *input_.args, **input_.kwargs  # type: ignore[arg-type]
+            )
+            if list(input_permute_args.dims) == channel_last_to_first:
+                prelu_input = input_permute_args.input
+            else:
+                with graph.inserting_after(input_):
+                    prelu_input = create_node(
+                        graph,
+                        torch.ops.aten.permute.default,
+                        args=(input_, channel_first_to_last),
+                        origin=input_,
+                    )
+        else:
+            with graph.inserting_after(input_):
+                prelu_input = create_node(
+                    graph,
+                    torch.ops.aten.permute.default,
+                    args=(input_, channel_first_to_last),
+                    origin=input_,
+                )
+
+        with graph.inserting_before(node):
+            circle_prelu = create_node(
+                graph,
+                torch.ops.circle_custom.prelu,
+                args=(prelu_input, weight),
+                origin=node,
+            )
+            prelu_out_permute = create_node(
+                graph,
+                torch.ops.aten.permute.default,
+                args=(circle_prelu, channel_last_to_first),
+            )
+
+        node.replace_all_uses_with(prelu_out_permute, propagate_meta=True)
+        logger.debug(f"{node.name} is replaced with {circle_prelu.name}")
+        return True
 
     def legalize_conv2d(self, exported_program, node) -> bool:
         logger = logging.getLogger(__name__)
@@ -436,6 +539,7 @@ class LegalizePreDefinedLayoutOperators(PassBase):
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         target_to_legalize_func = {
+            torch.ops.aten.prelu.default: self.legalize_prelu,
             torch.ops.aten.conv2d.default: self.legalize_conv2d,
             torch.ops.aten.conv2d.padding: self.legalize_conv2d,
             torch.ops.aten.conv_transpose2d.input: self.legalize_conv_transpose2d,

@@ -29,7 +29,12 @@ from tico.utils.validate_args_kwargs import PReLUArgs
 
 @register_node_visitor
 class PReLUVisitor(NodeVisitor):
-    target: List[torch._ops.OpOverload] = [torch.ops.aten.prelu.default]
+    """Serialize native or layout-legalized PReLU nodes as Circle PRELU."""
+
+    target: List[torch._ops.OpOverload] = [
+        torch.ops.aten.prelu.default,
+        torch.ops.circle_custom.prelu,
+    ]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
         super().__init__(op_codes, graph)

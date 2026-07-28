@@ -314,6 +314,39 @@ class TestRegisterCustomOp(unittest.TestCase):
         # Check output shape
         self.assertEqual(list(result.shape), list(input_tensor.shape))
 
+    def test_circle_prelu_channelwise(self):
+        """Test CirclePReLU with one slope per NHWC channel."""
+        input_tensor = torch.randn(2, 4, 5, 3)
+        weight_tensor = torch.randn(3)
+
+        result = torch.ops.circle_custom.prelu(input_tensor, weight_tensor)
+        expected = torch.where(
+            input_tensor >= 0,
+            input_tensor,
+            input_tensor * weight_tensor.reshape(1, 1, 1, 3),
+        )
+
+        torch.testing.assert_close(result, expected)
+
+    def test_circle_prelu_shared_slope(self):
+        """Test CirclePReLU with one slope shared by all channels."""
+        input_tensor = torch.randn(2, 4, 5, 3)
+        weight_tensor = torch.randn(1)
+
+        result = torch.ops.circle_custom.prelu(input_tensor, weight_tensor)
+        expected = torch.where(
+            input_tensor >= 0,
+            input_tensor,
+            input_tensor * weight_tensor,
+        )
+
+        torch.testing.assert_close(result, expected)
+
+    def test_circle_prelu_rejects_channel_mismatch(self):
+        """Test that CirclePReLU rejects an incompatible channel count."""
+        with self.assertRaisesRegex(RuntimeError, "match the last input dimension"):
+            torch.ops.circle_custom.prelu(torch.randn(1, 4, 5, 3), torch.randn(2))
+
     def test_circle_mx_fake_quantize_basic(self):
         """Test CircleMXFakeQuantize basic functionality."""
         input_tensor = torch.randn(2, 32, 32, 3)
