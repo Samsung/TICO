@@ -73,7 +73,7 @@ class LlamaGPTQConfig(BaseConfig):
     # wins if its error is at least mse_tolerance better (relatively) than the
     # current best. Prevents tiny float noise from flipping the winning
     # scale/zero, making results more batch-size-independent.
-    mse_tolerance: float = 1e-5
+    mse_tolerance: float = 1e-2
 
     # GPTQ.fasterquant params (algorithm hyperparams)
     percdamp: float = 0.01

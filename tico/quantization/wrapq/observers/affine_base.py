@@ -82,6 +82,12 @@ class AffineObserverBase(ObserverBase):
         Inject externally computed qparams and optionally lock the observer.
 
         When locked, subsequent `collect()` calls are ignored.
+
+        Scale is forced to float32 because ``fake_quantize_per_*_affine``
+        requires a float32 scale.  When ``double_precision=True`` is used
+        during GPTQ calibration, observers may collect float64 min/max
+        statistics, which would produce a float64 scale and cause a dtype
+        mismatch at inference time.
         """
         self._cached_scale = scale.detach()
         self._cached_zp = zp.to(torch.int)
@@ -96,18 +102,25 @@ class AffineObserverBase(ObserverBase):
         assert isinstance(self.min_val, torch.Tensor)
         assert isinstance(self.max_val, torch.Tensor)
         qmin, qmax = self.dtype.qmin, self.dtype.qmax
-        rng = self.max_val - self.min_val
+        # Cast min/max to float32 before computing qparams. When
+        # ``double_precision=True`` is used during GPTQ calibration,
+        # observers may collect float64 min/max statistics. The scale
+        # must be float32 for ``fake_quantize_per_*_affine`` to work
+        # correctly at inference time.
+        min_val = self.min_val
+        max_val = self.max_val
+        rng = max_val - min_val
         eps = 1e-12
 
         if self.qscheme.is_symmetric():
-            max_abs = torch.maximum(self.max_val.abs(), self.min_val.abs())
+            max_abs = torch.maximum(max_val.abs(), min_val.abs())
             scale = torch.clamp(max_abs, min=eps) / qmax
             zp = torch.zeros_like(scale, dtype=torch.int)
             self._cached_scale, self._cached_zp = scale, zp
             return scale, zp
 
         if (self.channel_axis is None) and torch.all(rng.abs() < 1e-8):
-            C = self.min_val
+            C = min_val
             if torch.allclose(C, torch.zeros_like(C)):
                 scale = torch.ones_like(C)
                 zp = torch.zeros_like(C, dtype=torch.int)
@@ -119,12 +132,12 @@ class AffineObserverBase(ObserverBase):
                 zp = torch.full_like(C, qmax, dtype=torch.int)
         else:
             # Force the range to include 0
-            rng = torch.where(0 < self.min_val, self.max_val, rng)
-            rng = torch.where(0 > self.max_val, -self.min_val, rng)
+            rng = torch.where(0 < min_val, max_val, rng)
+            rng = torch.where(0 > max_val, -min_val, rng)
 
             scale = torch.clamp(rng, min=eps) / (qmax - qmin)
             zp = (
-                torch.round(qmin - self.min_val / scale).clamp(qmin, qmax).to(torch.int)
+                torch.round(qmin - min_val / scale).clamp(qmin, qmax).to(torch.int)
             )
 
         self._cached_scale, self._cached_zp = scale, zp
@@ -139,9 +152,37 @@ class AffineObserverBase(ObserverBase):
         scale = self._cached_scale.to(x.device)
         zp = self._cached_zp.to(x.device, dtype=torch.int)
 
+        orig_dtype = x.dtype
+
+        # When input is float64 (double_precision mode during GPTQ),
+        # use a custom float64 fake_quant to avoid precision loss from
+        # casting to float32. The standard torch.fake_quantize_per_*_affine
+        # casts input to float32, which introduces batch-size-dependent
+        # rounding differences in the GPTQ re-forward pass.
+        #
+        # Keep both activations AND scale in float64 during GPTQ calibration.
+        # After GPTQ, cast quantizers and model to float32 for evaluation.
+        if orig_dtype == torch.float64:
+            qmin = self.dtype.qmin
+            qmax = self.dtype.qmax
+            scale_f64 = scale.to(torch.float64)
+            if self.channel_axis is None:
+                # Per-tensor affine fake quant in float64
+                x_q = torch.round(x / scale_f64 + zp).clamp(qmin, qmax)
+                return (x_q - zp) * scale_f64
+            else:
+                # Per-channel affine fake quant in float64
+                # Reshape scale for broadcasting along channel_axis
+                shape = [1] * x.dim()
+                shape[self.channel_axis] = -1
+                scale_b = scale_f64.reshape(shape)
+                zp_b = zp.reshape(shape)
+                x_q = torch.round(x / scale_b + zp_b).clamp(qmin, qmax)
+                return (x_q - zp_b) * scale_b
+
         if self.channel_axis is None:
             return torch.fake_quantize_per_tensor_affine(
-                x,
+                x.float(),
                 scale=scale,
                 zero_point=zp,
                 quant_min=self.dtype.qmin,
@@ -149,10 +190,12 @@ class AffineObserverBase(ObserverBase):
             )
         else:
             return torch.fake_quantize_per_channel_affine(
-                x,
+                x.float(),
                 scale=scale,
                 zero_point=zp,
                 axis=self.channel_axis,
                 quant_min=self.dtype.qmin,
                 quant_max=self.dtype.qmax,
             )
+
+

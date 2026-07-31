@@ -1183,7 +1183,10 @@ class GPTQ:
                 )
                 self.quantizer.sensitivity = self.quantizer.sensitivity.flatten(1)
 
-        W = W.float()
+        if self.double_precision:
+            W = W.double()
+        else:
+            W = W.float()
         user_percdamp = percdamp  # save before adaptive_percdamp may modify it
         tick = time.time()
         if not self.quantizer.ready():
@@ -1425,14 +1428,12 @@ class GPTQ:
                 f"(nsamples={self.nsamples}, num_batches={self.batch_id})"
             )
 
-        # Cast Hinv, P to float32
-        Hinv = Hinv.float()
-        if P is not None:
-            P = P.float()
-        #self.quantizer.to(torch.float32)
+        if not self.double_precision:
+            Hinv = Hinv.float()
+            if P is not None:
+                P = P.float()
 
         self.quantizer.update(W, Hinv, perm, P=P)
-        #Q = self.quantizer.quantize(W)
 
         assert isinstance(Hinv, torch.Tensor)
         
@@ -1556,8 +1557,11 @@ class GPTQ:
             )
             _debug_tag2 = self.layer_name.replace(".", "_")
             torch.save(Q.cpu(), _os2.path.join(_debug_dir2, f"Q_{_debug_tag2}.pt"))
+            # Save quantizer parameters (scale, zero) for cross-batch-size comparison
+            torch.save(self.quantizer.scale.cpu(), _os2.path.join(_debug_dir2, f"scale_{_debug_tag2}.pt"))
+            torch.save(self.quantizer.zero.cpu(), _os2.path.join(_debug_dir2, f"zero_{_debug_tag2}.pt"))
             print(
-                f"  [GPTQ debug] Saved Q to {_debug_dir2}/Q_{_debug_tag2}.pt"
+                f"  [GPTQ debug] Saved Q, scale, zero to {_debug_dir2}/Q_{_debug_tag2}.pt"
             )
 
         if isinstance(self.layer, nn.ConvTranspose2d):

@@ -1024,19 +1024,49 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             # casting the entire model — only the embedding lookup is done in
             # float64, which is the source of the inputs to the first decoder
             # layer.
-            embed_tokens = model.get_input_embeddings()
-            self._orig_embed_dtype = embed_tokens.weight.dtype
-            embed_tokens.to(torch.float64)
+            # Unwrap PTQ wrapper to reach the inner model that has
+            # get_input_embeddings() and rotate_embedding.
+            # Non-PTQ: model.model is LlamaModel
+            # PTQ-wrapped: model.model is PTQWrapper, .wrapped is QuantLlamaModel
+            inner_model = getattr(model, "model", model)
+            if isinstance(inner_model, PTQWrapper):
+                inner_model = inner_model.wrapped
+            embed_tokens = inner_model.get_input_embeddings()
+            # Unwrap PTQ wrapper if embed_tokens is wrapped:
+            # PTQWrapper → .wrapped (QuantEmbedding) → .module (nn.Embedding)
+            embed_inner = embed_tokens
+            if isinstance(embed_inner, PTQWrapper):
+                embed_inner = embed_inner.wrapped
+            if hasattr(embed_inner, "module"):
+                embed_inner = embed_inner.module
+            self._orig_embed_dtype = embed_inner.weight.dtype
+            embed_inner.to(torch.float64)
+
 
             # For SpinQuant models, rotate_embedding is a Linear layer that
             # processes the embed_tokens output. Cast it to float64 too so the
             # dtype chain stays consistent: embed_tokens (fp64) → rotate_embedding (fp64).
+            # rotate_embedding lives on the inner LlamaModel, which is deeper:
+            #   Non-PTQ: inner_model is already LlamaModel (has rotate_embedding)
+            #   PTQ: inner_model is QuantLlamaForCausalLM → .model is PTQWrapper
+            #        → .wrapped is QuantLlamaModel (has rotate_embedding)
             self._orig_rotate_embed_dtype = None
-            model_inner = getattr(model, "model", model)
-            if hasattr(model_inner, "rotate_embedding"):
-                rotate_embed = model_inner.rotate_embedding
-                self._orig_rotate_embed_dtype = rotate_embed.weight.dtype
-                rotate_embed.to(torch.float64)
+            rotate_model = inner_model
+            if hasattr(rotate_model, "model"):
+                rotate_model = rotate_model.model
+            if isinstance(rotate_model, PTQWrapper):
+                rotate_model = rotate_model.wrapped
+            if hasattr(rotate_model, "rotate_embedding"):
+                rotate_embed = rotate_model.rotate_embedding
+                # Unwrap PTQ wrapper if rotate_embedding is wrapped:
+                # PTQWrapper → .wrapped (QuantLinear) → .module (nn.Linear)
+                rotate_inner = rotate_embed
+                if isinstance(rotate_inner, PTQWrapper):
+                    rotate_inner = rotate_inner.wrapped
+                if hasattr(rotate_inner, "module"):
+                    rotate_inner = rotate_inner.module
+                self._orig_rotate_embed_dtype = rotate_inner.weight.dtype
+                rotate_inner.to(torch.float64)
         else:
             self._orig_attn_impl = None
             self._orig_embed_dtype = None
@@ -1254,11 +1284,28 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         """Recursively cast all tensors in a list/dict/tensor to float64."""
         if isinstance(obj, torch.Tensor):
             return obj.double()
-        if isinstance(obj, (list, tuple)):
-            return type(obj)(LlamaGPTQQuantizer._cast_to_double(o) for o in obj)
+        if isinstance(obj, tuple):
+            return tuple(LlamaGPTQQuantizer._cast_to_double(o) for o in obj)
+        if isinstance(obj, list):
+            return [LlamaGPTQQuantizer._cast_to_double(o) for o in obj]
         if isinstance(obj, dict):
             return {k: LlamaGPTQQuantizer._cast_to_double(v) for k, v in obj.items()}
         return obj
+
+    @staticmethod
+    def _cast_to_float(obj):
+        """Recursively cast all tensors in a list/dict/tensor to float32."""
+        if isinstance(obj, torch.Tensor):
+            return obj.float()
+        if isinstance(obj, tuple):
+            return tuple(LlamaGPTQQuantizer._cast_to_float(o) for o in obj)
+        if isinstance(obj, list):
+            return [LlamaGPTQQuantizer._cast_to_float(o) for o in obj]
+        if isinstance(obj, dict):
+            return {k: LlamaGPTQQuantizer._cast_to_float(v) for k, v in obj.items()}
+        
+        return obj
+
 
     @staticmethod
     @contextmanager
@@ -1419,6 +1466,45 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             self._first_layer_ref is not None and self._orig_layer_forward is not None
         )
         self._first_layer_ref.forward = self._orig_layer_forward
+        # Restore embed_tokens to original dtype if we cast it to float64
+        if self._orig_embed_dtype is not None:
+            # Unwrap PTQ wrapper to reach the inner model that has
+            # get_input_embeddings() and rotate_embedding.
+            inner_model = getattr(model, "model", model)
+            if isinstance(inner_model, PTQWrapper):
+                inner_model = inner_model.wrapped
+            embed_tokens = inner_model.get_input_embeddings()
+            # Unwrap PTQ wrapper if embed_tokens is wrapped:
+            # PTQWrapper → .wrapped (QuantEmbedding) → .module (nn.Embedding)
+            embed_inner = embed_tokens
+            if isinstance(embed_inner, PTQWrapper):
+                embed_inner = embed_inner.wrapped
+            if hasattr(embed_inner, "module"):
+                embed_inner = embed_inner.module
+            embed_inner.to(self._orig_embed_dtype)
+
+        # Restore rotate_embedding to original dtype if we cast it to float64
+        if self._orig_rotate_embed_dtype is not None:
+            # Unwrap to the inner LlamaModel that owns rotate_embedding.
+            #   Non-PTQ: inner_model is already LlamaModel (has rotate_embedding)
+            #   PTQ: inner_model is QuantLlamaForCausalLM → .model is PTQWrapper
+            #        → .wrapped is QuantLlamaModel (has rotate_embedding)
+            rotate_model = inner_model
+            if hasattr(rotate_model, "model"):
+                rotate_model = rotate_model.model
+            if isinstance(rotate_model, PTQWrapper):
+                rotate_model = rotate_model.wrapped
+            if hasattr(rotate_model, "rotate_embedding"):
+                rotate_embed = rotate_model.rotate_embedding
+                # Unwrap PTQ wrapper if rotate_embedding is wrapped:
+                # PTQWrapper → .wrapped (QuantLinear) → .module (nn.Linear)
+                rotate_inner = rotate_embed
+                if isinstance(rotate_inner, PTQWrapper):
+                    rotate_inner = rotate_inner.wrapped
+                if hasattr(rotate_inner, "module"):
+                    rotate_inner = rotate_inner.module
+                rotate_inner.to(self._orig_rotate_embed_dtype)
+        
 
         gptq_conf = self.config
         assert isinstance(gptq_conf, LlamaGPTQConfig)
@@ -1799,10 +1885,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     if ptq_wrapped and not calibrated:
                         # nevertheless we should calibrate
                         layer(*cache_args_batch, **cache_kwargs_batch)
-                # _run_layer_forward_double_precision already returns a single tensor (float64).
-                # For the non-double_precision path, take first element if tuple.
-                if not gptq_conf.double_precision:
-                    outs = outs[0] if isinstance(outs, tuple) else outs
+                outs = outs[0] if isinstance(outs, tuple) else outs
                 # Update inputs for next iteration.
                 if len(self.cache_args) > 0:
                     if hasattr(outs, "to") and hasattr(
@@ -1833,25 +1916,23 @@ class LlamaGPTQQuantizer(BaseQuantizer):
         if self._orig_attn_impl is not None and config is not None:
             config._attn_implementation = self._orig_attn_impl
 
-        # Restore embed_tokens to original dtype if we cast it to float64
-        if self._orig_embed_dtype is not None:
-            embed_tokens = model.get_input_embeddings()
-            embed_tokens.to(self._orig_embed_dtype)
-
-        # Restore rotate_embedding to original dtype if we cast it to float64
-        if self._orig_rotate_embed_dtype is not None:
-            model_inner = getattr(model, "model", model)
-            if hasattr(model_inner, "rotate_embedding"):
-                model_inner.rotate_embedding.to(self._orig_rotate_embed_dtype)
-
         # Clear caches to free memory
         self.cache_args.clear()
         self.cache_kwargs.clear()
         self.num_batches = 0
 
-       # model.quantizers = quantizers
+        model.quantizers = quantizers
+
+        # Finalization: cast entire model from float64 to float32 when
+        # double_precision was used. This converts all weights, buffers,
+        # and observer qparams (scale, zero_point) to float32 so that
+        # subsequent evaluation and export use standard float32 inference.
+        if gptq_conf.double_precision:
+            print("Casting model from float64 to float32 for evaluation ...")
+            model.float()
 
         return model
+
 
     def _quantize_lm_head(
         self,
@@ -1933,7 +2014,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             sym=gptq_conf.symmetric,
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
-                        mse_tolerance=gptq_conf.mse_tolerance,
+            mse_tolerance=gptq_conf.mse_tolerance,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -2059,7 +2140,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             sym=gptq_conf.symmetric,
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
-                        mse_tolerance=gptq_conf.mse_tolerance,
+            mse_tolerance=gptq_conf.mse_tolerance,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights

@@ -30,7 +30,8 @@ def quantize(x, scale, zero, maxq):
 
 def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50, P=None):
 
-    cur_weights = W.clone()
+    cur_weights = W.clone().to(Hinv.dtype)
+
     mults = torch.pow(torch.diag(Hinv), -1)
     Hinv_U = torch.triu(Hinv, diagonal=1)
     P_U = torch.triu(P, diagonal=1) if P is not None else None

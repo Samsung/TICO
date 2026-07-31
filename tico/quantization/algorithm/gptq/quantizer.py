@@ -606,6 +606,14 @@ class GPTQQuantizer(BaseQuantizer):
 
         model.quantizers = quantizers
 
+        # Finalization: cast entire model from float64 to float32 when
+        # double_precision was used. This converts all weights, buffers,
+        # and observer qparams (scale, zero_point) to float32 so that
+        # subsequent evaluation and export use standard float32 inference.
+        if gptq_conf.double_precision:
+            print("Casting model from float64 to float32 for evaluation ...")
+            model.float()
+
         return model
 
     def _quantize_lm_head(self, model, quantizers):

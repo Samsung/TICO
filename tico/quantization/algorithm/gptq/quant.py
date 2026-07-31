@@ -231,7 +231,7 @@ class Quantizer(nn.Module):
             compute_error_fn: Function that takes (x, scale1, zero1) and returns error tensor
         """
         dev = x.device
-        best = torch.full([x.shape[0]], float("inf"), device=dev, dtype=x.dtype)
+        best = torch.full([x.shape[0]], float("inf"), device=dev, dtype=x.dtype)#.double()
         for i in range(int(self.maxshrink * self.grid)):
             p = 1 - i / self.grid
             scale1, zero1 = self._compute_shrink_params(p, xmin, xmax)
@@ -255,7 +255,7 @@ class Quantizer(nn.Module):
                 # in case sensitivity is a second order derivatives of some global loss
                 # (q**2) * self.sensitivity is just a global loss change due to quantization.
                 q = (q**2) * self.sensitivity.to(
-                    q.device
+                    q.device, q.dtype
                 )  # estimate global target change
             else:
                 assert self.mse == "mse"
@@ -313,7 +313,7 @@ class Quantizer(nn.Module):
             )
             if sensitivity is not None:
                 assert self.mse == "smse_for_gptq"
-                err = ((q - x) ** 2) * sensitivity.to(q.device)
+                err = ((q - x) ** 2) * sensitivity.to(q.device, x.dtype)
             else:
                 assert self.mse == "mse_for_gptq"
                 err = ((q - pre_q) / torch.diag(Hinv)) ** 2

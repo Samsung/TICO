@@ -763,7 +763,8 @@ def CircleRMSNorm():
         eps: float,
     ) -> torch.Tensor:
         input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
+        compute_dtype = torch.float64 if input_dtype == torch.float64 else torch.float32
+        hidden_states = hidden_states.to(compute_dtype)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + eps)
         return weight * hidden_states.to(input_dtype)

@@ -52,7 +52,7 @@ class QuantLinear(QuantModuleBase):
     def forward(self, x):
         x_q = self._fq(x, self.obs_act_in)
 
-        w = self.module.weight
+        w = self.module.weight.to(x_q.dtype)
         if self._mode is Mode.QUANT:
             w = self.obs_weight.fake_quant(w)
         b = self.module.bias
