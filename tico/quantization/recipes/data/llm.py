@@ -45,7 +45,13 @@ def build_wikitext_calibration_inputs(
 
     random.seed(seed)
     samples: list[torch.Tensor] = []
+    bos = getattr(tokenizer, "bos_token_id", None)
     for _ in range(n_samples):
         i = random.randint(0, token_ids.shape[1] - seq_len - 1)
-        samples.append(token_ids[:, i : i + seq_len].cpu())
+        w = token_ids[:, i : i + seq_len]
+        if bos is not None:
+            w = torch.cat(
+                [torch.tensor([[bos]], device=w.device), w[:, : seq_len - 1]], dim=1
+            )
+        samples.append(w.cpu())
     return samples

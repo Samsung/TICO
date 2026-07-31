@@ -1295,10 +1295,16 @@ def build_calibration_inputs(
 
     random.seed(args.seed)
     calib_inputs = []
+    bos = getattr(tokenizer, "bos_token_id", None)
     for _ in range(nsamples):
         i = random.randint(0, train_ids.shape[1] - seqlen - 1)
-        j = i + seqlen
-        calib_inputs.append(train_ids[:, i:j].cpu())
+        w = train_ids[:, i : i + seqlen].cpu()
+        if bos is not None:
+            w = torch.cat(
+                [torch.tensor([[bos]], device=w.device), w[:, : seqlen - 1]], dim=1
+            )
+
+        calib_inputs.append(w)
 
     return calib_inputs
 
