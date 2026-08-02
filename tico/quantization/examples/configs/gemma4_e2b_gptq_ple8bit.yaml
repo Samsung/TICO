@@ -1,0 +1,94 @@
+model:
+  family: gemma4
+  name_or_path: google/gemma-4-e2b-it
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  datasets:
+    - dataset: vqav2
+      split: testdev
+      n_samples: 128
+  seq_len: 2048
+
+model_args:
+  vision:
+    visual_start_idx: 0
+    num_visual_tokens: 256
+    image_height: 896
+    image_width: 896
+    validate_static_layout: false
+
+pipeline:
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+    # PLE modules at 8-bit
+    weight_bits_overrides:
+      per_layer_input_gate: 8
+      per_layer_projection: 8
+
+  - name: ptq
+    enabled: true
+    print_model: false
+    print_overrides: true
+    activation: int16
+    linear_weight: uint4
+    vision_patch_embed_weight: uint8
+    embedding_weight: uint8
+    lm_head_weight: uint8
+    norm: int16
+    norm_weight: int16
+    strict_wrap: true
+
+    # Override PLE modules to uint8 in PTQ to match GPTQ's 8-bit quantization
+    specs:      
+      ple_weight_uint8: uint8
+
+    override_policies:
+      - name: ple_input_gate_weight_uint8
+        target:
+          component: text
+          layers: all
+          modules: [per_layer_input_gate]
+          observer_role: parameter
+        spec: ple_weight_uint8
+
+      - name: ple_projection_weight_uint8
+        target:
+          component: text
+          layers: all
+          modules: [per_layer_projection]
+          observer_role: parameter
+        spec: ple_weight_uint8
+
+evaluation:
+  enabled: false
+  vlm_tasks: []
+  coco: false
+  llava_bench:
+    enabled: false
+  videomme:
+    enabled: false
+  mmlu:
+    enabled: false
+  hellaswag:
+    enabled: false
+  mmmu:
+    enabled: false
+  ppl:
+    enabled: false
+  n_samples: -1
+  max_seq_len: 2048
+export:
+  enabled: false
+  output_dir: ./out/gemma4_e2b_gptq_ple
+  artifacts:
+    - ptq_checkpoint

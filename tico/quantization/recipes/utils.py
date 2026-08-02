@@ -19,7 +19,7 @@ from typing import Any, Mapping
 
 import torch
 
-from tico.quantization.config.specs import affine, mx, QuantSpec
+from tico.quantization.config.specs import affine, identity, mx, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
@@ -102,11 +102,14 @@ def quant_spec_from_config(
       - mapping with ``kind: affine``: affine spec with ``dtype`` and optional
         ``qscheme``.
       - mapping with ``kind: mx``: MX spec with ``elem_format`` and MX kwargs.
+      - mapping with ``kind: identity`` or ``kind: none``: no-op spec that
+        disables quantization for the role (passthrough observer).
 
     Examples:
         ``activation: int16``
         ``linear_weight: uint4``
         ``activation: {kind: mx, elem_format: fp8_e4m3, axis: -1}``
+        ``activation: {kind: identity}``
     """
     if value is None:
         return default
@@ -115,6 +118,9 @@ def quant_spec_from_config(
 
     if isinstance(value, Mapping):
         kind = str(value.get("kind", value.get("type", "affine"))).strip().lower()
+
+        if kind in ("identity", "none"):
+            return identity()
 
         if kind == "mx":
             return mx(

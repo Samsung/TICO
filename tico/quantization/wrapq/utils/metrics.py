@@ -12,10 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import Any, Optional
 
+import math
 import torch
+import torch.nn.functional as F
 import tqdm
+from collections.abc import Iterable
 
 
 def _resolve_device(device: torch.device, model: torch.nn.Module):
@@ -143,3 +146,221 @@ def perplexity(
     ppl = torch.exp(avg_nll)
 
     return ppl.item()
+
+
+def _extract_logits(outputs: Any) -> torch.Tensor:
+    """Support Hugging Face ModelOutput, tuple output, and TICO raw tensors."""
+    if isinstance(outputs, torch.Tensor):
+        return outputs
+
+    if hasattr(outputs, "logits"):
+        return outputs.logits
+
+    if isinstance(outputs, (tuple, list)) and outputs:
+        if isinstance(outputs[0], torch.Tensor):
+            return outputs[0]
+
+    raise TypeError(
+        f"Cannot extract logits from model output of type {type(outputs)!r}"
+    )
+
+
+def perplexity_chat_continuation(
+    model: torch.nn.Module,
+    processor_or_tokenizer: Any,
+    dataset: Iterable[dict[str, Any]],
+    *,
+    stride: int = 512,
+    max_seq_len: int = 2048,
+    device: torch.device | str | None = None,
+    show_progress: bool = True,
+) -> float:
+
+    """
+    Compute sliding-window causal PPL for raw text on Gemma4 IT models.
+
+    Gemma4 instruction-tuned models require a proper chat-template prefix
+    (user turn + model turn with empty thought channel) to produce
+    meaningful perplexity.  Without this prefix the model sees raw text
+    in an unexpected context and produces astronomically high PPL values.
+
+    The dataset must yield dictionaries containing a `text` field.
+    """
+
+    if max_seq_len <= 1:
+        raise ValueError("max_seq_len must be greater than 1.")
+
+    if not 1 <= stride <= max_seq_len:
+        raise ValueError("stride must satisfy 1 <= stride <= max_seq_len.")
+
+    tokenizer = getattr(
+        processor_or_tokenizer,
+        "tokenizer",
+        processor_or_tokenizer,
+    )
+
+    # ------------------------------------------------------------------
+    # Build the Gemma4 IT prompt prefix
+    # ------------------------------------------------------------------
+    # Gemma4 IT models need a proper chat-template prefix to produce
+    # correct predictions.  The best prefix is:
+    # BOS + user turn + model turn with empty thought channel.
+    #
+    #   <bos><|turn>user\nContinue the following text:\n<turn|>
+    #   <|turn>model\n<turn|><|channel>thought\n<channel|>
+    #
+    # The wikitext tokens then follow as the model's "response" and only
+    # those tokens are scored (the prefix is masked with -100).
+    prefix_str = (
+        "<bos><|turn>user\nContinue the following text:\n<turn|>"
+        "<|turn>model\n<turn|><|channel>thought\n<channel|>"
+    )
+    prefix_encodings = tokenizer(
+        prefix_str, return_tensors="pt", add_special_tokens=False
+    )
+    prefix_ids = prefix_encodings["input_ids"]  # shape [1, prefix_len]
+    prefix_len = prefix_ids.shape[1]
+
+    # Reserve slots for the prefix so the window still fits within max_seq_len.
+    window_size = max_seq_len - prefix_len
+
+    if window_size <= 0:
+        raise ValueError(
+            f"max_seq_len ({max_seq_len}) is too small for the Gemma4 prefix "
+            f"({prefix_len} tokens).  Increase max_seq_len."
+        )
+
+    # Iteration works for both Dataset and IterableDataset.
+    texts = []
+    for example in dataset:
+        text = example.get("text", "")
+        if text is not None:
+            texts.append(str(text))
+
+    if not texts:
+        raise ValueError("The dataset contains no text examples.")
+
+    full_text = "\n\n".join(texts)
+
+    encodings = tokenizer(
+        text=full_text,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_ids = encodings["input_ids"]
+
+    if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        raise ValueError(
+            f"Expected tokenized shape [1, sequence], got {input_ids.shape}."
+        )
+
+    if device is None:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+    else:
+        device = torch.device(device)
+
+    # Move prefix to device once
+    prefix_ids = prefix_ids.to(device)
+
+    model.eval()
+
+    sequence_length = input_ids.shape[1]
+    previous_end = 0
+
+    total_nll = torch.zeros((), dtype=torch.float64, device=device)
+    total_target_tokens = 0
+    window_count = 0
+
+    with torch.inference_mode():
+        for begin in tqdm.trange(0, sequence_length, stride, desc="PPL", disable=not show_progress):
+
+            end = min(begin + window_size, sequence_length)
+
+            # Only tokens not evaluated by the previous window contribute.
+            target_length = end - previous_end
+            if target_length <= 0:
+                break
+
+            window_ids = input_ids[:, begin:end].to(device)
+
+            labels = window_ids.clone()
+            labels[:, :-target_length] = -100
+
+            # Prepend the Gemma4 IT prefix (BOS + user turn + model turn
+            # with empty thought channel) so the model sees a valid
+            # instruction-tuned context.  All prefix tokens are masked (-100)
+            # so they never contribute to loss.
+            window_ids = torch.cat([prefix_ids, window_ids], dim=1)
+            prefix_labels = torch.full(
+                (1, prefix_len), -100, dtype=labels.dtype, device=device
+            )
+            labels = torch.cat([prefix_labels, labels], dim=1)
+
+            # Build attention mask: all ones (prefix + content)
+            attention_mask = torch.ones(
+                1, window_ids.shape[1], dtype=torch.long, device=device
+            )
+
+            model_kwargs = {
+                "input_ids": window_ids,
+                "attention_mask": attention_mask,
+                "use_cache": False,
+            }
+
+            # Prevent an implementation from returning only selected logits.
+            # Remove this argument if a particular wrapper does not accept it.
+            model_kwargs["logits_to_keep"] = 0
+
+            try:
+                outputs = model(**model_kwargs)
+            except TypeError as exc:
+                # Compatibility fallback for wrappers without logits_to_keep.
+                if "logits_to_keep" not in str(exc):
+                    raise
+                model_kwargs.pop("logits_to_keep")
+                outputs = model(**model_kwargs)
+
+            logits = _extract_logits(outputs)
+
+            if logits.shape[:2] != window_ids.shape:
+                raise ValueError(
+                    "Logit sequence shape does not match input shape: "
+                    f"logits={logits.shape}, input={window_ids.shape}. "
+                    "Check logits_to_keep or wrapper truncation."
+                )
+
+            # Standard causal shift: logit at t predicts token t+1.
+            shift_logits = logits[:, :-1, :].float().contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+
+            target_tokens = int((shift_labels != -100).sum().item())
+
+            if target_tokens:
+                window_nll = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.shape[-1]),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+
+                total_nll += window_nll.double()
+                total_target_tokens += target_tokens
+
+            window_count += 1
+            previous_end = end
+
+            if end == sequence_length:
+                break
+
+    if total_target_tokens == 0:
+        raise ValueError("No target tokens were evaluated.")
+
+    mean_nll = (total_nll / total_target_tokens).item()
+    ppl = math.exp(mean_nll)
+
+    return ppl
+

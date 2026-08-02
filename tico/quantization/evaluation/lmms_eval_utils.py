@@ -389,6 +389,12 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
         _model_classes.append(_Q2)
     except ImportError:
         pass
+    try:
+        from transformers import Gemma4ForConditionalGeneration as _G4
+
+        _model_classes.append(_G4)
+    except ImportError:
+        pass
 
     _original_model_fps = {cls: cls.from_pretrained for cls in _model_classes}
 
@@ -406,6 +412,26 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
             return _patched_from_pretrained
 
         cls.from_pretrained = classmethod(_make_patched_fp(_orig_fn))
+
+    # Also patch AutoModel, AutoModelForCausalLM, and AutoModelForImageTextToText
+    # because the Huggingface wrapper's __init__ uses AutoConfig to pick the
+    # model class, and for models not in the mapping (e.g. Gemma4), it falls
+    # back to AutoModel which returns a base model without generate().
+    from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
+
+    _auto_classes = [AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText]
+    _original_auto_fps = {cls: cls.from_pretrained for cls in _auto_classes}
+
+    for cls in _auto_classes:
+        _orig_fn = cls.from_pretrained
+
+        def _make_patched_auto_fp(orig_fn):
+            def _patched_from_pretrained(cls_arg, *args, **kwargs):
+                return model
+
+            return _patched_from_pretrained
+
+        cls.from_pretrained = classmethod(_make_patched_auto_fp(_orig_fn))
 
     # --- Patch AutoProcessor.from_pretrained ---
     _original_processor_fp = AutoProcessor.from_pretrained
@@ -431,6 +457,8 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
         finally:
             # Restore original from_pretrained methods
             for cls, orig_fp in _original_model_fps.items():
+                cls.from_pretrained = orig_fp
+            for cls, orig_fp in _original_auto_fps.items():
                 cls.from_pretrained = orig_fp
             AutoProcessor.from_pretrained = _original_processor_fp
             AutoTokenizer.from_pretrained = _original_tokenizer_fp
@@ -723,6 +751,20 @@ def evaluate_vlm_on_tasks(
     # Forward any additional kwargs (may override task_manager)
     eval_kwargs.update(kwargs)
 
+    # For models without a dedicated lmms-eval wrapper (e.g. Gemma4), patch
+    # the generic Huggingface wrapper's generate_until to handle Gemma4's
+    # processor quirks (no "audios" kwarg, no empty image lists, video
+    # frames must be loaded as tensors).
+    _gemma4_ctx = contextlib.nullcontext()
+    if model_name == "huggingface":
+        from tico.quantization.evaluation.lmms_gemma4 import (
+            patch_huggingface_wrapper_for_gemma4,
+        )
+
+        _gemma4_ctx = patch_huggingface_wrapper_for_gemma4(
+            max_num_frames=max_num_frames,
+        )
+
     # Patch _subsample_video_inputs to add debug logging
     _subsample_ctx = _patch_subsample_video_inputs_for_debug()
 
@@ -769,7 +811,7 @@ def evaluate_vlm_on_tasks(
     if _is_videomme and limit is not None and isinstance(limit, int) and limit > 0:
         _download_ctx = _patch_snapshot_download_for_limit(limit)
 
-    with _model_ctx, _subsample_ctx, _budget_ctx:
+    with _model_ctx, _gemma4_ctx, _subsample_ctx, _budget_ctx:
         if _download_ctx is not None:
             with _download_ctx:
                 results = simple_evaluate(**eval_kwargs)
@@ -984,10 +1026,20 @@ def _build_model_args(
     if pretrained is not None:
         model_args_dict["pretrained"] = pretrained
 
+    # max_pixels and min_pixels are only accepted by dedicated lmms-eval VLM
+    # wrappers (e.g. qwen3_vl, qwen2_5_vl).  The generic "huggingface"
+    # fallback wrapper does NOT accept them and will raise an AssertionError.
+    # However, max_num_frames IS accepted by the generic wrapper.
+    _has_dedicated_wrapper = lmms_model_name != "huggingface"
+
     # When a static context budget is provided, compute max_pixels and
     # min_pixels per video frame so that the total token count stays within
     # the budget.
-    if max_position_embeddings is not None and processor is not None:
+    if (
+        max_position_embeddings is not None
+        and processor is not None
+        and _has_dedicated_wrapper
+    ):
         (
             budget_max_pixels,
             budget_min_pixels,
@@ -1010,12 +1062,19 @@ def _build_model_args(
             f"min_pixels={budget_min_pixels}"
         )
     else:
-        # Pass max_num_frames to the lmms-eval model wrapper.
-        # The Qwen3_VL wrapper accepts this in __init__ and uses it in
-        # _subsample_video_inputs to control how many frames are sampled
-        # from each video.
+        # max_num_frames is accepted by both dedicated wrappers and the
+        # generic "huggingface" wrapper.
         if max_num_frames is not None:
             model_args_dict["max_num_frames"] = max_num_frames
+
+        if not _has_dedicated_wrapper:
+            # For models without a dedicated lmms-eval wrapper (e.g. Gemma),
+            # the generic "huggingface" wrapper does not accept max_pixels
+            # or min_pixels.  We skip them here.
+            print(
+                f"[INFO] Model {lmms_model_name!r} has no dedicated lmms-eval "
+                f"wrapper; skipping max_pixels/min_pixels in model_args."
+            )
 
     return lmms_model_name, model_args_dict
 
