@@ -168,15 +168,24 @@ def patch_huggingface_wrapper_for_gemma4(
             # It does NOT accept "audios" (plural).
             # Empty lists for images cause a crash in the image processor.
             kwargs = {}
+            processor_kwargs = {}
             if images:
                 kwargs["images"] = images
             if video_tensors:
                 kwargs["videos"] = video_tensors
+                processor_kwargs["videos_kwargs"] = {
+                    "num_frames": max_num_frames,
+                    "return_metadata": True,
+                }
             if audios:
                 kwargs["audio"] = audios
 
             inputs = self.processor(
-                text=texts, padding=True, return_tensors="pt", **kwargs
+                text=texts,
+                padding=True,
+                return_tensors="pt",
+                **kwargs,
+                **processor_kwargs,
             )
 
             if self.device_map == "auto":

@@ -59,6 +59,14 @@ class AffineObserverBase(ObserverBase):
             "_cached_zp", torch.tensor([], dtype=torch.int), persistent=False
         )
 
+        # This flag is set by load_qparams(lock=True) to protect externally
+        # injected qparams (e.g. GPTQ scales/zero-points) from being
+        # silently overwritten during the subsequent freeze_qparams() →
+        # compute_qparams() call in PTQQuantizer.convert().
+        # Cleared by reset() so the observer can be reused for a fresh
+        # calibration cycle.
+        self._qparams_locked = False
+
         self.reset()
 
     def reset(self) -> None:
@@ -76,6 +84,7 @@ class AffineObserverBase(ObserverBase):
         # Clear cached qparams while keeping buffer registration intact
         self._cached_scale = self._cached_scale.new_empty((0,))  # type: ignore[has-type]
         self._cached_zp = self._cached_zp.new_empty((0,), dtype=torch.int)  # type: ignore[has-type]
+        self._qparams_locked = False
 
     def load_qparams(self, scale: torch.Tensor, zp: torch.Tensor, *, lock: bool = True):
         """
@@ -85,6 +94,7 @@ class AffineObserverBase(ObserverBase):
         """
         self._cached_scale = scale.detach()
         self._cached_zp = zp.to(torch.int)
+        self._qparams_locked = bool(lock)
         if lock:
             self.enabled = False
 
@@ -93,6 +103,9 @@ class AffineObserverBase(ObserverBase):
         return self._cached_scale.numel() != 0
 
     def compute_qparams(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self._qparams_locked and self.has_qparams:
+            return self._cached_scale, self._cached_zp
+
         assert isinstance(self.min_val, torch.Tensor)
         assert isinstance(self.max_val, torch.Tensor)
         qmin, qmax = self.dtype.qmin, self.dtype.qmax

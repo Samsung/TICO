@@ -637,9 +637,10 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
                 hidden_states = extract_primary_output(outs)
 
                 # No deepstack post-processing needed for Gemma4.
-                # PLE is handled internally by each decoder layer.
-                # Update hidden_states in kwargs for next layer.
-                layer_kwargs["hidden_states"][batch_idx] = maybe_move_cache_to_cpu(
+                # PLE is handled internally by each decoder layer. Keep the
+                # persistent per-batch cache in sync so the next decoder layer
+                # calibrates on the previous layer's quantized output.
+                captured_batches[batch_idx]["hidden_states"] = maybe_move_cache_to_cpu(
                     hidden_states.detach().clone(),
                     enabled=self.config.move_cache_to_cpu,
                     dtype=self.config.cache_dtype,

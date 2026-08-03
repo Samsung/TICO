@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Iterable
 from typing import Any, Optional
 
 import math
 import torch
 import torch.nn.functional as F
 import tqdm
-from collections.abc import Iterable
 
 
 def _resolve_device(device: torch.device, model: torch.nn.Module):
@@ -165,6 +165,59 @@ def _extract_logits(outputs: Any) -> torch.Tensor:
     )
 
 
+_CHAT_CONTINUATION_INSTRUCTION = "Continue the following text:"
+
+
+def _render_chat_continuation_prefix(
+    processor_or_tokenizer: Any,
+    tokenizer: Any,
+) -> str:
+    """Render the generation prefix with the model's chat template."""
+    template_owner = None
+    if hasattr(processor_or_tokenizer, "apply_chat_template"):
+        template_owner = processor_or_tokenizer
+    elif hasattr(tokenizer, "apply_chat_template"):
+        template_owner = tokenizer
+
+    if template_owner is None:
+        raise ValueError(
+            "chat-continuation perplexity requires a processor or tokenizer "
+            "with apply_chat_template support."
+        )
+
+    text_content = _CHAT_CONTINUATION_INSTRUCTION
+    multimodal_content = [{"type": "text", "text": text_content}]
+    if hasattr(template_owner, "tokenizer"):
+        content_variants: tuple[Any, ...] = (multimodal_content, text_content)
+    else:
+        content_variants = (text_content, multimodal_content)
+    last_error: Exception | None = None
+    for content in content_variants:
+        messages = [{"role": "user", "content": content}]
+        try:
+            rendered = template_owner.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except (TypeError, ValueError) as exc:
+            last_error = exc
+            continue
+
+        if not isinstance(rendered, str):
+            raise TypeError(
+                "apply_chat_template(tokenize=False) must return a string, "
+                f"got {type(rendered)!r}."
+            )
+        if not rendered:
+            raise ValueError("apply_chat_template returned an empty chat prefix.")
+        return rendered
+
+    raise TypeError(
+        "Failed to render chat-continuation prefix with apply_chat_template."
+    ) from last_error
+
+
 def perplexity_chat_continuation(
     model: torch.nn.Module,
     processor_or_tokenizer: Any,
@@ -190,8 +243,8 @@ def perplexity_chat_continuation(
     if max_seq_len <= 1:
         raise ValueError("max_seq_len must be greater than 1.")
 
-    if not 1 <= stride <= max_seq_len:
-        raise ValueError("stride must satisfy 1 <= stride <= max_seq_len.")
+    if stride < 1:
+        raise ValueError("stride must be positive.")
 
     tokenizer = getattr(
         processor_or_tokenizer,
@@ -199,22 +252,9 @@ def perplexity_chat_continuation(
         processor_or_tokenizer,
     )
 
-    # ------------------------------------------------------------------
-    # Build the Gemma4 IT prompt prefix
-    # ------------------------------------------------------------------
-    # Gemma4 IT models need a proper chat-template prefix to produce
-    # correct predictions.  The best prefix is:
-    # BOS + user turn + model turn with empty thought channel.
-    #
-    #   <bos><|turn>user\nContinue the following text:\n<turn|>
-    #   <|turn>model\n<turn|><|channel>thought\n<channel|>
-    #
-    # The wikitext tokens then follow as the model's "response" and only
-    # those tokens are scored (the prefix is masked with -100).
-    prefix_str = (
-        "<bos><|turn>user\nContinue the following text:\n<turn|>"
-        "<|turn>model\n<turn|><|channel>thought\n<channel|>"
-    )
+    # Render the prefix from the model's own template. Hand-written control
+    # tokens easily drift from the tokenizer config and make PPL meaningless.
+    prefix_str = _render_chat_continuation_prefix(processor_or_tokenizer, tokenizer)
     prefix_encodings = tokenizer(
         prefix_str, return_tensors="pt", add_special_tokens=False
     )
@@ -226,8 +266,14 @@ def perplexity_chat_continuation(
 
     if window_size <= 0:
         raise ValueError(
-            f"max_seq_len ({max_seq_len}) is too small for the Gemma4 prefix "
+            f"max_seq_len ({max_seq_len}) is too small for the chat prefix "
             f"({prefix_len} tokens).  Increase max_seq_len."
+        )
+
+    if stride > window_size:
+        raise ValueError(
+            "stride must satisfy 1 <= stride <= max_seq_len - prefix_len "
+            f"({window_size}); got stride={stride}."
         )
 
     # Iteration works for both Dataset and IterableDataset.

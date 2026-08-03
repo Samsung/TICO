@@ -34,6 +34,9 @@ import os
 from typing import Any
 
 
+_GEMMA4_DEFAULT_VIDEO_SOFT_TOKENS = 70
+
+
 def _check_lmms_eval_available() -> None:
     """Raise a clear error if ``lmms-eval`` is not installed."""
     try:
@@ -652,6 +655,8 @@ def evaluate_vlm_on_tasks(
 
     from lmms_eval.evaluator import simple_evaluate
 
+    _effective_max_new_tokens = max_new_tokens if max_new_tokens is not None else 30
+
     if isinstance(model, str):
         model_name = model
         model_args_dict = {}
@@ -669,7 +674,6 @@ def evaluate_vlm_on_tasks(
         # (text + visual tokens from all frames) must fit within this
         # budget, so we compute max_pixels/min_pixels per frame.
         _max_pos_emb = _get_max_position_embeddings(inner_model)
-        _effective_max_new_tokens = max_new_tokens if max_new_tokens is not None else 30
 
         # Determine the lmms-eval model name and build model_args.
         # When max_position_embeddings is available, the budget-aware
@@ -688,12 +692,17 @@ def evaluate_vlm_on_tasks(
         # loading them a second time.
         _model_ctx = _patch_from_pretrained_to_reuse_model(model, processor)
 
+    _effective_max_num_frames = model_args_dict.get("max_num_frames", max_num_frames)
+
     # Propagate verbose flag to custom task utils via environment variable.
     # The videomme_mini utils.py checks LMMS_VERBOSE to decide whether to
     # print prompts, video paths, etc.
     os.environ["LMMS_VERBOSE"] = "1" if verbose else "0"
 
-    print(f"evaluate_vlm_on_tasks: model={model_name}, max_num_frames={max_num_frames}")
+    print(
+        f"evaluate_vlm_on_tasks: model={model_name}, "
+        f"max_num_frames={_effective_max_num_frames}"
+    )
     print(f"model_args: {model_args_dict}")
 
     # Normalise tasks to a list
@@ -762,7 +771,7 @@ def evaluate_vlm_on_tasks(
         )
 
         _gemma4_ctx = patch_huggingface_wrapper_for_gemma4(
-            max_num_frames=max_num_frames,
+            max_num_frames=int(_effective_max_num_frames),
         )
 
     # Patch _subsample_video_inputs to add debug logging
@@ -865,6 +874,56 @@ def _processor_vision_factor(processor: Any) -> int:
     return max(1, patch_size * merge_size)
 
 
+def _processor_gemma4_video_soft_tokens(processor: Any) -> int:
+    """Return Gemma4's per-frame video soft-token budget."""
+    video_processor = getattr(processor, "video_processor", None)
+    value = getattr(video_processor, "max_soft_tokens", None)
+    return max(1, _coerce_int_attr(value, _GEMMA4_DEFAULT_VIDEO_SOFT_TOKENS))
+
+
+def _compute_gemma4_max_num_frames_for_budget(
+    *,
+    max_position_embeddings: int,
+    max_num_frames: int,
+    max_new_tokens: int,
+    processor: Any,
+    text_token_margin: int = 512,
+) -> int:
+    """Compute a Gemma4 frame cap that fits a static text context budget.
+
+    Gemma4 controls video cost through ``max_soft_tokens`` per frame, not
+    Qwen-style ``max_pixels`` / ``min_pixels`` arguments.  The generic
+    lmms-eval HuggingFace wrapper cannot receive Gemma4-specific processor
+    kwargs, so TICO caps the sampled frame count before the patched Gemma4
+    generation path calls the processor.
+
+    The *text_token_margin* reserves tokens for the text portion of the
+    prompt (system prompt, question, answer choices, special tokens).
+    Video-MME prompts can be lengthy, so the default is 512 to avoid
+    exceeding the static context budget.
+    """
+    if max_num_frames <= 0:
+        raise ValueError(f"max_num_frames must be positive, got {max_num_frames}.")
+
+    # Reserve a small safety margin (4 tokens) to account for special tokens
+    # that may push the total sequence length to exactly static_max_seq + 1.
+    _safety_margin = 4
+    input_budget = int(max_position_embeddings) - int(max_new_tokens) - _safety_margin
+    visual_budget = input_budget - int(text_token_margin)
+    soft_tokens_per_frame = _processor_gemma4_video_soft_tokens(processor)
+    if visual_budget < soft_tokens_per_frame:
+        raise ValueError(
+            "Not enough context budget for one Gemma4 video frame: "
+            f"max_position_embeddings={max_position_embeddings}, "
+            f"max_new_tokens={max_new_tokens}, "
+            f"text_token_margin={text_token_margin}, "
+            f"safety_margin={_safety_margin}, "
+            f"soft_tokens_per_frame={soft_tokens_per_frame}."
+        )
+
+    return max(1, min(int(max_num_frames), visual_budget // soft_tokens_per_frame))
+
+
 def _compute_video_max_pixels_for_budget(
     *,
     max_position_embeddings: int,
@@ -937,12 +996,53 @@ def _compute_video_max_pixels_for_budget(
     return max_pixels, min_pixels, adjusted_max_num_frames
 
 
-def _get_max_position_embeddings(model: Any) -> int | None:
-    """Extract ``max_position_embeddings`` from a model config.
+def _find_static_max_seq(model: Any, _depth: int = 0) -> int | None:
+    """Walk the model tree to find a ``static_max_seq`` attribute.
 
-    Handles both plain transformers models and PTQ-wrapped models.
-    Returns ``None`` if the attribute cannot be found.
+    Quantized Gemma4 models store ``static_max_seq`` on the inner
+    ``QuantGemma4TextModel``.  This attribute represents the actual
+    runtime constraint enforced by the precomputed static mask and RoPE
+    templates, which may be smaller than ``config.max_position_embeddings``.
+
+    Returns ``None`` if no ``static_max_seq`` is found.
     """
+    if _depth > 10:
+        return None
+
+    value = getattr(model, "static_max_seq", None)
+    if value is not None:
+        return int(value)
+
+    for attr in ("wrapped", "model", "language_model"):
+        child = getattr(model, attr, None)
+        if child is not None and child is not model:
+            result = _find_static_max_seq(child, _depth + 1)
+            if result is not None:
+                return result
+
+    return None
+
+
+def _get_max_position_embeddings(model: Any) -> int | None:
+    """Extract the effective context length from a model.
+
+    For PTQ-wrapped Gemma4 models the actual runtime constraint is
+    ``static_max_seq`` (the size of the precomputed static mask and RoPE
+    templates), which may be smaller than ``config.max_position_embeddings``.
+    This function returns ``static_max_seq`` when present so that budget
+    computations respect the real limit.
+
+    For plain (non-quantized) models it falls back to
+    ``config.max_position_embeddings`` (or ``config.text_config.max_position_embeddings``
+    for VLMs like Qwen3-VL).
+
+    Returns ``None`` if no context length can be determined.
+    """
+    # Check for static_max_seq first (PTQ-wrapped Gemma4 models)
+    static_max_seq = _find_static_max_seq(model)
+    if static_max_seq is not None:
+        return static_max_seq
+
     config = getattr(model, "config", None)
     if config is None:
         return None
@@ -957,6 +1057,7 @@ def _get_max_position_embeddings(model: Any) -> int | None:
         return int(config.max_position_embeddings)
 
     return None
+
 
 
 def _build_model_args(
@@ -994,6 +1095,9 @@ def _build_model_args(
         A ``(model_name, model_args_dict)`` tuple.
     """
     model_cls_name = type(model).__name__.lower()
+    config = getattr(model, "config", None)
+    config_model_type = str(getattr(config, "model_type", "")).lower()
+    is_gemma4 = "gemma4" in model_cls_name or config_model_type == "gemma4"
 
     # Map model class names to lmms-eval registry names
     if "qwen3" in model_cls_name and (
@@ -1018,8 +1122,8 @@ def _build_model_args(
 
     # Get the Hugging Face model id from the model config if available
     pretrained = None
-    if hasattr(model, "config") and hasattr(model.config, "_name_or_path"):
-        pretrained = model.config._name_or_path
+    if config is not None and hasattr(config, "_name_or_path"):
+        pretrained = config._name_or_path
 
     model_args_dict: dict[str, Any] = {}
 
@@ -1060,6 +1164,21 @@ def _build_model_args(
             f"max_num_frames={max_num_frames} -> {adjusted_max_num_frames}, "
             f"max_pixels={budget_max_pixels}, "
             f"min_pixels={budget_min_pixels}"
+        )
+    elif max_position_embeddings is not None and processor is not None and is_gemma4:
+        adjusted_max_num_frames = _compute_gemma4_max_num_frames_for_budget(
+            max_position_embeddings=max_position_embeddings,
+            max_num_frames=max_num_frames,
+            max_new_tokens=max_new_tokens,
+            processor=processor,
+        )
+        model_args_dict["max_num_frames"] = adjusted_max_num_frames
+
+        print(
+            f"[INFO] Gemma4 video frame budget computed for static context: "
+            f"max_position_embeddings={max_position_embeddings}, "
+            f"max_num_frames={max_num_frames} -> {adjusted_max_num_frames}, "
+            f"soft_tokens_per_frame={_processor_gemma4_video_soft_tokens(processor)}"
         )
     else:
         # max_num_frames is accepted by both dedicated wrappers and the
