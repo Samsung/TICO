@@ -1,0 +1,36 @@
+# Export a Gemma4 E2B model or saved checkpoint without running quantization stages.
+model:
+  family: gemma4
+  name_or_path: google/gemma-4-e2b-it
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cpu
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  seq_len: 2048
+
+model_args:
+  vision:
+    visual_start_idx: 0
+    num_visual_tokens: 256
+    image_height: 896
+    image_width: 896
+    validate_static_layout: false
+
+pipeline: []
+
+evaluation:
+  enabled: false
+  max_seq_len: 2048
+
+export:
+  enabled: true
+  output_dir: ./out/gemma4_export
+  artifacts:
+    - ptq_checkpoint
