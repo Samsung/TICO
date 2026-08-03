@@ -138,6 +138,30 @@ class QuantGemma4Model(QuantModuleBase):
         )
         return self.embed_vision(vision_outputs.last_hidden_state)
 
+    def get_video_features(
+        self,
+        pixel_values_videos: torch.Tensor,
+        video_position_ids: Optional[torch.Tensor] = None,
+    ):
+        """Return projected video soft tokens.
+
+        Mirrors ``Gemma4Model.get_video_features``: flattens the
+        ``(num_videos, num_frames, ...)`` dimensions into a single batch
+        dimension, runs the frames through the (quantized) vision tower, and
+        projects the last hidden state via ``embed_vision``.
+        """
+        assert self.vision_tower is not None, "vision_tower is not available"
+        pixel_values_videos = pixel_values_videos.flatten(0, 1)
+        if video_position_ids is not None:
+            video_position_ids = video_position_ids.flatten(0, 1)
+        vision_outputs = self.vision_tower(
+            pixel_values=pixel_values_videos,
+            pixel_position_ids=video_position_ids,
+            return_dict=True,
+        )
+        return self.embed_vision(vision_outputs.last_hidden_state)
+
+
     def _uses_static_fusion(self) -> bool:
         """Return whether the current call should use static fixed-slot fusion."""
         return bool(torch.compiler.is_compiling() or self.force_export)
@@ -149,17 +173,23 @@ class QuantGemma4Model(QuantModuleBase):
         video_mask: torch.Tensor,
         audio_mask: torch.Tensor,
         pixel_values: Optional[torch.Tensor],
+        pixel_values_videos: Optional[torch.Tensor] = None,
     ) -> None:
         """Reject unsupported or incomplete multimodal eager inputs."""
-        if video_mask.any() or audio_mask.any():
+        if audio_mask.any():
             raise NotImplementedError(
-                "Gemma4 PTQ wrapper supports image-text inputs only. "
-                "Video and audio placeholder tokens are not supported."
+                "Gemma4 PTQ wrapper does not support audio placeholder tokens."
             )
         if pixel_values is None and image_mask.any():
             raise ValueError(
                 "pixel_values must be provided when input_ids contain image placeholders."
             )
+        if pixel_values_videos is None and video_mask.any():
+            raise ValueError(
+                "pixel_values_videos must be provided when input_ids contain "
+                "video placeholders."
+            )
+
 
     def _validate_static_image_layout(
         self,
@@ -207,20 +237,27 @@ class QuantGemma4Model(QuantModuleBase):
         inputs_embeds: Optional[torch.Tensor] = None,
         image_position_ids: Optional[torch.Tensor] = None,
         per_layer_inputs: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.Tensor] = None,
+        video_position_ids: Optional[torch.Tensor] = None,
+        input_features: Optional[torch.Tensor] = None,
+        input_features_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        """Run Gemma4 image-text forward with eager and static fusion paths.
+
+        """Run Gemma4 image/video-text forward with eager and static fusion paths.
 
         Eager/PTQ uses dynamic placeholder-mask fusion by default, matching
-        HF-style image placeholder positions. Static export/runtime uses strict
-        fixed-slot fusion. Static layout validation is opt-in in eager mode and
-        should be enabled only for deployment-style calibration or NPU-proxy
-        benchmarks whose prompts follow the final static runtime layout.
+        HF-style image and video placeholder positions. Static export/runtime
+        uses strict fixed-slot fusion. Static layout validation is opt-in in
+        eager mode and should be enabled only for deployment-style calibration
+        or NPU-proxy benchmarks whose prompts follow the final static runtime
+        layout.
 
         Image-size alignment and static-layout validation solve different
         problems: resizing stabilizes visual-token count, while layout
         validation checks visual-token positions in the sequence.
         """
+
         # --- Input validation (matches original Gemma4Model.forward) ------
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -236,9 +273,11 @@ class QuantGemma4Model(QuantModuleBase):
         text_model = self.language_model.wrapped  # QuantGemma4TextModel
         llm_input_ids: Optional[torch.Tensor] = None
         image_mask: Optional[torch.BoolTensor] = None
+        video_mask: Optional[torch.BoolTensor] = None
 
         if inputs_embeds is None:
             assert input_ids is not None  # guaranteed by validation above
+
             # Replace multimodal placeholder token IDs with pad_token_id so
             # the embedding lookup returns a neutral pad embedding at those
             # positions.  Image features are fused later.
@@ -252,7 +291,9 @@ class QuantGemma4Model(QuantModuleBase):
                     video_mask=video_mask,
                     audio_mask=audio_mask,
                     pixel_values=pixel_values,
+                    pixel_values_videos=pixel_values_videos,
                 )
+
             multimodal_mask = image_mask | video_mask | audio_mask
             if multimodal_mask.any():
                 pad_token_id = self.config.text_config.pad_token_id
@@ -350,7 +391,41 @@ class QuantGemma4Model(QuantModuleBase):
                 )
             inputs_embeds = self._fq(inputs_embeds, self.obs_mm_fusion)
 
+        # --- Multimodal fusion (video) ------------------------------------
+        # Video frames are processed through the same vision tower as images
+        # (after flattening the num_videos × num_frames dims).  The resulting
+        # soft tokens are fused at the video placeholder positions using the
+        # same dynamic placeholder-mask approach as images.
+        if pixel_values_videos is not None:
+            video_embeds = self.get_video_features(
+                pixel_values_videos, video_position_ids=video_position_ids
+            )
+            assert inputs_embeds is not None  # guaranteed after embedding step
+            # Align dtype/device to match text embeddings before fusion.
+            video_embeds = video_embeds.to(
+                device=inputs_embeds.device, dtype=inputs_embeds.dtype
+            )
+
+            if self._uses_static_fusion():
+                raise NotImplementedError(
+                    "Static fixed-slot fusion for video is not yet supported. "
+                    "Video inputs should use the eager/PTQ dynamic path."
+                )
+            else:
+                if video_mask is None:
+                    raise ValueError(
+                        "input_ids must be provided with pixel_values_videos when "
+                        "running Gemma4 eager/PTQ dynamic placeholder fusion."
+                    )
+                inputs_embeds = dynamic_placeholder_fuse(
+                    inputs_embeds,
+                    video_embeds,
+                    video_mask,
+                )
+            inputs_embeds = self._fq(inputs_embeds, self.obs_mm_fusion)
+
         # --- Language model -----------------------------------------------
+
         return self.language_model(
             input_ids=None,
             inputs_embeds=inputs_embeds,

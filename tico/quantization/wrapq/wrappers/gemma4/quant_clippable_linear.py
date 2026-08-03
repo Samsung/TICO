@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -43,7 +44,9 @@ class QuantGemma4ClippableLinear(QuantModuleBase):
         self.module = fp
         self.use_clipped_linears = bool(getattr(fp, "use_clipped_linears", False))
         self.linear = PTQWrapper(
-            fp.linear, qcfg=qcfg.child("linear") if qcfg else None, fp_name=fp_name
+            fp.linear,
+            qcfg=qcfg.child("linear") if qcfg else None,
+            fp_name=join_name(fp_name, "linear"),
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
