@@ -97,6 +97,36 @@ Use this three-step loop for the common LLaMA post-quantization benchmark flow.
      --checkpoint ./out/llama_quantized/quantized_model.pt
    ```
 
+### Gemma4 E2B flow
+
+Gemma4 E2B uses the same config-driven three-step interface. The current export
+preset writes a serialized model checkpoint; static Circle submodule export is
+not yet exposed through the Gemma4 recipe adapter.
+
+1. Quantize Gemma4 E2B and save the checkpoint.
+
+   ```bash
+   python -m tico.quantization.examples.quantize \
+     --config tico/quantization/examples/configs/gemma4_quantize.yaml
+   ```
+
+2. Evaluate either the floating-point model or the saved checkpoint with the
+   Gemma4 LLaVA-Bench judge suite.
+
+   ```bash
+   python -m tico.quantization.examples.evaluate \
+     --config tico/quantization/examples/configs/gemma4_eval_suite.yaml \
+     --checkpoint ./out/gemma4_quantized/quantized_model.pt
+   ```
+
+3. Export the configured checkpoint artifact.
+
+   ```bash
+   python -m tico.quantization.examples.export \
+     --config tico/quantization/examples/configs/gemma4_export.yaml \
+     --checkpoint ./out/gemma4_quantized/quantized_model.pt
+   ```
+
 ### Quantize
 
 `quantize.py` is the command that executes the recipe pipeline. It runs the
@@ -280,9 +310,11 @@ python -m tico.quantization.examples.export \
 > `qwen3_vl_eval_suite_mx_override_polices.yaml` enable the other evaluation
 > tasks by default. Disable them with `--set` overrides when running only
 > LLaVA-Bench.
+>
+> `gemma4_eval_suite.yaml` enables only LLaVA-Bench judge evaluation.
 
 LLaVA-Bench-in-the-Wild is evaluated through the regular `evaluate.py` entry
-point when the Qwen3-VL config enables `evaluation.llava_bench.mode=judge`.
+point when a supported VLM config enables `evaluation.llava_bench.mode=judge`.
 This path treats LLaVA-Bench as open-ended natural QA. The generation prompt is
 only:
 

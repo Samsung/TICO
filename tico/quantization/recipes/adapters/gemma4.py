@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
 import torch
@@ -24,13 +25,22 @@ from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
+from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench_judge import (
     evaluate_and_print_llava_bench_judge,
 )
+from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
+from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
+from tico.quantization.recipes.evaluation.video_mme import evaluate_and_print_video_mme
 from tico.quantization.recipes.evaluation.vlm import (
+    evaluate_coco,
     evaluate_llava_bench,
+    evaluate_vlm_text_ppl,
+    evaluate_vqa_tasks,
     print_coco_score_results,
+    print_vqa_results,
 )
+from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.utils import (
     move_to_device,
     quant_spec_from_config,
@@ -270,6 +280,35 @@ class Gemma4Adapter(ModelAdapter):
 
         max_seq_len = eval_cfg.get("max_seq_len")
         n_samples = int(eval_cfg.get("n_samples", 50))
+        tasks = eval_cfg.get("vlm_tasks") or []
+        verbose = bool(eval_cfg.get("verbose", False))
+        show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
+        if isinstance(tasks, str):
+            tasks = [task.strip() for task in tasks.split(",") if task.strip()]
+
+        if tasks:
+            vqa_results = evaluate_vqa_tasks(
+                model=ctx.model,
+                processor=ctx.processor,
+                tasks=tasks,
+                device=str(ctx.device),
+                n_samples=n_samples,
+                max_seq_len=max_seq_len,
+                verbose=verbose,
+                show_progress=show_progress,
+            )
+            print_vqa_results("VQA evaluation", vqa_results)
+
+        if eval_cfg.get("coco", False):
+            coco_results = evaluate_coco(
+                model=ctx.model,
+                processor=ctx.processor,
+                device=str(ctx.device),
+                dataset_name="coco",
+                n_samples=n_samples,
+                max_seq_len=max_seq_len,
+            )
+            print_coco_score_results("\n=== COCO Evaluation ===", coco_results)
 
         llava_bench_cfg = eval_cfg.get("llava_bench", False)
         if isinstance(llava_bench_cfg, Mapping):
@@ -319,12 +358,97 @@ class Gemma4Adapter(ModelAdapter):
             )
             print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
 
-    def export(self, ctx: RecipeContext) -> None:
-        """Export Gemma4 E2B artifacts.
+        videomme = eval_cfg.get("videomme", {})
+        if videomme.get("enabled", False):
+            video_n_samples = int(videomme.get("n_samples", -1))
+            max_num_frames = int(videomme.get("max_num_frames", 32))
+            if max_num_frames <= 0:
+                raise ValueError(
+                    "evaluation.videomme.max_num_frames must be a positive integer."
+                )
+            evaluate_and_print_video_mme(
+                model=ctx.model,
+                processor=ctx.processor,
+                device=str(ctx.device),
+                batch_size=int(videomme.get("batch_size", 1)),
+                max_new_tokens=int(videomme.get("max_new_tokens", 30)),
+                n_samples=video_n_samples if video_n_samples > 0 else None,
+                max_num_frames=max_num_frames,
+                use_cache=videomme.get("use_cache", None),
+                verbose=bool(videomme.get("verbose", verbose)),
+            )
 
-        TODO: Implement Circle export via the static runtime submodule adapters.
-        """
+        mmlu = eval_cfg.get("mmlu", {})
+        if mmlu.get("enabled", False):
+            evaluate_and_print_mmlu(
+                model=ctx.model,
+                tokenizer=ctx.processor.tokenizer,
+                subjects=mmlu.get("subjects") or ["mmlu"],
+                device=str(ctx.device),
+                n_shots=int(mmlu.get("n_shots", 5)),
+                n_samples=int(mmlu.get("n_samples", -1)),
+                batch_size=int(mmlu.get("batch_size", 1)),
+                max_seq_len=int(
+                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
+                ),
+            )
+
+        hellaswag = eval_cfg.get("hellaswag", {})
+        if hellaswag.get("enabled", False):
+            evaluate_and_print_hellaswag(
+                model=ctx.model,
+                tokenizer=ctx.processor.tokenizer,
+                device=str(ctx.device),
+                n_shots=int(hellaswag.get("n_shots", 10)),
+                n_samples=int(hellaswag.get("n_samples", -1)),
+                batch_size=int(hellaswag.get("batch_size", 1)),
+                max_seq_len=int(
+                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
+                ),
+            )
+
+        mmmu = eval_cfg.get("mmmu", {})
+        if mmmu.get("enabled", False):
+            subjects = mmmu.get("subjects")
+            if subjects == ["mmmu"] or subjects == "mmmu":
+                subjects = None
+            evaluate_and_print_mmmu(
+                model=ctx.model,
+                processor=ctx.processor,
+                dataset=mmmu.get("dataset") or "MMMU/MMMU",
+                subjects=subjects,
+                device=str(ctx.device),
+                n_shots=int(mmmu.get("n_shots", 5)),
+                n_samples=int(mmmu.get("n_samples", -1)),
+                max_new_tokens=int(mmmu.get("max_new_tokens", 16)),
+                max_seq_len=max_seq_len,
+                temperature=float(mmmu.get("temperature", 0.0)),
+                verbose=bool(mmmu.get("verbose", verbose)),
+            )
+
+        ppl = eval_cfg.get("ppl", {})
+        if ppl.get("enabled", False):
+            ppl_value = evaluate_vlm_text_ppl(
+                model=ctx.model,
+                processor=ctx.processor,
+                dataset_name=ppl.get("dataset", "wikitext2"),
+                split=ppl.get("split", "test"),
+                device=str(ctx.device),
+                stride=int(ppl.get("stride", 512)),
+                max_seq_len=int(
+                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
+                ),
+                show_progress=show_progress,
+            )
+            print(f"\nPPL({ppl.get('dataset', 'wikitext2')}): {ppl_value:.2f}")
+
+    def export(self, ctx: RecipeContext) -> None:
+        """Export configured Gemma4 E2B artifacts."""
         export_cfg = ctx.cfg.get("export", {})
         if not export_cfg.get("enabled", False):
             return
-        raise NotImplementedError("Gemma4 E2B export adapter is not wired yet.")
+
+        output_dir = Path(export_cfg.get("output_dir", "./out/gemma4"))
+        artifacts = set(export_cfg.get("artifacts", []))
+        if "ptq_checkpoint" in artifacts or "checkpoint" in artifacts:
+            save_checkpoint(ctx.require_model(), output_dir)

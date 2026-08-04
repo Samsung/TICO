@@ -25,6 +25,9 @@ qwen3_vl_quantize.yaml
 qwen3_vl_eval_suite.yaml
 qwen3_vl_eval_suite_mx_override_polices.yaml
 qwen3_vl_export.yaml
+gemma4_quantize.yaml
+gemma4_eval_suite.yaml
+gemma4_export.yaml
 ```
 
 Use lower snake case. Keep names descriptive but short.
@@ -117,7 +120,7 @@ Rules:
 Use `model_args` only for model-family-specific details needed by wrappers,
 export, or debug modes.
 
-Example:
+Qwen3-VL example:
 
 ```yaml
 model_args:
@@ -127,9 +130,25 @@ model_args:
     spatial_merge_size: 2
 ```
 
+Gemma4 static image-text example:
+
+```yaml
+model_args:
+  vision:
+    visual_start_idx: 0
+    num_visual_tokens: 256
+    image_height: 896
+    image_width: 896
+    validate_static_layout: false
+```
+
 Rules:
 
 - Keep generic quantization parameters under `pipeline`, not `model_args`.
+- Set both Gemma4 `image_height` and `image_width` when forcing a static
+  calibration image size; setting only one is invalid.
+- Enable Gemma4 `validate_static_layout` only for calibration inputs whose image
+  placeholders follow the deployment layout.
 - Document any new model-family-specific fields in this README.
 - The adapter owns interpretation of `model_args`.
 

@@ -198,6 +198,9 @@ qwen3_vl_eval_suite.yaml
 qwen3_vl_eval_suite_mx_override_polices.yaml
 qwen3_vl_export.yaml
 qwen3_vl_synthetic_smoke.yaml
+gemma4_quantize.yaml
+gemma4_eval_suite.yaml
+gemma4_export.yaml
 ```
 
 ## Runtime and artifact conventions
