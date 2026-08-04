@@ -42,6 +42,7 @@ from tico.quantization.recipes.evaluation.vlm import (
     print_vqa_results,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
+from tico.quantization.recipes.export.qwen3_vl import export_qwen3_vl_per_layer
 from tico.quantization.recipes.utils import (
     move_to_device,
     quant_spec_from_config,
@@ -547,6 +548,28 @@ class Qwen3VLAdapter(ModelAdapter):
         artifacts = set(export_cfg.get("artifacts", []))
         if "ptq_checkpoint" in artifacts or "checkpoint" in artifacts:
             save_checkpoint(ctx.model, output_dir)
+
+        if "circle_per_layer" in artifacts:
+            max_seq_len = int(
+                export_cfg.get(
+                    "max_seq_len",
+                    ctx.cfg.get("calibration", {}).get("seq_len", 2048),
+                )
+            )
+            model_args = ctx.cfg.get("model_args", {})
+            if not isinstance(model_args, Mapping):
+                raise TypeError(
+                    "Qwen3-VL Circle export requires model_args to be a mapping."
+                )
+
+            export_qwen3_vl_per_layer(
+                q_model=ctx.model,
+                max_seq_len=max_seq_len,
+                output_dir=output_dir,
+                model_args=model_args,
+                prefill_decode=bool(export_cfg.get("prefill_decode", True)),
+                strict=bool(export_cfg.get("strict", False)),
+            )
 
 
 def _load_torch_object(path: str | None) -> Any:

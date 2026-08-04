@@ -32,7 +32,9 @@ decides **how** to write an artifact.
 recipes/export/
 ├── README.md
 ├── checkpoint.py     # torch checkpoint saving
-└── circle.py         # full-model Circle export helpers
+├── circle.py         # full-model Circle export helpers
+├── llama.py          # staged LLaMA Circle export
+└── qwen3_vl.py       # fixed-grid Qwen3-VL staged Circle export
 ```
 
 Additional files can be added for per-layer export, ONNX-like formats, debug
@@ -51,6 +53,18 @@ model.q.circle
 layer_<index>.q.circle
 effective_config.yaml
 export_inputs.pt
+```
+
+Qwen3-VL `circle_per_layer` export uses stable runtime-stage names:
+
+```text
+vision_prefill.q.circle
+token_embedding.q.circle
+multimodal_embedding_prefill.q.circle
+decoder_layer_prefill_<index>.q.circle
+deepstack_fusion_<index>.q.circle
+decoder_layer_decode_<index>.q.circle
+lm_head.q.circle
 ```
 
 The output directory should come from `export.output_dir`.

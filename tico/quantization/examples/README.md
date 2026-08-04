@@ -34,7 +34,7 @@ are ignored by `evaluate.py`.
 
 Use `export.py` to export either a floating-point model loaded through its
 adapter or an already saved checkpoint. It writes configured artifacts such as
-LLaMA per-layer Circle files and does **not** run `pipeline` stages.
+LLaMA and Qwen3-VL staged Circle files and does **not** run `pipeline` stages.
 
 Use `inspector.py` for debug-oriented workflows such as trace, parity, runtime
 inspection, and wrapper-level smoke checks.
@@ -283,6 +283,35 @@ python -m tico.quantization.examples.export \
   --config tico/quantization/examples/configs/llama_export.yaml \
   --checkpoint ./out/llama_quantized/quantized_model.pt
 ```
+
+Qwen3-VL uses the same generic `circle_per_layer` artifact key. The exporter
+keeps the fixed-grid vision model as one prefill stage and emits each text
+decoder layer separately for prefill and decode:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/qwen3_vl_export.yaml \
+  --checkpoint ./out/qwen3_vl_quantized/quantized_model.pt
+```
+
+The fixed values under `model_args.vision` must match the values used when the
+checkpoint was wrapped and quantized. A default prefill/decode export writes:
+
+```text
+vision_prefill.q.circle
+token_embedding.q.circle
+multimodal_embedding_prefill.q.circle
+decoder_layer_prefill_<index>.q.circle
+deepstack_fusion_<index>.q.circle
+decoder_layer_decode_<index>.q.circle
+lm_head.q.circle
+```
+
+`token_embedding` has a dynamic sequence dimension and is shared by prefill
+and decode. The runtime owns mRoPE lookup, additive attention-mask
+construction, and KV cache storage/update. It passes those tensors to the
+exported decoder-layer graphs. Exporting with `--source model` writes the
+same artifact set with the `.f32.circle` suffix.
 
 `llama_export.yaml` exports both prefill and decode layer artifacts by default.
 Use an override only when decode layer export is not needed:
