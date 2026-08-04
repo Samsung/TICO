@@ -18,6 +18,7 @@ from typing import Any, Mapping, Optional, Type
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
@@ -167,3 +168,18 @@ def mx(
             "round": round,
         },
     )
+
+
+def identity() -> QuantSpec:
+    """
+    Create a no-op (identity) quantization spec.
+
+    The ``IdentityObserver`` passes tensors through unchanged — it collects
+    no statistics and applies no fake-quantization.  Use this spec to disable
+    quantization for a role (e.g. ``activation``) while keeping other roles
+    (e.g. ``weight``) quantized, enabling weight-only quantization estimation.
+
+    Returns:
+        A QuantSpec that expands to IdentityObserver kwargs.
+    """
+    return QuantSpec(observer=IdentityObserver)

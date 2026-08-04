@@ -16,9 +16,10 @@ import unittest
 
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.specs import affine, mx
+from tico.quantization.config.specs import affine, identity, mx
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -113,6 +114,58 @@ class TestQuantSpecBuilders(unittest.TestCase):
 
         self.assertIsInstance(wrapper.obs_act_in, CustomObserver)
         self.assertIsInstance(wrapper.obs_act_out, MXObserver)
+
+
+class TestIdentitySpec(unittest.TestCase):
+    """Tests for the identity() spec — enables weights-only quantization."""
+
+    def test_identity_returns_identity_observer(self):
+        """identity() must produce a QuantSpec with IdentityObserver."""
+        spec = identity()
+        self.assertEqual(spec.observer, IdentityObserver)
+        self.assertIsNone(spec.dtype)
+        self.assertIsNone(spec.qscheme)
+
+    def test_identity_to_kwargs_has_no_dtype_or_qscheme(self):
+        """Identity spec must not emit dtype/qscheme (no quantization)."""
+        spec = identity()
+        kwargs = spec.to_kwargs(obs_name="act_in", context="test")
+        self.assertEqual(kwargs["observer"], IdentityObserver)
+        self.assertNotIn("dtype", kwargs)
+        self.assertNotIn("qscheme", kwargs)
+
+    def test_identity_to_kwargs_mark_replace(self):
+        """mark_replace should add the internal replace marker."""
+        spec = identity()
+        kwargs = spec.to_kwargs(obs_name="act_in", mark_replace=True)
+        self.assertTrue(kwargs.get("__quant_spec_replace_role__"))
+
+    def test_identity_activation_weight_quantized(self):
+        """Weight-only quantization: identity activations + affine weights."""
+        cfg = PTQConfig(
+            activation=identity(),
+            weight=affine(DType.uint(4)),
+        )
+        wrapper = DummyWrapper(cfg)
+
+        # Activations must be IdentityObserver (float32 passthrough)
+        self.assertIsInstance(wrapper.obs_act_in, IdentityObserver)
+        self.assertIsInstance(wrapper.obs_act_out, IdentityObserver)
+
+        # Weights must still be quantized
+        self.assertIsInstance(wrapper.obs_weight, MinMaxObserver)
+        self.assertEqual(wrapper.obs_weight.dtype, DType.uint(4))
+
+    def test_identity_observer_fake_quant_is_passthrough(self):
+        """IdentityObserver.fake_quant() must return input unchanged."""
+        import torch
+
+        cfg = PTQConfig(activation=identity())
+        wrapper = DummyWrapper(cfg)
+
+        x = torch.randn(2, 3)
+        out = wrapper.obs_act_in.fake_quant(x)
+        self.assertTrue(torch.equal(x, out))
 
 
 if __name__ == "__main__":
