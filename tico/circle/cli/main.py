@@ -33,6 +33,8 @@ from tico.circle.passes import (
     CirclePass,
     CirclePassContext,
     CirclePassManager,
+    CirclePassStrategy,
+    EliminateTransposeBoundedLayoutRegionPass,
     RemoveRedundantLayoutOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
@@ -41,6 +43,9 @@ from tico.circle.selector import parse_operator_spec
 LOGGER = logging.getLogger("tico.circle.cli")
 
 _PASS_REGISTRY: dict[str, type[CirclePass]] = {
+    "eliminate-transpose-bounded-layout-region": (
+        EliminateTransposeBoundedLayoutRegionPass
+    ),
     "remove-redundant-layout-ops": RemoveRedundantLayoutOpsPass,
     "dce": DeadCodeEliminationPass,
     "compact": CompactIndicesPass,
@@ -48,6 +53,8 @@ _PASS_REGISTRY: dict[str, type[CirclePass]] = {
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Create the tico-circle command-line parser."""
+
     parser = argparse.ArgumentParser(
         prog="tico-circle",
         description="Inspect and transform exported Circle model artifacts.",
@@ -78,7 +85,10 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument(
         "--verify",
         action="store_true",
-        help="Check internal references and graph bookkeeping; print findings to stderr.",
+        help=(
+            "Check internal references and graph bookkeeping; "
+            "print findings to stderr."
+        ),
     )
     inspect_parser.set_defaults(handler=_inspect_command)
 
@@ -162,6 +172,15 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     optimize_parser.add_argument(
+        "--strategy",
+        choices=[strategy.value for strategy in CirclePassStrategy],
+        default=CirclePassStrategy.ONCE.value,
+        help=(
+            "Pass scheduling strategy. Use 'restart' when an earlier pass can "
+            "become applicable after a later rewrite."
+        ),
+    )
+    optimize_parser.add_argument(
         "--no-verify",
         action="store_true",
         help="Skip internal-consistency checks after passes and at completion.",
@@ -171,6 +190,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _inspect_command(args: argparse.Namespace) -> int:
+    """Inspect one Circle document."""
+
     document = CircleDocument.load(args.input)
     if args.subgraph is not None:
         document.subgraph(args.subgraph)
@@ -196,6 +217,8 @@ def _inspect_command(args: argparse.Namespace) -> int:
 
 
 def _verify_command(args: argparse.Namespace) -> int:
+    """Verify one Circle document."""
+
     document = CircleDocument.load(args.input)
     report = document.verify(raise_on_error=False)
     failed_on_warnings = args.warnings_as_errors and bool(report.warnings)
@@ -207,6 +230,8 @@ def _verify_command(args: argparse.Namespace) -> int:
 
 
 def _extract_command(args: argparse.Namespace) -> int:
+    """Extract one operator region from a Circle document."""
+
     document = CircleDocument.load(args.input)
     policy = (
         SignaturePolicy.PRESERVE_COMPATIBLE
@@ -251,6 +276,8 @@ def _extract_command(args: argparse.Namespace) -> int:
 
 
 def _parse_passes(value: str) -> list[CirclePass]:
+    """Create Circle pass instances from a comma-separated CLI value."""
+
     passes: list[CirclePass] = []
     for raw_name in value.split(","):
         name = raw_name.strip().lower()
@@ -269,10 +296,15 @@ def _parse_passes(value: str) -> list[CirclePass]:
 
 
 def _optimize_command(args: argparse.Namespace) -> int:
+    """Run a configured Circle pass pipeline and save its output."""
+
     document = CircleDocument.load(args.input)
     passes = _parse_passes(args.passes)
     context = CirclePassContext(verify_after_each_pass=not args.no_verify)
-    result = CirclePassManager(passes).run(document, context)
+    result = CirclePassManager(
+        passes,
+        strategy=CirclePassStrategy(args.strategy),
+    ).run(document, context)
     if not args.no_verify:
         document.verify(raise_on_error=True)
     document.save(args.output)

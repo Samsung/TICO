@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.optimization.remove.layout_ops import (
+from tico.circle.passes.optimization.remove import (
+    EliminateTransposeBoundedLayoutRegionPass,
     RemoveRedundantLayoutOpsPass,
 )
 
 __all__ = [
+    "EliminateTransposeBoundedLayoutRegionPass",
     "RemoveRedundantLayoutOpsPass",
 ]
