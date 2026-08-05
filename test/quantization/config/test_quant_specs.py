@@ -14,9 +14,11 @@
 
 import unittest
 
+from tico.quantization.config import no_quant
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.specs import affine, identity, mx
+from tico.quantization.config.specs import affine, mx
+from tico.quantization.recipes.utils import quant_spec_from_config
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.identity import IdentityObserver
@@ -116,56 +118,82 @@ class TestQuantSpecBuilders(unittest.TestCase):
         self.assertIsInstance(wrapper.obs_act_out, MXObserver)
 
 
-class TestIdentitySpec(unittest.TestCase):
-    """Tests for the identity() spec — enables weights-only quantization."""
+class TestNoQuantSpec(unittest.TestCase):
+    """Tests for the no_quant() spec used by weight-only quantization."""
 
-    def test_identity_returns_identity_observer(self):
-        """identity() must produce a QuantSpec with IdentityObserver."""
-        spec = identity()
+    def test_no_quant_returns_identity_observer(self):
+        """no_quant() must produce a QuantSpec with IdentityObserver."""
+        spec = no_quant()
         self.assertEqual(spec.observer, IdentityObserver)
         self.assertIsNone(spec.dtype)
         self.assertIsNone(spec.qscheme)
 
-    def test_identity_to_kwargs_has_no_dtype_or_qscheme(self):
-        """Identity spec must not emit dtype/qscheme (no quantization)."""
-        spec = identity()
+    def test_no_quant_to_kwargs_has_no_dtype_or_qscheme(self):
+        """No-quant spec must not emit dtype or qscheme."""
+        spec = no_quant()
         kwargs = spec.to_kwargs(obs_name="act_in", context="test")
         self.assertEqual(kwargs["observer"], IdentityObserver)
         self.assertNotIn("dtype", kwargs)
         self.assertNotIn("qscheme", kwargs)
 
-    def test_identity_to_kwargs_mark_replace(self):
+    def test_no_quant_to_kwargs_mark_replace(self):
         """mark_replace should add the internal replace marker."""
-        spec = identity()
+        spec = no_quant()
         kwargs = spec.to_kwargs(obs_name="act_in", mark_replace=True)
         self.assertTrue(kwargs.get("__quant_spec_replace_role__"))
 
-    def test_identity_activation_weight_quantized(self):
-        """Weight-only quantization: identity activations + affine weights."""
+    def test_no_quant_activation_keeps_weight_quantized(self):
+        """No-quant activations must not disable affine weight quantization."""
         cfg = PTQConfig(
-            activation=identity(),
+            activation=no_quant(),
             weight=affine(DType.uint(4)),
         )
         wrapper = DummyWrapper(cfg)
 
-        # Activations must be IdentityObserver (float32 passthrough)
         self.assertIsInstance(wrapper.obs_act_in, IdentityObserver)
         self.assertIsInstance(wrapper.obs_act_out, IdentityObserver)
 
-        # Weights must still be quantized
         self.assertIsInstance(wrapper.obs_weight, MinMaxObserver)
         self.assertEqual(wrapper.obs_weight.dtype, DType.uint(4))
 
-    def test_identity_observer_fake_quant_is_passthrough(self):
+    def test_no_quant_observer_fake_quant_is_passthrough(self):
         """IdentityObserver.fake_quant() must return input unchanged."""
         import torch
 
-        cfg = PTQConfig(activation=identity())
+        cfg = PTQConfig(activation=no_quant())
         wrapper = DummyWrapper(cfg)
 
         x = torch.randn(2, 3)
         out = wrapper.obs_act_in.fake_quant(x)
-        self.assertTrue(torch.equal(x, out))
+        self.assertIs(x, out)
+
+    def test_recipe_no_quant_mapping(self):
+        """Recipe configs must resolve kind=no_quant to the public spec."""
+        spec = quant_spec_from_config({"kind": "no_quant"})
+        self.assertEqual(spec, no_quant())
+
+    def test_recipe_no_quant_rejects_quantization_fields(self):
+        """A disabled role must not silently accept affine-only fields."""
+        with self.assertRaisesRegex(ValueError, "No-quant spec does not accept"):
+            quant_spec_from_config(
+                {
+                    "kind": "no_quant",
+                    "dtype": "uint8",
+                }
+            )
+
+    def test_recipe_does_not_accept_ambiguous_aliases(self):
+        """identity/none aliases are intentionally not part of the public schema."""
+        for kind in ("identity", "none"):
+            with self.subTest(kind=kind), self.assertRaisesRegex(
+                ValueError, "Unsupported quant spec kind"
+            ):
+                quant_spec_from_config({"kind": kind})
+
+    def test_none_still_means_use_default(self):
+        """Python/YAML null must retain the existing default-resolution meaning."""
+        default = affine(DType.int(16))
+        self.assertIs(quant_spec_from_config(None, default=default), default)
 
 
 if __name__ == "__main__":

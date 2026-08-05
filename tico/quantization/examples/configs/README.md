@@ -217,6 +217,26 @@ pipeline:
     linear_weight: uint4
 ```
 
+Weight-only PTQ keeps activations in the floating-point runtime dtype while
+quantizing weights:
+
+```yaml
+runtime:
+  dtype: float32
+
+pipeline:
+  - name: ptq
+    enabled: true
+    activation:
+      kind: no_quant
+    linear_weight: uint4
+```
+
+`no_quant` disables observer statistics and fake-quantization for the selected
+role. It does not choose the floating-point execution dtype; `runtime.dtype`
+does that. `activation: null` retains the normal default-resolution behavior and
+must not be used as an alias for disabling activation quantization.
+
 Preprocessing + GPTQ + PTQ:
 
 ```yaml

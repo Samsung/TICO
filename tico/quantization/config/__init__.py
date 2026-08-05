@@ -17,13 +17,14 @@ from tico.quantization.config.builders import (
     build_qwen3_vl_ptq_config,
 )
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.specs import affine, mx, QuantSpec
+from tico.quantization.config.specs import affine, mx, no_quant, QuantSpec
 
 __all__ = [
     "PTQConfig",
     "QuantSpec",
     "affine",
     "mx",
+    "no_quant",
     "build_llm_ptq_config",
     "build_qwen3_vl_ptq_config",
 ]
