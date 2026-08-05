@@ -60,6 +60,9 @@ class WrapperSmokeCase:
         """Return whether this case can run in the current environment."""
         return CaseAvailability(True)
 
+    def validate_config(self, cfg: Mapping[str, Any]) -> None:
+        """Validate case-specific options before constructing a module."""
+
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the PTQ config used to prepare the floating-point module."""
         from tico.quantization.config.ptq import PTQConfig

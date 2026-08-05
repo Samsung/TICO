@@ -14,6 +14,8 @@
 
 """Smoke cases for Gemma4 wrapper checks."""
 
+from dataclasses import dataclass
+from math import isqrt
 from typing import Any, Mapping
 
 import torch
@@ -23,7 +25,10 @@ from tico.quantization.recipes.debug.wrapper_smoke.case import (
     ForwardInput,
     WrapperSmokeCase,
 )
-from tico.quantization.recipes.debug.wrapper_smoke.utils import clone_module
+from tico.quantization.recipes.debug.wrapper_smoke.utils import (
+    clone_module,
+    smoke_section,
+)
 
 
 _GEMMA4_FULL_ROPE_PARAMETERS: dict[str, Any] = {
@@ -35,6 +40,139 @@ _GEMMA4_SLIDING_ROPE_PARAMETERS: dict[str, Any] = {
     "rope_type": "default",
     "rope_theta": 10_000.0,
 }
+
+_GEMMA4_SIZE_PROFILE_TINY = "tiny"
+_GEMMA4_SIZE_PROFILE_E2B_DIMS = "e2b_dims"
+_GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME = "e2b_static_runtime"
+_GEMMA4_SIZE_PROFILES = frozenset(
+    {
+        _GEMMA4_SIZE_PROFILE_TINY,
+        _GEMMA4_SIZE_PROFILE_E2B_DIMS,
+        _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME,
+    }
+)
+_GEMMA4_E2B_WIDTH_PROFILES = frozenset(
+    {
+        _GEMMA4_SIZE_PROFILE_E2B_DIMS,
+        _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME,
+    }
+)
+
+_GEMMA4_E2B_PLE_DIM = 256
+_GEMMA4_E2B_STATIC_MAX_SEQ = 2_048
+_GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS = 256
+_GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS = 280
+_GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE = 3
+_GEMMA4_SUPPORTED_MAX_SOFT_TOKENS = frozenset({70, 140, 280, 560, 1_120})
+
+# The E2B-width profiles intentionally cover bounded module-level cases and
+# one-layer vision composites. Text/full multimodal models and vocabulary-sized
+# embeddings remain tiny-only because they defeat the smoke workflow.
+_GEMMA4_E2B_DIMS_SUPPORTED_CASES = frozenset(
+    {
+        "gemma4_text_mlp",
+        "gemma4_text_attention",
+        "gemma4_text_attention_sliding",
+        "gemma4_text_attention_k_eq_v",
+        "gemma4_text_attention_shared_kv",
+        "gemma4_text_decoder_layer_prefill",
+        "gemma4_text_decoder_layer_sliding_prefill",
+        "gemma4_text_decoder_layer_decode",
+        "gemma4_text_decoder_layer_shared_kv",
+        "gemma4_vision_attention",
+        "gemma4_vision_encoder_layer",
+        "gemma4_vision_encoder",
+        "gemma4_vision_patch_embedder",
+        "gemma4_vision_pooler",
+        "gemma4_vision_model",
+        "gemma4_multimodal_embedder",
+    }
+)
+
+# The static-runtime profile follows the real E2B execution contract rather
+# than exercising synthetic feature variants. In particular, E2B itself uses
+# attention_k_eq_v=False, so the K=V-only branch remains available in e2b_dims
+# but is intentionally excluded here.
+_GEMMA4_E2B_STATIC_RUNTIME_SUPPORTED_CASES = _GEMMA4_E2B_DIMS_SUPPORTED_CASES - {
+    "gemma4_text_attention_k_eq_v"
+}
+
+
+@dataclass(frozen=True)
+class Gemma4StaticRuntimeShape:
+    """Fixed input-shape contract used by E2B static-runtime smoke exports."""
+
+    max_seq: int = _GEMMA4_E2B_STATIC_MAX_SEQ
+    num_visual_tokens: int = _GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS
+    max_soft_tokens: int = _GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS
+    pooling_kernel_size: int = _GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE
+
+    def __post_init__(self) -> None:
+        if self.max_seq < 2:
+            raise ValueError(
+                f"Gemma4 static max_seq must be at least 2, got {self.max_seq}."
+            )
+        if self.num_visual_tokens <= 0:
+            raise ValueError(
+                "Gemma4 static num_visual_tokens must be positive, got "
+                f"{self.num_visual_tokens}."
+            )
+        if self.max_soft_tokens < self.num_visual_tokens:
+            raise ValueError(
+                "Gemma4 static max_soft_tokens must be greater than or equal to "
+                f"num_visual_tokens, got {self.max_soft_tokens} < "
+                f"{self.num_visual_tokens}."
+            )
+        if self.max_soft_tokens not in _GEMMA4_SUPPORTED_MAX_SOFT_TOKENS:
+            supported = ", ".join(
+                str(value) for value in sorted(_GEMMA4_SUPPORTED_MAX_SOFT_TOKENS)
+            )
+            raise ValueError(
+                "Gemma4 static max_soft_tokens must match a processor-supported "
+                f"budget ({supported}), got {self.max_soft_tokens}."
+            )
+        if self.pooling_kernel_size != _GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE:
+            raise ValueError(
+                "Gemma4 E2B static-runtime smoke currently requires "
+                f"pooling_kernel_size={_GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE}."
+            )
+
+        visual_side = isqrt(self.num_visual_tokens)
+        if visual_side * visual_side != self.num_visual_tokens:
+            raise ValueError(
+                "Gemma4 static num_visual_tokens must form a square visual grid, "
+                f"got {self.num_visual_tokens}."
+            )
+
+    @property
+    def visual_grid_side(self) -> int:
+        """Return the valid post-pooling visual-grid width and height."""
+        return isqrt(self.num_visual_tokens)
+
+    @property
+    def patch_grid_side(self) -> int:
+        """Return the valid pre-pooling patch-grid width and height."""
+        return self.visual_grid_side * self.pooling_kernel_size
+
+    @property
+    def num_valid_patches(self) -> int:
+        """Return the number of non-padding patches in the fixed input."""
+        return self.num_visual_tokens * self.pooling_kernel_size**2
+
+    @property
+    def num_patches(self) -> int:
+        """Return the processor-compatible padded patch-slot count."""
+        return self.max_soft_tokens * self.pooling_kernel_size**2
+
+    @property
+    def num_padding_patches(self) -> int:
+        """Return the number of padded patch slots."""
+        return self.num_patches - self.num_valid_patches
+
+    @property
+    def num_padding_soft_tokens(self) -> int:
+        """Return the number of pooler output slots removed as padding."""
+        return self.max_soft_tokens - self.num_visual_tokens
 
 
 def _has_gemma4() -> CaseAvailability:
@@ -76,33 +214,111 @@ def _rope_parameters_for_layer_types(
     return rope_parameters
 
 
-def _make_text_config(
+def _gemma4_options(cfg: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the Gemma4-specific wrapper-smoke configuration mapping."""
+    section = smoke_section(cfg)
+    gemma4_cfg = section.get("gemma4", {})
+    if not isinstance(gemma4_cfg, Mapping):
+        raise ValueError("debug.wrapper_smoke.gemma4 must be a mapping.")
+    return gemma4_cfg
+
+
+def _gemma4_size_profile(cfg: Mapping[str, Any]) -> str:
+    """Return and validate the requested Gemma4 smoke size profile."""
+    gemma4_cfg = _gemma4_options(cfg)
+    profile = (
+        str(gemma4_cfg.get("size_profile", _GEMMA4_SIZE_PROFILE_TINY)).strip().lower()
+    )
+    if profile not in _GEMMA4_SIZE_PROFILES:
+        choices = ", ".join(sorted(_GEMMA4_SIZE_PROFILES))
+        raise ValueError(
+            f"Unsupported Gemma4 wrapper-smoke size profile '{profile}'. "
+            f"Expected one of: {choices}."
+        )
+    return profile
+
+
+def _gemma4_static_runtime_shape(
+    cfg: Mapping[str, Any],
+) -> Gemma4StaticRuntimeShape:
+    """Parse and validate the E2B static-runtime input-shape options."""
+    gemma4_cfg = _gemma4_options(cfg)
+    static_cfg = gemma4_cfg.get("static_runtime", {})
+    if not isinstance(static_cfg, Mapping):
+        raise ValueError("debug.wrapper_smoke.gemma4.static_runtime must be a mapping.")
+
+    return Gemma4StaticRuntimeShape(
+        max_seq=int(static_cfg.get("max_seq", _GEMMA4_E2B_STATIC_MAX_SEQ)),
+        num_visual_tokens=int(
+            static_cfg.get("num_visual_tokens", _GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS)
+        ),
+        max_soft_tokens=int(
+            static_cfg.get("max_soft_tokens", _GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS)
+        ),
+    )
+
+
+def _build_text_config(
     *,
+    size_profile: str,
     layer_types: tuple[str, ...] = ("full_attention",),
     attention_k_eq_v: bool = False,
     num_kv_shared_layers: int = 0,
     hidden_size_per_layer_input: int = 0,
 ) -> Any:
-    """Create a warning-free tiny Gemma4 text config for synthetic smoke tests.
+    """Create a tiny or E2B-width Gemma4 text config.
 
     The helper intentionally provides ``layer_types`` and ``rope_parameters`` as
     a matched pair. This prevents Hugging Face from treating nested Gemma4 RoPE
     parameters as one global default-RoPE config, which otherwise emits
     ``Unrecognized keys in rope_parameters`` warnings in one-layer smoke cases.
+
+    Both E2B profiles copy the original channel and projection dimensions while
+    preserving the short synthetic topology selected by each smoke case. PLE is
+    disabled through ``hidden_size_per_layer_input=0`` unless a caller explicitly
+    requests it.
     """
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
-    cfg = Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
+    if size_profile == _GEMMA4_SIZE_PROFILE_TINY:
+        dimension_kwargs: dict[str, Any] = {
+            "vocab_size": 256,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "num_global_key_value_heads": 2,
+            "head_dim": 32,
+            "global_head_dim": 32,
+            "max_position_embeddings": 128,
+        }
+    elif size_profile in _GEMMA4_E2B_WIDTH_PROFILES:
+        dimension_kwargs = {
+            "vocab_size": 262_144,
+            "hidden_size": 1_536,
+            "intermediate_size": 6_144,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 1,
+            # E2B falls back to num_key_value_heads for ordinary full attention.
+            # Keep this explicit so the synthetic K=V case also has a valid
+            # global-KV projection shape.
+            "num_global_key_value_heads": 1,
+            "head_dim": 256,
+            "global_head_dim": 512,
+            "hidden_activation": "gelu_pytorch_tanh",
+            "max_position_embeddings": 131_072,
+            "rms_norm_eps": 1e-6,
+            "sliding_window": 512,
+            "final_logit_softcapping": 30.0,
+            "use_double_wide_mlp": True,
+            "vocab_size_per_layer_input": 262_144,
+        }
+    else:
+        raise AssertionError(f"Unhandled Gemma4 size profile: {size_profile}")
+
+    text_cfg = Gemma4TextConfig(
+        **dimension_kwargs,
         num_hidden_layers=len(layer_types),
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_global_key_value_heads=2,
-        head_dim=32,
-        global_head_dim=32,
-        max_position_embeddings=128,
         layer_types=list(layer_types),
         rope_parameters=_rope_parameters_for_layer_types(layer_types),
         attention_bias=False,
@@ -113,7 +329,70 @@ def _make_text_config(
         num_kv_shared_layers=num_kv_shared_layers,
         hidden_size_per_layer_input=hidden_size_per_layer_input,
     )
-    return _set_eager_attention(cfg)
+    return _set_eager_attention(text_cfg)
+
+
+def _build_vision_config(*, size_profile: str) -> Any:
+    """Create a tiny or E2B-width Gemma4 vision config.
+
+    The E2B-width variant keeps a single encoder layer. It reproduces original
+    projection, patch, and position-table dimensions without constructing the
+    complete 16-layer vision tower.
+    """
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
+
+    if size_profile == _GEMMA4_SIZE_PROFILE_TINY:
+        vision_cfg = Gemma4VisionConfig(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            attention_dropout=0.0,
+            max_position_embeddings=128,
+            rms_norm_eps=1e-6,
+            use_clipped_linears=False,
+            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+            standardize=True,
+        )
+    elif size_profile in _GEMMA4_E2B_WIDTH_PROFILES:
+        vision_cfg = Gemma4VisionConfig(
+            hidden_size=768,
+            intermediate_size=3_072,
+            num_hidden_layers=1,
+            num_attention_heads=12,
+            num_key_value_heads=12,
+            head_dim=64,
+            hidden_activation="gelu_pytorch_tanh",
+            attention_bias=False,
+            attention_dropout=0.0,
+            max_position_embeddings=131_072,
+            rms_norm_eps=1e-6,
+            pooling_kernel_size=3,
+            patch_size=16,
+            position_embedding_size=10_240,
+            use_clipped_linears=True,
+            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+            standardize=False,
+        )
+    else:
+        raise AssertionError(f"Unhandled Gemma4 size profile: {size_profile}")
+
+    return _set_eager_attention(vision_cfg)
+
+
+def _build_vision_patch_embedder_config(*, size_profile: str) -> Any:
+    """Create a patch-embedder config for the requested size profile."""
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
+
+    if size_profile == _GEMMA4_SIZE_PROFILE_TINY:
+        return Gemma4VisionConfig(
+            hidden_size=32,
+            patch_size=4,
+            position_embedding_size=8,
+        )
+    return _build_vision_config(size_profile=size_profile)
 
 
 def _text_rope(
@@ -214,14 +493,252 @@ def _sliding_window_causal_mask(
     )
 
 
+def _static_pixel_position_ids(
+    shape: Gemma4StaticRuntimeShape,
+    *,
+    batch_size: int = 1,
+) -> torch.Tensor:
+    """Create the padded 2-D patch layout used by the E2B image processor.
+
+    The default contract contains a valid ``48 x 48`` patch grid (2,304
+    patches) followed by 216 ``(-1, -1)`` padding slots. Pooling by ``3 x 3``
+    produces 280 fixed output slots, of which 24 are padding and 256 are valid
+    visual tokens.
+    """
+    coords = torch.arange(shape.num_valid_patches)
+    valid = torch.stack(
+        (coords % shape.patch_grid_side, coords // shape.patch_grid_side),
+        dim=-1,
+    )
+    padding = torch.full(
+        (shape.num_padding_patches, 2),
+        -1,
+        dtype=valid.dtype,
+    )
+    position_ids = torch.cat((valid, padding), dim=0)
+    return position_ids.unsqueeze(0).expand(batch_size, -1, -1).long()
+
+
+def _padding_positions_from_ids(pixel_position_ids: torch.Tensor) -> torch.Tensor:
+    """Return the Boolean padding mask encoded by ``(-1, -1)`` positions."""
+    return (pixel_position_ids == -1).all(dim=-1)
+
+
+def _vision_additive_padding_mask(
+    padding_positions: torch.Tensor,
+    *,
+    fill_value: float = -120.0,
+) -> torch.Tensor:
+    """Create a bidirectional additive mask that blocks padded key positions."""
+    batch_size, seq_len = padding_positions.shape
+    mask = torch.zeros(batch_size, 1, seq_len, seq_len)
+    return mask.masked_fill(
+        padding_positions[:, None, None, :],
+        float(fill_value),
+    )
+
+
 class Gemma4BaseCase(WrapperSmokeCase):
     """Base class for Gemma4 E2B wrapper smoke cases."""
 
     tags: tuple[str, ...] = ("gemma4", "e2b")
+    # Set by concrete cases (class attribute or during build()).
+    seq_len: int
+    text_cfg: Any
 
     def availability(self) -> CaseAvailability:
         """Return whether Gemma4 modules can be imported."""
         return _has_gemma4()
+
+    def validate_config(self, cfg: Mapping[str, Any]) -> None:
+        """Reject unsupported size profiles before constructing a module."""
+        self._validated_size_profile(cfg)
+
+    def _validated_size_profile(self, cfg: Mapping[str, Any]) -> str:
+        """Validate that this case supports the requested Gemma4 profile."""
+        profile = _gemma4_size_profile(cfg)
+        supported_cases = None
+        if profile == _GEMMA4_SIZE_PROFILE_E2B_DIMS:
+            supported_cases = _GEMMA4_E2B_DIMS_SUPPORTED_CASES
+        elif profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME:
+            supported_cases = _GEMMA4_E2B_STATIC_RUNTIME_SUPPORTED_CASES
+
+        if supported_cases is not None and self.name not in supported_cases:
+            supported = ", ".join(sorted(supported_cases))
+            raise ValueError(
+                f"Case '{self.name}' does not support Gemma4 size profile "
+                f"'{profile}'. The profile is limited to bounded module-level "
+                f"cases: {supported}."
+            )
+
+        self._active_size_profile = profile
+        self._active_static_runtime_shape = (
+            _gemma4_static_runtime_shape(cfg)
+            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
+            else None
+        )
+        return profile
+
+    def _static_runtime_shape(self) -> Gemma4StaticRuntimeShape | None:
+        """Return the active static-runtime shape after profile validation."""
+        return getattr(self, "_active_static_runtime_shape", None)
+
+    def _text_prefill_seq_len(self, default: int) -> int:
+        """Return the text prefill length for the active profile."""
+        shape = self._static_runtime_shape()
+        return shape.max_seq if shape is not None else int(default)
+
+    def _decode_max_seq(self, default: int) -> int:
+        """Return the fixed decode cache capacity for the active profile."""
+        shape = self._static_runtime_shape()
+        return shape.max_seq if shape is not None else int(default)
+
+    def _vision_patch_seq_len(self, default: int) -> int:
+        """Return the padded vision patch-slot count for the active profile."""
+        shape = self._static_runtime_shape()
+        return shape.num_patches if shape is not None else int(default)
+
+    def _visual_token_seq_len(self, default: int) -> int:
+        """Return the number of valid post-pooling visual tokens."""
+        shape = self._static_runtime_shape()
+        return shape.num_visual_tokens if shape is not None else int(default)
+
+    def _vision_pool_output_length(self, default: int) -> int:
+        """Return the fixed pooler output-slot count before padding removal."""
+        shape = self._static_runtime_shape()
+        return shape.max_soft_tokens if shape is not None else int(default)
+
+    def _calibration_sample_count(self, cfg: Mapping[str, Any], *, default: int) -> int:
+        """Avoid retaining multiple large static-runtime samples in memory."""
+        profile = self._validated_size_profile(cfg)
+        return 1 if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME else default
+
+    def _case_pixel_position_ids(self, batch_size: int = 1) -> torch.Tensor:
+        """Create tiny or static-runtime pixel positions for this case."""
+        shape = self._static_runtime_shape()
+        if shape is not None:
+            return _static_pixel_position_ids(shape, batch_size=batch_size)
+        return _pixel_position_ids(batch_size, self.seq_len)
+
+    def _case_vision_position_ids(self, batch_size: int = 1) -> torch.Tensor:
+        """Create positions while preserving the legacy tiny encoder layout."""
+        shape = self._static_runtime_shape()
+        if shape is not None:
+            return _static_pixel_position_ids(shape, batch_size=batch_size)
+        return _vision_position_ids(batch_size, self.seq_len)
+
+    def _case_padding_positions(self, batch_size: int = 1) -> torch.Tensor:
+        """Return the padding mask corresponding to this case's patch layout."""
+        return _padding_positions_from_ids(
+            self._case_pixel_position_ids(batch_size=batch_size)
+        )
+
+    def _case_vision_attention_mask(self, batch_size: int = 1) -> torch.Tensor:
+        """Return the tiny all-visible or static padded-key attention mask."""
+        shape = self._static_runtime_shape()
+        if shape is None:
+            return torch.zeros(batch_size, 1, self.seq_len, self.seq_len)
+        return _vision_additive_padding_mask(
+            self._case_padding_positions(batch_size=batch_size)
+        )
+
+    def _case_vision_keep_mask(self, batch_size: int = 1) -> torch.Tensor:
+        """Return the Boolean valid-patch mask expected by the vision encoder."""
+        return torch.logical_not(self._case_padding_positions(batch_size=batch_size))
+
+    def _case_pixel_values(
+        self,
+        *,
+        batch_size: int,
+        patch_dim: int,
+    ) -> torch.Tensor:
+        """Create image-like patch values and zero any static padding slots."""
+        if self._static_runtime_shape() is None:
+            return torch.randn(batch_size, self.seq_len, patch_dim)
+        pixel_values = torch.rand(batch_size, self.seq_len, patch_dim)
+        return pixel_values.masked_fill(
+            self._case_padding_positions(batch_size=batch_size).unsqueeze(-1),
+            0.0,
+        )
+
+    def _case_hidden_states(
+        self,
+        *,
+        batch_size: int,
+        hidden_size: int,
+    ) -> torch.Tensor:
+        """Create hidden states and zero static padded patch slots."""
+        hidden = torch.randn(batch_size, self.seq_len, hidden_size)
+        if self._static_runtime_shape() is None:
+            return hidden
+        return hidden.masked_fill(
+            self._case_padding_positions(batch_size=batch_size).unsqueeze(-1),
+            0.0,
+        )
+
+    def _per_layer_input(self, seq_len: int) -> torch.Tensor | None:
+        """Create the external PLE input required by static decoder graphs."""
+        dim = int(getattr(self.text_cfg, "hidden_size_per_layer_input", 0) or 0)
+        if dim <= 0:
+            return None
+        return torch.randn(1, seq_len, dim)
+
+    def _make_text_config(
+        self,
+        cfg: Mapping[str, Any],
+        *,
+        layer_types: tuple[str, ...] = ("full_attention",),
+        attention_k_eq_v: bool = False,
+        num_kv_shared_layers: int = 0,
+        hidden_size_per_layer_input: int = 0,
+    ) -> Any:
+        """Create a text config after validating this case's profile support."""
+        return _build_text_config(
+            size_profile=self._validated_size_profile(cfg),
+            layer_types=layer_types,
+            attention_k_eq_v=attention_k_eq_v,
+            num_kv_shared_layers=num_kv_shared_layers,
+            hidden_size_per_layer_input=hidden_size_per_layer_input,
+        )
+
+    def _make_vision_config(self, cfg: Mapping[str, Any]) -> Any:
+        """Create a vision config after validating this case's profile support."""
+        return _build_vision_config(
+            size_profile=self._validated_size_profile(cfg),
+        )
+
+    def _make_vision_patch_embedder_config(self, cfg: Mapping[str, Any]) -> Any:
+        """Create a patch-embedder config after profile validation."""
+        return _build_vision_patch_embedder_config(
+            size_profile=self._validated_size_profile(cfg),
+        )
+
+    def prepare_model(
+        self, model: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Prepare E2B-width modules in place to avoid an extra large copy."""
+        from tico.quantization import prepare
+
+        profile = self._validated_size_profile(cfg)
+        inplace = self.inplace_prepare or profile in _GEMMA4_E2B_WIDTH_PROFILES
+        return prepare(model, self.ptq_config(cfg), inplace=inplace)
+
+    def convert_model(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Convert E2B-width modules in place to limit peak host memory."""
+        from tico.quantization import convert
+
+        profile = self._validated_size_profile(cfg)
+        inplace = self.inplace_convert or profile in _GEMMA4_E2B_WIDTH_PROFILES
+        return convert(prepared, inplace=inplace)
+
+    def export_filename(self, cfg: Mapping[str, Any]) -> str:
+        """Include the non-default size profile in the Circle filename."""
+        profile = self._validated_size_profile(cfg)
+        if profile == _GEMMA4_SIZE_PROFILE_TINY:
+            return super().export_filename(cfg)
+        return f"{self.name}.{profile}.q.circle"
 
 
 class Gemma4TextMLPCase(Gemma4BaseCase):
@@ -236,7 +753,8 @@ class Gemma4TextMLPCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextMLP
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(layer_types=("full_attention",))
+        self.text_cfg = self._make_text_config(cfg, layer_types=("full_attention",))
+        self.seq_len = self._text_prefill_seq_len(default=8)
         module = Gemma4TextMLP(self.text_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
@@ -245,15 +763,15 @@ class Gemma4TextMLPCase(Gemma4BaseCase):
     ) -> list[ForwardInput]:
         """Create calibration samples."""
         return [
-            ForwardInput((torch.randn(1, 8, self.text_cfg.hidden_size),))
-            for _ in range(3)
+            ForwardInput((torch.randn(1, self.seq_len, self.text_cfg.hidden_size),))
+            for _ in range(self._calibration_sample_count(cfg, default=3))
         ]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create an evaluation sample."""
-        return ForwardInput((torch.randn(1, 8, self.text_cfg.hidden_size),))
+        return ForwardInput((torch.randn(1, self.seq_len, self.text_cfg.hidden_size),))
 
 
 class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
@@ -272,21 +790,38 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(
+        self.text_cfg = self._make_text_config(
+            cfg,
             layer_types=self.layer_types,
             attention_k_eq_v=self.attention_k_eq_v,
             num_kv_shared_layers=self.num_kv_shared_layers,
         )
+        self.seq_len = self._text_prefill_seq_len(default=type(self).seq_len)
         module = Gemma4TextAttention(self.text_cfg, layer_idx=self.layer_idx).eval()
+        self.attention_head_dim = int(module.head_dim)
+        self.is_sliding_attention = bool(module.is_sliding)
+        self.sliding_window = int(module.sliding_window or 0)
         return module, clone_module(module)
+
+    def _case_text_attention_mask(self) -> torch.Tensor:
+        """Return a smoke or E2B static-runtime mask for this attention layer."""
+        if self._static_runtime_shape() is None:
+            return _attention_mask(self.seq_len)
+        if self.is_sliding_attention:
+            return _sliding_window_causal_mask(
+                self.seq_len,
+                self.sliding_window,
+                fill_value=-120.0,
+            )
+        return _causal_mask(self.seq_len, fill_value=-120.0)
 
     def _base_kwargs(self) -> dict[str, Any]:
         """Create keyword arguments shared by non-shared attention samples."""
         hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
         return {
             "hidden_states": hidden,
-            "position_embeddings": _text_rope(1, self.seq_len, self.text_cfg.head_dim),
-            "attention_mask": _attention_mask(self.seq_len),
+            "position_embeddings": _text_rope(1, self.seq_len, self.attention_head_dim),
+            "attention_mask": self._case_text_attention_mask(),
             "shared_kv_states": {},
         }
 
@@ -310,7 +845,10 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create Gemma4 text attention calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -382,7 +920,7 @@ class Gemma4TextAttentionSharedKVCase(Gemma4TextAttentionBaseCase):
             1,
             self.text_cfg.num_key_value_heads,
             self.seq_len,
-            self.text_cfg.head_dim,
+            self.attention_head_dim,
         )
         value_states = torch.randn_like(key_states)
         shared_key_value = (key_states, value_states)
@@ -391,9 +929,9 @@ class Gemma4TextAttentionSharedKVCase(Gemma4TextAttentionBaseCase):
             {
                 "hidden_states": hidden,
                 "position_embeddings": _text_rope(
-                    1, self.seq_len, self.text_cfg.head_dim
+                    1, self.seq_len, self.attention_head_dim
                 ),
-                "attention_mask": _attention_mask(self.seq_len),
+                "attention_mask": self._case_text_attention_mask(),
                 "shared_kv_states": {"full_attention": shared_key_value},
                 # QuantGemma4TextAttention implementations may also accept this
                 # explicit tuple form for static-runtime export paths.
@@ -407,6 +945,7 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
 
     tags: tuple[str, ...] = ("gemma4", "e2b", "text", "decoder_layer")
     max_mean_abs_diff = 2.5
+    max_seq: int
     seq_len = 8
     layer_idx = 0
     layer_types: tuple[str, ...] = ("full_attention",)
@@ -427,31 +966,46 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(
+        profile = self._validated_size_profile(cfg)
+        hidden_size_per_layer_input = (
+            _GEMMA4_E2B_PLE_DIM
+            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
+            else 0
+        )
+        self.text_cfg = self._make_text_config(
+            cfg,
             layer_types=self.layer_types,
             attention_k_eq_v=self.attention_k_eq_v,
             num_kv_shared_layers=self.num_kv_shared_layers,
+            hidden_size_per_layer_input=hidden_size_per_layer_input,
         )
+        self.seq_len = (
+            1
+            if self.export_mode == "decode"
+            else self._text_prefill_seq_len(default=type(self).seq_len)
+        )
+        if self.export_mode == "decode":
+            self.max_seq = self._decode_max_seq(default=type(self).max_seq)
         module = Gemma4TextDecoderLayer(self.text_cfg, layer_idx=self.layer_idx).eval()
+        self.attention_head_dim = int(module.self_attn.head_dim)
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic prefill decoder-layer sample."""
         hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "position_embeddings": _text_rope(
-                    1, self.seq_len, self.text_cfg.head_dim
-                ),
-                "attention_mask": _causal_mask(
-                    self.seq_len,
-                    fill_value=float(self.ptq_config({}).attention_mask_fill_value),
-                ),
-                "shared_kv_states": {},
-            },
-        )
+        kwargs: dict[str, Any] = {
+            "hidden_states": hidden,
+            "position_embeddings": _text_rope(1, self.seq_len, self.attention_head_dim),
+            "attention_mask": _causal_mask(
+                self.seq_len,
+                fill_value=float(self.ptq_config({}).attention_mask_fill_value),
+            ),
+            "shared_kv_states": {},
+        }
+        per_layer_input = self._per_layer_input(self.seq_len)
+        if per_layer_input is not None:
+            kwargs["per_layer_input"] = per_layer_input
+        return ForwardInput((), kwargs)
 
     def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
         """Run a Gemma4 decoder layer without sharing mutable sample state."""
@@ -472,7 +1026,10 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create decoder-layer calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -503,7 +1060,10 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         mask = kwargs["attention_mask"]
         rope = kwargs["position_embeddings"]
         shared_key_value = kwargs.get("shared_key_value")
+        per_layer_input = kwargs.get("per_layer_input")
         export_kwargs = {}
+        if per_layer_input is not None:
+            export_kwargs["per_layer_input"] = per_layer_input
         if shared_key_value is not None:
             export_kwargs["shared_key_value"] = shared_key_value
         return ForwardInput((hidden, mask, rope), export_kwargs)
@@ -569,13 +1129,30 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(layer_types=self.layer_types)
+        profile = self._validated_size_profile(cfg)
+        hidden_size_per_layer_input = (
+            _GEMMA4_E2B_PLE_DIM
+            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
+            else 0
+        )
+        self.text_cfg = self._make_text_config(
+            cfg,
+            layer_types=self.layer_types,
+            hidden_size_per_layer_input=hidden_size_per_layer_input,
+        )
+        self.seq_len = self._text_prefill_seq_len(default=type(self).seq_len)
+        self.sliding_window = (
+            int(self.text_cfg.sliding_window)
+            if profile == _GEMMA4_SIZE_PROFILE_E2B_STATIC_RUNTIME
+            else type(self).sliding_window
+        )
         self.text_cfg.sliding_window = self.sliding_window
 
         module = Gemma4TextDecoderLayer(
             self.text_cfg,
             layer_idx=self.layer_idx,
         ).eval()
+        self.attention_head_dim = int(module.self_attn.head_dim)
 
         if not module.self_attn.is_sliding:
             raise RuntimeError(
@@ -607,19 +1184,20 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
             fill_value=self.mask_fill_value,
         )
 
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "position_embeddings": _text_rope(
-                    batch_size,
-                    self.seq_len,
-                    self.text_cfg.head_dim,
-                ),
-                "attention_mask": attention_mask,
-                "shared_kv_states": {},
-            },
-        )
+        kwargs: dict[str, Any] = {
+            "hidden_states": hidden,
+            "position_embeddings": _text_rope(
+                batch_size,
+                self.seq_len,
+                self.attention_head_dim,
+            ),
+            "attention_mask": attention_mask,
+            "shared_kv_states": {},
+        }
+        per_layer_input = self._per_layer_input(self.seq_len)
+        if per_layer_input is not None:
+            kwargs["per_layer_input"] = per_layer_input
+        return ForwardInput((), kwargs)
 
 
 class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
@@ -642,25 +1220,26 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
                 1,
                 self.text_cfg.num_key_value_heads,
                 past_len,
-                self.text_cfg.head_dim,
+                self.attention_head_dim,
             ),
             torch.randn(
                 1,
                 self.text_cfg.num_key_value_heads,
                 past_len,
-                self.text_cfg.head_dim,
+                self.attention_head_dim,
             ),
         )
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "position_embeddings": _text_rope(1, 1, self.text_cfg.head_dim),
-                "attention_mask": _attention_mask(1, self.max_seq),
-                "past_key_value": past,
-                "use_cache": True,
-            },
-        )
+        kwargs: dict[str, Any] = {
+            "hidden_states": hidden,
+            "position_embeddings": _text_rope(1, 1, self.attention_head_dim),
+            "attention_mask": _attention_mask(1, self.max_seq),
+            "past_key_value": past,
+            "use_cache": True,
+        }
+        per_layer_input = self._per_layer_input(1)
+        if per_layer_input is not None:
+            kwargs["per_layer_input"] = per_layer_input
+        return ForwardInput((), kwargs)
 
     def export_input(
         self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
@@ -674,7 +1253,14 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
                 kwargs["attention_mask"],
                 kwargs["position_embeddings"],
             ),
-            {"past_key_value": kwargs["past_key_value"]},
+            {
+                "past_key_value": kwargs["past_key_value"],
+                **(
+                    {"per_layer_input": kwargs["per_layer_input"]}
+                    if "per_layer_input" in kwargs
+                    else {}
+                ),
+            },
         )
 
 
@@ -696,22 +1282,25 @@ class Gemma4TextDecoderLayerSharedKVCase(Gemma4TextDecoderLayerBaseCase):
             1,
             self.text_cfg.num_key_value_heads,
             self.seq_len,
-            self.text_cfg.head_dim,
+            self.attention_head_dim,
         )
         value_states = torch.randn_like(key_states)
         shared_key_value = (key_states, value_states)
-        return ForwardInput(
-            (),
-            {
-                "hidden_states": hidden,
-                "position_embeddings": _text_rope(
-                    1, self.seq_len, self.text_cfg.head_dim
-                ),
-                "attention_mask": _attention_mask(self.seq_len),
-                "shared_kv_states": {"full_attention": shared_key_value},
-                "shared_key_value": shared_key_value,
-            },
-        )
+        kwargs: dict[str, Any] = {
+            "hidden_states": hidden,
+            "position_embeddings": _text_rope(1, self.seq_len, self.attention_head_dim),
+            "attention_mask": (
+                _causal_mask(self.seq_len, fill_value=-120.0)
+                if self._static_runtime_shape() is not None
+                else _attention_mask(self.seq_len)
+            ),
+            "shared_kv_states": {"full_attention": shared_key_value},
+            "shared_key_value": shared_key_value,
+        }
+        per_layer_input = self._per_layer_input(self.seq_len)
+        if per_layer_input is not None:
+            kwargs["per_layer_input"] = per_layer_input
+        return ForwardInput((), kwargs)
 
 
 class Gemma4TextModelCase(Gemma4BaseCase):
@@ -741,7 +1330,8 @@ class Gemma4TextModelCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(
+        self.text_cfg = self._make_text_config(
+            cfg,
             layer_types=("sliding_attention", "full_attention"),
         )
         module = Gemma4TextModel(self.text_cfg).eval()
@@ -766,7 +1356,10 @@ class Gemma4TextModelCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 text-model calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -775,27 +1368,6 @@ class Gemma4TextModelCase(Gemma4BaseCase):
     ) -> ForwardInput:
         """Create the Gemma4 text-model evaluation sample."""
         return self._sample()
-
-
-def _make_vision_config() -> Any:
-    """Create a tiny Gemma4 vision config for synthetic smoke tests."""
-    from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
-
-    cfg = Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        attention_dropout=0.0,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-        use_clipped_linears=False,
-        rope_parameters={"rope_type": "default", "rope_theta": 100.0},
-        standardize=True,
-    )
-    return _set_eager_attention(cfg)
 
 
 def _vision_rope(
@@ -850,14 +1422,18 @@ class Gemma4VisionAttentionCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionAttention
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config()
+        self.vision_cfg = self._make_vision_config(cfg)
+        self.seq_len = self._vision_patch_seq_len(default=type(self).seq_len)
         module = Gemma4VisionAttention(self.vision_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic Gemma4 vision attention input."""
         batch_size = 1
-        hidden = torch.randn(batch_size, self.seq_len, self.vision_cfg.hidden_size)
+        hidden = self._case_hidden_states(
+            batch_size=batch_size,
+            hidden_size=self.vision_cfg.hidden_size,
+        )
         return ForwardInput(
             (),
             {
@@ -867,10 +1443,8 @@ class Gemma4VisionAttentionCase(Gemma4BaseCase):
                     self.seq_len,
                     self.vision_cfg.head_dim,
                 ),
-                "attention_mask": torch.zeros(
-                    batch_size, 1, self.seq_len, self.seq_len
-                ),
-                "position_ids": _vision_position_ids(batch_size, self.seq_len),
+                "attention_mask": self._case_vision_attention_mask(batch_size),
+                "position_ids": self._case_vision_position_ids(batch_size),
             },
         )
 
@@ -880,7 +1454,10 @@ class Gemma4VisionAttentionCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 vision attention calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -905,14 +1482,18 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionEncoderLayer
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config()
+        self.vision_cfg = self._make_vision_config(cfg)
+        self.seq_len = self._vision_patch_seq_len(default=type(self).seq_len)
         module = Gemma4VisionEncoderLayer(self.vision_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic Gemma4 vision encoder-layer input."""
         batch_size = 1
-        hidden = torch.randn(batch_size, self.seq_len, self.vision_cfg.hidden_size)
+        hidden = self._case_hidden_states(
+            batch_size=batch_size,
+            hidden_size=self.vision_cfg.hidden_size,
+        )
         return ForwardInput(
             (),
             {
@@ -922,10 +1503,8 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
                     self.seq_len,
                     self.vision_cfg.head_dim,
                 ),
-                "attention_mask": torch.zeros(
-                    batch_size, 1, self.seq_len, self.seq_len
-                ),
-                "position_ids": _vision_position_ids(batch_size, self.seq_len),
+                "attention_mask": self._case_vision_attention_mask(batch_size),
+                "position_ids": self._case_vision_position_ids(batch_size),
             },
         )
 
@@ -935,7 +1514,10 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 vision encoder-layer calibration samples."""
-        return [self._sample() for _ in range(8)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=8))
+        ]
 
     def eval_input(
         self,
@@ -965,6 +1547,7 @@ class Gemma4TextScaledWordEmbeddingCase(Gemma4BaseCase):
         )
 
         torch.manual_seed(123)
+        self._validated_size_profile(cfg)
         module = Gemma4TextScaledWordEmbedding(
             num_embeddings=self.vocab_size,
             embedding_dim=self.embedding_dim,
@@ -987,7 +1570,10 @@ class Gemma4TextScaledWordEmbeddingCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 text scaled word embedding calibration samples."""
-        return [self._sample() for _ in range(8)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=8))
+        ]
 
     def eval_input(
         self,
@@ -1013,28 +1599,38 @@ class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny Gemma4 vision patch embedder module and reference copy."""
-        from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
         from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPatchEmbedder
 
         torch.manual_seed(123)
-        self.vision_cfg = Gemma4VisionConfig(
-            hidden_size=self.hidden_size,
-            patch_size=self.patch_size,
-            position_embedding_size=self.position_embedding_size,
-        )
+        self.vision_cfg = self._make_vision_patch_embedder_config(cfg)
+        self.hidden_size = int(self.vision_cfg.hidden_size)
+        self.patch_size = int(self.vision_cfg.patch_size)
+        self.position_embedding_size = int(self.vision_cfg.position_embedding_size)
+        self.num_patches = self._vision_patch_seq_len(default=type(self).num_patches)
+        self.seq_len = self.num_patches
         module = Gemma4VisionPatchEmbedder(self.vision_cfg).eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic Gemma4 vision patch embedder input."""
         patch_dim = 3 * self.patch_size**2
-        pixel_values = torch.randn(self.batch_size, self.num_patches, patch_dim)
-        pixel_position_ids = torch.randint(
-            0, self.position_embedding_size, (self.batch_size, self.num_patches, 2)
-        )
-        padding_positions = torch.zeros(
-            self.batch_size, self.num_patches, dtype=torch.bool
-        )
+        if self._static_runtime_shape() is None:
+            pixel_values = torch.randn(self.batch_size, self.num_patches, patch_dim)
+            pixel_position_ids = torch.randint(
+                0,
+                self.position_embedding_size,
+                (self.batch_size, self.num_patches, 2),
+            )
+            padding_positions = torch.zeros(
+                self.batch_size, self.num_patches, dtype=torch.bool
+            )
+        else:
+            pixel_values = self._case_pixel_values(
+                batch_size=self.batch_size,
+                patch_dim=patch_dim,
+            )
+            pixel_position_ids = self._case_pixel_position_ids(self.batch_size)
+            padding_positions = self._case_padding_positions(self.batch_size)
         return ForwardInput((pixel_values, pixel_position_ids, padding_positions))
 
     def calibration_inputs(
@@ -1043,7 +1639,10 @@ class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 vision patch embedder calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -1070,7 +1669,11 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPooler
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config()
+        self.vision_cfg = self._make_vision_config(cfg)
+        self.seq_len = self._vision_patch_seq_len(default=type(self).seq_len)
+        self.output_length = self._vision_pool_output_length(
+            default=type(self).output_length
+        )
         module = Gemma4VisionPooler(self.vision_cfg).eval()
         return module, clone_module(module)
 
@@ -1080,11 +1683,12 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         return ForwardInput(
             (),
             {
-                "hidden_states": torch.randn(
-                    batch_size, self.seq_len, self.vision_cfg.hidden_size
+                "hidden_states": self._case_hidden_states(
+                    batch_size=batch_size,
+                    hidden_size=self.vision_cfg.hidden_size,
                 ),
-                "pixel_position_ids": _pixel_position_ids(batch_size, self.seq_len),
-                "padding_positions": _padding_positions(batch_size, self.seq_len),
+                "pixel_position_ids": self._case_pixel_position_ids(batch_size),
+                "padding_positions": self._case_padding_positions(batch_size),
                 "output_length": self.output_length,
             },
         )
@@ -1110,7 +1714,10 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 vision pooler calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -1132,7 +1739,7 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         """
         wrapped = getattr(quantized, "wrapped", quantized)
         if hasattr(wrapped, "as_export_module"):
-            pixel_pos_ids = _pixel_position_ids(1, self.seq_len)
+            pixel_pos_ids = self._case_pixel_position_ids(1)
             return wrapped.as_export_module(
                 mode="prefill",
                 output_length=self.output_length,
@@ -1173,7 +1780,8 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionModel
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config()
+        self.vision_cfg = self._make_vision_config(cfg)
+        self.seq_len = self._vision_patch_seq_len(default=type(self).seq_len)
         module = Gemma4VisionModel(self.vision_cfg).eval()
         return module, clone_module(module)
 
@@ -1187,8 +1795,11 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
         batch_size = 1
         patch_size = self.vision_cfg.patch_size
         patch_dim = 3 * patch_size**2
-        pixel_values = torch.randn(batch_size, self.seq_len, patch_dim)
-        pixel_position_ids = _pixel_position_ids(batch_size, self.seq_len)
+        pixel_values = self._case_pixel_values(
+            batch_size=batch_size,
+            patch_dim=patch_dim,
+        )
+        pixel_position_ids = self._case_pixel_position_ids(batch_size)
         return ForwardInput(
             (),
             {
@@ -1222,7 +1833,10 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 vision model calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -1243,7 +1857,7 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
         """
         wrapped = getattr(quantized, "wrapped", quantized)
         if hasattr(wrapped, "as_export_module"):
-            pixel_pos_ids = _pixel_position_ids(1, self.seq_len)
+            pixel_pos_ids = self._case_pixel_position_ids(1)
             return wrapped.as_export_module(
                 mode="prefill",
                 pixel_position_ids=pixel_pos_ids,
@@ -1280,8 +1894,9 @@ class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4MultimodalEmbedder
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config()
-        self.text_cfg = _make_text_config()
+        self.vision_cfg = self._make_vision_config(cfg)
+        self.text_cfg = self._make_text_config(cfg)
+        self.seq_len = self._visual_token_seq_len(default=type(self).seq_len)
         module = Gemma4MultimodalEmbedder(self.vision_cfg, self.text_cfg).eval()
         return module, clone_module(module)
 
@@ -1299,7 +1914,10 @@ class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 multimodal embedder calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -1344,20 +1962,24 @@ class Gemma4VisionEncoderCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionEncoder
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config()
+        self.vision_cfg = self._make_vision_config(cfg)
+        self.seq_len = self._vision_patch_seq_len(default=type(self).seq_len)
         module = Gemma4VisionEncoder(self.vision_cfg).eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic Gemma4 vision encoder input."""
         batch_size = 1
-        hidden = torch.randn(batch_size, self.seq_len, self.vision_cfg.hidden_size)
+        hidden = self._case_hidden_states(
+            batch_size=batch_size,
+            hidden_size=self.vision_cfg.hidden_size,
+        )
         return ForwardInput(
             (),
             {
                 "inputs_embeds": hidden,
-                "attention_mask": torch.ones(batch_size, self.seq_len),
-                "pixel_position_ids": _vision_position_ids(batch_size, self.seq_len),
+                "attention_mask": self._case_vision_keep_mask(batch_size),
+                "pixel_position_ids": self._case_vision_position_ids(batch_size),
             },
         )
 
@@ -1367,7 +1989,10 @@ class Gemma4VisionEncoderCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4 vision encoder calibration samples."""
-        return [self._sample() for _ in range(8)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=8))
+        ]
 
     def eval_input(
         self,
@@ -1389,7 +2014,7 @@ class Gemma4VisionEncoderCase(Gemma4BaseCase):
         """
         wrapped = getattr(quantized, "wrapped", quantized)
         if hasattr(wrapped, "as_export_module"):
-            pixel_pos_ids = _vision_position_ids(1, self.seq_len)
+            pixel_pos_ids = self._case_vision_position_ids(1)
             return wrapped.as_export_module(
                 mode="prefill", pixel_position_ids=pixel_pos_ids
             ).eval()
@@ -1442,8 +2067,8 @@ class Gemma4ModelCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4Model
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(layer_types=("full_attention",))
-        self.vision_cfg = _make_vision_config()
+        self.text_cfg = self._make_text_config(cfg, layer_types=("full_attention",))
+        self.vision_cfg = self._make_vision_config(cfg)
 
         config = Gemma4Config(
             text_config=self.text_cfg,
@@ -1476,7 +2101,10 @@ class Gemma4ModelCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4Model calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -1586,10 +2214,10 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
         )
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(layer_types=("full_attention",))
+        self.text_cfg = self._make_text_config(cfg, layer_types=("full_attention",))
         # Enable logit softcapping to exercise that code path.
         self.text_cfg.final_logit_softcapping = 30.0
-        self.vision_cfg = _make_vision_config()
+        self.vision_cfg = self._make_vision_config(cfg)
 
         config = Gemma4Config(
             text_config=self.text_cfg,
@@ -1622,7 +2250,10 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4ForConditionalGeneration calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,
@@ -1719,7 +2350,7 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
         from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config(layer_types=("full_attention",))
+        self.text_cfg = self._make_text_config(cfg, layer_types=("full_attention",))
         # Enable logit softcapping to exercise that code path.
         self.text_cfg.final_logit_softcapping = 30.0
 
@@ -1742,7 +2373,10 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
         cfg: Mapping[str, Any],
     ) -> list[ForwardInput]:
         """Create Gemma4ForCausalLM calibration samples."""
-        return [self._sample() for _ in range(3)]
+        return [
+            self._sample()
+            for _ in range(self._calibration_sample_count(cfg, default=3))
+        ]
 
     def eval_input(
         self,

@@ -12,3 +12,12 @@ debug:
       artifact: circle
     plot:
       enabled: true
+    gemma4:
+      # tiny: current lightweight synthetic modules
+      # e2b_dims: original E2B channel/weight dimensions with smoke-sized inputs
+      # e2b_static_runtime: E2B dimensions plus fixed runtime input shapes
+      size_profile: tiny
+      static_runtime:
+        max_seq: 2048
+        num_visual_tokens: 256
+        max_soft_tokens: 280
