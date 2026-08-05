@@ -19,7 +19,7 @@ from typing import Any, Mapping
 
 import torch
 
-from tico.quantization.config.specs import affine, identity, mx, QuantSpec
+from tico.quantization.config.specs import affine, mx, no_quant, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
@@ -102,14 +102,13 @@ def quant_spec_from_config(
       - mapping with ``kind: affine``: affine spec with ``dtype`` and optional
         ``qscheme``.
       - mapping with ``kind: mx``: MX spec with ``elem_format`` and MX kwargs.
-      - mapping with ``kind: identity`` or ``kind: none``: no-op spec that
-        disables quantization for the role (passthrough observer).
+      - mapping with ``kind: no_quant``: disable quantization for the role.
 
     Examples:
         ``activation: int16``
         ``linear_weight: uint4``
         ``activation: {kind: mx, elem_format: fp8_e4m3, axis: -1}``
-        ``activation: {kind: identity}``
+        ``activation: {kind: no_quant}``
     """
     if value is None:
         return default
@@ -119,8 +118,15 @@ def quant_spec_from_config(
     if isinstance(value, Mapping):
         kind = str(value.get("kind", value.get("type", "affine"))).strip().lower()
 
-        if kind in ("identity", "none"):
-            return identity()
+        if kind == "no_quant":
+            unexpected = sorted(set(value) - {"kind", "type"})
+            if unexpected:
+                fields = ", ".join(str(field) for field in unexpected)
+                raise ValueError(
+                    "No-quant spec does not accept dtype, qscheme, or observer "
+                    f"options. Unexpected fields: {fields}."
+                )
+            return no_quant()
 
         if kind == "mx":
             return mx(

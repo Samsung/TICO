@@ -36,6 +36,8 @@ class IdentityObserver(AffineObserverBase):
     • `fake_quant()`      → returns `x` unchanged
     """
 
+    is_quantizing = False
+
     def __init__(self, **kwargs):
         # Call parent so the usual fields (`dtype`, `qscheme`, …) exist,
         # but immediately disable any stateful behaviour.

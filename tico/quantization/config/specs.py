@@ -170,16 +170,16 @@ def mx(
     )
 
 
-def identity() -> QuantSpec:
+def no_quant() -> QuantSpec:
     """
-    Create a no-op (identity) quantization spec.
+    Create a spec that disables quantization for one observer role.
 
-    The ``IdentityObserver`` passes tensors through unchanged — it collects
-    no statistics and applies no fake-quantization.  Use this spec to disable
-    quantization for a role (e.g. ``activation``) while keeping other roles
-    (e.g. ``weight``) quantized, enabling weight-only quantization estimation.
+    ``IdentityObserver`` preserves the normal WrapQ observer lifecycle while
+    collecting no statistics and applying no fake-quantization. Use this spec
+    for roles that must remain floating-point, such as activations in a
+    weight-only quantization configuration.
 
     Returns:
-        A QuantSpec that expands to IdentityObserver kwargs.
+        A QuantSpec backed by ``IdentityObserver`` with no dtype or qscheme.
     """
     return QuantSpec(observer=IdentityObserver)

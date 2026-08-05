@@ -27,6 +27,7 @@ class TestIdentityObserver(unittest.TestCase):
 
     def test_initial_state(self):
         self.assertFalse(self.obs.enabled, msg="Observer must start disabled")
+        self.assertFalse(self.obs.is_quantizing)
         self.assertTrue(self.obs.has_qparams, msg="Scale / ZP should be pre-cached")
         self.assertEqual(self.obs._cached_scale.item(), 1.0)
         self.assertEqual(self.obs._cached_zp.item(), 0)
