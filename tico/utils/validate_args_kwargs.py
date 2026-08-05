@@ -1004,6 +1004,35 @@ class ReshapeArgs:
 
 @enforce_type
 @dataclass
+class ResizeBilinearArgs:
+    """Describe arguments of ``circle_custom.resize_bilinear``."""
+
+    input: torch.fx.Node
+    size: List[int]
+    align_corners: bool = False
+    half_pixel_centers: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate the static output size and coordinate options."""
+        if len(self.size) != 2:
+            raise ValueError(
+                "ResizeBilinear output size must contain exactly two values, "
+                f"but received {self.size}."
+            )
+        if any(int(dimension) <= 0 for dimension in self.size):
+            raise ValueError(
+                "ResizeBilinear output dimensions must be positive, "
+                f"but received {self.size}."
+            )
+        if self.align_corners and self.half_pixel_centers:
+            raise ValueError(
+                "ResizeBilinear does not allow align_corners and "
+                "half_pixel_centers to be enabled together."
+            )
+
+
+@enforce_type
+@dataclass
 class ResizeNearestNeighborArgs:
     """
     # Mapped from `torch.nn.functional.interpolate(x, scale_factor=scale_factor, mode='nearest')` case.
