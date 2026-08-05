@@ -381,8 +381,6 @@ def export_qwen3_vl_per_layer(
         dtype=torch.long,
         device="cpu",
     )
-    if artifact_tag == "q":
-        register_fake_quant_meta_kernels_for_dynamic_export()
     _convert_and_save(
         Qwen3VLTextEmbeddingExportAdapter(qmodel),
         (token_input_ids,),
