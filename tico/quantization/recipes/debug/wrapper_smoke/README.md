@@ -54,6 +54,129 @@ python -m tico.quantization.examples.inspector \
   --case all
 ```
 
+### Gemma4 E2B-width and static-runtime Circle export
+
+Gemma4 cases default to the existing `tiny` profile. Two larger profiles are
+available for bounded wrapper cases:
+
+- `e2b_dims` uses the original E2B channel, projection, patch, and position-table
+  dimensions while retaining smoke-sized input tensors.
+- `e2b_static_runtime` uses the same E2B dimensions and replaces the smoke input
+  shapes with the fixed runtime contract used by the static Gemma4 path.
+
+Both profiles retain a one- or two-layer case topology and deterministically
+random weights. They do not download a Hugging Face checkpoint or construct the
+full text, vocabulary, PLE-table, or multimodal model.
+
+Supported `e2b_dims` cases:
+
+```text
+gemma4_text_mlp
+gemma4_text_attention
+gemma4_text_attention_sliding
+gemma4_text_attention_k_eq_v
+gemma4_text_attention_shared_kv
+gemma4_text_decoder_layer_prefill
+gemma4_text_decoder_layer_sliding_prefill
+gemma4_text_decoder_layer_decode
+gemma4_text_decoder_layer_shared_kv
+gemma4_vision_attention
+gemma4_vision_encoder_layer
+gemma4_vision_encoder
+gemma4_vision_patch_embedder
+gemma4_vision_pooler
+gemma4_vision_model
+gemma4_multimodal_embedder
+```
+
+`e2b_static_runtime` supports the same bounded cases except
+`gemma4_text_attention_k_eq_v`, which is a synthetic alternative-attention
+branch rather than the E2B runtime configuration.
+
+The default static-runtime shape is:
+
+```text
+Text prefill                  : (1, 2048, 1536)
+Text decode hidden            : (1, 1, 1536)
+Text decode K/V capacity      : 2048 tokens
+Sliding window                : 512 tokens
+Per-layer input (PLE)         : (1, S, 256)
+Vision patch slots            : 2520
+Vision valid patches          : 2304 = 48 x 48
+Vision padding patches        : 216
+Pooler output slots           : 280
+Valid visual tokens           : 256 = 16 x 16
+Vision hidden size            : 768
+```
+
+The vision layout matches Gemma4 processor semantics for the default
+`max_soft_tokens=280` and `pooling_kernel_size=3`: valid position IDs are
+followed by `(-1, -1)` padding slots, and the pooler removes 24 padded output
+slots after producing 280 fixed slots.
+
+Run one original-width module with smoke-sized inputs:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case gemma4_text_decoder_layer_prefill \
+  --export circle \
+  --output-dir ./out/wrapper_smoke/gemma4_e2b_dims \
+  --calibration-iters 1 \
+  --no-plot \
+  --set debug.wrapper_smoke.gemma4.size_profile=e2b_dims
+```
+
+Run the same case with the fixed E2B runtime shape:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case gemma4_text_decoder_layer_prefill \
+  --export circle \
+  --output-dir ./out/wrapper_smoke/gemma4_e2b_static_runtime \
+  --calibration-iters 1 \
+  --no-plot \
+  --set debug.wrapper_smoke.gemma4.size_profile=e2b_static_runtime
+```
+
+The resulting filenames include the profile:
+
+```text
+gemma4_text_decoder_layer_prefill.e2b_dims.q.circle
+gemma4_text_decoder_layer_prefill.e2b_static_runtime.q.circle
+```
+
+Static dimensions can be overridden for targeted debugging:
+
+```bash
+--set debug.wrapper_smoke.gemma4.static_runtime.max_seq=1024
+--set debug.wrapper_smoke.gemma4.static_runtime.num_visual_tokens=256
+--set debug.wrapper_smoke.gemma4.static_runtime.max_soft_tokens=280
+```
+
+`num_visual_tokens` must form a square grid, and `max_soft_tokens` must use a
+Gemma4 processor-supported budget. The full default shapes intentionally create
+large attention tensors, so use one calibration iteration and disable plotting
+when the goal is Circle/compiler validation.
+
+The following composite or vocabulary-sized cases reject both E2B profiles
+before allocating a model:
+
+```text
+gemma4_text_scaled_word_embedding
+gemma4_text_model
+gemma4_model
+gemma4_for_conditional_generation
+gemma4_for_causal_lm
+```
+
+Use the regular Gemma4 quantize/export recipe when full layer depth, the full
+vocabulary/PLE tables, pretrained weights, or end-to-end model evaluation is
+required.
+
 Fail immediately if parity thresholds are exceeded:
 
 ```bash

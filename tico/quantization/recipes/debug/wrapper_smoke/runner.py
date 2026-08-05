@@ -150,6 +150,20 @@ def run_wrapper_smoke(
             result.raise_if_failed()
         return result
 
+    try:
+        case.validate_config(cfg)
+    except ValueError as exc:
+        result = WrapperSmokeResult(
+            case=case.name,
+            passed=False,
+            messages=[f"Invalid case configuration: {exc}"],
+        )
+        _write_report(result, report_json)
+        print(result.format_text())
+        if strict:
+            result.raise_if_failed()
+        return result
+
     result = WrapperSmokeResult(case=case.name, passed=True)
     export_requested = export != "none" or bool(
         section.get("export", {}).get("enabled", False)

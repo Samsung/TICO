@@ -35,8 +35,8 @@ class QuantGemma4VisionModel(QuantModuleBase):
     This wrapper supports two modes:
     1. Runtime mode (forward): Supports dynamic tensor shapes and conditional branching
        (config.standardize can be True or False). Not exportable.
-    2. Export mode (forward_export): Static tensor shapes, no conditional branching.
-       Assumes config.standardize=True. Exportable via torch.export.
+    2. Export mode (forward_export): Static tensor shapes with configuration-time
+       standardization selection. Exportable via torch.export.
 
     The vision model encodes image pixels into visual soft tokens through:
     - Patch embedder: Projects pixels to patch embeddings with position encoding
@@ -212,9 +212,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
         """Run Gemma4 vision model with static shapes for torch.export.
 
         This forward method assumes:
-        - config.standardize is True (std_bias and std_scale are always applied)
+        - ``config.standardize`` is fixed when the module is constructed
         - output_length is precomputed and fixed
-        - No conditional branching
+        - No data-dependent branching
         - as_export_module() has been called to set up export adapters
 
         This method IS exportable via torch.export.
@@ -264,14 +264,16 @@ class QuantGemma4VisionModel(QuantModuleBase):
         hidden_states = hidden_states[pooler_mask]
         hidden_states = self._fq(hidden_states, self.obs_strip_padding)
 
-        # Standardization (always applied in export mode)
-        assert self.obs_std_bias is not None
-        assert self.obs_std_scale is not None
-        std_bias = self.obs_std_bias.fake_quant(self.std_bias)
-        std_scale = self.obs_std_scale.fake_quant(self.std_scale)
-        hidden_states = hidden_states - std_bias.float()
-        hidden_states = self._fq(hidden_states, self.obs_minus_bias)
-        hidden_states = hidden_states * std_scale.float()
+        # The configuration-time branch is constant for torch.export and keeps
+        # the real E2B ``standardize=False`` contract exportable.
+        if self.config.standardize:
+            assert self.obs_std_bias is not None
+            assert self.obs_std_scale is not None
+            std_bias = self.obs_std_bias.fake_quant(self.std_bias)
+            std_scale = self.obs_std_scale.fake_quant(self.std_scale)
+            hidden_states = hidden_states - std_bias.float()
+            hidden_states = self._fq(hidden_states, self.obs_minus_bias)
+            hidden_states = hidden_states * std_scale.float()
 
         # Cast to input dtype
         hidden_states = hidden_states.to(inputs_embeds.dtype)
@@ -291,10 +293,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
         """Prepare the model for torch.export by precomputing static tensors.
 
         This method:
-        1. Asserts that config.standardize is True (required for export)
-        2. Asserts that the model is in QUANT mode
-        3. Recursively converts submodules to their export adapters
-        4. Registers output_length as a buffer for static export
+        1. Asserts that the model is in QUANT mode
+        2. Recursively converts submodules to their export adapters
+        3. Registers output_length and padding tensors for static export
 
         Submodule export adapters are stored as separate attributes
         (e.g. ``patch_embedder_export``, ``pooler_export``) so that the
@@ -311,11 +312,6 @@ class QuantGemma4VisionModel(QuantModuleBase):
         Returns:
             Gemma4VisionModelPrefillExportAdapter wrapping this module.
         """
-        # Assert standardize is True for export
-        assert (
-            self.config.standardize
-        ), "Gemma4VisionModel export requires config.standardize=True"
-
         # Assert QUANT mode
         assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
 
@@ -364,11 +360,12 @@ class QuantGemma4VisionModel(QuantModuleBase):
         return Gemma4VisionModelPrefillExportAdapter(wrapped_model=self)
 
     def _all_observers(self) -> Iterable:
-        """Return all observers owned by this wrapper."""
-        yield self.obs_minus_bias
+        """Return observers reachable in the configured vision-model path."""
         yield self.obs_last_hidden_state
         yield self.obs_strip_padding
-        if self.obs_std_bias is not None:
-            yield self.obs_std_bias
-        if self.obs_std_scale is not None:
-            yield self.obs_std_scale
+        if self.config.standardize:
+            yield self.obs_minus_bias
+            if self.obs_std_bias is not None:
+                yield self.obs_std_bias
+            if self.obs_std_scale is not None:
+                yield self.obs_std_scale
