@@ -21,6 +21,62 @@ from torch.library import custom_op, register_fake
 from tico.utils.mx.dtypes import normalize_mx_elem_format, SUPPORTED_MX_ELEM_FORMATS
 from tico.utils.mx.mx_ops import _quantize_mx
 
+
+def _same_padding_1d(
+    input_size: int,
+    kernel_size: int,
+    stride: int,
+    dilation: int,
+) -> tuple[int, int]:
+    """Return TensorFlow Lite SAME padding before and after one dimension."""
+    output_size = (input_size + stride - 1) // stride
+    effective_kernel = (kernel_size - 1) * dilation + 1
+    total_padding = max(
+        (output_size - 1) * stride + effective_kernel - input_size,
+        0,
+    )
+    padding_before = total_padding // 2
+    return padding_before, total_padding - padding_before
+
+
+def _conv2d_with_string_padding(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    stride: List[int],
+    padding: str,
+    dilation: List[int],
+    groups: int,
+) -> torch.Tensor:
+    """Run NCHW Conv2d with Circle VALID or SAME padding semantics."""
+    padding = padding.lower()
+    if padding == "same":
+        top, bottom = _same_padding_1d(
+            input_.shape[-2],
+            weight.shape[-2],
+            stride[0],
+            dilation[0],
+        )
+        left, right = _same_padding_1d(
+            input_.shape[-1],
+            weight.shape[-1],
+            stride[1],
+            dilation[1],
+        )
+        if any((left, right, top, bottom)):
+            input_ = torch.ops.aten.constant_pad_nd.default(
+                input_,
+                [left, right, top, bottom],
+                0.0,
+            )
+    elif padding != "valid":
+        raise RuntimeError(f"Unsupported Conv2d padding mode: {padding!r}")
+
+    return torch.ops.aten.conv2d.default(
+        input_, weight, bias, stride, [0, 0], dilation, groups
+    )
+
+
 # Note that an operator assumes input tensor has NHWC format.
 def CircleResizeNearestNeighbor():
     @custom_op("circle_custom::resize_nearest_neighbor", mutates_args=())
@@ -44,6 +100,174 @@ def CircleResizeNearestNeighbor():
         new_shape = [shape[0]] + list(size) + [shape[3]]
         result = torch.empty(new_shape, dtype=input_.dtype)
         return result
+
+
+def _normalize_resize_bilinear_size(size: List[int]) -> tuple[int, int]:
+    """Validate and return a two-dimensional ResizeBilinear output size."""
+    if len(size) != 2:
+        raise RuntimeError(
+            "ResizeBilinear output size must contain exactly two values, "
+            f"but received {size}."
+        )
+
+    output_height = int(size[0])
+    output_width = int(size[1])
+    if output_height <= 0 or output_width <= 0:
+        raise RuntimeError(
+            "ResizeBilinear output dimensions must be positive, "
+            f"but received {(output_height, output_width)}."
+        )
+    return output_height, output_width
+
+
+def _validate_resize_bilinear_options(
+    *, align_corners: bool, half_pixel_centers: bool
+) -> None:
+    """Validate the coordinate options accepted by Circle ResizeBilinear."""
+    if align_corners and half_pixel_centers:
+        raise RuntimeError(
+            "ResizeBilinear does not allow align_corners and "
+            "half_pixel_centers to be enabled together."
+        )
+
+
+def _resize_bilinear_source_coordinates(
+    input_size: int,
+    output_size: int,
+    *,
+    align_corners: bool,
+    half_pixel_centers: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return source coordinates for one ResizeBilinear spatial axis."""
+    output = torch.arange(output_size, dtype=dtype, device=device)
+    if align_corners:
+        if output_size == 1:
+            return torch.zeros_like(output)
+        return output * float(input_size - 1) / float(output_size - 1)
+    if half_pixel_centers:
+        return (output + 0.5) * float(input_size) / float(output_size) - 0.5
+    return output * float(input_size) / float(output_size)
+
+
+def _resize_bilinear_nhwc_reference(
+    input_: torch.Tensor,
+    size: List[int],
+    *,
+    align_corners: bool,
+    half_pixel_centers: bool,
+) -> torch.Tensor:
+    """Apply Circle ResizeBilinear semantics to one floating NHWC tensor."""
+    if input_.dim() != 4:
+        raise RuntimeError(
+            "ResizeBilinear expects a rank-4 NHWC input, "
+            f"but received rank {input_.dim()}."
+        )
+    if not input_.is_floating_point():
+        raise RuntimeError(
+            "The eager ResizeBilinear reference expects a floating-point "
+            f"input, but received {input_.dtype}."
+        )
+
+    output_height, output_width = _normalize_resize_bilinear_size(size)
+    _validate_resize_bilinear_options(
+        align_corners=align_corners,
+        half_pixel_centers=half_pixel_centers,
+    )
+
+    input_height = int(input_.shape[1])
+    input_width = int(input_.shape[2])
+    if input_height <= 0 or input_width <= 0:
+        raise RuntimeError(
+            "ResizeBilinear input spatial dimensions must be positive, "
+            f"but received {(input_height, input_width)}."
+        )
+
+    compute_dtype = torch.float64 if input_.dtype == torch.float64 else torch.float32
+    input_for_compute = input_.to(dtype=compute_dtype)
+    source_y = _resize_bilinear_source_coordinates(
+        input_height,
+        output_height,
+        align_corners=align_corners,
+        half_pixel_centers=half_pixel_centers,
+        device=input_.device,
+        dtype=compute_dtype,
+    )
+    source_x = _resize_bilinear_source_coordinates(
+        input_width,
+        output_width,
+        align_corners=align_corners,
+        half_pixel_centers=half_pixel_centers,
+        device=input_.device,
+        dtype=compute_dtype,
+    )
+
+    source_y = source_y.clamp(0.0, float(input_height - 1))
+    source_x = source_x.clamp(0.0, float(input_width - 1))
+    y0 = torch.floor(source_y).to(torch.int64)
+    x0 = torch.floor(source_x).to(torch.int64)
+    y1 = torch.clamp(y0 + 1, max=input_height - 1)
+    x1 = torch.clamp(x0 + 1, max=input_width - 1)
+
+    y_weight = (source_y - y0.to(compute_dtype)).reshape(1, output_height, 1, 1)
+    x_weight = (source_x - x0.to(compute_dtype)).reshape(1, 1, output_width, 1)
+
+    top_left = input_for_compute[:, y0[:, None], x0[None, :], :]
+    top_right = input_for_compute[:, y0[:, None], x1[None, :], :]
+    bottom_left = input_for_compute[:, y1[:, None], x0[None, :], :]
+    bottom_right = input_for_compute[:, y1[:, None], x1[None, :], :]
+
+    top = top_left + (top_right - top_left) * x_weight
+    bottom = bottom_left + (bottom_right - bottom_left) * x_weight
+    output = top + (bottom - top) * y_weight
+    return output.to(dtype=input_.dtype)
+
+
+def CircleResizeBilinear():
+    """Register the internal channel-last Circle ResizeBilinear operator."""
+
+    @custom_op("circle_custom::resize_bilinear", mutates_args=())
+    def resize_bilinear(
+        input_: torch.Tensor,
+        size: List[int],
+        align_corners: bool = False,
+        half_pixel_centers: bool = False,
+    ) -> torch.Tensor:
+        """Execute the eager Circle ResizeBilinear reference."""
+        return _resize_bilinear_nhwc_reference(
+            input_,
+            size,
+            align_corners=align_corners,
+            half_pixel_centers=half_pixel_centers,
+        )
+
+    @register_fake("circle_custom::resize_bilinear")
+    def _(
+        input_: torch.Tensor,
+        size: List[int],
+        align_corners: bool = False,
+        half_pixel_centers: bool = False,
+    ) -> torch.Tensor:
+        """Infer metadata for the internal Circle ResizeBilinear operator."""
+        if input_.dim() != 4:
+            raise RuntimeError(
+                "ResizeBilinear expects a rank-4 NHWC input, "
+                f"but received rank {input_.dim()}."
+            )
+        output_height, output_width = _normalize_resize_bilinear_size(size)
+        _validate_resize_bilinear_options(
+            align_corners=align_corners,
+            half_pixel_centers=half_pixel_centers,
+        )
+        return input_.new_empty(
+            (
+                input_.shape[0],
+                output_height,
+                output_width,
+                input_.shape[3],
+            )
+        )
 
 
 def CirclePReLU():
@@ -234,8 +458,15 @@ def CircleConv2dPadding():
         NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
         OIHW_weight = torch.ops.aten.permute.default(weight, OHWI_to_OIHW)
 
-        args = [NCHW_input, OIHW_weight, bias, stride, padding, dilation, groups]
-        NCHW_output = torch.ops.aten.conv2d.padding(*args)
+        NCHW_output = _conv2d_with_string_padding(
+            NCHW_input,
+            OIHW_weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            groups,
+        )
         NCHW_to_NHWC = [0, 2, 3, 1]
         NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
 
@@ -272,8 +503,15 @@ def CircleConv2dPadding():
         NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
         OIHW_weight = torch.ops.aten.permute.default(weight, OHWI_to_OIHW)
 
-        args = [NCHW_input, OIHW_weight, bias, stride, padding, dilation, groups]
-        NCHW_output = torch.ops.aten.conv2d.padding(*args)
+        NCHW_output = _conv2d_with_string_padding(
+            NCHW_input,
+            OIHW_weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            groups,
+        )
         NCHW_to_NHWC = [0, 2, 3, 1]
         NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
 
@@ -391,8 +629,15 @@ def CircleDepthwiseConv2dPadding():
         NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
         _1OHW_weight = torch.ops.aten.permute.default(weight, OHW1_to_1OHW)
 
-        args = [NCHW_input, _1OHW_weight, bias, stride, padding, dilation, groups]
-        NCHW_output = torch.ops.aten.conv2d.padding(*args)
+        NCHW_output = _conv2d_with_string_padding(
+            NCHW_input,
+            _1OHW_weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            groups,
+        )
         NCHW_to_NHWC = [0, 2, 3, 1]
         NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
 
@@ -426,8 +671,15 @@ def CircleDepthwiseConv2dPadding():
         NCHW_input = torch.ops.aten.permute.default(input_, NHWC_to_NCHW)
         _1OHW_weight = torch.ops.aten.permute.default(weight, OHW1_to_1OHW)
 
-        args = [NCHW_input, _1OHW_weight, bias, stride, padding, dilation, groups]
-        NCHW_output = torch.ops.aten.conv2d.padding(*args)
+        NCHW_output = _conv2d_with_string_padding(
+            NCHW_input,
+            _1OHW_weight,
+            bias,
+            stride,
+            padding,
+            dilation,
+            groups,
+        )
         NCHW_to_NHWC = [0, 2, 3, 1]
         NHWC_output = torch.ops.aten.permute.default(NCHW_output, NCHW_to_NHWC)
 
@@ -962,6 +1214,7 @@ def RegisterGatherNdOp() -> None:
 # Add custom ops to the torch namespace
 def RegisterOps():
     CircleResizeNearestNeighbor()
+    CircleResizeBilinear()
     CirclePReLU()
     CircleDepthwiseConv2d()
     CircleDepthwiseConv2dPadding()
