@@ -115,16 +115,10 @@ def create_visual_input(
     for i in range(batch_size):
         input_ids[i, :num_video_tokens] = image_token_id
 
-    num_temporal_patches, num_spatial_patches_h, num_spatial_patches_w = thw
-
-    # Create pixel values for videos
-    pixel_values = torch.randn(
-        batch_size,
-        3,
-        num_temporal_patches * temporal_patch_size,
-        num_spatial_patches_h * spatial_patch_size,
-        num_spatial_patches_w * spatial_patch_size,
-    )
+    # The Qwen3-VL processor outputs one flattened feature vector per patch.
+    num_patches = thw[0] * thw[1] * thw[2]
+    patch_dim = 3 * temporal_patch_size * spatial_patch_size * spatial_patch_size
+    pixel_values = torch.randn(1, num_patches, patch_dim)
     grid_thw = torch.tensor([thw])
 
     # Compute position_ids for 3D RoPE

@@ -209,6 +209,27 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
         attention_mask = torch.ones_like(input_ids)
         return input_ids, attention_mask
 
+    def _create_patchified_pixel_values(
+        self,
+        thw: Tuple[int, int, int],
+        *,
+        batch_size: int = 1,
+    ) -> torch.Tensor:
+        """Create processor-shaped patches for a batch-one visual input."""
+        if batch_size != 1:
+            raise ValueError(
+                "Synthetic Qwen3-VL visual tests support batch size 1 only."
+            )
+        vision_cfg = self.fp_model.config.vision_config
+        num_patches = thw[0] * thw[1] * thw[2]
+        patch_dim = (
+            vision_cfg.in_channels
+            * vision_cfg.temporal_patch_size
+            * vision_cfg.patch_size
+            * vision_cfg.patch_size
+        )
+        return torch.randn(1, num_patches, patch_dim)
+
     def _create_visual_input(
         self,
         visual_token_id: int,
@@ -243,16 +264,7 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
         for i in range(batch_size):
             input_ids[i, :num_video_tokens] = visual_token_id
 
-        num_temporal_patches, num_spatial_patches_h, num_spatial_patches_w = thw
-
-        # Create pixel values for videos
-        pixel_values = torch.randn(
-            batch_size,
-            3,
-            num_temporal_patches * self.temporal_patch_size,
-            num_spatial_patches_h * self.patch_size,
-            num_spatial_patches_w * self.patch_size,
-        )
+        pixel_values = self._create_patchified_pixel_values(thw, batch_size=batch_size)
         video_grid_thw = torch.tensor([thw])
 
         position_ids = self._compute_3d_position_ids(
@@ -457,22 +469,12 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
         ] = self.video_token_id
 
         # Create pixel values for images
-        pixel_values = torch.randn(
-            batch_size,
-            3,
-            thw[0] * self.temporal_patch_size,
-            thw[1] * self.patch_size,
-            thw[2] * self.patch_size,
-        )
+        pixel_values = self._create_patchified_pixel_values(thw, batch_size=batch_size)
         image_grid_thw = torch.tensor([thw])
 
         # Create pixel values for videos
-        pixel_values_videos = torch.randn(
-            batch_size,
-            3,
-            thw[0] * self.temporal_patch_size,
-            thw[1] * self.patch_size,
-            thw[2] * self.patch_size,
+        pixel_values_videos = self._create_patchified_pixel_values(
+            thw, batch_size=batch_size
         )
         video_grid_thw = torch.tensor([thw])
 

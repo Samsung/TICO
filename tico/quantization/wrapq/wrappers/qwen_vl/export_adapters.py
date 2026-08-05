@@ -246,7 +246,9 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
 
     Input contract:
         pixel_values:
-            Flattened image patch tensor produced by the Qwen3-VL processor.
+            Flattened image patches. The processor-native shape is
+            `(num_patches, patch_dim)`; static NPU export uses
+            `(1, num_patches, patch_dim)`.
         image_grid_thw:
             Static image grid tensor with shape `(1, 3)`.
 

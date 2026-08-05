@@ -115,8 +115,9 @@ class QuantQwen3VLModel(QuantModuleBase):
             position_ids: Position IDs for RoPE
             past_key_values: Past key-value caches for autoregressive generation
             inputs_embeds: Input embeddings of shape (batch_size, sequence_length, hidden_size)
-            pixel_values: Image pixel values of shape (batch_size, C, H, W)
-            pixel_values_videos: Video pixel values
+            pixel_values: Flattened image patches with shape
+                (num_patches, patch_dim) or (1, num_patches, patch_dim).
+            pixel_values_videos: Flattened video patches with the same contract.
             image_grid_thw: Grid dimensions for images of shape (num_images, 3)
             video_grid_thw: Grid dimensions for videos
             cache_position: Cache positions for generation

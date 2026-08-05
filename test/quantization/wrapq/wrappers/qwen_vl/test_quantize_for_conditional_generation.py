@@ -186,13 +186,14 @@ def _create_image_input(
         0, visual_start_idx : visual_start_idx + num_visual_tokens
     ] = 1  # text=0, image=1, video=2
 
-    pixel_values = torch.randn(
-        1,
-        3,
-        thw[0] * cfg.vision_config.temporal_patch_size,
-        thw[1] * cfg.vision_config.patch_size,
-        thw[2] * cfg.vision_config.patch_size,
+    num_patches = thw[0] * thw[1] * thw[2]
+    patch_dim = (
+        cfg.vision_config.in_channels
+        * cfg.vision_config.temporal_patch_size
+        * cfg.vision_config.patch_size
+        * cfg.vision_config.patch_size
     )
+    pixel_values = torch.randn(1, num_patches, patch_dim)
     image_grid_thw = torch.tensor([thw])
     position_ids = _compute_3d_position_ids(
         input_ids=input_ids,
