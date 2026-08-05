@@ -21,6 +21,9 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
+    Qwen3VLVisionPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
     QuantQwen3VLVisionModel,
 )
@@ -221,6 +224,26 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         self.assertEqual(
             len(q_model.deepstack_merger_list), len(self.fp_model.deepstack_merger_list)
         )
+
+    def test_non_strict_export_with_temporal_grid(self):
+        """Fixed temporal grids should not create data-dependent split sizes."""
+        grid_thw = (2, 4, 4)
+        ptq_config = self._make_ptq_config(grid_thw)
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=ptq_config,
+            fp_name="test_temporal_export",
+        ).eval()
+        export_module = Qwen3VLVisionPrefillExportAdapter(q_model).eval()
+        hidden_states, grid_tensor = self._create_test_inputs(grid_thw)
+
+        exported_program = torch.export.export(
+            export_module,
+            (hidden_states, grid_tensor),
+            strict=False,
+        )
+
+        self.assertIsNotNone(exported_program)
 
     def test_init_missing_vision_grid_thw(self):
         """Test initialization fails without vision_grid_thw."""

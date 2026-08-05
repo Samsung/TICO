@@ -112,6 +112,30 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         self.assertLess(diff, 0.1)
         self.assertEqual(fp_out.shape, q_out.shape)
 
+    def test_static_attention_split_sizes_match_dynamic_cu_seqlens(self):
+        """Static export split sizes should preserve eager attention results."""
+        split_sizes = (4, 8)
+        seq_len = sum(split_sizes)
+        cu_seqlens = torch.tensor([0, split_sizes[0], seq_len])
+        qattn = QuantQwen3VLVisionAttention(self.fp_attn)
+
+        x = torch.randn(seq_len, self.hidden_size)
+        pos = self._rand_rope(seq_len)
+        with torch.no_grad():
+            dynamic_output = qattn(
+                x,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=pos,
+            )
+            static_output = qattn(
+                x,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=pos,
+                attention_split_sizes=split_sizes,
+            )
+
+        torch.testing.assert_close(static_output, dynamic_output)
+
     def test_per_projection_override(self):
         cfg = make_affine_ptq_config(
             dtype=DType.uint(8),

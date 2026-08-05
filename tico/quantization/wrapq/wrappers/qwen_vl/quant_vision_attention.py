@@ -135,6 +135,7 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor | None = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attention_split_sizes: Optional[tuple[int, ...]] = None,
         **kwargs,
     ):
         hidden_states = self._fq(hidden_states, self.obs_hidden)
@@ -157,9 +158,18 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         # Split into chunks (one per image/video-frame in the batch).
         # For a single image there is 1 chunk; for video there may be
         # multiple chunks (one per frame group).
-        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        #
+        # Fixed-grid export passes Python integer sizes so torch.export does not
+        # turn `Tensor.tolist()` results into unbacked symbolic integers. Eager
+        # execution keeps the original dynamic cu_seqlens behavior.
+        if attention_split_sizes is None:
+            lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+            split_sizes = lengths.tolist()
+        else:
+            split_sizes = attention_split_sizes
+
         q_splits, k_splits, v_splits = [
-            torch.split(tensor, lengths.tolist(), dim=2)
+            torch.split(tensor, split_sizes, dim=2)
             for tensor in (query_states, key_states, value_states)
         ]
         num_chunks = len(q_splits)
