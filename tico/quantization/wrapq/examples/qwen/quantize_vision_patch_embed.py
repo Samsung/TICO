@@ -17,7 +17,6 @@ import copy
 import sys
 
 import torch
-import torch.nn as nn
 
 import tico
 import tico.quantization
@@ -29,11 +28,10 @@ from tico.quantization.wrapq.utils.version import has_transformers_for
 torch.manual_seed(123)
 
 
-# Check if transformers is available
-
 if not has_transformers_for("qwen3-vl"):
     print(
-        "Error: Required transformers package not installed. Cannot test Qwen3VLVisionPatchEmbed."
+        "Error: Required transformers package not installed. "
+        "Cannot test Qwen3VLVisionPatchEmbed."
     )
     sys.exit(1)
 
@@ -41,17 +39,12 @@ from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionCon
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchEmbed
 
 
-def generate_calibration_data(batch_size: int, sample_shape) -> list:
-    """Generate calibration data for PTQ"""
-    calibration_data = []
-    for i in range(batch_size):
-        x = torch.randn(sample_shape)
-        calibration_data.append(x)
-    return calibration_data
+def generate_calibration_data(batch_size: int, sample_shape: tuple) -> list:
+    """Generate processor-style flattened patch calibration data."""
+    return [torch.randn(sample_shape) for _ in range(batch_size)]
 
 
 def main():
-    # Create the vision patch embed model
     cfg = Qwen3VLVisionConfig(
         in_channels=3,
         hidden_size=1024,
@@ -62,54 +55,46 @@ def main():
     orig_model = copy.deepcopy(model)
     model.eval()
 
-    # Qwen3VLVisionPatchEmbed(
-    #     (proj): Conv3d(3, 1024, kernel_size=(2, 16, 16), stride=(2, 16, 16))
-    # )
     assert model.proj.in_channels == 3
     assert model.proj.out_channels == 1024
     assert model.proj.kernel_size == (2, 16, 16)
     assert model.proj.stride == (2, 16, 16)
 
-    # Generate calibration data
-    # Input shape: (batch_size, in_channels, depth, height, width)
-    # Example: (2, 3, 8, 224, 224) - 2 videos, RGB, 8 frames, 224x224 resolution
+    num_patches = 16
+    patch_dim = (
+        cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
+    )
+    sample_shape = (1, num_patches, patch_dim)
     calibration_data = generate_calibration_data(
-        batch_size=20, sample_shape=(2, 3, 8, 224, 224)
+        batch_size=20,
+        sample_shape=sample_shape,
     )
 
-    # Configure PTQ
     ptq_config = tico.quantization.config.ptq.PTQConfig()
+    prepared_model = tico.quantization.prepare(model, ptq_config, inplace=True)
 
-    # Prepare the model for quantization
-    prepared_model = tico.quantization.prepare(
-        model, ptq_config, inplace=True  # Transform the model in place
-    )
-
-    # Calibrate the model (collect statistics)
     with torch.no_grad():
-        for i, batch in enumerate(calibration_data):
+        for batch in calibration_data:
             prepared_model(batch)
 
-    # Convert to quantized model
     quantized_model = tico.quantization.convert(prepared_model, inplace=True)
 
-    # Compute PEIR (Peak Error-to-Interval Ratio) between quantized model and original model
     with torch.no_grad():
         quant_out = quantized_model(calibration_data[0])
         fp_out = orig_model(calibration_data[0])
 
-    print(f"┌───────────── Quantization Error Summary ─────────────")
+    print("┌───────────── Quantization Error Summary ─────────────")
     print(f"│ Mean |diff|: {(quant_out - fp_out).abs().mean().item():.6f}")
     print(f"│ PEIR       : {compute_peir(fp_out, quant_out) * 100:.6f} %")
-    print(f"└──────────────────────────────────────────────────────")
+    print("└──────────────────────────────────────────────────────")
     print(plot_two_outputs(fp_out, quant_out))
 
-    # Convert to Circle format
-    # example_inputs shape: (batch_size, in_channels, depth, height, width)
-    example_inputs = (torch.randn(2, 3, 8, 224, 224),)
+    # The exported ABI is [batch=1, num_patches, patch_dim]. The wrapper folds
+    # the patch sequence into a batch-one rank-3 Linear input and returns
+    # [num_patches, hidden_size].
+    example_inputs = (torch.randn(sample_shape),)
     circle_model = tico.convert(quantized_model.eval(), example_inputs)
 
-    # Save the Circle model
     filename = "qwen3vl_vision_patch_embed.q.circle"
     circle_model.save(filename)
     print(f"Circle model saved as '{filename}'")

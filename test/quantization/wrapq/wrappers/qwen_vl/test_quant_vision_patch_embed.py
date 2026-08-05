@@ -35,6 +35,7 @@ skip_msg = (
 class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
     fp_patch_embed: torch.nn.Module
     hidden_size: int
+    patch_dim: int
 
     @classmethod
     def setUpClass(cls):
@@ -46,60 +47,88 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
         )
 
         cfg = Qwen3VLVisionConfig(
-            hidden_size=64,  # Smaller for testing
+            hidden_size=64,
             spatial_merge_size=2,
             temporal_merge_size=2,
         )
 
         cls.fp_patch_embed = Qwen3VLVisionPatchEmbed(cfg)
         cls.hidden_size = cfg.hidden_size
+        cls.patch_dim = (
+            cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
+        )
+
+    @classmethod
+    def _make_input(cls, *, batch_size: int = 1, num_patches: int = 8) -> torch.Tensor:
+        """Create processor-style flattened Qwen3-VL patch input."""
+        return torch.randn(batch_size, num_patches, cls.patch_dim)
 
     def test_mode_transitions(self):
-        """Test quantization mode transitions: NO_QUANT → CALIB → QUANT"""
+        """Test quantization mode transitions: NO_QUANT → CALIB → QUANT."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
         self.assertIs(q_patch._mode, Mode.NO_QUANT)
 
         q_patch.enable_calibration()
         self.assertIs(q_patch._mode, Mode.CALIB)
 
-        # Run forward pass during calibration
-        x = torch.randn(2, 3, 4, 32, 32)
-        _ = q_patch(x)
+        _ = q_patch(self._make_input())
 
         q_patch.freeze_qparams()
         self.assertIs(q_patch._mode, Mode.QUANT)
 
+    def test_linearized_projection_matches_fp_reference(self):
+        """The Linear projection must exactly match the original Conv3d path."""
+        q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
+        x = self._make_input(batch_size=2, num_patches=5)
+
+        with torch.no_grad():
+            q_out = q_patch(x)
+            fp_out = self.fp_patch_embed(x)
+
+        torch.testing.assert_close(q_out, fp_out)
+
+    def test_projection_parameters_are_flattened_without_reordering(self):
+        """Conv3d parameters must be copied to Linear in C-T-H-W order."""
+        q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
+        q_linear = q_patch.proj.wrapped
+        linear = q_linear.module
+        conv3d = self.fp_patch_embed.proj
+
+        self.assertIsInstance(linear, torch.nn.Linear)
+        self.assertEqual(
+            linear.weight.shape,
+            (conv3d.out_channels, self.patch_dim),
+        )
+        torch.testing.assert_close(
+            linear.weight,
+            conv3d.weight.reshape(conv3d.out_channels, self.patch_dim),
+        )
+        if conv3d.bias is not None:
+            self.assertIsNotNone(linear.bias)
+            torch.testing.assert_close(linear.bias, conv3d.bias)
+
     def test_forward_diff(self):
-        """
-        Test that quantized output is acceptably close to FP32 reference.
-        After calibration and freeze, quantized output should:
-        - Differ from FP reference (quantization actually applied)
-        - Stay within reasonable error bounds
-        """
+        """Quantized output should differ from and remain close to FP output."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
         q_patch.enable_calibration()
 
-        # Calibrate with multiple inputs
         for _ in range(4):
-            x = torch.randn(2, 3, 4, 32, 32)
-            _ = q_patch(x)
+            _ = q_patch(self._make_input())
 
         q_patch.freeze_qparams()
 
-        x = torch.randn(2, 3, 4, 32, 32)
+        x = self._make_input()
         with torch.no_grad():
             q_out = q_patch(x)
             fp_out = self.fp_patch_embed(x)
 
         diff = (fp_out - q_out).abs().mean().item()
-        self.assertGreater(diff, 0.0)  # not identical
-        self.assertLess(diff, 0.7)  # acceptably close
+        self.assertGreater(diff, 0.0)
+        self.assertLess(diff, 0.7)
         self.assertEqual(fp_out.shape, q_out.shape)
 
     def test_proj_override(self):
-        """
-        PTQConfig overrides should propagate to the wrapped Conv3d layer.
-        """
+        """PTQConfig overrides should propagate to the wrapped Linear layer."""
         cfg = make_affine_ptq_config(
             dtype=DType.uint(8),
             overrides={
@@ -111,46 +140,35 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
             },
         )
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed, qcfg=cfg)
-        q_conv3d = q_patch.proj.wrapped
+        q_linear = q_patch.proj.wrapped
 
-        self.assertIn("QuantConv3d", type(q_conv3d).__name__)
-        self.assertEqual(q_conv3d.obs_weight.dtype, DType.uint(4))
-        self.assertEqual(q_conv3d.obs_act_in.dtype, DType.uint(4))
-        self.assertEqual(q_conv3d.obs_act_out.dtype, DType.uint(4))
+        self.assertEqual(type(q_linear).__name__, "QuantLinear")
+        self.assertEqual(q_linear.obs_weight.dtype, DType.uint(4))
+        self.assertEqual(q_linear.obs_act_in.dtype, DType.uint(4))
+        self.assertEqual(q_linear.obs_act_out.dtype, DType.uint(4))
 
     def test_activation_stats_collected(self):
-        """
-        Test that activation statistics are properly collected during calibration.
-        """
+        """Activation and weight statistics should be collected by QuantLinear."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
         q_patch.enable_calibration()
 
-        # Run forward pass to collect stats
-        x = torch.randn(2, 3, 4, 32, 32)
-        _ = q_patch(x)
+        _ = q_patch(self._make_input())
 
-        # Check that wrapped Conv3d observers have collected stats
-        q_conv3d = q_patch.proj.wrapped
-        self.assertTrue(q_conv3d.obs_act_in.min_val.numel() > 0)
-        self.assertTrue(q_conv3d.obs_act_out.min_val.numel() > 0)
-        self.assertTrue(q_conv3d.obs_weight.min_val.numel() > 0)
+        q_linear = q_patch.proj.wrapped
+        self.assertTrue(q_linear.obs_act_in.min_val.numel() > 0)
+        self.assertTrue(q_linear.obs_act_out.min_val.numel() > 0)
+        self.assertTrue(q_linear.obs_weight.min_val.numel() > 0)
 
-        # Freeze and check qparams exist
         q_patch.freeze_qparams()
-        self.assertTrue(q_conv3d.obs_act_in.has_qparams)
-        self.assertTrue(q_conv3d.obs_act_out.has_qparams)
-        self.assertTrue(q_conv3d.obs_weight.has_qparams)
+        self.assertTrue(q_linear.obs_act_in.has_qparams)
+        self.assertTrue(q_linear.obs_act_out.has_qparams)
+        self.assertTrue(q_linear.obs_weight.has_qparams)
 
     def test_observer_count(self):
-        """
-        Test observer ownership and recursive enumeration.
-        - PatchEmbed owns no local observers directly.
-        - Recursive named_observers() exposes 3 observers from wrapped Conv3d.
-        """
+        """The wrapper should expose three observers through ``proj``."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
 
-        local_observers = list(q_patch._all_observers())
-        self.assertEqual(len(local_observers), 0)
+        self.assertEqual(len(list(q_patch._all_observers())), 0)
 
         observers = list(q_patch.named_observers())
         self.assertEqual(len(observers), 3)
@@ -160,29 +178,22 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
         )
 
     def test_registration_in_registry(self):
-        """
-        Test that Qwen3VLVisionPatchEmbed is properly registered in the wrapper registry.
-        """
-        from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_patch_embed import (
-            QuantQwen3VLVisionPatchEmbed,
-        )
+        """Qwen3VLVisionPatchEmbed should map to this wrapper."""
         from tico.quantization.wrapq.wrappers.registry import lookup
         from transformers.models.qwen3_vl.modeling_qwen3_vl import (
             Qwen3VLVisionPatchEmbed,
         )
 
-        # Verify Qwen3VLVisionPatchEmbed maps to QuantQwen3VLVisionPatchEmbed
         wrapper_cls = lookup(Qwen3VLVisionPatchEmbed)
         self.assertIs(wrapper_cls, QuantQwen3VLVisionPatchEmbed)
 
     def test_output_shape(self):
-        """Test that output shape is correct after patch embedding."""
+        """The wrapper should preserve the original flattened output shape."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
         q_patch.enable_calibration()
 
-        x = torch.randn(2, 3, 4, 32, 32)
+        x = self._make_input(num_patches=7)
         _ = q_patch(x)
-
         q_patch.freeze_qparams()
 
         with torch.no_grad():
@@ -190,47 +201,64 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
             fp_out = self.fp_patch_embed(x)
 
         self.assertEqual(q_out.shape, fp_out.shape)
+        self.assertEqual(q_out.shape, (7, self.hidden_size))
 
     def test_multiple_calibration_steps(self):
-        """
-        Test that running multiple calibration iterations works correctly.
-        Statistics should be accumulated across multiple forward passes.
-        """
+        """Statistics should accumulate across multiple calibration steps."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
         q_patch.enable_calibration()
 
-        # Run multiple calibration steps
-        for i in range(5):
-            x = torch.randn(2, 3, 4, 32, 32)
-            _ = q_patch(x)
+        for _ in range(5):
+            _ = q_patch(self._make_input())
 
         q_patch.freeze_qparams()
+        q_linear = q_patch.proj.wrapped
+        self.assertTrue(q_linear.obs_act_in.has_qparams)
+        self.assertTrue(q_linear.obs_act_out.has_qparams)
+        self.assertTrue(q_linear.obs_weight.has_qparams)
 
-        # Verify that all observers have quantization parameters
-        self.assertTrue(q_patch.proj.wrapped.obs_act_in.has_qparams)
-        self.assertTrue(q_patch.proj.wrapped.obs_act_out.has_qparams)
-        self.assertTrue(q_patch.proj.wrapped.obs_weight.has_qparams)
-
-    def test_different_batch_sizes(self):
-        """
-        Test that quantization works correctly with different batch sizes.
-        """
+    def test_flattens_leading_dimensions_into_batch_one_sequence(self):
+        """Leading input dimensions should be folded without changing semantics."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
-        q_patch.enable_calibration()
 
-        # Calibrate with one batch size
-        calibrate_batch = torch.randn(2, 3, 4, 32, 32)
-        for _ in range(3):
-            _ = q_patch(calibrate_batch)
-        q_patch.freeze_qparams()
-
-        # Test with different batch sizes
         for batch_size in [1, 2, 4]:
-            x = torch.randn(batch_size, 3, 4, 32, 32)
-            with torch.no_grad():
-                q_out = q_patch(x)
-                fp_out = self.fp_patch_embed(x)
+            with self.subTest(batch_size=batch_size):
+                x = self._make_input(batch_size=batch_size, num_patches=3)
+                with torch.no_grad():
+                    q_out = q_patch(x)
+                    fp_out = self.fp_patch_embed(x)
 
-            self.assertEqual(q_out.shape, fp_out.shape)
-            diff = (fp_out - q_out).abs().mean().item()
-            self.assertLess(diff, 0.8)
+                torch.testing.assert_close(q_out, fp_out)
+                self.assertEqual(
+                    q_out.shape,
+                    (batch_size * 3, self.hidden_size),
+                )
+
+    def test_export_graph_contains_linear_without_conv3d(self):
+        """Export should expose rank-3 Linear input and no Conv3d operation."""
+        q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed).eval()
+        x = self._make_input(num_patches=4)
+
+        exported = torch.export.export(q_patch, (x,))
+        call_nodes = [
+            node for node in exported.graph.nodes if node.op == "call_function"
+        ]
+        targets = {node.target for node in call_nodes}
+
+        self.assertIn(torch.ops.aten.linear.default, targets)
+        self.assertNotIn(torch.ops.aten.conv3d.default, targets)
+        self.assertNotIn(torch.ops.aten.conv3d.padding, targets)
+
+        linear_node = next(
+            node for node in call_nodes if node.target == torch.ops.aten.linear.default
+        )
+        linear_input = linear_node.args[0]
+        self.assertIsInstance(linear_input, torch.fx.Node)
+        self.assertEqual(
+            tuple(linear_input.meta["val"].shape),
+            (1, 4, self.patch_dim),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

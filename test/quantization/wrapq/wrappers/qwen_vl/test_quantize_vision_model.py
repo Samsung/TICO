@@ -36,7 +36,7 @@ skip_msg = "required transformers not installed — skipping Qwen3-VL vision mod
 )
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenVisionModelExample(unittest.TestCase):
-    """Exercise the old vision-model PTQ flow with a tiny static grid."""
+    """Exercise the vision-model PTQ flow with a tiny static grid."""
 
     def test_prepare_convert_vision_model_flow_matches_example(self):
         """Quantize Qwen3VLVisionModel and validate pooled vision output."""
@@ -67,13 +67,12 @@ class TestQwenVisionModelExample(unittest.TestCase):
 
         grid_tuple = (1, 2, 2)
         grid_thw = torch.tensor([grid_tuple])
-        sample_shape = (
-            1,
-            cfg.in_channels,
-            grid_tuple[0] * cfg.temporal_patch_size,
-            grid_tuple[1] * cfg.patch_size,
-            grid_tuple[2] * cfg.patch_size,
+        num_patches = grid_tuple[0] * grid_tuple[1] * grid_tuple[2]
+        patch_dim = (
+            cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
         )
+        sample_shape = (1, num_patches, patch_dim)
+
         model = Qwen3VLVisionModel(cfg).eval()
         fp_ref = copy.deepcopy(model).eval()
         qcfg = PTQConfig(model_args={"vision": {"grid_thw": grid_tuple}})
