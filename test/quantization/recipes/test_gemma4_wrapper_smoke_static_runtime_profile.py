@@ -158,7 +158,7 @@ class TestGemma4StaticRuntimeConfigs(unittest.TestCase):
         self.assertEqual(text_cfg.intermediate_size, 6_144)
         self.assertEqual(text_cfg.hidden_size_per_layer_input, 256)
         self.assertEqual(text_cfg.sliding_window, 512)
-        self.assertEqual(text_cfg.per_layer_config[1].head_dim, 512)
+        self.assertEqual(text_cfg.global_head_dim, 512)
 
     def test_vision_config_uses_e2b_width_without_standardization(self):
         """The real E2B vision config should retain standardize=False."""

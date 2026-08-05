@@ -75,7 +75,7 @@ class TestGemma4WrapperSmokeSizeProfile(unittest.TestCase):
         self.assertEqual(text_cfg.num_attention_heads, 8)
         self.assertEqual(text_cfg.num_key_value_heads, 1)
         self.assertEqual(text_cfg.head_dim, 256)
-        self.assertEqual(text_cfg.per_layer_config[1].head_dim, 512)
+        self.assertEqual(text_cfg.global_head_dim, 512)
         self.assertEqual(text_cfg.num_hidden_layers, 2)
         self.assertEqual(
             text_cfg.layer_types,
