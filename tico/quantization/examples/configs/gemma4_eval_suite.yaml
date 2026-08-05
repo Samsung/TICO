@@ -68,7 +68,7 @@ evaluation:
     batch_size: 1
     max_new_tokens: 30
     n_samples: 1000
-    max_num_frames: 32
+    max_num_frames: 21
     use_cache: null
     verbose: true
   mmlu:

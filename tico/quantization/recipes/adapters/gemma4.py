@@ -23,6 +23,7 @@ from transformers import AutoProcessor
 from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
@@ -111,6 +112,13 @@ class Gemma4Adapter(ModelAdapter):
         ctx.model.eval()
         self._disable_cache(ctx.model)
         assert_gemma4_e2b_no_moe(ctx.model)
+
+        calib_seq_len = get_by_path(cfg, "calibration.seq_len")
+        if calib_seq_len is not None and hasattr(ctx.model.config, "text_config"):
+            ctx.model.config.text_config.max_position_embeddings = min(
+                int(ctx.model.config.text_config.max_position_embeddings),
+                int(calib_seq_len),
+            )
         return ctx
 
     @staticmethod
@@ -121,6 +129,15 @@ class Gemma4Adapter(ModelAdapter):
         text_config = getattr(getattr(model, "config", None), "text_config", None)
         if text_config is not None and hasattr(text_config, "use_cache"):
             text_config.use_cache = False
+
+    @staticmethod
+    def _enable_cache(model: Any) -> None:
+        """Re-enable HF dynamic cache for autoregressive generation."""
+        if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+            model.config.use_cache = True
+        text_config = getattr(getattr(model, "config", None), "text_config", None)
+        if text_config is not None and hasattr(text_config, "use_cache"):
+            text_config.use_cache = True
 
     @staticmethod
     def _static_calibration_image_size(
@@ -278,6 +295,11 @@ class Gemma4Adapter(ModelAdapter):
         if not eval_cfg.get("enabled", False):
             return
 
+        # Re-enable KV cache for autoregressive generation during evaluation.
+        # ``_disable_cache`` in ``load_model`` turns it off for calibration,
+        # but ``generate()`` requires cache for acceptable speed.
+        self._enable_cache(ctx.model)
+
         max_seq_len = eval_cfg.get("max_seq_len")
         n_samples = int(eval_cfg.get("n_samples", 50))
         tasks = eval_cfg.get("vlm_tasks") or []
@@ -361,7 +383,9 @@ class Gemma4Adapter(ModelAdapter):
         videomme = eval_cfg.get("videomme", {})
         if videomme.get("enabled", False):
             video_n_samples = int(videomme.get("n_samples", -1))
-            max_num_frames = int(videomme.get("max_num_frames", 32))
+            # max_num_frames=21 for gemma4 model with max_seq_len=2048
+            # due to the minimal soft_tokens_per_frame is 70 (comes from processor.video_processor.max_soft_tokens)
+            max_num_frames = int(videomme.get("max_num_frames", 21))
             if max_num_frames <= 0:
                 raise ValueError(
                     "evaluation.videomme.max_num_frames must be a positive integer."

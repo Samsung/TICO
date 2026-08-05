@@ -284,5 +284,98 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
             )
 
 
+# ---------------------------------------------------------------------------
+# Tests for Generation support in QuantGemma4ForConditionalGeneration
+# ---------------------------------------------------------------------------
+
+
+@unittest.skipIf(
+    not IS_INTERNAL_TEST,
+    "Internal smoke test — set RUN_INTERNAL_TESTS=1 to enable it.",
+)
+@unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
+class TestQuantGemma4ForConditionalGenerationGeneration(unittest.TestCase):
+    """Exercise GenerationMixin support added to QuantGemma4ForConditionalGeneration."""
+
+    def setUp(self):
+        """Create deterministic tiny Gemma4ForConditionalGeneration modules."""
+        torch.manual_seed(2026)
+        self.fp_model = _make_gemma4_for_conditional_generation()
+        self.fp_ref = copy.deepcopy(self.fp_model).eval()
+        self.config = self.fp_model.config
+        self.text_config = self.config.get_text_config()
+        self.seq_len = 4
+        self.batch_size = 1
+        self.qcfg = PTQConfig(
+            model_args={
+                "vision": {
+                    "visual_start_idx": 0,
+                    "num_visual_tokens": 4,
+                }
+            }
+        )
+
+    def _text_only_sample(self):
+        """Create a text-only sample (no image/video/audio tokens).
+
+        Token IDs 10, 11, 12 are reserved for image, video, and audio
+        placeholders.  We exclude them so the multimodal validation in
+        ``QuantGemma4Model`` does not reject the input.
+        """
+        special_ids = {
+            self.config.image_token_id,
+            self.config.video_token_id,
+            self.config.audio_token_id,
+        }
+        valid_ids = [
+            i for i in range(self.text_config.vocab_size) if i not in special_ids
+        ]
+        idx = torch.randint(0, len(valid_ids), (self.batch_size, self.seq_len))
+        input_ids = torch.tensor(valid_ids)[idx]
+        return {"input_ids": input_ids}
+
+    def _make_quantized(self):
+        """prepare → calibrate → convert and return the quantized wrapper."""
+        qmodel = prepare(self.fp_model, self.qcfg).eval()
+        sample = self._text_only_sample()
+        with torch.no_grad():
+            for _ in range(3):
+                qmodel(**sample)
+        return convert(qmodel)
+
+    # --- End-to-end generation ---------------------------------------------
+
+    def test_generate_returns_tensor(self):
+        """generate() should return a tensor of token ids."""
+        quantized = self._make_quantized()
+        sample = self._text_only_sample()
+
+        with torch.no_grad():
+            out = quantized.generate(
+                **sample,
+                max_new_tokens=1,
+                do_sample=False,
+            )
+
+        self.assertIsInstance(out, torch.Tensor)
+        # Output should be at least as long as the input.
+        self.assertGreaterEqual(out.shape[1], sample["input_ids"].shape[1])
+
+    def test_generate_extends_sequence(self):
+        """generate(max_new_tokens=N) should add exactly N new tokens."""
+        quantized = self._make_quantized()
+        sample = self._text_only_sample()
+        max_new = 1
+
+        with torch.no_grad():
+            out = quantized.generate(
+                **sample,
+                max_new_tokens=max_new,
+                do_sample=False,
+            )
+
+        self.assertEqual(out.shape[1], self.seq_len + max_new)
+
+
 if __name__ == "__main__":
     unittest.main()
