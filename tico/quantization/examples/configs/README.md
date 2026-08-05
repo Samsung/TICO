@@ -232,6 +232,38 @@ pipeline:
     enabled: true
 ```
 
+### PTQ stage: `lock_gptq_qparams`
+
+When GPTQ runs before PTQ, the PTQ stage injects GPTQ-computed scales and
+zero-points into weight observers via `inject_gptq_qparams()`.  By default
+(`lock_gptq_qparams: false`), the subsequent `convert()` call recomputes
+quantization parameters from min/max calibration statistics, **silently
+replacing** the GPTQ-injected values.  This preserves the original pipeline
+behavior.
+
+Set `lock_gptq_qparams: true` to enable the `_qparams_locked` guard in
+`AffineObserverBase`.  When enabled, `compute_qparams()` returns the cached
+GPTQ scale/zero-point instead of recomputing from min/max, so GPTQ
+quantization parameters survive through `convert()`.
+
+```yaml
+pipeline:
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+
+  - name: ptq
+    enabled: true
+    lock_gptq_qparams: true   # preserve GPTQ scales/zero-points through convert()
+    activation: int16
+    linear_weight: uint4
+```
+
+Rules:
+
+- Defaults to `false` (original behavior: PTQ replaces GPTQ qparams).
+- When `true`, weight observers are disabled after `load_qparams(lock=True)`.
+
 ## `evaluation`
 
 LLM example:

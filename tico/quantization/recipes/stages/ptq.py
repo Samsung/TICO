@@ -30,6 +30,11 @@ from tico.quantization.recipes.qparams import (
     inject_gptq_qparams,
 )
 from tico.quantization.recipes.stages.base import Stage
+from tico.quantization.wrapq.observers.affine_base import (
+    AffineObserverBase,
+    set_qparams_lock_enabled,
+)
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 _INTERNAL_OVERRIDE_FIELDS = frozenset({"__quant_spec_replace_role__"})
@@ -175,6 +180,15 @@ class PTQStage(Stage):
 
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         print("Wrapping model with PTQ wrappers …")
+
+        # Read lock_gptq_qparams from YAML (default: False = original behavior)
+        lock_gptq_qparams = bool(stage_cfg.get("lock_gptq_qparams", False))
+        set_qparams_lock_enabled(lock_gptq_qparams)
+        print(
+            f"GPTQ qparam lock: "
+            f"{'enabled' if lock_gptq_qparams else 'disabled (default)'}"
+        )
+
         ptq_config = ctx.adapter.build_ptq_config(ctx, stage_cfg)
         ptq_config = apply_ptq_override_policies(
             ptq_config,
