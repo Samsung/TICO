@@ -15,14 +15,21 @@
 import unittest
 
 from tico.circle.cli.main import _build_parser, _parse_passes
+from tico.circle.passes import (
+    CirclePassStrategy,
+    EliminateTransposeBoundedLayoutRegionPass,
+    RemoveRedundantLayoutOpsPass,
+)
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
-from tico.circle.passes.optimization import RemoveRedundantLayoutOpsPass
 
 
 class CircleCLITest(unittest.TestCase):
-    def test_extract_accepts_tensor_patterns_without_marker_flag(self):
-        parser = _build_parser()
+    """Test Circle CLI argument parsing and pass resolution."""
 
+    def test_extract_accepts_tensor_patterns_without_marker_flag(self) -> None:
+        """Parse extraction tensor patterns without a marker-only flag."""
+
+        parser = _build_parser()
         args = parser.parse_args(
             [
                 "extract",
@@ -39,9 +46,36 @@ class CircleCLITest(unittest.TestCase):
         self.assertEqual(args.from_tensor, ["input"])
         self.assertEqual(args.to_tensor, ["output"])
 
-    def test_optimization_and_cleanup_pass_names_are_resolved(self):
-        passes = _parse_passes("remove-redundant-layout-ops,dce,compact")
+    def test_optimization_and_cleanup_pass_names_are_resolved(self) -> None:
+        """Resolve the layout optimization and cleanup pass names in order."""
 
-        self.assertIsInstance(passes[0], RemoveRedundantLayoutOpsPass)
-        self.assertIsInstance(passes[1], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[2], CompactIndicesPass)
+        passes = _parse_passes(
+            "eliminate-transpose-bounded-layout-region,"
+            "remove-redundant-layout-ops,dce,compact"
+        )
+
+        self.assertIsInstance(passes[0], EliminateTransposeBoundedLayoutRegionPass)
+        self.assertIsInstance(passes[1], RemoveRedundantLayoutOpsPass)
+        self.assertIsInstance(passes[2], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[3], CompactIndicesPass)
+
+    def test_optimize_accepts_restart_strategy(self) -> None:
+        """Parse the restart scheduling strategy for a Circle pass pipeline."""
+
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "optimize",
+                "input.circle",
+                "-o",
+                "output.circle",
+                "--strategy",
+                CirclePassStrategy.RESTART.value,
+            ]
+        )
+
+        self.assertEqual(args.strategy, CirclePassStrategy.RESTART.value)
+
+
+if __name__ == "__main__":
+    unittest.main()

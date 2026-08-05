@@ -19,7 +19,10 @@ from tico.circle.passes.manager import (
     CirclePassManagerResult,
     CirclePassStrategy,
 )
-from tico.circle.passes.optimization import RemoveRedundantLayoutOpsPass
+from tico.circle.passes.optimization import (
+    EliminateTransposeBoundedLayoutRegionPass,
+    RemoveRedundantLayoutOpsPass,
+)
 
 __all__ = [
     "CirclePass",
@@ -29,5 +32,6 @@ __all__ = [
     "CirclePassManagerResult",
     "CirclePassResult",
     "CirclePassStrategy",
+    "EliminateTransposeBoundedLayoutRegionPass",
     "RemoveRedundantLayoutOpsPass",
 ]

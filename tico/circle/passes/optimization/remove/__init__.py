@@ -15,7 +15,11 @@
 from tico.circle.passes.optimization.remove.layout_ops import (
     RemoveRedundantLayoutOpsPass,
 )
+from tico.circle.passes.optimization.remove.transpose_bounded_layout_region import (
+    EliminateTransposeBoundedLayoutRegionPass,
+)
 
 __all__ = [
+    "EliminateTransposeBoundedLayoutRegionPass",
     "RemoveRedundantLayoutOpsPass",
 ]
