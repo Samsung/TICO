@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import ClassVar, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -33,9 +33,6 @@ class ObserverBase(nn.Module, ABC):
       - compute_qparams(): optional in practice for some observers (e.g., MX),
         but still part of the interface; those can return None.
     """
-
-    # False only for observers that deliberately preserve floating-point values.
-    is_quantizing: ClassVar[bool] = True
 
     def __init__(
         self,

@@ -152,11 +152,8 @@ class TestNoQuantSpec(unittest.TestCase):
 
         self.assertIsInstance(wrapper.obs_act_in, IdentityObserver)
         self.assertIsInstance(wrapper.obs_act_out, IdentityObserver)
-        self.assertFalse(wrapper.obs_act_in.is_quantizing)
-        self.assertFalse(wrapper.obs_act_out.is_quantizing)
 
         self.assertIsInstance(wrapper.obs_weight, MinMaxObserver)
-        self.assertTrue(wrapper.obs_weight.is_quantizing)
         self.assertEqual(wrapper.obs_weight.dtype, DType.uint(4))
 
     def test_no_quant_observer_fake_quant_is_passthrough(self):
