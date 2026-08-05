@@ -360,12 +360,12 @@ def _set_tensor_layout(
     if new_shape is None:
         return False
     signature = _shape_signature(tensor)
-    new_signature = _permuted_shape(signature, permutation) if signature else ()
+    new_signature = _permuted_shape(signature, permutation) if signature else None
     if signature and new_signature is None:
         return False
 
     tensor.shape = list(new_shape)
-    if signature:
+    if new_signature is not None:
         tensor.shapeSignature = list(new_signature)
     return True
 
@@ -729,9 +729,9 @@ def _build_region_plan(
             return None
 
     output_contracts: dict[int, tuple[Any, ...]] = {}
-    for boundary in output_boundaries:
-        region_tensor = tensors[boundary.region_tensor_index]
-        final_tensor = tensors[boundary.transpose_output_index]
+    for output_boundary in output_boundaries:
+        region_tensor = tensors[output_boundary.region_tensor_index]
+        final_tensor = tensors[output_boundary.transpose_output_index]
         if _permuted_shape(_shape(region_tensor), region_to_source) != _shape(
             final_tensor
         ):
@@ -749,7 +749,7 @@ def _build_region_plan(
         if not _tensor_has_visible_use(
             document,
             graph,
-            boundary.transpose_output_index,
+            output_boundary.transpose_output_index,
         ):
             return None
         contract = (
@@ -760,7 +760,7 @@ def _build_region_plan(
             int(getattr(final_tensor, "buffer", 0) or 0),
         )
         previous = output_contracts.setdefault(
-            boundary.region_tensor_index,
+            output_boundary.region_tensor_index,
             contract,
         )
         if previous != contract:
@@ -879,8 +879,10 @@ def _apply_region_plan(
 
     tensors = as_list(graph.subgraph.tensors)
     output_boundaries: dict[int, list[_OutputBoundary]] = {}
-    for boundary in plan.output_boundaries:
-        output_boundaries.setdefault(boundary.region_tensor_index, []).append(boundary)
+    for output_boundary in plan.output_boundaries:
+        output_boundaries.setdefault(output_boundary.region_tensor_index, []).append(
+            output_boundary
+        )
 
     for operator_index in plan.operator_indices:
         operator = operators[operator_index]
@@ -902,17 +904,17 @@ def _apply_region_plan(
                     f"Failed to update tensor {tensor_index} to source layout."
                 )
 
-    for boundary in plan.output_boundaries:
-        final_tensor = tensors[boundary.transpose_output_index]
+    for output_boundary in plan.output_boundaries:
+        final_tensor = tensors[output_boundary.transpose_output_index]
         _rename_dead_tensor(
             final_tensor,
-            f"::dead_layout_{boundary.transpose_index}",
+            f"::dead_layout_{output_boundary.transpose_index}",
         )
         replacement = replace_tensor_uses(
             document.model,
             subgraph_index=graph.subgraph_index,
-            old_tensor_index=boundary.transpose_output_index,
-            new_tensor_index=boundary.region_tensor_index,
+            old_tensor_index=output_boundary.transpose_output_index,
+            new_tensor_index=output_boundary.region_tensor_index,
         )
         if not replacement.modified:
             raise RuntimeError(
