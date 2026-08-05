@@ -180,6 +180,21 @@ def _make_ptq_config(
     )
 
 
+def _create_patchified_pixel_values(
+    vision_cfg: Any,
+    thw: Tuple[int, int, int],
+) -> torch.Tensor:
+    """Create batch-one flattened patches for one synthetic visual item."""
+    num_patches = thw[0] * thw[1] * thw[2]
+    patch_dim = (
+        vision_cfg.in_channels
+        * vision_cfg.temporal_patch_size
+        * vision_cfg.patch_size
+        * vision_cfg.patch_size
+    )
+    return torch.randn(1, num_patches, patch_dim)
+
+
 def _compute_3d_position_ids(
     input_ids: torch.Tensor,
     thw: Tuple[int, int, int],
@@ -263,13 +278,7 @@ def _create_image_input(
     input_ids[
         0, visual_start_idx : visual_start_idx + num_visual_tokens
     ] = cfg.image_token_id
-    pixel_values = torch.randn(
-        1,
-        3,
-        thw[0] * cfg.vision_config.temporal_patch_size,
-        thw[1] * cfg.vision_config.patch_size,
-        thw[2] * cfg.vision_config.patch_size,
-    )
+    pixel_values = _create_patchified_pixel_values(cfg.vision_config, thw)
     image_grid_thw = torch.tensor([thw])
     position_ids = _compute_3d_position_ids(
         input_ids, thw, spatial_merge_size, cfg.image_token_id
@@ -777,6 +786,7 @@ class QwenVisionPatchEmbedCase(QwenBaseCase):
         self.vision_cfg = _make_vision_config(
             in_channels=3, hidden_size=32, temporal_patch_size=2, patch_size=16
         )
+        self.grid_tuple = (1, 2, 2)
         module = Qwen3VLVisionPatchEmbed(self.vision_cfg).eval()
         return module, clone_module(module)
 
@@ -784,7 +794,12 @@ class QwenVisionPatchEmbedCase(QwenBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create patch-embed calibration samples."""
-        return [ForwardInput((torch.randn(1, 3, 2, 16, 16),)) for _ in range(3)]
+        return [
+            ForwardInput(
+                (_create_patchified_pixel_values(self.vision_cfg, self.grid_tuple),)
+            )
+            for _ in range(3)
+        ]
 
 
 class QwenVisionPatchMergerCase(QwenBaseCase):
@@ -848,19 +863,13 @@ class QwenVisionModelCase(QwenBaseCase):
         )
         self.grid_tuple = (1, 2, 2)
         self.grid_thw = torch.tensor([self.grid_tuple])
-        self.sample_shape = (
-            1,
-            self.vision_cfg.in_channels,
-            self.grid_tuple[0] * self.vision_cfg.temporal_patch_size,
-            self.grid_tuple[1] * self.vision_cfg.patch_size,
-            self.grid_tuple[2] * self.vision_cfg.patch_size,
-        )
         module = Qwen3VLVisionModel(self.vision_cfg).eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
         """Create one synthetic vision-model input."""
-        return ForwardInput((torch.randn(self.sample_shape), self.grid_thw))
+        pixel_values = _create_patchified_pixel_values(self.vision_cfg, self.grid_tuple)
+        return ForwardInput((pixel_values, self.grid_thw))
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]

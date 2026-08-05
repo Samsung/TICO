@@ -18,7 +18,6 @@ import sys
 from collections import namedtuple
 
 import torch
-import torch.nn as nn
 
 import tico
 import tico.quantization
@@ -29,8 +28,6 @@ from tico.quantization.wrapq.utils.version import has_transformers_for
 
 torch.manual_seed(123)
 
-
-# Check if transformers is available
 
 if not has_transformers_for("qwen3-vl"):
     print("Error: transformers package not installed. Cannot test Qwen3VLVisionModel.")
@@ -45,64 +42,48 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
 
 
 def generate_calibration_data(batch_size: int, sample_shape: tuple) -> list:
-    """Generate calibration data for PTQ"""
-    calibration_data = []
-    for i in range(batch_size):
-        x = torch.randn(sample_shape)
-        calibration_data.append(x)
-    return calibration_data
+    """Generate processor-style flattened patch calibration data."""
+    return [torch.randn(sample_shape) for _ in range(batch_size)]
 
 
 def main():
-    # Create the vision model configuration
-    # Based on Qwen3VLVisionModel structure:
-    # (patch_embed): Qwen3VLVisionPatchEmbed(
-    #     (proj): Conv3d(3, 1024, kernel_size=(2, 16, 16), stride=(2, 16, 16))
-    # )
-    # (pos_embed): Embedding(2304, 1024)
     cfg = Qwen3VLVisionConfig(
         hidden_size=1024,
-        num_position_embeddings=2304,  # 48x48 spatial grid
+        num_position_embeddings=2304,
         temporal_patch_size=2,
         patch_size=16,
-        depth=2,  # Number of transformer blocks (reduced for example)
+        depth=2,
     )
     model = Qwen3VLVisionModel(cfg)
     orig_model = copy.deepcopy(model)
     model.eval()
 
-    # Define grid_thw for fixed input size
-    # grid_thw: (num_images, 3) with (temporal, height, width)
-    # Example: [1, 24, 24] means 1 video with 1 temporal patch, 24 vertical, 24 horizontal
-    # Total patches: 1 * 24 * 24 = 576
+    # Fixed grid for static export. The processor supplies one flattened vector
+    # for each temporal/spatial patch.
     THW = namedtuple(
         "THW", ["num_temporal_patches", "num_height_patches", "num_width_patches"]
     )
     vision_grid_thw = THW(1, 24, 24)
     grid_thw = torch.tensor([vision_grid_thw])
 
-    # Input to patch_embed: (batch_size, in_channels, depth, height, width)
-    # Example: (1, 3, 16, 384, 384)
-    # - batch_size: 1
-    # - in_channels: 3 (RGB)
-    # - depth: frames = num_temporal_patches * temporal_patch_size = 1 * 2 = 2 frames
-    # - height: num_height_patches * patch_size = 24 * 16 = 384
-    # - width: num_width_patches * patch_size = 24 * 16 = 384
-    num_frames = vision_grid_thw.num_temporal_patches * cfg.temporal_patch_size
-    frame_height = vision_grid_thw.num_height_patches * cfg.patch_size
-    frame_width = vision_grid_thw.num_width_patches * cfg.patch_size
-    input_shape = (1, cfg.in_channels, num_frames, frame_height, frame_width)
+    num_patches = (
+        vision_grid_thw.num_temporal_patches
+        * vision_grid_thw.num_height_patches
+        * vision_grid_thw.num_width_patches
+    )
+    patch_dim = (
+        cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
+    )
+    input_shape = (1, num_patches, patch_dim)
 
     print(f"Input shape: {input_shape}")
     print(f"grid_thw: {grid_thw.tolist()}")
 
-    # Generate calibration data
     calibration_data = generate_calibration_data(
-        batch_size=20, sample_shape=input_shape
+        batch_size=20,
+        sample_shape=input_shape,
     )
 
-    # Configure PTQ with vision_grid_thw override
-    # This is required for QuantQwen3VLVisionModel to precompute RoPE embeddings
     ptq_config = tico.quantization.config.ptq.PTQConfig(
         model_args={
             "vision": {
@@ -111,26 +92,19 @@ def main():
         }
     )
 
-    # Prepare the model for quantization
-    prepared_model = tico.quantization.prepare(
-        model, ptq_config, inplace=True  # Transform the model in place
-    )
+    prepared_model = tico.quantization.prepare(model, ptq_config, inplace=True)
 
-    # Calibrate the model (collect statistics)
     with torch.no_grad():
-        for i, batch in enumerate(calibration_data):
+        for batch in calibration_data:
             prepared_model(batch, grid_thw)
 
-    # Convert to quantized model
     quantized_model = tico.quantization.convert(prepared_model, inplace=True)
 
-    # Compute PEIR (Peak Error-to-Interval Ratio) between quantized model and original model
     with torch.no_grad():
         test_input = calibration_data[0]
         quant_out = quantized_model(test_input, grid_thw)
         fp_out = orig_model(test_input, grid_thw)
 
-        # The structure of quant_out depends on transformers version
         if QuantQwen3VLVisionModel.has_deepstack_model_output:
             quant_out = quant_out.pooler_output
             fp_out = fp_out.pooler_output
@@ -138,18 +112,15 @@ def main():
             quant_out = quant_out[0]
             fp_out = fp_out[0]
 
-    print(f"┌───────────── Quantization Error Summary ─────────────")
+    print("┌───────────── Quantization Error Summary ─────────────")
     print(f"│ Mean |diff|: {(quant_out - fp_out).abs().mean().item():.6f}")
     print(f"│ PEIR       : {compute_peir(fp_out, quant_out) * 100:.6f} %")
-    print(f"└──────────────────────────────────────────────────────")
+    print("└──────────────────────────────────────────────────────")
     print(plot_two_outputs(fp_out, quant_out))
 
-    # Convert to Circle format
-    # example_inputs: (hidden_states, grid_thw)
     example_input = (calibration_data[0], grid_thw)
     circle_model = tico.convert(quantized_model.eval(), example_input)
 
-    # Save the Circle model
     filename = "qwen3vl_vision_model.q.circle"
     circle_model.save(filename)
     print(f"Circle model saved as '{filename}'")

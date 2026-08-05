@@ -87,10 +87,15 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         """Helper to create test inputs for VisionModel."""
         t, h, w = grid_thw
         num_patches = t * h * w
-        # Input shape: (seq_len, in_channels * temporal_patch_size * patch_size * patch_size)
-        hidden_states = torch.randn(
-            num_patches, 3 * 2 * 16 * 16
-        )  # 3 channels, 2 temporal, 16x16 patches
+        vision_cfg = self.fp_model.config
+        patch_dim = (
+            vision_cfg.in_channels
+            * vision_cfg.temporal_patch_size
+            * vision_cfg.patch_size
+            * vision_cfg.patch_size
+        )
+        # Explicit batch-one ABI used by the static NPU export path.
+        hidden_states = torch.randn(1, num_patches, patch_dim)
         grid_tensor = torch.tensor([grid_thw])
         return hidden_states, grid_tensor
 

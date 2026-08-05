@@ -352,7 +352,8 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         Forward pass with fake quantization.
 
         Args:
-            hidden_states: Input tensor of shape (seq_len, in_channels * T * H * W)
+            hidden_states: Flattened patches with shape (seq_len, patch_dim)
+                or the static export ABI (1, seq_len, patch_dim).
             grid_thw: Grid dimensions (num_images, 3) with (temporal, height, width)
 
         Returns:

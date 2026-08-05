@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Smoke tests migrated from the Qwen3-VL vision patch-embed quantization example."""
+"""Smoke tests migrated from the Qwen3-VL vision patch-embed example."""
 
 import copy
 import os
@@ -38,7 +38,7 @@ skip_msg = (
 )
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQwenVisionPatchEmbedExample(unittest.TestCase):
-    """Exercise the old vision patch-embed PTQ flow with a tiny input."""
+    """Exercise the vision patch-embed PTQ flow with flattened patches."""
 
     def test_prepare_convert_vision_patch_embed_flow_matches_example(self):
         """Quantize Qwen3VLVisionPatchEmbed and validate output shape."""
@@ -61,7 +61,10 @@ class TestQwenVisionPatchEmbedExample(unittest.TestCase):
         prepared = tico.quantization.prepare(model, PTQConfig(), inplace=True)
         self.assertIsInstance(prepared, PTQWrapper)
 
-        calibration_data = [torch.randn(1, 3, 2, 16, 16) for _ in range(3)]
+        patch_dim = (
+            cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
+        )
+        calibration_data = [torch.randn(1, 4, patch_dim) for _ in range(3)]
         with torch.no_grad():
             for sample in calibration_data:
                 prepared(sample)
@@ -74,6 +77,7 @@ class TestQwenVisionPatchEmbedExample(unittest.TestCase):
             fp_out = fp_ref(calibration_data[0])
 
         self.assertEqual(quant_out.shape, fp_out.shape)
+        self.assertEqual(quant_out.shape, (4, cfg.hidden_size))
         self.assertTrue(torch.isfinite(quant_out).all())
 
 
