@@ -16,6 +16,7 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import cast
 
 import torch
 
@@ -178,13 +179,16 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
         """E2B standardize=False should not require uncalibrated dead observers."""
         last_hidden = object()
         strip_padding = object()
-        fake = SimpleNamespace(
-            config=SimpleNamespace(standardize=False),
-            obs_last_hidden_state=last_hidden,
-            obs_strip_padding=strip_padding,
-            obs_minus_bias=object(),
-            obs_std_bias=None,
-            obs_std_scale=None,
+        fake = cast(
+            QuantGemma4VisionModel,
+            SimpleNamespace(
+                config=SimpleNamespace(standardize=False),
+                obs_last_hidden_state=last_hidden,
+                obs_strip_padding=strip_padding,
+                obs_minus_bias=object(),
+                obs_std_bias=None,
+                obs_std_scale=None,
+            ),
         )
 
         self.assertEqual(
@@ -202,22 +206,25 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
         seq_len = 4
         padding_positions = torch.zeros(1, seq_len, dtype=torch.bool)
 
-        fake = SimpleNamespace(
-            config=SimpleNamespace(standardize=False),
-            padding_positions=padding_positions,
-            patch_embedder_export=lambda pixels, positions, padding: pixels,
-            encoder=lambda **kwargs: kwargs["inputs_embeds"],
-            pooler_export=lambda **kwargs: (
-                kwargs["hidden_states"],
-                torch.ones(1, seq_len, dtype=torch.bool),
+        fake = cast(
+            QuantGemma4VisionModel,
+            SimpleNamespace(
+                config=SimpleNamespace(standardize=False),
+                padding_positions=padding_positions,
+                patch_embedder_export=lambda pixels, positions, padding: pixels,
+                encoder=lambda **kwargs: kwargs["inputs_embeds"],
+                pooler_export=lambda **kwargs: (
+                    kwargs["hidden_states"],
+                    torch.ones(1, seq_len, dtype=torch.bool),
+                ),
+                output_length=seq_len,
+                obs_strip_padding=object(),
+                obs_last_hidden_state=object(),
+                obs_minus_bias=object(),
+                obs_std_bias=None,
+                obs_std_scale=None,
+                _fq=lambda tensor, observer: tensor,
             ),
-            output_length=seq_len,
-            obs_strip_padding=object(),
-            obs_last_hidden_state=object(),
-            obs_minus_bias=object(),
-            obs_std_bias=None,
-            obs_std_scale=None,
-            _fq=lambda tensor, observer: tensor,
         )
         pixel_values = torch.randn(1, seq_len, hidden_size)
         position_ids = torch.zeros(1, seq_len, 2, dtype=torch.long)
@@ -233,13 +240,16 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
         minus_bias = object()
         std_bias = object()
         std_scale = object()
-        fake = SimpleNamespace(
-            config=SimpleNamespace(standardize=True),
-            obs_last_hidden_state=last_hidden,
-            obs_strip_padding=strip_padding,
-            obs_minus_bias=minus_bias,
-            obs_std_bias=std_bias,
-            obs_std_scale=std_scale,
+        fake = cast(
+            QuantGemma4VisionModel,
+            SimpleNamespace(
+                config=SimpleNamespace(standardize=True),
+                obs_last_hidden_state=last_hidden,
+                obs_strip_padding=strip_padding,
+                obs_minus_bias=minus_bias,
+                obs_std_bias=std_bias,
+                obs_std_scale=std_scale,
+            ),
         )
 
         self.assertEqual(

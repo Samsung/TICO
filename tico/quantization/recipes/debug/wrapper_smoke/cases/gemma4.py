@@ -542,6 +542,9 @@ class Gemma4BaseCase(WrapperSmokeCase):
     """Base class for Gemma4 E2B wrapper smoke cases."""
 
     tags: tuple[str, ...] = ("gemma4", "e2b")
+    # Set by concrete cases (class attribute or during build()).
+    seq_len: int
+    text_cfg: Any
 
     def availability(self) -> CaseAvailability:
         """Return whether Gemma4 modules can be imported."""
@@ -942,6 +945,7 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
 
     tags: tuple[str, ...] = ("gemma4", "e2b", "text", "decoder_layer")
     max_mean_abs_diff = 2.5
+    max_seq: int
     seq_len = 8
     layer_idx = 0
     layer_types: tuple[str, ...] = ("full_attention",)
