@@ -100,7 +100,9 @@ class QuantPReLUChannelwiseTest(unittest.TestCase):
         wrapper(torch.randn(1, 4, 3, 3))
         wrapper.freeze_qparams()
 
-        scale, zero_point = wrapper.obs_weight.compute_qparams()
+        qparams = wrapper.obs_weight.compute_qparams()
+        assert qparams is not None
+        scale, zero_point = qparams
         self.assertEqual(tuple(scale.shape), (4,))
         self.assertEqual(tuple(zero_point.shape), (4,))
 
@@ -140,7 +142,9 @@ class QuantPReLUChannelwiseTest(unittest.TestCase):
         wrapper.enable_calibration()
         wrapper(torch.randn(1, 3, 2, 2))
         wrapper.freeze_qparams()
-        scale, zero_point = wrapper.obs_weight.compute_qparams()
+        qparams = wrapper.obs_weight.compute_qparams()
+        assert qparams is not None
+        scale, zero_point = qparams
 
         self.assertEqual(tuple(scale.shape), (1,))
         self.assertEqual(tuple(zero_point.shape), (1,))
