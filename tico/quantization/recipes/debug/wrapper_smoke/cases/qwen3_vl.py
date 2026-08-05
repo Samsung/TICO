@@ -14,6 +14,7 @@
 
 """Smoke cases for Qwen3-VL wrapper checks."""
 
+from dataclasses import dataclass
 from typing import Any, Mapping, Tuple
 
 import torch
@@ -26,7 +27,139 @@ from tico.quantization.recipes.debug.wrapper_smoke.case import (
 from tico.quantization.recipes.debug.wrapper_smoke.utils import (
     clone_module,
     first_tensor,
+    smoke_section,
 )
+
+
+_QWEN3_VL_SIZE_PROFILE_TINY = "tiny"
+_QWEN3_VL_SIZE_PROFILE_4B_DIMS = "qwen3_vl_4b_dims"
+_QWEN3_VL_SIZE_PROFILE_4B_STATIC_RUNTIME = "qwen3_vl_4b_static_runtime"
+_QWEN3_VL_SIZE_PROFILES = frozenset(
+    {
+        _QWEN3_VL_SIZE_PROFILE_TINY,
+        _QWEN3_VL_SIZE_PROFILE_4B_DIMS,
+        _QWEN3_VL_SIZE_PROFILE_4B_STATIC_RUNTIME,
+    }
+)
+_QWEN3_VL_4B_WIDTH_PROFILES = frozenset(
+    {
+        _QWEN3_VL_SIZE_PROFILE_4B_DIMS,
+        _QWEN3_VL_SIZE_PROFILE_4B_STATIC_RUNTIME,
+    }
+)
+
+_QWEN3_VL_4B_STATIC_MAX_SEQ = 2_048
+_QWEN3_VL_4B_STATIC_GRID_THW = (1, 54, 72)
+_QWEN3_VL_4B_STATIC_VISUAL_CAPACITY = 1_000
+_QWEN3_VL_4B_STATIC_NON_VISUAL_TOKENS = 14
+_QWEN3_VL_4B_STATIC_VISUAL_START_IDX = 4
+_QWEN3_VL_4B_SPATIAL_MERGE_SIZE = 2
+
+_QWEN3_VL_4B_SUPPORTED_CASES = frozenset(
+    {
+        "qwen3_vl_text_attention_prefill",
+        "qwen3_vl_text_attention_decode",
+        "qwen3_vl_text_mlp",
+        "qwen3_vl_text_decoder_layer_prefill",
+        "qwen3_vl_text_decoder_layer_decode",
+        "qwen3_vl_vision_attention",
+        "qwen3_vl_vision_mlp",
+        "qwen3_vl_vision_block",
+        "qwen3_vl_vision_patch_embed",
+        "qwen3_vl_vision_patch_merger",
+        "qwen3_vl_vision_model",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Qwen3VLStaticRuntimeShape:
+    """Fixed Qwen3-VL-4B text and image shape contract used by TICO."""
+
+    max_seq: int = _QWEN3_VL_4B_STATIC_MAX_SEQ
+    grid_thw: tuple[int, int, int] = _QWEN3_VL_4B_STATIC_GRID_THW
+    visual_capacity: int = _QWEN3_VL_4B_STATIC_VISUAL_CAPACITY
+    non_visual_tokens: int = _QWEN3_VL_4B_STATIC_NON_VISUAL_TOKENS
+    visual_start_idx: int = _QWEN3_VL_4B_STATIC_VISUAL_START_IDX
+    spatial_merge_size: int = _QWEN3_VL_4B_SPATIAL_MERGE_SIZE
+
+    def __post_init__(self) -> None:
+        if self.max_seq < 2:
+            raise ValueError(
+                f"Qwen3-VL static max_seq must be at least 2, got {self.max_seq}."
+            )
+        if len(self.grid_thw) != 3 or any(value <= 0 for value in self.grid_thw):
+            raise ValueError(
+                "Qwen3-VL static grid_thw must contain three positive integers, "
+                f"got {self.grid_thw}."
+            )
+        if self.spatial_merge_size <= 0:
+            raise ValueError("Qwen3-VL spatial_merge_size must be positive.")
+        if self.visual_capacity <= 0:
+            raise ValueError("Qwen3-VL static visual_capacity must be positive.")
+        if self.visual_capacity > self.max_seq:
+            raise ValueError(
+                "Qwen3-VL static visual_capacity must not exceed max_seq, got "
+                f"{self.visual_capacity} > {self.max_seq}."
+            )
+        if self.non_visual_tokens < 0:
+            raise ValueError("Qwen3-VL static non_visual_tokens must be non-negative.")
+
+        _, grid_h, grid_w = self.grid_thw
+        if grid_h % self.spatial_merge_size != 0:
+            raise ValueError(
+                "Qwen3-VL static grid height must be divisible by "
+                f"spatial_merge_size={self.spatial_merge_size}."
+            )
+        if grid_w % self.spatial_merge_size != 0:
+            raise ValueError(
+                "Qwen3-VL static grid width must be divisible by "
+                f"spatial_merge_size={self.spatial_merge_size}."
+            )
+        if self.visual_capacity < self.num_visual_tokens:
+            raise ValueError(
+                "Qwen3-VL static visual_capacity must cover all merged visual "
+                f"tokens, got {self.visual_capacity} < {self.num_visual_tokens}."
+            )
+        if self.valid_seq_len > self.max_seq:
+            raise ValueError(
+                "Qwen3-VL static non-visual and visual tokens do not fit in "
+                f"max_seq: {self.valid_seq_len} > {self.max_seq}."
+            )
+        if self.visual_start_idx < 0:
+            raise ValueError("Qwen3-VL static visual_start_idx must be non-negative.")
+        if self.visual_start_idx > self.non_visual_tokens:
+            raise ValueError(
+                "Qwen3-VL static visual_start_idx must fit within the non-visual "
+                "token budget."
+            )
+        if self.visual_start_idx + self.num_visual_tokens > self.valid_seq_len:
+            raise ValueError(
+                "Qwen3-VL static visual segment does not fit in the valid sequence."
+            )
+
+    @property
+    def num_patch_tokens(self) -> int:
+        """Return the number of vision tokens before spatial merging."""
+        grid_t, grid_h, grid_w = self.grid_thw
+        return grid_t * grid_h * grid_w
+
+    @property
+    def num_visual_tokens(self) -> int:
+        """Return the number of merged visual tokens inserted into text."""
+        grid_t, grid_h, grid_w = self.grid_thw
+        merge = self.spatial_merge_size
+        return grid_t * (grid_h // merge) * (grid_w // merge)
+
+    @property
+    def valid_seq_len(self) -> int:
+        """Return the unpadded logical sequence length."""
+        return self.non_visual_tokens + self.num_visual_tokens
+
+    @property
+    def visual_arena_start(self) -> int:
+        """Return the first physical slot reserved for visual tokens."""
+        return self.max_seq - self.visual_capacity
 
 
 def _has_qwen3_vl() -> CaseAvailability:
@@ -52,42 +185,181 @@ def _set_eager_attention(cfg: Any) -> Any:
     return cfg
 
 
-def _make_text_config() -> Any:
-    """Create a tiny Qwen3-VL text config for synthetic smoke tests."""
+def _qwen3_vl_options(cfg: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return the Qwen3-VL-specific wrapper-smoke configuration mapping."""
+    section = smoke_section(cfg)
+    qwen_cfg = section.get("qwen3_vl", {})
+    if not isinstance(qwen_cfg, Mapping):
+        raise ValueError("debug.wrapper_smoke.qwen3_vl must be a mapping.")
+    return qwen_cfg
+
+
+def _qwen3_vl_size_profile(cfg: Mapping[str, Any]) -> str:
+    """Return and validate the requested Qwen3-VL smoke size profile."""
+    qwen_cfg = _qwen3_vl_options(cfg)
+    profile = (
+        str(qwen_cfg.get("size_profile", _QWEN3_VL_SIZE_PROFILE_TINY)).strip().lower()
+    )
+    if profile not in _QWEN3_VL_SIZE_PROFILES:
+        choices = ", ".join(sorted(_QWEN3_VL_SIZE_PROFILES))
+        raise ValueError(
+            f"Unsupported Qwen3-VL wrapper-smoke size profile '{profile}'. "
+            f"Expected one of: {choices}."
+        )
+    return profile
+
+
+def _parse_grid_thw(value: Any) -> tuple[int, int, int]:
+    """Parse one static ``(T, H, W)`` image-grid value."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(
+            "debug.wrapper_smoke.qwen3_vl.static_runtime.grid_thw must be "
+            "a three-element list or tuple."
+        )
+    return tuple(int(item) for item in value)
+
+
+def _qwen3_vl_static_runtime_shape(
+    cfg: Mapping[str, Any],
+) -> Qwen3VLStaticRuntimeShape:
+    """Parse and validate the Qwen3-VL-4B static-runtime options."""
+    qwen_cfg = _qwen3_vl_options(cfg)
+    static_cfg = qwen_cfg.get("static_runtime", {})
+    if not isinstance(static_cfg, Mapping):
+        raise ValueError(
+            "debug.wrapper_smoke.qwen3_vl.static_runtime must be a mapping."
+        )
+
+    return Qwen3VLStaticRuntimeShape(
+        max_seq=int(static_cfg.get("max_seq", _QWEN3_VL_4B_STATIC_MAX_SEQ)),
+        grid_thw=_parse_grid_thw(
+            static_cfg.get("grid_thw", _QWEN3_VL_4B_STATIC_GRID_THW)
+        ),
+        visual_capacity=int(
+            static_cfg.get("visual_capacity", _QWEN3_VL_4B_STATIC_VISUAL_CAPACITY)
+        ),
+        non_visual_tokens=int(
+            static_cfg.get("non_visual_tokens", _QWEN3_VL_4B_STATIC_NON_VISUAL_TOKENS)
+        ),
+        visual_start_idx=int(
+            static_cfg.get("visual_start_idx", _QWEN3_VL_4B_STATIC_VISUAL_START_IDX)
+        ),
+    )
+
+
+def _build_text_config(*, size_profile: str, max_seq: int) -> Any:
+    """Create a tiny or Qwen3-VL-4B-width text configuration.
+
+    Real-width profiles retain one synthetic decoder layer. The context capacity
+    follows the smoke/runtime input rather than the checkpoint's 262,144-token
+    limit so wrapper-owned static masks remain bounded.
+    """
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextConfig
 
-    cfg = Qwen3VLTextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        head_dim=32,
-        max_position_embeddings=128,
+    if size_profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+        params: dict[str, Any] = {
+            "vocab_size": 256,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "max_position_embeddings": max_seq,
+            "rope_scaling": {
+                "rope_type": "default",
+                "mrope_section": [1, 1, 2],
+            },
+        }
+    elif size_profile in _QWEN3_VL_4B_WIDTH_PROFILES:
+        params = {
+            "vocab_size": 151_936,
+            "hidden_size": 2_560,
+            "intermediate_size": 9_728,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "head_dim": 128,
+            "hidden_act": "silu",
+            "max_position_embeddings": max_seq,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 5_000_000.0,
+            "rope_scaling": {
+                "rope_type": "default",
+                "mrope_section": [24, 20, 20],
+                "mrope_interleaved": True,
+            },
+        }
+    else:
+        raise AssertionError(f"Unhandled Qwen3-VL size profile: {size_profile}")
+
+    text_cfg = Qwen3VLTextConfig(
+        **params,
+        attention_bias=False,
         attention_dropout=0.0,
         use_cache=False,
-        rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
     )
-    return _set_eager_attention(cfg)
+    return _set_eager_attention(text_cfg)
 
 
-def _make_vision_config(**overrides: Any) -> Any:
-    """Create a tiny Qwen3-VL vision config for synthetic smoke tests."""
+def _build_vision_config(*, size_profile: str, **overrides: Any) -> Any:
+    """Create a tiny or Qwen3-VL-4B-width bounded vision config."""
     from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
 
-    params = {
-        "hidden_size": 64,
-        "num_heads": 4,
-        "depth": 2,
-        "temporal_patch_size": 2,
-        "patch_size": 16,
-        "out_hidden_size": 64,
-        "spatial_merge_size": 2,
-        "deepstack_visual_indexes": [0, 1],
-    }
+    if size_profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+        params: dict[str, Any] = {
+            "hidden_size": 64,
+            "num_heads": 4,
+            "depth": 2,
+            "temporal_patch_size": 2,
+            "patch_size": 16,
+            "out_hidden_size": 64,
+            "spatial_merge_size": 2,
+            "deepstack_visual_indexes": [0, 1],
+        }
+    elif size_profile in _QWEN3_VL_4B_WIDTH_PROFILES:
+        params = {
+            "hidden_size": 1_024,
+            "intermediate_size": 4_096,
+            "num_heads": 16,
+            "depth": 1,
+            "hidden_act": "gelu_pytorch_tanh",
+            "in_channels": 3,
+            "temporal_patch_size": 2,
+            "patch_size": 16,
+            "out_hidden_size": 2_560,
+            "spatial_merge_size": 2,
+            "num_position_embeddings": 2_304,
+            "deepstack_visual_indexes": [0],
+        }
+    else:
+        raise AssertionError(f"Unhandled Qwen3-VL size profile: {size_profile}")
+
     params.update(overrides)
     return _set_eager_attention(Qwen3VLVisionConfig(**params))
+
+
+def _make_bounded_vision_model(
+    *, size_profile: str, **overrides: Any
+) -> torch.nn.Module:
+    """Build a vision-only Qwen3-VL model without allocating text embeddings.
+
+    The tiny profile preserves the original two-layer smoke configuration. The
+    real-width profiles use one vision layer because only block zero is consumed
+    by the bounded attention/MLP/block cases.
+    """
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+
+    model_overrides = dict(overrides)
+    if size_profile in _QWEN3_VL_4B_WIDTH_PROFILES:
+        model_overrides.setdefault("depth", 1)
+        model_overrides.setdefault("deepstack_visual_indexes", [0])
+
+    vision_cfg = _build_vision_config(
+        size_profile=size_profile,
+        **model_overrides,
+    )
+    return Qwen3VLVisionModel(vision_cfg).eval()
 
 
 def _make_tiny_qwen3vl_config() -> Any:
@@ -125,7 +397,7 @@ def _make_tiny_qwen3vl_config() -> Any:
 
 
 def _make_tiny_qwen3vl_model() -> torch.nn.Module:
-    """Build a tiny Qwen3-VL model from config without downloading weights."""
+    """Build the existing tiny multimodal model without downloading weights."""
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
     return Qwen3VLModel(_make_tiny_qwen3vl_config()).eval()
@@ -307,13 +579,122 @@ def _causal_mask(seq_len: int, fill_value: float = -120.0) -> torch.Tensor:
 
 
 class QwenBaseCase(WrapperSmokeCase):
-    """Base class for Qwen3-VL wrapper smoke cases."""
+    """Base class for Qwen3-VL wrapper smoke cases with size profiles."""
 
     tags: tuple[str, ...] = ("qwen3_vl",)
 
     def availability(self) -> CaseAvailability:
         """Return whether this case can import Qwen3-VL modules."""
         return _has_qwen3_vl()
+
+    def validate_config(self, cfg: Mapping[str, Any]) -> None:
+        """Reject unsupported real-width cases before model construction."""
+        self._validated_size_profile(cfg)
+
+    def _validated_size_profile(self, cfg: Mapping[str, Any]) -> str:
+        """Validate the case/profile pair and cache the static shape."""
+        profile = _qwen3_vl_size_profile(cfg)
+        if (
+            profile in _QWEN3_VL_4B_WIDTH_PROFILES
+            and self.name not in _QWEN3_VL_4B_SUPPORTED_CASES
+        ):
+            supported = ", ".join(sorted(_QWEN3_VL_4B_SUPPORTED_CASES))
+            raise ValueError(
+                f"Case '{self.name}' does not support Qwen3-VL size profile "
+                f"'{profile}'. The profile is limited to bounded module-level "
+                f"and one-layer vision cases: {supported}."
+            )
+
+        self._active_size_profile = profile
+        self._active_static_runtime_shape = (
+            _qwen3_vl_static_runtime_shape(cfg)
+            if profile == _QWEN3_VL_SIZE_PROFILE_4B_STATIC_RUNTIME
+            else None
+        )
+        return profile
+
+    def _static_runtime_shape(self) -> Qwen3VLStaticRuntimeShape | None:
+        """Return the active static-runtime shape after validation."""
+        return getattr(self, "_active_static_runtime_shape", None)
+
+    def _is_wide_profile(self, cfg: Mapping[str, Any]) -> bool:
+        """Return whether the selected profile uses Qwen3-VL-4B widths."""
+        return self._validated_size_profile(cfg) in _QWEN3_VL_4B_WIDTH_PROFILES
+
+    def _text_seq_len(self, default: int) -> int:
+        """Return the text prefill/decode capacity for the active profile."""
+        shape = self._static_runtime_shape()
+        return shape.max_seq if shape is not None else int(default)
+
+    def _vision_grid_tuple(self, default: tuple[int, int, int]) -> tuple[int, int, int]:
+        """Return the fixed image grid for the active profile."""
+        shape = self._static_runtime_shape()
+        return shape.grid_thw if shape is not None else default
+
+    def _vision_patch_seq_len(self, default: int) -> int:
+        """Return the number of pre-merge vision patch tokens."""
+        shape = self._static_runtime_shape()
+        return shape.num_patch_tokens if shape is not None else int(default)
+
+    def _batch_size(self, default: int) -> int:
+        """Use batch one for real-width profiles and preserve tiny behavior."""
+        profile = getattr(self, "_active_size_profile", _QWEN3_VL_SIZE_PROFILE_TINY)
+        return 1 if profile in _QWEN3_VL_4B_WIDTH_PROFILES else int(default)
+
+    def _calibration_sample_count(self, cfg: Mapping[str, Any], *, default: int) -> int:
+        """Avoid retaining multiple full static-runtime samples in memory."""
+        profile = self._validated_size_profile(cfg)
+        return 1 if profile == _QWEN3_VL_SIZE_PROFILE_4B_STATIC_RUNTIME else default
+
+    def _make_text_config(
+        self, cfg: Mapping[str, Any], *, tiny_max_seq: int = 128
+    ) -> Any:
+        """Create a profile-aware one-layer Qwen3-VL text config."""
+        profile = self._validated_size_profile(cfg)
+        shape = self._static_runtime_shape()
+        max_seq = shape.max_seq if shape is not None else int(tiny_max_seq)
+        return _build_text_config(size_profile=profile, max_seq=max_seq)
+
+    def _make_vision_config(self, cfg: Mapping[str, Any], **overrides: Any) -> Any:
+        """Create a profile-aware bounded Qwen3-VL vision config."""
+        return _build_vision_config(
+            size_profile=self._validated_size_profile(cfg),
+            **overrides,
+        )
+
+    def _make_vision_model(
+        self, cfg: Mapping[str, Any], **overrides: Any
+    ) -> torch.nn.Module:
+        """Create a profile-aware vision-only Qwen3-VL model."""
+        return _make_bounded_vision_model(
+            size_profile=self._validated_size_profile(cfg),
+            **overrides,
+        )
+
+    def prepare_model(
+        self, model: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Prepare real-width modules in place to limit peak host memory."""
+        from tico.quantization import prepare
+
+        inplace = self.inplace_prepare or self._is_wide_profile(cfg)
+        return prepare(model, self.ptq_config(cfg), inplace=inplace)
+
+    def convert_model(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Convert real-width modules in place to limit peak host memory."""
+        from tico.quantization import convert
+
+        inplace = self.inplace_convert or self._is_wide_profile(cfg)
+        return convert(prepared, inplace=inplace)
+
+    def export_filename(self, cfg: Mapping[str, Any]) -> str:
+        """Include non-default profiles in generated Circle filenames."""
+        profile = self._validated_size_profile(cfg)
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            return super().export_filename(cfg)
+        return f"{self.name}.{profile}.q.circle"
 
 
 class QwenTextAttentionBaseCase(QwenBaseCase):
@@ -329,7 +710,8 @@ class QwenTextAttentionBaseCase(QwenBaseCase):
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config()
+        self.text_cfg = self._make_text_config(cfg)
+        self.seq_len = self._text_seq_len(8)
         module = Qwen3VLTextAttention(self.text_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
@@ -363,7 +745,8 @@ class QwenTextAttentionPrefillCase(QwenTextAttentionBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create prefill text attention calibration samples."""
-        return [self._sample() for _ in range(3)]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -422,7 +805,8 @@ class QwenTextAttentionDecodeCase(QwenTextAttentionBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create static decode text attention calibration samples."""
-        return [self._sample() for _ in range(3)]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -453,24 +837,36 @@ class QwenTextMLPCase(QwenBaseCase):
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextMLP
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config()
+        self.text_cfg = self._make_text_config(cfg)
+        self.seq_len = self._text_seq_len(8)
+        self.batch_size = self._batch_size(2)
         module = Qwen3VLTextMLP(self.text_cfg).eval()
         return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one profile-aware text MLP input."""
+        return ForwardInput(
+            (
+                torch.randn(
+                    self.batch_size,
+                    self.seq_len,
+                    self.text_cfg.hidden_size,
+                ),
+            )
+        )
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create text MLP calibration samples."""
-        return [
-            ForwardInput((torch.randn(2, 8, self.text_cfg.hidden_size),))
-            for _ in range(3)
-        ]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the text MLP evaluation sample."""
-        return ForwardInput((torch.randn(2, 8, self.text_cfg.hidden_size),))
+        return self._sample()
 
 
 class QwenTextDecoderLayerBaseCase(QwenBaseCase):
@@ -489,7 +885,8 @@ class QwenTextDecoderLayerBaseCase(QwenBaseCase):
         )
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config()
+        self.text_cfg = self._make_text_config(cfg)
+        self.seq_len = self._text_seq_len(8)
         module = Qwen3VLTextDecoderLayer(self.text_cfg, layer_idx=0).eval()
         return module, clone_module(module)
 
@@ -533,7 +930,8 @@ class QwenTextDecoderLayerPrefillCase(QwenTextDecoderLayerBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create text decoder-layer prefill calibration samples."""
-        return [self._sample() for _ in range(5)]
+        count = self._calibration_sample_count(cfg, default=5)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -595,7 +993,8 @@ class QwenTextDecoderLayerDecodeCase(QwenTextDecoderLayerBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create text decoder-layer decode calibration samples."""
-        return [self._sample() for _ in range(3)]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -628,7 +1027,7 @@ class QwenTextModelCase(QwenBaseCase):
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
         torch.manual_seed(123)
-        self.text_cfg = _make_text_config()
+        self.text_cfg = self._make_text_config(cfg)
         module = Qwen3VLTextModel(self.text_cfg).eval()
         return module, clone_module(module)
 
@@ -668,22 +1067,33 @@ class QwenVisionMLPCase(QwenBaseCase):
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny vision MLP module and reference copy."""
         torch.manual_seed(123)
-        model = _make_tiny_qwen3vl_model()
-        self.hidden_size = model.config.vision_config.hidden_size
-        module = model.visual.blocks[0].mlp.eval()
+        profile = self._validated_size_profile(cfg)
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            visual = _make_tiny_qwen3vl_model().visual
+        else:
+            visual = self._make_vision_model(cfg)
+        self.vision_cfg = visual.config
+        self.hidden_size = self.vision_cfg.hidden_size
+        self.seq_len = self._vision_patch_seq_len(16)
+        module = visual.blocks[0].mlp.eval()
         return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one profile-aware vision MLP input."""
+        return ForwardInput((torch.randn(self.seq_len, self.hidden_size),))
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create vision MLP calibration samples."""
-        return [ForwardInput((torch.randn(16, self.hidden_size),)) for _ in range(3)]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
         """Create the vision MLP evaluation sample."""
-        return ForwardInput((torch.randn(16, self.hidden_size),))
+        return self._sample()
 
 
 class QwenVisionAttentionCase(QwenBaseCase):
@@ -698,14 +1108,18 @@ class QwenVisionAttentionCase(QwenBaseCase):
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny vision attention module and reference copy."""
         torch.manual_seed(123)
-        model = _make_tiny_qwen3vl_model()
-        self.visual = model.visual
-        self.hidden_size = model.config.vision_config.hidden_size
-        self.grid_thw = torch.tensor([[1, 8, 8]], dtype=torch.long)
+        profile = self._validated_size_profile(cfg)
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            visual = _make_tiny_qwen3vl_model().visual
+        else:
+            visual = self._make_vision_model(cfg)
+        self.hidden_size = visual.config.hidden_size
+        self.grid_tuple = self._vision_grid_tuple((1, 8, 8))
+        self.grid_thw = torch.tensor([self.grid_tuple], dtype=torch.long)
         self.cu_seqlens = _get_cu_seqlens(self.grid_thw)
-        self.position_embeddings = _get_position_embeddings(self.visual, self.grid_thw)
+        self.position_embeddings = _get_position_embeddings(visual, self.grid_thw)
         self.seq_len = int(self.cu_seqlens[-1].item())
-        module = model.visual.blocks[0].attn.eval()
+        module = visual.blocks[0].attn.eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
@@ -717,7 +1131,8 @@ class QwenVisionAttentionCase(QwenBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create vision attention calibration samples."""
-        return [self._sample() for _ in range(3)]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -737,27 +1152,45 @@ class QwenVisionBlockCase(QwenBaseCase):
     inplace_convert = True
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
-        """Build a tiny vision block and reference copy."""
+        """Build a profile-aware vision block and reference copy."""
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config(hidden_size=64, num_heads=4)
-        module = Qwen3VLVisionBlock(self.vision_cfg).eval()
+        profile = self._validated_size_profile(cfg)
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            self.vision_cfg = self._make_vision_config(cfg)
+            self.seq_len = 8
+            self.cu_seqlens = torch.tensor([0, self.seq_len])
+            self.position_embeddings = _rope(
+                self.seq_len,
+                self.vision_cfg.hidden_size // self.vision_cfg.num_heads,
+            )
+            module = Qwen3VLVisionBlock(self.vision_cfg).eval()
+        else:
+            visual = self._make_vision_model(cfg)
+            self.vision_cfg = visual.config
+            self.grid_tuple = self._vision_grid_tuple((1, 2, 4))
+            self.grid_thw = torch.tensor([self.grid_tuple], dtype=torch.long)
+            self.cu_seqlens = _get_cu_seqlens(self.grid_thw)
+            self.position_embeddings = _get_position_embeddings(visual, self.grid_thw)
+            self.seq_len = int(self.cu_seqlens[-1].item())
+            module = visual.blocks[0].eval()
         return module, clone_module(module)
 
     def _sample(self) -> ForwardInput:
-        """Create one synthetic vision block input."""
-        seq_len = 8
-        hidden = torch.randn(seq_len, self.vision_cfg.hidden_size)
-        cu_seqlens = torch.tensor([0, seq_len])
-        pos = _rope(seq_len, self.vision_cfg.hidden_size // self.vision_cfg.num_heads)
-        return ForwardInput((hidden, cu_seqlens), {"position_embeddings": pos})
+        """Create one profile-aware vision block input."""
+        hidden = torch.randn(self.seq_len, self.vision_cfg.hidden_size)
+        return ForwardInput(
+            (hidden, self.cu_seqlens),
+            {"position_embeddings": self.position_embeddings},
+        )
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create vision block calibration samples."""
-        return [self._sample() for _ in range(3)]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -783,23 +1216,37 @@ class QwenVisionPatchEmbedCase(QwenBaseCase):
         )
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config(
-            in_channels=3, hidden_size=32, temporal_patch_size=2, patch_size=16
-        )
-        self.grid_tuple = (1, 2, 2)
+        profile = self._validated_size_profile(cfg)
+        overrides: dict[str, Any] = {"in_channels": 3}
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            overrides.update(
+                hidden_size=32,
+                temporal_patch_size=2,
+                patch_size=16,
+            )
+        self.vision_cfg = self._make_vision_config(cfg, **overrides)
+        self.grid_tuple = self._vision_grid_tuple((1, 2, 2))
         module = Qwen3VLVisionPatchEmbed(self.vision_cfg).eval()
         return module, clone_module(module)
+
+    def _sample(self) -> ForwardInput:
+        """Create one profile-aware patch-embed input."""
+        return ForwardInput(
+            (_create_patchified_pixel_values(self.vision_cfg, self.grid_tuple),)
+        )
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create patch-embed calibration samples."""
-        return [
-            ForwardInput(
-                (_create_patchified_pixel_values(self.vision_cfg, self.grid_tuple),)
-            )
-            for _ in range(3)
-        ]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
+
+    def eval_input(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create the patch-embed evaluation sample."""
+        return self._sample()
 
 
 class QwenVisionPatchMergerCase(QwenBaseCase):
@@ -819,22 +1266,37 @@ class QwenVisionPatchMergerCase(QwenBaseCase):
         )
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config(
-            hidden_size=32, spatial_merge_size=2, out_hidden_size=64
-        )
+        profile = self._validated_size_profile(cfg)
+        overrides: dict[str, Any] = {}
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            overrides.update(
+                hidden_size=32,
+                spatial_merge_size=2,
+                out_hidden_size=64,
+            )
+        self.vision_cfg = self._make_vision_config(cfg, **overrides)
+        self.seq_len = self._vision_patch_seq_len(8)
         module = Qwen3VLVisionPatchMerger(
             self.vision_cfg, use_postshuffle_norm=False
         ).eval()
         return module, clone_module(module)
 
+    def _sample(self) -> ForwardInput:
+        """Create one profile-aware patch-merger input."""
+        return ForwardInput((torch.randn(self.seq_len, self.vision_cfg.hidden_size),))
+
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create patch-merger calibration samples."""
-        return [
-            ForwardInput((torch.randn(8, self.vision_cfg.hidden_size),))
-            for _ in range(3)
-        ]
+        count = self._calibration_sample_count(cfg, default=3)
+        return [self._sample() for _ in range(count)]
+
+    def eval_input(
+        self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create the patch-merger evaluation sample."""
+        return self._sample()
 
 
 class QwenVisionModelCase(QwenBaseCase):
@@ -858,10 +1320,15 @@ class QwenVisionModelCase(QwenBaseCase):
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
         torch.manual_seed(123)
-        self.vision_cfg = _make_vision_config(
-            depth=1, num_position_embeddings=64, deepstack_visual_indexes=[0]
-        )
-        self.grid_tuple = (1, 2, 2)
+        profile = self._validated_size_profile(cfg)
+        overrides: dict[str, Any] = {
+            "depth": 1,
+            "deepstack_visual_indexes": [0],
+        }
+        if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
+            overrides["num_position_embeddings"] = 64
+        self.vision_cfg = self._make_vision_config(cfg, **overrides)
+        self.grid_tuple = self._vision_grid_tuple((1, 2, 2))
         self.grid_thw = torch.tensor([self.grid_tuple])
         module = Qwen3VLVisionModel(self.vision_cfg).eval()
         return module, clone_module(module)
@@ -875,7 +1342,8 @@ class QwenVisionModelCase(QwenBaseCase):
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
         """Create vision-model calibration samples."""
-        return [self._sample() for _ in range(2)]
+        count = self._calibration_sample_count(cfg, default=2)
+        return [self._sample() for _ in range(count)]
 
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -914,6 +1382,7 @@ class QwenModelCase(QwenBaseCase):
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny multimodal Qwen3-VL model and reference copy."""
         torch.manual_seed(123)
+        self._validated_size_profile(cfg)
         self.qwen_cfg = _make_tiny_qwen3vl_config()
         self.thw = (1, 8, 8)
         model_cls = self._model_class()

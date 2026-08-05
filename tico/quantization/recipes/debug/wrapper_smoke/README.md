@@ -54,6 +54,152 @@ python -m tico.quantization.examples.inspector \
   --case all
 ```
 
+### Llama 3.2-3B width and static-runtime Circle export
+
+Llama cases default to `tiny`. The following profiles are available for every
+registered Llama module case:
+
+- `llama3_2_3b_dims` uses the original 3B MLP, hidden, and attention dimensions
+  with smoke-sized inputs.
+- `llama3_2_3b_static_runtime` uses the same dimensions with batch one and a
+  fixed 2,048-token prefill/decode capacity.
+
+Both profiles keep one synthetic layer and deterministic random weights. The
+checkpoint's 131,072-token context limit is not copied into
+`max_position_embeddings`, because the attention wrapper allocates its static
+causal-mask template from that value. The dimensions profile uses a bounded
+16-token capacity, while the static profile uses the configured runtime value.
+
+Supported cases:
+
+```text
+llama_mlp
+llama_attention_prefill
+llama_attention_decode
+llama_decoder_layer_prefill
+llama_decoder_layer_decode
+```
+
+Run one fixed-shape Llama decoder layer:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case llama_decoder_layer_prefill \
+  --export circle \
+  --output-dir ./out/wrapper_smoke/llama3_2_3b_static_runtime \
+  --calibration-iters 1 \
+  --no-plot \
+  --set debug.wrapper_smoke.llama.size_profile=llama3_2_3b_static_runtime
+```
+
+The decode profile uses hidden shape `(1, 1, 3072)`, an attention mask with
+2,048 key slots, and K/V inputs with shape `(1, 8, 2047, 128)` by default.
+Override the capacity with:
+
+```bash
+--set debug.wrapper_smoke.llama.static_runtime.max_seq=1024
+```
+
+### Qwen3-VL-4B width and static-runtime Circle export
+
+Qwen3-VL cases also default to `tiny`:
+
+- `qwen3_vl_4b_dims` uses the original 4B text and vision channel dimensions
+  with smoke-sized inputs.
+- `qwen3_vl_4b_static_runtime` uses those dimensions with the fixed TICO text
+  and image runtime contract.
+
+The bounded text cases keep one decoder layer. Bounded vision cases keep one
+vision block while preserving the original patch, merger, attention, and MLP
+widths. No checkpoint is downloaded.
+
+Supported cases:
+
+```text
+qwen3_vl_text_attention_prefill
+qwen3_vl_text_attention_decode
+qwen3_vl_text_mlp
+qwen3_vl_text_decoder_layer_prefill
+qwen3_vl_text_decoder_layer_decode
+qwen3_vl_vision_attention
+qwen3_vl_vision_mlp
+qwen3_vl_vision_block
+qwen3_vl_vision_patch_embed
+qwen3_vl_vision_patch_merger
+qwen3_vl_vision_model
+```
+
+The default static contract is:
+
+```text
+Text prefill hidden           : (1, 2048, 2560)
+Text decode hidden            : (1, 1, 2560)
+Text decode K/V               : (1, 8, 2047, 128)
+Vision grid_thw               : (1, 54, 72)
+Vision patch tokens           : 3888
+Merged visual tokens          : 972
+Non-visual tokens             : 14
+Logical valid sequence        : 986
+Reserved visual capacity      : 1000
+Physical visual arena start   : 1048
+Visual segment start          : 4
+```
+
+Run one static Qwen text decoder layer:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case qwen3_vl_text_decoder_layer_prefill \
+  --export circle \
+  --output-dir ./out/wrapper_smoke/qwen3_vl_4b_static_runtime \
+  --calibration-iters 1 \
+  --no-plot \
+  --set debug.wrapper_smoke.qwen3_vl.size_profile=qwen3_vl_4b_static_runtime
+```
+
+Run the one-layer vision model with the same fixed image grid:
+
+```bash
+python -m tico.quantization.examples.inspector \
+  --config tico/quantization/examples/configs/wrapper_smoke.yaml \
+  --mode wrapper-smoke \
+  --case qwen3_vl_vision_model \
+  --export circle \
+  --output-dir ./out/wrapper_smoke/qwen3_vl_4b_static_runtime \
+  --calibration-iters 1 \
+  --no-plot \
+  --set debug.wrapper_smoke.qwen3_vl.size_profile=qwen3_vl_4b_static_runtime
+```
+
+Static inputs can be overridden together:
+
+```bash
+--set debug.wrapper_smoke.qwen3_vl.static_runtime.max_seq=1024
+--set debug.wrapper_smoke.qwen3_vl.static_runtime.grid_thw=[1,32,32]
+--set debug.wrapper_smoke.qwen3_vl.static_runtime.visual_capacity=256
+--set debug.wrapper_smoke.qwen3_vl.static_runtime.non_visual_tokens=14
+--set debug.wrapper_smoke.qwen3_vl.static_runtime.visual_start_idx=4
+```
+
+The grid height and width must be divisible by the spatial merge size. The
+merged visual tokens must fit both `visual_capacity` and `max_seq`.
+
+The following embedding/full-model cases reject both 4B profiles before model
+allocation:
+
+```text
+qwen3_vl_text_model
+qwen3_vl_model
+qwen3_vl_for_conditional_generation
+```
+
+Use the regular Qwen3-VL quantize/export recipe when full text depth, vocabulary
+embeddings, LM head, or end-to-end multimodal execution is required.
+
 ### Gemma4 E2B-width and static-runtime Circle export
 
 Gemma4 cases default to the existing `tiny` profile. Two larger profiles are
