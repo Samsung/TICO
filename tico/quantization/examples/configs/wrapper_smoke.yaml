@@ -12,6 +12,24 @@ debug:
       artifact: circle
     plot:
       enabled: true
+    llama:
+      # tiny: current lightweight synthetic modules
+      # llama3_2_3b_dims: original 3B channel/weight dimensions with smoke inputs
+      # llama3_2_3b_static_runtime: 3B dimensions plus fixed runtime shapes
+      size_profile: tiny
+      static_runtime:
+        max_seq: 2048
+    qwen3_vl:
+      # tiny: current lightweight synthetic modules
+      # qwen3_vl_4b_dims: original 4B channel/weight dimensions with smoke inputs
+      # qwen3_vl_4b_static_runtime: 4B dimensions plus fixed runtime shapes
+      size_profile: tiny
+      static_runtime:
+        max_seq: 2048
+        grid_thw: [1, 54, 72]
+        visual_capacity: 1000
+        non_visual_tokens: 14
+        visual_start_idx: 4
     gemma4:
       # tiny: current lightweight synthetic modules
       # e2b_dims: original E2B channel/weight dimensions with smoke-sized inputs
