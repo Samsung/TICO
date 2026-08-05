@@ -31,6 +31,10 @@ model_args:
     validate_static_layout: false
 
 pipeline:
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+    
   - name: ptq
     enabled: true
     activation: int16

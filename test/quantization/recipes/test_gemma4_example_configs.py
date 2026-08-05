@@ -51,8 +51,8 @@ class TestGemma4ExampleConfigs(unittest.TestCase):
         """The quantize preset should use mixed calibration and export PTQ state."""
         cfg = self._load("gemma4_quantize.yaml")
 
-        self.assertEqual([stage["name"] for stage in cfg["pipeline"]], ["ptq"])
-        self.assertTrue(cfg["pipeline"][0]["enabled"])
+        self.assertEqual([stage["name"] for stage in cfg["pipeline"]], ["gptq", "ptq"])
+        self.assertTrue(cfg["pipeline"][1]["enabled"])
         self.assertEqual(
             [entry["dataset"] for entry in cfg["calibration"]["datasets"]],
             ["vqav2", "wikitext2"],
