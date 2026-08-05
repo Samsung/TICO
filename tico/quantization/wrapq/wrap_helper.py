@@ -52,9 +52,7 @@ class PTQWrapHelper:
         try:
             return PTQWrapper(root, qcfg=qcfg, fp_name=fp_name)
         except NotImplementedError:
-            print(
-                f"No specialized wrapper found for {type(root).__name__}; applying recursive wrapping."
-            )
+            pass
 
         # Case A: HuggingFace-style transformers: model.model.layers
         lm = getattr(root, "model", None)

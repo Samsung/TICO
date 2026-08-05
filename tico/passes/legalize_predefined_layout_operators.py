@@ -262,6 +262,22 @@ class LegalizePreDefinedLayoutOperators(PassBase):
                 torch.ops.quantized_decomposed.dequantize_per_tensor.default,
             ]:
                 dq = args.weight
+                if (
+                    dq.target
+                    == torch.ops.quantized_decomposed.dequantize_per_channel.default
+                ):
+                    dq_args = DequantizePerChannelArgs(
+                        *dq.args, **dq.kwargs  # type: ignore[arg-type]
+                    )
+                    old_axis = dq_args.axis
+                    if old_axis < 0:
+                        old_axis += len(perm)
+                    if old_axis not in perm:
+                        raise NotYetSupportedError(
+                            f"Invalid per-channel axis {dq_args.axis} for "
+                            f"weight permutation {perm}."
+                        )
+                    dq.update_arg(3, perm.index(old_axis))
                 dq.update_arg(dq.args.index(weight), weight_permute)
                 # Need to update dq.meta["val"] in FillMetaVal pass.
                 del dq.meta["val"]
@@ -354,6 +370,22 @@ class LegalizePreDefinedLayoutOperators(PassBase):
                 torch.ops.quantized_decomposed.dequantize_per_tensor.default,
             ]:
                 dq = args.weight
+                if (
+                    dq.target
+                    == torch.ops.quantized_decomposed.dequantize_per_channel.default
+                ):
+                    dq_args = DequantizePerChannelArgs(
+                        *dq.args, **dq.kwargs  # type: ignore[arg-type]
+                    )
+                    old_axis = dq_args.axis
+                    if old_axis < 0:
+                        old_axis += len(perm)
+                    if old_axis not in perm:
+                        raise NotYetSupportedError(
+                            f"Invalid per-channel axis {dq_args.axis} for "
+                            f"weight permutation {perm}."
+                        )
+                    dq.update_arg(3, perm.index(old_axis))
                 dq.update_arg(dq.args.index(weight), weight_permute)
                 # Need to update dq.meta["val"] in FillMetaVal pass.
                 del dq.meta["val"]

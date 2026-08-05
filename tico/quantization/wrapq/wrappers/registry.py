@@ -27,15 +27,22 @@ _WRAPPERS: Dict[
 _IMPORT_ONCE = False
 _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.quant_elementwise",
+    "tico.quantization.wrapq.wrappers.quant_stub",
     ## nn ##
     "tico.quantization.wrapq.wrappers.nn.quant_embedding",
     "tico.quantization.wrapq.wrappers.nn.quant_layernorm",
     "tico.quantization.wrapq.wrappers.nn.quant_linear",
+    "tico.quantization.wrapq.wrappers.nn.quant_maxpool2d",
+    "tico.quantization.wrapq.wrappers.nn.quant_conv2d",
+    "tico.quantization.wrapq.wrappers.nn.quant_prelu",
     "tico.quantization.wrapq.wrappers.nn.quant_conv3d_decomposed",
     # This includes not only `nn.SiLU` but also `SiLUActivation` from transformers
     # as they are same operation.
     "tico.quantization.wrapq.wrappers.nn.quant_silu",
     ## ops ##
+    "tico.quantization.wrapq.wrappers.ops.quant_concat",
+    "tico.quantization.wrapq.wrappers.ops.quant_resize_bilinear",
+    "tico.quantization.wrapq.wrappers.ops.quant_same_padding_conv2d",
     "tico.quantization.wrapq.wrappers.ops.quant_rmsnorm",
     ## llama ##
     "tico.quantization.wrapq.wrappers.llama.quant_attention",
@@ -142,6 +149,7 @@ def register(
     """
 
     def _decorator(quant_cls: Type[QuantModuleBase]):
+        """Register and return one quantization wrapper class."""
         existing = _WRAPPERS.get(fp_cls)
         if existing is not None and existing is not quant_cls:
             raise ValueError(
@@ -176,6 +184,7 @@ def try_register(
     """
 
     def _decorator(quant_cls: Type[QuantModuleBase]):
+        """Conditionally register and return one wrapper class."""
         for path in paths:
             module_name, _, cls_name = path.rpartition(".")
             try:
