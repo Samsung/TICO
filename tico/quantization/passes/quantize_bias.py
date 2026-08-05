@@ -47,6 +47,8 @@ def _get_input_weight_bias_for_bias_quantization(
     if node.target in [
         torch.ops.circle_custom.conv2d,
         torch.ops.circle_custom.conv2d.padding,
+        torch.ops.circle_custom.depthwise_conv2d,
+        torch.ops.circle_custom.depthwise_conv2d.padding,
     ]:
         conv_args = Conv2DArgs(*node.args, **node.kwargs)
         if conv_args.bias is None:

@@ -15,11 +15,18 @@
 import torch
 
 
-def channelwise_minmax(x: torch.Tensor, channel_axis: int):
-    """
-    Compute per-channel (min, max) by reducing all axes except `channel_axis`.
-    """
-    channel_axis = channel_axis % x.ndim  # handle negative indices safely
-    dims = tuple(d for d in range(x.ndim) if d != channel_axis)
+def channelwise_minmax(
+    x: torch.Tensor,
+    channel_axis: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Compute per-channel minimum and maximum values.
 
+    Every dimension except ``channel_axis`` is reduced. A rank-one tensor whose
+    channel axis is its only dimension already contains one scalar per channel,
+    so no reduction is performed in that case.
+    """
+    channel_axis = channel_axis % x.ndim
+    dims = tuple(dimension for dimension in range(x.ndim) if dimension != channel_axis)
+    if not dims:
+        return x, x
     return x.amin(dim=dims), x.amax(dim=dims)
