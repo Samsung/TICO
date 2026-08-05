@@ -216,7 +216,7 @@ def _parse_grid_thw(value: Any) -> tuple[int, int, int]:
             "debug.wrapper_smoke.qwen3_vl.static_runtime.grid_thw must be "
             "a three-element list or tuple."
         )
-    return tuple(int(item) for item in value)
+    return int(value[0]), int(value[1]), int(value[2])
 
 
 def _qwen3_vl_static_runtime_shape(
