@@ -60,6 +60,25 @@ def _linear_tree_override(
     return root
 
 
+def _clippable_linear_tree_override(
+    linear_weight: Optional[QuantSpec], names: tuple[str, ...]
+) -> Dict[str, Any]:
+    """Build a tree of clippable linear weight overrides nested under 'linear'.
+
+    Gemma4ClippableLinear wraps an inner ``nn.Linear`` as ``.linear``.
+    ``QuantGemma4ClippableLinear`` scopes the child config via
+    ``qcfg.child("linear")``, so weight overrides must be placed at
+    ``<name>.linear.weight`` instead of ``<name>.weight``.
+    """
+    root: Dict[str, Any] = {}
+    override = _weight_override(linear_weight)
+    if not override:
+        return root
+    for name in names:
+        _set_nested(root, (name, "linear"), override)
+    return root
+
+
 def _deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> Dict[str, Any]:
     """Return ``base`` recursively merged with ``overlay``."""
     out: Dict[str, Any] = copy.deepcopy(dict(base))
@@ -191,8 +210,13 @@ def _gemma4_vision_attention_override(
     linear_weight: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
 ) -> Dict[str, Any]:
-    """Build overrides for Gemma4VisionAttention."""
-    result = _linear_tree_override(
+    """Build overrides for Gemma4VisionAttention.
+
+    Vision attention uses ``Gemma4ClippableLinear`` (not plain ``nn.Linear``)
+    for q/k/v/o projections, so weight overrides must be nested under
+    ``.linear`` to match ``QuantGemma4ClippableLinear``'s ``qcfg.child("linear")``.
+    """
+    result = _clippable_linear_tree_override(
         linear_weight,
         ("q_proj", "k_proj", "v_proj", "o_proj"),
     )
@@ -241,7 +265,7 @@ def _gemma4_vision_model_override(
     for idx in range(num_vision_layers):
         layer = {
             "self_attn": _gemma4_vision_attention_override(linear_weight, norm_weight),
-            "mlp": _linear_tree_override(
+            "mlp": _clippable_linear_tree_override(
                 linear_weight,
                 ("gate_proj", "up_proj", "down_proj"),
             ),

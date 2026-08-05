@@ -297,7 +297,7 @@ class TestBuildGemma4E2BPtqConfig(unittest.TestCase):
             DType.uint(4),
         )
         self.assertEqual(
-            cfg.overrides["model"]["vision_tower"]["encoder"]["layers"]["0"]["mlp"]["down_proj"]["weight"]["dtype"],  # type: ignore[index]
+            cfg.overrides["model"]["vision_tower"]["encoder"]["layers"]["0"]["mlp"]["down_proj"]["linear"]["weight"]["dtype"],  # type: ignore[index]
             DType.uint(4),
         )
         self.assertEqual(
