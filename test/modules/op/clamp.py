@@ -103,6 +103,21 @@ class DoubleClampsFrom0to6WithBigMax(TestModuleBase):
         return (torch.randn(5, 3) * 10,), {}
 
 
+class SimpleClampTensorMinMax(TestModuleBase):
+    """Clamp with scalar tensor buffers as used by Gemma4ClippableLinear."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("min_value", torch.tensor(-11.0))
+        self.register_buffer("max_value", torch.tensor(11.0))
+
+    def forward(self, x):
+        return torch.clamp(x, self.min_value, self.max_value)
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 3) * 20,), {}
+
+
 class ClampIntInputFloatMinMax(TestModuleBase):
     def __init__(self):
         super().__init__()
