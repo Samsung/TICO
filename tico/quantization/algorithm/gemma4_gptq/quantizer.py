@@ -75,8 +75,6 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
     - **Vision stages**: Gemma4 has ``patch_embedder``, ``encoder.layers``,
       ``pooler``, and ``embed_vision`` (multimodal embedder).  Qwen3-VL has
       ``patch_embed``, ``blocks``, ``merger``, and ``deepstack_merger_list``.
-    - **Vision detection**: Gemma4 checks for ``pixel_values`` only;
-      Qwen3-VL also checks ``pixel_values_videos``.
     """
 
     def __init__(self, config: Gemma4GPTQConfig):
@@ -169,10 +167,11 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
             )
 
             # Track whether this batch has vision inputs (pixel_values)
-            # Gemma4 uses 'pixel_values' for image inputs.
-            # Unlike Qwen3-VL, Gemma4 does not have 'pixel_values_videos'.
-            has_vision_input = (
-                "pixel_values" in m_kwargs and m_kwargs["pixel_values"] is not None
+            # Gemma4 uses 'pixel_values' for image inputs
+            # and `pixel_values_videos` for video inputs.
+            has_vision_input = any(
+                m_kwargs.get(name) is not None
+                for name in ("pixel_values", "pixel_values_videos")
             )
 
             if has_vision_input:
