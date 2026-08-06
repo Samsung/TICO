@@ -281,8 +281,8 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
     # as_export_module
     # ------------------------------------------------------------------
 
-    def test_as_export_module_requires_quant_mode(self):
-        """as_export_module should assert that mode is QUANT."""
+    def test_as_export_module_supports_no_quant_mode(self):
+        """Floating-point export should be available in NO_QUANT mode."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -290,8 +290,19 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         )
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
 
-        # Should fail in NO_QUANT mode
-        with self.assertRaises(AssertionError):
+        self.assertIs(q_module.as_export_module(mode="prefill"), q_module)
+
+    def test_as_export_module_rejects_calibration_mode(self):
+        """Export should reject CALIB mode because its qparams are incomplete."""
+        fp_module = _make_patch_embedder(
+            hidden_size=self.hidden_size,
+            patch_size=self.patch_size,
+            position_embedding_size=self.position_embedding_size,
+        )
+        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
+        q_module.enable_calibration()
+
+        with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
             q_module.as_export_module(mode="prefill")
 
     def test_as_export_module_returns_self(self):

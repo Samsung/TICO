@@ -249,18 +249,42 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
         self.assertFalse(hasattr(q_model, "std_bias"))
         self.assertFalse(hasattr(q_model, "std_scale"))
 
-    def test_as_export_module_requires_quant_mode(self):
-        """as_export_module should assert that mode is QUANT."""
+    def test_as_export_module_supports_no_quant_mode(self):
+        """Floating-point export should be available in NO_QUANT mode."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4VisionModelPrefillExportAdapter,
+        )
         from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
             QuantGemma4VisionModel,
         )
 
         fp_model = self._make_vision_model()
         q_model = QuantGemma4VisionModel(fp_model).eval()
+        sample = self._sample_inputs()
 
-        # Should fail in NO_QUANT mode
-        with self.assertRaises(AssertionError):
-            q_model.as_export_module(mode="prefill", pixel_position_ids=None)
+        export_module = q_model.as_export_module(
+            mode="prefill",
+            pixel_position_ids=sample["pixel_position_ids"],
+        )
+
+        self.assertIsInstance(export_module, Gemma4VisionModelPrefillExportAdapter)
+
+    def test_as_export_module_rejects_calibration_mode(self):
+        """Export should reject CALIB mode because its qparams are incomplete."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
+            QuantGemma4VisionModel,
+        )
+
+        fp_model = self._make_vision_model()
+        q_model = QuantGemma4VisionModel(fp_model).eval()
+        q_model.enable_calibration()
+        sample = self._sample_inputs()
+
+        with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
+            q_model.as_export_module(
+                mode="prefill",
+                pixel_position_ids=sample["pixel_position_ids"],
+            )
 
     def test_as_export_module_requires_standardize(self):
         """as_export_module should assert that config.standardize is True."""

@@ -86,14 +86,16 @@ class TestGemma4ExampleConfigs(unittest.TestCase):
         )
         self.assertEqual(cfg["evaluation"]["n_samples"], 1000)
 
-    def test_export_config_only_requests_the_checkpoint_artifact(self):
-        """The export preset should avoid calibration and pipeline execution."""
+    def test_export_config_requests_circle_per_layer_artifact(self):
+        """The export preset should directly request static Circle artifacts."""
         cfg = self._load("gemma4_export.yaml")
 
         self.assertEqual(cfg["pipeline"], [])
         self.assertFalse(cfg["evaluation"]["enabled"])
         self.assertTrue(cfg["export"]["enabled"])
-        self.assertEqual(cfg["export"]["artifacts"], ["ptq_checkpoint"])
+        self.assertEqual(cfg["export"]["artifacts"], ["circle_per_layer"])
+        self.assertEqual(cfg["export"]["max_seq_len"], 2048)
+        self.assertTrue(cfg["export"]["prefill_decode"])
 
 
 if __name__ == "__main__":
