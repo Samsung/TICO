@@ -1,0 +1,3424 @@
+{
+  "format_version": 1,
+  "source": "hand_detector.tflite",
+  "input_layout": "NCHW",
+  "inputs": [
+    0
+  ],
+  "outputs": [
+    279,
+    276
+  ],
+  "operations": [
+    {
+      "index": 2,
+      "name": "CONV_2D",
+      "inputs": [
+        0,
+        387,
+        346
+      ],
+      "outputs": [
+        141
+      ],
+      "config": {
+        "in_channels": 3,
+        "out_channels": 32,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 4,
+      "name": "PRELU",
+      "inputs": [
+        141,
+        344
+      ],
+      "outputs": [
+        142
+      ],
+      "config": {
+        "channels": 32
+      }
+    },
+    {
+      "index": 7,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        142,
+        353,
+        408
+      ],
+      "outputs": [
+        143
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 32,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 10,
+      "name": "CONV_2D",
+      "inputs": [
+        143,
+        336,
+        328
+      ],
+      "outputs": [
+        144
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 11,
+      "name": "ADD",
+      "inputs": [
+        142,
+        144
+      ],
+      "outputs": [
+        145
+      ],
+      "config": {}
+    },
+    {
+      "index": 13,
+      "name": "PRELU",
+      "inputs": [
+        145,
+        310
+      ],
+      "outputs": [
+        146
+      ],
+      "config": {
+        "channels": 32
+      }
+    },
+    {
+      "index": 15,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        146,
+        319,
+        408
+      ],
+      "outputs": [
+        147
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 32,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 18,
+      "name": "CONV_2D",
+      "inputs": [
+        147,
+        297,
+        291
+      ],
+      "outputs": [
+        148
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 19,
+      "name": "ADD",
+      "inputs": [
+        146,
+        148
+      ],
+      "outputs": [
+        149
+      ],
+      "config": {}
+    },
+    {
+      "index": 21,
+      "name": "PRELU",
+      "inputs": [
+        149,
+        404
+      ],
+      "outputs": [
+        150
+      ],
+      "config": {
+        "channels": 32
+      }
+    },
+    {
+      "index": 23,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        150,
+        295,
+        408
+      ],
+      "outputs": [
+        151
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 32,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 26,
+      "name": "CONV_2D",
+      "inputs": [
+        151,
+        407,
+        368
+      ],
+      "outputs": [
+        152
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 27,
+      "name": "ADD",
+      "inputs": [
+        150,
+        152
+      ],
+      "outputs": [
+        153
+      ],
+      "config": {}
+    },
+    {
+      "index": 29,
+      "name": "PRELU",
+      "inputs": [
+        153,
+        351
+      ],
+      "outputs": [
+        154
+      ],
+      "config": {
+        "channels": 32
+      }
+    },
+    {
+      "index": 31,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        154,
+        388,
+        408
+      ],
+      "outputs": [
+        155
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 32,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 34,
+      "name": "CONV_2D",
+      "inputs": [
+        155,
+        369,
+        334
+      ],
+      "outputs": [
+        156
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 35,
+      "name": "ADD",
+      "inputs": [
+        154,
+        156
+      ],
+      "outputs": [
+        157
+      ],
+      "config": {}
+    },
+    {
+      "index": 37,
+      "name": "PRELU",
+      "inputs": [
+        157,
+        315
+      ],
+      "outputs": [
+        158
+      ],
+      "config": {
+        "channels": 32
+      }
+    },
+    {
+      "index": 39,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        158,
+        355,
+        408
+      ],
+      "outputs": [
+        159
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 32,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 32,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 42,
+      "name": "CONV_2D",
+      "inputs": [
+        159,
+        303,
+        313
+      ],
+      "outputs": [
+        160
+      ],
+      "config": {
+        "in_channels": 32,
+        "out_channels": 64,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 43,
+      "name": "MAX_POOL_2D",
+      "inputs": [
+        158
+      ],
+      "outputs": [
+        161
+      ],
+      "config": {
+        "kernel_size": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 44,
+      "name": "PAD",
+      "inputs": [
+        161,
+        9
+      ],
+      "outputs": [
+        162
+      ],
+      "config": {
+        "pad": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          32
+        ]
+      }
+    },
+    {
+      "index": 45,
+      "name": "ADD",
+      "inputs": [
+        162,
+        160
+      ],
+      "outputs": [
+        163
+      ],
+      "config": {}
+    },
+    {
+      "index": 47,
+      "name": "PRELU",
+      "inputs": [
+        163,
+        293
+      ],
+      "outputs": [
+        164
+      ],
+      "config": {
+        "channels": 64
+      }
+    },
+    {
+      "index": 50,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        164,
+        284,
+        324
+      ],
+      "outputs": [
+        165
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 64,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 53,
+      "name": "CONV_2D",
+      "inputs": [
+        165,
+        396,
+        405
+      ],
+      "outputs": [
+        166
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 54,
+      "name": "ADD",
+      "inputs": [
+        164,
+        166
+      ],
+      "outputs": [
+        167
+      ],
+      "config": {}
+    },
+    {
+      "index": 56,
+      "name": "PRELU",
+      "inputs": [
+        167,
+        386
+      ],
+      "outputs": [
+        168
+      ],
+      "config": {
+        "channels": 64
+      }
+    },
+    {
+      "index": 58,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        168,
+        392,
+        324
+      ],
+      "outputs": [
+        169
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 64,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 61,
+      "name": "CONV_2D",
+      "inputs": [
+        169,
+        374,
+        370
+      ],
+      "outputs": [
+        170
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 62,
+      "name": "ADD",
+      "inputs": [
+        168,
+        170
+      ],
+      "outputs": [
+        171
+      ],
+      "config": {}
+    },
+    {
+      "index": 64,
+      "name": "PRELU",
+      "inputs": [
+        171,
+        338
+      ],
+      "outputs": [
+        172
+      ],
+      "config": {
+        "channels": 64
+      }
+    },
+    {
+      "index": 66,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        172,
+        357,
+        324
+      ],
+      "outputs": [
+        173
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 64,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 69,
+      "name": "CONV_2D",
+      "inputs": [
+        173,
+        339,
+        321
+      ],
+      "outputs": [
+        174
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 70,
+      "name": "ADD",
+      "inputs": [
+        172,
+        174
+      ],
+      "outputs": [
+        175
+      ],
+      "config": {}
+    },
+    {
+      "index": 72,
+      "name": "PRELU",
+      "inputs": [
+        175,
+        301
+      ],
+      "outputs": [
+        176
+      ],
+      "config": {
+        "channels": 64
+      }
+    },
+    {
+      "index": 74,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        176,
+        304,
+        324
+      ],
+      "outputs": [
+        177
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 64,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 77,
+      "name": "CONV_2D",
+      "inputs": [
+        177,
+        288,
+        282
+      ],
+      "outputs": [
+        178
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 78,
+      "name": "ADD",
+      "inputs": [
+        176,
+        178
+      ],
+      "outputs": [
+        179
+      ],
+      "config": {}
+    },
+    {
+      "index": 80,
+      "name": "PRELU",
+      "inputs": [
+        179,
+        410
+      ],
+      "outputs": [
+        180
+      ],
+      "config": {
+        "channels": 64
+      }
+    },
+    {
+      "index": 82,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        180,
+        400,
+        324
+      ],
+      "outputs": [
+        181
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 64,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 85,
+      "name": "CONV_2D",
+      "inputs": [
+        181,
+        362,
+        390
+      ],
+      "outputs": [
+        182
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 86,
+      "name": "MAX_POOL_2D",
+      "inputs": [
+        180
+      ],
+      "outputs": [
+        183
+      ],
+      "config": {
+        "kernel_size": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 87,
+      "name": "PAD",
+      "inputs": [
+        183,
+        8
+      ],
+      "outputs": [
+        184
+      ],
+      "config": {
+        "pad": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          64
+        ]
+      }
+    },
+    {
+      "index": 88,
+      "name": "ADD",
+      "inputs": [
+        184,
+        182
+      ],
+      "outputs": [
+        185
+      ],
+      "config": {}
+    },
+    {
+      "index": 90,
+      "name": "PRELU",
+      "inputs": [
+        185,
+        372
+      ],
+      "outputs": [
+        186
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 93,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        186,
+        361,
+        380
+      ],
+      "outputs": [
+        187
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 96,
+      "name": "CONV_2D",
+      "inputs": [
+        187,
+        342,
+        354
+      ],
+      "outputs": [
+        188
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 97,
+      "name": "ADD",
+      "inputs": [
+        186,
+        188
+      ],
+      "outputs": [
+        189
+      ],
+      "config": {}
+    },
+    {
+      "index": 99,
+      "name": "PRELU",
+      "inputs": [
+        189,
+        323
+      ],
+      "outputs": [
+        190
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 101,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        190,
+        326,
+        380
+      ],
+      "outputs": [
+        191
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 104,
+      "name": "CONV_2D",
+      "inputs": [
+        191,
+        307,
+        305
+      ],
+      "outputs": [
+        192
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 105,
+      "name": "ADD",
+      "inputs": [
+        190,
+        192
+      ],
+      "outputs": [
+        193
+      ],
+      "config": {}
+    },
+    {
+      "index": 107,
+      "name": "PRELU",
+      "inputs": [
+        193,
+        286
+      ],
+      "outputs": [
+        194
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 109,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        194,
+        401,
+        380
+      ],
+      "outputs": [
+        195
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 112,
+      "name": "CONV_2D",
+      "inputs": [
+        195,
+        381,
+        398
+      ],
+      "outputs": [
+        196
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 113,
+      "name": "ADD",
+      "inputs": [
+        194,
+        196
+      ],
+      "outputs": [
+        197
+      ],
+      "config": {}
+    },
+    {
+      "index": 115,
+      "name": "PRELU",
+      "inputs": [
+        197,
+        379
+      ],
+      "outputs": [
+        198
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 117,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        198,
+        366,
+        380
+      ],
+      "outputs": [
+        199
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 120,
+      "name": "CONV_2D",
+      "inputs": [
+        199,
+        349,
+        377
+      ],
+      "outputs": [
+        200
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 121,
+      "name": "ADD",
+      "inputs": [
+        198,
+        200
+      ],
+      "outputs": [
+        201
+      ],
+      "config": {}
+    },
+    {
+      "index": 123,
+      "name": "PRELU",
+      "inputs": [
+        201,
+        359
+      ],
+      "outputs": [
+        202
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 125,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        202,
+        331,
+        380
+      ],
+      "outputs": [
+        203
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 128,
+      "name": "CONV_2D",
+      "inputs": [
+        203,
+        312,
+        341
+      ],
+      "outputs": [
+        204
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 129,
+      "name": "MAX_POOL_2D",
+      "inputs": [
+        202
+      ],
+      "outputs": [
+        205
+      ],
+      "config": {
+        "kernel_size": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 130,
+      "name": "PAD",
+      "inputs": [
+        205,
+        7
+      ],
+      "outputs": [
+        206
+      ],
+      "config": {
+        "pad": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          128
+        ]
+      }
+    },
+    {
+      "index": 131,
+      "name": "ADD",
+      "inputs": [
+        206,
+        204
+      ],
+      "outputs": [
+        207
+      ],
+      "config": {}
+    },
+    {
+      "index": 133,
+      "name": "PRELU",
+      "inputs": [
+        207,
+        325
+      ],
+      "outputs": [
+        208
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 136,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        208,
+        292,
+        330
+      ],
+      "outputs": [
+        209
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 139,
+      "name": "CONV_2D",
+      "inputs": [
+        209,
+        403,
+        287
+      ],
+      "outputs": [
+        210
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 140,
+      "name": "ADD",
+      "inputs": [
+        208,
+        210
+      ],
+      "outputs": [
+        211
+      ],
+      "config": {}
+    },
+    {
+      "index": 142,
+      "name": "PRELU",
+      "inputs": [
+        211,
+        399
+      ],
+      "outputs": [
+        212
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 144,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        212,
+        367,
+        330
+      ],
+      "outputs": [
+        213
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 147,
+      "name": "CONV_2D",
+      "inputs": [
+        213,
+        350,
+        382
+      ],
+      "outputs": [
+        214
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 148,
+      "name": "ADD",
+      "inputs": [
+        212,
+        214
+      ],
+      "outputs": [
+        215
+      ],
+      "config": {}
+    },
+    {
+      "index": 150,
+      "name": "PRELU",
+      "inputs": [
+        215,
+        364
+      ],
+      "outputs": [
+        216
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 152,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        216,
+        332,
+        330
+      ],
+      "outputs": [
+        217
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 155,
+      "name": "CONV_2D",
+      "inputs": [
+        217,
+        316,
+        347
+      ],
+      "outputs": [
+        218
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 156,
+      "name": "ADD",
+      "inputs": [
+        216,
+        218
+      ],
+      "outputs": [
+        219
+      ],
+      "config": {}
+    },
+    {
+      "index": 158,
+      "name": "PRELU",
+      "inputs": [
+        219,
+        345
+      ],
+      "outputs": [
+        220
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 160,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        220,
+        298,
+        330
+      ],
+      "outputs": [
+        221
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 163,
+      "name": "CONV_2D",
+      "inputs": [
+        221,
+        296,
+        329
+      ],
+      "outputs": [
+        222
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 164,
+      "name": "ADD",
+      "inputs": [
+        220,
+        222
+      ],
+      "outputs": [
+        223
+      ],
+      "config": {}
+    },
+    {
+      "index": 166,
+      "name": "PRELU",
+      "inputs": [
+        223,
+        309
+      ],
+      "outputs": [
+        224
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 168,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        224,
+        409,
+        330
+      ],
+      "outputs": [
+        225
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 171,
+      "name": "CONV_2D",
+      "inputs": [
+        225,
+        389,
+        289
+      ],
+      "outputs": [
+        226
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 172,
+      "name": "MAX_POOL_2D",
+      "inputs": [
+        224
+      ],
+      "outputs": [
+        227
+      ],
+      "config": {
+        "kernel_size": [
+          2,
+          2
+        ],
+        "stride": [
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 173,
+      "name": "ADD",
+      "inputs": [
+        227,
+        226
+      ],
+      "outputs": [
+        228
+      ],
+      "config": {}
+    },
+    {
+      "index": 175,
+      "name": "PRELU",
+      "inputs": [
+        228,
+        384
+      ],
+      "outputs": [
+        229
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 177,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        229,
+        371,
+        330
+      ],
+      "outputs": [
+        230
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 180,
+      "name": "CONV_2D",
+      "inputs": [
+        230,
+        337,
+        365
+      ],
+      "outputs": [
+        231
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 181,
+      "name": "ADD",
+      "inputs": [
+        229,
+        231
+      ],
+      "outputs": [
+        232
+      ],
+      "config": {}
+    },
+    {
+      "index": 183,
+      "name": "PRELU",
+      "inputs": [
+        232,
+        348
+      ],
+      "outputs": [
+        233
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 185,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        233,
+        320,
+        330
+      ],
+      "outputs": [
+        234
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 188,
+      "name": "CONV_2D",
+      "inputs": [
+        234,
+        300,
+        333
+      ],
+      "outputs": [
+        235
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 189,
+      "name": "ADD",
+      "inputs": [
+        233,
+        235
+      ],
+      "outputs": [
+        236
+      ],
+      "config": {}
+    },
+    {
+      "index": 191,
+      "name": "PRELU",
+      "inputs": [
+        236,
+        317
+      ],
+      "outputs": [
+        237
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 193,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        237,
+        280,
+        330
+      ],
+      "outputs": [
+        238
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 196,
+      "name": "CONV_2D",
+      "inputs": [
+        238,
+        411,
+        314
+      ],
+      "outputs": [
+        239
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 197,
+      "name": "ADD",
+      "inputs": [
+        237,
+        239
+      ],
+      "outputs": [
+        240
+      ],
+      "config": {}
+    },
+    {
+      "index": 199,
+      "name": "PRELU",
+      "inputs": [
+        240,
+        294
+      ],
+      "outputs": [
+        241
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 201,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        241,
+        394,
+        330
+      ],
+      "outputs": [
+        242
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 204,
+      "name": "CONV_2D",
+      "inputs": [
+        242,
+        375,
+        406
+      ],
+      "outputs": [
+        243
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 205,
+      "name": "ADD",
+      "inputs": [
+        241,
+        243
+      ],
+      "outputs": [
+        244
+      ],
+      "config": {}
+    },
+    {
+      "index": 207,
+      "name": "PRELU",
+      "inputs": [
+        244,
+        385
+      ],
+      "outputs": [
+        245
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 208,
+      "name": "RESIZE_BILINEAR",
+      "inputs": [
+        245,
+        4
+      ],
+      "outputs": [
+        246
+      ],
+      "config": {
+        "size": [
+          12,
+          12
+        ],
+        "align_corners": false,
+        "half_pixel_centers": true
+      }
+    },
+    {
+      "index": 211,
+      "name": "CONV_2D",
+      "inputs": [
+        246,
+        358,
+        311
+      ],
+      "outputs": [
+        247
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 213,
+      "name": "PRELU",
+      "inputs": [
+        247,
+        352
+      ],
+      "outputs": [
+        248
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 214,
+      "name": "ADD",
+      "inputs": [
+        224,
+        248
+      ],
+      "outputs": [
+        249
+      ],
+      "config": {}
+    },
+    {
+      "index": 216,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        249,
+        340,
+        330
+      ],
+      "outputs": [
+        250
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 219,
+      "name": "CONV_2D",
+      "inputs": [
+        250,
+        306,
+        335
+      ],
+      "outputs": [
+        251
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 220,
+      "name": "ADD",
+      "inputs": [
+        249,
+        251
+      ],
+      "outputs": [
+        252
+      ],
+      "config": {}
+    },
+    {
+      "index": 222,
+      "name": "PRELU",
+      "inputs": [
+        252,
+        318
+      ],
+      "outputs": [
+        253
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 224,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        253,
+        285,
+        330
+      ],
+      "outputs": [
+        254
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 256,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 227,
+      "name": "CONV_2D",
+      "inputs": [
+        254,
+        397,
+        299
+      ],
+      "outputs": [
+        255
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 228,
+      "name": "ADD",
+      "inputs": [
+        253,
+        255
+      ],
+      "outputs": [
+        256
+      ],
+      "config": {}
+    },
+    {
+      "index": 230,
+      "name": "PRELU",
+      "inputs": [
+        256,
+        281
+      ],
+      "outputs": [
+        257
+      ],
+      "config": {
+        "channels": 256
+      }
+    },
+    {
+      "index": 233,
+      "name": "CONV_2D",
+      "inputs": [
+        257,
+        378,
+        412
+      ],
+      "outputs": [
+        258
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 6,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 234,
+      "name": "RESHAPE",
+      "inputs": [
+        258,
+        6
+      ],
+      "outputs": [
+        259
+      ],
+      "config": {
+        "shape": [
+          1,
+          -1,
+          1
+        ],
+        "nhwc_memory_order": true
+      }
+    },
+    {
+      "index": 237,
+      "name": "CONV_2D",
+      "inputs": [
+        257,
+        376,
+        391
+      ],
+      "outputs": [
+        260
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 108,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 238,
+      "name": "RESHAPE",
+      "inputs": [
+        260,
+        5
+      ],
+      "outputs": [
+        261
+      ],
+      "config": {
+        "shape": [
+          1,
+          -1,
+          18
+        ],
+        "nhwc_memory_order": true
+      }
+    },
+    {
+      "index": 239,
+      "name": "RESIZE_BILINEAR",
+      "inputs": [
+        257,
+        3
+      ],
+      "outputs": [
+        262
+      ],
+      "config": {
+        "size": [
+          24,
+          24
+        ],
+        "align_corners": false,
+        "half_pixel_centers": true
+      }
+    },
+    {
+      "index": 242,
+      "name": "CONV_2D",
+      "inputs": [
+        262,
+        360,
+        290
+      ],
+      "outputs": [
+        263
+      ],
+      "config": {
+        "in_channels": 256,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 244,
+      "name": "PRELU",
+      "inputs": [
+        263,
+        373
+      ],
+      "outputs": [
+        264
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 245,
+      "name": "ADD",
+      "inputs": [
+        202,
+        264
+      ],
+      "outputs": [
+        265
+      ],
+      "config": {}
+    },
+    {
+      "index": 247,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        265,
+        343,
+        380
+      ],
+      "outputs": [
+        266
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 250,
+      "name": "CONV_2D",
+      "inputs": [
+        266,
+        327,
+        356
+      ],
+      "outputs": [
+        267
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 251,
+      "name": "ADD",
+      "inputs": [
+        265,
+        267
+      ],
+      "outputs": [
+        268
+      ],
+      "config": {}
+    },
+    {
+      "index": 253,
+      "name": "PRELU",
+      "inputs": [
+        268,
+        322
+      ],
+      "outputs": [
+        269
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 255,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        269,
+        308,
+        380
+      ],
+      "outputs": [
+        270
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 128,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 258,
+      "name": "CONV_2D",
+      "inputs": [
+        270,
+        402,
+        302
+      ],
+      "outputs": [
+        271
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 259,
+      "name": "ADD",
+      "inputs": [
+        269,
+        271
+      ],
+      "outputs": [
+        272
+      ],
+      "config": {}
+    },
+    {
+      "index": 261,
+      "name": "PRELU",
+      "inputs": [
+        272,
+        283
+      ],
+      "outputs": [
+        273
+      ],
+      "config": {
+        "channels": 128
+      }
+    },
+    {
+      "index": 264,
+      "name": "CONV_2D",
+      "inputs": [
+        273,
+        383,
+        395
+      ],
+      "outputs": [
+        274
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 2,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 265,
+      "name": "RESHAPE",
+      "inputs": [
+        274,
+        6
+      ],
+      "outputs": [
+        275
+      ],
+      "config": {
+        "shape": [
+          1,
+          -1,
+          1
+        ],
+        "nhwc_memory_order": true
+      }
+    },
+    {
+      "index": 266,
+      "name": "CONCATENATION",
+      "inputs": [
+        275,
+        259
+      ],
+      "outputs": [
+        276
+      ],
+      "config": {
+        "axis": 1
+      }
+    },
+    {
+      "index": 269,
+      "name": "CONV_2D",
+      "inputs": [
+        273,
+        363,
+        393
+      ],
+      "outputs": [
+        277
+      ],
+      "config": {
+        "in_channels": 128,
+        "out_channels": 36,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 270,
+      "name": "RESHAPE",
+      "inputs": [
+        277,
+        5
+      ],
+      "outputs": [
+        278
+      ],
+      "config": {
+        "shape": [
+          1,
+          -1,
+          18
+        ],
+        "nhwc_memory_order": true
+      }
+    },
+    {
+      "index": 271,
+      "name": "CONCATENATION",
+      "inputs": [
+        278,
+        261
+      ],
+      "outputs": [
+        279
+      ],
+      "config": {
+        "axis": 1
+      }
+    }
+  ]
+}

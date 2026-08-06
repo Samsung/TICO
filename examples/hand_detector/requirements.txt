@@ -1,0 +1,3 @@
+numpy>=1.24
+torch>=2.6
+# Install Samsung/TICO separately from PyPI or source.
