@@ -87,6 +87,7 @@ quantization/
 │   ├── qwen3_vl_gptq/#   GPTQ specialization for Qwen3-VL
 │   ├── smoothquant/  #   SmoothQuant
 │   └── spinquant/    #   SpinQuant (rotation-based)
+├── analysis/         # Numerical ablation, clipping, and sensitivity
 ├── config/           # Configuration definitions (PTQConfig, GPTQConfig, ...)
 ├── evaluation/       # Evaluation utilities
 ├── examples/         # Config-driven CLI examples (quantize / evaluate / inspect)
@@ -116,6 +117,7 @@ On top of these, two layers make the toolkit usable end-to-end from the command 
 
 | Document | Description |
 |---|---|
+| [analysis/README.md](./analysis/README.md) | Numerical PTQ ablation, clipping, and sensitivity APIs |
 | [algorithm/README.md](./algorithm/README.md) | Algorithm module design and usage guidelines |
 | [algorithm/gptq/README.md](./algorithm/gptq/README.md) | GPTQ |
 | [algorithm/smoothquant/README.md](./algorithm/smoothquant/README.md) | SmoothQuant |

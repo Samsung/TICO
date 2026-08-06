@@ -131,6 +131,8 @@ class AffineObserverBase(ObserverBase):
         return scale, zp
 
     def fake_quant(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.fake_quant_enabled:
+            return x
         if not self.has_qparams:
             raise RuntimeError(
                 "Call compute_qparams()/freeze_qparams() or load_qparams() first."

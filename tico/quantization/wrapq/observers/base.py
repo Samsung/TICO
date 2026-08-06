@@ -48,6 +48,19 @@ class ObserverBase(nn.Module, ABC):
         self.qscheme = qscheme
         self.channel_axis = channel_axis if qscheme.is_per_channel() else None
         self.enabled = True
+        self.fake_quant_enabled = True
+
+    def set_fake_quant_enabled(self, enabled: bool) -> None:
+        """Enable or bypass fake quantization independently of calibration."""
+        self.fake_quant_enabled = bool(enabled)
+
+    def enable_fake_quant(self) -> None:
+        """Enable fake quantization for quantized-mode calls."""
+        self.set_fake_quant_enabled(True)
+
+    def disable_fake_quant(self) -> None:
+        """Bypass fake quantization for quantized-mode calls."""
+        self.set_fake_quant_enabled(False)
 
     @abstractmethod
     def reset(self) -> None:
@@ -95,5 +108,6 @@ class ObserverBase(nn.Module, ABC):
     def __repr__(self) -> str:
         return (
             f"{self.__class__.__name__}(name={self.name}, dtype={str(self.dtype)}, "
-            f"qscheme={str(self.qscheme)}, channel_axis={self.channel_axis}, enabled={self.enabled})"
+            f"qscheme={str(self.qscheme)}, channel_axis={self.channel_axis}, "
+            f"enabled={self.enabled}, fake_quant_enabled={self.fake_quant_enabled})"
         )

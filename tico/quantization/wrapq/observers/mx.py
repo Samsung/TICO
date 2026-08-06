@@ -51,6 +51,8 @@ class MXObserver(ObserverBase):
         return None
 
     def fake_quant(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.fake_quant_enabled:
+            return x
         return quantize_mx(
             x,
             elem_format=self.elem_format,
