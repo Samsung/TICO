@@ -209,7 +209,7 @@ class OutputCodeStatistics:
         self.low_saturation_count += int((unclamped < qmin).sum().cpu())
         self.high_saturation_count += int((unclamped > qmax).sum().cpu())
 
-    def summary(self, quantizer: OutputTensorQuantizer) -> dict[str, float | int]:
+    def summary(self, quantizer: OutputTensorQuantizer) -> dict[str, float | int | str]:
         """Return JSON-compatible output-grid statistics."""
         if self.count == 0:
             raise RuntimeError("No output values were accumulated.")

@@ -24,7 +24,11 @@ from tico.quantization.analysis.clipping import (
     OutputCalibrationData,
 )
 from tico.quantization.analysis.inputs import ModelInput, ModelInvocation
-from tico.quantization.analysis.metrics import evaluate_models, TensorErrorMetrics
+from tico.quantization.analysis.metrics import (
+    evaluate_models,
+    metric_float,
+    TensorErrorMetrics,
+)
 from tico.quantization.analysis.output_quantization import (
     AffineQParams,
     AffineQuantizationPolicy,

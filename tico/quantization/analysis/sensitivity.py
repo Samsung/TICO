@@ -88,7 +88,7 @@ class QuantizationSensitivity:
         mode: SensitivityMode = SensitivityMode.LEAVE_ONE_FLOAT,
         score_output: str,
         score_metric: str = "mae",
-    ) -> tuple[dict[str, Mapping[str, float | int | None]], list[SensitivityResult]]:
+    ) -> tuple[dict[str, dict[str, float | int | None]], list[SensitivityResult]]:
         """Evaluate and rank the supplied quantization groups."""
         if not samples:
             raise ValueError("Sensitivity analysis requires at least one sample.")

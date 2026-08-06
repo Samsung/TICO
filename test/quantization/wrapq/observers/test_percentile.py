@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 import torch
 
@@ -29,7 +30,7 @@ class PercentileObserverTest(unittest.TestCase):
     """Verify clipping, qparams, and bounded calibration storage."""
 
     @staticmethod
-    def _uint8(**kwargs: object) -> PercentileObserver:
+    def _uint8(**kwargs: Any) -> PercentileObserver:
         """Create one UINT8 per-tensor observer."""
         return PercentileObserver(
             name="activation",

@@ -21,6 +21,7 @@ import torch
 from tico.quantization.analysis import (
     evaluate_models,
     make_output_adapter,
+    metric_float,
     ModelInvocation,
     normalize_outputs,
     TensorErrorMetrics,
@@ -42,9 +43,9 @@ class TensorErrorMetricsTest(unittest.TestCase):
         metrics = TensorErrorMetrics()
         metrics.update(torch.tensor([0.0, 2.0]), torch.tensor([1.0, 4.0]))
         summary = metrics.summary()
-        self.assertAlmostEqual(float(summary["mae"]), 1.5)
-        self.assertAlmostEqual(float(summary["mse"]), 2.5)
-        self.assertAlmostEqual(float(summary["rmse"]), 2.5**0.5)
+        self.assertAlmostEqual(metric_float(summary, "mae"), 1.5)
+        self.assertAlmostEqual(metric_float(summary, "mse"), 2.5)
+        self.assertAlmostEqual(metric_float(summary, "rmse"), 2.5**0.5)
         self.assertEqual(summary["count"], 2)
 
     def test_evaluate_models_supports_named_sequence_outputs(self) -> None:
@@ -57,8 +58,8 @@ class TensorErrorMetricsTest(unittest.TestCase):
             samples,
             output_adapter=make_output_adapter(("first", "second")),
         )
-        self.assertAlmostEqual(float(report["first"]["mae"]), 0.5)
-        self.assertAlmostEqual(float(report["second"]["mae"]), 0.5)
+        self.assertAlmostEqual(metric_float(report["first"], "mae"), 0.5)
+        self.assertAlmostEqual(metric_float(report["second"], "mae"), 0.5)
 
     def test_model_invocation_supports_keyword_inputs(self) -> None:
         class KeywordModel(nn.Module):
@@ -67,7 +68,7 @@ class TensorErrorMetricsTest(unittest.TestCase):
 
         sample = ModelInvocation(kwargs={"value": torch.ones(3)})
         report = evaluate_models(KeywordModel(), KeywordModel(), [sample])
-        self.assertEqual(float(report["output"]["mae"]), 0.0)
+        self.assertEqual(metric_float(report["output"], "mae"), 0.0)
 
     def test_mapping_output_validation(self) -> None:
         result = normalize_outputs({"x": torch.ones(1)})

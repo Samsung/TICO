@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import torch
 from torch import nn
@@ -91,6 +91,14 @@ class TensorErrorMetrics:
             }
         )
         return result
+
+
+def metric_float(summary: Mapping[str, float | int | None], key: str) -> float:
+    """Return one numeric metric value, rejecting missing or ``None`` entries."""
+    value = summary.get(key)
+    if not isinstance(value, (int, float)):
+        raise KeyError(f"Metric {key!r} is missing or not numeric.")
+    return float(value)
 
 
 def evaluate_models(

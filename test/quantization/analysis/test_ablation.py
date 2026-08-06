@@ -19,6 +19,7 @@ import unittest
 import torch
 
 from tico.quantization.analysis import (
+    metric_float,
     QuantizationAblation,
     QuantizationBoundaries,
     QuantizationProfile,
@@ -130,7 +131,7 @@ class QuantizationAblationTest(unittest.TestCase):
             for observer in candidate.block._all_observers()
         }
         self.assertEqual(restored, original_states)
-        self.assertLess(float(report.float_parity["output"]["mae"]), 1e-7)
+        self.assertLess(metric_float(report.float_parity["output"], "mae"), 1e-7)
 
     def test_rejects_an_empty_output_boundary(self) -> None:
         reference = TinyModel(quantized=False)

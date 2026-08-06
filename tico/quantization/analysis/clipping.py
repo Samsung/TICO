@@ -24,7 +24,7 @@ import torch
 from torch import nn
 
 from tico.quantization.analysis.inputs import invoke_model, ModelInput
-from tico.quantization.analysis.metrics import TensorErrorMetrics
+from tico.quantization.analysis.metrics import metric_float, TensorErrorMetrics
 from tico.quantization.analysis.output_quantization import (
     AffineQuantizationPolicy,
     OutputCodeStatistics,
@@ -67,7 +67,7 @@ class EvaluatedClippingCandidate:
 
     candidate: ClippingCandidate
     evaluation_error: Mapping[str, float | int | None]
-    quantizer: Mapping[str, float | int]
+    quantizer: Mapping[str, float | int | str]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -339,11 +339,11 @@ def find_l1_optimal_candidate(
             best = candidate
             continue
         key = (
-            float(candidate.calibration_error["mae"]),
+            metric_float(candidate.calibration_error, "mae"),
             lower_tail + upper_tail,
         )
         best_key = (
-            float(best.calibration_error["mae"]),
+            metric_float(best.calibration_error, "mae"),
             best.lower_tail_percent + best.upper_tail_percent,
         )
         if key < best_key:

@@ -24,6 +24,7 @@ from tico.quantization.analysis import (
     collect_output_calibration_data,
     evaluate_clipping_candidates,
     make_output_adapter,
+    metric_float,
 )
 from torch import nn
 
@@ -62,8 +63,8 @@ class OutputClippingTest(unittest.TestCase):
         )["value"]
         by_name = {item.candidate.name: item for item in evaluated}
         self.assertLess(
-            float(by_name["p99_9"].evaluation_error["mae"]),
-            float(by_name["minmax"].evaluation_error["mae"]),
+            metric_float(by_name["p99_9"].evaluation_error, "mae"),
+            metric_float(by_name["minmax"].evaluation_error, "mae"),
         )
         self.assertIn("l1_optimal", by_name)
 
