@@ -672,7 +672,7 @@ class GPTQQuantizer(BaseQuantizer):
             sym=gptq_conf.symmetric,
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
-                        mse_tolerance=gptq_conf.mse_tolerance,
+            mse_tolerance=gptq_conf.mse_tolerance,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -723,7 +723,7 @@ class GPTQQuantizer(BaseQuantizer):
             adaptive_percdamp=gptq_conf.adaptive_percdamp,
             cond_threshold_good=gptq_conf.cond_threshold_good,
             use_iterate=gptq_conf.use_iterate,
-                        actorder_precision=gptq_conf.actorder_precision,
+            actorder_precision=gptq_conf.actorder_precision,
         )
         quantizers[f"lm_head"] = gptq.quantizer
         gptq.free()

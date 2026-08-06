@@ -21,7 +21,7 @@
 import torch
 import torch.nn as nn
 
-from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ
+from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ, soft_quantize
 
 
 def quantize(x, scale, zero, maxq):
@@ -300,7 +300,7 @@ class Quantizer(nn.Module):
             P: GPTQv2 P correction matrix (optional)
         """
         num_of_iters = 15
-
+        quantize_fn = None#soft_quantize
         def compute_error(x, scale1, zero1):
             q, pre_q = iterate_GPTQ(
                 scale1.unsqueeze(1),
@@ -310,6 +310,7 @@ class Quantizer(nn.Module):
                 Hinv,
                 max_num_of_iters=num_of_iters,
                 P=P,
+                quantize_fn = quantize_fn
             )
             if sensitivity is not None:
                 assert self.mse == "smse_for_gptq"

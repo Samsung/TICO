@@ -603,22 +603,6 @@ class FPInputsCache:
 
     def cache_fp_input(self, m, inp, out, name):
         inp = inp[0].detach()
-
-       # if isinstance(m, (torch.nn.Linear, Conv1D)):
-       #     if len(inp.shape) == 3:
-       #         inp = inp.reshape((-1, inp.shape[-1]))
-       #     inp = inp.t()
-       # elif isinstance(m, torch.nn.Conv2d):
-       #     unfold = torch.nn.Unfold(
-       #         m.kernel_size,
-       #         dilation=m.dilation,
-       #         padding=m.padding,
-       #         stride=m.stride,
-       #     )
-       #     inp = unfold(inp)
-       #     inp = inp.permute([1, 0, 2])
-       #     inp = inp.flatten(1)
-
         self.fp_cache[name] += [inp.cpu()]
 
     def add_hook(self, full):
@@ -1866,7 +1850,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         else:
                             fp_inps[0][batch_idx] = fp_outs
                     
-                if orig_layers is None or self.config.gptq_v2 is True:
+                if gptq_conf.use_orig_model_inference is False:
                     if gptq_conf.double_precision:
                         outs = self._run_layer_forward_double_precision(
                             layer, cache_args_batch, cache_kwargs_batch, True
@@ -1874,6 +1858,7 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     else:
                         outs = layer(*cache_args_batch, **cache_kwargs_batch)
                 else:
+                    assert orig_layers is not None
                     orig_layer = orig_layers[l_idx].to(device)
                     if gptq_conf.double_precision:
                         outs = self._run_layer_forward_double_precision(
@@ -1882,9 +1867,9 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                     else:
                         outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
                     orig_layer.cpu()
-                    if ptq_wrapped and not calibrated:
-                        # nevertheless we should calibrate
-                        layer(*cache_args_batch, **cache_kwargs_batch)
+                if ptq_wrapped and not calibrated:
+                    # nevertheless we should calibrate
+                    layer(*cache_args_batch, **cache_kwargs_batch)
                 outs = outs[0] if isinstance(outs, tuple) else outs
                 # Update inputs for next iteration.
                 if len(self.cache_args) > 0:
