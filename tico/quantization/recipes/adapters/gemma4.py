@@ -42,6 +42,7 @@ from tico.quantization.recipes.evaluation.vlm import (
     print_vqa_results,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
+from tico.quantization.recipes.export.gemma4 import export_gemma4_per_layer
 from tico.quantization.recipes.utils import (
     move_to_device,
     quant_spec_from_config,
@@ -476,3 +477,23 @@ class Gemma4Adapter(ModelAdapter):
         artifacts = set(export_cfg.get("artifacts", []))
         if "ptq_checkpoint" in artifacts or "checkpoint" in artifacts:
             save_checkpoint(ctx.require_model(), output_dir)
+
+        if "circle_per_layer" in artifacts:
+            calibration_cfg = ctx.cfg.get("calibration", {})
+            max_seq_len = int(
+                export_cfg.get(
+                    "max_seq_len",
+                    calibration_cfg.get("seq_len", 2048),
+                )
+            )
+            model_args = ctx.cfg.get("model_args", {})
+            if not isinstance(model_args, Mapping):
+                raise TypeError("model_args must be a mapping for Gemma4 export.")
+            export_gemma4_per_layer(
+                q_model=ctx.require_model(),
+                max_seq_len=max_seq_len,
+                output_dir=output_dir,
+                model_args=model_args,
+                prefill_decode=bool(export_cfg.get("prefill_decode", True)),
+                strict=bool(export_cfg.get("strict", False)),
+            )

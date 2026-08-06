@@ -269,8 +269,8 @@ class QuantGemma4VisionModel(QuantModuleBase):
         if self.config.standardize:
             assert self.obs_std_bias is not None
             assert self.obs_std_scale is not None
-            std_bias = self.obs_std_bias.fake_quant(self.std_bias)
-            std_scale = self.obs_std_scale.fake_quant(self.std_scale)
+            std_bias = self._fq(self.std_bias, self.obs_std_bias)
+            std_scale = self._fq(self.std_scale, self.obs_std_scale)
             hidden_states = hidden_states - std_bias.float()
             hidden_states = self._fq(hidden_states, self.obs_minus_bias)
             hidden_states = hidden_states * std_scale.float()
@@ -293,7 +293,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
         """Prepare the model for torch.export by precomputing static tensors.
 
         This method:
-        1. Asserts that the model is in QUANT mode
+        1. Requires either NO_QUANT or QUANT mode
         2. Recursively converts submodules to their export adapters
         3. Registers output_length and padding tensors for static export
 
@@ -312,12 +312,19 @@ class QuantGemma4VisionModel(QuantModuleBase):
         Returns:
             Gemma4VisionModelPrefillExportAdapter wrapping this module.
         """
-        # Assert QUANT mode
-        assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
+        if mode != "prefill":
+            raise ValueError(f"Unsupported Gemma4 VisionModel export mode: {mode!r}")
 
-        # Make sure that all observers are calibrated
-        for obs in self._all_observers():
-            assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+        if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
+            raise RuntimeError(
+                "Gemma4 VisionModel export requires NO_QUANT or QUANT mode, "
+                f"got {self._mode}."
+            )
+
+        if self._mode is Mode.QUANT:
+            # Make sure that all observers are calibrated.
+            for obs in self._all_observers():
+                assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
 
         # Store output_length for use in forward_export
         pooling_kernel_size = self.config.pooling_kernel_size
@@ -351,7 +358,8 @@ class QuantGemma4VisionModel(QuantModuleBase):
         padding_positions = (pixel_position_ids == -1).all(dim=-1)
         self.register_buffer("padding_positions", padding_positions)
 
-        register_fake_quant_meta_kernels_for_dynamic_export()
+        if self._mode is Mode.QUANT:
+            register_fake_quant_meta_kernels_for_dynamic_export()
 
         from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
             Gemma4VisionModelPrefillExportAdapter,

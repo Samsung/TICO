@@ -99,9 +99,8 @@ Use this three-step loop for the common LLaMA post-quantization benchmark flow.
 
 ### Gemma4 E2B flow
 
-Gemma4 E2B uses the same config-driven three-step interface. The current export
-preset writes a serialized model checkpoint; static Circle submodule export is
-not yet exposed through the Gemma4 recipe adapter.
+Gemma4 E2B uses the same config-driven three-step interface. The export preset
+writes static per-stage Circle files for the vision and text runtime.
 
 1. Quantize Gemma4 E2B and save the checkpoint.
 
@@ -119,13 +118,26 @@ not yet exposed through the Gemma4 recipe adapter.
      --checkpoint ./out/gemma4_quantized/quantized_model.pt
    ```
 
-3. Export the configured checkpoint artifact.
+3. Export quantized per-stage Circle artifacts.
 
    ```bash
    python -m tico.quantization.examples.export \
      --config tico/quantization/examples/configs/gemma4_export.yaml \
      --checkpoint ./out/gemma4_quantized/quantized_model.pt
    ```
+
+   Export the floating-point model with the same static runtime contract:
+
+   ```bash
+   python -m tico.quantization.examples.export \
+     --config tico/quantization/examples/configs/gemma4_export.yaml \
+     --source model \
+     --device cpu \
+     --output-dir ./out/gemma4_float/circle_layers
+   ```
+
+   Floating-point files use the `.f32.circle` suffix. Quantized checkpoint
+   files use `.q.circle`.
 
 ### Quantize
 

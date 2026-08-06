@@ -230,7 +230,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         hidden_states = self._fq(hidden_states, self.obs_pool_in)
 
         # Step 3: Fake-quantize pool_weights (weight quantization for matmul).
-        pool_weights_q = self.obs_pool_weight.fake_quant(self.pool_weights)
+        pool_weights_q = self._fq(self.pool_weights, self.obs_pool_weight)
 
         # Step 4: Spatial pooling via precomputed weight matrix.
         # pool_weights_q: (1, V, S), hidden_states.float(): (1, S, D)
@@ -240,7 +240,7 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         pooled = self._fq(pooled, self.obs_pool_matmul_out)
 
         # Step 6: Scale by sqrt(hidden_size) in float32.
-        root_hidden_size = self.obs_root_hidden_size.fake_quant(self.root_hidden_size)
+        root_hidden_size = self._fq(self.root_hidden_size, self.obs_root_hidden_size)
         pooled = pooled * root_hidden_size
 
         # Step 7: Fake-quantize final output (collects stats in CALIB, applies Q-DQ in QUANT).
@@ -265,12 +265,17 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             Gemma4VisionPoolerPrefillExportAdapter,
         )
 
-        assert self._mode is Mode.QUANT
+        if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
+            raise RuntimeError(
+                "Gemma4 VisionPooler export requires NO_QUANT or QUANT mode, "
+                f"got {self._mode}."
+            )
 
-        # Make sure that all observers are calibrated
-        for obs in self._all_observers():
-            if isinstance(obs, AffineObserverBase):
-                assert obs.has_qparams
+        if self._mode is Mode.QUANT:
+            # Make sure that all observers are calibrated.
+            for obs in self._all_observers():
+                if isinstance(obs, AffineObserverBase):
+                    assert obs.has_qparams
 
         # Precompute static tensors
         weights, mask = self._build_pool_weights(
@@ -281,12 +286,13 @@ class QuantGemma4VisionPooler(QuantModuleBase):
         self.register_buffer("pool_weights", weights)
         self.register_buffer("pool_mask", mask)
 
-        # Collect statistics about pool_weights and compute qparams
-        obs_pool_weight_enabled: bool = self.obs_pool_weight.enabled
-        self.obs_pool_weight.enabled = True
-        self.obs_pool_weight.reset()
-        self.obs_pool_weight.collect(self.pool_weights)
-        self.obs_pool_weight.compute_qparams()
-        self.obs_pool_weight.enabled = obs_pool_weight_enabled
+        if self._mode is Mode.QUANT:
+            # Collect statistics about generated pool weights and compute qparams.
+            obs_pool_weight_enabled: bool = self.obs_pool_weight.enabled
+            self.obs_pool_weight.enabled = True
+            self.obs_pool_weight.reset()
+            self.obs_pool_weight.collect(self.pool_weights)
+            self.obs_pool_weight.compute_qparams()
+            self.obs_pool_weight.enabled = obs_pool_weight_enabled
 
         return Gemma4VisionPoolerPrefillExportAdapter(self)

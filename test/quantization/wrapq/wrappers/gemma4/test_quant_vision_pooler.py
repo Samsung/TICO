@@ -354,15 +354,33 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
     # as_export_module
     # ------------------------------------------------------------------
 
-    def test_as_export_module_requires_quant_mode(self):
-        """as_export_module should assert that mode is QUANT."""
+    def test_as_export_module_supports_no_quant_mode(self):
+        """Floating-point export should be available in NO_QUANT mode."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4VisionPoolerPrefillExportAdapter,
+        )
+
         fp_pooler = _make_pooler()
         q_pooler = QuantGemma4VisionPooler(fp_pooler).eval()
-
         pixel_pos_ids = _pixel_position_ids(self.batch_size, self.seq_len)
 
-        # Should fail in NO_QUANT mode
-        with self.assertRaises(AssertionError):
+        export_module = q_pooler.as_export_module(
+            output_length=self.output_length,
+            pixel_position_ids=pixel_pos_ids,
+        )
+
+        self.assertIsInstance(export_module, Gemma4VisionPoolerPrefillExportAdapter)
+        self.assertTrue(hasattr(q_pooler, "pool_weights"))
+        self.assertTrue(hasattr(q_pooler, "pool_mask"))
+
+    def test_as_export_module_rejects_calibration_mode(self):
+        """Export should reject CALIB mode because its qparams are incomplete."""
+        fp_pooler = _make_pooler()
+        q_pooler = QuantGemma4VisionPooler(fp_pooler).eval()
+        q_pooler.enable_calibration()
+        pixel_pos_ids = _pixel_position_ids(self.batch_size, self.seq_len)
+
+        with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
             q_pooler.as_export_module(
                 output_length=self.output_length,
                 pixel_position_ids=pixel_pos_ids,
