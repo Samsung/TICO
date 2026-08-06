@@ -19,6 +19,7 @@ import torch
 
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
+from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.recipes.context import RecipeContext
@@ -150,11 +151,15 @@ class GPTQStage(Stage):
         if self._is_smse_mode(payload):
             payload["sensitivity"] = self._resolve_sensitivity(ctx, payload)
 
-        # Generic GPTQ now has LLaMA-specific safety switches such as
-        # quantize_lm_head=False by default and use_orig_model_inference.
-        config_cls = (
-            Qwen3VLGPTQConfig if ctx.adapter.family == "qwen3_vl" else GPTQConfig
-        )
+        # Map model family to the appropriate GPTQ config class.
+        # Families with a dedicated multimodal GPTQ config (vision + text
+        # stagewise quantization) get their own class; everything else falls
+        # back to the generic GPTQConfig (single decoder stack).
+        _FAMILY_CONFIG_MAP = {
+            "qwen3_vl": Qwen3VLGPTQConfig,
+            "gemma4": Gemma4GPTQConfig,
+        }
+        config_cls = _FAMILY_CONFIG_MAP.get(ctx.adapter.family, GPTQConfig)
         gptq_config = config_cls(**filter_dataclass_kwargs(config_cls, payload))
 
         print(f"Applying {gptq_config.name} …")
