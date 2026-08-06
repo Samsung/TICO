@@ -19,6 +19,7 @@ model_args:
   vision:
     visual_start_idx: 0
     num_visual_tokens: 256
+    max_soft_tokens: 280
     image_height: 896
     image_width: 896
     validate_static_layout: false
@@ -31,6 +32,9 @@ evaluation:
 
 export:
   enabled: true
-  output_dir: ./out/gemma4_export
+  output_dir: ./out/gemma4_quantized/circle_layers
+  max_seq_len: 2048
+  prefill_decode: true
+  strict: false
   artifacts:
-    - ptq_checkpoint
+    - circle_per_layer

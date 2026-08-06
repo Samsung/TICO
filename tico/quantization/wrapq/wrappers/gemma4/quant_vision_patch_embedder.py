@@ -183,7 +183,11 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
 
     def as_export_module(self, mode: str = "prefill", **kwargs) -> nn.Module:
         """Return self for export (this wrapper is already exportable)."""
-        assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
+        if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
+            raise RuntimeError(
+                "Gemma4 VisionPatchEmbedder export requires NO_QUANT or "
+                f"QUANT mode, got {self._mode}."
+            )
         if mode != "prefill":
             raise ValueError(
                 f"Unsupported Gemma4 VisionPatchEmbedder export mode: {mode!r}"
