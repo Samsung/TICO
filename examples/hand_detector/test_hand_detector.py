@@ -24,12 +24,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from tico.ops import Concat, ResizeBilinear2d, SamePaddingConv2d
 
 from examples.hand_detector.hand_detector import (
     load_hand_detector,
     load_nhwc_hand_detector,
 )
+from tico.ops import Concat, ResizeBilinear2d, SamePaddingConv2d
 
 
 DIRECTORY = Path(__file__).resolve().parent
