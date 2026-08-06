@@ -100,6 +100,7 @@ class CastClampMixedTypeArgs(PassBase):
         graph = graph_module.graph
 
         # clamp(Tensor self, Scalar? min=None, Scalar? max=None) -> Tensor
+        # clamp.Tensor(Tensor self, Tensor? min=None, Tensor? max=None) -> Tensor
         args = ClampArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
 
         input = args.input
@@ -113,20 +114,42 @@ class CastClampMixedTypeArgs(PassBase):
             if arg is None:
                 return False
 
-            arg_dtype = torch.tensor(arg).dtype
             arg_idx = node.args.index(arg)
-            if arg_dtype != output_dtype:
-                assert output_dtype in [torch.float, torch.int]
-                if output_dtype == torch.float:
-                    arg = float(arg)
-                else:
-                    arg = int(arg)
-                node.update_arg(arg_idx, arg)
+
+            if isinstance(arg, torch.fx.Node):
+                arg_dtype = extract_torch_dtype(arg)
+                if arg_dtype == output_dtype:
+                    return False
+
+                with graph.inserting_after(arg):
+                    to_copy = create_node(
+                        graph,
+                        torch.ops.aten._to_copy.default,
+                        (arg,),
+                        {"dtype": output_dtype},
+                        origin=arg,
+                    )
+                    set_new_meta_val(to_copy)
+                    node.update_arg(arg_idx, to_copy)
+
                 logger.debug(
-                    f"Casting {arg_name} value from {arg_dtype} to {output_dtype} for clamp operation at {node.name}"
+                    f"Inserting cast for {arg_name} from {arg_dtype} to "
+                    f"{output_dtype} for clamp operation at {node.name}"
                 )
                 return True
-            return False
+
+            arg_dtype = torch.tensor(arg).dtype
+            if arg_dtype == output_dtype:
+                return False
+
+            assert output_dtype in [torch.float, torch.int]
+            converted_arg = float(arg) if output_dtype == torch.float else int(arg)
+            node.update_arg(arg_idx, converted_arg)
+            logger.debug(
+                f"Casting {arg_name} value from {arg_dtype} to {output_dtype} "
+                f"for clamp operation at {node.name}"
+            )
+            return True
 
         modified |= _convert_arg(min, "min")
         modified |= _convert_arg(max, "max")

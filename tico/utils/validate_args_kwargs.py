@@ -208,11 +208,12 @@ class CircleRMSNormArgs:
 class ClampArgs:
     """
     clamp(Tensor self, Scalar? min=None, Scalar? max=None) -> Tensor
+    clamp.Tensor(Tensor self, Tensor? min=None, Tensor? max=None) -> Tensor
     """
 
     input: torch.fx.Node
-    min: Optional[Union[int, float]] = None
-    max: Optional[Union[int, float]] = None
+    min: Optional[Union[torch.fx.Node, int, float]] = None
+    max: Optional[Union[torch.fx.Node, int, float]] = None
 
 
 @enforce_type

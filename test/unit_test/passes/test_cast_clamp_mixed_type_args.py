@@ -106,3 +106,29 @@ class CastClampIntInputFloatMaxTest(SinglePassValueTest):
         self.run_value_test(CastClampMixedTypeArgs())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.clamp), 1)
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten._to_copy), 1)
+
+
+class CastClampTensorBounds(torch.nn.Module):
+    """Use lifted scalar tensor buffers as Clamp min/max arguments."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("min_value", torch.tensor(-10.0))
+        self.register_buffer("max_value", torch.tensor(10.0))
+
+    def forward(self, x):
+        return torch.clamp(x, self.min_value, self.max_value)
+
+    def get_example_inputs(self):
+        return (torch.randn(5, 3) * 20,), {}
+
+
+class CastClampTensorBoundsTest(SinglePassValueTest):
+    def test_pass(self):
+        self.setup(CastClampTensorBounds())
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.clamp), 1)
+
+        self.run_value_test(CastClampMixedTypeArgs())
+
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten.clamp), 1)
+        self.assertEqual(num_of_ops(self.exported_program(), ops.aten._to_copy), 0)
