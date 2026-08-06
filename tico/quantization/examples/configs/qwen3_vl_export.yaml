@@ -16,6 +16,7 @@ calibration:
   seq_len: 2048
 
 model_args:
+  profile: npu_export
   vision:
     grid_thw: [8, 24, 24]
     visual_start_idx: 0
@@ -29,6 +30,8 @@ evaluation:
 
 export:
   enabled: true
-  output_dir: ./out/qwen3_vl_export
+  output_dir: ./out/qwen3_vl_quantized/circle_layers
+  max_seq_len: 2048
+  prefill_decode: true
   artifacts:
-    - ptq_checkpoint
+    - circle_per_layer

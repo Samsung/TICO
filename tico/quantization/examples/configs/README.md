@@ -124,6 +124,7 @@ Qwen3-VL example:
 
 ```yaml
 model_args:
+  profile: npu_export
   vision:
     grid_thw: [8, 24, 24]
     visual_start_idx: 0
@@ -379,6 +380,10 @@ Rules:
 - Use relative paths in committed configs.
 - Artifact names should be stable and lower snake case.
 - Export implementation belongs in `recipes/export/` and adapter orchestration.
+- `circle_per_layer` is a generic artifact key; the selected model adapter
+  chooses the model-family-specific stage layout.
+- Qwen3-VL Circle export requires `model_args.profile: npu_export`, and its
+  fixed vision grid/start/merge values must match the wrapped checkpoint.
 
 ## CLI overrides
 

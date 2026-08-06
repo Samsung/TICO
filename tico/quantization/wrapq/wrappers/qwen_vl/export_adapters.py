@@ -18,6 +18,48 @@ import torch
 import torch.nn as nn
 
 
+def _find_vision_grid_thw(module: nn.Module) -> torch.Tensor:
+    """Find the fixed vision grid owned by a wrapped Qwen3-VL vision model."""
+    current: Optional[nn.Module] = module
+    visited: set[int] = set()
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        grid_thw = getattr(current, "vision_grid_thw", None)
+        if isinstance(grid_thw, torch.Tensor):
+            return grid_thw
+
+        wrapped = getattr(current, "wrapped", None)
+        current = wrapped if isinstance(wrapped, nn.Module) else None
+
+    raise ValueError(
+        "Qwen3VLVisionPrefillExportAdapter requires a wrapped vision model "
+        "with fixed vision_grid_thw metadata."
+    )
+
+
+def _make_attention_split_sizes(grid_thw: torch.Tensor) -> tuple[int, ...]:
+    """Build static per-frame attention split sizes from a fixed THW grid."""
+    if grid_thw.dim() != 2 or grid_thw.size(1) != 3:
+        raise ValueError(
+            "vision_grid_thw must have shape `(N, 3)`, " f"got {tuple(grid_thw.shape)}."
+        )
+
+    split_sizes: list[int] = []
+    for temporal, height, width in grid_thw.detach().cpu().tolist():
+        temporal = int(temporal)
+        height = int(height)
+        width = int(width)
+        if temporal <= 0 or height <= 0 or width <= 0:
+            raise ValueError(
+                "vision_grid_thw values must be positive, "
+                f"got {(temporal, height, width)}."
+            )
+        split_sizes.extend([height * width] * temporal)
+
+    return tuple(split_sizes)
+
+
 class Qwen3VLTextAttentionPrefillExportAdapter(nn.Module):
     """
     Export adapter for the Qwen3-VL text attention prefill path.
@@ -262,6 +304,9 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped: nn.Module):
         super().__init__()
         self.wrapped = wrapped
+        self.attention_split_sizes = _make_attention_split_sizes(
+            _find_vision_grid_thw(wrapped)
+        )
 
     @staticmethod
     def _unwrap_vision_output(vision_output):
@@ -289,7 +334,12 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
         **kwargs,
     ):
         """Run fixed-grid vision prefill and return merged visual features."""
-        vision_output = self.wrapped(pixel_values, grid_thw=image_grid_thw, **kwargs)
+        vision_output = self.wrapped(
+            pixel_values,
+            grid_thw=image_grid_thw,
+            attention_split_sizes=self.attention_split_sizes,
+            **kwargs,
+        )
         return self._unwrap_vision_output(vision_output)
 
 
@@ -340,3 +390,200 @@ class Qwen3VLVisualEmbeddingFusionAdapter(nn.Module):
             dtype=fused.dtype,
         )
         return fused
+
+
+def _unwrap_qwen3_vl_text_model(wrapped: nn.Module) -> nn.Module:
+    """Return the wrapped Qwen3-VL text model from the top-level wrapper."""
+    qwen_model = wrapped.model.wrapped
+    return qwen_model.language_model.wrapped
+
+
+class Qwen3VLTextEmbeddingExportAdapter(nn.Module):
+    """Export dynamic token embedding and optional SpinQuant rotation.
+
+    The embedding wrapper already quantizes its output. When an embedding
+    rotation exists, its wrapped linear module owns the next input/output
+    quantization boundary. No model-level observer is replayed here.
+
+    Input contract:
+        input_ids: Token IDs with shape ``(1, S)``.
+
+    Return contract:
+        Text hidden states with shape ``(1, S, hidden_size)`` ready for a
+        separately exported decoder layer.
+    """
+
+    def __init__(self, wrapped: nn.Module):
+        super().__init__()
+        text_model = _unwrap_qwen3_vl_text_model(wrapped)
+        self.embed_tokens = text_model.embed_tokens
+        self.rotate_embedding = getattr(text_model, "rotate_embedding", None)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Map token IDs to decoder-ready hidden states."""
+        hidden_states = self.embed_tokens(input_ids)
+        if self.rotate_embedding is not None:
+            hidden_states = self.rotate_embedding(hidden_states)
+        return hidden_states
+
+
+class Qwen3VLMultimodalEmbeddingExportAdapter(nn.Module):
+    """Export fixed-span visual embedding insertion and optional rotation.
+
+    The fusion itself does not replay ``obs_mm_fusion`` or
+    ``obs_inputs_embeds``. Quantization is already provided by the token
+    embedding output, the optional rotation wrapper, or the next decoder
+    layer's input observer.
+
+    Input contract:
+        input_ids: Token IDs with shape ``(1, S)``.
+        image_embeds: Merged visual embeddings with shape ``(V, hidden_size)``.
+
+    Return contract:
+        Multimodal hidden states with shape ``(1, S, hidden_size)``.
+    """
+
+    def __init__(self, wrapped: nn.Module, *, visual_start_idx: int):
+        super().__init__()
+        if visual_start_idx < 0:
+            raise ValueError("visual_start_idx must be non-negative.")
+
+        text_model = _unwrap_qwen3_vl_text_model(wrapped)
+        self.visual_start_idx = int(visual_start_idx)
+        self.embed_tokens = text_model.embed_tokens
+        self.rotate_embedding = getattr(text_model, "rotate_embedding", None)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        image_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Insert fixed-grid image embeddings into the token embedding sequence."""
+        if input_ids.dim() != 2 or input_ids.size(0) != 1:
+            raise RuntimeError(
+                "input_ids must have shape `(1, S)`, " f"got {tuple(input_ids.shape)}."
+            )
+        if image_embeds.dim() != 2:
+            raise RuntimeError(
+                "image_embeds must have shape `(V, H)`, "
+                f"got {tuple(image_embeds.shape)}."
+            )
+
+        hidden_states = self.embed_tokens(input_ids)
+        if image_embeds.size(-1) != hidden_states.size(-1):
+            raise RuntimeError(
+                "image_embeds hidden size does not match token embeddings: "
+                f"image_hidden={image_embeds.size(-1)}, "
+                f"text_hidden={hidden_states.size(-1)}."
+            )
+
+        visual_end = self.visual_start_idx + image_embeds.size(0)
+        if visual_end > hidden_states.size(1):
+            raise RuntimeError(
+                "The visual embedding span exceeds the input sequence length: "
+                f"start={self.visual_start_idx}, visual_end={visual_end}, "
+                f"seq_len={hidden_states.size(1)}."
+            )
+
+        hidden_states = hidden_states.clone()
+        hidden_states[
+            :, self.visual_start_idx : visual_end, :
+        ] = image_embeds.unsqueeze(0).to(
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        if self.rotate_embedding is not None:
+            hidden_states = self.rotate_embedding(hidden_states)
+        return hidden_states
+
+
+class Qwen3VLDeepstackFusionExportAdapter(nn.Module):
+    """Export one fixed-span DeepStack residual insertion after a text layer.
+
+    This adapter performs only the residual addition. The next decoder layer's
+    input observer, or the final norm input observer after the last layer,
+    provides the following quantization boundary.
+
+    Input contract:
+        hidden_states: Decoder hidden states with shape ``(1, S, hidden_size)``.
+        visual_embeds: One DeepStack feature tensor with shape
+            ``(V, hidden_size)``.
+
+    Return contract:
+        Updated hidden states with shape ``(1, S, hidden_size)``.
+    """
+
+    def __init__(self, *, visual_start_idx: int):
+        super().__init__()
+        if visual_start_idx < 0:
+            raise ValueError("visual_start_idx must be non-negative.")
+        self.visual_start_idx = int(visual_start_idx)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        visual_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """Add a DeepStack feature tensor to its fixed visual-token span."""
+        if hidden_states.dim() != 3 or hidden_states.size(0) != 1:
+            raise RuntimeError(
+                "hidden_states must have shape `(1, S, H)`, "
+                f"got {tuple(hidden_states.shape)}."
+            )
+        if visual_embeds.dim() != 2:
+            raise RuntimeError(
+                "visual_embeds must have shape `(V, H)`, "
+                f"got {tuple(visual_embeds.shape)}."
+            )
+        if visual_embeds.size(-1) != hidden_states.size(-1):
+            raise RuntimeError(
+                "visual_embeds hidden size does not match hidden_states: "
+                f"visual_hidden={visual_embeds.size(-1)}, "
+                f"text_hidden={hidden_states.size(-1)}."
+            )
+
+        visual_end = self.visual_start_idx + visual_embeds.size(0)
+        if visual_end > hidden_states.size(1):
+            raise RuntimeError(
+                "The DeepStack span exceeds the input sequence length: "
+                f"start={self.visual_start_idx}, visual_end={visual_end}, "
+                f"seq_len={hidden_states.size(1)}."
+            )
+
+        output = hidden_states.clone()
+        output[:, self.visual_start_idx : visual_end, :] = output[
+            :, self.visual_start_idx : visual_end, :
+        ] + visual_embeds.unsqueeze(0).to(
+            device=output.device,
+            dtype=output.dtype,
+        )
+        return output
+
+
+class Qwen3VLLMHeadExportAdapter(nn.Module):
+    """Export Qwen3-VL final normalization, optional rotation, and LM head.
+
+    Input contract:
+        hidden_states: Last-layer hidden states with shape ``(1, Q, hidden_size)``.
+
+    Return contract:
+        Vocabulary logits with shape ``(1, Q, vocab_size)``.
+    """
+
+    def __init__(self, wrapped: nn.Module):
+        super().__init__()
+        text_model = _unwrap_qwen3_vl_text_model(wrapped)
+        self.norm = text_model.norm
+        self.rotate_lm_head: Optional[nn.Module] = getattr(
+            wrapped,
+            "rotate_lm_head",
+            None,
+        )
+        self.lm_head = wrapped.lm_head
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Return vocabulary logits for the supplied decoder hidden states."""
+        hidden_states = self.norm(hidden_states)
+        if self.rotate_lm_head is not None:
+            hidden_states = self.rotate_lm_head(hidden_states)
+        return self.lm_head(hidden_states)
