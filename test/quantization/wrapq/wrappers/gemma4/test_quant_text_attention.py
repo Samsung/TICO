@@ -107,12 +107,15 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
     def test_copies_sliding_window_contract(self):
         """The wrapper should retain the static sliding-attention contract."""
         cfg = _make_text_config(
-            layer_types=["sliding_attention"],
+            num_hidden_layers=2,
+            layer_types=["sliding_attention", "full_attention"],
             sliding_window=8,
         )
-        fp_attn = self._make_attention(cfg)
+        fp_attn = self._make_attention(cfg, layer_idx=0)
         qattn = QuantGemma4TextAttention(fp_attn).eval()
 
+        self.assertTrue(fp_attn.is_sliding)
+        self.assertEqual(fp_attn.sliding_window, 8)
         self.assertTrue(qattn.is_sliding)
         self.assertEqual(qattn.sliding_window, 8)
 

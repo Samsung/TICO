@@ -106,12 +106,17 @@ class Gemma4StaticExportAdapterUtilityTest(unittest.TestCase):
                 for node in exported.graph.nodes:
                     if node.target != torch.ops.aten.slice.Tensor:
                         continue
-                    slice_start = int(node.args[2])
-                    slice_end = int(node.args[3])
-                    self.assertGreater(
-                        slice_end,
-                        slice_start,
-                        msg=f"Empty slice remained in exported graph: {node.format_node()}",
+
+                    slice_value = node.meta.get("val")
+                    self.assertIsInstance(slice_value, torch.Tensor)
+                    assert isinstance(slice_value, torch.Tensor)
+                    slice_shape = tuple(int(dim) for dim in slice_value.shape)
+                    self.assertTrue(
+                        all(dim > 0 for dim in slice_shape),
+                        msg=(
+                            "Empty slice remained in exported graph: "
+                            f"shape={slice_shape}, node={node.format_node()}"
+                        ),
                     )
 
     def test_fixed_slot_fuse_rejects_wrong_visual_length(self) -> None:
