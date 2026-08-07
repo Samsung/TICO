@@ -14,6 +14,7 @@
 
 import inspect
 import unittest
+from unittest.mock import patch
 
 import torch
 from tico.quantization.wrapq.dtypes import DType
@@ -178,6 +179,38 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         self.assertTrue(torch.allclose(out_unrolled, out_batched, rtol=1e-4, atol=1e-5))
         self.assertTrue(
             torch.allclose(attn_unrolled, attn_batched, rtol=1e-4, atol=1e-5)
+        )
+
+    def test_unrolled_layout_runs_attention_per_query_head(self):
+        """Verify that grouped-query attention does not broadcast a KV head."""
+        qattn = QuantQwen3VLTextAttention(self.fp_attn)
+
+        batch_size, seq_len = 1, 4
+        x = torch.randn(batch_size, seq_len, self.hidden_size)
+        pos = self._rand_rope(batch_size, seq_len)
+        mask = torch.zeros(batch_size, 1, seq_len, seq_len)
+
+        logits_shapes: list[tuple[int, ...]] = []
+        apply_scale = qattn._apply_attention_scale_if_needed
+
+        def record_logits_shape(logits: torch.Tensor) -> torch.Tensor:
+            logits_shapes.append(tuple(logits.shape))
+            return apply_scale(logits)
+
+        with patch.object(
+            qattn,
+            "_apply_attention_scale_if_needed",
+            side_effect=record_logits_shape,
+        ):
+            with torch.no_grad():
+                out, attn_weights = qattn(x, pos, attention_mask=mask)
+
+        expected_logits_shape = (batch_size, seq_len, seq_len)
+        self.assertEqual(logits_shapes, [expected_logits_shape] * self.num_heads)
+        self.assertEqual(out.shape, (batch_size, seq_len, self.hidden_size))
+        self.assertEqual(
+            attn_weights.shape,
+            (batch_size, self.num_heads, seq_len, seq_len),
         )
 
     def test_forward_diff(self):

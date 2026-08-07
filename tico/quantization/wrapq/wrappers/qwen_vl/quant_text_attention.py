@@ -44,8 +44,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
     """
     Quantized Qwen3-VL text attention wrapper with selectable attention layout.
 
-    The default `npu_export` profile preserves the existing per-KV-head
-    unrolled graph for NPU export. Set `PTQConfig.model_args["profile"]` to
+    The default `npu_export` profile uses a per-query-head unrolled graph for
+    NPU export. Set `PTQConfig.model_args["profile"]` to
     "reference_eval" or pass `model_args["attention"]` overrides to run a
     Hugging Face-like batched attention graph for experiments.
     """
@@ -603,53 +603,50 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         batch_size: int,
         q_len: int,
     ):
-        """Run the NPU-export-friendly per-KV-head attention path."""
+        """Run the NPU-export-friendly per-query-head attention path."""
         attn_weights_parts: list[torch.Tensor] = []
         attn_out_parts: list[torch.Tensor] = []
 
-        n_kv = present_k.size(1)
-        kv_rep = self.kv_rep
+        # Remove the singleton head dimension so every attention operation has
+        # the same rank and shape on both sides. The mask builder guarantees
+        # that the head dimension is one for this decomposed path.
+        attn_mask = attention_mask.squeeze(1)
 
-        for i in range(n_kv):
-            # (B, 1, K, H)
-            k_i = present_k[:, i : i + 1, :, :]
-            v_i = present_v[:, i : i + 1, :, :]
+        for kv_i in range(self.num_kv_heads):
+            # (B, K, H)
+            k_i = present_k[:, kv_i, :, :]
+            v_i = present_v[:, kv_i, :, :]
 
-            # (B, G, S, H) where G=kv_rep
-            h0 = i * kv_rep
-            h1 = (i + 1) * kv_rep
-            q_i = q_rot[:, h0:h1, :, :]
+            for rep_i in range(self.kv_rep):
+                q_idx = kv_i * self.kv_rep + rep_i
+                q_i = q_rot[:, q_idx, :, :]  # (B, S, H)
 
-            # logits: (B, G, S, K)
-            logits_i = q_i @ k_i.transpose(-2, -1)
-            logits_i = self._apply_attention_scale_if_needed(logits_i)
-            logits_i = self._fq(logits_i, self.obs_logits)
+                # logits: (B, S, K)
+                logits_i = q_i @ k_i.transpose(-2, -1)
+                logits_i = self._apply_attention_scale_if_needed(logits_i)
+                logits_i = self._fq(logits_i, self.obs_logits)
 
-            # mask add: broadcast on head axis (1 -> G)
-            logits_i = self._fq(logits_i + attention_mask, self.obs_mask_add)
+                logits_i = self._fq(logits_i + attn_mask, self.obs_mask_add)
 
-            # softmax
-            attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
-                q_rot.dtype
-            )
-            attn_i = self._fq(attn_i, self.obs_softmax)
+                attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
+                    q_i.dtype
+                )
+                attn_i = self._fq(attn_i, self.obs_softmax)
 
-            # out: (B, G, S, H)
-            out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
+                # out: (B, S, H)
+                out_i = self._fq(attn_i @ v_i, self.obs_attn_out)
 
-            attn_weights_parts.append(attn_i)
-            attn_out_parts.append(out_i)
+                attn_weights_parts.append(attn_i)
+                attn_out_parts.append(out_i)
 
-        # Concatenate heads back: (B, n_h, S, K) / (B, n_h, S, H)
+        # Stack heads back: (B, n_h, S, K) / (B, S, n_h, H)
         attn_weights = self._fq(
-            torch.cat(attn_weights_parts, dim=1), self.obs_attn_weights
+            torch.stack(attn_weights_parts, dim=1), self.obs_attn_weights
         )
-        attn_out_h = self._fq(torch.cat(attn_out_parts, dim=1), self.obs_attn_out_h)
+        attn_out_h = self._fq(torch.stack(attn_out_parts, dim=2), self.obs_attn_out_h)
 
         # Attention output
-        attn_out = attn_out_h.transpose(1, 2).reshape(
-            batch_size, q_len, -1
-        )  # (B, S, n_h * H)
+        attn_out = attn_out_h.reshape(batch_size, q_len, -1)  # (B, S, n_h * H)
 
         # Final projection
         out = self.o_proj(attn_out)
