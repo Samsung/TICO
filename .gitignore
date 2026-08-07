@@ -25,3 +25,6 @@ out/
 
 # Dump files
 .tico_tmp/
+
+# Claude Code local settings
+.claude/
