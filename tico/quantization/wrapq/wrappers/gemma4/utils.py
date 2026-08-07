@@ -306,20 +306,26 @@ def fixed_slot_fuse(
             f"expected {expected_len}, got {visual_len}."
         )
 
-    end = int(visual_start_idx) + expected_len
-    if visual_start_idx < 0 or end > seq_len:
+    start = int(visual_start_idx)
+    end = start + expected_len
+    if start < 0 or end > seq_len:
         raise ValueError(
-            f"Invalid visual slot range [{visual_start_idx}, {end}) for seq_len={seq_len}."
+            f"Invalid visual slot range [{start}, {end}) for seq_len={seq_len}."
         )
 
-    return torch.cat(
-        [
-            text_embeds[:, :visual_start_idx, :],
-            visual_embeds,
-            text_embeds[:, end:, :],
-        ],
-        dim=1,
-    )
+    # Circle does not support zero-length Slice outputs. Build the concatenation
+    # from non-empty static ranges so boundary placements such as start=0 do not
+    # leave ``slice(0, 0)`` in the exported graph.
+    segments: list[torch.Tensor] = []
+    if start > 0:
+        segments.append(text_embeds[:, :start, :])
+    segments.append(visual_embeds)
+    if end < seq_len:
+        segments.append(text_embeds[:, end:, :])
+
+    if len(segments) == 1:
+        return segments[0]
+    return torch.cat(segments, dim=1)
 
 
 def build_decode_attention_mask(
