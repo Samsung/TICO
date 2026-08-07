@@ -16,6 +16,9 @@ import unittest
 
 import torch
 
+from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    Gemma4MMFusionExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.gemma4.quant_model import QuantGemma4Model
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     dynamic_placeholder_fuse,
@@ -43,6 +46,73 @@ class Gemma4StaticExportAdapterUtilityTest(unittest.TestCase):
         self.assertTrue(torch.equal(fused[:, :2], torch.zeros(1, 2, 2)))
         self.assertTrue(torch.equal(fused[:, 2:4], torch.ones(1, 2, 2)))
         self.assertTrue(torch.equal(fused[:, 4:], torch.zeros(1, 2, 2)))
+
+    def test_fixed_slot_fuse_supports_zero_start(self) -> None:
+        """A visual span at token zero should not require an empty prefix."""
+        text = torch.arange(12, dtype=torch.float32).view(1, 6, 2)
+        visual = torch.full((1, 2, 2), 99.0)
+
+        fused = fixed_slot_fuse(
+            text,
+            visual,
+            visual_start_idx=0,
+            num_visual_tokens=2,
+        )
+
+        expected = torch.cat((visual, text[:, 2:, :]), dim=1)
+        torch.testing.assert_close(fused, expected)
+
+    def test_fixed_slot_fuse_supports_sequence_end(self) -> None:
+        """A visual span ending at S should not require an empty suffix."""
+        text = torch.arange(12, dtype=torch.float32).view(1, 6, 2)
+        visual = torch.full((1, 2, 2), 99.0)
+
+        fused = fixed_slot_fuse(
+            text,
+            visual,
+            visual_start_idx=4,
+            num_visual_tokens=2,
+        )
+
+        expected = torch.cat((text[:, :4, :], visual), dim=1)
+        torch.testing.assert_close(fused, expected)
+
+    def test_multimodal_fusion_export_omits_empty_boundary_slices(self) -> None:
+        """Static fusion export should not emit Circle-invalid empty slices."""
+        text = torch.arange(12, dtype=torch.float32).view(1, 6, 2)
+
+        for start, count in ((0, 2), (4, 2), (0, 6)):
+            with self.subTest(start=start, count=count):
+                visual = torch.full((count, 2), 99.0)
+                adapter = Gemma4MMFusionExportAdapter(
+                    visual_start_idx=start,
+                    num_visual_tokens=count,
+                ).eval()
+
+                exported = torch.export.export(
+                    adapter,
+                    (text, visual),
+                    strict=False,
+                )
+                actual = exported.module()(text, visual)
+                expected = fixed_slot_fuse(
+                    text,
+                    visual,
+                    visual_start_idx=start,
+                    num_visual_tokens=count,
+                )
+                torch.testing.assert_close(actual, expected)
+
+                for node in exported.graph.nodes:
+                    if node.target != torch.ops.aten.slice.Tensor:
+                        continue
+                    slice_start = int(node.args[2])
+                    slice_end = int(node.args[3])
+                    self.assertGreater(
+                        slice_end,
+                        slice_start,
+                        msg=f"Empty slice remained in exported graph: {node.format_node()}",
+                    )
 
     def test_fixed_slot_fuse_rejects_wrong_visual_length(self) -> None:
         """Fixed-slot fusion should reject mismatched visual token counts."""
