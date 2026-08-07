@@ -262,3 +262,90 @@ class TestAffineObserverBase(unittest.TestCase):
 
         self.assertTrue(torch.allclose(scale, expected_scale, atol=1e-6))
         self.assertTrue(torch.equal(zp, expected_zp))
+
+    def test_locked_qparams_survive_compute_qparams(self):
+        # Test full GPTQ conversion flow
+
+        observer = _MinMaxLikeObserver(
+            name="pc_asymm_neg",
+            dtype=DType.uint(4),  # 4-bit unsigned
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+
+        observer.collect(
+            torch.tensor(
+                [
+                    [-2.0, 1.0],
+                    [-1.0, 3.0],
+                ]
+            )
+        )
+
+        injected_scale = torch.tensor([0.1, 0.2])
+        injected_zero_point = torch.tensor([7, 8], dtype=torch.int)
+
+        observer.load_qparams(
+            injected_scale,
+            injected_zero_point,
+            lock=True,
+        )
+
+        scale, zero_point = observer.compute_qparams()
+
+        torch.testing.assert_close(scale, injected_scale)
+        torch.testing.assert_close(zero_point, injected_zero_point)
+
+    def test_unlocked_qparams_can_be_recomputed(self):
+        # Test recompute loaded qparams
+
+        observer = _MinMaxLikeObserver(
+            name="pc_asymm_neg",
+            dtype=DType.uint(4),  # 4-bit unsigned
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+
+        observer.collect(
+            torch.tensor(
+                [
+                    [-2.0, 1.0],
+                    [-1.0, 3.0],
+                ]
+            )
+        )
+
+        injected_scale = torch.tensor([123.0, 456.0])
+        injected_zero_point = torch.tensor([7, 8], dtype=torch.int)
+
+        observer.load_qparams(
+            injected_scale,
+            injected_zero_point,
+            lock=False,
+        )
+
+        scale, zero_point = observer.compute_qparams()
+
+        assert not torch.equal(scale, injected_scale)
+        assert not torch.equal(zero_point, injected_zero_point)
+
+    def test_reset_clears_qparam_lock(self):
+        # Test that reset() removes the lock
+
+        observer = _MinMaxLikeObserver(
+            name="pc_asymm_neg",
+            dtype=DType.uint(4),  # 4-bit unsigned
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+
+        observer.load_qparams(
+            torch.tensor([0.1]),
+            torch.tensor([0], dtype=torch.int),
+            lock=True,
+        )
+
+        observer.reset()
+
+        assert not observer._qparams_locked
+        assert not observer.has_qparams
