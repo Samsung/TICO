@@ -22,23 +22,6 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.qscheme import QScheme
 
 
-# ---------------------------------------------------------------------------
-# Module-level gate for _qparams_locked mechanism.
-#
-# When False (default), _qparams_locked is ignored and compute_qparams()
-# always recomputes from min/max stats — preserving the original behavior.
-# Set to True via set_qparams_lock_enabled(True) (called by PTQStage from
-# YAML config ``lock_gptq_qparams``) to enable the lock.
-# ---------------------------------------------------------------------------
-_qparams_lock_enabled: bool = False
-
-
-def set_qparams_lock_enabled(enabled: bool) -> None:
-    """Enable or disable the _qparams_locked mechanism globally."""
-    global _qparams_lock_enabled
-    _qparams_lock_enabled = bool(enabled)
-
-
 class AffineObserverBase(ObserverBase):
     """Base for affine observers (min/max → scale/zp)."""
 
@@ -77,9 +60,7 @@ class AffineObserverBase(ObserverBase):
         )
 
         # This flag is set by load_qparams(lock=True) to protect externally
-        # injected qparams (e.g. GPTQ scales/zero-points) from being
-        # silently overwritten during the subsequent freeze_qparams() →
-        # compute_qparams() call in PTQQuantizer.convert().
+        # injected qparams (e.g. GPTQ scales/zero-points)
         # Cleared by reset() so the observer can be reused for a fresh
         # calibration cycle.
         self._qparams_locked = False
@@ -111,7 +92,7 @@ class AffineObserverBase(ObserverBase):
         """
         self._cached_scale = scale.detach()
         self._cached_zp = zp.to(torch.int)
-        self._qparams_locked = bool(lock) and _qparams_lock_enabled
+        self._qparams_locked = bool(lock)
         if lock:
             self.enabled = False
 
@@ -120,7 +101,12 @@ class AffineObserverBase(ObserverBase):
         return self._cached_scale.numel() != 0
 
     def compute_qparams(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        if _qparams_lock_enabled and self._qparams_locked and self.has_qparams:
+        """Return locked qparams or compute them from collected statistics."""
+        if self._qparams_locked:
+            if not self.has_qparams:
+                raise RuntimeError(
+                    "The observer is locked but does not contain valid qparams."
+                )
             return self._cached_scale, self._cached_zp
 
         assert isinstance(self.min_val, torch.Tensor)
