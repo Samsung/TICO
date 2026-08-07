@@ -167,6 +167,5 @@ config = Gemma4GPTQConfig(
 | Patch embedding | `Conv3d` (`patch_embed.proj`) | `Linear` (`patch_embedder.input_proj`) |
 | Vision merger | `merger` + `deepstack_merger_list` | `pooler` + `embed_vision` (multimodal embedder) |
 | Deepstack | Replays `_deepstack_process` after each text layer | Not present; PLE is internal to each layer |
-| Vision detection | `pixel_values` or `pixel_values_videos` | `pixel_values` only |
 | Stages | Patch embed, vision blocks, merger, deepstack mergers, text layers, `lm_head` | Patch embed, vision blocks, pooler, multimodal embedder, text layers, `lm_head` |
 | Core GPTQ class | `qwen3_vl_gptq.gptq.GPTQ` (shared) | Re-exports same `GPTQ` class |
