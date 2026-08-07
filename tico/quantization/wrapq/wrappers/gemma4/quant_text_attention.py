@@ -62,6 +62,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self.layer_idx = fp_attn.layer_idx
         self.layer_type = fp_attn.layer_type
         self.is_sliding = bool(getattr(fp_attn, "is_sliding", False))
+        self.sliding_window = int(fp_attn.sliding_window) if self.is_sliding else None
         self.is_kv_shared_layer = bool(getattr(fp_attn, "is_kv_shared_layer", False))
         self.store_full_length_kv = bool(
             getattr(fp_attn, "store_full_length_kv", False)
