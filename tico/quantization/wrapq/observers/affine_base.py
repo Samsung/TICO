@@ -88,10 +88,22 @@ class AffineObserverBase(ObserverBase):
         """
         Inject externally computed qparams and optionally lock the observer.
 
+        Per-channel qparams are canonicalized to the one-dimensional form
+        required by ``torch.fake_quantize_per_channel_affine``. External
+        quantizers may keep the same qparams in broadcast-ready shapes such as
+        ``(C, 1)`` for Linear weights or ``(C, 1, 1, 1)`` for Conv2d weights.
+
         When locked, subsequent `collect()` calls are ignored.
         """
-        self._cached_scale = scale.detach()
-        self._cached_zp = zp.to(torch.int)
+        scale = scale.detach()
+        zp = zp.detach().to(torch.int)
+
+        if self.channel_axis is not None:
+            scale = scale.reshape(-1)
+            zp = zp.reshape(-1)
+
+        self._cached_scale = scale
+        self._cached_zp = zp
         self._qparams_locked = bool(lock)
         if lock:
             self.enabled = False
