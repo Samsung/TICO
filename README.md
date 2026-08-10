@@ -48,13 +48,15 @@ cd TICO
 | Option | Description |
 |---|---|
 | `--dist` | Install from the built wheel (default is editable mode) |
-| `--torch_ver <ver>` | Torch version to install: a configured family (`2.10` ~ `2.13`; `2.13` is a candidate), an exact version (e.g. `2.13.0+cu132`), `nightly` (repository-pinned), or `nightly-latest` (moving Torch/TorchVision pair). Default: `2.12` |
+| `--torch_ver <ver>` | Torch version to install: a configured family (`2.5` ~ `2.13`; `2.5` ~ `2.9` are legacy best-effort and `2.13` is a candidate), an exact version (e.g. `2.13.0+cu132`), `nightly` (repository-pinned), or `nightly-latest` (moving Torch/TorchVision pair). Default: `2.12` |
 | `--cuda_ver <maj.min>` | Override the detected CUDA version (e.g. `12.1`) |
 | `--cpu_only` | Force a CPU-only Torch installation |
 
 `./ccex install` pins the newest qualified stable family for a reproducible source
-setup. See the [PyTorch version policy](./docs/torch_version_policy.md) for the
-support window and CI tiers.
+setup. Older configured families remain explicitly installable, while `pyproject.toml`
+keeps an unbounded `torch` dependency so `pip install` does not reject a user-managed
+Torch version. See the [PyTorch version policy](./docs/torch_version_policy.md) for the
+installer, support, and CI tiers.
 
 ## Quick start
 

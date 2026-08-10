@@ -17,11 +17,15 @@
 Keep the policy in this module so that the installer, runtime warnings, tests,
 and GitHub Actions all consume the same version window.
 
+The package dependency intentionally remains unbounded so users can install TICO
+into environments that already use older PyTorch releases. Installer acceptance,
+qualified support, and CI coverage are separate policy tiers.
+
 A newly released stable family should first be added to
 ``QUALIFICATION_CANDIDATE_FAMILIES``. After the scheduled compatibility job has
 remained green for the qualification window, move it into
-``SUPPORTED_STABLE_FAMILIES``, promote it to ``DEFAULT_FAMILY``, and remove the
-oldest supported family.
+``SUPPORTED_STABLE_FAMILIES``, promote it to ``DEFAULT_FAMILY``, and move the
+oldest supported family into ``LEGACY_INSTALLABLE_FAMILIES``.
 """
 
 from __future__ import annotations
@@ -30,15 +34,15 @@ import argparse
 import json
 import re
 import shlex
-import sys
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Final
 
 DEFAULT_FAMILY: Final = "2.12"
+LEGACY_INSTALLABLE_FAMILIES: Final = ("2.5", "2.6", "2.7", "2.8", "2.9")
 SUPPORTED_STABLE_FAMILIES: Final = ("2.10", "2.11", "2.12")
 QUALIFICATION_CANDIDATE_FAMILIES: Final = ("2.13",)
 QUALIFICATION_WINDOW_DAYS: Final = 28
-PACKAGE_TORCH_REQUIREMENT: Final = "torch>=2.10,<2.14"
+PACKAGE_TORCH_DEPENDENCY: Final = "torch"
 PINNED_NIGHTLY_SELECTOR: Final = "nightly"
 LATEST_NIGHTLY_SELECTOR: Final = "nightly-latest"
 NIGHTLY_SELECTORS: Final = (
@@ -47,6 +51,11 @@ NIGHTLY_SELECTORS: Final = (
 )
 
 LATEST_STABLE_VERSION: Final[dict[str, str]] = {
+    "2.5": "2.5.1",
+    "2.6": "2.6.0",
+    "2.7": "2.7.1",
+    "2.8": "2.8.0",
+    "2.9": "2.9.1",
     "2.10": "2.10.0",
     "2.11": "2.11.0",
     "2.12": "2.12.1",
@@ -56,6 +65,11 @@ LATEST_STABLE_VERSION: Final[dict[str, str]] = {
 # Values are ordered from newest to oldest. The installer selects the newest
 # published wheel that does not exceed the detected host CUDA capability.
 STABLE_CUDA_WHEELS: Final[dict[str, tuple[str, ...]]] = {
+    "2.5": ("12.4", "12.1", "11.8"),
+    "2.6": ("12.6", "12.4", "11.8"),
+    "2.7": ("12.8", "12.6", "11.8"),
+    "2.8": ("12.9", "12.8", "12.6"),
+    "2.9": ("13.0", "12.8", "12.6"),
     "2.10": ("13.0", "12.8", "12.6"),
     "2.11": ("13.0", "12.8", "12.6"),
     "2.12": ("13.2", "13.0", "12.6"),
@@ -65,6 +79,7 @@ STABLE_CUDA_WHEELS: Final[dict[str, tuple[str, ...]]] = {
 NIGHTLY_CUDA_FALLBACKS: Final = ("13.2", "13.0", "12.6")
 
 INSTALLABLE_FAMILIES: Final = (
+    *LEGACY_INSTALLABLE_FAMILIES,
     *SUPPORTED_STABLE_FAMILIES,
     *QUALIFICATION_CANDIDATE_FAMILIES,
 )
@@ -79,6 +94,11 @@ def version_family(version: str) -> str:
     if match is None:
         raise ValueError(f"Unrecognized PyTorch version: {version}")
     return match.group(1)
+
+
+def is_legacy_installable_family(family: str) -> bool:
+    """Return whether a stable family is accepted on a best-effort basis."""
+    return family in LEGACY_INSTALLABLE_FAMILIES
 
 
 def is_supported_family(family: str) -> bool:
@@ -99,35 +119,6 @@ def is_installable_family(family: str) -> bool:
 def is_nightly_selector(selector: str) -> bool:
     """Return whether a CLI selector requests a PyTorch nightly channel."""
     return selector in NIGHTLY_SELECTORS
-
-
-def filter_expected_nightly_pip_check(output: str) -> tuple[list[str], list[str]]:
-    """Split the intentional TICO/nightly metadata mismatch from real conflicts.
-
-    PyPI metadata is bounded to configured stable families, while nightly CI
-    deliberately installs the next development family with ``--no-deps``.
-    ``pip check`` therefore reports exactly one expected TICO-to-Torch conflict.
-    All other lines remain errors.
-    """
-    ignored: list[str] = []
-    remaining: list[str] = []
-    actual_marker = ", but you have torch "
-
-    for line in output.splitlines():
-        normalized = line.strip().lower()
-        if (
-            normalized.startswith("tico ")
-            and " has requirement torch" in normalized
-            and actual_marker in normalized
-        ):
-            actual_version = normalized.split(actual_marker, maxsplit=1)[1].rstrip(".")
-            if ".dev" in actual_version:
-                ignored.append(line)
-                continue
-        if line.strip():
-            remaining.append(line)
-
-    return ignored, remaining
 
 
 def _family_key(family: str) -> tuple[int, int]:
@@ -159,50 +150,65 @@ def validate_policy() -> None:
     if DEFAULT_FAMILY != SUPPORTED_STABLE_FAMILIES[-1]:
         raise ValueError("DEFAULT_FAMILY must be the newest qualified stable family")
 
-    _validate_contiguous(SUPPORTED_STABLE_FAMILIES, "SUPPORTED_STABLE_FAMILIES")
-
-    overlap = set(SUPPORTED_STABLE_FAMILIES).intersection(
-        QUALIFICATION_CANDIDATE_FAMILIES
+    _validate_contiguous(
+        LEGACY_INSTALLABLE_FAMILIES,
+        "LEGACY_INSTALLABLE_FAMILIES",
     )
-    if overlap:
-        raise ValueError(f"Stable and candidate families overlap: {sorted(overlap)}")
+    _validate_contiguous(SUPPORTED_STABLE_FAMILIES, "SUPPORTED_STABLE_FAMILIES")
+    _validate_contiguous(INSTALLABLE_FAMILIES, "INSTALLABLE_FAMILIES")
+
+    tier_sets = (
+        set(LEGACY_INSTALLABLE_FAMILIES),
+        set(SUPPORTED_STABLE_FAMILIES),
+        set(QUALIFICATION_CANDIDATE_FAMILIES),
+    )
+    overlaps = any(
+        left.intersection(right)
+        for index, left in enumerate(tier_sets)
+        for right in tier_sets[index + 1 :]
+    )
+    if overlaps:
+        raise ValueError("Legacy, supported, and candidate families must not overlap")
+
+    if LEGACY_INSTALLABLE_FAMILIES:
+        legacy_major, legacy_minor = _family_key(LEGACY_INSTALLABLE_FAMILIES[-1])
+        if _family_key(SUPPORTED_STABLE_FAMILIES[0]) != (
+            legacy_major,
+            legacy_minor + 1,
+        ):
+            raise ValueError(
+                "The supported window must immediately follow the legacy window"
+            )
 
     if QUALIFICATION_CANDIDATE_FAMILIES:
         _validate_contiguous(
             QUALIFICATION_CANDIDATE_FAMILIES,
             "QUALIFICATION_CANDIDATE_FAMILIES",
         )
-        expected_first_candidate = (
-            _family_key(SUPPORTED_STABLE_FAMILIES[-1])[0],
-            _family_key(SUPPORTED_STABLE_FAMILIES[-1])[1] + 1,
-        )
-        if _family_key(QUALIFICATION_CANDIDATE_FAMILIES[0]) != expected_first_candidate:
+        supported_major, supported_minor = _family_key(SUPPORTED_STABLE_FAMILIES[-1])
+        if _family_key(QUALIFICATION_CANDIDATE_FAMILIES[0]) != (
+            supported_major,
+            supported_minor + 1,
+        ):
             raise ValueError(
                 "The first candidate must immediately follow the newest "
                 "supported family"
             )
 
-    newest_installable_major, newest_installable_minor = _family_key(
-        INSTALLABLE_FAMILIES[-1]
-    )
-    expected_package_requirement = (
-        f"torch>={SUPPORTED_STABLE_FAMILIES[0]},"
-        f"<{newest_installable_major}.{newest_installable_minor + 1}"
-    )
-    if PACKAGE_TORCH_REQUIREMENT != expected_package_requirement:
+    if PACKAGE_TORCH_DEPENDENCY != "torch":
         raise ValueError(
-            "PACKAGE_TORCH_REQUIREMENT must cover the supported and candidate "
-            "families, but exclude the next unknown stable family"
+            "The package dependency must remain unbounded; support is enforced "
+            "by policy and CI, not by pip resolution"
         )
 
     expected = set(INSTALLABLE_FAMILIES)
     if set(LATEST_STABLE_VERSION) != expected:
         raise ValueError(
-            "LATEST_STABLE_VERSION keys must match all supported and candidate families"
+            "LATEST_STABLE_VERSION keys must match all installable stable families"
         )
     if set(STABLE_CUDA_WHEELS) != expected:
         raise ValueError(
-            "STABLE_CUDA_WHEELS keys must match all supported and candidate families"
+            "STABLE_CUDA_WHEELS keys must match all installable stable families"
         )
 
     for family, version in LATEST_STABLE_VERSION.items():
@@ -286,6 +292,8 @@ def shell_assignments() -> str:
         f"PYTORCH_DEFAULT_FAMILY={shlex.quote(DEFAULT_FAMILY)}",
         "PYTORCH_SUPPORTED_FAMILIES=" + _shell_array(SUPPORTED_STABLE_FAMILIES),
         "PYTORCH_CANDIDATE_FAMILIES=" + _shell_array(QUALIFICATION_CANDIDATE_FAMILIES),
+        "PYTORCH_LEGACY_INSTALLABLE_FAMILIES="
+        + _shell_array(LEGACY_INSTALLABLE_FAMILIES),
         "PYTORCH_INSTALLABLE_FAMILIES=" + _shell_array(INSTALLABLE_FAMILIES),
         "PYTORCH_SUPPORTED_FAMILY_MIN=" + shlex.quote(SUPPORTED_STABLE_FAMILIES[0]),
         "PYTORCH_SUPPORTED_FAMILY_MAX=" + shlex.quote(SUPPORTED_STABLE_FAMILIES[-1]),
@@ -320,11 +328,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("supported-range", help="Print the qualified range")
     subparsers.add_parser("installable-range", help="Print the installer range")
     subparsers.add_parser(
-        "package-requirement", help="Print the package Torch requirement"
-    )
-    subparsers.add_parser(
-        "filter-nightly-pip-check",
-        help="Ignore only the expected TICO-to-nightly Torch metadata conflict",
+        "package-dependency", help="Print the unbounded package dependency"
     )
 
     matrix_parser = subparsers.add_parser(
@@ -352,21 +356,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_range_text(SUPPORTED_STABLE_FAMILIES))
     elif args.command == "installable-range":
         print(_range_text(INSTALLABLE_FAMILIES))
-    elif args.command == "package-requirement":
-        print(PACKAGE_TORCH_REQUIREMENT)
-    elif args.command == "filter-nightly-pip-check":
-        ignored, remaining = filter_expected_nightly_pip_check(sys.stdin.read())
-        for line in ignored:
-            print(f"[WARN] Ignoring expected nightly metadata mismatch: {line}")
-        if remaining or not ignored:
-            for line in remaining:
-                print(line, file=sys.stderr)
-            if not ignored:
-                print(
-                    "No expected TICO-to-nightly Torch mismatch was found.",
-                    file=sys.stderr,
-                )
-            return 1
+    elif args.command == "package-dependency":
+        print(PACKAGE_TORCH_DEPENDENCY)
     elif args.command == "ci-matrix":
         print(json.dumps(github_matrix(args.kind), separators=(",", ":")))
     else:  # pragma: no cover - argparse rejects unknown commands.

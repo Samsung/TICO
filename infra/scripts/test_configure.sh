@@ -355,7 +355,7 @@ if actual_tag != expected_tag:
 print(f"[INFO] Verified torch {torch_full} with torchvision {vision_full}")
 PY
 
-pytorch_pip_check "${INSTALLED_TORCH_IS_NIGHTLY}" || {
+python3 -m pip check || {
   echo "[ERROR] Installed Python packages have incompatible dependencies." >&2
   exit 1
 }

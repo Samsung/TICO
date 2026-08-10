@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -62,11 +63,25 @@ class TorchVersionPolicyTest(unittest.TestCase):
         self.assertNotIn(policy.PINNED_NIGHTLY_SELECTOR, by_version)
         self.assertTrue(by_version[policy.LATEST_NIGHTLY_SELECTOR]["experimental"])
 
-    def test_project_dependency_matches_policy(self) -> None:
-        """Keep package metadata aligned with the central family window."""
+    def test_legacy_families_remain_installable_but_not_qualified(self) -> None:
+        """Keep older source-install selections available on a best-effort basis."""
+        for family in policy.LEGACY_INSTALLABLE_FAMILIES:
+            self.assertTrue(policy.is_legacy_installable_family(family))
+            self.assertTrue(policy.is_installable_family(family))
+            self.assertFalse(policy.is_supported_family(family))
+            self.assertIn(family, policy.LATEST_STABLE_VERSION)
+            self.assertIn(family, policy.STABLE_CUDA_WHEELS)
+
+    def test_project_declares_unbounded_torch_dependency(self) -> None:
+        """Do not let package metadata reject unqualified PyTorch versions."""
         project_root = Path(__file__).resolve().parents[3]
         pyproject = (project_root / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn(f'"{policy.PACKAGE_TORCH_REQUIREMENT}"', pyproject)
+        torch_dependencies = re.findall(
+            r'^\s*"(torch(?:[<>=!~][^"]*)?)",\s*$',
+            pyproject,
+            flags=re.MULTILINE,
+        )
+        self.assertEqual(torch_dependencies, [policy.PACKAGE_TORCH_DEPENDENCY])
 
     def test_nightly_selectors_have_distinct_semantics(self) -> None:
         """Keep reproducible and moving nightly channels explicitly separate."""
@@ -89,6 +104,9 @@ class TorchVersionPolicyTest(unittest.TestCase):
         configure = (project_root / "infra/scripts/test_configure.sh").read_text(
             encoding="utf-8"
         )
+        package_utils = (
+            project_root / "infra/scripts/pytorch_package_utils.sh"
+        ).read_text(encoding="utf-8")
 
         self.assertIn('./ccex install --dist --torch_ver "$TORCH_VERSION"', action)
         self.assertIn('./ccex configure test --torch_ver "$TORCH_VERSION"', action)
@@ -102,23 +120,9 @@ class TorchVersionPolicyTest(unittest.TestCase):
             "Keeping installed latest nightly torchvision",
             configure,
         )
-
-    def test_nightly_pip_check_filter_ignores_only_expected_conflict(self) -> None:
-        """Allow the bounded metadata mismatch only for a development Torch."""
-        expected = (
-            "tico 0.2.0 has requirement torch<2.14,>=2.10, "
-            "but you have torch 2.14.0.dev20260806."
-        )
-        ignored, remaining = policy.filter_expected_nightly_pip_check(expected)
-        self.assertEqual(ignored, [expected])
-        self.assertEqual(remaining, [])
-
-        stable_conflict = expected.replace("2.14.0.dev20260806", "2.14.0")
-        ignored, remaining = policy.filter_expected_nightly_pip_check(
-            expected + "\n" + stable_conflict
-        )
-        self.assertEqual(ignored, [expected])
-        self.assertEqual(remaining, [stable_conflict])
+        self.assertIn("python3 -m pip check", configure)
+        self.assertNotIn("pytorch_pip_check", package_utils)
+        self.assertNotIn("filter-nightly-pip-check", package_utils)
 
     def test_cli_matrix_is_compact_json(self) -> None:
         """Keep matrix output safe for one-line GitHub Actions outputs."""
@@ -148,6 +152,7 @@ class TorchVersionPolicyTest(unittest.TestCase):
             + 'test "$PYTORCH_DEFAULT_FAMILY" = "'
             + policy.DEFAULT_FAMILY
             + '"\n'
+            + 'test "${#PYTORCH_LEGACY_INSTALLABLE_FAMILIES[@]}" -eq 5\n'
             + 'test "${#PYTORCH_SUPPORTED_FAMILIES[@]}" -eq 3\n'
             + 'test "$PYTORCH_PINNED_NIGHTLY_SELECTOR" = "'
             + policy.PINNED_NIGHTLY_SELECTOR

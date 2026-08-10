@@ -25,11 +25,13 @@ workflow; a Circle runtime is needed only when the generated model is executed.
 - A supported PyTorch installation
 - An inference-mode, `torch.export`-compatible module
 
-TICO's qualified stable support window is Torch 2.10 through 2.12, and the
-default source-install family is 2.12. Torch 2.13 is available as a qualification
-candidate. `nightly` is repository-pinned for reproducibility, while
-`nightly-latest` is used as a moving early-compatibility signal rather than release
-support. See the [PyTorch Version Policy](./torch_version_policy.md) and
+TICO's source installer keeps Torch 2.5 through 2.9 as legacy best-effort choices,
+while the qualified stable support window is 2.10 through 2.12 and the default is 2.12.
+Torch 2.13 is available as a qualification candidate. The package metadata keeps a
+bare `torch` dependency so a normal `pip install` can coexist with a user-managed old
+version. `nightly` is repository-pinned for reproducibility, while `nightly-latest` is
+used as a moving early-compatibility signal rather than release support. See the
+[PyTorch Version Policy](./torch_version_policy.md) and
 [Development Guide](./development.md) for exact installation and CI details.
 
 > [!IMPORTANT]
@@ -63,6 +65,7 @@ Useful source-install options include:
 ```bash
 ./ccex install --cpu_only
 ./ccex install --torch_ver 2.12
+./ccex install --torch_ver 2.7    # legacy best-effort
 ./ccex install --torch_ver 2.10
 ./ccex install --torch_ver 2.13
 ./ccex install --torch_ver nightly
@@ -409,8 +412,8 @@ The conversion pipeline writes images such as `1_after_decompose.png`,
 
 - [System Design](./design.md): conversion stages, invariants, serialization, and
   extension points
-- [PyTorch Version Policy](./torch_version_policy.md): supported families, default and
-  candidate versions, CI tiers, and promotion rules
+- [PyTorch Version Policy](./torch_version_policy.md): package installation, legacy and
+  supported families, candidate versions, CI tiers, and promotion rules
 - [Development Guide](./development.md): source setup, tests, formatting, and CI
 - [Quantization](../tico/quantization/README.md): quantize a model before Circle export
 - [Quantization examples](../tico/quantization/examples/README.md): config-driven LLM

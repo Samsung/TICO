@@ -334,27 +334,3 @@ is_nightly = "1" if ".dev" in base_version else "0"
 print("\t".join((full_version, base_version, wheel_tag, is_nightly)))
 PY
 }
-
-pytorch_pip_check() {
-  local allow_nightly_mismatch="${1:-0}"
-  local output
-  local status
-
-  if output="$(python3 -m pip check 2>&1)"; then
-    [[ -n "${output}" ]] && printf '%s\n' "${output}"
-    return 0
-  else
-    status=$?
-  fi
-
-  if [[ "${allow_nightly_mismatch}" == "1" ]]; then
-    if printf '%s\n' "${output}" | \
-       python3 "${PYTORCH_POLICY_FILE}" filter-nightly-pip-check; then
-      return 0
-    fi
-    return "${status}"
-  fi
-
-  printf '%s\n' "${output}" >&2
-  return "${status}"
-}

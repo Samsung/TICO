@@ -19,7 +19,7 @@ from packaging.version import Version
 
 from tico.config import CompileConfigV1, get_default_config
 from tico.utils.compat.torch_version_policy import (
-    MINIMUM_SUPPORTED_VERSION,
+    LEGACY_INSTALLABLE_FAMILIES,
     QUALIFICATION_CANDIDATE_FAMILIES,
     SUPPORTED_STABLE_FAMILIES,
     version_family,
@@ -41,15 +41,15 @@ _torch_version = Version(torch.__version__)
 _torch_family = version_family(str(_torch_version))
 _supported_range = f"{SUPPORTED_STABLE_FAMILIES[0]} ~ {SUPPORTED_STABLE_FAMILIES[-1]}"
 
-if _torch_version < Version(MINIMUM_SUPPORTED_VERSION):
-    warnings.warn(
-        f"TICO supports PyTorch families {_supported_range}; "
-        f"detected torch {torch.__version__}. Upgrade to "
-        f"torch>={MINIMUM_SUPPORTED_VERSION}.",
-        stacklevel=2,
-    )
-elif not _torch_version.is_devrelease:
-    if _torch_family in QUALIFICATION_CANDIDATE_FAMILIES:
+if not _torch_version.is_devrelease:
+    if _torch_family in LEGACY_INSTALLABLE_FAMILIES:
+        warnings.warn(
+            f"PyTorch {_torch_family} is a legacy TICO install target. "
+            "It remains available on a best-effort basis but is not covered "
+            f"by the qualified CI window {_supported_range}.",
+            stacklevel=2,
+        )
+    elif _torch_family in QUALIFICATION_CANDIDATE_FAMILIES:
         warnings.warn(
             f"PyTorch {_torch_family} is still a TICO qualification candidate. "
             "Use it for compatibility testing, not release builds.",
@@ -57,7 +57,7 @@ elif not _torch_version.is_devrelease:
         )
     elif _torch_family not in SUPPORTED_STABLE_FAMILIES:
         warnings.warn(
-            f"TICO supports PyTorch families {_supported_range}; "
+            f"TICO officially supports PyTorch families {_supported_range}; "
             f"detected torch {torch.__version__}.",
             stacklevel=2,
         )

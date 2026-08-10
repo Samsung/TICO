@@ -65,6 +65,7 @@ candidate, a repository-pinned nightly, or the latest published nightly pair:
 
 ```bash
 ./ccex install --torch_ver 2.12
+./ccex install --torch_ver 2.7    # legacy best-effort
 ./ccex install --torch_ver 2.10
 ./ccex install --torch_ver 2.12.1+cu132
 ./ccex install --torch_ver 2.13
@@ -72,11 +73,13 @@ candidate, a repository-pinned nightly, or the latest published nightly pair:
 ./ccex install --torch_ver nightly-latest   # latest published nightly pair
 ```
 
-TICO qualifies the latest three stable Torch families: 2.10, 2.11, and 2.12. The
-default family is 2.12. Torch 2.13 is installable as a qualification candidate but is
-not part of the release-support window. Family requests resolve to a project-pinned
-patch rather than allowing pip to select an arbitrary patch release. `nightly` uses the
-versions pinned under `infra/dependency/`; `nightly-latest` resolves Torch and
+TICO keeps Torch 2.5 through 2.9 as legacy best-effort source-install choices,
+qualifies 2.10, 2.11, and 2.12, and uses 2.12 as the default. Torch 2.13 is installable
+as a qualification candidate but is not part of the release-support window. Family
+requests resolve to a project-pinned patch rather than allowing pip to select an
+arbitrary patch release. The package metadata itself keeps a bare `torch` dependency,
+so a normal `pip install` does not reject a user-managed older version. `nightly` uses
+the versions pinned under `infra/dependency/`; `nightly-latest` resolves Torch and
 TorchVision together from one moving nightly index.
 
 Compute-platform options:
@@ -91,9 +94,10 @@ Compute-platform options:
 
 `--cpu_only` and `--cuda_ver` are mutually exclusive.
 
-When no Torch version is explicitly requested and a qualified stable Torch package is
+When no Torch version is explicitly requested and a configured stable Torch package is
 already installed, `./ccex install` preserves that installation if its compute platform
-is compatible. `./ccex configure test` then installs the matching TorchVision package
+is compatible. This includes legacy best-effort families. `./ccex configure test` then
+installs the matching TorchVision package
 and verifies the final package pair with `pip check`. Nightly selectors are deliberately
 re-resolved: `nightly` restores the repository pin, while `nightly-latest` upgrades the
 Torch/TorchVision pair together before test configuration validates it.

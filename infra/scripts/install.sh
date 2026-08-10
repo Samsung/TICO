@@ -185,12 +185,12 @@ fi
 
 SKIP_TORCH_INSTALL=0
 if [[ -n "${INSTALLED_TORCH_FULL}" ]]; then
-  # With no explicit Torch version, preserve any supported stable family. If a
+  # With no explicit Torch version, preserve any configured stable family. If a
   # compute-platform option requires reinstalling the wheel, reinstall the same
-  # family at its latest supported patch rather than falling back to the default.
+  # family at its project-pinned patch rather than falling back to the default.
   if [[ "${_TORCH_VER_WAS_SET}" == "0" && \
         "${INSTALLED_TORCH_IS_NIGHTLY}" == "0" ]] && \
-     pytorch_is_supported_family "${INSTALLED_TORCH_FAMILY}"; then
+     pytorch_is_installable_family "${INSTALLED_TORCH_FAMILY}"; then
     REQUESTED_FAMILY="${INSTALLED_TORCH_FAMILY}"
     RESOLVED_TORCH_VERSION="$(pytorch_resolve_latest_stable_version \
       "${REQUESTED_FAMILY}")" || exit 1
@@ -199,8 +199,8 @@ if [[ -n "${INSTALLED_TORCH_FULL}" ]]; then
   if installed_compute_matches_request "${INSTALLED_TORCH_WHEEL_TAG}"; then
     if [[ "${_TORCH_VER_WAS_SET}" == "0" ]]; then
       if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" == "0" ]] && \
-         pytorch_is_supported_family "${INSTALLED_TORCH_FAMILY}"; then
-        echo "[INFO] Supported torch ${INSTALLED_TORCH_FULL} already present — keeping it"
+         pytorch_is_installable_family "${INSTALLED_TORCH_FAMILY}"; then
+        echo "[INFO] Configured torch ${INSTALLED_TORCH_FULL} already present — keeping it"
         SKIP_TORCH_INSTALL=1
         RESOLVED_TORCH_VERSION="${INSTALLED_TORCH_BASE}"
       fi
@@ -350,7 +350,7 @@ if [[ "${_DIST}" -eq 1 ]]; then
     "${CCEX_PROJECT_PATH}"/dist/tico*.whl || exit 1
 else
   echo "[INFO] Installing TICO in editable mode"
-  python3 -m pip install --no-deps --editable "${CCEX_PROJECT_PATH}" || exit 1
+  python3 -m pip install --editable "${CCEX_PROJECT_PATH}" || exit 1
 fi
 
 # TorchVision is installed by `./ccex configure test`, so a global `pip check`

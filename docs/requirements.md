@@ -226,7 +226,9 @@ The package metadata requires Python 3.10 or newer.
 
 ### PyTorch
 
-- Package metadata accepts `torch>=2.10,<2.14`.
+- Package metadata intentionally declares the unbounded dependency `torch`, so
+  installation does not reject a user-managed older or newer Torch version.
+- Source tooling keeps Torch 2.5 through 2.9 as legacy best-effort install choices.
 - The qualified stable support window is Torch 2.10, 2.11, and 2.12.
 - The default source-install family is 2.12.
 - Torch 2.13 is explicitly installable as a qualification candidate and is not part of
@@ -239,8 +241,9 @@ The package metadata requires Python 3.10 or newer.
   on the oldest supported family, and non-blocking candidate smoke. Scheduled CI runs
   daily `nightly-latest` smoke and a weekly full matrix.
 
-Package compatibility, source-installer acceptance, qualified release support, and CI
-coverage are intentionally separate claims. The exact policy is defined in
+Package installation, source-installer acceptance, qualified release support, and CI
+coverage are intentionally separate claims. An installable legacy version is not a
+promise of regression fixes or CI coverage. The exact policy is defined in
 [`tico/utils/compat/torch_version_policy.py`](../tico/utils/compat/torch_version_policy.py).
 
 ### Operating system
