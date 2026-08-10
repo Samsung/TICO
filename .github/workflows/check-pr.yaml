@@ -6,6 +6,13 @@ on:
       - main
       - rel/*
 
+permissions:
+  contents: read
+
+concurrency:
+  group: check-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check-commit-message:
     name: Check commit message
@@ -16,18 +23,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Checkout PR head commit
-          # Checkout Action use merge commit as default
+          # Checkout PR head commit. The default is the synthetic merge commit.
           ref: ${{ github.event.pull_request.head.sha }}
-          # Fetch all history and branch (default: 1)
           fetch-depth: 0
-      - name: "Check signed-off"
+
+      - name: Check signed-off
         run: |
-          # Get commit body
           git log origin/"$GITHUB_BASE_REF"..HEAD --format=%b > commit_msg.txt
           sed "/^$/d" commit_msg.txt > commit_body.txt
 
-          # Check string starting from "TICO-DCO-1.0-Signed-off-by:"
           count="$(grep -c "TICO-DCO-1.0-Signed-off-by:" commit_body.txt)"
           if [[ ! "$count" -ge "1" ]]; then
             echo "Your commit message does not contain the expected signoff information."
@@ -38,97 +42,119 @@ jobs:
 
           echo "TICO-DCO-1.0-Signed-off-by is OK"
 
-
   check-style:
+    name: Check style
     runs-on: ubuntu-24.04
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: "Run configure"
-        run: |
-          ./ccex configure format
+      - name: Run configure
+        run: ./ccex configure format
 
-      - name: "Run linters"
-        run: |
-          ./ccex format --no-apply-patches
+      - name: Run linters
+        run: ./ccex format --no-apply-patches
 
-  build-and-test:
+  resolve_torch_policy:
+    name: Resolve PyTorch policy
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        torch-version: ["2.5", "2.6", "2.7", "2.8", "nightly"]
+    outputs:
+      default_family: ${{ steps.policy.outputs.default_family }}
+      pr_smoke_matrix: ${{ steps.policy.outputs.pr_smoke_matrix }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read central policy
+        id: policy
+        run: |
+          POLICY=tico/utils/compat/torch_version_policy.py
+          python3 "$POLICY" validate
+          echo "default_family=$(python3 "$POLICY" default-family)" >> "$GITHUB_OUTPUT"
+          echo "pr_smoke_matrix=$(python3 "$POLICY" ci-matrix pr-smoke)" >> "$GITHUB_OUTPUT"
+
+  build_package:
+    name: Build package once
+    runs-on: ubuntu-24.04
+
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Import all commit history and tag
+          fetch-depth: 0
 
-      - name: Get Ubuntu codename
-        id: os
-        run: |
-          CODENAME=$(lsb_release -cs)
-          echo "codename=$CODENAME" >> "$GITHUB_OUTPUT"
-
-      - name: Specify ONE version and binary
-        id: one
-        run: |
-          VERSION=1.30.1
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "filename=one-compiler-${{ steps.os.outputs.codename }}_${VERSION}_amd64.deb" >> "$GITHUB_OUTPUT"
-
-      - name: Download one-compiler package
-        id: download
-        uses: ./.github/actions/download-release-asset
+      - uses: actions/setup-python@v5
         with:
-          owner: Samsung
-          repo: ONE
-          tag: ${{ steps.one.outputs.version }}
-          filename: ${{ steps.one.outputs.filename }}
+          python-version: '3.12'
 
-      - name: "Install one-compiler"
-        working-directory: ./.github/actions/download-release-asset
-        run: |
-          sudo dpkg -i ${{ steps.one.outputs.filename }}
-          sudo apt-get install -f -y
-          onecc --version || echo "Installation failed."
+      - name: Build wheel
+        run: ./ccex build
 
-      - name: Trust all directories for Git
-        run: |
-          # Enable access to git from 'versioningit'
-          git config --global --add safe.directory "*"
-
-      - name: "Build package"
-        run: |
-          pip install build
-          ./ccex build
-
-      - name: "Run install"
-        shell: bash
-        run: |
-          TORCH_VERSION=${{ matrix.torch-version }}
-          ./ccex install --dist --torch_ver $TORCH_VERSION
-          pt2-to-circle -h
-
-      - name: "Configure test"
-        shell: bash
-        run: |
-          TORCH_VERSION=${{ matrix.torch-version }}
-          ./ccex configure test --torch_ver $TORCH_VERSION
-
-      - name: "Show torch package versions"
-        shell: bash
-        run: |
-          pip list | grep torch
-
-      - name: "Run test"
-        shell: bash
-        run: |
-          ./ccex test
-
-      - name: "Upload artifact"
+      - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: "wheel-${{ matrix.torch-version }}"
-          path: "./dist/"
+          name: tico-wheel
+          path: ./dist/
+          retention-days: 1
+
+  test_default:
+    name: Full test (default torch ${{ needs.resolve_torch_policy.outputs.default_family }})
+    needs:
+      - resolve_torch_policy
+      - build_package
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tico-wheel
+          path: ./dist/
+
+      - name: Set up test environment
+        uses: ./.github/actions/setup-tico-test
+        with:
+          torch-version: ${{ needs.resolve_torch_policy.outputs.default_family }}
+
+      - name: Run all tests
+        run: ./ccex test
+
+  test_compatibility:
+    name: Smoke (${{ matrix.tier }}, torch ${{ matrix.torch-version }})
+    needs:
+      - resolve_torch_policy
+      - build_package
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve_torch_policy.outputs.pr_smoke_matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tico-wheel
+          path: ./dist/
+
+      - name: Set up test environment
+        uses: ./.github/actions/setup-tico-test
+        with:
+          torch-version: ${{ matrix.torch-version }}
+
+      - name: Run export and quantization smoke tests
+        run: |
+          ./ccex test -k SimpleAdd
+          python3 -m unittest \
+            test.quantization.wrapq.test_cnn_quantized_export.CNNQuantizedExportTest.test_uint8_circle_export \
+            -v

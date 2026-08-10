@@ -5,6 +5,7 @@ on:
     paths:
       # WARNING: PRs from forked repo are not allowed.
       - '.github/workflows/**'
+      - '.github/actions/**'
 
 jobs:
   actionlint:

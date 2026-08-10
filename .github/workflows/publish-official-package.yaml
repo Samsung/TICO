@@ -4,53 +4,107 @@ on:
   workflow_dispatch:
     inputs:
       ref_name:
-        description: 'Git reference (branch or tag) to build and publish'
+        description: Git reference (branch or tag) to build and publish
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
-  build-and-upload:
+  resolve_torch_policy:
+    name: Resolve PyTorch release matrix
+    runs-on: ubuntu-24.04
+    outputs:
+      release_matrix: ${{ steps.policy.outputs.release_matrix }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_name }}
+
+      - name: Read central policy
+        id: policy
+        run: |
+          POLICY=tico/utils/compat/torch_version_policy.py
+          python3 "$POLICY" validate
+          echo "release_matrix=$(python3 "$POLICY" ci-matrix release)" >> "$GITHUB_OUTPUT"
+
+  build_and_upload:
+    name: Build official package
     runs-on: ubuntu-24.04
 
     steps:
-      - name: "Checkout the specified ref"
+      - name: Checkout the specified ref
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref_name }}
-          fetch-depth: 0 # Import all commit history and tag
+          fetch-depth: 0
 
-      - name: "Build package"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build package
+        run: ./ccex build
+
+      - name: Check requested version
+        env:
+          INPUT_REF: ${{ inputs.ref_name }}
         run: |
-          ./ccex build
-
-      - name: "Check requested version (ref_name)"
-        run: |
-          INPUT_REF="${{ inputs.ref_name }}"
-          TAG_VERSION="${INPUT_REF#v}"  # Strip leading 'v' from ref_name
-
+          TAG_VERSION="${INPUT_REF#v}"
           VERSION="$(versioningit)"
           CLEAN_VERSION="$(echo "$VERSION" | cut -d'.' -f1-3)"
-
-          echo "$CLEAN_VERSION"
 
           echo "VERSION from prepared package: $CLEAN_VERSION"
           echo "VERSION from ref_name: $TAG_VERSION"
 
-          if [ "$CLEAN_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::VERSION($CLEAN_VERSION) of current package does not match your requested ref_name ($INPUT_REF)"
+          if [[ "$CLEAN_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::error::VERSION($CLEAN_VERSION) does not match requested ref ($INPUT_REF)"
             exit 1
           fi
 
-      - name: "Upload artifact"
+      - name: Upload wheel
         uses: actions/upload-artifact@v4
         with:
-          name: "wheel"
-          path: "./dist/"
+          name: official-wheel
+          path: ./dist/
+          retention-days: 1
 
-  publish-to-pypi:
-
+  test_supported_torch:
+    name: Release test (torch ${{ matrix.torch-version }})
     needs:
-      - build-and-upload
+      - resolve_torch_policy
+      - build_and_upload
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve_torch_policy.outputs.release_matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_name }}
+          fetch-depth: 0
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: official-wheel
+          path: ./dist/
+
+      - name: Set up test environment
+        uses: ./.github/actions/setup-tico-test
+        with:
+          torch-version: ${{ matrix.torch-version }}
+
+      - name: Run all tests
+        run: ./ccex test
+
+  publish_to_pypi:
+    name: Publish to PyPI
+    needs:
+      - test_supported_torch
     runs-on: ubuntu-24.04
 
     environment:
@@ -58,14 +112,14 @@ jobs:
       url: https://pypi.org/p/TICO
 
     permissions:
-      id-token: write  # IMPORTANT: mandatory for trusted publishing
+      id-token: write
 
     steps:
-      - name: "Download all the dists"
+      - name: Download distribution
         uses: actions/download-artifact@v4
         with:
-          name: "wheel"
-          path: "./dist/"
+          name: official-wheel
+          path: ./dist/
 
-      - name: "Publish distribution to PyPI"
+      - name: Publish distribution to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

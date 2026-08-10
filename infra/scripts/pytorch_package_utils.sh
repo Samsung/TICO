@@ -21,36 +21,15 @@ if [[ -n "${TICO_PYTORCH_PACKAGE_UTILS_SOURCED:-}" ]]; then
 fi
 TICO_PYTORCH_PACKAGE_UTILS_SOURCED=1
 
-PYTORCH_DEFAULT_FAMILY="2.7"
-PYTORCH_SUPPORTED_FAMILIES=("2.5" "2.6" "2.7" "2.8" "2.9" "2.10")
+PYTORCH_PACKAGE_UTILS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTORCH_POLICY_FILE="${PYTORCH_PACKAGE_UTILS_DIR}/../../tico/utils/compat/torch_version_policy.py"
 
-# Keep family requests deterministic. A family such as 2.7 resolves to the
-# latest stable patch explicitly supported by TICO instead of asking pip to
-# backtrack over every 2.7.x release.
-declare -A PYTORCH_LATEST_STABLE_VERSION=(
-  ["2.5"]="2.5.1"
-  ["2.6"]="2.6.0"
-  ["2.7"]="2.7.1"
-  ["2.8"]="2.8.0"
-  ["2.9"]="2.9.1"
-  ["2.10"]="2.10.0"
-)
-
-# Official CUDA wheel variants for each supported stable Torch family. Values
-# are ordered from newest to oldest so that the best compatible wheel is tried
-# first. The CPU index is appended separately as the final fallback.
-declare -A PYTORCH_STABLE_CUDA_WHEELS=(
-  ["2.5"]="12.4 12.1 11.8"
-  ["2.6"]="12.6 12.4 11.8"
-  ["2.7"]="12.8 12.6 11.8"
-  ["2.8"]="12.9 12.8 12.6"
-  ["2.9"]="13.0 12.8 12.6"
-  ["2.10"]="13.0 12.8 12.6"
-)
-
-# Used only when a nightly requirement does not contain an explicit local
-# build tag such as +cpu or +cu130.
-PYTORCH_NIGHTLY_CUDA_FALLBACKS=("13.0" "12.8" "12.6")
+if ! PYTORCH_POLICY_SHELL="$(python3 "${PYTORCH_POLICY_FILE}" shell)"; then
+  echo "[ERROR] Failed to load PyTorch policy from ${PYTORCH_POLICY_FILE}" >&2
+  return 1
+fi
+eval "${PYTORCH_POLICY_SHELL}"
+unset PYTORCH_POLICY_SHELL
 
 pytorch_is_supported_family() {
   local family="$1"
@@ -58,6 +37,26 @@ pytorch_is_supported_family() {
 
   for supported in "${PYTORCH_SUPPORTED_FAMILIES[@]}"; do
     [[ "${supported}" == "${family}" ]] && return 0
+  done
+  return 1
+}
+
+pytorch_is_installable_family() {
+  local family="$1"
+  local installable
+
+  for installable in "${PYTORCH_INSTALLABLE_FAMILIES[@]}"; do
+    [[ "${installable}" == "${family}" ]] && return 0
+  done
+  return 1
+}
+
+pytorch_is_nightly_selector() {
+  local selector="$1"
+  local nightly_selector
+
+  for nightly_selector in "${PYTORCH_NIGHTLY_SELECTORS[@]}"; do
+    [[ "${nightly_selector}" == "${selector}" ]] && return 0
   done
   return 1
 }
@@ -103,7 +102,7 @@ pytorch_local_build_tag() {
 pytorch_resolve_latest_stable_version() {
   local family="$1"
 
-  if ! pytorch_is_supported_family "${family}"; then
+  if ! pytorch_is_installable_family "${family}"; then
     return 1
   fi
 
@@ -128,12 +127,12 @@ pytorch_resolve_torchvision_version() {
   patch="${BASH_REMATCH[3]}"
   family="${major}.${minor}"
 
-  if [[ "${major}" != "2" ]] || ! pytorch_is_supported_family "${family}"; then
+  if [[ "${major}" != "2" ]] || ! pytorch_is_installable_family "${family}"; then
     return 1
   fi
 
-  # Torch 2.N.P is paired with TorchVision 0.(N+15).P for the supported
-  # release families (2.5 through 2.10).
+  # Torch 2.N.P is paired with TorchVision 0.(N+15).P for the stable
+  # release families configured by the central policy.
   vision_minor=$((10#${minor} + 15))
   echo "0.${vision_minor}.${patch}"
 }
@@ -245,7 +244,7 @@ pytorch_build_index_urls() {
       pytorch_add_unique_index_url "$(pytorch_index_url "${cuda_tag}" 1)"
       cuda_candidates=("${PYTORCH_NIGHTLY_CUDA_FALLBACKS[@]}")
     else
-      if ! pytorch_is_supported_family "${family}"; then
+      if ! pytorch_is_installable_family "${family}"; then
         echo "[ERROR] Unsupported Torch family '${family}'" >&2
         return 1
       fi
@@ -311,5 +310,27 @@ else:
     wheel_tag = "cpu"
 
 print("\t".join((full_version, base_version, family, wheel_tag, is_nightly)))
+PY
+}
+
+pytorch_get_installed_torchvision_info() {
+  python3 - <<'PY'
+import importlib.util
+import sys
+
+if importlib.util.find_spec("torchvision") is None:
+    sys.exit(1)
+
+try:
+    import torchvision
+except Exception as exc:
+    print(f"Failed to import torchvision: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+full_version = str(torchvision.__version__)
+base_version = full_version.split("+", 1)[0]
+wheel_tag = full_version.split("+", 1)[1] if "+" in full_version else "none"
+is_nightly = "1" if ".dev" in base_version else "0"
+print("\t".join((full_version, base_version, wheel_tag, is_nightly)))
 PY
 }

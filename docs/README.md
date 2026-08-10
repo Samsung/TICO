@@ -11,6 +11,7 @@ workflows, supported behavior, and the test strategy.
 | [Getting Started](./getting_started.md) | TICO users | Install TICO, convert PyTorch modules or `.pt2` files, configure conversion, run Circle models, and inspect artifacts. |
 | [System Design](./design.md) | Contributors | Understand the actual `main`-branch conversion pipeline, package boundaries, pass execution, serialization, runtime behavior, and extension points. |
 | [Development Guide](./development.md) | Contributors | Set up a source checkout, select a Torch build, run tests and model tests, format code, collect coverage, and understand PR CI. |
+| [PyTorch Version Policy](./torch_version_policy.md) | Users and contributors | Understand package installation, legacy installable families, the qualified stable window, candidates, CI tiers, and promotion rules. |
 | [Requirements](./requirements.md) | Users and contributors | Define the currently supported contract, constraints, quality expectations, benchmark targets, and non-goals. |
 | [System Test Guide](./system_test.md) | Contributors | Explain test layers, end-to-end validation, test commands, CI coverage, performance tests, and maintenance rules. |
 
@@ -41,7 +42,9 @@ source of truth for version-sensitive details:
 - Conversion pass order: `tico/utils/convert.py`
 - Circle serialization: `tico/serialize/`
 - Source-install and test tooling: `infra/command/` and `infra/scripts/`
+- PyTorch compatibility metadata: `tico/utils/compat/torch_version_policy.py`
 - PR CI: `.github/workflows/check-pr.yaml`
+- Scheduled PyTorch compatibility CI: `.github/workflows/check-pytorch-compatibility.yaml`
 
 When a change modifies a public API, command, configuration field, package boundary,
 pass order, supported version, or test workflow, update the corresponding document in

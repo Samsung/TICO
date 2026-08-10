@@ -60,18 +60,27 @@ Set up only one part of the environment when needed:
 
 ## Torch selection
 
-The source installer accepts a stable family, an exact version, or a pinned nightly:
+The source installer accepts a stable family, an exact version, a qualification
+candidate, a repository-pinned nightly, or the latest published nightly pair:
 
 ```bash
-./ccex install --torch_ver 2.7
-./ccex install --torch_ver 2.10.0
-./ccex install --torch_ver 2.7.1+cu128
-./ccex install --torch_ver nightly
+./ccex install --torch_ver 2.12
+./ccex install --torch_ver 2.7    # legacy best-effort
+./ccex install --torch_ver 2.10
+./ccex install --torch_ver 2.12.1+cu132
+./ccex install --torch_ver 2.13
+./ccex install --torch_ver nightly          # repository-pinned Torch/TorchVision
+./ccex install --torch_ver nightly-latest   # latest published nightly pair
 ```
 
-Current stable families supported by the install tooling are 2.5 through 2.10. The
-default family is 2.7. Family requests resolve to a project-pinned latest supported
-patch rather than allowing pip to select any patch release.
+TICO keeps Torch 2.5 through 2.9 as legacy best-effort source-install choices,
+qualifies 2.10, 2.11, and 2.12, and uses 2.12 as the default. Torch 2.13 is installable
+as a qualification candidate but is not part of the release-support window. Family
+requests resolve to a project-pinned patch rather than allowing pip to select an
+arbitrary patch release. The package metadata itself keeps a bare `torch` dependency,
+so a normal `pip install` does not reject a user-managed older version. `nightly` uses
+the versions pinned under `infra/dependency/`; `nightly-latest` resolves Torch and
+TorchVision together from one moving nightly index.
 
 Compute-platform options:
 
@@ -85,10 +94,18 @@ Compute-platform options:
 
 `--cpu_only` and `--cuda_ver` are mutually exclusive.
 
-When no Torch version is explicitly requested and a supported stable Torch package is
+When no Torch version is explicitly requested and a configured stable Torch package is
 already installed, `./ccex install` preserves that installation if its compute platform
-is compatible. `./ccex configure test` then installs the matching TorchVision package
-and verifies the final package pair with `pip check`.
+is compatible. This includes legacy best-effort families. `./ccex configure test` then
+installs the matching TorchVision package
+and verifies the final package pair with `pip check`. Nightly selectors are deliberately
+re-resolved: `nightly` restores the repository pin, while `nightly-latest` upgrades the
+Torch/TorchVision pair together before test configuration validates it.
+
+The source of truth for families, exact patches, CUDA wheel variants, and CI matrices is
+[`tico/utils/compat/torch_version_policy.py`](../tico/utils/compat/torch_version_policy.py).
+See the [PyTorch Version Policy](./torch_version_policy.md) for qualification,
+promotion, and release-branch rules.
 
 ## Build and install a wheel
 
@@ -108,8 +125,8 @@ A clean wheel workflow similar to CI is:
 
 ```bash
 ./ccex build
-./ccex install --dist --torch_ver 2.7
-./ccex configure test --torch_ver 2.7
+./ccex install --dist --torch_ver 2.12
+./ccex configure test --torch_ver 2.12
 pt2-to-circle -h
 ```
 
@@ -325,8 +342,8 @@ If `coverage` is not installed, the current helper requests version 7.6.1.
 
 ## Pull-request CI
 
-The PR workflow currently performs three major checks for pull requests targeting
-`main` or `rel/*`:
+The PR workflow targets `main` and `rel/*`. PyTorch versions are resolved from the
+central policy module rather than duplicated in workflow YAML.
 
 1. **Commit-message check**
    - Runs when the pull request is ready for review.
@@ -341,11 +358,21 @@ The PR workflow currently performs three major checks for pull requests targetin
    - Executes `./ccex configure format` and
      `./ccex format --no-apply-patches`.
 
-3. **Build and test matrix**
-   - Current matrix: Torch 2.5, 2.6, 2.7, 2.8, and the pinned nightly.
-   - Installs the CI-pinned ONE compiler package.
-   - Builds a wheel, installs it, configures test dependencies, and runs
-     `./ccex test`.
+3. **Package build**
+   - Builds the TICO wheel once.
+   - Uploads one short-lived artifact reused by all versioned test jobs.
+
+4. **Versioned tests**
+   - Runs the complete suite on the default qualified family, currently 2.12.
+   - Runs blocking export and quantization smoke tests on the oldest supported family,
+     currently 2.10.
+   - Runs the same smoke tests non-blockingly on the qualification candidate, currently
+     2.13.
+
+A separate compatibility workflow runs `nightly-latest` smoke tests daily and the
+complete supported/candidate/`nightly-latest` matrix weekly. Official package
+publication runs the full suite on every qualified stable family before publishing. See the
+[PyTorch Version Policy](./torch_version_policy.md) for the exact tiers.
 
 Performance tests are available through `./ccex test -p`, but are not part of the
 current PR matrix.
