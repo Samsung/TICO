@@ -1,0 +1,118 @@
+name: Check PyTorch Compatibility
+
+on:
+  schedule:
+    # Daily latest-nightly smoke at 03:17 KST.
+    - cron: '17 18 * * *'
+    # Weekly full matrix on Monday at 03:41 KST.
+    - cron: '41 18 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pytorch-compatibility-${{ github.event.schedule || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  resolve_torch_policy:
+    name: Resolve PyTorch policy
+    runs-on: ubuntu-24.04
+    outputs:
+      scheduled_full_matrix: ${{ steps.policy.outputs.scheduled_full_matrix }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read central policy
+        id: policy
+        run: |
+          POLICY=tico/utils/compat/torch_version_policy.py
+          python3 "$POLICY" validate
+          echo "scheduled_full_matrix=$(python3 "$POLICY" ci-matrix scheduled-full)" >> "$GITHUB_OUTPUT"
+
+  build_package:
+    name: Build package once
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build wheel
+        run: ./ccex build
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: tico-wheel
+          path: ./dist/
+          retention-days: 1
+
+  nightly_smoke:
+    name: Daily latest-nightly smoke
+    if: github.event_name == 'schedule' && github.event.schedule == '17 18 * * *'
+    needs:
+      - resolve_torch_policy
+      - build_package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tico-wheel
+          path: ./dist/
+
+      - name: Set up latest-nightly test environment
+        uses: ./.github/actions/setup-tico-test
+        with:
+          torch-version: nightly-latest
+
+      - name: Run export and quantization smoke tests
+        run: |
+          ./ccex test -k SimpleAdd
+          python3 -m unittest \
+            test.quantization.wrapq.test_cnn_quantized_export.CNNQuantizedExportTest.test_uint8_circle_export \
+            -v
+
+  full_matrix:
+    name: Full test (${{ matrix.tier }}, torch ${{ matrix.torch-version }})
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && github.event.schedule == '41 18 * * 0')
+    needs:
+      - resolve_torch_policy
+      - build_package
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.resolve_torch_policy.outputs.scheduled_full_matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tico-wheel
+          path: ./dist/
+
+      - name: Set up test environment
+        uses: ./.github/actions/setup-tico-test
+        with:
+          torch-version: ${{ matrix.torch-version }}
+
+      - name: Run all tests
+        run: ./ccex test

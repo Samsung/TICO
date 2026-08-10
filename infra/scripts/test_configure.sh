@@ -32,9 +32,10 @@ Usage: ./ccex configure test [OPTIONS]
 
 --torch_ver VER       Validate the installed Torch version before installing
                       its matching TorchVision package. Accepts:
-                        • 2.5 ~ 2.10
-                        • 2.6.0, 2.7.1+cu126 ...
-                        • nightly
+                        • ${PYTORCH_INSTALLABLE_FAMILY_MIN} ~ ${PYTORCH_INSTALLABLE_FAMILY_MAX}
+                        • 2.10.0, 2.13.0+cu132 ...
+                        • ${PYTORCH_PINNED_NIGHTLY_SELECTOR}
+                        • ${PYTORCH_LATEST_NIGHTLY_SELECTOR}
                       If omitted, the installed Torch version is used.
 --cuda_ver MAJ.MIN    Validate that this CUDA capability can run the installed
                       Torch wheel. TorchVision still follows the Torch wheel.
@@ -103,22 +104,71 @@ if [[ "${INSTALLED_TORCH_WHEEL_TAG}" != "cpu" && \
 fi
 
 if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" == "0" ]] && \
-   ! pytorch_is_supported_family "${INSTALLED_TORCH_FAMILY}"; then
-  echo "[ERROR] Installed torch ${INSTALLED_TORCH_FULL} is not supported." >&2
+   ! pytorch_is_installable_family "${INSTALLED_TORCH_FAMILY}"; then
+  echo "[ERROR] Installed torch ${INSTALLED_TORCH_FULL} is not configured." >&2
   exit 1
+fi
+
+NIGHTLY_MODE=""
+PINNED_TORCH_VERSION=""
+PINNED_TORCH_BASE=""
+PINNED_TORCH_BUILD_TAG=""
+INSTALLED_MATCHES_PINNED=0
+
+if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" == "1" ]]; then
+  TORCH_DEV_FILE="${SCRIPTS_DIR}/../dependency/torch_dev.txt"
+  PINNED_TORCH_VERSION="$(pytorch_get_pinned_requirement_version \
+    "${TORCH_DEV_FILE}" torch)"
+  if [[ -z "${PINNED_TORCH_VERSION}" ]]; then
+    echo "[ERROR] ${TORCH_DEV_FILE} must pin torch with 'torch==VERSION'." >&2
+    exit 1
+  fi
+  PINNED_TORCH_BASE="$(pytorch_strip_local_version "${PINNED_TORCH_VERSION}")"
+  PINNED_TORCH_BUILD_TAG="$(pytorch_local_build_tag "${PINNED_TORCH_VERSION}")"
+
+  if [[ "${INSTALLED_TORCH_BASE}" == "${PINNED_TORCH_BASE}" && \
+        ( -z "${PINNED_TORCH_BUILD_TAG}" || \
+          "${INSTALLED_TORCH_WHEEL_TAG}" == "${PINNED_TORCH_BUILD_TAG}" ) ]]; then
+    INSTALLED_MATCHES_PINNED=1
+  fi
+
+  if [[ "${_TORCH_VER_WAS_SET}" == "1" && \
+        "${_TORCH_VER}" == "${PYTORCH_LATEST_NIGHTLY_SELECTOR}" ]]; then
+    NIGHTLY_MODE="latest"
+  elif [[ "${_TORCH_VER_WAS_SET}" == "1" && \
+          "${_TORCH_VER}" == "${PYTORCH_PINNED_NIGHTLY_SELECTOR}" ]]; then
+    NIGHTLY_MODE="pinned"
+  elif [[ "${INSTALLED_MATCHES_PINNED}" == "1" ]]; then
+    NIGHTLY_MODE="pinned"
+  else
+    NIGHTLY_MODE="latest"
+  fi
 fi
 
 ###############################################################################
 # Validate optional version and compute-platform requests
 ###############################################################################
 if [[ "${_TORCH_VER_WAS_SET}" == "1" ]]; then
-  if [[ "${_TORCH_VER}" == "nightly" ]]; then
+  if [[ "${_TORCH_VER}" == "${PYTORCH_PINNED_NIGHTLY_SELECTOR}" ]]; then
     if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" != "1" ]]; then
-      echo "[ERROR] --torch_ver nightly was requested, but ${INSTALLED_TORCH_FULL} is installed." >&2
+      echo "[ERROR] --torch_ver ${PYTORCH_PINNED_NIGHTLY_SELECTOR} was requested, " \
+           "but ${INSTALLED_TORCH_FULL} is installed." >&2
+      exit 1
+    fi
+    if [[ "${INSTALLED_MATCHES_PINNED}" != "1" ]]; then
+      echo "[ERROR] Requested pinned nightly ${PINNED_TORCH_VERSION}, " \
+           "but ${INSTALLED_TORCH_FULL} is installed." >&2
+      echo "[ERROR] Re-run './ccex install --torch_ver ${PYTORCH_PINNED_NIGHTLY_SELECTOR}' first." >&2
+      exit 1
+    fi
+  elif [[ "${_TORCH_VER}" == "${PYTORCH_LATEST_NIGHTLY_SELECTOR}" ]]; then
+    if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" != "1" ]]; then
+      echo "[ERROR] --torch_ver ${PYTORCH_LATEST_NIGHTLY_SELECTOR} was requested, " \
+           "but ${INSTALLED_TORCH_FULL} is installed." >&2
       exit 1
     fi
   elif [[ "${_TORCH_VER}" =~ ^[0-9]+\.[0-9]+$ ]]; then
-    if ! pytorch_is_supported_family "${_TORCH_VER}"; then
+    if ! pytorch_is_installable_family "${_TORCH_VER}"; then
       echo "[ERROR] Unsupported --torch_ver family '${_TORCH_VER}'" >&2
       exit 1
     fi
@@ -133,7 +183,7 @@ if [[ "${_TORCH_VER_WAS_SET}" == "1" ]]; then
     REQUESTED_BUILD_TAG="$(pytorch_local_build_tag "${_TORCH_VER}")"
     REQUESTED_FAMILY="$(pytorch_version_family "${_TORCH_VER}")" || exit 1
 
-    if ! pytorch_is_supported_family "${REQUESTED_FAMILY}"; then
+    if ! pytorch_is_installable_family "${REQUESTED_FAMILY}"; then
       echo "[ERROR] Unsupported --torch_ver value '${_TORCH_VER}'" >&2
       exit 1
     fi
@@ -179,25 +229,52 @@ INDEX_URL="$(pytorch_index_url \
 EXPECTED_VISION_VERSION=""
 
 if [[ "${INSTALLED_TORCH_IS_NIGHTLY}" == "1" ]]; then
-  TORCHVISION_DEV_FILE="${SCRIPTS_DIR}/../dependency/torchvision_dev.txt"
-  EXPECTED_VISION_FULL="$(pytorch_get_pinned_requirement_version \
-    "${TORCHVISION_DEV_FILE}" torchvision)"
-  if [[ -z "${EXPECTED_VISION_FULL}" ]]; then
-    echo "[ERROR] ${TORCHVISION_DEV_FILE} must pin torchvision with 'torchvision==VERSION'." >&2
-    exit 1
-  fi
+  if [[ "${NIGHTLY_MODE}" == "latest" ]]; then
+    VISION_INFO="$(pytorch_get_installed_torchvision_info)" || {
+      echo "[ERROR] ${PYTORCH_LATEST_NIGHTLY_SELECTOR} requires an installed " \
+           "TorchVision nightly from './ccex install'." >&2
+      exit 1
+    }
+    IFS=$'\t' read -r \
+      INSTALLED_VISION_FULL \
+      INSTALLED_VISION_BASE \
+      INSTALLED_VISION_WHEEL_TAG \
+      INSTALLED_VISION_IS_NIGHTLY <<< "${VISION_INFO}"
 
-  PINNED_VISION_BUILD_TAG="$(pytorch_local_build_tag "${EXPECTED_VISION_FULL}")"
-  if [[ -n "${PINNED_VISION_BUILD_TAG}" && \
-        "${PINNED_VISION_BUILD_TAG}" != "${INSTALLED_TORCH_WHEEL_TAG}" ]]; then
-    echo "[ERROR] torchvision_dev.txt pins +${PINNED_VISION_BUILD_TAG}, but Torch uses ${INSTALLED_TORCH_WHEEL_TAG}." >&2
-    exit 1
-  fi
+    if [[ "${INSTALLED_VISION_IS_NIGHTLY}" != "1" ]]; then
+      echo "[ERROR] Expected a TorchVision nightly, but found ${INSTALLED_VISION_FULL}." >&2
+      exit 1
+    fi
+    if [[ "${INSTALLED_VISION_WHEEL_TAG}" != "none" && \
+          "${INSTALLED_VISION_WHEEL_TAG}" != "${INSTALLED_TORCH_WHEEL_TAG}" ]]; then
+      echo "[ERROR] Nightly wheel mismatch: torch uses ${INSTALLED_TORCH_WHEEL_TAG}, " \
+           "but torchvision is ${INSTALLED_VISION_FULL}." >&2
+      exit 1
+    fi
 
-  EXPECTED_VISION_VERSION="$(pytorch_strip_local_version "${EXPECTED_VISION_FULL}")"
-  echo "[INFO] Installing torchvision ${EXPECTED_VISION_FULL} from ${INDEX_URL}"
-  python3 -m pip install -r "${TORCHVISION_DEV_FILE}" \
-    --index-url "${INDEX_URL}" || exit 1
+    EXPECTED_VISION_VERSION="${INSTALLED_VISION_BASE}"
+    echo "[INFO] Keeping installed latest nightly torchvision ${INSTALLED_VISION_FULL}"
+  else
+    TORCHVISION_DEV_FILE="${SCRIPTS_DIR}/../dependency/torchvision_dev.txt"
+    EXPECTED_VISION_FULL="$(pytorch_get_pinned_requirement_version \
+      "${TORCHVISION_DEV_FILE}" torchvision)"
+    if [[ -z "${EXPECTED_VISION_FULL}" ]]; then
+      echo "[ERROR] ${TORCHVISION_DEV_FILE} must pin torchvision with 'torchvision==VERSION'." >&2
+      exit 1
+    fi
+
+    PINNED_VISION_BUILD_TAG="$(pytorch_local_build_tag "${EXPECTED_VISION_FULL}")"
+    if [[ -n "${PINNED_VISION_BUILD_TAG}" && \
+          "${PINNED_VISION_BUILD_TAG}" != "${INSTALLED_TORCH_WHEEL_TAG}" ]]; then
+      echo "[ERROR] torchvision_dev.txt pins +${PINNED_VISION_BUILD_TAG}, but Torch uses ${INSTALLED_TORCH_WHEEL_TAG}." >&2
+      exit 1
+    fi
+
+    EXPECTED_VISION_VERSION="$(pytorch_strip_local_version "${EXPECTED_VISION_FULL}")"
+    echo "[INFO] Installing torchvision ${EXPECTED_VISION_FULL} from ${INDEX_URL}"
+    python3 -m pip install -r "${TORCHVISION_DEV_FILE}" \
+      --index-url "${INDEX_URL}" || exit 1
+  fi
 else
   EXPECTED_VISION_VERSION="$(pytorch_resolve_torchvision_version \
     "${INSTALLED_TORCH_BASE}")" || {
@@ -278,7 +355,7 @@ if actual_tag != expected_tag:
 print(f"[INFO] Verified torch {torch_full} with torchvision {vision_full}")
 PY
 
-python3 -m pip check || {
+pytorch_pip_check "${INSTALLED_TORCH_IS_NIGHTLY}" || {
   echo "[ERROR] Installed Python packages have incompatible dependencies." >&2
   exit 1
 }

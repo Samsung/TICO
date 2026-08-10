@@ -1,0 +1,73 @@
+name: Setup TICO test environment
+description: Install ONE, a selected PyTorch channel, TICO, and test dependencies
+
+inputs:
+  torch-version:
+    description: PyTorch family, nightly, or nightly-latest
+    required: true
+  one-version:
+    description: ONE compiler release used by tests
+    required: false
+    default: 1.30.1
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Resolve ONE package name
+      id: one
+      shell: bash
+      env:
+        ONE_VERSION: ${{ inputs.one-version }}
+      run: |
+        CODENAME="$(lsb_release -cs)"
+        echo "filename=one-compiler-${CODENAME}_${ONE_VERSION}_amd64.deb" >> "$GITHUB_OUTPUT"
+
+    - name: Download ONE compiler
+      shell: bash
+      working-directory: ./.github/actions/download-release-asset
+      env:
+        ONE_VERSION: ${{ inputs.one-version }}
+        ONE_PACKAGE: ${{ steps.one.outputs.filename }}
+      run: |
+        chmod +x entrypoint.sh
+        ./entrypoint.sh Samsung ONE "$ONE_VERSION" "$ONE_PACKAGE"
+
+    - name: Install ONE compiler
+      shell: bash
+      working-directory: ./.github/actions/download-release-asset
+      env:
+        ONE_PACKAGE: ${{ steps.one.outputs.filename }}
+      run: |
+        sudo dpkg -i "$ONE_PACKAGE" || sudo apt-get install -f -y
+        onecc --version
+
+    - name: Trust the checkout for versioningit
+      shell: bash
+      run: git config --global --add safe.directory '*'
+
+    - name: Install TICO and configure tests
+      shell: bash
+      env:
+        TORCH_VERSION: ${{ inputs.torch-version }}
+      run: |
+        ./ccex install --dist --torch_ver "$TORCH_VERSION" --cpu_only
+        pt2-to-circle -h
+        ./ccex configure test --torch_ver "$TORCH_VERSION" --cpu_only
+
+    - name: Show installed package versions
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import torch
+        import torchvision
+        import tico
+
+        print(f"torch={torch.__version__}")
+        print(f"torchvision={torchvision.__version__}")
+        print(f"tico={tico.__version__}")
+        PY

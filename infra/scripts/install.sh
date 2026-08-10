@@ -32,9 +32,13 @@ Usage: ./ccex install [OPTIONS]
 --dist                 Install from wheel in ./dist instead of editable mode
 --torch_ver VER        Torch version or family to install.
                        Accepts:
-                         • 2.5 ~ 2.10                 (family, installs latest supported patch)
-                         • 2.6.0, 2.7.1+cu126 ...   (exact)
-                         • nightly
+                         • ${PYTORCH_INSTALLABLE_FAMILY_MIN} ~ ${PYTORCH_INSTALLABLE_FAMILY_MAX}
+                           (family, installs latest configured patch)
+                         • 2.10.0, 2.13.0+cu132 ... (exact)
+                         • ${PYTORCH_PINNED_NIGHTLY_SELECTOR}
+                           (repository-pinned nightly Torch)
+                         • ${PYTORCH_LATEST_NIGHTLY_SELECTOR}
+                           (latest published Torch/TorchVision nightly pair)
                        Default: ${PYTORCH_DEFAULT_FAMILY}
 --cuda_ver MAJ.MIN     Override detected host CUDA capability (e.g. 12.1)
 --cpu_only             Force CPU-only Torch installation
@@ -123,17 +127,21 @@ fi
 # Normalize the requested Torch version
 ###############################################################################
 REQUEST_IS_NIGHTLY=0
+REQUEST_IS_LATEST_NIGHTLY=0
 REQUEST_IS_EXACT=0
 REQUESTED_FAMILY=""
 REQUESTED_EXACT_VERSION=""
 REQUESTED_BUILD_TAG=""
 RESOLVED_TORCH_VERSION=""
 
-if [[ "${_TORCH_VER}" == "nightly" ]]; then
+if [[ "${_TORCH_VER}" == "${PYTORCH_PINNED_NIGHTLY_SELECTOR}" ]]; then
   REQUEST_IS_NIGHTLY=1
+elif [[ "${_TORCH_VER}" == "${PYTORCH_LATEST_NIGHTLY_SELECTOR}" ]]; then
+  REQUEST_IS_NIGHTLY=1
+  REQUEST_IS_LATEST_NIGHTLY=1
 elif [[ "${_TORCH_VER}" =~ ^[0-9]+\.[0-9]+$ ]]; then
   REQUESTED_FAMILY="${_TORCH_VER}"
-  if ! pytorch_is_supported_family "${REQUESTED_FAMILY}"; then
+  if ! pytorch_is_installable_family "${REQUESTED_FAMILY}"; then
     echo "[ERROR] Unsupported --torch_ver family '${_TORCH_VER}'" >&2
     exit 1
   fi
@@ -143,7 +151,7 @@ elif [[ "${_TORCH_VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+[A-Za-z0-9._-]+)?$ ]]; then
   REQUESTED_EXACT_VERSION="${_TORCH_VER}"
   REQUESTED_FAMILY="$(pytorch_version_family "${_TORCH_VER}")" || exit 1
   REQUESTED_BUILD_TAG="$(pytorch_local_build_tag "${_TORCH_VER}")"
-  if ! pytorch_is_supported_family "${REQUESTED_FAMILY}"; then
+  if ! pytorch_is_installable_family "${REQUESTED_FAMILY}"; then
     echo "[ERROR] Unsupported --torch_ver value '${_TORCH_VER}'" >&2
     exit 1
   fi
@@ -196,9 +204,8 @@ if [[ -n "${INSTALLED_TORCH_FULL}" ]]; then
         SKIP_TORCH_INSTALL=1
         RESOLVED_TORCH_VERSION="${INSTALLED_TORCH_BASE}"
       fi
-    elif [[ "${REQUEST_IS_NIGHTLY}" == "1" && "${INSTALLED_TORCH_IS_NIGHTLY}" == "1" ]]; then
-      echo "[INFO] Requested nightly torch ${INSTALLED_TORCH_FULL} already present — keeping it"
-      SKIP_TORCH_INSTALL=1
+    elif [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
+      echo "[INFO] Re-resolving ${_TORCH_VER}; nightly selectors are never cached"
     elif [[ "${REQUEST_IS_EXACT}" == "1" ]]; then
       REQUESTED_BASE="$(pytorch_strip_local_version "${REQUESTED_EXACT_VERSION}")"
       if [[ "${INSTALLED_TORCH_BASE}" == "${REQUESTED_BASE}" ]]; then
@@ -227,7 +234,8 @@ if [[ "${SKIP_TORCH_INSTALL}" == "0" ]]; then
   HOST_CUDA=""
   PINNED_BUILD_TAG=""
 
-  if [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
+  if [[ "${REQUEST_IS_NIGHTLY}" == "1" && \
+        "${REQUEST_IS_LATEST_NIGHTLY}" == "0" ]]; then
     TORCH_DEV_FILE="${SCRIPTS_DIR}/../dependency/torch_dev.txt"
     PINNED_TORCH_VERSION="$(pytorch_get_pinned_requirement_version "${TORCH_DEV_FILE}" torch)"
     if [[ -z "${PINNED_TORCH_VERSION}" ]]; then
@@ -263,7 +271,12 @@ if [[ "${SKIP_TORCH_INSTALL}" == "0" ]]; then
     echo "[INFO] CUDA was not detected; using a CPU Torch wheel"
   fi
 
-  if [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
+  if [[ "${REQUEST_IS_LATEST_NIGHTLY}" == "1" ]]; then
+    pytorch_build_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
+    # Resolve Torch and TorchVision together so pip selects one compatible
+    # nightly pair from the same moving index.
+    install_torch --pre --upgrade torch torchvision || exit 1
+  elif [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
     pytorch_build_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
     install_torch -r "${TORCH_DEV_FILE}" || exit 1
   else
@@ -291,6 +304,36 @@ IFS=$'\t' read -r \
 echo "[INFO] Installed torch: ${INSTALLED_TORCH_FULL}"
 echo "[INFO] Torch wheel build: ${INSTALLED_TORCH_WHEEL_TAG}"
 
+if [[ "${REQUEST_IS_NIGHTLY}" == "1" && \
+      "${INSTALLED_TORCH_IS_NIGHTLY}" != "1" ]]; then
+  echo "[ERROR] ${_TORCH_VER} resolved non-nightly torch ${INSTALLED_TORCH_FULL}." >&2
+  exit 1
+fi
+
+if [[ "${REQUEST_IS_LATEST_NIGHTLY}" == "1" ]]; then
+  VISION_INFO="$(pytorch_get_installed_torchvision_info)" || {
+    echo "[ERROR] TorchVision is not importable after nightly-latest installation." >&2
+    exit 1
+  }
+  IFS=$'\t' read -r \
+    INSTALLED_VISION_FULL \
+    INSTALLED_VISION_BASE \
+    INSTALLED_VISION_WHEEL_TAG \
+    INSTALLED_VISION_IS_NIGHTLY <<< "${VISION_INFO}"
+
+  if [[ "${INSTALLED_VISION_IS_NIGHTLY}" != "1" ]]; then
+    echo "[ERROR] nightly-latest resolved stable torchvision ${INSTALLED_VISION_FULL}." >&2
+    exit 1
+  fi
+  if [[ "${INSTALLED_VISION_WHEEL_TAG}" != "none" && \
+        "${INSTALLED_VISION_WHEEL_TAG}" != "${INSTALLED_TORCH_WHEEL_TAG}" ]]; then
+    echo "[ERROR] Nightly wheel mismatch: torch uses ${INSTALLED_TORCH_WHEEL_TAG}, " \
+         "but torchvision is ${INSTALLED_VISION_FULL}." >&2
+    exit 1
+  fi
+  echo "[INFO] Installed torchvision: ${INSTALLED_VISION_FULL}"
+fi
+
 ###############################################################################
 # Install the auxiliary Python requirements
 ###############################################################################
@@ -307,7 +350,7 @@ if [[ "${_DIST}" -eq 1 ]]; then
     "${CCEX_PROJECT_PATH}"/dist/tico*.whl || exit 1
 else
   echo "[INFO] Installing TICO in editable mode"
-  python3 -m pip install --editable "${CCEX_PROJECT_PATH}" || exit 1
+  python3 -m pip install --no-deps --editable "${CCEX_PROJECT_PATH}" || exit 1
 fi
 
 # TorchVision is installed by `./ccex configure test`, so a global `pip check`

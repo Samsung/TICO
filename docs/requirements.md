@@ -226,16 +226,22 @@ The package metadata requires Python 3.10 or newer.
 
 ### PyTorch
 
-- The package warns when Torch is older than 2.5.
-- It also recommends Torch 2.6 or newer for security when an older supported release
-  is detected.
-- Source installation tooling currently supports stable Torch families 2.5 through
-  2.10 and a pinned nightly build.
-- The default source-install family is 2.7.
-- The current PR CI matrix tests Torch 2.5, 2.6, 2.7, 2.8, and the pinned nightly.
+- Package metadata accepts `torch>=2.10,<2.14`.
+- The qualified stable support window is Torch 2.10, 2.11, and 2.12.
+- The default source-install family is 2.12.
+- Torch 2.13 is explicitly installable as a qualification candidate and is not part of
+  release support until it is promoted.
+- `nightly` installs the repository-pinned Torch/TorchVision builds for reproducible
+  local debugging.
+- `nightly-latest` resolves Torch and TorchVision together from the moving nightly index;
+  scheduled compatibility CI uses this selector as its early-warning signal.
+- Pull requests run the full suite on the default family, blocking compatibility smoke
+  on the oldest supported family, and non-blocking candidate smoke. Scheduled CI runs
+  daily `nightly-latest` smoke and a weekly full matrix.
 
-“Install-tool support” and “PR CI coverage” are intentionally separate claims. A
-stable family accepted by `./ccex install` is not necessarily run in every pull request.
+Package compatibility, source-installer acceptance, qualified release support, and CI
+coverage are intentionally separate claims. The exact policy is defined in
+[`tico/utils/compat/torch_version_policy.py`](../tico/utils/compat/torch_version_policy.py).
 
 ### Operating system
 
@@ -327,7 +333,7 @@ TICO does not currently promise:
 | Circle artifact verification/extraction/passes | `test/unit_test/circle/` |
 | CLI and configuration | `test/pt2_to_circle_test/`, config tests, quantization example/config tests |
 | Performance thresholds | `test/performance/benchmark_perf.py`, invoked by `./ccex test -p` |
-| Torch compatibility and package build | `.github/workflows/check-pr.yaml` matrix |
+| Torch compatibility and package build | `tico/utils/compat/torch_version_policy.py`, `.github/workflows/check-pr.yaml`, `.github/workflows/check-pytorch-compatibility.yaml` |
 | Style and type checks | `.lintrunner.toml` through `./ccex format --no-apply-patches` |
 
 See [System Test Guide](./system_test.md) for test flow and commands.
@@ -348,10 +354,11 @@ Version-sensitive sources of truth:
 
 | Fact | Source |
 |---|---|
-| Python requirement and entry points | `pyproject.toml` |
-| Torch warning and public exports | `tico/__init__.py` |
-| Supported source-install Torch families | `infra/scripts/pytorch_package_utils.sh` |
-| PR CI matrix | `.github/workflows/check-pr.yaml` |
+| Python and Torch package requirements and entry points | `pyproject.toml` |
+| Runtime Torch warnings and public exports | `tico/__init__.py` |
+| Torch families, exact patches, wheel variants, and CI matrices | `tico/utils/compat/torch_version_policy.py` |
+| PR compatibility tiers | `.github/workflows/check-pr.yaml` |
+| Scheduled compatibility matrix | `.github/workflows/check-pytorch-compatibility.yaml` |
 | Compile configuration | `tico/config/v1.py` and its use sites |
 | Pass order | `tico/utils/convert.py` |
 | Performance thresholds | `test/performance/benchmark_perf.py` |

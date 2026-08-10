@@ -40,7 +40,7 @@ The test suite is designed to answer distinct questions:
 4. **Negative-path behavior**
    - Does TICO reject unsupported or invalid patterns with the expected diagnostic?
 5. **Version compatibility**
-   - Does the package build and test across the current PR Torch matrix?
+   - Does the package satisfy the tiered PR and scheduled PyTorch compatibility policy?
 6. **Performance regression detection**
    - Do the opt-in synthetic Llama conversion and size benchmarks remain within their
      repository thresholds?
@@ -62,7 +62,7 @@ runtime parity, and target-NPU compilation are different checks.
 | Quantization tests | `test/quantization/` | Cover algorithms, WrapQ, qparam passes, configs, recipes, evaluation, analysis, and export behavior. |
 | Performance tests | `test/performance/` | Measure the current synthetic Llama decoder-layer conversion time and serialized-size thresholds. |
 | Shared test support | `test/support/` | Provide test builders, runtime adapters, tags, and helpers. |
-| PR compatibility checks | `.github/workflows/check-pr.yaml` | Build/install/test selected Torch versions and enforce style and DCO checks. |
+| PyTorch compatibility checks | `.github/workflows/check-pr.yaml`, `.github/workflows/check-pytorch-compatibility.yaml` | Enforce style/DCO checks and validate the default, oldest supported, candidate, and `nightly-latest` tiers. |
 
 ## 3. Test directory layout
 
@@ -441,9 +441,15 @@ source of structural assertions.
 
 ## 11. Continuous integration
 
-The current pull-request workflow targets `main` and `rel/*` and contains:
+PyTorch version selection is generated from
+`tico/utils/compat/torch_version_policy.py`; workflow YAML does not maintain a separate
+hard-coded family list.
 
-### Commit-message check
+### Pull-request workflow
+
+The pull-request workflow targets `main` and `rel/*`.
+
+#### Commit-message check
 
 For non-draft pull requests, at least one commit body must contain:
 
@@ -451,7 +457,7 @@ For non-draft pull requests, at least one commit body must contain:
 TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
 ```
 
-### Style job
+#### Style job
 
 - Ubuntu 24.04
 - Python 3.12
@@ -460,28 +466,38 @@ TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
 
 The lintrunner configuration currently includes Pylint, ufmt, and mypy for Python files.
 
-### Build-and-test matrix
+#### Build package once
 
-Current Torch matrix:
+The workflow builds one TICO wheel and uploads one short-lived artifact. All versioned
+test jobs download and reuse that wheel instead of rebuilding it for each Torch family.
 
-```text
-2.5, 2.6, 2.7, 2.8, nightly
-```
+#### Versioned tests
 
-Each matrix job:
+- The complete suite runs on the default qualified family, currently 2.12.
+- Blocking export and quantization smoke tests run on the oldest supported family,
+  currently 2.10.
+- The same smoke tests run non-blockingly on the qualification candidate, currently
+  2.13.
 
-1. Checks out full Git history.
-2. Installs the CI-pinned ONE compiler package.
-3. Builds the TICO wheel.
-4. Installs the wheel with the selected Torch family.
-5. Runs `pt2-to-circle -h` as an entry-point smoke check.
-6. Configures test dependencies for that Torch installation.
-7. Prints installed Torch package versions.
-8. Runs `./ccex test`.
-9. Uploads the wheel artifact.
+The smoke path includes a small `torch.export`/PT2/Circle conversion and a quantized CNN
+Circle export. It is intended to detect version-contract breakage without multiplying
+the complete suite across every pull request.
 
-The source installer supports additional stable families, but the PR matrix is the
-explicit list above.
+### Scheduled compatibility workflow
+
+A separate workflow provides broader early warning without participating in PR branch
+protection:
+
+- daily: `nightly-latest` export and quantization smoke
+- weekly: complete suite on all qualified stable families, qualification candidates,
+  and `nightly-latest`
+- manual dispatch: complete matrix on demand
+
+### Official release workflow
+
+Official package publication builds the wheel once and runs the complete suite on every
+qualified stable family before publishing. Candidate and nightly selectors are not
+part of the release-support gate.
 
 ## 12. Test-result reporting policy
 
@@ -559,7 +575,7 @@ and make the assertion distinguish the bug from unrelated failures.
 | Quantized graph legalization | `test/quantization/passes/`, quantization unit tests |
 | Quantization API and workflows | registry/config/WrapQ/algorithm/recipe tests |
 | Circle artifact structural contracts | `test/unit_test/circle/` |
-| Package/Torch compatibility | `.github/workflows/check-pr.yaml` |
+| Package/Torch compatibility | `tico/utils/compat/torch_version_policy.py`, `.github/workflows/check-pr.yaml`, `.github/workflows/check-pytorch-compatibility.yaml` |
 | Performance thresholds | `test/performance/benchmark_perf.py` through `./ccex test -p` |
 | Formatting/type quality | `.lintrunner.toml` through `./ccex format --no-apply-patches` |
 
