@@ -2,10 +2,16 @@ name: Check PyTorch Compatibility
 
 on:
   schedule:
-    # Daily latest-nightly smoke at 03:17 KST.
-    - cron: '17 18 * * *'
-    # Weekly full matrix on Monday at 03:41 KST.
-    - cron: '41 18 * * 0'
+    # Tuesday-Sunday, 03:30 KST:
+    # Run the nightly smoke test.
+    #
+    # Monday is excluded because the weekly full matrix below
+    # already tests PyTorch nightly.
+    - cron: "30 18 * * 1-6"
+
+    # Monday, 04:30 KST:
+    # Run the full supported/candidate/nightly matrix.
+    - cron: "30 19 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -57,7 +63,7 @@ jobs:
 
   nightly_smoke:
     name: Daily latest-nightly smoke
-    if: github.event_name == 'schedule' && github.event.schedule == '17 18 * * *'
+    if: github.event_name == 'schedule' && github.event.schedule == '30 18 * * 1-6'
     needs:
       - resolve_torch_policy
       - build_package
@@ -89,7 +95,7 @@ jobs:
     name: Full test (${{ matrix.tier }}, torch ${{ matrix.torch-version }})
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'schedule' && github.event.schedule == '41 18 * * 0')
+      (github.event_name == 'schedule' && github.event.schedule == '30 19 * * 0')
     needs:
       - resolve_torch_policy
       - build_package
