@@ -1,173 +1,395 @@
 # Development Guide
 
-This guide covers setting up a development environment, running tests, and formatting
-code. All developer workflows go through the `./ccex` helper script in the repository
-root.
+This guide describes the current source-development workflow for TICO. Repository
+commands are routed through the `./ccex` helper in the project root.
 
-## Table of Contents
+## Contents
 
-- [Environment setup](#environment-setup)
-- [Testing](#testing)
-  - [Run all tests](#run-all-tests)
-  - [Run a subset](#run-a-subset)
-  - [Debugging aids](#debugging-aids)
-  - [Model tests](#model-tests)
-  - [Runtime selection](#runtime-selection)
-- [Code formatting](#code-formatting)
+- [Prerequisites](#prerequisites)
+- [Create a development environment](#create-a-development-environment)
+- [Torch selection](#torch-selection)
+- [Build and install a wheel](#build-and-install-a-wheel)
+- [Run tests](#run-tests)
+- [Test organization](#test-organization)
+- [Runtime selection](#runtime-selection)
+- [Model tests](#model-tests)
+- [Debug conversion](#debug-conversion)
+- [Formatting and static checks](#formatting-and-static-checks)
+- [Coverage](#coverage)
+- [Pull-request CI](#pull-request-ci)
+- [Change-specific guidance](#change-specific-guidance)
 
-## Environment setup
+## Prerequisites
 
-Run the commands below to configure the testing and/or formatting environment:
+- Linux development environment
+- Python 3.10 or newer
+- `git`
+- A Python virtual environment is strongly recommended
+- A compatible ONE installation when running `circle-interpreter`-based end-to-end
+  tests locally
 
-```bash
-./ccex configure          # testing & formatting environment
-./ccex configure format   # formatting environment only
-./ccex configure test     # testing environment only
-```
+TICO conversion does not require ONE. The default end-to-end test runtime does because
+it executes the generated Circle model.
 
-> [!NOTE]
-> `./ccex configure test` installs `TICO` in editable mode. Use
-> `./ccex configure test --dist` to install from the built wheel instead.
-
-**Available options**
-
-| Option | Description |
-|---|---|
-| `--torch_ver <ver>` | Torch (and torch-family packages, e.g. torchvision) version to install: a family (`2.5` ~ `2.10`), an exact version (e.g. `2.7.0+cu118`), or `nightly`. Default: `2.7` |
-| `--cuda_ver <maj.min>` | Override the detected CUDA version (e.g. `12.1`) |
-| `--cpu_only` | Force a CPU-only installation |
+## Create a development environment
 
 ```bash
-./ccex configure test                    # stable 2.7.x (default)
-./ccex configure test --torch_ver 2.6    # stable 2.6.x
-./ccex configure test --torch_ver nightly
+git clone https://github.com/Samsung/TICO.git
+cd TICO
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install a supported Torch build and TICO in editable mode.
+./ccex install
+
+# Install formatter/static-check dependencies and test-only dependencies.
+./ccex configure
 ```
 
-## Testing
+The order matters. `./ccex configure test` validates an already installed Torch package
+and installs the matching TorchVision build; it does not install TICO or Torch. Run
+`./ccex install` first.
 
-### Run all tests
+Set up only one part of the environment when needed:
+
+```bash
+./ccex configure format
+./ccex configure test
+```
+
+## Torch selection
+
+The source installer accepts a stable family, an exact version, or a pinned nightly:
+
+```bash
+./ccex install --torch_ver 2.7
+./ccex install --torch_ver 2.10.0
+./ccex install --torch_ver 2.7.1+cu128
+./ccex install --torch_ver nightly
+```
+
+Current stable families supported by the install tooling are 2.5 through 2.10. The
+default family is 2.7. Family requests resolve to a project-pinned latest supported
+patch rather than allowing pip to select any patch release.
+
+Compute-platform options:
+
+```bash
+# Force a CPU wheel.
+./ccex install --cpu_only
+
+# Override detected host CUDA capability when selecting a compatible wheel.
+./ccex install --cuda_ver 12.8
+```
+
+`--cpu_only` and `--cuda_ver` are mutually exclusive.
+
+When no Torch version is explicitly requested and a supported stable Torch package is
+already installed, `./ccex install` preserves that installation if its compute platform
+is compatible. `./ccex configure test` then installs the matching TorchVision package
+and verifies the final package pair with `pip check`.
+
+## Build and install a wheel
+
+Build the distribution artifacts:
+
+```bash
+./ccex build
+```
+
+Install from `dist/` instead of editable source:
+
+```bash
+./ccex install --dist
+```
+
+A clean wheel workflow similar to CI is:
+
+```bash
+./ccex build
+./ccex install --dist --torch_ver 2.7
+./ccex configure test --torch_ver 2.7
+pt2-to-circle -h
+```
+
+## Run tests
+
+### Default suite
 
 ```bash
 ./ccex test
-# OR
-./ccex test run-all-tests
 ```
 
-> [!NOTE]
-> Unit tests don't include model tests — see [Model tests](#model-tests).
+With no filter, `ccex` runs `unittest` discovery under `test/`. Large model tests are
+selected separately with `-m` and are not part of the normal model-independent suite.
 
-### Run a subset
-
-To run a subset of `test.modules.*`, use `./ccex test -k <keyword>`:
+### Keyword filtering
 
 ```bash
-# Tests in a specific sub-directory (op/, net/, ...)
+./ccex test -k add
+./ccex test -k ConvertMatmulToLinear
+./ccex test -k quantization
+```
+
+The shorthand keywords `op` and `net` are expanded to the corresponding generated
+module-test namespaces:
+
+```bash
 ./ccex test -k op
 ./ccex test -k net
+```
 
-# Tests in one file (single/op/add, single/op/sub, ...)
+Use the narrowest relevant test first, then expand to the owning subsystem and finally
+to the complete suite for cross-cutting changes.
+
+### Other test-runner options
+
+```bash
+./ccex test --all                 # Explicit full suite
+./ccex test -i                    # Include internal-only tests
+./ccex test -v                    # Set TICO_LOG=4 for this run
+./ccex test -r onert              # Select onert for runtime parity checks
+./ccex test -p                    # Run performance benchmarks
+```
+
+`--all` and `--keyword` cannot be combined. `--model` also cannot be combined with
+`--all` or `--keyword`.
+
+## Test organization
+
+```text
+test/
+├── modules/                 # Small PyTorch modules used by generated E2E tests
+│   ├── op/
+│   ├── net/
+│   └── model/               # Opt-in dependency-isolated model tests
+├── unit_test/               # Focused tests for core conversion and Circle utilities
+│   ├── circle/
+│   ├── ops/
+│   ├── passes/
+│   ├── quantization/
+│   ├── serialize/
+│   └── utils/
+├── quantization/            # Algorithms, WrapQ, recipes, configs, export, and analysis
+├── support/                 # Shared runtime and test-builder utilities
+├── performance/             # Llama decoder-layer conversion/size benchmarks
+└── pt2_to_circle_test/      # CLI/API and end-to-end conversion tests
+```
+
+The module test harness normally:
+
+1. Creates the PyTorch reference outputs before export.
+2. Exports directly or saves and reloads a `.pt2` file.
+3. Converts the `ExportedProgram` to Circle.
+4. Runs `circle2circle` to validate the serialized model.
+5. Executes with `circle-interpreter` or `onert`, unless inference is disabled by a
+   test tag.
+6. Compares output count, shape, dtype, and values with explicit tolerances.
+
+See [System Test Guide](./system_test.md) for the complete test strategy.
+
+## Runtime selection
+
+The default runtime for module parity tests is `circle-interpreter`:
+
+```bash
 ./ccex test -k add
-./ccex test -k sub
-
-# The SimpleAdd test in test/modules/single/op/add.py
-./ccex test -k SimpleAdd
 ```
 
-### Debugging aids
-
-To see the full debug log, add `-v` or set `TICO_LOG=4`:
+Select `onert` from the command line or environment:
 
 ```bash
-TICO_LOG=4 ./ccex test -k add
-# OR
-./ccex test -v -k add
+./ccex test -r onert -k add
+CCEX_RUNTIME=onert ./ccex test -k add
 ```
 
-To dump the intermediate torch graph IR as `.png`, set `TICO_GRAPH_DUMP=1`:
+A test module may explicitly require `onert`; this is used for dynamic-shape execution.
+The test setup installs the project-pinned pre-release `onert` package from
+`test/requirements_pre.txt`.
 
-```bash
-TICO_GRAPH_DUMP=1 ./ccex test -k add
-# Images are dumped into $(pwd)/.tico_temp
-```
+## Model tests
 
-### Model tests
-
-To run model tests locally, install each model's dependencies first, then run the tests
-one by one:
+Model tests are selected by directory name or shell-style pattern:
 
 ```bash
 pip install -r test/modules/model/<model_name>/requirements.txt
-
-# Run a single model
 ./ccex test -m <model_name>
 
-# Run models whose names contain "Llama" (Llama, LlamaDecoderLayer, LlamaWithGQA, ...)
-# Note: quote the wildcard(*) pattern
+# Quote wildcard patterns so the shell does not expand them.
 ./ccex test -m "Llama*"
 ```
 
-For example:
+The `-m` option sets `CCEX_TEST_MODEL` and runs the model-test loader. Model tests may
+have additional dependencies and can be significantly more expensive than synthetic
+unit or module tests. Do not use a full model test when a small deterministic graph can
+cover the behavior.
+
+## Debug conversion
+
+### Log levels
+
+Set `TICO_LOG` before the Python process imports TICO:
 
 ```bash
-./ccex test -m InceptionV3
+TICO_LOG=4 ./ccex test -k add
+TICO_LOG=4 python examples/my_conversion.py
 ```
 
-### Runtime selection
+| Value | Level |
+|---:|---|
+| `1` | fatal |
+| `2` | warning |
+| `3` | info |
+| `4` | debug |
 
-By default, `./ccex test` runs all modules with the `circle-interpreter` engine. You can
-run tests with the `onert` runtime instead.
+Debug mode includes instrumented graph and constant-size diffs around passes and
+conversion phases.
 
-**Supported runtimes**
-
-- `circle-interpreter` (default) — uses the Circle interpreter for inference.
-- `onert` — uses the ONERT package for inference; useful when the Circle interpreter
-  cannot run a given module.
-
-**0. Install ONERT**
+### Intermediate graph images
 
 ```bash
-pip install onert
+TICO_GRAPH_DUMP=1 ./ccex test -k add
 ```
 
-**1. Command-line flag**
+The main conversion pipeline writes these stage snapshots when applicable:
+
+```text
+.tico_tmp/session_<timestamp>/1_after_decompose.png
+.tico_tmp/session_<timestamp>/2_after_legalize.png
+.tico_tmp/session_<timestamp>/3_after_quantfold.png
+```
+
+Graph rendering uses `pydot` and Graphviz. The output directory is session-scoped; do
+not commit generated images.
+
+### Circle artifact inspection
 
 ```bash
-# Run with the default circle-interpreter
-./ccex test
-
-# Run all tests with onert
-./ccex test --runtime onert
-# or
-./ccex test -r onert
+tico-circle inspect model.circle --tensors --operators
+tico-circle verify model.circle
+tico-circle extract model.circle --ops 20-64 -o region.circle
 ```
 
-**2. Environment variable**
+Use `tico-circle verify` for static Circle consistency. Use an end-to-end runtime test
+for numerical parity and backend execution.
 
-```bash
-# Temporarily override for one command
-CCEX_RUNTIME=onert ./ccex test
+## Formatting and static checks
 
-# Persist in your shell session
-export CCEX_RUNTIME=onert
-./ccex test
-```
-
-## Code formatting
-
-Install the formatting requirements:
+Install the tools:
 
 ```bash
 ./ccex configure format
 ```
 
-Run the formatter:
+Apply formatter-generated patches:
 
 ```bash
 ./ccex format
 ```
 
+Check all files without applying changes, as CI does:
+
+```bash
+./ccex format --no-apply-patches
+```
+
+Check only files changed from the local `main` branch:
+
+```bash
+./ccex format --diff-only --no-apply-patches
+```
+
+The current lintrunner configuration executes:
+
+- Pylint
+- ufmt (Black-compatible formatting plus import sorting)
+- mypy
+
+## Coverage
+
+Run the discovery suite under `coverage` and print a terminal report:
+
+```bash
+./ccex coverage
+```
+
+Write a report under `test/reports/cov/`:
+
+```bash
+./ccex coverage -f txt
+./ccex coverage -f xml
+```
+
+If `coverage` is not installed, the current helper requests version 7.6.1.
+
+## Pull-request CI
+
+The PR workflow currently performs three major checks for pull requests targeting
+`main` or `rel/*`:
+
+1. **Commit-message check**
+   - Runs when the pull request is ready for review.
+   - Requires at least one commit-body line in the form:
+
+     ```text
+     TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
+     ```
+
+2. **Style check**
+   - Runs on Ubuntu 24.04 with Python 3.12.
+   - Executes `./ccex configure format` and
+     `./ccex format --no-apply-patches`.
+
+3. **Build and test matrix**
+   - Current matrix: Torch 2.5, 2.6, 2.7, 2.8, and the pinned nightly.
+   - Installs the CI-pinned ONE compiler package.
+   - Builds a wheel, installs it, configures test dependencies, and runs
+     `./ccex test`.
+
+Performance tests are available through `./ccex test -p`, but are not part of the
+current PR matrix.
+
+## Change-specific guidance
+
+### Add or change a PyTorch-IR pass
+
+- Implement `PassBase.call()` and return `PassResult(modified=...)` accurately.
+- Preserve `ExportedProgram` graph-signature mappings while replacing nodes.
+- Update metadata for newly created or rewritten tensors.
+- Add focused coverage under `test/unit_test/passes/`.
+- Include both matching and structurally similar non-matching cases.
+- Add an end-to-end module test when serialization or runtime behavior changes.
+
+### Add a serialized operator
+
+- Add or update a `NodeVisitor` under `tico/serialize/operators/`.
+- Register every supported ATen overload with `register_node_visitor`.
+- Add serializer/operator unit coverage and a module conversion/parity test.
+- Do not leave an unsupported operator in the final graph and rely on a runtime to
+  reject it; TICO validates supported targets before serialization.
+
+### Change quantization
+
+- Preserve the `prepare -> calibration/statistics -> convert` lifecycle.
+- Put generic algorithms and infrastructure in their owning quantization packages.
+- Put model-family behavior in recipe adapters rather than generic stages.
+- Prefer deterministic synthetic tests before full model evaluation.
+- Update the relevant quantization README or configuration reference when behavior is
+  user visible.
+
+### Change Circle artifact tools
+
+- Keep PyTorch-IR passes in `tico/passes/` and serialized Circle-to-Circle passes in
+  `tico/circle/passes/`.
+- Verify index remapping, graph boundaries, buffers, signatures, multi-subgraph
+  behavior, and cleanup contracts as applicable.
+- Follow the dedicated pass guidance in
+  [Circle artifact tools](../tico/circle/README.md#writing-a-new-circle-pass).
+
 ## See also
 
-- [System design](./design.md) — architecture, pass pipeline, and behavior design
-- [Requirements](./requirements.md) — functional and non-functional requirements
-- [Quantization recipes developer guide](../tico/quantization/recipes/README.md) — adding adapters, stages, and configs
+- [System Design](./design.md)
+- [Requirements](./requirements.md)
+- [System Test Guide](./system_test.md)
+- [Quantization recipes developer guide](../tico/quantization/recipes/README.md)
