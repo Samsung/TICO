@@ -157,6 +157,39 @@ class TestAffineObserverBase(unittest.TestCase):
         self.assertTrue(torch.allclose(y[0], y0, atol=1e-6))
         self.assertTrue(torch.allclose(y[1], y1, atol=1e-6))
 
+    def test_load_qparams_flattens_per_channel_broadcast_shape(self):
+        """GPTQ-style broadcast qparams should become valid 1-D qparams."""
+        obs = _MinMaxLikeObserver(
+            name="pc_gptq",
+            dtype=DType.uint(4),
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+        injected_scale = torch.tensor([[0.1], [0.2]])
+        injected_zero_point = torch.tensor([[7], [8]], dtype=torch.int)
+
+        obs.load_qparams(
+            injected_scale,
+            injected_zero_point,
+            lock=True,
+        )
+
+        scale, zero_point = obs.compute_qparams()
+        self.assertEqual(scale.shape, torch.Size([2]))
+        self.assertEqual(zero_point.shape, torch.Size([2]))
+
+        x = torch.tensor([[-0.2, 0.0, 0.4], [-0.3, 0.2, 0.9]])
+        actual = obs.fake_quant(x)
+        expected = torch.fake_quantize_per_channel_affine(
+            x,
+            scale=injected_scale.reshape(-1),
+            zero_point=injected_zero_point.reshape(-1),
+            axis=0,
+            quant_min=obs.dtype.qmin,
+            quant_max=obs.dtype.qmax,
+        )
+        torch.testing.assert_close(actual, expected)
+
     def test_degenerate_constant_cases(self):
         # Verify constant-tensor handling (0, positive, negative) for asymmetric affine
         def _check_scalar(value: float, dtype: DType):
