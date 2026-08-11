@@ -19,6 +19,9 @@ from typing import Any, Mapping
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.config import save_effective_config
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.evaluation.selection import (
+    validate_adapter_evaluation_config,
+)
 from tico.quantization.recipes.stages import get_stage
 from tico.quantization.recipes.utils import set_seed
 
@@ -336,6 +339,7 @@ class QuantizationRunner:
         _print_config_summary(cfg)
 
         adapter = get_adapter(model_cfg["family"])
+        validate_adapter_evaluation_config(adapter, cfg)
         ctx = RecipeContext(cfg=cfg, adapter=adapter)
 
         print("=== Loading model ===")

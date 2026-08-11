@@ -70,6 +70,7 @@ examples/quantize.py
   └─ load_recipe_config(...)
   └─ QuantizationRunner.run(cfg)
        ├─ get_adapter(cfg["model"]["family"])
+       ├─ validate_adapter_evaluation_config(adapter, cfg)
        ├─ adapter.load_model(ctx)
        ├─ adapter.build_calibration_inputs(ctx)
        ├─ for each enabled pipeline stage:
@@ -116,7 +117,10 @@ A model adapter owns model-family-specific behavior:
 ```python
 class ModelAdapter(ABC):
     family: str
+    evaluation_targets: frozenset[str]
+    evaluation_target_requirements: Mapping[str, str]
 
+    def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None: ...
     def load_model(self, ctx: RecipeContext) -> RecipeContext: ...
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[Any]: ...
     def forward_calibration(self, ctx, model, calibration_inputs, *, desc: str) -> None: ...
@@ -127,6 +131,13 @@ class ModelAdapter(ABC):
 ```
 
 Adapters should be deterministic with respect to `runtime.seed` when possible.
+
+Adapters also declare canonical top-level evaluation target names. When
+`evaluation.selected_tasks` is present, the common adapter validation treats it
+as an exclusive allow-list and rejects unsupported names before model loading.
+Benchmark details remain under their existing config keys, such as
+`evaluation.lm_eval_tasks`, `evaluation.vlm_tasks`, or
+`evaluation.mmmu.subjects`.
 
 ### `Stage`
 

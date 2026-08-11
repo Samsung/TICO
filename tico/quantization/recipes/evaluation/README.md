@@ -27,14 +27,41 @@ Evaluation helpers should not:
 The model adapter decides **which** evaluation helpers to call. The helper
 decides **how** to evaluate a task.
 
+## Top-level target selection
+
+`recipes/evaluation/selection.py` defines the common selection contract used by
+all model adapters.
+
+`evaluation.selected_tasks` is either:
+
+- absent or `null`, which preserves each adapter's existing enabled behavior;
+- a list of canonical top-level target names, which becomes an exclusive
+  allow-list;
+- an empty list, which intentionally runs no evaluation targets.
+
+The `evaluate.py --tasks` option populates this field. It selects evaluators,
+not their benchmark-specific details. For example:
+
+```text
+lm_eval -> evaluation.lm_eval_tasks
+vqa     -> evaluation.vlm_tasks
+mmmu    -> evaluation.mmmu.*
+ppl     -> evaluation.perplexity.* or evaluation.ppl.*
+```
+
+Each adapter declares `evaluation_targets`. A selected name that is not in that
+registry must fail before model loading. Do not add aliases for config key names
+or legacy spellings.
+
 ## Current layout
 
 ```text
 recipes/evaluation/
 ├── README.md
-├── llm.py      # perplexity and text-only LM benchmark helpers
-├── vlm.py      # VQA / COCO-style VLM benchmark helpers
-└── mmlu.py     # MMLU wrapper helpers
+├── selection.py # top-level target parsing and allow-list helpers
+├── llm.py       # perplexity and text-only LM benchmark helpers
+├── vlm.py       # VQA / COCO-style VLM benchmark helpers
+└── mmlu.py      # MMLU wrapper helpers
 ```
 
 The split is by benchmark/input type, not by model name.
@@ -100,8 +127,13 @@ evaluation:
 Example adapter call:
 
 ```python
-hellaswag_cfg = eval_cfg.get("hellaswag", {})
-if hellaswag_cfg.get("enabled", False):
+from tico.quantization.recipes.evaluation.selection import (
+    get_mapping_evaluation_config,
+    should_run_mapping_evaluation,
+)
+
+if should_run_mapping_evaluation(eval_cfg, "hellaswag"):
+    hellaswag_cfg = get_mapping_evaluation_config(eval_cfg, "hellaswag")
     results = evaluate_hellaswag(
         model=ctx.model,
         tokenizer=ctx.tokenizer,

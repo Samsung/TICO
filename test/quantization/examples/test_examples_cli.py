@@ -32,6 +32,7 @@ import tico.quantization.examples.inspector as inspect_cli
 import tico.quantization.examples.quantize as quantize_cli
 
 import torch
+from tico.quantization.recipes.adapters.base import ModelAdapter
 
 
 class TestQuantizationExamplesCLI(unittest.TestCase):
@@ -85,14 +86,20 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         )
         self.assertEqual(calls["run"], {"loaded": True})
 
-    def test_evaluate_cli_loads_checkpoint_and_overrides_tasks(self):
-        """evaluate.py should load checkpoints and route task overrides to the adapter."""
+    def test_evaluate_cli_loads_checkpoint_and_selects_top_level_targets(self):
+        """evaluate.py should preserve task details and select top-level targets."""
         calls: dict[str, Any] = {}
 
         class FakeAdapter:
             """Fake adapter used by evaluate CLI tests."""
 
             family = "llama"
+            evaluation_targets = frozenset({"lm_eval", "ppl"})
+            evaluation_target_requirements = {"lm_eval": "lm_eval_tasks"}
+
+            def validate_evaluation_config(self, cfg):
+                """Validate targets through the shared adapter implementation."""
+                ModelAdapter.validate_evaluation_config(self, cfg)
 
             def load_model(self, ctx):
                 """Attach a floating-point model to the context."""
@@ -117,7 +124,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "--checkpoint",
             "model.pt",
             "--tasks",
-            "winogrande,arc_easy",
+            "lm_eval,ppl",
         ]
 
         with patch.object(
@@ -126,26 +133,89 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             lambda path, overrides: {
                 "model": {"family": "llama", "name_or_path": "model"},
                 "runtime": {},
-                "evaluation": {},
+                "evaluation": {"enabled": True, "lm_eval_tasks": "mmlu"},
             },
         ), patch.object(
-            evaluate_cli, "set_seed", lambda seed: calls.setdefault("seed", seed)
+            evaluate_cli,
+            "set_seed",
+            lambda seed: calls.setdefault("seed", seed),
         ), patch.object(
-            evaluate_cli, "get_adapter", lambda family: FakeAdapter()
+            evaluate_cli,
+            "get_adapter",
+            lambda family: FakeAdapter(),
         ), patch.object(
             evaluate_cli.torch,
             "load",
             lambda path, **kwargs: FakeCheckpoint(),
         ), patch.object(
-            sys, "argv", argv
+            sys,
+            "argv",
+            argv,
         ):
             evaluate_cli.main()
 
         self.assertEqual(calls["ctx"].model, "checkpoint-eval")
         self.assertEqual(
-            calls["ctx"].cfg["evaluation"]["lm_eval_tasks"],
-            "winogrande,arc_easy",
+            calls["ctx"].cfg["evaluation"]["selected_tasks"],
+            ["lm_eval", "ppl"],
         )
+        self.assertEqual(
+            calls["ctx"].cfg["evaluation"]["lm_eval_tasks"],
+            "mmlu",
+        )
+
+    def test_evaluate_cli_rejects_config_key_alias_as_target(self):
+        """evaluate.py should reject non-canonical target names before model loading."""
+        calls: list[str] = []
+
+        class FakeAdapter:
+            """Fake adapter used to verify early target validation."""
+
+            family = "llama"
+            evaluation_targets = frozenset({"lm_eval", "ppl"})
+            evaluation_target_requirements = {"lm_eval": "lm_eval_tasks"}
+
+            def validate_evaluation_config(self, cfg):
+                """Validate targets through the shared adapter implementation."""
+                ModelAdapter.validate_evaluation_config(self, cfg)
+
+            def load_model(self, ctx):
+                """Record an unexpected model load."""
+                calls.append("load")
+                return ctx
+
+        argv = [
+            "evaluate.py",
+            "--config",
+            "recipe.yaml",
+            "--tasks",
+            "lm_eval_tasks",
+        ]
+
+        with patch.object(
+            evaluate_cli,
+            "load_recipe_config",
+            lambda path, overrides: {
+                "model": {"family": "llama", "name_or_path": "model"},
+                "runtime": {},
+                "evaluation": {"enabled": True, "lm_eval_tasks": "mmlu"},
+            },
+        ), patch.object(
+            evaluate_cli,
+            "get_adapter",
+            lambda family: FakeAdapter(),
+        ), patch.object(
+            sys,
+            "argv",
+            argv,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unsupported evaluation target",
+            ):
+                evaluate_cli.main()
+
+        self.assertEqual(calls, [])
 
     def test_inspect_cli_dispatches_static_llama_runtime(self):
         """inspector.py should dispatch static LLaMA runtime mode without loading adapters."""

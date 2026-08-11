@@ -32,6 +32,11 @@ from tico.quantization.recipes.evaluation.llava_bench_judge import (
 )
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
+from tico.quantization.recipes.evaluation.selection import (
+    get_mapping_evaluation_config,
+    should_run_evaluation,
+    should_run_mapping_evaluation,
+)
 from tico.quantization.recipes.evaluation.video_mme import evaluate_and_print_video_mme
 from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
@@ -53,6 +58,19 @@ from tico.quantization.recipes.utils import (
 
 class Qwen3VLAdapter(ModelAdapter):
     family = "qwen3_vl"
+    evaluation_targets = frozenset(
+        {
+            "vqa",
+            "coco",
+            "llava_bench",
+            "videomme",
+            "mmlu",
+            "hellaswag",
+            "mmmu",
+            "ppl",
+        }
+    )
+    evaluation_target_requirements = {"vqa": "vlm_tasks"}
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         cfg = ctx.cfg
@@ -372,19 +390,46 @@ class Qwen3VLAdapter(ModelAdapter):
         if not eval_cfg.get("enabled", False):
             return
 
+        self.validate_evaluation_config(ctx.cfg)
         max_seq_len = eval_cfg.get("max_seq_len")
         n_samples = int(eval_cfg.get("n_samples", 50))
-        tasks = eval_cfg.get("vlm_tasks") or []
+        raw_vqa_tasks = eval_cfg.get("vlm_tasks") or []
         verbose = bool(eval_cfg.get("verbose", False))
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
-        if isinstance(tasks, str):
-            tasks = [t.strip() for t in tasks.split(",") if t.strip()]
 
-        if tasks:
+        if should_run_evaluation(
+            eval_cfg,
+            "vqa",
+            default_enabled=bool(raw_vqa_tasks),
+        ):
+            if isinstance(raw_vqa_tasks, str):
+                vqa_tasks = [
+                    task.strip() for task in raw_vqa_tasks.split(",") if task.strip()
+                ]
+            elif isinstance(raw_vqa_tasks, Sequence):
+                vqa_tasks = []
+                for task in raw_vqa_tasks:
+                    if not isinstance(task, str):
+                        raise TypeError(
+                            "evaluation.vlm_tasks must contain only strings."
+                        )
+                    normalized_task = task.strip()
+                    if normalized_task:
+                        vqa_tasks.append(normalized_task)
+            else:
+                raise TypeError(
+                    "evaluation.vlm_tasks must be a sequence or "
+                    "comma-separated string."
+                )
+
+            if not vqa_tasks:
+                raise ValueError(
+                    "evaluation.vlm_tasks must be non-empty when vqa runs."
+                )
             vqa_results = evaluate_vqa_tasks(
                 model=ctx.model,
                 processor=ctx.processor,
-                tasks=tasks,
+                tasks=vqa_tasks,
                 device=str(ctx.device),
                 n_samples=n_samples,
                 max_seq_len=max_seq_len,
@@ -393,7 +438,11 @@ class Qwen3VLAdapter(ModelAdapter):
             )
             print_vqa_results("VQA evaluation", vqa_results)
 
-        if eval_cfg.get("coco", False):
+        if should_run_evaluation(
+            eval_cfg,
+            "coco",
+            default_enabled=bool(eval_cfg.get("coco", False)),
+        ):
             coco_results = evaluate_coco(
                 model=ctx.model,
                 processor=ctx.processor,
@@ -404,16 +453,26 @@ class Qwen3VLAdapter(ModelAdapter):
             )
             print_coco_score_results("\n=== COCO Evaluation ===", coco_results)
 
-        llava_bench_cfg = eval_cfg.get("llava_bench", False)
-        if isinstance(llava_bench_cfg, Mapping):
-            if llava_bench_cfg.get("enabled", False):
-                mode = str(llava_bench_cfg.get("mode", "judge")).lower()
+        raw_llava_cfg = eval_cfg.get("llava_bench")
+        llava_default_enabled = (
+            bool(raw_llava_cfg.get("enabled", False))
+            if isinstance(raw_llava_cfg, Mapping)
+            else bool(raw_llava_cfg)
+        )
+        if should_run_evaluation(
+            eval_cfg,
+            "llava_bench",
+            default_enabled=llava_default_enabled,
+        ):
+            if isinstance(raw_llava_cfg, Mapping):
+                llava_cfg = raw_llava_cfg
+                mode = str(llava_cfg.get("mode", "judge")).lower()
                 if mode in {"judge", "llm_judge"}:
                     evaluate_and_print_llava_bench_judge(
                         model=ctx.model,
                         processor=ctx.processor,
                         device=str(ctx.device),
-                        llava_cfg=llava_bench_cfg,
+                        llava_cfg=llava_cfg,
                         model_cfg=ctx.cfg.get("model", {}),
                         runtime_cfg=ctx.cfg.get("runtime", {}),
                         default_n_samples=n_samples,
@@ -424,8 +483,11 @@ class Qwen3VLAdapter(ModelAdapter):
                         model=ctx.model,
                         processor=ctx.processor,
                         device=str(ctx.device),
-                        n_samples=int(llava_bench_cfg.get("n_samples", n_samples)),
-                        max_seq_len=llava_bench_cfg.get("max_seq_len", max_seq_len),
+                        n_samples=int(llava_cfg.get("n_samples", n_samples)),
+                        max_seq_len=llava_cfg.get(
+                            "max_seq_len",
+                            max_seq_len,
+                        ),
                     )
                     print_coco_score_results(
                         "\n=== LLaVA Bench Legacy COCO-style Evaluation ===",
@@ -437,24 +499,42 @@ class Qwen3VLAdapter(ModelAdapter):
                         "{'judge', 'llm_judge', 'legacy', 'coco', 'caption'}, "
                         f"got {mode!r}."
                     )
-        elif llava_bench_cfg:
-            print(
-                "[WARNING] evaluation.llava_bench=true uses the legacy "
-                "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
-                "evaluation.llava_bench.enabled=true, mode=judge."
-            )
-            llava_results = evaluate_llava_bench(
-                model=ctx.model,
-                processor=ctx.processor,
-                device=str(ctx.device),
-                n_samples=n_samples,
-                max_seq_len=max_seq_len,
-            )
-            print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
+            elif raw_llava_cfg is None or raw_llava_cfg is False:
+                evaluate_and_print_llava_bench_judge(
+                    model=ctx.model,
+                    processor=ctx.processor,
+                    device=str(ctx.device),
+                    llava_cfg={},
+                    model_cfg=ctx.cfg.get("model", {}),
+                    runtime_cfg=ctx.cfg.get("runtime", {}),
+                    default_n_samples=n_samples,
+                    default_max_seq_len=max_seq_len,
+                )
+            elif raw_llava_cfg is True:
+                print(
+                    "[WARNING] evaluation.llava_bench=true uses the legacy "
+                    "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
+                    "evaluation.llava_bench.enabled=true, mode=judge."
+                )
+                llava_results = evaluate_llava_bench(
+                    model=ctx.model,
+                    processor=ctx.processor,
+                    device=str(ctx.device),
+                    n_samples=n_samples,
+                    max_seq_len=max_seq_len,
+                )
+                print_coco_score_results(
+                    "\n=== Llava Bench Evaluation ===",
+                    llava_results,
+                )
+            else:
+                raise TypeError(
+                    "evaluation.llava_bench must be a mapping, boolean, or null."
+                )
 
-        videomme = eval_cfg.get("videomme", {})
-        if videomme.get("enabled", False):
-            n_samples = int(videomme.get("n_samples", -1))
+        if should_run_mapping_evaluation(eval_cfg, "videomme"):
+            videomme = get_mapping_evaluation_config(eval_cfg, "videomme")
+            video_n_samples = int(videomme.get("n_samples", -1))
             max_num_frames = int(videomme.get("max_num_frames", 32))
             if max_num_frames <= 0:
                 raise ValueError(
@@ -467,14 +547,14 @@ class Qwen3VLAdapter(ModelAdapter):
                 device=str(ctx.device),
                 batch_size=int(videomme.get("batch_size", 1)),
                 max_new_tokens=int(videomme.get("max_new_tokens", 30)),
-                n_samples=n_samples if n_samples > 0 else None,
+                n_samples=video_n_samples if video_n_samples > 0 else None,
                 max_num_frames=max_num_frames,
                 use_cache=videomme.get("use_cache", None),
-                verbose=bool(videomme.get("verbose", eval_cfg.get("verbose", False))),
+                verbose=bool(videomme.get("verbose", verbose)),
             )
 
-        mmlu = eval_cfg.get("mmlu", {})
-        if mmlu.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "mmlu"):
+            mmlu = get_mapping_evaluation_config(eval_cfg, "mmlu")
             evaluate_and_print_mmlu(
                 model=ctx.model,
                 tokenizer=ctx.processor.tokenizer,
@@ -488,8 +568,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 ),
             )
 
-        hellaswag = eval_cfg.get("hellaswag", {})
-        if hellaswag.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "hellaswag"):
+            hellaswag = get_mapping_evaluation_config(eval_cfg, "hellaswag")
             evaluate_and_print_hellaswag(
                 model=ctx.model,
                 tokenizer=ctx.processor.tokenizer,
@@ -502,8 +582,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 ),
             )
 
-        mmmu = eval_cfg.get("mmmu", {})
-        if mmmu.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "mmmu"):
+            mmmu = get_mapping_evaluation_config(eval_cfg, "mmmu")
             subjects = mmmu.get("subjects")
             if subjects == ["mmmu"] or subjects == "mmmu":
                 subjects = None
@@ -518,26 +598,24 @@ class Qwen3VLAdapter(ModelAdapter):
                 max_new_tokens=int(mmmu.get("max_new_tokens", 16)),
                 max_seq_len=max_seq_len,
                 temperature=float(mmmu.get("temperature", 0.0)),
-                verbose=bool(mmmu.get("verbose", eval_cfg.get("verbose", False))),
+                verbose=bool(mmmu.get("verbose", verbose)),
             )
 
-        ppl = eval_cfg.get("ppl", {})
-        if ppl.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "ppl"):
+            ppl_cfg = get_mapping_evaluation_config(eval_cfg, "ppl")
             ppl_value = evaluate_vlm_text_ppl(
                 model=ctx.model,
                 processor=ctx.processor,
-                dataset_name=ppl.get("dataset", "wikitext2"),
-                split=ppl.get("split", "test"),
+                dataset_name=ppl_cfg.get("dataset", "wikitext2"),
+                split=ppl_cfg.get("split", "test"),
                 device=str(ctx.device),
-                stride=int(ppl.get("stride", 512)),
+                stride=int(ppl_cfg.get("stride", 512)),
                 max_seq_len=int(
                     max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
                 ),
-                show_progress=bool(
-                    ctx.cfg.get("runtime", {}).get("show_progress", True)
-                ),
+                show_progress=show_progress,
             )
-            print(f"\nPPL({ppl.get('dataset', 'wikitext2')}): {ppl_value:.2f}")
+            print(f"\nPPL({ppl_cfg.get('dataset', 'wikitext2')}): {ppl_value:.2f}")
 
     def export(self, ctx: RecipeContext) -> None:
         export_cfg = ctx.cfg.get("export", {})

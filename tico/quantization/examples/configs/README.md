@@ -294,6 +294,77 @@ Rules:
 - Evaluation helpers belong in `recipes/evaluation/`.
 - The model adapter decides which evaluation fields are meaningful.
 
+### Selecting top-level evaluation targets
+
+`evaluation.selected_tasks` is an optional exclusive allow-list used by the
+evaluation adapters. It is normally populated by the `evaluate.py --tasks`
+option.
+
+```yaml
+evaluation:
+  enabled: true
+  selected_tasks:
+    - mmmu
+    - ppl
+```
+
+Selection rules:
+
+- When `selected_tasks` is absent or `null`, existing per-target `enabled`
+  values and truthy fields determine which evaluations run.
+- When `selected_tasks` is a list, only the listed top-level targets run.
+- A selected target runs even when its nested `enabled` value is `false`.
+- Dataset names, subjects, sample counts, and other benchmark details still
+  come from their existing YAML fields or `--set` overrides.
+- An explicit empty list runs no evaluation targets.
+- Target names are canonical and have no aliases.
+
+Canonical targets:
+
+```text
+LLaMA:
+  lm_eval
+  ppl
+
+Qwen3-VL / Gemma4:
+  vqa
+  coco
+  llava_bench
+  videomme
+  mmlu
+  hellaswag
+  mmmu
+  ppl
+```
+
+`lm_eval` requires a non-empty `evaluation.lm_eval_tasks` value. `vqa`
+requires a non-empty `evaluation.vlm_tasks` value. Other selected targets may
+use their evaluator defaults when their detail mapping is omitted.
+
+CLI examples:
+
+```bash
+# Run only the configured LM-Eval benchmark list.
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/llama_eval_suite.yaml \
+  --tasks lm_eval
+```
+
+```bash
+# Run only MMMU and PPL; preserve their YAML detail settings.
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks mmmu,ppl
+```
+
+```bash
+# Select the VQA evaluator and override its dataset list separately.
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks vqa \
+  --set 'evaluation.vlm_tasks=[vqav2,textvqa]'
+```
+
 ## `evaluation.llava_bench` for judge-based LLaVA-Bench scoring
 
 `qwen3_vl_eval_suite.yaml` uses the standard example entry point:

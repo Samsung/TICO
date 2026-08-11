@@ -18,12 +18,53 @@ from typing import Any, Mapping, Sequence
 import torch
 
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.evaluation.selection import (
+    get_selected_evaluation_targets,
+)
 
 
 class ModelAdapter(ABC):
     """Model-family-specific hooks for a common quantization recipe runner."""
 
     family: str
+    evaluation_targets: frozenset[str] = frozenset()
+    evaluation_target_requirements: Mapping[str, str] = {}
+
+    def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None:
+        """Validate selected top-level evaluation targets before model execution."""
+        eval_cfg = cfg.get("evaluation")
+        if eval_cfg is None:
+            return
+        if not isinstance(eval_cfg, Mapping):
+            raise TypeError("evaluation must be a mapping.")
+        if not eval_cfg.get("enabled", False):
+            return
+
+        selected_targets = get_selected_evaluation_targets(eval_cfg)
+        if selected_targets is None:
+            return
+
+        unsupported_targets = [
+            target
+            for target in selected_targets
+            if target not in self.evaluation_targets
+        ]
+        if unsupported_targets:
+            raise ValueError(
+                "Unsupported evaluation target(s) for model family "
+                f"{self.family!r}: {unsupported_targets}. Supported targets: "
+                f"{sorted(self.evaluation_targets)}."
+            )
+
+        for target_name, config_key in self.evaluation_target_requirements.items():
+            if target_name not in selected_targets:
+                continue
+            if eval_cfg.get(config_key):
+                continue
+            raise ValueError(
+                f"Evaluation target {target_name!r} requires non-empty "
+                f"evaluation.{config_key}."
+            )
 
     @abstractmethod
     def load_model(self, ctx: RecipeContext) -> RecipeContext:

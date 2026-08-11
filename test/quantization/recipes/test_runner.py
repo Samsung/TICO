@@ -40,6 +40,10 @@ class DummyAdapter:
     def __init__(self, events):
         self.events = events
 
+    def validate_evaluation_config(self, cfg):
+        """Record evaluation config validation."""
+        self.events.append("validate")
+
     def load_model(self, ctx):
         """Record model loading and attach a dummy model."""
         self.events.append("load")
@@ -109,6 +113,7 @@ class TestQuantizationRunner(unittest.TestCase):
             events,
             [
                 "seed:7",
+                "validate",
                 "load",
                 "calibration",
                 "stage:gptq",
