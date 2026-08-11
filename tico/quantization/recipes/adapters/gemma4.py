@@ -37,6 +37,7 @@ from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
     evaluate_llava_bench,
     evaluate_vlm_text_ppl,
+    evaluate_vlm_text_ppl_chat_prefix,
     evaluate_vqa_tasks,
     print_coco_score_results,
     print_vqa_results,
@@ -453,7 +454,22 @@ class Gemma4Adapter(ModelAdapter):
 
         ppl = eval_cfg.get("ppl", {})
         if ppl.get("enabled", False):
-            ppl_value = evaluate_vlm_text_ppl(
+            ppl_mode = str(ppl.get("mode", "raw")).lower()
+
+            _VALID_PPL_MODES = {"raw", "chat-prefix"}
+            if ppl_mode not in _VALID_PPL_MODES:
+                raise ValueError(
+                    f"Unsupported ppl mode: {ppl_mode!r}. "
+                    f"Must be one of {sorted(_VALID_PPL_MODES)}."
+                )
+
+            eval_fn = (
+                evaluate_vlm_text_ppl_chat_prefix
+                if ppl_mode == "chat-prefix"
+                else evaluate_vlm_text_ppl
+            )
+
+            ppl_value = eval_fn(
                 model=ctx.model,
                 processor=ctx.processor,
                 dataset_name=ppl.get("dataset", "wikitext2"),

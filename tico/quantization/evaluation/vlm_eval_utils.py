@@ -1064,6 +1064,55 @@ def evaluate_ppl(
     return ppl
 
 
+def evaluate_ppl_chat_prefix(
+    model,
+    processor,
+    ds: Dataset | IterableDataset,
+    device: str | torch.device,
+    stride: int,
+    max_seq_len: int,
+    show_progress: bool = True,
+) -> float:
+    """
+    Evaluate conditional perplexity on a text dataset using chat-prefix.
+
+    This function computes conditional perplexity by placing a preceding text
+    span in a user prompt via ``apply_chat_template`` and scoring only the
+    reference assistant continuation tokens.  It expects a dataset that yields
+    examples with a "text" field (e.g., wikitext2).
+
+    This is the natural evaluation protocol for instruction-tuned models
+    (e.g. Gemma 4 IT), where the raw token-stream PPL from ``evaluate_ppl``
+    is not directly comparable because the model expects chat-formatted input.
+
+    Args:
+        model: Language model to evaluate.
+        processor: Hugging Face processor with ``apply_chat_template`` and
+            a ``.tokenizer`` attribute.
+        ds: Iterable dataset yielding examples with a "text" field.
+        device: Device used for evaluation.
+        stride: stride for evaluation.
+        max_seq_len: max seq_len for evaluation.
+        show_progress: Whether to show progress bar.
+
+    Returns:
+        Conditional perplexity score.
+    """
+    from tico.quantization.wrapq.utils.metrics import perplexity_chat_prefix
+
+    ppl = perplexity_chat_prefix(
+        model=model,
+        processor_or_tokenizer=processor,
+        dataset=ds,
+        device=device,
+        stride=stride,
+        max_seq_len=max_seq_len,
+        show_progress=show_progress,
+    )
+
+    return ppl
+
+
 def get_calib_inputs(
     dataset: str,
     processor,

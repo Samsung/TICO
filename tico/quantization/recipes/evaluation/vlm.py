@@ -20,6 +20,7 @@ import tqdm
 
 from tico.quantization.evaluation.vlm_eval_utils import (
     evaluate_ppl,
+    evaluate_ppl_chat_prefix,
     get_accuracy_on_dataset,
     get_coco_scores_on_dataset,
     get_dataset,
@@ -213,6 +214,54 @@ def evaluate_vlm_text_ppl(
         evaluate_ppl(
             model=model,
             tokenizer=processor.tokenizer,
+            ds=dataset,
+            device=device,
+            stride=stride,
+            max_seq_len=max_seq_len,
+            show_progress=show_progress,
+        )
+    )
+
+
+def evaluate_vlm_text_ppl_chat_prefix(
+    *,
+    model: Any,
+    processor: Any,
+    dataset_name: str,
+    split: str,
+    device: str,
+    stride: int,
+    max_seq_len: int,
+    show_progress: bool = True,
+) -> float:
+    """Evaluate conditional perplexity using chat-prefix protocol.
+
+    A preceding text span is placed in a user prompt via
+    ``apply_chat_template``.  Only the reference assistant continuation is
+    scored; chat/control/prompt tokens are context and are not scored.
+
+    This is the natural evaluation for instruction-tuned models (e.g. Gemma 4
+    IT) where the raw token-stream PPL is not directly comparable because the
+    model expects chat-formatted input.
+
+    Args:
+        model: Model to evaluate.
+        processor: Hugging Face processor paired with the model.
+        dataset_name: Dataset key accepted by the shared VLM evaluation helper.
+        split: Dataset split to load.
+        device: Device string used for inference.
+        stride: stride for evaluation.
+        max_seq_len: max seq_len for evaluation.
+        show_progress: Whether to show a progress bar.
+
+    Returns:
+        Conditional perplexity score.
+    """
+    dataset, _ = get_dataset(dataset_name, split=split, n=-1)
+    return float(
+        evaluate_ppl_chat_prefix(
+            model=model,
+            processor=processor,
             ds=dataset,
             device=device,
             stride=stride,

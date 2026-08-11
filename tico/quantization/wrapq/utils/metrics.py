@@ -12,9 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+import math
+from collections.abc import Iterable
+from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 import tqdm
 
 
@@ -143,3 +146,294 @@ def perplexity(
     ppl = torch.exp(avg_nll)
 
     return ppl.item()
+
+
+_CHAT_PREFIX_INSTRUCTION = (
+    "You are a text continuation engine. " "Complete the following passage exactly."
+)
+
+
+def _render_chat_prefix(
+    processor_or_tokenizer: Any,
+    tokenizer: Any,
+) -> str:
+    """Render the generation prefix with the model's chat template."""
+    template_owner = None
+    if hasattr(processor_or_tokenizer, "apply_chat_template"):
+        template_owner = processor_or_tokenizer
+    elif hasattr(tokenizer, "apply_chat_template"):
+        template_owner = tokenizer
+
+    if template_owner is None:
+        raise ValueError(
+            "chat-prefix perplexity requires a processor or tokenizer "
+            "with apply_chat_template support."
+        )
+
+    text_content = _CHAT_PREFIX_INSTRUCTION
+    multimodal_content = [{"type": "text", "text": text_content}]
+    if hasattr(template_owner, "tokenizer"):
+        content_variants: tuple[Any, ...] = (multimodal_content, text_content)
+    else:
+        content_variants = (text_content, multimodal_content)
+    last_error: Exception | None = None
+    for content in content_variants:
+        messages = [{"role": "user", "content": content}]
+        try:
+            rendered = template_owner.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except (TypeError, ValueError) as exc:
+            last_error = exc
+            continue
+
+        if not isinstance(rendered, str):
+            raise TypeError(
+                "apply_chat_template(tokenize=False) must return a string, "
+                f"got {type(rendered)!r}."
+            )
+        if not rendered:
+            raise ValueError("apply_chat_template returned an empty chat prefix.")
+        return rendered
+
+    raise TypeError(
+        "Failed to render chat prefix with apply_chat_template."
+    ) from last_error
+
+
+def perplexity_chat_prefix(
+    model: torch.nn.Module,
+    processor_or_tokenizer: Any,
+    dataset: Iterable[dict[str, Any]],
+    *,
+    stride: int = 512,
+    max_seq_len: int = 2048,
+    device: torch.device | str | None = None,
+    show_progress: bool = True,
+) -> float:
+    """
+    Compute sliding-window causal PPL for raw text on Gemma4 IT models.
+
+    Gemma4 instruction-tuned models require a proper chat-template prefix
+    (user turn + model turn with empty thought channel) to produce
+    meaningful perplexity.  Without this prefix the model sees raw text
+    in an unexpected context and produces astronomically high PPL values.
+
+    **Algorithm**
+
+    1. A fixed chat-template prefix is rendered **once** via
+       :func:`_render_chat_prefix` using the model's own
+       ``apply_chat_template``.  The prefix contains a user turn with
+       a text-continuation instruction and a generation prompt
+       (``add_generation_prompt=True``).  This places the model in
+       "continuation mode" so it expects raw text to follow.
+    2. The full corpus is tokenised **once** (no special tokens) and
+       concatenated into a single 1-D token stream.
+    3. A sliding window of ``max_seq_len - prefix_len`` content tokens
+       advances by ``stride`` positions per step.
+    4. For each window:
+       a. The chat prefix is prepended to the content tokens.
+       b. Labels are set to ``-100`` for all prefix tokens and for
+          content tokens that were already scored in a previous window
+          (the first ``window_size - target_length`` tokens).  Only
+          the last ``target_length`` content tokens (the freshly
+          covered ones) have their actual IDs as labels.
+       c. The model is called with ``input_ids``, ``attention_mask``,
+          ``labels``, ``use_cache=False``.  The model computes the
+          cross-entropy loss internally (averaged over non-masked
+          labels), avoiding the need to materialise the full logits
+          tensor in memory.
+     5. The per-window NLL sums and token counts are accumulated, and
+        the corpus-level PPL is ``exp(total_nll / total_tokens)``.
+
+    **Key design choices**
+
+    * The prefix is **constant** across all windows.
+    * The prefix tokens are **never scored** (labels = -100), so only
+      corpus tokens contribute to PPL.
+    * Each corpus token is scored **exactly once** — in the first
+      window whose target range covers it — matching the standard
+      sliding-window PPL semantics.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Causal LM (original or quantized) in eval mode.
+    processor_or_tokenizer : Any
+        Processor or tokenizer with ``apply_chat_template`` support.
+    dataset : Iterable[dict[str, Any]]
+        Dataset yielding dictionaries with a ``text`` field
+        (e.g. HuggingFace ``wikitext-2-raw-v1``).
+    stride : int
+        Sliding-window step size.  Must satisfy
+        ``1 <= stride <= max_seq_len - prefix_len``.
+    max_seq_len : int
+        Maximum total sequence length (prefix + content) per window.
+    device : torch.device | str | None
+        Device for computation.  Auto-detected from model parameters
+        if None.
+    show_progress : bool
+        Show a tqdm progress bar.
+
+    Returns
+    -------
+    float
+        Corpus-level perplexity.
+
+    Raises
+    ------
+    ValueError
+        If ``max_seq_len`` is too small for the chat prefix, if
+        ``stride`` exceeds the content window size, or if no target
+        tokens were evaluated.
+    """
+
+    if max_seq_len <= 1:
+        raise ValueError("max_seq_len must be greater than 1.")
+
+    if stride < 1:
+        raise ValueError("stride must be positive.")
+
+    tokenizer = getattr(
+        processor_or_tokenizer,
+        "tokenizer",
+        processor_or_tokenizer,
+    )
+
+    prefix_str = _render_chat_prefix(processor_or_tokenizer, tokenizer)
+    prefix_encodings = tokenizer(
+        prefix_str, return_tensors="pt", add_special_tokens=False
+    )
+    prefix_ids = prefix_encodings["input_ids"]  # shape [1, prefix_len]
+    prefix_len = prefix_ids.shape[1]
+
+    # Reserve slots for the prefix so the window still fits within max_seq_len.
+    window_size = max_seq_len - prefix_len
+
+    if window_size <= 0:
+        raise ValueError(
+            f"max_seq_len ({max_seq_len}) is too small for the chat prefix "
+            f"({prefix_len} tokens).  Increase max_seq_len."
+        )
+
+    if stride > window_size:
+        raise ValueError(
+            "stride must satisfy 1 <= stride <= max_seq_len - prefix_len "
+            f"({window_size}); got stride={stride}."
+        )
+
+    # Iteration works for both Dataset and IterableDataset.
+    texts = []
+    for example in dataset:
+        text = example.get("text", "")
+        if text is not None:
+            texts.append(str(text))
+
+    if not texts:
+        raise ValueError("The dataset contains no text examples.")
+
+    full_text = "\n\n".join(texts)
+
+    encodings = tokenizer(
+        text=full_text,
+        return_tensors="pt",
+        add_special_tokens=False,
+    )
+
+    input_ids = encodings["input_ids"]
+
+    if input_ids.ndim != 2 or input_ids.shape[0] != 1:
+        raise ValueError(
+            f"Expected tokenized shape [1, sequence], got {input_ids.shape}."
+        )
+
+    if device is None:
+        try:
+            device = next(model.parameters()).device
+        except StopIteration:
+            device = torch.device("cpu")
+    else:
+        device = torch.device(device)
+
+    # Move prefix to device once
+    prefix_ids = prefix_ids.to(device)
+
+    model.eval()
+
+    sequence_length = input_ids.shape[1]
+    previous_end = 0
+
+    total_nll = torch.zeros((), dtype=torch.float64, device=device)
+    total_target_tokens = 0
+
+    with torch.inference_mode():
+        for begin in tqdm.trange(
+            0, sequence_length, stride, desc="PPL", disable=not show_progress
+        ):
+
+            end = min(begin + window_size, sequence_length)
+
+            # Only tokens not evaluated by the previous window contribute.
+            target_length = end - previous_end
+            if target_length <= 0:
+                break
+
+            window_ids = input_ids[:, begin:end].to(device)
+
+            labels = window_ids.clone()
+            labels[:, :-target_length] = -100
+
+            # Prepend the Gemma4 IT prefix (BOS + user turn + model turn
+            # with empty thought channel) so the model sees a valid
+            # instruction-tuned context.  All prefix tokens are masked (-100)
+            # so they never contribute to loss.
+            window_ids = torch.cat([prefix_ids, window_ids], dim=1)
+            prefix_labels = torch.full(
+                (1, prefix_len), -100, dtype=labels.dtype, device=device
+            )
+            labels = torch.cat([prefix_labels, labels], dim=1)
+
+            # Build attention mask: all ones (prefix + content)
+            attention_mask = torch.ones(
+                1, window_ids.shape[1], dtype=torch.long, device=device
+            )
+
+            model_kwargs = {
+                "input_ids": window_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "use_cache": False,
+            }
+
+            outputs = model(**model_kwargs)
+
+            if outputs.loss is None:
+                raise RuntimeError(
+                    "Model returned loss=None despite labels being provided. "
+                    "Ensure the model or wrapper supports the 'labels' argument."
+                )
+
+            # outputs.loss is the mean CE over non-masked (label != -100) tokens.
+            # Count the exact number of target tokens that contributed to the loss.
+            # The causal shift means label at position t is predicted by logit at t-1,
+            # so we count non-masked labels starting from position 1.
+            target_tokens = int((labels[:, 1:] != -100).sum().item())
+
+            if target_tokens:
+                total_nll += outputs.loss.double() * target_tokens
+                total_target_tokens += target_tokens
+
+            previous_end = end
+
+            if end == sequence_length:
+                break
+
+    if total_target_tokens == 0:
+        raise ValueError("No target tokens were evaluated.")
+
+    mean_nll = (total_nll / total_target_tokens).item()
+    ppl = math.exp(mean_nll)
+
+    return ppl

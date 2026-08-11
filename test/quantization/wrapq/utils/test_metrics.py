@@ -16,7 +16,12 @@ import unittest
 from types import SimpleNamespace
 
 import torch
-from tico.quantization.wrapq.utils.metrics import perplexity
+import torch.nn.functional as F
+from tico.quantization.wrapq.utils.metrics import (
+    _CHAT_PREFIX_INSTRUCTION,
+    perplexity,
+    perplexity_chat_prefix,
+)
 from torch import nn
 
 """
@@ -32,6 +37,8 @@ This test checks three things:
 
 A lightweight dummy causal-LM is used so the tests run quickly on CPU.
 """
+
+
 # ────────────────────────────────────────────────────────────
 #   Dummy causal language model
 # ────────────────────────────────────────────────────────────
@@ -62,6 +69,10 @@ class DummyLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         labels: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        use_cache: bool = False,
+        logits_to_keep: int | None = None,
+        **kwargs,
     ) -> SimpleNamespace:
         """
         Parameters
@@ -70,6 +81,9 @@ class DummyLM(nn.Module):
         labels    : Tensor[B, T] or None
             If provided, this method emulates HF CausalLM by shifting
             logits/labels internally before computing CE loss.
+        attention_mask, use_cache, logits_to_keep : ignored
+            Accepted for compatibility with perplexity_chat_prefix
+            which passes these kwargs.
         """
         emb = self.embed(input_ids)  # (B, T, H)
         logits = self.fc(emb)  # (B, T, V)
@@ -209,3 +223,214 @@ class TestPerplexitySlidingWindow(unittest.TestCase):
             ignore_index=123,
         )
         self.assertIsInstance(ppl, float)
+
+
+# ────────────────────────────────────────────────────────────
+#   Dummy tokenizer with apply_chat_template
+# ────────────────────────────────────────────────────────────
+class DummyTokenizer:
+    """
+    Minimal tokenizer that supports `apply_chat_template` and basic
+    `__call__` for perplexity_chat_prefix tests.
+
+    Vocabulary: token id 0 = <pad>, 1..VOCAB-1 = real tokens.
+    Each character in the text is mapped to (ord(c) % (VOCAB-1)) + 1.
+    """
+
+    def __init__(self, vocab_size: int = 16):
+        self.vocab_size = vocab_size
+        self.bos_token_id = 0
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True):
+        """Render a simple chat prefix: '<bos>user: {text}\\nmodel: '."""
+        text = messages[0]["content"]
+        prefix = f"<bos>user: {text}\nmodel: "
+        if tokenize:
+            # Return a dict mimicking tokenizer output
+            ids = [self._char_to_id(c) for c in prefix]
+            return {"input_ids": torch.tensor([ids])}
+        return prefix
+
+    def __call__(self, text=None, return_tensors="pt", add_special_tokens=False):
+        """Tokenize text into input_ids tensor [1, seq_len]."""
+        if text is None:
+            raise ValueError("text is required")
+        ids = [self._char_to_id(c) for c in text]
+        return {"input_ids": torch.tensor([ids])}
+
+    def _char_to_id(self, c: str) -> int:
+        return (ord(c) % (self.vocab_size - 1)) + 1
+
+
+# ─────────────────────────────────────────────────────────────
+# Unit-test class for perplexity_chat_prefix
+# ─────────────────────────────────────────────────────────────
+class TestPerplexityChatPrefix(unittest.TestCase):
+    """
+    Tests for perplexity_chat_prefix.
+
+    All tests run on CPU with a DummyLM and DummyTokenizer.
+    """
+
+    VOCAB: int = 16
+    HIDDEN: int = 8
+    MAX_SEQ_LEN: int = 256
+
+    device: torch.device
+    model: DummyLM
+    tokenizer: DummyTokenizer
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        torch.manual_seed(42)
+        cls.device = torch.device("cpu")
+        cls.model = (
+            DummyLM(
+                vocab_size=cls.VOCAB,
+                hidden_size=cls.HIDDEN,
+                n_positions=cls.MAX_SEQ_LEN,
+            )
+            .to(cls.device)
+            .eval()
+        )
+        cls.tokenizer = DummyTokenizer(vocab_size=cls.VOCAB)
+
+    def _make_dataset(self, text: str) -> list[dict]:
+        return [{"text": text}]
+
+    # ─────────────────────────────────────────────────────────
+    # 1. API sanity — returns a positive float
+    # ─────────────────────────────────────────────────────────
+    def test_returns_positive_float(self) -> None:
+        dataset = self._make_dataset("Hello world this is a test sentence.")
+        ppl = perplexity_chat_prefix(
+            self.model,
+            self.tokenizer,
+            dataset,
+            stride=8,
+            max_seq_len=self.MAX_SEQ_LEN,
+            device=self.device,
+            show_progress=False,
+        )
+        self.assertIsInstance(ppl, float)
+        self.assertGreater(ppl, 0.0)
+
+    # ─────────────────────────────────────────────────────────
+    # 2. Empty dataset raises ValueError
+    # ─────────────────────────────────────────────────────────
+    def test_empty_dataset_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            perplexity_chat_prefix(
+                self.model,
+                self.tokenizer,
+                [],
+                stride=8,
+                max_seq_len=self.MAX_SEQ_LEN,
+                device=self.device,
+                show_progress=False,
+            )
+
+    # ─────────────────────────────────────────────────────────
+    # 3. stride > window_size raises ValueError
+    # ─────────────────────────────────────────────────────────
+    def test_stride_too_large_raises(self) -> None:
+        dataset = self._make_dataset("Some text here.")
+        with self.assertRaises(ValueError):
+            perplexity_chat_prefix(
+                self.model,
+                self.tokenizer,
+                dataset,
+                stride=1000,
+                max_seq_len=self.MAX_SEQ_LEN,
+                device=self.device,
+                show_progress=False,
+            )
+
+    # ─────────────────────────────────────────────────────────
+    # 4. max_seq_len too small for prefix raises ValueError
+    # ─────────────────────────────────────────────────────────
+    def test_max_seq_len_too_small_raises(self) -> None:
+        dataset = self._make_dataset("Some text here.")
+        with self.assertRaises(ValueError):
+            perplexity_chat_prefix(
+                self.model,
+                self.tokenizer,
+                dataset,
+                stride=1,
+                max_seq_len=2,  # too small for the chat prefix
+                device=self.device,
+                show_progress=False,
+            )
+
+    # ─────────────────────────────────────────────────────────
+    # 5. Prefix tokens are never scored — PPL computed by
+    #    perplexity_chat_prefix matches a manual reference that
+    #    uses the same prefix+content input but computes loss only
+    #    on content tokens.
+    # ─────────────────────────────────────────────────────────
+    def test_prefix_not_scored(self) -> None:
+        text = "Hello world test."
+        dataset = self._make_dataset(text)
+
+        # PPL via perplexity_chat_prefix (prefix prepended, prefix masked)
+        ppl_with_prefix = perplexity_chat_prefix(
+            self.model,
+            self.tokenizer,
+            dataset,
+            stride=64,  # large stride → single window, all tokens scored
+            max_seq_len=self.MAX_SEQ_LEN,
+            device=self.device,
+            show_progress=False,
+        )
+
+        # Reference: run the model with the SAME prefix+content input
+        # and compute loss only on content tokens (prefix masked with -100).
+        prefix_str = self.tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": _CHAT_PREFIX_INSTRUCTION,
+                }
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        prefix_enc = self.tokenizer(
+            text=prefix_str, return_tensors="pt", add_special_tokens=False
+        )
+        prefix_ids = prefix_enc["input_ids"].to(self.device)
+
+        content_enc = self.tokenizer(
+            text=text, return_tensors="pt", add_special_tokens=False
+        )
+        content_ids = content_enc["input_ids"].to(self.device)
+
+        full_ids = torch.cat([prefix_ids, content_ids], dim=1)
+        prefix_len = prefix_ids.shape[1]
+        content_len = content_ids.shape[1]
+
+        labels = torch.full(
+            (1, prefix_len + content_len), -100, dtype=torch.long, device=self.device
+        )
+        labels[:, prefix_len:] = full_ids[:, prefix_len:]
+
+        with torch.no_grad():
+            logits = self.model(full_ids).logits
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+
+        ref_loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+            reduction="sum",
+        )
+        n_tokens = (shift_labels != -100).sum().item()
+        ref_ppl = torch.exp(ref_loss / n_tokens).item()
+
+        self.assertAlmostEqual(
+            ppl_with_prefix,
+            ref_ppl,
+            places=5,
+            msg=f"with_prefix={ppl_with_prefix:.6f}, ref={ref_ppl:.6f}",
+        )
