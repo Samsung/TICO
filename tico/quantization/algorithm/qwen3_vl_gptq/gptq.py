@@ -419,6 +419,11 @@ class GPTQ:
         h[dead, dead] = 1
         w[:, dead] = 0
 
+        if groupsize != -1 and self.quantizer.mse in {"mse_for_gptq", "smse_for_gptq"}:
+            raise ValueError(
+                "GPTQ-adjusted MSE currently does not support groupsize != -1"
+            )
+
         if static_groups:
             import copy
 
@@ -428,6 +433,8 @@ class GPTQ:
                 quantizer.find_params(w[:, i : i + groupsize], weight=True)
                 groups.append(quantizer)
 
+        perm = None
+        invperm = None
         if actorder:
             perm = torch.argsort(torch.diag(h), descending=True)
             w = w[:, perm]
@@ -444,6 +451,8 @@ class GPTQ:
         h = torch.cholesky_inverse(h)
         h = torch.linalg.cholesky(h, upper=True)
         hinv = h
+
+        self.quantizer.update(w, hinv, perm)
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
