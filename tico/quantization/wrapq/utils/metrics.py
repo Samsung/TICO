@@ -235,27 +235,28 @@ def perplexity_chat_prefix(
        advances by ``stride`` positions per step.
     4. For each window:
        a. The chat prefix is prepended to the content tokens.
-       b. Labels are set to ``-100`` for all prefix tokens and for
-          content tokens that were already scored in a previous window
-          (the first ``window_size - target_length`` tokens).  Only
-          the last ``target_length`` content tokens (the freshly
-          covered ones) have their actual IDs as labels.
+       b. ``target_length`` identifies the newly covered content tokens,
+          which always occupy the final positions of the window.
        c. The model is called with ``input_ids``, ``attention_mask``,
-          ``labels``, ``use_cache=False``.  The model computes the
-          cross-entropy loss internally (averaged over non-masked
-          labels), avoiding the need to materialise the full logits
-          tensor in memory.
-     5. The per-window NLL sums and token counts are accumulated, and
-        the corpus-level PPL is ``exp(total_nll / total_tokens)``.
+          ``use_cache=False``, and
+          ``logits_to_keep=target_length + 1``.  This limits the LM-head
+          projection to the minimal suffix required for causal alignment.
+       d. The final returned logit is discarded because it predicts the
+          token following the current window.  The remaining logits are
+          aligned with the final ``target_length`` input IDs, and their
+          summed cross-entropy is accumulated.
+    5. The per-window NLL sums and token counts are accumulated, and
+       the corpus-level PPL is ``exp(total_nll / total_tokens)``.
 
     **Key design choices**
 
     * The prefix is **constant** across all windows.
-    * The prefix tokens are **never scored** (labels = -100), so only
-      corpus tokens contribute to PPL.
+    * Prefix and overlapping context tokens are never used as targets.
     * Each corpus token is scored **exactly once** — in the first
       window whose target range covers it — matching the standard
       sliding-window PPL semantics.
+    * ``logits_to_keep`` reduces LM-head compute and logits memory.
+      Transformer hidden states are still computed for the full context.
 
     Parameters
     ----------
@@ -288,6 +289,9 @@ def perplexity_chat_prefix(
         If ``max_seq_len`` is too small for the chat prefix, if
         ``stride`` exceeds the content window size, or if no target
         tokens were evaluated.
+    RuntimeError
+        If the model output does not provide logits or does not honor
+        ``logits_to_keep``.
     """
 
     if max_seq_len <= 1:
@@ -380,50 +384,63 @@ def perplexity_chat_prefix(
             if target_length <= 0:
                 break
 
-            window_ids = input_ids[:, begin:end].to(device)
+            content_window_ids = input_ids[:, begin:end].to(device)
 
-            labels = window_ids.clone()
-            labels[:, :-target_length] = -100
-
-            # Prepend the Gemma4 IT prefix (BOS + user turn + model turn
-            # with empty thought channel) so the model sees a valid
-            # instruction-tuned context.  All prefix tokens are masked (-100)
-            # so they never contribute to loss.
-            window_ids = torch.cat([prefix_ids, window_ids], dim=1)
-            prefix_labels = torch.full(
-                (1, prefix_len), -100, dtype=labels.dtype, device=device
+            # Prepend the fixed chat prefix. Fresh targets always occupy the
+            # final `target_length` positions of the resulting sequence.
+            model_input_ids = torch.cat(
+                [prefix_ids, content_window_ids],
+                dim=1,
             )
-            labels = torch.cat([prefix_labels, labels], dim=1)
-
-            # Build attention mask: all ones (prefix + content)
-            attention_mask = torch.ones(
-                1, window_ids.shape[1], dtype=torch.long, device=device
+            attention_mask = torch.ones_like(
+                model_input_ids,
+                dtype=torch.long,
             )
 
-            model_kwargs = {
-                "input_ids": window_ids,
-                "attention_mask": attention_mask,
-                "labels": labels,
-                "use_cache": False,
-            }
+            # To score T target tokens, causal LM loss needs logits from the T
+            # immediately preceding positions. Integer logits_to_keep can only
+            # select a suffix, so request T + 1 positions and discard the final
+            # logit, which predicts the token following the current window.
+            logits_to_keep = target_length + 1
+            outputs = model(
+                input_ids=model_input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                logits_to_keep=logits_to_keep,
+            )
 
-            outputs = model(**model_kwargs)
-
-            if outputs.loss is None:
+            logits = getattr(outputs, "logits", None)
+            if logits is None:
                 raise RuntimeError(
-                    "Model returned loss=None despite labels being provided. "
-                    "Ensure the model or wrapper supports the 'labels' argument."
+                    "Model output does not contain logits required for "
+                    "chat-prefix perplexity."
                 )
 
-            # outputs.loss is the mean CE over non-masked (label != -100) tokens.
-            # Count the exact number of target tokens that contributed to the loss.
-            # The causal shift means label at position t is predicted by logit at t-1,
-            # so we count non-masked labels starting from position 1.
-            target_tokens = int((labels[:, 1:] != -100).sum().item())
+            if logits.ndim != 3 or logits.shape[1] != logits_to_keep:
+                raise RuntimeError(
+                    "Model did not honor logits_to_keep: expected logits with "
+                    f"shape [B, {logits_to_keep}, V], got {tuple(logits.shape)}."
+                )
 
-            if target_tokens:
-                total_nll += outputs.loss.double() * target_tokens
-                total_target_tokens += target_tokens
+            # The final logit predicts a token outside the current window.
+            # Removing it aligns the remaining T logits with the final T input
+            # token IDs, including the first fresh target's predecessor.
+            target_logits = logits[:, :-1, :].contiguous()
+            target_ids = model_input_ids[:, -target_length:].contiguous()
+
+            # Hugging Face causal-LM loss upcasts logits to float before CE.
+            # Match that behavior and accumulate the exact summed token NLL.
+            window_nll = F.cross_entropy(
+                target_logits.float().reshape(
+                    -1,
+                    target_logits.size(-1),
+                ),
+                target_ids.reshape(-1),
+                reduction="sum",
+            )
+
+            total_nll += window_nll.double()
+            total_target_tokens += target_length
 
             previous_end = end
 

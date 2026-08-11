@@ -481,7 +481,10 @@ class Gemma4Adapter(ModelAdapter):
                 ),
                 show_progress=show_progress,
             )
-            print(f"\nPPL({ppl.get('dataset', 'wikitext2')}): {ppl_value:.2f}")
+            print(
+                f"\nPPL[{ppl_mode}]"
+                f"({ppl.get('dataset', 'wikitext2')}): {ppl_value:.2f}"
+            )
 
     def export(self, ctx: RecipeContext) -> None:
         """Export configured Gemma4 E2B artifacts."""
