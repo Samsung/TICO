@@ -63,6 +63,7 @@ class DummyLM(nn.Module):
         )
         self.embed = nn.Embedding(vocab_size, hidden_size)
         self.fc = nn.Linear(hidden_size, vocab_size)
+        self.logits_to_keep_history: list[int | torch.Tensor] = []
 
     # ---------------------------------------------------------
     def forward(  # type: ignore[override]
@@ -71,7 +72,7 @@ class DummyLM(nn.Module):
         labels: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
         use_cache: bool = False,
-        logits_to_keep: int | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
     ) -> SimpleNamespace:
         """
@@ -81,12 +82,25 @@ class DummyLM(nn.Module):
         labels    : Tensor[B, T] or None
             If provided, this method emulates HF CausalLM by shifting
             logits/labels internally before computing CE loss.
-        attention_mask, use_cache, logits_to_keep : ignored
-            Accepted for compatibility with perplexity_chat_prefix
-            which passes these kwargs.
+        attention_mask, use_cache : ignored
+            Accepted for compatibility with perplexity evaluation helpers.
+        logits_to_keep : int or Tensor
+            Select the hidden-state positions projected by the LM head,
+            matching Gemma4's integer-suffix and tensor-index semantics.
         """
-        emb = self.embed(input_ids)  # (B, T, H)
-        logits = self.fc(emb)  # (B, T, V)
+        hidden_states = self.embed(input_ids)  # (B, T, H)
+        self.logits_to_keep_history.append(logits_to_keep)
+
+        # Match Gemma4: slice hidden states before applying the LM head so
+        # unnecessary vocabulary projections are not computed.
+        if isinstance(logits_to_keep, int) and logits_to_keep:
+            slice_indices = slice(-logits_to_keep, None)
+        elif isinstance(logits_to_keep, torch.Tensor):
+            slice_indices = logits_to_keep
+        else:
+            slice_indices = slice(None)
+
+        logits = self.fc(hidden_states[:, slice_indices, :])
 
         if labels is None:
             return SimpleNamespace(logits=logits)
@@ -363,28 +377,139 @@ class TestPerplexityChatPrefix(unittest.TestCase):
             )
 
     # ─────────────────────────────────────────────────────────
-    # 5. Prefix tokens are never scored — PPL computed by
-    #    perplexity_chat_prefix matches a manual reference that
-    #    uses the same prefix+content input but computes loss only
-    #    on content tokens.
+    # 5. Optimized suffix logits match a full-logits masked-CE
+    #    reference across overlapping windows.
     # ─────────────────────────────────────────────────────────
-    def test_prefix_not_scored(self) -> None:
-        text = "Hello world test."
+    def test_overlapping_windows_match_full_logits_reference(self) -> None:
+        """Optimized suffix logits should match full-logits masked CE."""
+        # Fourteen character tokens with window_size=8 and stride=3 produce
+        # three overlapping windows whose fresh target lengths are 8, 3, 3.
+        text = "abcdefghijklmn"
         dataset = self._make_dataset(text)
 
-        # PPL via perplexity_chat_prefix (prefix prepended, prefix masked)
-        ppl_with_prefix = perplexity_chat_prefix(
+        prefix_str = self.tokenizer.apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": _CHAT_PREFIX_INSTRUCTION,
+                },
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        prefix_enc = self.tokenizer(
+            text=prefix_str,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        prefix_ids = prefix_enc["input_ids"].to(self.device)
+
+        content_enc = self.tokenizer(
+            text=text,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )
+        content_ids = content_enc["input_ids"].to(self.device)
+
+        prefix_len = prefix_ids.shape[1]
+        window_size = 8
+        stride = 3
+        max_seq_len = prefix_len + window_size
+
+        self.model.logits_to_keep_history.clear()
+
+        optimized_ppl = perplexity_chat_prefix(
             self.model,
             self.tokenizer,
             dataset,
-            stride=64,  # large stride → single window, all tokens scored
-            max_seq_len=self.MAX_SEQ_LEN,
+            stride=stride,
+            max_seq_len=max_seq_len,
             device=self.device,
             show_progress=False,
         )
 
-        # Reference: run the model with the SAME prefix+content input
-        # and compute loss only on content tokens (prefix masked with -100).
+        # Each T-token target suffix requests T + 1 logits. The final logit
+        # is discarded because it predicts the token following the window.
+        self.assertEqual(
+            self.model.logits_to_keep_history,
+            [9, 4, 4],
+        )
+
+        # Build a full-logits reference using the original label-masking
+        # formulation. This verifies both causal alignment and the rule that
+        # every content token is scored exactly once.
+        sequence_length = content_ids.shape[1]
+        previous_end = 0
+        total_nll = torch.zeros(
+            (),
+            dtype=torch.float64,
+            device=self.device,
+        )
+        total_target_tokens = 0
+
+        with torch.no_grad():
+            for begin in range(0, sequence_length, stride):
+                end = min(begin + window_size, sequence_length)
+                target_length = end - previous_end
+                if target_length <= 0:
+                    break
+
+                content_window_ids = content_ids[:, begin:end]
+                model_input_ids = torch.cat(
+                    [prefix_ids, content_window_ids],
+                    dim=1,
+                )
+
+                labels = torch.full_like(model_input_ids, -100)
+                labels[:, -target_length:] = model_input_ids[:, -target_length:]
+
+                full_logits = self.model(
+                    model_input_ids,
+                    logits_to_keep=0,
+                ).logits
+                shift_logits = full_logits[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+
+                window_nll = F.cross_entropy(
+                    shift_logits.float().reshape(
+                        -1,
+                        shift_logits.size(-1),
+                    ),
+                    shift_labels.reshape(-1),
+                    ignore_index=-100,
+                    reduction="sum",
+                )
+
+                target_tokens = int((shift_labels != -100).sum().item())
+                total_nll += window_nll.double()
+                total_target_tokens += target_tokens
+
+                previous_end = end
+                if end == sequence_length:
+                    break
+
+        reference_ppl = torch.exp(total_nll / total_target_tokens).item()
+
+        # The prefix provides context for the first corpus token but is never
+        # itself scored. Therefore all corpus tokens contribute exactly once.
+        self.assertEqual(total_target_tokens, sequence_length)
+
+        self.assertAlmostEqual(
+            optimized_ppl,
+            reference_ppl,
+            places=5,
+            msg=(f"optimized={optimized_ppl:.6f}, " f"reference={reference_ppl:.6f}"),
+        )
+
+    # ─────────────────────────────────────────────────────────
+    # 6. Overlapping windows score every content token exactly
+    #    once, including the final partial window.
+    # ─────────────────────────────────────────────────────────
+    def test_overlapping_windows_score_each_token_once(self) -> None:
+        """Every corpus token should be scored once across all windows."""
+        text = "abcdefghijklmnop"  # 16 content tokens
+        dataset = self._make_dataset(text)
+
         prefix_str = self.tokenizer.apply_chat_template(
             [
                 {
@@ -395,42 +520,151 @@ class TestPerplexityChatPrefix(unittest.TestCase):
             tokenize=False,
             add_generation_prompt=True,
         )
-        prefix_enc = self.tokenizer(
-            text=prefix_str, return_tensors="pt", add_special_tokens=False
-        )
-        prefix_ids = prefix_enc["input_ids"].to(self.device)
+        prefix_ids = self.tokenizer(
+            text=prefix_str,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )["input_ids"].to(self.device)
+        content_ids = self.tokenizer(
+            text=text,
+            return_tensors="pt",
+            add_special_tokens=False,
+        )["input_ids"].to(self.device)
 
-        content_enc = self.tokenizer(
-            text=text, return_tensors="pt", add_special_tokens=False
-        )
-        content_ids = content_enc["input_ids"].to(self.device)
-
-        full_ids = torch.cat([prefix_ids, content_ids], dim=1)
         prefix_len = prefix_ids.shape[1]
         content_len = content_ids.shape[1]
 
-        labels = torch.full(
-            (1, prefix_len + content_len), -100, dtype=torch.long, device=self.device
-        )
-        labels[:, prefix_len:] = full_ids[:, prefix_len:]
+        # For 16 content tokens:
+        #
+        # window 0: [0, 8)   -> score [0, 8)   : 8 tokens
+        # window 1: [3, 11)  -> score [8, 11)  : 3 tokens
+        # window 2: [6, 14)  -> score [11, 14) : 3 tokens
+        # window 3: [9, 16)  -> score [14, 16) : 2 tokens
+        #
+        # The final window has only seven content tokens and only two
+        # fresh targets, so it also covers the final partial-window case.
+        window_size = 8
+        stride = 3
+        max_seq_len = prefix_len + window_size
 
-        with torch.no_grad():
-            logits = self.model(full_ids).logits
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = labels[:, 1:].contiguous()
+        calls: list[tuple[torch.Tensor, torch.Tensor, bool, int]] = []
 
-        ref_loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            ignore_index=-100,
-            reduction="sum",
+        def record_call(_module, _args, kwargs):
+            calls.append(
+                (
+                    kwargs["input_ids"].detach().clone(),
+                    kwargs["attention_mask"].detach().clone(),
+                    bool(kwargs["use_cache"]),
+                    int(kwargs["logits_to_keep"]),
+                )
+            )
+
+        hook = self.model.register_forward_pre_hook(
+            record_call,
+            with_kwargs=True,
         )
-        n_tokens = (shift_labels != -100).sum().item()
-        ref_ppl = torch.exp(ref_loss / n_tokens).item()
+        try:
+            actual_ppl = perplexity_chat_prefix(
+                self.model,
+                self.tokenizer,
+                dataset,
+                stride=stride,
+                max_seq_len=max_seq_len,
+                device=self.device,
+                show_progress=False,
+            )
+        finally:
+            hook.remove()
+
+        expected_content_lengths = [8, 8, 8, 7]
+        expected_target_lengths = [8, 3, 3, 2]
+        expected_logits_to_keep = [9, 4, 4, 3]
+
+        self.assertEqual(len(calls), len(expected_content_lengths))
+        self.assertEqual(
+            [input_ids.shape[1] - prefix_len for input_ids, _, _, _ in calls],
+            expected_content_lengths,
+        )
+        self.assertEqual(
+            [logits_to_keep for _, _, _, logits_to_keep in calls],
+            expected_logits_to_keep,
+        )
+        self.assertTrue(all(not use_cache for _, _, use_cache, _ in calls))
+
+        previous_end = 0
+        reference_nll = torch.zeros(
+            (),
+            dtype=torch.float64,
+            device=self.device,
+        )
+        reference_tokens = 0
+        scored_positions: list[int] = []
+
+        for call_index, begin in enumerate(range(0, content_len, stride)):
+            end = min(begin + window_size, content_len)
+            target_length = end - previous_end
+            if target_length <= 0:
+                break
+
+            expected_window_ids = content_ids[:, begin:end]
+            expected_input_ids = torch.cat(
+                [prefix_ids, expected_window_ids],
+                dim=1,
+            )
+
+            actual_input_ids, actual_attention_mask, _, _ = calls[call_index]
+
+            self.assertTrue(
+                torch.equal(actual_input_ids, expected_input_ids),
+                msg=f"Unexpected input_ids in window {call_index}",
+            )
+            self.assertTrue(
+                torch.equal(
+                    actual_attention_mask,
+                    torch.ones_like(expected_input_ids, dtype=torch.long),
+                ),
+                msg=f"Unexpected attention_mask in window {call_index}",
+            )
+
+            labels = torch.full_like(expected_input_ids, -100)
+            labels[:, -target_length:] = expected_input_ids[:, -target_length:]
+
+            with torch.no_grad():
+                full_logits = self.model(
+                    expected_input_ids,
+                    logits_to_keep=0,
+                ).logits
+
+            shift_logits = full_logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+
+            reference_nll += F.cross_entropy(
+                shift_logits.float().reshape(-1, shift_logits.size(-1)),
+                shift_labels.reshape(-1),
+                ignore_index=-100,
+                reduction="sum",
+            ).double()
+
+            target_tokens = int((shift_labels != -100).sum().item())
+            self.assertEqual(target_tokens, expected_target_lengths[call_index])
+            reference_tokens += target_tokens
+            scored_positions.extend(range(previous_end, end))
+
+            previous_end = end
+            if end == content_len:
+                break
+
+        # This checks both properties:
+        #   1. no corpus position was skipped;
+        #   2. no corpus position was scored more than once.
+        self.assertEqual(scored_positions, list(range(content_len)))
+        self.assertEqual(reference_tokens, content_len)
+
+        reference_ppl = torch.exp(reference_nll / reference_tokens).item()
 
         self.assertAlmostEqual(
-            ppl_with_prefix,
-            ref_ppl,
+            actual_ppl,
+            reference_ppl,
             places=5,
-            msg=f"with_prefix={ppl_with_prefix:.6f}, ref={ref_ppl:.6f}",
+            msg=(f"actual={actual_ppl:.6f}, " f"reference={reference_ppl:.6f}"),
         )
