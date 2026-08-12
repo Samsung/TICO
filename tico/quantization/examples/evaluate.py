@@ -13,12 +13,17 @@
 # limitations under the License.
 
 import argparse
+from collections.abc import MutableMapping
 
 import torch
 
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.evaluation.selection import (
+    parse_evaluation_targets,
+    validate_adapter_evaluation_config,
+)
 from tico.quantization.recipes.utils import set_seed
 
 
@@ -35,7 +40,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tasks",
         default=None,
-        help="Override eval tasks. LLM: lm_eval_tasks, VLM: vlm_tasks.",
+        help=(
+            "Comma-separated top-level evaluation targets. When set, only "
+            "these targets run; benchmark details remain in the config."
+        ),
     )
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     parser.add_argument(
@@ -65,8 +73,16 @@ def main() -> None:
         overrides.append("runtime.show_progress=false")
 
     cfg = load_recipe_config(args.config, overrides=overrides)
-    set_seed(cfg.get("runtime", {}).get("seed", 42))
     adapter = get_adapter(cfg["model"]["family"])
+
+    if args.tasks is not None:
+        eval_cfg = cfg.setdefault("evaluation", {})
+        if not isinstance(eval_cfg, MutableMapping):
+            raise TypeError("evaluation must be a mutable mapping.")
+        eval_cfg["selected_tasks"] = parse_evaluation_targets(args.tasks)
+
+    validate_adapter_evaluation_config(adapter, cfg)
+    set_seed(cfg.get("runtime", {}).get("seed", 42))
     ctx = RecipeContext(cfg=cfg, adapter=adapter)
     ctx = adapter.load_model(ctx)
 
@@ -79,14 +95,6 @@ def main() -> None:
         if hasattr(checkpoint, "to"):
             checkpoint = checkpoint.to(ctx.device)
         ctx.model = checkpoint.eval()
-
-    if args.tasks:
-        if adapter.family == "llama":
-            cfg.setdefault("evaluation", {})["lm_eval_tasks"] = args.tasks
-        else:
-            cfg.setdefault("evaluation", {})["vlm_tasks"] = [
-                t.strip() for t in args.tasks.split(",") if t.strip()
-            ]
 
     adapter.evaluate(ctx)
 

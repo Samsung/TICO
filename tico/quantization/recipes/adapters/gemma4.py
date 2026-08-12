@@ -32,6 +32,11 @@ from tico.quantization.recipes.evaluation.llava_bench_judge import (
 )
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
+from tico.quantization.recipes.evaluation.selection import (
+    get_mapping_evaluation_config,
+    should_run_evaluation,
+    should_run_mapping_evaluation,
+)
 from tico.quantization.recipes.evaluation.video_mme import evaluate_and_print_video_mme
 from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
@@ -56,6 +61,19 @@ class Gemma4Adapter(ModelAdapter):
     """Model adapter for Gemma4 E2B PTQ and static runtime experiments."""
 
     family = "gemma4"
+    evaluation_targets = frozenset(
+        {
+            "vqa",
+            "coco",
+            "llava_bench",
+            "videomme",
+            "mmlu",
+            "hellaswag",
+            "mmmu",
+            "ppl",
+        }
+    )
+    evaluation_target_requirements = {"vqa": "vlm_tasks"}
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         """Load the Gemma4 E2B model and processor."""
@@ -292,10 +310,12 @@ class Gemma4Adapter(ModelAdapter):
         return convert(prepared, inplace=True)
 
     def evaluate(self, ctx: RecipeContext) -> None:
-        """Evaluate Gemma4 E2B via LLaVA-Bench judge and other VLM tasks."""
+        """Evaluate Gemma4 E2B with the configured top-level targets."""
         eval_cfg = ctx.cfg.get("evaluation", {})
         if not eval_cfg.get("enabled", False):
             return
+
+        self.validate_evaluation_config(ctx.cfg)
 
         # Re-enable KV cache for autoregressive generation during evaluation.
         # ``_disable_cache`` in ``load_model`` turns it off for calibration,
@@ -304,17 +324,43 @@ class Gemma4Adapter(ModelAdapter):
 
         max_seq_len = eval_cfg.get("max_seq_len")
         n_samples = int(eval_cfg.get("n_samples", 50))
-        tasks = eval_cfg.get("vlm_tasks") or []
+        raw_vqa_tasks = eval_cfg.get("vlm_tasks") or []
         verbose = bool(eval_cfg.get("verbose", False))
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
-        if isinstance(tasks, str):
-            tasks = [task.strip() for task in tasks.split(",") if task.strip()]
 
-        if tasks:
+        if should_run_evaluation(
+            eval_cfg,
+            "vqa",
+            default_enabled=bool(raw_vqa_tasks),
+        ):
+            if isinstance(raw_vqa_tasks, str):
+                vqa_tasks = [
+                    task.strip() for task in raw_vqa_tasks.split(",") if task.strip()
+                ]
+            elif isinstance(raw_vqa_tasks, Sequence):
+                vqa_tasks = []
+                for task in raw_vqa_tasks:
+                    if not isinstance(task, str):
+                        raise TypeError(
+                            "evaluation.vlm_tasks must contain only strings."
+                        )
+                    normalized_task = task.strip()
+                    if normalized_task:
+                        vqa_tasks.append(normalized_task)
+            else:
+                raise TypeError(
+                    "evaluation.vlm_tasks must be a sequence or "
+                    "comma-separated string."
+                )
+
+            if not vqa_tasks:
+                raise ValueError(
+                    "evaluation.vlm_tasks must be non-empty when vqa runs."
+                )
             vqa_results = evaluate_vqa_tasks(
                 model=ctx.model,
                 processor=ctx.processor,
-                tasks=tasks,
+                tasks=vqa_tasks,
                 device=str(ctx.device),
                 n_samples=n_samples,
                 max_seq_len=max_seq_len,
@@ -323,7 +369,11 @@ class Gemma4Adapter(ModelAdapter):
             )
             print_vqa_results("VQA evaluation", vqa_results)
 
-        if eval_cfg.get("coco", False):
+        if should_run_evaluation(
+            eval_cfg,
+            "coco",
+            default_enabled=bool(eval_cfg.get("coco", False)),
+        ):
             coco_results = evaluate_coco(
                 model=ctx.model,
                 processor=ctx.processor,
@@ -334,16 +384,26 @@ class Gemma4Adapter(ModelAdapter):
             )
             print_coco_score_results("\n=== COCO Evaluation ===", coco_results)
 
-        llava_bench_cfg = eval_cfg.get("llava_bench", False)
-        if isinstance(llava_bench_cfg, Mapping):
-            if llava_bench_cfg.get("enabled", False):
-                mode = str(llava_bench_cfg.get("mode", "judge")).lower()
+        raw_llava_cfg = eval_cfg.get("llava_bench")
+        llava_default_enabled = (
+            bool(raw_llava_cfg.get("enabled", False))
+            if isinstance(raw_llava_cfg, Mapping)
+            else bool(raw_llava_cfg)
+        )
+        if should_run_evaluation(
+            eval_cfg,
+            "llava_bench",
+            default_enabled=llava_default_enabled,
+        ):
+            if isinstance(raw_llava_cfg, Mapping):
+                llava_cfg = raw_llava_cfg
+                mode = str(llava_cfg.get("mode", "judge")).lower()
                 if mode in {"judge", "llm_judge"}:
                     evaluate_and_print_llava_bench_judge(
                         model=ctx.model,
                         processor=ctx.processor,
                         device=str(ctx.device),
-                        llava_cfg=llava_bench_cfg,
+                        llava_cfg=llava_cfg,
                         model_cfg=ctx.cfg.get("model", {}),
                         runtime_cfg=ctx.cfg.get("runtime", {}),
                         default_n_samples=n_samples,
@@ -354,8 +414,11 @@ class Gemma4Adapter(ModelAdapter):
                         model=ctx.model,
                         processor=ctx.processor,
                         device=str(ctx.device),
-                        n_samples=int(llava_bench_cfg.get("n_samples", n_samples)),
-                        max_seq_len=llava_bench_cfg.get("max_seq_len", max_seq_len),
+                        n_samples=int(llava_cfg.get("n_samples", n_samples)),
+                        max_seq_len=llava_cfg.get(
+                            "max_seq_len",
+                            max_seq_len,
+                        ),
                     )
                     print_coco_score_results(
                         "\n=== LLaVA Bench Legacy COCO-style Evaluation ===",
@@ -367,31 +430,49 @@ class Gemma4Adapter(ModelAdapter):
                         "{'judge', 'llm_judge', 'legacy', 'coco', 'caption'}, "
                         f"got {mode!r}."
                     )
-        elif llava_bench_cfg:
-            print(
-                "[WARNING] evaluation.llava_bench=true uses the legacy "
-                "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
-                "evaluation.llava_bench.enabled=true, mode=judge."
-            )
-            llava_results = evaluate_llava_bench(
-                model=ctx.model,
-                processor=ctx.processor,
-                device=str(ctx.device),
-                n_samples=n_samples,
-                max_seq_len=max_seq_len,
-            )
-            print_coco_score_results("\n=== Llava Bench Evaluation ===", llava_results)
+            elif raw_llava_cfg is None or raw_llava_cfg is False:
+                evaluate_and_print_llava_bench_judge(
+                    model=ctx.model,
+                    processor=ctx.processor,
+                    device=str(ctx.device),
+                    llava_cfg={},
+                    model_cfg=ctx.cfg.get("model", {}),
+                    runtime_cfg=ctx.cfg.get("runtime", {}),
+                    default_n_samples=n_samples,
+                    default_max_seq_len=max_seq_len,
+                )
+            elif raw_llava_cfg is True:
+                print(
+                    "[WARNING] evaluation.llava_bench=true uses the legacy "
+                    "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
+                    "evaluation.llava_bench.enabled=true, mode=judge."
+                )
+                llava_results = evaluate_llava_bench(
+                    model=ctx.model,
+                    processor=ctx.processor,
+                    device=str(ctx.device),
+                    n_samples=n_samples,
+                    max_seq_len=max_seq_len,
+                )
+                print_coco_score_results(
+                    "\n=== Llava Bench Evaluation ===",
+                    llava_results,
+                )
+            else:
+                raise TypeError(
+                    "evaluation.llava_bench must be a mapping, boolean, or null."
+                )
 
-        videomme = eval_cfg.get("videomme", {})
-        if videomme.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "videomme"):
+            videomme = get_mapping_evaluation_config(eval_cfg, "videomme")
             video_n_samples = int(videomme.get("n_samples", -1))
-            # max_num_frames=21 for gemma4 model with max_seq_len=2048
-            # due to the minimal soft_tokens_per_frame is 70 (comes from processor.video_processor.max_soft_tokens)
+            # Gemma4 uses at least 70 soft tokens per frame at this profile.
             max_num_frames = int(videomme.get("max_num_frames", 21))
             if max_num_frames <= 0:
                 raise ValueError(
                     "evaluation.videomme.max_num_frames must be a positive integer."
                 )
+
             evaluate_and_print_video_mme(
                 model=ctx.model,
                 processor=ctx.processor,
@@ -404,8 +485,8 @@ class Gemma4Adapter(ModelAdapter):
                 verbose=bool(videomme.get("verbose", verbose)),
             )
 
-        mmlu = eval_cfg.get("mmlu", {})
-        if mmlu.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "mmlu"):
+            mmlu = get_mapping_evaluation_config(eval_cfg, "mmlu")
             evaluate_and_print_mmlu(
                 model=ctx.model,
                 tokenizer=ctx.processor.tokenizer,
@@ -419,8 +500,8 @@ class Gemma4Adapter(ModelAdapter):
                 ),
             )
 
-        hellaswag = eval_cfg.get("hellaswag", {})
-        if hellaswag.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "hellaswag"):
+            hellaswag = get_mapping_evaluation_config(eval_cfg, "hellaswag")
             evaluate_and_print_hellaswag(
                 model=ctx.model,
                 tokenizer=ctx.processor.tokenizer,
@@ -433,8 +514,8 @@ class Gemma4Adapter(ModelAdapter):
                 ),
             )
 
-        mmmu = eval_cfg.get("mmmu", {})
-        if mmmu.get("enabled", False):
+        if should_run_mapping_evaluation(eval_cfg, "mmmu"):
+            mmmu = get_mapping_evaluation_config(eval_cfg, "mmmu")
             subjects = mmmu.get("subjects")
             if subjects == ["mmmu"] or subjects == "mmmu":
                 subjects = None
@@ -452,15 +533,15 @@ class Gemma4Adapter(ModelAdapter):
                 verbose=bool(mmmu.get("verbose", verbose)),
             )
 
-        ppl = eval_cfg.get("ppl", {})
-        if ppl.get("enabled", False):
-            ppl_mode = str(ppl.get("mode", "raw")).lower()
+        if should_run_mapping_evaluation(eval_cfg, "ppl"):
+            ppl_cfg = get_mapping_evaluation_config(eval_cfg, "ppl")
+            ppl_mode = str(ppl_cfg.get("mode", "raw")).lower()
 
-            _VALID_PPL_MODES = {"raw", "chat-prefix"}
-            if ppl_mode not in _VALID_PPL_MODES:
+            valid_ppl_modes = {"raw", "chat-prefix"}
+            if ppl_mode not in valid_ppl_modes:
                 raise ValueError(
                     f"Unsupported ppl mode: {ppl_mode!r}. "
-                    f"Must be one of {sorted(_VALID_PPL_MODES)}."
+                    f"Must be one of {sorted(valid_ppl_modes)}."
                 )
 
             eval_fn = (
@@ -468,14 +549,13 @@ class Gemma4Adapter(ModelAdapter):
                 if ppl_mode == "chat-prefix"
                 else evaluate_vlm_text_ppl
             )
-
             ppl_value = eval_fn(
                 model=ctx.model,
                 processor=ctx.processor,
-                dataset_name=ppl.get("dataset", "wikitext2"),
-                split=ppl.get("split", "test"),
+                dataset_name=ppl_cfg.get("dataset", "wikitext2"),
+                split=ppl_cfg.get("split", "test"),
                 device=str(ctx.device),
-                stride=int(ppl.get("stride", 512)),
+                stride=int(ppl_cfg.get("stride", 512)),
                 max_seq_len=int(
                     max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
                 ),
@@ -483,7 +563,7 @@ class Gemma4Adapter(ModelAdapter):
             )
             print(
                 f"\nPPL[{ppl_mode}]"
-                f"({ppl.get('dataset', 'wikitext2')}): {ppl_value:.2f}"
+                f"({ppl_cfg.get('dataset', 'wikitext2')}): {ppl_value:.2f}"
             )
 
     def export(self, ctx: RecipeContext) -> None:

@@ -261,14 +261,60 @@ python -m tico.quantization.examples.evaluate \
   --checkpoint ./out/llama_quantized/quantized_model.pt
 ```
 
-Task overrides are supported:
+Top-level evaluation target selection is supported through `--tasks`.
+
+`--tasks` is an exclusive allow-list. When it is present, only the listed
+top-level evaluation targets run, even when other targets are enabled in the
+YAML file. The option does not replace benchmark details such as LM-Eval task
+names, VQA datasets, MMMU subjects, or sample limits. Configure those details
+in YAML or with `--set`.
+
+Canonical targets are model-family specific:
+
+| Model family | Supported `--tasks` values |
+|---|---|
+| LLaMA | `lm_eval`, `ppl` |
+| Qwen3-VL, Gemma4 | `vqa`, `coco`, `llava_bench`, `videomme`, `mmlu`, `hellaswag`, `mmmu`, `ppl` |
+
+Run only the configured LM-Eval suite:
 
 ```bash
 python -m tico.quantization.examples.evaluate \
   --config tico/quantization/examples/configs/llama_eval_suite.yaml \
   --checkpoint ./out/llama_quantized/quantized_model.pt \
-  --tasks winogrande,arc_easy
+  --tasks lm_eval
 ```
+
+Override the LM-Eval benchmark details separately:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/llama_eval_suite.yaml \
+  --checkpoint ./out/llama_quantized/quantized_model.pt \
+  --tasks lm_eval \
+  --set evaluation.lm_eval_tasks=mmlu,hellaswag
+```
+
+Run only MMMU and text perplexity from a VLM suite:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks mmmu,ppl
+```
+
+Run only the VQA evaluator while selecting its datasets separately:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks vqa \
+  --set 'evaluation.vlm_tasks=[textvqa]'
+```
+
+Target names are canonical and have no aliases. For example,
+`--tasks lm_eval_tasks`, `--tasks vlm_tasks`, and `--tasks perplexity` are
+invalid. Use `lm_eval`, `vqa`, and `ppl`, respectively.
 
 ### Export
 
@@ -347,12 +393,9 @@ python -m tico.quantization.examples.export \
 ### LLaVA-Bench judge evaluation
 
 > [!NOTE]
-> `qwen3_vl_eval_suite.yaml` and
-> `qwen3_vl_eval_suite_mx_override_polices.yaml` enable the other evaluation
-> tasks by default. Disable them with `--set` overrides when running only
-> LLaVA-Bench.
->
-> `gemma4_eval_suite.yaml` enables only LLaVA-Bench judge evaluation.
+> Pass `--tasks llava_bench` to run only LLaVA-Bench, even when the selected
+> YAML preset enables other evaluation targets. Benchmark details under
+> `evaluation.llava_bench` remain unchanged.
 
 LLaVA-Bench-in-the-Wild is evaluated through the regular `evaluate.py` entry
 point when a supported VLM config enables `evaluation.llava_bench.mode=judge`.

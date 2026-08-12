@@ -23,7 +23,10 @@ Every adapter implements `ModelAdapter`:
 ```python
 class ModelAdapter(ABC):
     family: str
+    evaluation_targets: frozenset[str]
+    evaluation_target_requirements: Mapping[str, str]
 
+    def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None: ...
     def load_model(self, ctx: RecipeContext) -> RecipeContext: ...
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[Any]: ...
     def forward_calibration(self, ctx, model, calibration_inputs, *, desc: str) -> None: ...
@@ -41,6 +44,45 @@ model:
 ```
 
 and registered in `recipes/adapters/__init__.py`.
+
+## Evaluation target registry
+
+Every adapter declares the canonical top-level evaluation targets that it
+supports. The registry is used to validate `evaluation.selected_tasks` before
+model loading.
+
+```python
+class GemmaAdapter(ModelAdapter):
+    family = "gemma"
+    evaluation_targets = frozenset(
+        {
+            "vqa",
+            "coco",
+            "llava_bench",
+            "mmlu",
+            "ppl",
+        }
+    )
+    evaluation_target_requirements = {
+        "vqa": "vlm_tasks",
+    }
+```
+
+`evaluation_target_requirements` maps a top-level target to the config field
+that must contain its benchmark details. Use it only when a selected evaluator
+cannot run without a non-empty detail list.
+
+Target names represent evaluator-level concepts. They must not duplicate config
+key names merely for convenience:
+
+```text
+Good: lm_eval, vqa, ppl
+Bad:  lm_eval_tasks, vlm_tasks, perplexity
+```
+
+The common `validate_evaluation_config()` implementation rejects unsupported
+names and missing required details. Adapter `evaluate()` methods should gate
+each helper with functions from `recipes/evaluation/selection.py`.
 
 ## When to add a new adapter
 
@@ -87,6 +129,8 @@ from tico.quantization.recipes.context import RecipeContext
 
 class GemmaAdapter(ModelAdapter):
     family = "gemma"
+    evaluation_targets = frozenset({"lm_eval", "ppl"})
+    evaluation_target_requirements = {"lm_eval": "lm_eval_tasks"}
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         model_cfg = ctx.cfg["model"]
@@ -259,6 +303,7 @@ Before merging a new adapter:
 - `forward_calibration` supports the sample type returned by
   `build_calibration_inputs`.
 - `build_ptq_config` does not mutate global state.
-- Evaluation and export are optional and respect `enabled: false`.
+- Evaluation targets are registered with canonical names and have no aliases.
+- Evaluation and export are optional and respect `enabled: false` when no exclusive selector is configured.
 - No example imports this adapter-specific helper directly except through the
   recipe runner or debug CLI.

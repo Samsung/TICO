@@ -28,6 +28,7 @@ from tico.quantization.recipes.evaluation.llm import (
     evaluate_lm_tasks,
     evaluate_perplexity,
 )
+from tico.quantization.recipes.evaluation.selection import should_run_evaluation
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.circle import export_full_circle
 from tico.quantization.recipes.export.llama import export_llama_per_layer
@@ -131,6 +132,8 @@ def validate_tied_embedding_weight_specs(
 
 class LlamaAdapter(ModelAdapter):
     family = "llama"
+    evaluation_targets = frozenset({"lm_eval", "ppl"})
+    evaluation_target_requirements = {"lm_eval": "lm_eval_tasks"}
 
     def _ptq_decode_calibration_steps(self, cfg: Mapping[str, Any]) -> int:
         calib = cfg.get("calibration", {})
@@ -312,14 +315,28 @@ class LlamaAdapter(ModelAdapter):
         if not eval_cfg.get("enabled", False):
             return
 
+        self.validate_evaluation_config(ctx.cfg)
         max_seq_len = int(
             eval_cfg.get("max_seq_len")
             or ctx.cfg.get("calibration", {}).get("seq_len")
             or ctx.model.config.max_position_embeddings
         )
 
-        ppl_cfg = eval_cfg.get("perplexity")
-        if ppl_cfg:
+        raw_ppl_cfg = eval_cfg.get("perplexity")
+        if should_run_evaluation(
+            eval_cfg,
+            "ppl",
+            default_enabled=bool(raw_ppl_cfg),
+        ):
+            if isinstance(raw_ppl_cfg, Mapping):
+                ppl_cfg = raw_ppl_cfg
+            elif raw_ppl_cfg is None or isinstance(raw_ppl_cfg, bool):
+                ppl_cfg = {}
+            else:
+                raise TypeError(
+                    "evaluation.perplexity must be a mapping, boolean, or null."
+                )
+
             ppl = evaluate_perplexity(
                 model=ctx.model,
                 tokenizer=ctx.tokenizer,
@@ -327,7 +344,10 @@ class LlamaAdapter(ModelAdapter):
                 cache_dir=ctx.cfg.get("model", {}).get("cache_dir"),
                 max_seq_len=max_seq_len,
                 dataset_name=ppl_cfg.get("dataset", "Salesforce/wikitext"),
-                dataset_config=ppl_cfg.get("dataset_config", "wikitext-2-raw-v1"),
+                dataset_config=ppl_cfg.get(
+                    "dataset_config",
+                    "wikitext-2-raw-v1",
+                ),
                 split=ppl_cfg.get("split", "test"),
             )
             print("\n┌── Perplexity ─────────────────────────────")
@@ -335,7 +355,17 @@ class LlamaAdapter(ModelAdapter):
             print("└───────────────────────────────────────────")
 
         tasks = eval_cfg.get("lm_eval_tasks")
-        if tasks:
+        if should_run_evaluation(
+            eval_cfg,
+            "lm_eval",
+            default_enabled=bool(tasks),
+        ):
+            if not isinstance(tasks, str) or not tasks.strip():
+                raise ValueError(
+                    "evaluation.lm_eval_tasks must be a non-empty "
+                    "comma-separated string when lm_eval runs."
+                )
+
             print("\n=== lm-eval ===")
             evaluate_lm_tasks(
                 model=ctx.model,
