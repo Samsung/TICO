@@ -64,6 +64,12 @@ work exactly as documented in [`../gptq/README.md`](../gptq/README.md). For
 `weight_bits_overrides`, key matching is full name → stage-local name → full-name
 suffix.
 
+Four `mse` modes — `"mse"`, `"smse"`, `"mse_for_gptq"`, and
+`"smse_for_gptq"` — are supported (see the [MSE section](../gptq/README.md#mse)
+of the base README for details). As in the generic implementation, the
+`*_for_gptq` modes use an accelerated approximate GPTQ (FPI_GPTQ) to tune the
+quantizer grid and currently require `groupsize == -1`.
+
 Qwen3-VL specific fields:
 
 | Field | Default | Description |
