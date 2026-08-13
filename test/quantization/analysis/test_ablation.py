@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for runtime A/B/C/D quantization ablation."""
+"""Tests for runtime A/B/C/D/E quantization ablation."""
 
 import unittest
 
@@ -122,6 +122,12 @@ class QuantizationAblationTest(unittest.TestCase):
             report.profiles[QuantizationProfile.ACTIVATION_ONLY].enabled_site_count,
             1,
         )
+        internal_full = report.profiles[QuantizationProfile.INTERNAL_FULL]
+        self.assertEqual(internal_full.enabled_site_count, 2)
+        self.assertEqual(
+            set(internal_full.enabled_sites),
+            {"block.weight", "block.act_in"},
+        )
         self.assertEqual(
             report.profiles[QuantizationProfile.FULL].enabled_site_count,
             3,
@@ -133,7 +139,28 @@ class QuantizationAblationTest(unittest.TestCase):
         self.assertEqual(restored, original_states)
         self.assertLess(metric_float(report.float_parity["output"], "mae"), 1e-7)
 
-    def test_rejects_an_empty_output_boundary(self) -> None:
+    def test_explicit_activation_selector_does_not_require_output_sites(self) -> None:
+        """Allow C to define its complete activation domain explicitly."""
+        reference = TinyModel(quantized=False)
+        candidate = TinyModel(quantized=True)
+        reference.block.weight.data.copy_(candidate.block.weight.data)
+        report = QuantizationAblation(
+            reference,
+            candidate,
+            boundaries=QuantizationBoundaries(
+                outputs=SiteSelector.paths("block.missing"),
+                activations=SiteSelector.paths("block.act_in"),
+            ),
+        ).run(
+            [torch.tensor([0.19, 0.73, 1.11])],
+            profiles=(QuantizationProfile.ACTIVATION_ONLY,),
+        )
+
+        activation_only = report.profiles[QuantizationProfile.ACTIVATION_ONLY]
+        self.assertEqual(activation_only.enabled_sites, ("block.act_in",))
+
+    def test_rejects_an_empty_output_boundary_for_dependent_profiles(self) -> None:
+        """Require an output domain whenever a profile includes or excludes it."""
         reference = TinyModel(quantized=False)
         candidate = TinyModel(quantized=True)
         reference.block.weight.data.copy_(candidate.block.weight.data)
@@ -144,11 +171,17 @@ class QuantizationAblationTest(unittest.TestCase):
                 outputs=SiteSelector.paths("block.missing")
             ),
         )
-        with self.assertRaisesRegex(ValueError, "output selector"):
-            runner.run(
-                [torch.tensor([0.19, 0.73, 1.11])],
-                profiles=(QuantizationProfile.OUTPUT_ONLY,),
-            )
+        for profile in (
+            QuantizationProfile.OUTPUT_ONLY,
+            QuantizationProfile.ACTIVATION_ONLY,
+            QuantizationProfile.INTERNAL_FULL,
+        ):
+            with self.subTest(profile=profile):
+                with self.assertRaisesRegex(ValueError, "output selector"):
+                    runner.run(
+                        [torch.tensor([0.19, 0.73, 1.11])],
+                        profiles=(profile,),
+                    )
 
 
 if __name__ == "__main__":

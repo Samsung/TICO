@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Reusable A/B/C/D fake-quantization ablation runner."""
+"""Reusable A/B/C/D/E fake-quantization ablation runner."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ _DEFAULT_PROFILES = (
     QuantizationProfile.WEIGHT_ONLY,
     QuantizationProfile.ACTIVATION_ONLY,
     QuantizationProfile.FULL,
+    QuantizationProfile.INTERNAL_FULL,
 )
 
 
@@ -79,9 +80,18 @@ class QuantizationAblation:
         all_sites = tuple(iter_quantization_sites(self.quantized_model))
         if not all_sites:
             raise ValueError("The candidate model does not contain WrapQ observers.")
-        if QuantizationProfile.OUTPUT_ONLY in selected_profiles and not any(
+        output_boundary_required = (
+            QuantizationProfile.OUTPUT_ONLY in selected_profiles
+            or QuantizationProfile.INTERNAL_FULL in selected_profiles
+            or (
+                QuantizationProfile.ACTIVATION_ONLY in selected_profiles
+                and self.boundaries.activations is None
+            )
+        )
+        output_boundary_matches = any(
             self.boundaries.outputs(site) for site in all_sites
-        ):
+        )
+        if output_boundary_required and not output_boundary_matches:
             raise ValueError(
                 "The output selector did not match any quantization sites."
             )

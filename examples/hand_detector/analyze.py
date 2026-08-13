@@ -63,7 +63,10 @@ def parse_args() -> argparse.Namespace:
 
     ablation = subparsers.add_parser(
         "ablation",
-        help="Run output-only, weight-only, activation-only, and full PTQ.",
+        help=(
+            "Run output-only, weight-only, activation-only, full, and "
+            "internal-full PTQ."
+        ),
     )
     _add_model_arguments(ablation)
     _add_dataset_arguments(ablation, evaluation=True)
@@ -402,7 +405,7 @@ def _validate_percentiles(percentiles: list[float]) -> None:
 
 
 def _print_ablation(report: dict[str, Any]) -> None:
-    print("\nQuantization A/B/C/D ablation")
+    print("\nQuantization A/B/C/D/E ablation")
     print(
         f"{'profile':18s} {'REG_MAE':>13s} {'REG_COS':>13s} "
         f"{'CLS_MAE':>13s} {'CLS_COS':>13s} {'SITES':>7s}"
@@ -414,6 +417,7 @@ def _print_ablation(report: dict[str, Any]) -> None:
         QuantizationProfile.WEIGHT_ONLY,
         QuantizationProfile.ACTIVATION_ONLY,
         QuantizationProfile.FULL,
+        QuantizationProfile.INTERNAL_FULL,
     ):
         result = report["profiles"][profile.value]
         _print_output_row(

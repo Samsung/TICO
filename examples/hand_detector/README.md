@@ -116,7 +116,7 @@ python -m examples.hand_detector.export quantized \
 
 ## Quantization analysis
 
-### A/B/C/D ablation
+### A/B/C/D/E ablation
 
 The standard profiles isolate the major quantization error sources:
 
@@ -125,9 +125,10 @@ A  output-only
 B  weight-only with floating-point activations and outputs
 C  internal activation-only with floating-point weights and outputs
 D  full quantization
+E  internal full quantization with floating-point outputs
 ```
 
-Run all four profiles from one calibrated candidate:
+Run all five profiles from one calibrated candidate:
 
 ```bash
 python -m examples.hand_detector.analyze ablation \
