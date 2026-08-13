@@ -790,7 +790,8 @@ class EliminateTransposeBoundedLayoutRegionPass(CirclePass):
     """Rewrite registered Transpose-bounded regions into their source layout.
 
     The pass finds dataflow-connected components composed only of operators with
-    registered region rules. The initial registry contains binary ADD and constant
+    registered region rules. The registry includes rank-preserving unary,
+    same-shape binary, and same-shape variadic elementwise operators plus constant
     PAD. Every external data input must enter through the same Transpose
     permutation, and every external data output must leave through its inverse.
     The complete component is then executed directly in the source layout,
