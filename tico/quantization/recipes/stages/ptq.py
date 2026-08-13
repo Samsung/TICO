@@ -31,7 +31,6 @@ from tico.quantization.recipes.qparams import (
 )
 from tico.quantization.recipes.stages.base import Stage
 
-
 _INTERNAL_OVERRIDE_FIELDS = frozenset({"__quant_spec_replace_role__"})
 _OVERRIDE_FIELD_ORDER = (
     "observer",
@@ -193,19 +192,27 @@ class PTQStage(Stage):
 
         q_model = prepare(ctx.require_model(), ptq_config)
 
-        owner, quantizers = find_gptq_quantizers(q_model)
-        if quantizers:
-            inject_gptq_qparams(
-                q_model if owner is q_model else owner,
-                quantizers,
-                verbose=_qparam_injection_verbose(ctx, stage_cfg),
-            )
-            clear_gptq_quantizers(q_model)
+        inject_gptq = bool(stage_cfg.get("inject_gptq_qparams", True))
+        if inject_gptq:
+            owner, quantizers = find_gptq_quantizers(q_model)
+            if quantizers:
+                inject_gptq_qparams(
+                    q_model if owner is q_model else owner,
+                    quantizers,
+                    verbose=_qparam_injection_verbose(ctx, stage_cfg),
+                )
+                clear_gptq_quantizers(q_model)
+            else:
+                print(
+                    "[Warn] GPTQ quantizers were not found; "
+                    "PTQ weight observers will use PTQ statistics."
+                )
         else:
             print(
-                "[Warn] GPTQ quantizers were not found; "
-                "PTQ weight observers will use PTQ statistics."
+                "[Info] GPTQ qparam injection disabled by config "
+                "(inject_gptq_qparams=false)."
             )
+            clear_gptq_quantizers(q_model)
 
         ctx.adapter.calibrate_prepared_model(ctx, q_model, stage_cfg)
 

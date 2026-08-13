@@ -51,6 +51,7 @@ pipeline:
     norm: int16
     norm_weight: int16
     strict_wrap: true
+    inject_gptq_qparams: false
 
 evaluation:
   enabled: true

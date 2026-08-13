@@ -253,6 +253,32 @@ pipeline:
     enabled: true
 ```
 
+### GPTQ-to-PTQ qparam injection
+
+The GPTQ quantizer attaches per-layer weight quantization parameters (scale, zero-point)
+to `model.quantizers`. The PTQ stage discovers these and injects them into
+the PTQ weight observers so that PTQ reuses GPTQ's weight qparams
+instead of recomputing them from scratch.
+
+Set `inject_gptq_qparams: false` on the PTQ stage to skip this injection.
+
+```yaml
+pipeline:
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+
+  - name: ptq
+    enabled: true
+    inject_gptq_qparams: false  # skip GPTQ qparam injection (default: true)
+    activation: int16
+    linear_weight: uint4
+```
+
+- Default is `true`
+- When `false`, PTQ weight observers compute their own statistics from
+  calibration data.
+
 ## `evaluation`
 
 LLM example:
