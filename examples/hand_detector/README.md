@@ -171,7 +171,13 @@ from calibration outputs.
 ### Activation observer sweep
 
 Keep per-channel MinMax weight quantization fixed and compare activation range
-estimators:
+estimators across three ablation profiles:
+
+```text
+C  activation-only with floating-point weights and outputs
+D  full quantization
+E  internal full quantization with floating-point outputs
+```
 
 ```bash
 python -m examples.hand_detector.analyze observer-sweep \
@@ -182,7 +188,11 @@ python -m examples.hand_detector.analyze observer-sweep \
 ```
 
 `PercentileObserver` uses bounded sampling, so it does not retain every value
-from every activation tensor.
+from every activation tensor. The console ranks candidates by E regressor MAE,
+which isolates internal W8A8 behavior from the selected final-output domains.
+The JSON report stores C/D/E metrics under each candidate's `profiles` mapping.
+For compatibility with existing report readers, the candidate-level `outputs`
+field remains an alias of D outputs.
 
 ## Calibration and evaluation data
 
