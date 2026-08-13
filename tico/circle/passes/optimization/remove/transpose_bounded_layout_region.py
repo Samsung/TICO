@@ -721,18 +721,30 @@ def _apply_region_plan(
     operators = as_list(graph.subgraph.operators)
 
     for operator_rewrite in plan.operator_rewrites:
-        if not operator_rewrite.constant_input_rewrites:
-            continue
         operator = operators[operator_rewrite.operator_index]
-        inputs = as_indices(getattr(operator, "inputs", None))
-        for rewrite in operator_rewrite.constant_input_rewrites:
-            new_tensor_index = _clone_i32_constant(
-                graph,
-                rewrite.source_tensor_index,
-                rewrite.values,
-            )
-            inputs[rewrite.input_position] = new_tensor_index
-        operator.inputs = inputs
+        if operator_rewrite.constant_input_rewrites:
+            inputs = as_indices(getattr(operator, "inputs", None))
+            for rewrite in operator_rewrite.constant_input_rewrites:
+                new_tensor_index = _clone_i32_constant(
+                    graph,
+                    rewrite.source_tensor_index,
+                    rewrite.values,
+                )
+                inputs[rewrite.input_position] = new_tensor_index
+            operator.inputs = inputs
+
+        if operator_rewrite.builtin_option_rewrites:
+            options = copy.deepcopy(getattr(operator, "builtinOptions", None))
+            if options is None:
+                raise RuntimeError("Axis-remap rule expected Circle builtin options.")
+            for rewrite in operator_rewrite.builtin_option_rewrites:
+                if not hasattr(options, rewrite.field_name):
+                    raise RuntimeError(
+                        "Axis-remap rule references missing builtin option "
+                        f"{rewrite.field_name}."
+                    )
+                setattr(options, rewrite.field_name, rewrite.value)
+            operator.builtinOptions = options
 
     for boundary in plan.input_boundaries:
         operator = operators[boundary.region_operator_index]
@@ -791,12 +803,13 @@ class EliminateTransposeBoundedLayoutRegionPass(CirclePass):
 
     The pass finds dataflow-connected components composed only of operators with
     registered region rules. The registry includes rank-preserving unary,
-    same-shape binary, and same-shape variadic elementwise operators plus constant
-    PAD. Every external data input must enter through the same Transpose
+    same-shape binary, and same-shape variadic elementwise operators plus
+    axis-remapped CONCATENATION, constant-padding operators, TILE, and SLICE.
+    Every external data input must enter through the same Transpose
     permutation, and every external data output must leave through its inverse.
     The complete component is then executed directly in the source layout,
-    operator-local constants are rewritten through their rules, and the boundary
-    Transpose outputs are bypassed. Dead-code elimination removes the now-unused
+    operator-local constants and builtin options are rewritten through their rules,
+    and the boundary Transpose outputs are bypassed. Dead-code elimination removes
     Transpose nodes.
 
     Float tensors and per-tensor quantized activation tensors are supported.
