@@ -804,8 +804,9 @@ class EliminateTransposeBoundedLayoutRegionPass(CirclePass):
     The pass finds dataflow-connected components composed only of operators with
     registered region rules. The registry includes rank-preserving unary,
     same-shape binary, and same-shape variadic elementwise operators plus
-    axis-remapped CONCATENATION, constant-padding operators, TILE, and SLICE.
-    Every external data input must enter through the same Transpose
+    axis-remapped CONCATENATION, constant-padding operators, TILE, SLICE,
+    SPLIT, and SPLIT_V. Every external data input must enter through the same
+    Transpose
     permutation, and every external data output must leave through its inverse.
     The complete component is then executed directly in the source layout,
     operator-local constants and builtin options are rewritten through their rules,

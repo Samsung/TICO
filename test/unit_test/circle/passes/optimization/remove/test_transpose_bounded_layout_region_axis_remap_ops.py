@@ -431,13 +431,22 @@ class AxisRemapRuleRegistryTest(unittest.TestCase):
                     rule_type,
                 )
 
-    def test_multi_output_axis_ops_remain_unregistered(self) -> None:
-        """Keep SPLIT and SPLIT_V for the later multi-output extension."""
+    def test_multi_output_axis_ops_use_dedicated_rules(
+        self,
+    ) -> None:
+        """Resolve SPLIT and SPLIT_V through their multi-output rules."""
 
-        for name in ("SPLIT", "SPLIT_V"):
+        expected = {
+            "SPLIT": rules._SplitRule,
+            "SPLIT_V": rules._SplitVRule,
+        }
+        for name, rule_type in expected.items():
             with self.subTest(name=name):
-                builtin_code = rules._builtin_operator_value(name)
-                self.assertIsNone(rules._rule_for_builtin_code(builtin_code))
+                builtin_code = rules._AXIS_REMAP_BUILTIN_CODES[name]
+                self.assertIsInstance(
+                    rules._rule_for_builtin_code(builtin_code),
+                    rule_type,
+                )
 
 
 class AxisRemapRegionPassTest(unittest.TestCase):
