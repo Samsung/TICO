@@ -301,12 +301,18 @@ cross its inverse. The registered layout-invariant operator families are:
   `GREATER`, `GREATER_EQUAL`, `LESS`, `LESS_EQUAL`, `LOGICAL_AND`, `LOGICAL_OR`,
   `MAXIMUM`, `MINIMUM`, `MUL`, `NOT_EQUAL`, `POW`, `SQUARED_DIFFERENCE`, and `SUB`
 - variadic without broadcasting: `ADD_N`
-- constant axis remapping: `PAD`
+- axis option remapping: `CONCATENATION`
+- constant padding-row remapping: `PAD`, `PADV2`, and `MIRROR_PAD`
+- constant rank-vector remapping: `TILE` and `SLICE`
 
 Unary inputs and outputs must have the same shape. Binary and variadic operators require
 all data inputs and outputs to have exactly the same shape, so broadcasting remains a
-region boundary. Axis-sensitive or rank-changing operators such as `PRELU`, `RESHAPE`,
-and `SOFTMAX` are intentionally not registered.
+region boundary. `CONCATENATION` remaps its normalized axis. `PADV2` preserves its
+scalar padding value, and `MIRROR_PAD` preserves its reflection mode. `TILE` requires a
+static INT32 multiples vector. `SLICE` requires static INT32 begin and size vectors and
+supports `-1` only in the size vector. Rank-changing or unsupported axis-sensitive
+operators such as `PRELU`, `RESHAPE`, `SOFTMAX`, `SPLIT`, and `SPLIT_V` remain region
+boundaries.
 
 Run the bounded-region pass with restart scheduling and cleanup:
 

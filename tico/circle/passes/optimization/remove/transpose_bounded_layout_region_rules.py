@@ -28,7 +28,22 @@ from tico.circle.passes.optimization.remove.layout_ops import (
 
 _ADD_BUILTIN_CODE = _builtin_operator_value("ADD")
 _ADD_N_BUILTIN_CODE = _builtin_operator_value("ADD_N")
+_CONCATENATION_BUILTIN_CODE = _builtin_operator_value("CONCATENATION")
+_MIRROR_PAD_BUILTIN_CODE = _builtin_operator_value("MIRROR_PAD")
 _PAD_BUILTIN_CODE = _builtin_operator_value("PAD")
+_PADV2_BUILTIN_CODE = _builtin_operator_value("PADV2")
+_SLICE_BUILTIN_CODE = _builtin_operator_value("SLICE")
+_TILE_BUILTIN_CODE = _builtin_operator_value("TILE")
+
+_AXIS_REMAP_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
+    {
+        "CONCATENATION": _CONCATENATION_BUILTIN_CODE,
+        "MIRROR_PAD": _MIRROR_PAD_BUILTIN_CODE,
+        "PADV2": _PADV2_BUILTIN_CODE,
+        "SLICE": _SLICE_BUILTIN_CODE,
+        "TILE": _TILE_BUILTIN_CODE,
+    }
+)
 
 _UNARY_LAYOUT_INVARIANT_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
     {
@@ -153,6 +168,135 @@ def _remap_axis_rows(
     return _flatten_rows([row for row in new_rows if row is not None])
 
 
+def _remap_axis_vector(
+    values: tuple[int, ...],
+    rank: int,
+    source_to_region: tuple[int, ...],
+) -> tuple[int, ...] | None:
+    """Reorder one region-layout rank vector into source-layout order."""
+
+    if len(values) != rank or len(source_to_region) != rank:
+        return None
+    remapped = [0] * rank
+    for region_axis, source_axis in enumerate(source_to_region):
+        remapped[source_axis] = values[region_axis]
+    return tuple(remapped)
+
+
+def _normalize_axis(axis: int, rank: int) -> int | None:
+    """Normalize one possibly negative axis against a known rank."""
+
+    normalized = axis + rank if axis < 0 else axis
+    if normalized < 0 or normalized >= rank:
+        return None
+    return normalized
+
+
+def _remap_axis(
+    axis: int,
+    rank: int,
+    source_to_region: tuple[int, ...],
+) -> int | None:
+    """Map one region-layout axis into the source layout."""
+
+    normalized = _normalize_axis(axis, rank)
+    if normalized is None or len(source_to_region) != rank:
+        return None
+    return source_to_region[normalized]
+
+
+def _rank_vector_constant(
+    context: _RegionOpContext,
+    input_position: int,
+) -> tuple[int, tuple[int, ...]] | None:
+    """Return one constant INT32 rank vector and its tensor index."""
+
+    if input_position < 0 or input_position >= len(context.inputs):
+        return None
+    tensor_index = context.inputs[input_position]
+    if tensor_index < 0 or tensor_index >= len(context.tensors):
+        return None
+    if _shape(context.tensors[tensor_index]) != (context.rank,):
+        return None
+    raw_values = _get_const_data(context.graph, tensor_index)
+    if raw_values is None or len(raw_values) != context.rank:
+        return None
+    return tensor_index, tuple(int(value) for value in raw_values)
+
+
+def _source_layout_shapes(
+    context: _RegionOpContext,
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    """Return input and output shapes converted into source-layout order."""
+
+    source_input = _permuted_shape(
+        input_shape,
+        context.region_to_source_permutation,
+    )
+    source_output = _permuted_shape(
+        output_shape,
+        context.region_to_source_permutation,
+    )
+    if source_input is None or source_output is None:
+        return None
+    return source_input, source_output
+
+
+def _tile_matches_shape(
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    multiples: tuple[int, ...],
+) -> bool:
+    """Return whether TILE multiples transform one shape into another."""
+
+    if len(input_shape) != len(output_shape) or len(multiples) != len(input_shape):
+        return False
+    if any(dimension < 0 for dimension in (*input_shape, *output_shape)):
+        return False
+    return all(
+        multiple >= 0 and input_size * multiple == output_size
+        for input_size, output_size, multiple in zip(
+            input_shape,
+            output_shape,
+            multiples,
+        )
+    )
+
+
+def _slice_matches_shape(
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    begin: tuple[int, ...],
+    size: tuple[int, ...],
+) -> bool:
+    """Return whether one static SLICE specification yields the output shape."""
+
+    rank = len(input_shape)
+    if len(output_shape) != rank or len(begin) != rank or len(size) != rank:
+        return False
+    if any(dimension < 0 for dimension in (*input_shape, *output_shape)):
+        return False
+    for input_size, output_size, begin_value, size_value in zip(
+        input_shape,
+        output_shape,
+        begin,
+        size,
+    ):
+        if begin_value < 0 or begin_value > input_size:
+            return False
+        if size_value == -1:
+            sliced_size = input_size - begin_value
+        elif size_value >= 0:
+            sliced_size = size_value
+        else:
+            return False
+        if begin_value + sliced_size > input_size or sliced_size != output_size:
+            return False
+    return True
+
+
 def _padding_matches_shape(
     input_shape: tuple[int, ...],
     output_shape: tuple[int, ...],
@@ -202,11 +346,20 @@ class _ConstantInputRewrite:
 
 
 @dataclass(frozen=True)
+class _BuiltinOptionRewrite:
+    """Describe one integer builtin-option field replacement."""
+
+    field_name: str
+    value: int
+
+
+@dataclass(frozen=True)
 class _OperatorRewritePlan:
     """Describe operator-local metadata rewrites for source-layout execution."""
 
     operator_index: int
     constant_input_rewrites: tuple[_ConstantInputRewrite, ...] = ()
+    builtin_option_rewrites: tuple[_BuiltinOptionRewrite, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -369,32 +522,66 @@ class _SameShapeVariadicElementwiseRule(_RegionOpRule):
         return _OperatorRewritePlan(context.operator_index)
 
 
-class _PadRule(_RegionOpRule):
-    """Support constant PAD by remapping its rank-by-two axis rows."""
+class _ConstantPaddingRule(_RegionOpRule):
+    """Support one constant-padding operator by remapping axis rows."""
+
+    def __init__(
+        self,
+        builtin_code: int,
+        *,
+        input_count: int,
+        scalar_value_input_position: int | None = None,
+    ) -> None:
+        """Create one padding rule with an explicit Circle input contract."""
+
+        super().__init__(builtin_code)
+        self._input_count = input_count
+        self._scalar_value_input_position = scalar_value_input_position
 
     def data_input_positions(self, operator: Any) -> tuple[int, ...]:
-        """Return the PAD data input position."""
+        """Return the padding operator data input position."""
 
         del operator
         return (0,)
 
     def data_output_positions(self, operator: Any) -> tuple[int, ...]:
-        """Return the PAD data output position."""
+        """Return the padding operator data output position."""
 
         del operator
         return (0,)
+
+    def _has_valid_scalar_value(self, context: _RegionOpContext) -> bool:
+        """Return whether an optional padding value input contains one element."""
+
+        position = self._scalar_value_input_position
+        if position is None:
+            return True
+        if position < 0 or position >= len(context.inputs):
+            return False
+        tensor_index = context.inputs[position]
+        if tensor_index < 0 or tensor_index >= len(context.tensors):
+            return False
+        shape = _shape(context.tensors[tensor_index])
+        element_count = 1
+        for dimension in shape:
+            if dimension < 0:
+                return False
+            element_count *= dimension
+        return element_count == 1
 
     def plan_rewrite(
         self,
         context: _RegionOpContext,
     ) -> _OperatorRewritePlan | None:
-        """Validate PAD and plan a cloned source-layout padding constant."""
+        """Validate padding and plan a cloned source-layout constant."""
 
-        if len(context.inputs) != 2 or len(context.outputs) != 1:
+        if len(context.inputs) != self._input_count or len(context.outputs) != 1:
             return None
         tensor_count = len(context.tensors)
         tensor_indices = (*context.inputs, *context.outputs)
         if any(index < 0 or index >= tensor_count for index in tensor_indices):
+            return None
+        if not self._has_valid_scalar_value(context):
             return None
 
         padding_tensor_index = context.inputs[1]
@@ -418,19 +605,16 @@ class _PadRule(_RegionOpRule):
         )
         if remapped_values is None:
             return None
-        source_input_shape = _permuted_shape(
+        source_shapes = _source_layout_shapes(
+            context,
             input_shape,
-            context.region_to_source_permutation,
-        )
-        source_output_shape = _permuted_shape(
             output_shape,
-            context.region_to_source_permutation,
         )
-        if source_input_shape is None or source_output_shape is None:
+        if source_shapes is None:
             return None
         if not _padding_matches_shape(
-            source_input_shape,
-            source_output_shape,
+            source_shapes[0],
+            source_shapes[1],
             remapped_values,
         ):
             return None
@@ -447,6 +631,237 @@ class _PadRule(_RegionOpRule):
         )
 
 
+class _PadRule(_ConstantPaddingRule):
+    """Support PAD by remapping its constant rank-by-two axis rows."""
+
+    def __init__(self, builtin_code: int) -> None:
+        """Create the two-input PAD rule."""
+
+        super().__init__(builtin_code, input_count=2)
+
+
+class _PadV2Rule(_ConstantPaddingRule):
+    """Support PADV2 while preserving its scalar padding value input."""
+
+    def __init__(self, builtin_code: int) -> None:
+        """Create the three-input PADV2 rule."""
+
+        super().__init__(
+            builtin_code,
+            input_count=3,
+            scalar_value_input_position=2,
+        )
+
+
+class _MirrorPadRule(_ConstantPaddingRule):
+    """Support MIRROR_PAD while preserving its reflection mode option."""
+
+    def __init__(self, builtin_code: int) -> None:
+        """Create the two-input MIRROR_PAD rule."""
+
+        super().__init__(builtin_code, input_count=2)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate MIRROR_PAD mode and plan its remapped padding constant."""
+
+        options = getattr(context.operator, "builtinOptions", None)
+        if options is None or not hasattr(options, "mode"):
+            return None
+        return super().plan_rewrite(context)
+
+
+class _ConcatenationRule(_RegionOpRule):
+    """Support CONCATENATION by remapping its axis builtin option."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return every CONCATENATION data input position."""
+
+        return tuple(range(len(as_indices(getattr(operator, "inputs", None)))))
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the single CONCATENATION data output position."""
+
+        del operator
+        return (0,)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate concatenation shapes and plan source-layout axis remapping."""
+
+        if len(context.inputs) < 2 or len(context.outputs) != 1:
+            return None
+        shapes = _tensor_shapes(
+            context,
+            (*context.inputs, context.outputs[0]),
+        )
+        if shapes is None or any(len(shape) != context.rank for shape in shapes):
+            return None
+
+        options = getattr(context.operator, "builtinOptions", None)
+        if options is None or not hasattr(options, "axis"):
+            return None
+        try:
+            region_axis = _normalize_axis(int(options.axis), context.rank)
+        except (TypeError, ValueError):
+            return None
+        if region_axis is None:
+            return None
+        source_axis = _remap_axis(
+            region_axis,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        if source_axis is None:
+            return None
+
+        input_shapes = shapes[:-1]
+        output_shape = shapes[-1]
+        if any(dimension < 0 for shape in shapes for dimension in shape):
+            return None
+        reference = input_shapes[0]
+        for shape in input_shapes[1:]:
+            if any(
+                shape[axis] != reference[axis]
+                for axis in range(context.rank)
+                if axis != region_axis
+            ):
+                return None
+        if any(
+            output_shape[axis] != reference[axis]
+            for axis in range(context.rank)
+            if axis != region_axis
+        ):
+            return None
+        if output_shape[region_axis] != sum(
+            shape[region_axis] for shape in input_shapes
+        ):
+            return None
+
+        return _OperatorRewritePlan(
+            operator_index=context.operator_index,
+            builtin_option_rewrites=(_BuiltinOptionRewrite("axis", source_axis),),
+        )
+
+
+class _TileRule(_RegionOpRule):
+    """Support TILE by remapping its constant multiples vector."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the TILE data input position."""
+
+        del operator
+        return (0,)
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the TILE data output position."""
+
+        del operator
+        return (0,)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate TILE and plan a source-layout multiples constant."""
+
+        if len(context.inputs) != 2 or len(context.outputs) != 1:
+            return None
+        vector = _rank_vector_constant(context, 1)
+        shapes = _tensor_shapes(
+            context,
+            (context.inputs[0], context.outputs[0]),
+        )
+        if vector is None or shapes is None:
+            return None
+        tensor_index, multiples = vector
+        if not _tile_matches_shape(shapes[0], shapes[1], multiples):
+            return None
+        remapped = _remap_axis_vector(
+            multiples,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        source_shapes = _source_layout_shapes(context, shapes[0], shapes[1])
+        if remapped is None or source_shapes is None:
+            return None
+        if not _tile_matches_shape(source_shapes[0], source_shapes[1], remapped):
+            return None
+        return _OperatorRewritePlan(
+            operator_index=context.operator_index,
+            constant_input_rewrites=(_ConstantInputRewrite(1, tensor_index, remapped),),
+        )
+
+
+class _SliceRule(_RegionOpRule):
+    """Support static SLICE by remapping begin and size vectors."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the SLICE data input position."""
+
+        del operator
+        return (0,)
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the SLICE data output position."""
+
+        del operator
+        return (0,)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate static SLICE and plan source-layout begin and size vectors."""
+
+        if len(context.inputs) != 3 or len(context.outputs) != 1:
+            return None
+        begin_vector = _rank_vector_constant(context, 1)
+        size_vector = _rank_vector_constant(context, 2)
+        shapes = _tensor_shapes(
+            context,
+            (context.inputs[0], context.outputs[0]),
+        )
+        if begin_vector is None or size_vector is None or shapes is None:
+            return None
+        begin_index, begin = begin_vector
+        size_index, size = size_vector
+        if not _slice_matches_shape(shapes[0], shapes[1], begin, size):
+            return None
+
+        remapped_begin = _remap_axis_vector(
+            begin,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        remapped_size = _remap_axis_vector(
+            size,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        source_shapes = _source_layout_shapes(context, shapes[0], shapes[1])
+        if remapped_begin is None or remapped_size is None or source_shapes is None:
+            return None
+        if not _slice_matches_shape(
+            source_shapes[0],
+            source_shapes[1],
+            remapped_begin,
+            remapped_size,
+        ):
+            return None
+        return _OperatorRewritePlan(
+            operator_index=context.operator_index,
+            constant_input_rewrites=(
+                _ConstantInputRewrite(1, begin_index, remapped_begin),
+                _ConstantInputRewrite(2, size_index, remapped_size),
+            ),
+        )
+
+
 def _build_region_op_rules() -> Mapping[int, _RegionOpRule]:
     """Create the immutable builtin-to-rule registry."""
 
@@ -457,7 +872,14 @@ def _build_region_op_rules() -> Mapping[int, _RegionOpRule]:
         registry[builtin_code] = _SameShapeBinaryElementwiseRule(builtin_code)
     for builtin_code in _VARIADIC_LAYOUT_INVARIANT_BUILTIN_CODES.values():
         registry[builtin_code] = _SameShapeVariadicElementwiseRule(builtin_code)
+    registry[_CONCATENATION_BUILTIN_CODE] = _ConcatenationRule(
+        _CONCATENATION_BUILTIN_CODE
+    )
+    registry[_MIRROR_PAD_BUILTIN_CODE] = _MirrorPadRule(_MIRROR_PAD_BUILTIN_CODE)
     registry[_PAD_BUILTIN_CODE] = _PadRule(_PAD_BUILTIN_CODE)
+    registry[_PADV2_BUILTIN_CODE] = _PadV2Rule(_PADV2_BUILTIN_CODE)
+    registry[_SLICE_BUILTIN_CODE] = _SliceRule(_SLICE_BUILTIN_CODE)
+    registry[_TILE_BUILTIN_CODE] = _TileRule(_TILE_BUILTIN_CODE)
     return MappingProxyType(registry)
 
 
