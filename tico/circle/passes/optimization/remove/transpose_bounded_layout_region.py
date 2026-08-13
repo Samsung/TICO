@@ -24,16 +24,18 @@ from tico.circle.document import CircleDocument
 from tico.circle.graph import as_indices, as_list
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
 from tico.circle.passes.optimization.remove.layout_ops import (
-    _builtin_operator_value,
     _check_perm,
     _get_const_data,
     _is_transpose_op,
 )
 from tico.circle.rewrite import replace_tensor_uses
-
-
-_ADD_BUILTIN_CODE = _builtin_operator_value("ADD")
-_PAD_BUILTIN_CODE = _builtin_operator_value("PAD")
+from .transpose_bounded_layout_region_rules import (
+    _ADD_BUILTIN_CODE,
+    _OperatorRewritePlan,
+    _PAD_BUILTIN_CODE,
+    _RegionOpContext,
+    _rule_for_operator,
+)
 
 
 @dataclass(frozen=True)
@@ -68,16 +70,6 @@ class _OutputBoundary:
 
 
 @dataclass(frozen=True)
-class _PadRewrite:
-    """Describe one PAD constant that must be reordered for source layout."""
-
-    operator_index: int
-    constant_input_position: int
-    padding_tensor_index: int
-    remapped_values: tuple[int, ...]
-
-
-@dataclass(frozen=True)
 class _RegionPlan:
     """Describe one validated Transpose-bounded layout region rewrite."""
 
@@ -86,7 +78,7 @@ class _RegionPlan:
     region_to_source_permutation: tuple[int, ...]
     input_boundaries: tuple[_InputBoundary, ...]
     output_boundaries: tuple[_OutputBoundary, ...]
-    pad_rewrites: tuple[_PadRewrite, ...]
+    operator_rewrites: tuple[_OperatorRewritePlan, ...]
 
     @property
     def bypassed_transpose_indices(self) -> tuple[int, ...]:
@@ -116,69 +108,6 @@ def _vector(value: Any) -> tuple[Any, ...]:
     return tuple(value)
 
 
-def _operator_builtin_code(
-    operator: Any,
-    operator_codes: list[Any],
-) -> int | None:
-    """Return one operator's Circle builtin code when its index is valid."""
-
-    try:
-        opcode_index = int(getattr(operator, "opcodeIndex", -1))
-        if opcode_index < 0 or opcode_index >= len(operator_codes):
-            return None
-        return int(getattr(operator_codes[opcode_index], "builtinCode", -1))
-    except (TypeError, ValueError, AttributeError):
-        return None
-
-
-def _is_add_op(operator: Any, operator_codes: list[Any]) -> bool:
-    """Return whether an operator references the Circle ADD builtin."""
-
-    return _operator_builtin_code(operator, operator_codes) == _ADD_BUILTIN_CODE
-
-
-def _is_pad_op(operator: Any, operator_codes: list[Any]) -> bool:
-    """Return whether an operator references the Circle PAD builtin."""
-
-    return _operator_builtin_code(operator, operator_codes) == _PAD_BUILTIN_CODE
-
-
-def _is_supported_region_op(
-    operator: Any,
-    operator_codes: list[Any],
-) -> bool:
-    """Return whether an operator can execute unchanged in either layout."""
-
-    return _is_add_op(operator, operator_codes) or _is_pad_op(
-        operator,
-        operator_codes,
-    )
-
-
-def _data_input_positions(
-    operator: Any,
-    operator_codes: list[Any],
-) -> tuple[int, ...]:
-    """Return input positions whose tensor layout follows the operator data."""
-
-    if _is_add_op(operator, operator_codes):
-        return (0, 1)
-    if _is_pad_op(operator, operator_codes):
-        return (0,)
-    return ()
-
-
-def _data_output_positions(
-    operator: Any,
-    operator_codes: list[Any],
-) -> tuple[int, ...]:
-    """Return output positions whose tensor layout follows the operator data."""
-
-    if _is_supported_region_op(operator, operator_codes):
-        return (0,)
-    return ()
-
-
 def _operator_consumes_data_tensor(
     operator: Any,
     operator_codes: list[Any],
@@ -186,10 +115,13 @@ def _operator_consumes_data_tensor(
 ) -> bool:
     """Return whether an operator consumes a tensor through a data input."""
 
+    rule = _rule_for_operator(operator, operator_codes)
+    if rule is None:
+        return False
     inputs = as_indices(getattr(operator, "inputs", None))
     return any(
         position < len(inputs) and inputs[position] == tensor_index
-        for position in _data_input_positions(operator, operator_codes)
+        for position in rule.data_input_positions(operator)
     )
 
 
@@ -419,13 +351,13 @@ def _supported_components(
     graph: Any,
     operator_codes: list[Any],
 ) -> tuple[tuple[int, ...], ...]:
-    """Return dataflow-connected components of supported region operators."""
+    """Return dataflow-connected components of registered region operators."""
 
     operators = as_list(graph.subgraph.operators)
     supported = {
         index
         for index, operator in enumerate(operators)
-        if _is_supported_region_op(operator, operator_codes)
+        if _rule_for_operator(operator, operator_codes) is not None
     }
     pending = set(supported)
     components: list[tuple[int, ...]] = []
@@ -440,9 +372,12 @@ def _supported_components(
                 continue
             component.add(operator_index)
             operator = operators[operator_index]
+            rule = _rule_for_operator(operator, operator_codes)
+            if rule is None:
+                continue
 
             inputs = as_indices(getattr(operator, "inputs", None))
-            for position in _data_input_positions(operator, operator_codes):
+            for position in rule.data_input_positions(operator):
                 if position >= len(inputs):
                     continue
                 producer = graph.producer(inputs[position])
@@ -450,7 +385,7 @@ def _supported_components(
                     queue.append(producer)
 
             outputs = as_indices(getattr(operator, "outputs", None))
-            for position in _data_output_positions(operator, operator_codes):
+            for position in rule.data_output_positions(operator):
                 if position >= len(outputs):
                     continue
                 tensor_index = outputs[position]
@@ -468,50 +403,6 @@ def _supported_components(
         components.append(tuple(sorted(component)))
 
     return tuple(sorted(components, key=lambda values: values[0]))
-
-
-def _flatten_padding_rows(rows: Iterable[Iterable[int]]) -> tuple[int, ...]:
-    """Flatten rank-by-two padding rows into one integer tuple."""
-
-    return tuple(int(value) for row in rows for value in row)
-
-
-def _remap_padding_values(
-    values: tuple[int, ...],
-    rank: int,
-    source_to_region: tuple[int, ...],
-) -> tuple[int, ...] | None:
-    """Reorder region-layout padding rows into source-layout axis order."""
-
-    if len(values) != rank * 2 or len(source_to_region) != rank:
-        return None
-    old_rows = [values[axis * 2 : axis * 2 + 2] for axis in range(rank)]
-    new_rows: list[tuple[int, int] | None] = [None] * rank
-    for region_axis, source_axis in enumerate(source_to_region):
-        before, after = old_rows[region_axis]
-        new_rows[source_axis] = (before, after)
-    if any(row is None for row in new_rows):
-        return None
-    return _flatten_padding_rows(row for row in new_rows if row is not None)
-
-
-def _padding_matches_shape(
-    input_shape: tuple[int, ...],
-    output_shape: tuple[int, ...],
-    values: tuple[int, ...],
-) -> bool:
-    """Return whether constant padding transforms one shape into the other."""
-
-    if len(input_shape) != len(output_shape) or len(values) != len(input_shape) * 2:
-        return False
-    for axis, input_size in enumerate(input_shape):
-        before = values[axis * 2]
-        after = values[axis * 2 + 1]
-        if before < 0 or after < 0:
-            return False
-        if input_size + before + after != output_shape[axis]:
-            return False
-    return True
 
 
 def _encode_i32_payload_like(original: Any, values: tuple[int, ...]) -> Any:
@@ -537,26 +428,26 @@ def _encode_i32_payload_like(original: Any, values: tuple[int, ...]) -> Any:
     return payload
 
 
-def _clone_padding_constant(
+def _clone_i32_constant(
     graph: Any,
     tensor_index: int,
     values: tuple[int, ...],
 ) -> int:
-    """Clone one inline INT32 padding constant with replacement values."""
+    """Clone one inline INT32 constant with replacement values."""
 
     tensors = as_list(graph.subgraph.tensors)
     if tensor_index < 0 or tensor_index >= len(tensors):
-        raise IndexError(f"Padding tensor index {tensor_index} is out of range.")
+        raise IndexError(f"Constant tensor index {tensor_index} is out of range.")
     source_tensor = tensors[tensor_index]
     buffer_index = int(getattr(source_tensor, "buffer", 0) or 0)
     buffers = as_list(graph.model.buffers)
     if buffer_index <= 0 or buffer_index >= len(buffers):
-        raise ValueError(f"Padding tensor {tensor_index} has no inline buffer.")
+        raise ValueError(f"Constant tensor {tensor_index} has no inline buffer.")
 
     source_buffer = buffers[buffer_index]
     source_data = getattr(source_buffer, "data", None)
     if source_data is None or len(source_data) == 0:
-        raise ValueError(f"Padding tensor {tensor_index} has no inline data.")
+        raise ValueError(f"Constant tensor {tensor_index} has no inline data.")
 
     new_buffer = copy.deepcopy(source_buffer)
     new_buffer.data = _encode_i32_payload_like(source_data, values)
@@ -592,13 +483,16 @@ def _region_data_tensor_indices(
     seen: set[int] = set()
     for operator_index in component:
         operator = operators[operator_index]
+        rule = _rule_for_operator(operator, operator_codes)
+        if rule is None:
+            continue
         inputs = as_indices(getattr(operator, "inputs", None))
-        for position in _data_input_positions(operator, operator_codes):
+        for position in rule.data_input_positions(operator):
             if position < len(inputs) and inputs[position] not in seen:
                 seen.add(inputs[position])
                 result.append(inputs[position])
         outputs = as_indices(getattr(operator, "outputs", None))
-        for position in _data_output_positions(operator, operator_codes):
+        for position in rule.data_output_positions(operator):
             if position < len(outputs) and outputs[position] not in seen:
                 seen.add(outputs[position])
                 result.append(outputs[position])
@@ -621,10 +515,13 @@ def _build_region_plan(
 
     for operator_index in component:
         operator = operators[operator_index]
+        rule = _rule_for_operator(operator, operator_codes)
+        if rule is None:
+            return None
         inputs = as_indices(getattr(operator, "inputs", None))
         outputs = as_indices(getattr(operator, "outputs", None))
-        data_inputs = _data_input_positions(operator, operator_codes)
-        data_outputs = _data_output_positions(operator, operator_codes)
+        data_inputs = rule.data_input_positions(operator)
+        data_outputs = rule.data_output_positions(operator)
         if not data_inputs or not data_outputs:
             return None
         if any(position >= len(inputs) for position in data_inputs):
@@ -713,19 +610,21 @@ def _build_region_plan(
         return None
 
     for boundary in input_boundaries:
-        source = tensors[boundary.source_tensor_index]
+        source_tensor = tensors[boundary.source_tensor_index]
         transposed = tensors[boundary.transpose_output_index]
-        if _permuted_shape(_shape(source), source_to_region) != _shape(transposed):
+        if _permuted_shape(_shape(source_tensor), source_to_region) != _shape(
+            transposed
+        ):
             return None
         if not _shape_signature_matches_permutation(
-            source,
+            source_tensor,
             transposed,
             source_to_region,
         ):
             return None
-        if not _same_tensor_encoding(source, transposed):
+        if not _same_tensor_encoding(source_tensor, transposed):
             return None
-        if not _same_runtime_buffer(source, transposed):
+        if not _same_runtime_buffer(source_tensor, transposed):
             return None
 
     output_contracts: dict[int, tuple[Any, ...]] = {}
@@ -783,63 +682,24 @@ def _build_region_plan(
         if _per_tensor_encoding(tensor) is None:
             return None
 
-    pad_rewrites: list[_PadRewrite] = []
+    operator_rewrites: list[_OperatorRewritePlan] = []
     for operator_index in component:
         operator = operators[operator_index]
-        inputs = as_indices(getattr(operator, "inputs", None))
-        outputs = as_indices(getattr(operator, "outputs", None))
-        if _is_add_op(operator, operator_codes):
-            if len(inputs) != 2 or len(outputs) != 1:
-                return None
-            input_shapes = [_shape(tensors[index]) for index in inputs]
-            output_shape = _shape(tensors[outputs[0]])
-            if input_shapes[0] != input_shapes[1] or input_shapes[0] != output_shape:
-                return None
-            continue
-
-        if not _is_pad_op(operator, operator_codes):
+        rule = _rule_for_operator(operator, operator_codes)
+        if rule is None:
             return None
-        if len(inputs) != 2 or len(outputs) != 1:
-            return None
-        padding_tensor_index = inputs[1]
-        if padding_tensor_index < 0 or padding_tensor_index >= len(tensors):
-            return None
-        padding_shape = _shape(tensors[padding_tensor_index])
-        if padding_shape != (rank, 2):
-            return None
-        raw_values = _get_const_data(graph, padding_tensor_index)
-        if raw_values is None:
-            return None
-        values = tuple(int(value) for value in raw_values)
-        input_shape = _shape(tensors[inputs[0]])
-        output_shape = _shape(tensors[outputs[0]])
-        if not _padding_matches_shape(input_shape, output_shape, values):
-            return None
-        remapped_values = _remap_padding_values(
-            values,
-            rank,
-            source_to_region,
-        )
-        if remapped_values is None:
-            return None
-        source_input_shape = _permuted_shape(input_shape, region_to_source)
-        source_output_shape = _permuted_shape(output_shape, region_to_source)
-        if source_input_shape is None or source_output_shape is None:
-            return None
-        if not _padding_matches_shape(
-            source_input_shape,
-            source_output_shape,
-            remapped_values,
-        ):
-            return None
-        pad_rewrites.append(
-            _PadRewrite(
+        rewrite = rule.plan_rewrite(
+            _RegionOpContext(
+                graph=graph,
                 operator_index=operator_index,
-                constant_input_position=1,
-                padding_tensor_index=padding_tensor_index,
-                remapped_values=remapped_values,
+                operator=operator,
+                source_to_region_permutation=source_to_region,
+                region_to_source_permutation=region_to_source,
             )
         )
+        if rewrite is None:
+            return None
+        operator_rewrites.append(rewrite)
 
     return _RegionPlan(
         operator_indices=component,
@@ -847,7 +707,7 @@ def _build_region_plan(
         region_to_source_permutation=region_to_source,
         input_boundaries=tuple(input_boundaries),
         output_boundaries=tuple(output_boundaries),
-        pad_rewrites=tuple(pad_rewrites),
+        operator_rewrites=tuple(operator_rewrites),
     )
 
 
@@ -860,15 +720,18 @@ def _apply_region_plan(
 
     operators = as_list(graph.subgraph.operators)
 
-    for rewrite in plan.pad_rewrites:
-        new_tensor_index = _clone_padding_constant(
-            graph,
-            rewrite.padding_tensor_index,
-            rewrite.remapped_values,
-        )
-        operator = operators[rewrite.operator_index]
+    for operator_rewrite in plan.operator_rewrites:
+        if not operator_rewrite.constant_input_rewrites:
+            continue
+        operator = operators[operator_rewrite.operator_index]
         inputs = as_indices(getattr(operator, "inputs", None))
-        inputs[rewrite.constant_input_position] = new_tensor_index
+        for rewrite in operator_rewrite.constant_input_rewrites:
+            new_tensor_index = _clone_i32_constant(
+                graph,
+                rewrite.source_tensor_index,
+                rewrite.values,
+            )
+            inputs[rewrite.input_position] = new_tensor_index
         operator.inputs = inputs
 
     for boundary in plan.input_boundaries:
@@ -884,18 +747,19 @@ def _apply_region_plan(
             output_boundary
         )
 
+    operator_codes = as_list(document.model.operatorCodes)
     for operator_index in plan.operator_indices:
         operator = operators[operator_index]
+        rule = _rule_for_operator(operator, operator_codes)
+        if rule is None:
+            raise RuntimeError(f"Missing region rule for operator {operator_index}.")
         outputs = as_indices(getattr(operator, "outputs", None))
-        for output_position in _data_output_positions(
-            operator,
-            as_list(document.model.operatorCodes),
-        ):
+        for output_position in rule.data_output_positions(operator):
             tensor_index = outputs[output_position]
             boundaries = output_boundaries.get(tensor_index, [])
             if boundaries:
-                source = tensors[boundaries[0].transpose_output_index]
-                _copy_tensor_contract(tensors[tensor_index], source)
+                final_tensor = tensors[boundaries[0].transpose_output_index]
+                _copy_tensor_contract(tensors[tensor_index], final_tensor)
             elif not _set_tensor_layout(
                 tensors[tensor_index],
                 plan.region_to_source_permutation,
@@ -923,14 +787,16 @@ def _apply_region_plan(
 
 
 class EliminateTransposeBoundedLayoutRegionPass(CirclePass):
-    """Rewrite Transpose-bounded ADD/PAD regions into their source layout.
+    """Rewrite registered Transpose-bounded regions into their source layout.
 
-    The pass finds dataflow-connected components composed only of binary ADD and
-    constant PAD operators. Every external data input must enter through the same
-    Transpose permutation, and every external data output must leave through its
-    inverse. The complete component is then executed directly in the source
-    layout, PAD axis constants are remapped, and the boundary Transpose outputs
-    are bypassed. Dead-code elimination removes the now-unused Transpose nodes.
+    The pass finds dataflow-connected components composed only of operators with
+    registered region rules. The initial registry contains binary ADD and constant
+    PAD. Every external data input must enter through the same Transpose
+    permutation, and every external data output must leave through its inverse.
+    The complete component is then executed directly in the source layout,
+    operator-local constants are rewritten through their rules, and the boundary
+    Transpose outputs are bypassed. Dead-code elimination removes the now-unused
+    Transpose nodes.
 
     Float tensors and per-tensor quantized activation tensors are supported.
     Per-channel activation qparams are rejected because the target backend only
