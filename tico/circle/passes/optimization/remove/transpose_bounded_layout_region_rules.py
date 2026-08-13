@@ -33,6 +33,8 @@ _MIRROR_PAD_BUILTIN_CODE = _builtin_operator_value("MIRROR_PAD")
 _PAD_BUILTIN_CODE = _builtin_operator_value("PAD")
 _PADV2_BUILTIN_CODE = _builtin_operator_value("PADV2")
 _SLICE_BUILTIN_CODE = _builtin_operator_value("SLICE")
+_SPLIT_BUILTIN_CODE = _builtin_operator_value("SPLIT")
+_SPLIT_V_BUILTIN_CODE = _builtin_operator_value("SPLIT_V")
 _TILE_BUILTIN_CODE = _builtin_operator_value("TILE")
 
 _AXIS_REMAP_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
@@ -41,6 +43,8 @@ _AXIS_REMAP_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
         "MIRROR_PAD": _MIRROR_PAD_BUILTIN_CODE,
         "PADV2": _PADV2_BUILTIN_CODE,
         "SLICE": _SLICE_BUILTIN_CODE,
+        "SPLIT": _SPLIT_BUILTIN_CODE,
+        "SPLIT_V": _SPLIT_V_BUILTIN_CODE,
         "TILE": _TILE_BUILTIN_CODE,
     }
 )
@@ -222,6 +226,182 @@ def _rank_vector_constant(
     if raw_values is None or len(raw_values) != context.rank:
         return None
     return tensor_index, tuple(int(value) for value in raw_values)
+
+
+def _single_element_i32_constant(
+    context: _RegionOpContext,
+    input_position: int,
+) -> tuple[int, int] | None:
+    """Return one constant INT32 scalar-like input and its tensor index."""
+
+    if input_position < 0 or input_position >= len(context.inputs):
+        return None
+    tensor_index = context.inputs[input_position]
+    if tensor_index < 0 or tensor_index >= len(context.tensors):
+        return None
+
+    shape = _shape(context.tensors[tensor_index])
+    element_count = 1
+    for dimension in shape:
+        if dimension < 0:
+            return None
+        element_count *= dimension
+    if element_count != 1:
+        return None
+
+    raw_values = _get_const_data(context.graph, tensor_index)
+    if raw_values is None or len(raw_values) != 1:
+        return None
+    return tensor_index, int(raw_values[0])
+
+
+def _fixed_length_i32_vector_constant(
+    context: _RegionOpContext,
+    input_position: int,
+    length: int,
+) -> tuple[int, tuple[int, ...]] | None:
+    """Return one constant INT32 vector with an exact static length."""
+
+    if length < 0 or input_position < 0 or input_position >= len(context.inputs):
+        return None
+    tensor_index = context.inputs[input_position]
+    if tensor_index < 0 or tensor_index >= len(context.tensors):
+        return None
+    if _shape(context.tensors[tensor_index]) != (length,):
+        return None
+
+    raw_values = _get_const_data(context.graph, tensor_index)
+    if raw_values is None or len(raw_values) != length:
+        return None
+    return tensor_index, tuple(int(value) for value in raw_values)
+
+
+def _num_splits_option(context: _RegionOpContext) -> int | None:
+    """Return a positive numSplits builtin option for one split operator."""
+
+    options = getattr(context.operator, "builtinOptions", None)
+    if options is None or not hasattr(options, "numSplits"):
+        return None
+    try:
+        num_splits = int(options.numSplits)
+    except (TypeError, ValueError):
+        return None
+    return num_splits if num_splits > 0 else None
+
+
+def _axis_constant_rewrite(
+    context: _RegionOpContext,
+    input_position: int,
+) -> tuple[int, int, _ConstantInputRewrite] | None:
+    """Plan a source-layout replacement for one constant axis input."""
+
+    constant = _single_element_i32_constant(context, input_position)
+    if constant is None:
+        return None
+    tensor_index, axis = constant
+    region_axis = _normalize_axis(axis, context.rank)
+    if region_axis is None:
+        return None
+    source_axis = _remap_axis(
+        region_axis,
+        context.rank,
+        context.source_to_region_permutation,
+    )
+    if source_axis is None:
+        return None
+    return (
+        region_axis,
+        source_axis,
+        _ConstantInputRewrite(
+            input_position=input_position,
+            source_tensor_index=tensor_index,
+            values=(source_axis,),
+        ),
+    )
+
+
+def _split_output_shapes_match(
+    input_shape: tuple[int, ...],
+    output_shapes: tuple[tuple[int, ...], ...],
+    axis: int,
+    split_sizes: tuple[int, ...],
+) -> bool:
+    """Return whether output shapes match one static split specification."""
+
+    rank = len(input_shape)
+    if axis < 0 or axis >= rank:
+        return False
+    if len(output_shapes) != len(split_sizes) or not output_shapes:
+        return False
+    if any(dimension < 0 for dimension in input_shape):
+        return False
+    if any(size < 0 for size in split_sizes):
+        return False
+    if sum(split_sizes) != input_shape[axis]:
+        return False
+
+    for output_shape, split_size in zip(output_shapes, split_sizes):
+        if len(output_shape) != rank:
+            return False
+        if any(dimension < 0 for dimension in output_shape):
+            return False
+        for current_axis, input_size in enumerate(input_shape):
+            expected = split_size if current_axis == axis else input_size
+            if output_shape[current_axis] != expected:
+                return False
+    return True
+
+
+def _source_layout_split_shapes(
+    context: _RegionOpContext,
+    input_shape: tuple[int, ...],
+    output_shapes: tuple[tuple[int, ...], ...],
+) -> tuple[tuple[int, ...], tuple[tuple[int, ...], ...]] | None:
+    """Return split input and output shapes in source-layout order."""
+
+    source_input = _permuted_shape(
+        input_shape,
+        context.region_to_source_permutation,
+    )
+    if source_input is None:
+        return None
+    source_outputs: list[tuple[int, ...]] = []
+    for output_shape in output_shapes:
+        source_output = _permuted_shape(
+            output_shape,
+            context.region_to_source_permutation,
+        )
+        if source_output is None:
+            return None
+        source_outputs.append(source_output)
+    return source_input, tuple(source_outputs)
+
+
+def _resolve_split_sizes(
+    values: tuple[int, ...],
+    input_size: int,
+) -> tuple[int, ...] | None:
+    """Resolve at most one inferred SPLIT_V size against a static input size."""
+
+    if input_size < 0 or not values:
+        return None
+    if any(value < -1 for value in values):
+        return None
+
+    inferred_positions = [index for index, value in enumerate(values) if value == -1]
+    if len(inferred_positions) > 1:
+        return None
+
+    known_sum = sum(value for value in values if value >= 0)
+    resolved = list(values)
+    if inferred_positions:
+        inferred = input_size - known_sum
+        if inferred < 0:
+            return None
+        resolved[inferred_positions[0]] = inferred
+    elif known_sum != input_size:
+        return None
+    return tuple(resolved)
 
 
 def _source_layout_shapes(
@@ -862,6 +1042,152 @@ class _SliceRule(_RegionOpRule):
         )
 
 
+class _SplitRule(_RegionOpRule):
+    """Support equal-size SPLIT by remapping its constant axis input."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the SPLIT data input position."""
+
+        del operator
+        return (1,)
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return every SPLIT data output position."""
+
+        return tuple(range(len(as_indices(getattr(operator, "outputs", None)))))
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate equal-size outputs and plan source-layout axis remapping."""
+
+        if len(context.inputs) != 2 or not context.outputs:
+            return None
+        num_splits = _num_splits_option(context)
+        if num_splits is None or num_splits != len(context.outputs):
+            return None
+
+        axis_rewrite = _axis_constant_rewrite(context, 0)
+        shapes = _tensor_shapes(
+            context,
+            (context.inputs[1], *context.outputs),
+        )
+        if axis_rewrite is None or shapes is None:
+            return None
+        region_axis, source_axis, rewrite = axis_rewrite
+        input_shape = shapes[0]
+        output_shapes = shapes[1:]
+        if len(input_shape) != context.rank:
+            return None
+        input_size = input_shape[region_axis]
+        if input_size < 0 or input_size % num_splits != 0:
+            return None
+        split_size = input_size // num_splits
+        split_sizes = (split_size,) * num_splits
+        if not _split_output_shapes_match(
+            input_shape,
+            output_shapes,
+            region_axis,
+            split_sizes,
+        ):
+            return None
+        source_shapes = _source_layout_split_shapes(
+            context,
+            input_shape,
+            output_shapes,
+        )
+        if source_shapes is None or not _split_output_shapes_match(
+            source_shapes[0],
+            source_shapes[1],
+            source_axis,
+            split_sizes,
+        ):
+            return None
+
+        return _OperatorRewritePlan(
+            operator_index=context.operator_index,
+            constant_input_rewrites=(rewrite,),
+        )
+
+
+class _SplitVRule(_RegionOpRule):
+    """Support static SPLIT_V by remapping its constant axis input."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the SPLIT_V data input position."""
+
+        del operator
+        return (0,)
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return every SPLIT_V data output position."""
+
+        return tuple(range(len(as_indices(getattr(operator, "outputs", None)))))
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate static split sizes and plan source-layout axis remapping."""
+
+        if len(context.inputs) != 3 or not context.outputs:
+            return None
+        num_splits = _num_splits_option(context)
+        if num_splits is None or num_splits != len(context.outputs):
+            return None
+
+        axis_rewrite = _axis_constant_rewrite(context, 2)
+        split_vector = _fixed_length_i32_vector_constant(
+            context,
+            1,
+            num_splits,
+        )
+        shapes = _tensor_shapes(
+            context,
+            (context.inputs[0], *context.outputs),
+        )
+        if axis_rewrite is None or split_vector is None or shapes is None:
+            return None
+
+        region_axis, source_axis, rewrite = axis_rewrite
+        input_shape = shapes[0]
+        output_shapes = shapes[1:]
+        if len(input_shape) != context.rank:
+            return None
+        _, split_sizes = split_vector
+        resolved_sizes = _resolve_split_sizes(
+            split_sizes,
+            input_shape[region_axis],
+        )
+        if resolved_sizes is None:
+            return None
+        if not _split_output_shapes_match(
+            input_shape,
+            output_shapes,
+            region_axis,
+            resolved_sizes,
+        ):
+            return None
+        source_shapes = _source_layout_split_shapes(
+            context,
+            input_shape,
+            output_shapes,
+        )
+        if source_shapes is None or not _split_output_shapes_match(
+            source_shapes[0],
+            source_shapes[1],
+            source_axis,
+            resolved_sizes,
+        ):
+            return None
+
+        return _OperatorRewritePlan(
+            operator_index=context.operator_index,
+            constant_input_rewrites=(rewrite,),
+        )
+
+
 def _build_region_op_rules() -> Mapping[int, _RegionOpRule]:
     """Create the immutable builtin-to-rule registry."""
 
@@ -879,6 +1205,8 @@ def _build_region_op_rules() -> Mapping[int, _RegionOpRule]:
     registry[_PAD_BUILTIN_CODE] = _PadRule(_PAD_BUILTIN_CODE)
     registry[_PADV2_BUILTIN_CODE] = _PadV2Rule(_PADV2_BUILTIN_CODE)
     registry[_SLICE_BUILTIN_CODE] = _SliceRule(_SLICE_BUILTIN_CODE)
+    registry[_SPLIT_BUILTIN_CODE] = _SplitRule(_SPLIT_BUILTIN_CODE)
+    registry[_SPLIT_V_BUILTIN_CODE] = _SplitVRule(_SPLIT_V_BUILTIN_CODE)
     registry[_TILE_BUILTIN_CODE] = _TileRule(_TILE_BUILTIN_CODE)
     return MappingProxyType(registry)
 

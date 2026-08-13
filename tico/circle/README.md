@@ -304,15 +304,18 @@ cross its inverse. The registered layout-invariant operator families are:
 - axis option remapping: `CONCATENATION`
 - constant padding-row remapping: `PAD`, `PADV2`, and `MIRROR_PAD`
 - constant rank-vector remapping: `TILE` and `SLICE`
+- multi-output axis-constant remapping: `SPLIT` and `SPLIT_V`
 
 Unary inputs and outputs must have the same shape. Binary and variadic operators require
 all data inputs and outputs to have exactly the same shape, so broadcasting remains a
 region boundary. `CONCATENATION` remaps its normalized axis. `PADV2` preserves its
 scalar padding value, and `MIRROR_PAD` preserves its reflection mode. `TILE` requires a
 static INT32 multiples vector. `SLICE` requires static INT32 begin and size vectors and
-supports `-1` only in the size vector. Rank-changing or unsupported axis-sensitive
-operators such as `PRELU`, `RESHAPE`, `SOFTMAX`, `SPLIT`, and `SPLIT_V` remain region
-boundaries.
+supports `-1` only in the size vector. `SPLIT` requires a static INT32 axis, equal-size
+outputs, and a matching `numSplits` option. `SPLIT_V` requires static INT32 axis and
+size-splits constants, permits at most one inferred `-1` size, and validates every
+output shape. Rank-changing or unsupported axis-sensitive operators such as `PRELU`,
+`RESHAPE`, and `SOFTMAX` remain region boundaries.
 
 Run the bounded-region pass with restart scheduling and cleanup:
 
