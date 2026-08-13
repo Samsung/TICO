@@ -830,6 +830,10 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         )
         return key_states, torch.randn_like(key_states)
 
+    def _sample(self) -> ForwardInput:
+        """Create one mode-specific synthetic Gemma4 text attention sample."""
+        raise NotImplementedError
+
     def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
         """Run a Gemma4 attention wrapper without sharing mutable sample state."""
         cloned = _clone_forward_input(sample)

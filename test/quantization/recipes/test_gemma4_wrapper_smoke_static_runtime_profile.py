@@ -27,7 +27,7 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
     Gemma4ForCausalLMCase,
     Gemma4MultimodalEmbedderCase,
     Gemma4StaticRuntimeShape,
-    Gemma4TextAttentionKEqVCase,
+    Gemma4TextAttentionKEqVPrefillCase,
     Gemma4TextDecoderLayerDecodeCase,
     Gemma4TextDecoderLayerPrefillCase,
     Gemma4TextMLPCase,
@@ -123,7 +123,7 @@ class TestGemma4StaticRuntimeShape(unittest.TestCase):
         """Static runtime should cover real bounded E2B branches only."""
         cfg = _static_cfg()
         with self.assertRaisesRegex(ValueError, "does not support"):
-            Gemma4TextAttentionKEqVCase().validate_config(cfg)
+            Gemma4TextAttentionKEqVPrefillCase().validate_config(cfg)
         with self.assertRaisesRegex(ValueError, "does not support"):
             Gemma4ForCausalLMCase().validate_config(cfg)
 
