@@ -42,9 +42,9 @@ def output_boundaries(model: nn.Module) -> QuantizationBoundaries:
             output_paths.append(module_path)
     if not output_paths:
         raise RuntimeError("No detector layer produces a configured model output.")
-    selector = SiteSelector.module_paths(*output_paths) & SiteSelector.observer_names(
-        "act_out"
-    )
+    selector = SiteSelector.fp_module_paths(
+        *output_paths
+    ) & SiteSelector.observer_names("act_out")
     return QuantizationBoundaries(outputs=selector)
 
 

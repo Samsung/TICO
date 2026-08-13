@@ -80,6 +80,21 @@ class SiteSelector:
         )
 
     @classmethod
+    def fp_module_paths(cls, *patterns: str) -> "SiteSelector":
+        """Select sites using their original floating-point module paths."""
+        checked = _validated_patterns(patterns, "floating-point module path")
+        return cls(
+            lambda site: any(
+                fnmatchcase(
+                    getattr(site.module, "fp_name", None) or site.module_path,
+                    pattern,
+                )
+                for pattern in checked
+            ),
+            f"fp_module_paths={checked}",
+        )
+
+    @classmethod
     def module_types(cls, *types: type) -> "SiteSelector":
         """Select sites whose owner is an instance of one of ``types``."""
         if not types:
