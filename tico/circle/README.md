@@ -280,6 +280,7 @@ Available passes:
 
 | Name | Implementation | Behavior |
 |---|---|---|
+| `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
 | `remove-redundant-layout-ops` | `RemoveRedundantLayoutOpsPass` | Rewires consecutive Reshape operations and consecutive inverse Transpose pairs so redundant operators can be removed |
 | `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
@@ -287,6 +288,34 @@ Available passes:
 `--passes` defaults to `dce,compact`. To remove redundant layout patterns, select the
 three-pass pipeline shown above. Its order matters: the layout pass rewires dataflow,
 `dce` removes the newly dead operators, and `compact` removes and remaps unused objects.
+
+`EliminateTransposeBoundedLayoutRegionPass` moves a region into the source layout when
+all external data inputs cross one Transpose permutation and all external data outputs
+cross its inverse. The registered layout-invariant operator families are:
+
+- unary: `ABS`, `CAST`, `CEIL`, `COS`, `DEQUANTIZE`, `ELU`, `EXP`, `FLOOR`,
+  `LEAKY_RELU`, `LOG`, `LOGICAL_NOT`, `LOGISTIC`, `NEG`, `QUANTIZE`, `RELU`,
+  `RELU6`, `RELU_N1_TO_1`, `RSQRT`, `SIN`, `SQRT`, `SQUARE`, `TANH`, and
+  `ZEROS_LIKE`
+- binary without broadcasting: `ADD`, `DIV`, `EQUAL`, `FLOOR_DIV`, `FLOOR_MOD`,
+  `GREATER`, `GREATER_EQUAL`, `LESS`, `LESS_EQUAL`, `LOGICAL_AND`, `LOGICAL_OR`,
+  `MAXIMUM`, `MINIMUM`, `MUL`, `NOT_EQUAL`, `POW`, `SQUARED_DIFFERENCE`, and `SUB`
+- variadic without broadcasting: `ADD_N`
+- constant axis remapping: `PAD`
+
+Unary inputs and outputs must have the same shape. Binary and variadic operators require
+all data inputs and outputs to have exactly the same shape, so broadcasting remains a
+region boundary. Axis-sensitive or rank-changing operators such as `PRELU`, `RESHAPE`,
+and `SOFTMAX` are intentionally not registered.
+
+Run the bounded-region pass with restart scheduling and cleanup:
+
+```bash
+tico-circle optimize model.circle \
+  --passes eliminate-transpose-bounded-layout-region,remove-redundant-layout-ops,dce,compact \
+  --strategy restart \
+  -o model.optimized.circle
+```
 
 ### Standard input and output
 

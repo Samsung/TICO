@@ -27,7 +27,69 @@ from tico.circle.passes.optimization.remove.layout_ops import (
 
 
 _ADD_BUILTIN_CODE = _builtin_operator_value("ADD")
+_ADD_N_BUILTIN_CODE = _builtin_operator_value("ADD_N")
 _PAD_BUILTIN_CODE = _builtin_operator_value("PAD")
+
+_UNARY_LAYOUT_INVARIANT_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
+    {
+        name: _builtin_operator_value(name)
+        for name in (
+            "ABS",
+            "CAST",
+            "CEIL",
+            "COS",
+            "DEQUANTIZE",
+            "ELU",
+            "EXP",
+            "FLOOR",
+            "LEAKY_RELU",
+            "LOG",
+            "LOGICAL_NOT",
+            "LOGISTIC",
+            "NEG",
+            "QUANTIZE",
+            "RELU",
+            "RELU6",
+            "RELU_N1_TO_1",
+            "RSQRT",
+            "SIN",
+            "SQRT",
+            "SQUARE",
+            "TANH",
+            "ZEROS_LIKE",
+        )
+    }
+)
+
+_BINARY_LAYOUT_INVARIANT_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
+    {
+        name: _builtin_operator_value(name)
+        for name in (
+            "ADD",
+            "DIV",
+            "EQUAL",
+            "FLOOR_DIV",
+            "FLOOR_MOD",
+            "GREATER",
+            "GREATER_EQUAL",
+            "LESS",
+            "LESS_EQUAL",
+            "LOGICAL_AND",
+            "LOGICAL_OR",
+            "MAXIMUM",
+            "MINIMUM",
+            "MUL",
+            "NOT_EQUAL",
+            "POW",
+            "SQUARED_DIFFERENCE",
+            "SUB",
+        )
+    }
+)
+
+_VARIADIC_LAYOUT_INVARIANT_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
+    {"ADD_N": _ADD_N_BUILTIN_CODE}
+)
 
 
 def _shape(tensor: Any) -> tuple[int, ...]:
@@ -112,6 +174,24 @@ def _padding_matches_shape(
     return True
 
 
+def _tensor_shapes(
+    context: _RegionOpContext,
+    tensor_indices: tuple[int, ...],
+) -> tuple[tuple[int, ...], ...] | None:
+    """Return tensor shapes when every index is valid."""
+
+    tensor_count = len(context.tensors)
+    if any(index < 0 or index >= tensor_count for index in tensor_indices):
+        return None
+    return tuple(_shape(context.tensors[index]) for index in tensor_indices)
+
+
+def _all_shapes_equal(shapes: tuple[tuple[int, ...], ...]) -> bool:
+    """Return whether a non-empty sequence contains one common shape."""
+
+    return bool(shapes) and all(shape == shapes[0] for shape in shapes[1:])
+
+
 @dataclass(frozen=True)
 class _ConstantInputRewrite:
     """Describe one cloned INT32 constant input with replacement values."""
@@ -194,6 +274,38 @@ class _RegionOpRule(ABC):
         """Validate one operator and plan its source-layout metadata rewrite."""
 
 
+class _SameShapeUnaryElementwiseRule(_RegionOpRule):
+    """Support one rank-preserving unary layout-invariant operator."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the single unary data input position."""
+
+        del operator
+        return (0,)
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the single unary data output position."""
+
+        del operator
+        return (0,)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Accept a unary operator only when its shape remains unchanged."""
+
+        if len(context.inputs) != 1 or len(context.outputs) != 1:
+            return None
+        shapes = _tensor_shapes(
+            context,
+            (context.inputs[0], context.outputs[0]),
+        )
+        if shapes is None or not _all_shapes_equal(shapes):
+            return None
+        return _OperatorRewritePlan(context.operator_index)
+
+
 class _SameShapeBinaryElementwiseRule(_RegionOpRule):
     """Support one binary elementwise operator without broadcasting."""
 
@@ -217,14 +329,42 @@ class _SameShapeBinaryElementwiseRule(_RegionOpRule):
 
         if len(context.inputs) != 2 or len(context.outputs) != 1:
             return None
-        tensor_count = len(context.tensors)
-        tensor_indices = (*context.inputs, *context.outputs)
-        if any(index < 0 or index >= tensor_count for index in tensor_indices):
+        shapes = _tensor_shapes(
+            context,
+            (*context.inputs, context.outputs[0]),
+        )
+        if shapes is None or not _all_shapes_equal(shapes):
             return None
-        left_shape = _shape(context.tensors[context.inputs[0]])
-        right_shape = _shape(context.tensors[context.inputs[1]])
-        output_shape = _shape(context.tensors[context.outputs[0]])
-        if left_shape != right_shape or left_shape != output_shape:
+        return _OperatorRewritePlan(context.operator_index)
+
+
+class _SameShapeVariadicElementwiseRule(_RegionOpRule):
+    """Support one variadic elementwise operator without broadcasting."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return every variadic data input position."""
+
+        return tuple(range(len(as_indices(getattr(operator, "inputs", None)))))
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the single variadic data output position."""
+
+        del operator
+        return (0,)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Accept a variadic operator when all data tensor shapes are equal."""
+
+        if len(context.inputs) < 2 or len(context.outputs) != 1:
+            return None
+        shapes = _tensor_shapes(
+            context,
+            (*context.inputs, context.outputs[0]),
+        )
+        if shapes is None or not _all_shapes_equal(shapes):
             return None
         return _OperatorRewritePlan(context.operator_index)
 
@@ -307,12 +447,21 @@ class _PadRule(_RegionOpRule):
         )
 
 
-_REGION_OP_RULES: Mapping[int, _RegionOpRule] = MappingProxyType(
-    {
-        _ADD_BUILTIN_CODE: _SameShapeBinaryElementwiseRule(_ADD_BUILTIN_CODE),
-        _PAD_BUILTIN_CODE: _PadRule(_PAD_BUILTIN_CODE),
-    }
-)
+def _build_region_op_rules() -> Mapping[int, _RegionOpRule]:
+    """Create the immutable builtin-to-rule registry."""
+
+    registry: dict[int, _RegionOpRule] = {}
+    for builtin_code in _UNARY_LAYOUT_INVARIANT_BUILTIN_CODES.values():
+        registry[builtin_code] = _SameShapeUnaryElementwiseRule(builtin_code)
+    for builtin_code in _BINARY_LAYOUT_INVARIANT_BUILTIN_CODES.values():
+        registry[builtin_code] = _SameShapeBinaryElementwiseRule(builtin_code)
+    for builtin_code in _VARIADIC_LAYOUT_INVARIANT_BUILTIN_CODES.values():
+        registry[builtin_code] = _SameShapeVariadicElementwiseRule(builtin_code)
+    registry[_PAD_BUILTIN_CODE] = _PadRule(_PAD_BUILTIN_CODE)
+    return MappingProxyType(registry)
+
+
+_REGION_OP_RULES: Mapping[int, _RegionOpRule] = _build_region_op_rules()
 
 
 def _rule_for_builtin_code(builtin_code: int) -> _RegionOpRule | None:
