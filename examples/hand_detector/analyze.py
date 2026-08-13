@@ -31,6 +31,12 @@ from examples.hand_detector._support.data import (
     load_npy_inputs,
     make_synthetic_inputs,
 )
+from examples.hand_detector._support.observer_sweep import (
+    build_observer_sweep_result,
+    evaluate_observer_profiles,
+    OBSERVER_SWEEP_PROFILES,
+    print_observer_sweep,
+)
 from examples.hand_detector._support.quantization import (
     quantization_name,
     quantize_candidate,
@@ -41,7 +47,6 @@ from tico.quantization.analysis import (
     build_clipping_candidates,
     collect_output_calibration_data,
     evaluate_clipping_candidates,
-    evaluate_models,
     make_output_adapter,
     QuantizationAblation,
     QuantizationProfile,
@@ -107,7 +112,10 @@ def parse_args() -> argparse.Namespace:
 
     observer_sweep = subparsers.add_parser(
         "observer-sweep",
-        help="Compare MinMax and percentile activation observers in full PTQ.",
+        help=(
+            "Compare MinMax and percentile activation observers across "
+            "activation-only, full, and internal-full PTQ."
+        ),
     )
     _add_model_arguments(observer_sweep)
     _add_dataset_arguments(observer_sweep, evaluation=True)
@@ -270,16 +278,18 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
         calibration,
         activation_observer=MinMaxObserver,
     )
-    results["minmax"] = {
-        "observer": "MinMaxObserver",
-        "outputs": evaluate_models(
-            float_model,
-            minmax,
-            evaluation,
-            output_adapter=OUTPUT_ADAPTER,
-        ),
-        "observer_details": [],
-    }
+    minmax_profiles = evaluate_observer_profiles(
+        float_model,
+        minmax,
+        evaluation,
+        boundaries=output_boundaries(minmax),
+        output_adapter=OUTPUT_ADAPTER,
+    )
+    results["minmax"] = build_observer_sweep_result(
+        observer="MinMaxObserver",
+        profiles=minmax_profiles,
+        observer_details=(),
+    )
 
     for percentile in args.percentiles:
         name = f"percentile_{percentile:g}".replace(".", "_")
@@ -295,19 +305,21 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
                 "seed": args.sampling_seed,
             },
         )
-        results[name] = {
-            "observer": "PercentileObserver",
-            "percentile": percentile,
-            "outputs": evaluate_models(
-                float_model,
-                candidate,
-                evaluation,
-                output_adapter=OUTPUT_ADAPTER,
-            ),
-            "observer_details": summarize_percentile_observers(candidate),
-        }
+        profiles = evaluate_observer_profiles(
+            float_model,
+            candidate,
+            evaluation,
+            boundaries=output_boundaries(candidate),
+            output_adapter=OUTPUT_ADAPTER,
+        )
+        results[name] = build_observer_sweep_result(
+            observer="PercentileObserver",
+            percentile=percentile,
+            profiles=profiles,
+            observer_details=summarize_percentile_observers(candidate),
+        )
 
-    _print_observer_sweep(results, quantization_name(args.bits))
+    print_observer_sweep(results, quantization_name(args.bits))
     _write_json(
         args.report_json,
         {
@@ -318,6 +330,10 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
                 "percentiles": args.percentiles,
                 "max_samples": args.max_samples,
                 "samples_per_batch": args.samples_per_batch,
+                "sampling_seed": args.sampling_seed,
+                "profiles": [profile.value for profile in OBSERVER_SWEEP_PROFILES],
+                "ranking_profile": QuantizationProfile.INTERNAL_FULL.value,
+                "outputs_alias_profile": QuantizationProfile.FULL.value,
             },
             "results": results,
         },
@@ -470,28 +486,6 @@ def _print_output_clipping(calibration_data, evaluated, dtype_name: str) -> None
                 f"{float(item.evaluation_error['mae']):11.4e} "
                 f"{100.0 * float(item.quantizer['saturation_ratio']):10.5f}"
             )
-
-
-def _print_observer_sweep(results: dict[str, dict[str, Any]], dtype_name: str) -> None:
-    print(f"\n{dtype_name.upper()} activation observer sweep")
-    print(
-        f"{'observer':24s} {'REG_MAE':>13s} {'REG_COS':>13s} "
-        f"{'CLS_MAE':>13s} {'CLS_COS':>13s}"
-    )
-    ranked = sorted(
-        results.items(),
-        key=lambda item: float(item[1]["outputs"]["regressors"]["mae"]),
-    )
-    for index, (name, result) in enumerate(ranked):
-        marker = "*" if index == 0 else " "
-        outputs = result["outputs"]
-        print(
-            f"{marker}{name:23s} "
-            f"{float(outputs['regressors']['mae']):13.6e} "
-            f"{float(outputs['regressors']['cosine_similarity']):13.9f} "
-            f"{float(outputs['classifiers']['mae']):13.6e} "
-            f"{float(outputs['classifiers']['cosine_similarity']):13.9f}"
-        )
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
