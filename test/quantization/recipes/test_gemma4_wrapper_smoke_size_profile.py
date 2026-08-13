@@ -18,7 +18,7 @@ import unittest
 
 from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
     _has_gemma4,
-    Gemma4TextAttentionCase,
+    Gemma4TextAttentionPrefillCase,
     Gemma4TextMLPCase,
     Gemma4TextModelCase,
     Gemma4TextScaledWordEmbeddingCase,
@@ -65,7 +65,7 @@ class TestGemma4WrapperSmokeSizeProfile(unittest.TestCase):
     def test_e2b_text_dimensions_preserve_case_topology(self):
         """Text cases should use E2B widths without constructing 35 layers."""
         cfg = _profile_cfg("e2b_dims")
-        text_cfg = Gemma4TextAttentionCase()._make_text_config(
+        text_cfg = Gemma4TextAttentionPrefillCase()._make_text_config(
             cfg,
             layer_types=("sliding_attention", "full_attention"),
         )

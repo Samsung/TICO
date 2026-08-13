@@ -20,8 +20,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
-from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
+from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    Gemma4TextAttentionDecodeExportAdapter,
+    Gemma4TextAttentionPrefillExportAdapter,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -807,6 +811,25 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 ),
             )
         return attn_output, attn_weights
+
+    def as_export_module(
+        self,
+        mode: ExportMode = "prefill",
+        *,
+        return_kv: bool = True,
+    ) -> nn.Module:
+        """Return a static export adapter for the requested attention mode."""
+        if mode == "prefill":
+            return Gemma4TextAttentionPrefillExportAdapter(
+                self,
+                return_kv=return_kv,
+            )
+        if mode == "decode":
+            return Gemma4TextAttentionDecodeExportAdapter(
+                self,
+                return_kv=return_kv,
+            )
+        raise ValueError(f"Unsupported Gemma4 export mode: {mode!r}")
 
     def _all_observers(self) -> Iterable:
         """Return observers owned directly by this wrapper."""

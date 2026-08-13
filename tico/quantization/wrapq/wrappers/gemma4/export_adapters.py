@@ -58,6 +58,29 @@ def _flatten_hidden_and_kv(output: Any, *, return_kv: bool) -> Any:
     return hidden_states, key, value
 
 
+def _flatten_attention_and_kv(output: Any, *, return_kv: bool) -> Any:
+    """Return attention hidden states and optional K/V delta tensors."""
+    if not isinstance(output, tuple) or not output:
+        raise RuntimeError(
+            "Gemma4 attention export adapter expected a non-empty tuple output."
+        )
+
+    hidden_states = output[0]
+    if not return_kv:
+        return hidden_states
+
+    key_value = output[2] if len(output) > 2 else None
+    if key_value is None:
+        return hidden_states
+    if not isinstance(key_value, tuple) or len(key_value) != 2:
+        raise RuntimeError(
+            "Gemma4 attention export adapter expected cache output to be a "
+            "``(key, value)`` tuple."
+        )
+    key, value = key_value
+    return hidden_states, key, value
+
+
 class Gemma4TokenEmbeddingExportAdapter(nn.Module):
     """Export adapter for Gemma4 token embeddings.
 
@@ -183,6 +206,92 @@ class Gemma4VisionEncoderPrefillExportAdapter(nn.Module):
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Run a static vision encoder prefill graph."""
         return self.wrapped.forward_export(inputs_embeds)
+
+
+class Gemma4TextAttentionPrefillExportAdapter(nn.Module):
+    """Export adapter for Gemma4 text attention in prefill mode.
+
+    Input contract:
+        ``hidden_states`` has shape ``(1, S, hidden_size)``.
+        ``attention_mask`` is broadcastable to ``(1, heads, S, S)``.
+        ``position_embeddings`` is a ``(cos, sin)`` tuple for ``S`` tokens.
+        ``shared_key_value`` is optional and is used only by shared-KV consumers.
+
+    Output contract:
+        Non-shared layers return ``(hidden_states, new_key, new_value)`` when
+        ``return_kv=True`` and only ``hidden_states`` otherwise. Shared-KV
+        consumer layers always return only ``hidden_states`` because they do not
+        own K/V projection weights.
+    """
+
+    def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
+        """Store the wrapped attention module and cache-output policy."""
+        super().__init__()
+        self.wrapped = wrapped
+        self.return_kv = bool(return_kv)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        shared_key_value: Optional[LayerKV] = None,
+    ) -> Any:
+        """Run the fixed-shape prefill graph and return an optional K/V delta."""
+        output = self.wrapped(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+            shared_key_value=shared_key_value,
+            past_key_value=None,
+            use_cache=self.return_kv,
+            cache_output_mode="delta",
+        )
+        return _flatten_attention_and_kv(output, return_kv=self.return_kv)
+
+
+class Gemma4TextAttentionDecodeExportAdapter(nn.Module):
+    """Export adapter for Gemma4 text attention in single-token decode mode.
+
+    Input contract:
+        ``hidden_states`` has shape ``(1, 1, hidden_size)``.
+        ``attention_mask`` is broadcastable to ``(1, heads, 1, K)``.
+        ``position_embeddings`` is a ``(cos, sin)`` tuple for one token.
+        ``past_key_value`` contains ``K - 1`` cached tokens for non-shared
+        layers. ``shared_key_value`` contains the full ``K`` tokens for a
+        shared-KV consumer layer.
+
+    Output contract:
+        Non-shared layers return ``(hidden_states, new_key, new_value)`` when
+        ``return_kv=True``. The K/V tensors contain only the current-token delta.
+        Shared-KV consumer layers return only ``hidden_states``.
+    """
+
+    def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
+        """Store the wrapped attention module and cache-output policy."""
+        super().__init__()
+        self.wrapped = wrapped
+        self.return_kv = bool(return_kv)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        past_key_value: Optional[LayerKV] = None,
+        shared_key_value: Optional[LayerKV] = None,
+    ) -> Any:
+        """Run the fixed-shape decode graph and return an optional K/V delta."""
+        output = self.wrapped(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_embeddings=position_embeddings,
+            past_key_value=past_key_value,
+            shared_key_value=shared_key_value,
+            use_cache=self.return_kv,
+            cache_output_mode="delta",
+        )
+        return _flatten_attention_and_kv(output, return_kv=self.return_kv)
 
 
 class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):

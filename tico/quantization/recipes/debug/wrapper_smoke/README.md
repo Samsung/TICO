@@ -218,10 +218,13 @@ Supported `e2b_dims` cases:
 
 ```text
 gemma4_text_mlp
-gemma4_text_attention
-gemma4_text_attention_sliding
-gemma4_text_attention_k_eq_v
-gemma4_text_attention_shared_kv
+gemma4_text_attention_prefill
+gemma4_text_attention_decode
+gemma4_text_attention_sliding_prefill
+gemma4_text_attention_sliding_decode
+gemma4_text_attention_k_eq_v_prefill
+gemma4_text_attention_shared_kv_prefill
+gemma4_text_attention_shared_kv_decode
 gemma4_text_decoder_layer_prefill
 gemma4_text_decoder_layer_sliding_prefill
 gemma4_text_decoder_layer_decode
@@ -236,8 +239,10 @@ gemma4_multimodal_embedder
 ```
 
 `e2b_static_runtime` supports the same bounded cases except
-`gemma4_text_attention_k_eq_v`, which is a synthetic alternative-attention
+`gemma4_text_attention_k_eq_v_prefill`, which is a synthetic alternative-attention
 branch rather than the E2B runtime configuration.
+
+Attention smoke cases use separate prefill and decode adapters. Full and sliding decode cases consume a single query token plus a fixed-capacity past cache. Shared-KV decode consumes a full externally managed K/V tuple and does not return a layer-owned K/V delta.
 
 The default static-runtime shape is:
 
