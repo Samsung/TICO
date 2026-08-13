@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Standard quantization-ablation profiles."""
+"""Standard A/B/C/D/E quantization-ablation profiles."""
 
 from __future__ import annotations
 
@@ -32,12 +32,16 @@ class QuantizationProfile(str, Enum):
         explicitly selected model outputs in floating point.
     ``FULL`` (D)
         Enable every analysis site.
+    ``INTERNAL_FULL`` (E)
+        Enable every included site except explicitly selected model-output
+        domains.
     """
 
     OUTPUT_ONLY = "A"
     WEIGHT_ONLY = "B"
     ACTIVATION_ONLY = "C"
     FULL = "D"
+    INTERNAL_FULL = "E"
 
     @property
     def label(self) -> str:
@@ -47,5 +51,6 @@ class QuantizationProfile(str, Enum):
             QuantizationProfile.WEIGHT_ONLY: "weight-only",
             QuantizationProfile.ACTIVATION_ONLY: "activation-only",
             QuantizationProfile.FULL: "full",
+            QuantizationProfile.INTERNAL_FULL: "internal-full",
         }
         return labels[self]

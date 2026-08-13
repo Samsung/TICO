@@ -158,4 +158,6 @@ class QuantizationBoundaries:
             return self.included & activations
         if profile is QuantizationProfile.FULL:
             return self.included
+        if profile is QuantizationProfile.INTERNAL_FULL:
+            return self.included & ~self.outputs
         raise ValueError(f"Unsupported quantization profile: {profile!r}")

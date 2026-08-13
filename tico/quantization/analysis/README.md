@@ -15,12 +15,16 @@ backend export.
 | B — weight-only | parameter observers |
 | C — activation-only | internal non-parameter sites, excluding selected outputs |
 | D — full | all included sites |
+| E — internal-full | all included sites except selected final-output domains |
 
 A model adapter supplies `QuantizationBoundaries.outputs`; the other default
 profiles are derived from observer roles. More specialized models may also
 supply explicit parameter, activation, or included selectors. Selectors may
 match full observer paths, owner-module paths or types, observer names, and
 logical quantization roles.
+
+Comparing E with D isolates the effect of the selected output domains after
+parameters and internal activations are already quantized.
 
 ```python
 from tico.quantization.analysis import (
