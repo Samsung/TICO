@@ -71,10 +71,13 @@ _GEMMA4_SUPPORTED_MAX_SOFT_TOKENS = frozenset({70, 140, 280, 560, 1_120})
 _GEMMA4_E2B_DIMS_SUPPORTED_CASES = frozenset(
     {
         "gemma4_text_mlp",
-        "gemma4_text_attention",
-        "gemma4_text_attention_sliding",
-        "gemma4_text_attention_k_eq_v",
-        "gemma4_text_attention_shared_kv",
+        "gemma4_text_attention_prefill",
+        "gemma4_text_attention_decode",
+        "gemma4_text_attention_sliding_prefill",
+        "gemma4_text_attention_sliding_decode",
+        "gemma4_text_attention_k_eq_v_prefill",
+        "gemma4_text_attention_shared_kv_prefill",
+        "gemma4_text_attention_shared_kv_decode",
         "gemma4_text_decoder_layer_prefill",
         "gemma4_text_decoder_layer_sliding_prefill",
         "gemma4_text_decoder_layer_decode",
@@ -94,7 +97,7 @@ _GEMMA4_E2B_DIMS_SUPPORTED_CASES = frozenset(
 # attention_k_eq_v=False, so the K=V-only branch remains available in e2b_dims
 # but is intentionally excluded here.
 _GEMMA4_E2B_STATIC_RUNTIME_SUPPORTED_CASES = _GEMMA4_E2B_DIMS_SUPPORTED_CASES - {
-    "gemma4_text_attention_k_eq_v"
+    "gemma4_text_attention_k_eq_v_prefill"
 }
 
 
@@ -775,18 +778,21 @@ class Gemma4TextMLPCase(Gemma4BaseCase):
 
 
 class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
-    """Base class for tiny Gemma4 text attention smoke cases."""
+    """Base class for mode-specific Gemma4 text attention smoke cases."""
 
     tags = ("gemma4", "e2b", "text", "attention")
     max_mean_abs_diff = 2.0
     seq_len = 8
+    max_seq = 8
     layer_idx = 0
     layer_types: tuple[str, ...] = ("full_attention",)
     attention_k_eq_v = False
     num_kv_shared_layers = 0
+    export_mode = "prefill"
+    smoke_sliding_window: int | None = None
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
-        """Build a tiny Gemma4 text attention module and reference copy."""
+        """Build a mode-specific Gemma4 text attention module and reference copy."""
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
         torch.manual_seed(123)
@@ -796,38 +802,33 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
             attention_k_eq_v=self.attention_k_eq_v,
             num_kv_shared_layers=self.num_kv_shared_layers,
         )
-        self.seq_len = self._text_prefill_seq_len(default=type(self).seq_len)
+        if (
+            self.smoke_sliding_window is not None
+            and self._static_runtime_shape() is None
+        ):
+            self.text_cfg.sliding_window = self.smoke_sliding_window
+
+        if self.export_mode == "decode":
+            self.max_seq = self._decode_max_seq(default=type(self).max_seq)
+            self.seq_len = 1
+        else:
+            self.seq_len = self._text_prefill_seq_len(default=type(self).seq_len)
+
         module = Gemma4TextAttention(self.text_cfg, layer_idx=self.layer_idx).eval()
         self.attention_head_dim = int(module.head_dim)
         self.is_sliding_attention = bool(module.is_sliding)
         self.sliding_window = int(module.sliding_window or 0)
         return module, clone_module(module)
 
-    def _case_text_attention_mask(self) -> torch.Tensor:
-        """Return a smoke or E2B static-runtime mask for this attention layer."""
-        if self._static_runtime_shape() is None:
-            return _attention_mask(self.seq_len)
-        if self.is_sliding_attention:
-            return _sliding_window_causal_mask(
-                self.seq_len,
-                self.sliding_window,
-                fill_value=-120.0,
-            )
-        return _causal_mask(self.seq_len, fill_value=-120.0)
-
-    def _base_kwargs(self) -> dict[str, Any]:
-        """Create keyword arguments shared by non-shared attention samples."""
-        hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
-        return {
-            "hidden_states": hidden,
-            "position_embeddings": _text_rope(1, self.seq_len, self.attention_head_dim),
-            "attention_mask": self._case_text_attention_mask(),
-            "shared_kv_states": {},
-        }
-
-    def _sample(self) -> ForwardInput:
-        """Create one synthetic Gemma4 text attention input."""
-        return ForwardInput((), self._base_kwargs())
+    def _shared_key_value(self, kv_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Create a synthetic full K/V tuple for a shared-KV consumer layer."""
+        key_states = torch.randn(
+            1,
+            self.text_cfg.num_key_value_heads,
+            kv_len,
+            self.attention_head_dim,
+        )
+        return key_states, torch.randn_like(key_states)
 
     def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
         """Run a Gemma4 attention wrapper without sharing mutable sample state."""
@@ -837,14 +838,14 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
-        """Run the original Gemma4 attention module without sharing mutable sample state."""
+        """Run the selected reference module without sharing mutable sample state."""
         cloned = _clone_forward_input(sample)
         return reference(*cloned.args, **dict(cloned.kwargs))
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> list[ForwardInput]:
-        """Create Gemma4 text attention calibration samples."""
+        """Create mode-specific Gemma4 text attention calibration samples."""
         return [
             self._sample()
             for _ in range(self._calibration_sample_count(cfg, default=3))
@@ -853,88 +854,254 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
     def eval_input(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> ForwardInput:
-        """Create the Gemma4 text attention evaluation sample."""
+        """Create the mode-specific Gemma4 text attention evaluation sample."""
         return self._sample()
 
-    def export_input(
-        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
-    ) -> ForwardInput:
-        """Return export input without shared_kv_states.
-
-        shared_kv_states is a mutable dict used to pass KV tensors between
-        layers at runtime. torch.export strict mode fails when an empty dict
-        is included in kwargs because pytree traversal produces a tensor-count
-        mismatch. The export path does not need this side-channel.
-        """
-        kwargs = {
-            k: v for k, v in eval_sample.kwargs.items() if k != "shared_kv_states"
-        }
-        return ForwardInput(eval_sample.args, kwargs)
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Return the static attention adapter selected by this smoke case."""
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if not hasattr(wrapped, "as_export_module"):
+            return quantized
+        return wrapped.as_export_module(
+            self.export_mode,
+            return_kv=not bool(getattr(wrapped, "is_kv_shared_layer", False)),
+        ).eval()
 
 
-class Gemma4TextAttentionCase(Gemma4TextAttentionBaseCase):
-    """Smoke case for one tiny full-attention Gemma4 text attention module."""
+class Gemma4TextAttentionPrefillBaseCase(Gemma4TextAttentionBaseCase):
+    """Base class for Gemma4 text attention prefill smoke cases."""
 
-    name = "gemma4_text_attention"
-    description = "Quantize one tiny full-attention Gemma4 text attention module."
-    layer_types = ("sliding_attention", "full_attention")
-    layer_idx = 1
+    export_mode = "prefill"
 
-
-class Gemma4TextSlidingAttentionCase(Gemma4TextAttentionBaseCase):
-    """Smoke case for one tiny sliding Gemma4 text attention module."""
-
-    name = "gemma4_text_attention_sliding"
-    description = "Quantize one tiny sliding Gemma4 text attention module."
-    layer_types = ("sliding_attention", "full_attention")
-    layer_idx = 0
-
-
-class Gemma4TextAttentionKEqVCase(Gemma4TextAttentionBaseCase):
-    """Smoke case for Gemma4 full attention with K-equals-V alternative attention."""
-
-    name = "gemma4_text_attention_k_eq_v"
-    description = (
-        "Quantize one tiny Gemma4 text attention module with attention_k_eq_v=True."
-    )
-    layer_types = ("full_attention",)
-    layer_idx = 0
-    attention_k_eq_v = True
-
-
-class Gemma4TextAttentionSharedKVCase(Gemma4TextAttentionBaseCase):
-    """Smoke case for a Gemma4 shared-KV consumer attention layer."""
-
-    name = "gemma4_text_attention_shared_kv"
-    description = (
-        "Quantize one tiny Gemma4 text attention module that consumes shared KV states."
-    )
-    layer_types = ("full_attention", "full_attention")
-    layer_idx = 1
-    num_kv_shared_layers = 1
+    def _case_text_attention_mask(self) -> torch.Tensor:
+        """Return the full or sliding prefill mask for the selected layer."""
+        if self.is_sliding_attention:
+            return _sliding_window_causal_mask(
+                self.seq_len,
+                self.sliding_window,
+                fill_value=-120.0,
+            )
+        if self._static_runtime_shape() is not None:
+            return _causal_mask(self.seq_len, fill_value=-120.0)
+        return _attention_mask(self.seq_len)
 
     def _sample(self) -> ForwardInput:
-        """Create one synthetic shared-KV attention input."""
+        """Create one synthetic Gemma4 text attention prefill sample."""
         hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
-        key_states = torch.randn(
-            1,
-            self.text_cfg.num_key_value_heads,
-            self.seq_len,
-            self.attention_head_dim,
-        )
-        value_states = torch.randn_like(key_states)
-        shared_key_value = (key_states, value_states)
         return ForwardInput(
             (),
             {
                 "hidden_states": hidden,
                 "position_embeddings": _text_rope(
-                    1, self.seq_len, self.attention_head_dim
+                    1,
+                    self.seq_len,
+                    self.attention_head_dim,
+                ),
+                "attention_mask": self._case_text_attention_mask(),
+                "shared_kv_states": {},
+            },
+        )
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create positional inputs expected by the prefill export adapter."""
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        export_kwargs = {}
+        shared_key_value = kwargs.get("shared_key_value")
+        if shared_key_value is not None:
+            export_kwargs["shared_key_value"] = shared_key_value
+        return ForwardInput(
+            (
+                kwargs["hidden_states"],
+                kwargs["attention_mask"],
+                kwargs["position_embeddings"],
+            ),
+            export_kwargs,
+        )
+
+
+class Gemma4TextAttentionDecodeBaseCase(Gemma4TextAttentionBaseCase):
+    """Base class for Gemma4 text attention single-token decode smoke cases."""
+
+    export_mode = "decode"
+    compare_reference_source = "prepared"
+    seq_len = 1
+    max_seq = 8
+
+    def _case_text_attention_mask(self) -> torch.Tensor:
+        """Return a fixed-capacity full or sliding single-token decode mask."""
+        if self.is_sliding_attention:
+            full_mask = _sliding_window_causal_mask(
+                self.max_seq,
+                self.sliding_window,
+                fill_value=-120.0,
+            )
+            return full_mask[..., -1:, :]
+        return _attention_mask(1, self.max_seq)
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic non-shared Gemma4 attention decode sample."""
+        hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
+        past_len = self.max_seq - 1
+        past_key = torch.randn(
+            1,
+            self.text_cfg.num_key_value_heads,
+            past_len,
+            self.attention_head_dim,
+        )
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(
+                    1,
+                    1,
+                    self.attention_head_dim,
+                ),
+                "attention_mask": self._case_text_attention_mask(),
+                "past_key_value": (past_key, torch.randn_like(past_key)),
+                "use_cache": True,
+            },
+        )
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Create positional inputs expected by the decode export adapter."""
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        export_kwargs = {}
+        past_key_value = kwargs.get("past_key_value")
+        shared_key_value = kwargs.get("shared_key_value")
+        if past_key_value is not None:
+            export_kwargs["past_key_value"] = past_key_value
+        if shared_key_value is not None:
+            export_kwargs["shared_key_value"] = shared_key_value
+        return ForwardInput(
+            (
+                kwargs["hidden_states"],
+                kwargs["attention_mask"],
+                kwargs["position_embeddings"],
+            ),
+            export_kwargs,
+        )
+
+
+class Gemma4TextAttentionPrefillCase(Gemma4TextAttentionPrefillBaseCase):
+    """Smoke case for Gemma4 full attention in prefill mode."""
+
+    name = "gemma4_text_attention_prefill"
+    description = "Quantize one Gemma4 full-attention module in prefill mode."
+    tags = ("gemma4", "e2b", "text", "attention", "prefill")
+    layer_types = ("sliding_attention", "full_attention")
+    layer_idx = 1
+
+
+class Gemma4TextAttentionDecodeCase(Gemma4TextAttentionDecodeBaseCase):
+    """Smoke case for Gemma4 full attention in decode mode."""
+
+    name = "gemma4_text_attention_decode"
+    description = "Quantize one Gemma4 full-attention module in decode mode."
+    tags = ("gemma4", "e2b", "text", "attention", "decode")
+    layer_types = ("sliding_attention", "full_attention")
+    layer_idx = 1
+
+
+class Gemma4TextSlidingAttentionPrefillCase(Gemma4TextAttentionPrefillBaseCase):
+    """Smoke case for Gemma4 sliding attention in prefill mode."""
+
+    name = "gemma4_text_attention_sliding_prefill"
+    description = "Quantize one Gemma4 sliding-attention module in prefill mode."
+    tags = ("gemma4", "e2b", "text", "attention", "prefill", "sliding")
+    layer_types = ("sliding_attention", "full_attention")
+    layer_idx = 0
+    smoke_sliding_window = 4
+
+
+class Gemma4TextSlidingAttentionDecodeCase(Gemma4TextAttentionDecodeBaseCase):
+    """Smoke case for Gemma4 sliding attention in decode mode."""
+
+    name = "gemma4_text_attention_sliding_decode"
+    description = "Quantize one Gemma4 sliding-attention module in decode mode."
+    tags = ("gemma4", "e2b", "text", "attention", "decode", "sliding")
+    layer_types = ("sliding_attention", "full_attention")
+    layer_idx = 0
+    smoke_sliding_window = 4
+
+
+class Gemma4TextAttentionKEqVPrefillCase(Gemma4TextAttentionPrefillBaseCase):
+    """Smoke case for Gemma4 K-equals-V attention in prefill mode."""
+
+    name = "gemma4_text_attention_k_eq_v_prefill"
+    description = (
+        "Quantize one Gemma4 full-attention module with attention_k_eq_v=True "
+        "in prefill mode."
+    )
+    tags = ("gemma4", "e2b", "text", "attention", "prefill", "k_eq_v")
+    layer_types = ("full_attention",)
+    layer_idx = 0
+    attention_k_eq_v = True
+
+
+class Gemma4TextAttentionSharedKVPrefillCase(Gemma4TextAttentionPrefillBaseCase):
+    """Smoke case for a Gemma4 shared-KV consumer in prefill mode."""
+
+    name = "gemma4_text_attention_shared_kv_prefill"
+    description = "Quantize one Gemma4 shared-KV attention consumer in prefill mode."
+    tags = ("gemma4", "e2b", "text", "attention", "prefill", "shared_kv")
+    layer_types = ("full_attention", "full_attention")
+    layer_idx = 1
+    num_kv_shared_layers = 1
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic shared-KV prefill sample."""
+        hidden = torch.randn(1, self.seq_len, self.text_cfg.hidden_size)
+        shared_key_value = self._shared_key_value(self.seq_len)
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(
+                    1,
+                    self.seq_len,
+                    self.attention_head_dim,
                 ),
                 "attention_mask": self._case_text_attention_mask(),
                 "shared_kv_states": {"full_attention": shared_key_value},
-                # QuantGemma4TextAttention implementations may also accept this
-                # explicit tuple form for static-runtime export paths.
+                "shared_key_value": shared_key_value,
+            },
+        )
+
+
+class Gemma4TextAttentionSharedKVDecodeCase(Gemma4TextAttentionDecodeBaseCase):
+    """Smoke case for a Gemma4 shared-KV consumer in decode mode."""
+
+    name = "gemma4_text_attention_shared_kv_decode"
+    description = "Quantize one Gemma4 shared-KV attention consumer in decode mode."
+    tags = ("gemma4", "e2b", "text", "attention", "decode", "shared_kv")
+    layer_types = ("full_attention", "full_attention")
+    layer_idx = 1
+    num_kv_shared_layers = 1
+
+    def _sample(self) -> ForwardInput:
+        """Create one synthetic shared-KV single-token decode sample."""
+        hidden = torch.randn(1, 1, self.text_cfg.hidden_size)
+        shared_key_value = self._shared_key_value(self.max_seq)
+        return ForwardInput(
+            (),
+            {
+                "hidden_states": hidden,
+                "position_embeddings": _text_rope(
+                    1,
+                    1,
+                    self.attention_head_dim,
+                ),
+                "attention_mask": self._case_text_attention_mask(),
+                "shared_kv_states": {"full_attention": shared_key_value},
                 "shared_key_value": shared_key_value,
             },
         )
@@ -2450,10 +2617,13 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
 
 GEMMA4_CASES = (
     Gemma4TextMLPCase(),
-    Gemma4TextAttentionCase(),
-    Gemma4TextSlidingAttentionCase(),
-    Gemma4TextAttentionKEqVCase(),
-    Gemma4TextAttentionSharedKVCase(),
+    Gemma4TextAttentionPrefillCase(),
+    Gemma4TextAttentionDecodeCase(),
+    Gemma4TextSlidingAttentionPrefillCase(),
+    Gemma4TextSlidingAttentionDecodeCase(),
+    Gemma4TextAttentionKEqVPrefillCase(),
+    Gemma4TextAttentionSharedKVPrefillCase(),
+    Gemma4TextAttentionSharedKVDecodeCase(),
     Gemma4TextDecoderLayerPrefillCase(),
     Gemma4TextDecoderLayerSlidingPrefillCase(),
     Gemma4TextDecoderLayerDecodeCase(),
