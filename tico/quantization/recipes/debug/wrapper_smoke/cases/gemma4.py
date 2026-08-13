@@ -956,10 +956,10 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
     compare_reference_source = "reference"
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
-        """Build the PTQ config used by Gemma4 decoder-layer smoke checks."""
+        """Build the NPU-export PTQ config used by Gemma4 decoder-layer smoke checks."""
         from tico.quantization.config.ptq import PTQConfig
 
-        return PTQConfig(model_args={"profile": "reference_eval"})
+        return PTQConfig(model_args={"profile": "npu_export"})
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny dense Gemma4 text decoder layer and reference copy."""
@@ -1113,11 +1113,11 @@ class Gemma4TextDecoderLayerSlidingPrefillCase(Gemma4TextDecoderLayerBaseCase):
     mask_fill_value = -120.0
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
-        """Build a PTQ config matching the sample mask fill value."""
+        """Build an NPU-export PTQ config matching the sample mask fill value."""
         from tico.quantization.config.ptq import PTQConfig
 
         return PTQConfig(
-            model_args={"profile": "reference_eval"},
+            model_args={"profile": "npu_export"},
             attention_mask_fill_value=self.mask_fill_value,
         )
 

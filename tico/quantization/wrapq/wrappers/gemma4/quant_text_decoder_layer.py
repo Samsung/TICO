@@ -17,6 +17,9 @@ from typing import Any, Callable, Iterable, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from tico.quantization.config.gemma4_attention import (
+    is_npu_export_text_attention_options,
+)
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
@@ -302,8 +305,40 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
             return hidden_states, cache_output
         return hidden_states
 
-    def as_export_module(self, mode: ExportMode = "prefill", *, return_kv: bool = True):
-        """Return a static export adapter for the requested execution mode."""
+    def as_export_module(
+        self,
+        mode: ExportMode = "prefill",
+        *,
+        return_kv: bool = True,
+        require_npu_profile: bool = True,
+    ) -> nn.Module:
+        """Return a static export adapter for the requested execution mode.
+
+        Parameters
+        ----------
+        mode : ExportMode
+            Export mode, either ``"prefill"`` or ``"decode"``.
+        return_kv : bool
+            Whether the adapter should return the newly produced K/V tensors.
+        require_npu_profile : bool
+            Whether to reject a non-unrolled attention graph. Static NPU export
+            should keep this enabled. Reference-only experiments may disable it
+            explicitly.
+        """
+        if require_npu_profile:
+            attn_options = getattr(self.self_attn.wrapped, "attn_options", None)
+            if attn_options is None:
+                raise RuntimeError(
+                    "Gemma4 text attention does not expose execution options."
+                )
+            if not is_npu_export_text_attention_options(attn_options):
+                raise ValueError(
+                    "Gemma4 text decoder export requires execution profile "
+                    "'npu_export'. Set PTQConfig.model_args['profile'] to "
+                    "'npu_export', or pass require_npu_profile=False for a "
+                    "reference-only export experiment."
+                )
+
         if mode == "prefill":
             return Gemma4TextDecoderLayerPrefillExportAdapter(self, return_kv=return_kv)
         if mode == "decode":
