@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
@@ -34,19 +35,18 @@ CacheOutputMode = Literal["delta", "present", "full"]
 class QuantGemma4TextAttention(QuantModuleBase):
     """PTQ wrapper for dense Gemma4 E2B text attention.
 
-    This wrapper keeps the Hugging Face Gemma4 attention semantics while making
-    the arithmetic explicit enough for post-training quantization and static
-    export. It supports the dense E2B path only:
+    The wrapper keeps projection, RoPE, cache, mask, and shared-KV semantics
+    common across two attention layouts:
 
-    - regular non-shared KV layers with q/k/v/o projections,
-    - global layers with ``attention_k_eq_v=True`` where V reuses raw K states,
-    - shared-KV layers that consume key/value tensors produced by an earlier
-      non-shared layer of the same ``layer_type``.
+    - ``batched`` uses a Hugging Face-like batched GQA implementation and is
+      intended for reference evaluation.
+    - ``unrolled`` emits rank-3 attention matmuls for every query head and avoids
+      head-axis broadcasting for static NPU export.
 
-    CPU runtime code should own dynamic orchestration such as cache writes,
-    shared-KV bookkeeping, mask generation, and sampling. This wrapper only
-    performs fixed-shape tensor compute and returns optional K/V deltas when
-    requested.
+    The dense E2B scope supports regular K/V-owning layers, global layers where
+    ``attention_k_eq_v=True``, and shared-KV consumer layers. Dynamic runtime
+    orchestration such as cache writes, shared-KV bookkeeping, mask generation,
+    and sampling remains outside this module.
     """
 
     def __init__(
@@ -57,6 +57,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
+        self.attn_options = get_gemma4_text_attention_options(self.qcfg)
+
         self.module = fp_attn
         self.config = fp_attn.config
         self.layer_idx = fp_attn.layer_idx
@@ -121,23 +123,19 @@ class QuantGemma4TextAttention(QuantModuleBase):
         mk = self._make_obs
         self.obs_hidden = mk("hidden")
 
-        # RoPE tables.
         self.obs_cos = mk("cos")
         self.obs_sin = mk("sin")
 
-        # rotate_half sub-steps for Q.
         self.obs_q_x1 = mk("q_x1")
         self.obs_q_x2 = mk("q_x2")
         self.obs_q_neg = mk("q_neg")
         self.obs_q_cat = mk("q_cat")
 
-        # rotate_half sub-steps for K.
         self.obs_k_x1 = mk("k_x1")
         self.obs_k_x2 = mk("k_x2")
         self.obs_k_neg = mk("k_neg")
         self.obs_k_cat = mk("k_cat")
 
-        # RoPE combine points.
         self.obs_q_cos = mk("q_cos")
         self.obs_q_sin = mk("q_sin")
         self.obs_q_rot = mk("q_rot")
@@ -145,7 +143,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self.obs_k_sin = mk("k_sin")
         self.obs_k_rot = mk("k_rot")
 
-        # Cache and attention math.
         self.obs_new_k = mk("new_k")
         self.obs_new_v = mk("new_v")
         self.obs_present_key = mk("present_key")
@@ -170,19 +167,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
     _DEFAULT_STATIC_MAX_SEQ = 2048
 
     def _resolve_max_seq(self) -> int:
-        """Resolve the causal mask template capacity from config or model_args.
+        """Resolve the causal-mask capacity from configuration and model limits.
 
-        Resolution precedence:
-        1. ``calibration.seq_len`` (from PTQ config, same as Llama/Qwen adapters)
-        2. ``model_args["text"]["max_seq"]``
-        3. ``model_args["max_seq"]``
-        4. ``min(max_position_embeddings, 2048)``
-
-        This avoids allocating a ``(1, 1, max_position_embeddings, max_position_embeddings)``
-        buffer when the model supports a very large context window (e.g. 128K)
-        but the actual calibration/export sequence length is much smaller.
+        Resolution precedence is ``calibration.seq_len``,
+        ``model_args["text"]["max_seq"]``, ``model_args["max_seq"]``, and finally
+        ``min(max_position_embeddings, 2048)``. The cap avoids allocating a full
+        model-context square mask for a smaller static export profile.
         """
-        # Try calibration.seq_len first (same as Llama/Qwen adapters)
         from tico.quantization.recipes.config import get_by_path
 
         try:
@@ -192,7 +183,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
         except (KeyError, TypeError):
             pass
 
-        # Fall back to model_args
         configured = get_model_arg(self.qcfg, "text", "max_seq", default=None)
         if configured is None:
             configured = get_model_arg(self.qcfg, "max_seq", default=None)
@@ -256,7 +246,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         obs_sin,
         obs_rot,
     ) -> torch.Tensor:
-        """Apply rotary position embedding to Q or K before head transposition."""
+        """Apply rotary position embedding before head transposition."""
         cos = self._expand_rope_table(cos)
         sin = self._expand_rope_table(sin)
         half = self._rot(tensor, obs_x1, obs_x2, obs_neg, obs_cat)
@@ -271,12 +261,11 @@ class QuantGemma4TextAttention(QuantModuleBase):
         q_len: int,
         k_len: int,
     ) -> torch.Tensor:
-        """Normalize an attention mask so it broadcasts to ``(B, heads, Q, K)``.
+        """Normalize a mask so it broadcasts to ``(B, heads, Q, K)``.
 
         Supported input shapes are ``(B, K)``, ``(B, Q, K)``, and
-        ``(B, 1, Q, K)``. Longer preallocated masks are sliced from the right
-        query range and from the left key range to match the actual attention
-        tensors.
+        ``(B, 1, Q, K)``. Longer preallocated masks are sliced to the active
+        query and key ranges.
         """
         if mask.dim() not in (2, 3, 4):
             raise RuntimeError(
@@ -326,7 +315,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         k_len: int,
         device: torch.device,
     ) -> torch.Tensor:
-        """Build an additive attention mask for per-head attention logits."""
+        """Build an additive attention mask for the active query and key range."""
         fill_val = float(self.qcfg.attention_mask_fill_value)
         assert isinstance(self.causal_mask_template, torch.Tensor)
 
@@ -359,9 +348,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
             torch.int32,
             torch.int64,
         ):
-            keep_mask = attention_mask.bool()
             keep_mask = self._normalize_attention_mask_shape(
-                keep_mask,
+                attention_mask.bool(),
                 q_len=q_len,
                 k_len=k_len,
             )
@@ -392,7 +380,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         shared_key_value: Optional[LayerKV],
         shared_kv_states: Optional[MutableMapping[str, LayerKV]],
     ) -> LayerKV:
-        """Return shared K/V tensors for a shared-KV layer."""
+        """Return full shared K/V tensors for a shared-KV consumer layer."""
         if shared_key_value is not None:
             return shared_key_value
         if shared_kv_states is not None and self.layer_type in shared_kv_states:
@@ -409,7 +397,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> LayerKV:
-        """Project and rotate the current non-shared K/V tensors."""
+        """Project, normalize, and rotate the current non-shared K/V tensors."""
         key_states_raw = self.k_proj(hidden_states).view(hidden_shape)
         if self.v_proj is None:
             value_states = key_states_raw
@@ -444,7 +432,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         new_key_value: LayerKV,
         past_key_value: Optional[Any],
     ) -> tuple[LayerKV, Optional[Any]]:
-        """Build the K/V tensors used by attention and optional cache output."""
+        """Build full K/V tensors for attention and an optional cache object."""
         new_k, new_v = new_key_value
         cache_object_out = None
 
@@ -461,8 +449,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 torch.cat([past_k, new_k], dim=2), self.obs_present_key
             )
             present_v = self._fq(
-                torch.cat([past_v, new_v], dim=2),
-                self.obs_present_value,
+                torch.cat([past_v, new_v], dim=2), self.obs_present_value
             )
             return (present_k, present_v), cache_object_out
 
@@ -481,7 +468,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
 
     @staticmethod
     def _normalize_cache_output_mode(cache_output_mode: str) -> CacheOutputMode:
-        """Normalize the cache output mode accepted by static runtime adapters."""
+        """Normalize cache-output aliases used by static runtime adapters."""
         if cache_output_mode == "full":
             return "present"
         if cache_output_mode not in ("delta", "present"):
@@ -496,7 +483,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         present_key_value: Optional[LayerKV],
         cache_object_out: Optional[Any],
     ) -> Optional[Any]:
-        """Return cache data according to the requested cache output mode."""
+        """Return cache data according to the requested output policy."""
         if new_key_value is None:
             return None
         if mode == "delta":
@@ -505,7 +492,85 @@ class QuantGemma4TextAttention(QuantModuleBase):
             return cache_object_out
         return present_key_value
 
-    def _attention_forward(
+    def _validate_attention_shapes(
+        self,
+        *,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[int, int, int, int]:
+        """Validate GQA tensor relationships shared by both attention layouts."""
+        if query_states.dim() != 4 or key_states.dim() != 4 or value_states.dim() != 4:
+            raise RuntimeError(
+                "Gemma4 attention expects rank-4 Q/K/V tensors, got "
+                f"Q={tuple(query_states.shape)}, K={tuple(key_states.shape)}, "
+                f"V={tuple(value_states.shape)}."
+            )
+        if attention_mask.dim() != 4 or attention_mask.size(1) != 1:
+            raise RuntimeError(
+                "Gemma4 attention expects a shared-head mask shaped "
+                f"(B, 1, Q, K), got {tuple(attention_mask.shape)}."
+            )
+
+        batch_size, num_heads, q_len, head_dim = query_states.shape
+        num_kv_heads = key_states.size(1)
+        kv_rep = self.num_key_value_groups
+        if num_heads != num_kv_heads * kv_rep:
+            raise RuntimeError(
+                "Invalid Gemma4 GQA head relationship: "
+                f"num_heads={num_heads}, num_kv_heads={num_kv_heads}, "
+                f"num_key_value_groups={kv_rep}."
+            )
+        if value_states.size(1) != num_kv_heads:
+            raise RuntimeError(
+                "Gemma4 key/value head counts differ: "
+                f"key_heads={num_kv_heads}, value_heads={value_states.size(1)}."
+            )
+        if key_states.size(0) != batch_size or value_states.size(0) != batch_size:
+            raise RuntimeError("Gemma4 Q/K/V batch dimensions must match.")
+        if key_states.size(-1) != head_dim or value_states.size(-1) != head_dim:
+            raise RuntimeError(
+                "Gemma4 Q/K/V head dimensions must match: "
+                f"query={head_dim}, key={key_states.size(-1)}, "
+                f"value={value_states.size(-1)}."
+            )
+        if key_states.size(-2) != value_states.size(-2):
+            raise RuntimeError(
+                "Gemma4 key/value sequence lengths must match: "
+                f"key={key_states.size(-2)}, value={value_states.size(-2)}."
+            )
+        if attention_mask.size(0) not in (1, batch_size):
+            raise RuntimeError(
+                "Gemma4 attention-mask batch dimension is incompatible with Q/K/V: "
+                f"mask_batch={attention_mask.size(0)}, batch={batch_size}."
+            )
+        if attention_mask.size(-2) not in (1, q_len):
+            raise RuntimeError(
+                "Gemma4 attention-mask query length is incompatible with Q: "
+                f"mask_q={attention_mask.size(-2)}, q_len={q_len}."
+            )
+        if attention_mask.size(-1) != key_states.size(-2):
+            raise RuntimeError(
+                "Gemma4 attention-mask key length is incompatible with K/V: "
+                f"mask_k={attention_mask.size(-1)}, k_len={key_states.size(-2)}."
+            )
+        return batch_size, num_heads, q_len, num_kv_heads
+
+    def _apply_attention_scale(self, logits: torch.Tensor) -> torch.Tensor:
+        """Observe logits, apply the Gemma4 attention scale, and observe output."""
+        logits = self._fq(logits, self.obs_logits_raw)
+        scale = self._fq(
+            torch.tensor(
+                self.scaling,
+                device=logits.device,
+                dtype=logits.dtype,
+            ),
+            self.obs_scale,
+        )
+        return self._fq(logits * scale, self.obs_logits)
+
+    def _forward_unrolled(
         self,
         *,
         query_states: torch.Tensor,
@@ -513,56 +578,105 @@ class QuantGemma4TextAttention(QuantModuleBase):
         value_states: torch.Tensor,
         attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run grouped-query attention without materializing repeated K/V tensors."""
-        batch_size, num_heads, q_len, _ = query_states.shape
-        num_kv_heads = key_states.size(1)
+        """Run NPU-friendly attention with one rank-3 graph per query head."""
+        batch_size, _, q_len, num_kv_heads = self._validate_attention_shapes(
+            query_states=query_states,
+            key_states=key_states,
+            value_states=value_states,
+            attention_mask=attention_mask,
+        )
         kv_rep = self.num_key_value_groups
+        attn_mask = attention_mask.squeeze(1)
 
         attn_weights_parts: list[torch.Tensor] = []
         attn_out_parts: list[torch.Tensor] = []
 
         for kv_idx in range(num_kv_heads):
-            key_i = key_states[:, kv_idx : kv_idx + 1, :, :]
-            value_i = value_states[:, kv_idx : kv_idx + 1, :, :]
-            head_start = kv_idx * kv_rep
-            head_end = min(head_start + kv_rep, num_heads)
-            query_i = query_states[:, head_start:head_end, :, :]
-            if query_i.size(1) == 0:
-                continue
+            key_i = key_states[:, kv_idx, :, :]
+            value_i = value_states[:, kv_idx, :, :]
 
-            logits_i = query_i @ key_i.transpose(-2, -1)
-            logits_i = self._fq(logits_i, self.obs_logits_raw)
-            scale = self._fq(
-                torch.tensor(
-                    self.scaling,
-                    device=logits_i.device,
-                    dtype=logits_i.dtype,
-                ),
-                self.obs_scale,
-            )
-            logits_i = self._fq(logits_i * scale, self.obs_logits)
-            logits_i = self._fq(logits_i + attention_mask, self.obs_mask_add)
+            for rep_idx in range(kv_rep):
+                query_idx = kv_idx * kv_rep + rep_idx
+                query_i = query_states[:, query_idx, :, :]
 
-            attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
-                query_states.dtype
-            )
-            if self.training and self.attention_dropout > 0.0:
-                attn_i = F.dropout(attn_i, p=self.attention_dropout, training=True)
-            attn_i = self._fq(attn_i, self.obs_softmax)
+                logits_i = query_i @ key_i.transpose(-2, -1)
+                logits_i = self._apply_attention_scale(logits_i)
+                logits_i = self._fq(logits_i + attn_mask, self.obs_mask_add)
 
-            out_i = self._fq(attn_i @ value_i, self.obs_attn_out)
-            attn_weights_parts.append(attn_i)
-            attn_out_parts.append(out_i)
+                attn_i = torch.softmax(logits_i, dim=-1, dtype=torch.float32).to(
+                    query_i.dtype
+                )
+                if self.training and self.attention_dropout > 0.0:
+                    attn_i = F.dropout(
+                        attn_i,
+                        p=self.attention_dropout,
+                        training=True,
+                    )
+                attn_i = self._fq(attn_i, self.obs_softmax)
+
+                out_i = self._fq(attn_i @ value_i, self.obs_attn_out)
+                attn_weights_parts.append(attn_i)
+                attn_out_parts.append(out_i)
 
         attn_weights = self._fq(
-            torch.cat(attn_weights_parts, dim=1),
+            torch.stack(attn_weights_parts, dim=1),
             self.obs_attn_weights,
         )
         attn_out_h = self._fq(
-            torch.cat(attn_out_parts, dim=1),
+            torch.stack(attn_out_parts, dim=2),
             self.obs_attn_out_h,
         )
-        attn_output = attn_out_h.transpose(1, 2).reshape(batch_size, q_len, -1)
+        attn_output = attn_out_h.reshape(batch_size, q_len, -1)
+        return self.o_proj(attn_output), attn_weights
+
+    def _forward_batched(
+        self,
+        *,
+        query_states: torch.Tensor,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run a Hugging Face-like batched GQA path for reference evaluation."""
+        batch_size, _, q_len, _ = self._validate_attention_shapes(
+            query_states=query_states,
+            key_states=key_states,
+            value_states=value_states,
+            attention_mask=attention_mask,
+        )
+        kv_rep = self.num_key_value_groups
+
+        if kv_rep != 1:
+            key_for_attention = key_states.repeat_interleave(kv_rep, dim=1)
+            value_for_attention = value_states.repeat_interleave(kv_rep, dim=1)
+        else:
+            key_for_attention = key_states
+            value_for_attention = value_states
+
+        logits = query_states @ key_for_attention.transpose(-2, -1)
+        logits = self._apply_attention_scale(logits)
+        logits = self._fq(logits + attention_mask, self.obs_mask_add)
+
+        attn_weights = torch.softmax(logits, dim=-1, dtype=torch.float32).to(
+            query_states.dtype
+        )
+        if self.training and self.attention_dropout > 0.0:
+            attn_weights = F.dropout(
+                attn_weights,
+                p=self.attention_dropout,
+                training=True,
+            )
+        attn_weights = self._fq(attn_weights, self.obs_softmax)
+        attn_weights = self._fq(attn_weights, self.obs_attn_weights)
+
+        attn_out_h = self._fq(
+            attn_weights @ value_for_attention,
+            self.obs_attn_out,
+        )
+        attn_out_h = self._fq(attn_out_h, self.obs_attn_out_h)
+        attn_output = (
+            attn_out_h.transpose(1, 2).contiguous().reshape(batch_size, q_len, -1)
+        )
         return self.o_proj(attn_output), attn_weights
 
     def forward(
@@ -576,26 +690,25 @@ class QuantGemma4TextAttention(QuantModuleBase):
         cache_output_mode: str = "delta",
         **kwargs,
     ):
-        """Run Gemma4 text attention with explicit static-friendly K/V handling.
+        """Run Gemma4 text attention with selectable execution layout.
 
         Args:
             hidden_states: Input tensor shaped ``(B, S, hidden_size)``.
             position_embeddings: Tuple ``(cos, sin)`` shaped ``(B, S, head_dim)``.
             attention_mask: Optional additive or keep mask broadcastable to
-                attention logits. Static runtime should provide this tensor.
+                attention logits.
             shared_key_value: Optional full K/V tensors for shared-KV layers.
             past_key_value: Optional tuple or HF-like cache object for non-shared
-                layers. Tuple caches must be shaped ``(B, num_kv_heads, K, H)``.
-            use_cache: When ``True``, append cache data to the output tuple.
-            cache_output_mode: ``"delta"`` returns only newly projected K/V;
+                layers. Tuple caches are shaped ``(B, num_kv_heads, K, H)``.
+            use_cache: Whether to append cache data to the output tuple.
+            cache_output_mode: ``"delta"`` returns newly projected K/V;
                 ``"present"`` or ``"full"`` returns full K/V or the updated
-                cache object when a cache object is supplied.
+                cache object.
 
         Returns:
-            ``(attn_output, attn_weights)`` when ``use_cache=False``. When
-            ``use_cache=True``, returns ``(attn_output, attn_weights, cache)``.
-            Shared-KV layers return ``cache=None`` because they do not own K/V
-            projection weights.
+            ``(attn_output, attn_weights)`` and an optional third cache item when
+            ``use_cache=True``. Shared-KV layers return ``cache=None`` because
+            they do not own K/V projection weights.
         """
         past_key_value = kwargs.pop("past_key_values", past_key_value)
         shared_kv_states = kwargs.pop("shared_kv_states", None)
@@ -663,12 +776,24 @@ class QuantGemma4TextAttention(QuantModuleBase):
             device=query_states.device,
         )
 
-        attn_output, attn_weights = self._attention_forward(
-            query_states=query_states,
-            key_states=key_states,
-            value_states=value_states,
-            attention_mask=attn_mask,
-        )
+        if self.attn_options.layout == "batched":
+            attn_output, attn_weights = self._forward_batched(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                attention_mask=attn_mask,
+            )
+        elif self.attn_options.layout == "unrolled":
+            attn_output, attn_weights = self._forward_unrolled(
+                query_states=query_states,
+                key_states=key_states,
+                value_states=value_states,
+                attention_mask=attn_mask,
+            )
+        else:
+            raise RuntimeError(
+                f"Invalid Gemma4 attention layout: {self.attn_options.layout!r}."
+            )
 
         if use_cache:
             return (
