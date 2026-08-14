@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from numbers import Integral
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Sequence
 
 from tico.circle.errors import CircleRewriteError
 from tico.circle.graph import as_indices, as_list, OPTIONAL_TENSOR_INDEX
@@ -61,6 +61,20 @@ class RewriteStats:
             removed_signatures=self.removed_signatures + other.removed_signatures,
             remapped_references=(self.remapped_references + other.remapped_references),
         )
+
+
+@dataclass(frozen=True)
+class TensorUseReplacement:
+    """Describe one simultaneous consumer-side tensor reference replacement."""
+
+    old_tensor_index: int
+    new_tensor_index: int
+
+    def __post_init__(self) -> None:
+        """Normalize replacement indices to plain Python integers."""
+
+        object.__setattr__(self, "old_tensor_index", int(self.old_tensor_index))
+        object.__setattr__(self, "new_tensor_index", int(self.new_tensor_index))
 
 
 def _valid_index(index: int, size: int, path: str) -> int:
@@ -108,9 +122,22 @@ def _replace_tensor_index(
     old_index: int,
     new_index: int,
 ) -> tuple[list[int], int]:
-    """Replace a tensor index in a vector and return the number of changes."""
+    """Replace one tensor index in a vector and return the number of changes."""
+
+    return _replace_tensor_indices(
+        value,
+        {int(old_index): int(new_index)},
+    )
+
+
+def _replace_tensor_indices(
+    value: Any,
+    mapping: dict[int, int],
+) -> tuple[list[int], int]:
+    """Apply a simultaneous tensor mapping to one vector without cascading."""
+
     original = as_indices(value)
-    remapped = [new_index if index == old_index else index for index in original]
+    remapped = [mapping.get(index, index) for index in original]
     return remapped, sum(old != new for old, new in zip(original, remapped))
 
 
@@ -127,6 +154,27 @@ def replace_tensor_uses(
     dead-code elimination can remove producers that become unreachable.
     Existing ``CircleGraph`` consumer indexes must be rebuilt after this rewrite.
     """
+
+    return replace_tensor_uses_many(
+        model,
+        subgraph_index=subgraph_index,
+        replacements=(TensorUseReplacement(old_tensor_index, new_tensor_index),),
+    )
+
+
+def replace_tensor_uses_many(
+    model: Any,
+    *,
+    subgraph_index: int,
+    replacements: Iterable[TensorUseReplacement | tuple[int, int]],
+) -> RewriteStats:
+    """Replace multiple tensor uses simultaneously within one subgraph.
+
+    Each original reference is looked up exactly once. This permits cycles such as
+    ``0 -> 1`` and ``1 -> 0`` and prevents chain mappings such as ``0 -> 1`` and
+    ``1 -> 2`` from cascading into ``0 -> 2``.
+    """
+
     subgraphs = as_list(model.subgraphs)
     subgraph_index = _valid_index(
         int(subgraph_index),
@@ -135,48 +183,109 @@ def replace_tensor_uses(
     )
     subgraph = subgraphs[subgraph_index]
     tensor_count = len(as_list(subgraph.tensors))
-    old_tensor_index = _valid_index(
-        int(old_tensor_index),
-        tensor_count,
-        f"subgraphs[{subgraph_index}].old_tensor_index",
-    )
-    new_tensor_index = _valid_index(
-        int(new_tensor_index),
-        tensor_count,
-        f"subgraphs[{subgraph_index}].new_tensor_index",
-    )
-    if old_tensor_index == new_tensor_index:
+
+    mapping: dict[int, int] = {}
+    for replacement in replacements:
+        if isinstance(replacement, TensorUseReplacement):
+            old_index = replacement.old_tensor_index
+            new_index = replacement.new_tensor_index
+        else:
+            try:
+                old_index, new_index = replacement
+            except (TypeError, ValueError) as error:
+                raise CircleRewriteError(
+                    "Tensor replacements must contain exactly two indices."
+                ) from error
+        old_index = _valid_index(
+            int(old_index),
+            tensor_count,
+            f"subgraphs[{subgraph_index}].old_tensor_index",
+        )
+        new_index = _valid_index(
+            int(new_index),
+            tensor_count,
+            f"subgraphs[{subgraph_index}].new_tensor_index",
+        )
+        if old_index == new_index:
+            continue
+        previous = mapping.get(old_index)
+        if previous is not None and previous != new_index:
+            raise CircleRewriteError(
+                f"Tensor {old_index} has conflicting replacements "
+                f"{previous} and {new_index}."
+            )
+        mapping[old_index] = new_index
+
+    mapping = {old: new for old, new in mapping.items() if old != new}
+    if not mapping:
         return RewriteStats()
 
-    replacements = 0
+    replacements_count = 0
     for operator in as_list(subgraph.operators):
-        inputs, changes = _replace_tensor_index(
+        inputs, changes = _replace_tensor_indices(
             getattr(operator, "inputs", None),
-            old_tensor_index,
-            new_tensor_index,
+            mapping,
         )
         if changes:
             operator.inputs = inputs
-            replacements += changes
+            replacements_count += changes
 
-    outputs, changes = _replace_tensor_index(
+    outputs, changes = _replace_tensor_indices(
         getattr(subgraph, "outputs", None),
-        old_tensor_index,
-        new_tensor_index,
+        mapping,
     )
     if changes:
         subgraph.outputs = outputs
-        replacements += changes
+        replacements_count += changes
 
     for signature in as_list(getattr(model, "signatureDefs", None)):
         if int(getattr(signature, "subgraphIndex", -1)) != subgraph_index:
             continue
         for tensor_map in as_list(getattr(signature, "outputs", None)):
-            if int(getattr(tensor_map, "tensorIndex", -1)) == old_tensor_index:
-                tensor_map.tensorIndex = new_tensor_index
-                replacements += 1
+            old_index = int(getattr(tensor_map, "tensorIndex", -1))
+            new_index = mapping.get(old_index)
+            if new_index is None:
+                continue
+            tensor_map.tensorIndex = new_index
+            replacements_count += 1
 
-    return RewriteStats(remapped_references=replacements)
+    return RewriteStats(remapped_references=replacements_count)
+
+
+def replace_operator_output_uses(
+    model: Any,
+    *,
+    subgraph_index: int,
+    operator_index: int,
+    new_tensor_indices: Sequence[int],
+) -> RewriteStats:
+    """Replace all consumer-side uses of one operator's outputs by position."""
+
+    subgraphs = as_list(model.subgraphs)
+    subgraph_index = _valid_index(
+        int(subgraph_index),
+        len(subgraphs),
+        "operator-output replacement subgraph",
+    )
+    subgraph = subgraphs[subgraph_index]
+    operators = as_list(subgraph.operators)
+    operator_index = _valid_index(
+        int(operator_index),
+        len(operators),
+        f"subgraphs[{subgraph_index}].operator_index",
+    )
+    old_outputs = as_indices(getattr(operators[operator_index], "outputs", None))
+    new_outputs = [int(index) for index in new_tensor_indices]
+    if len(old_outputs) != len(new_outputs):
+        raise CircleRewriteError(
+            f"Operator {operator_index} has {len(old_outputs)} outputs, but "
+            f"{len(new_outputs)} replacements were supplied."
+        )
+    return replace_tensor_uses_many(
+        model,
+        subgraph_index=subgraph_index,
+        replacements=tuple(zip(old_outputs, new_outputs)),
+    )
 
 
 def _signature_tensor_maps(signature: Any) -> Iterator[tuple[str, Any]]:
