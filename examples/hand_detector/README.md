@@ -194,6 +194,35 @@ The JSON report stores C/D/E metrics under each candidate's `profiles` mapping.
 For compatibility with existing report readers, the candidate-level `outputs`
 field remains an alias of D outputs.
 
+### Activation block sensitivity
+
+Rank semantic activation-domain groups from a percentile-calibrated
+E:internal-full baseline. Weight quantization remains enabled, final-output
+domains remain floating point, and one internal activation group is disabled at
+a time:
+
+```bash
+python -m examples.hand_detector.analyze activation-sensitivity \
+  --calibration-dir /path/to/npy \
+  --calibration-offset 0 \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --bits 8 \
+  --percentile 99.99 \
+  --score-output regressors \
+  --top-k 20
+```
+
+Groups follow logical activation domains rather than individual wrappers.
+Producer `act_out` and downstream consumer `act_in` observers for the same
+tensor are assigned to the producer block where possible. The report includes
+the E baseline, all group metrics, matched observer paths, operation indices,
+and regressor/classifier MAE recovery. Positive recovery means that leaving the
+group floating point improved the selected baseline.
+
 ## Calibration and evaluation data
 
 Supported NumPy shapes are:
@@ -259,6 +288,7 @@ _support/circle.py
 _support/conversion.py
 _support/data.py
 _support/quantization.py
+_support/sensitivity.py
 _support/tflite_flatbuffer.py
 _support/verify_circle_layout.py
 _support/verify_circle_resize.py

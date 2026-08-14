@@ -96,6 +96,36 @@ class QuantizationSensitivityTest(unittest.TestCase):
         self.assertEqual(results[0].to_dict()["matched_site_count"], 1)
         self.assertGreater(results[0].sensitivity, results[1].sensitivity)
 
+    def test_leave_one_float_respects_a_custom_baseline(self) -> None:
+        groups = (QuantizationGroup("coarse", SiteSelector.paths("block.act_in")),)
+        baseline_selector = SiteSelector.paths("block.act_in")
+        baseline, results = QuantizationSensitivity(
+            IdentityReference(),
+            Candidate(),
+        ).run(
+            [torch.tensor([0.13, 0.57, 0.91])],
+            groups,
+            mode=SensitivityMode.LEAVE_ONE_FLOAT,
+            score_output="output",
+            baseline_selector=baseline_selector,
+        )
+
+        self.assertGreater(float(baseline["output"]["mae"]), 0.0)
+        self.assertEqual(results[0].matched_sites, ("block.act_in",))
+        self.assertGreater(results[0].sensitivity, 0.0)
+        self.assertAlmostEqual(float(results[0].outputs["output"]["mae"]), 0.0)
+
+    def test_custom_baseline_rejects_an_immutable_group(self) -> None:
+        groups = (QuantizationGroup("fine", SiteSelector.paths("block.act_out")),)
+        with self.assertRaisesRegex(ValueError, "matched no quantization sites"):
+            QuantizationSensitivity(IdentityReference(), Candidate(),).run(
+                [torch.tensor([0.13, 0.57, 0.91])],
+                groups,
+                mode=SensitivityMode.LEAVE_ONE_FLOAT,
+                score_output="output",
+                baseline_selector=SiteSelector.paths("block.act_in"),
+            )
+
     def test_rejects_a_group_that_matches_no_site(self) -> None:
         groups = (QuantizationGroup("missing", SiteSelector.paths("block.missing")),)
         with self.assertRaisesRegex(ValueError, "matched no quantization sites"):

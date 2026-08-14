@@ -70,6 +70,31 @@ modes:
 Groups may contain one observer or a complete precision domain such as a
 producer output, consumer input, and shared Add/Concat boundary.
 
+Pass `baseline_selector` to analyze a custom profile rather than the default
+all-enabled or all-disabled baseline. For example, an E:internal-full selector
+keeps final-output domains floating point while leave-one-float analysis ranks
+internal groups:
+
+```python
+baseline_selector = boundaries.selector_for(
+    QuantizationProfile.INTERNAL_FULL
+)
+baseline, results = QuantizationSensitivity(
+    float_model,
+    calibrated_quantized_model,
+).run(
+    evaluation_samples,
+    groups,
+    mode=SensitivityMode.LEAVE_ONE_FLOAT,
+    score_output="logits",
+    baseline_selector=baseline_selector,
+)
+```
+
+A group is matched only against sites that can change relative to the selected
+baseline. This prevents a leave-one-float group from silently targeting sites
+that are already floating point.
+
 ## Runtime control
 
 Observer fake-quantization switches are independent from calibration

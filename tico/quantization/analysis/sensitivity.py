@@ -30,7 +30,7 @@ from tico.quantization.wrapq.control import FakeQuantState, iter_quantization_si
 
 
 class SensitivityMode(str, Enum):
-    """Describe how one group differs from the full-quantized baseline."""
+    """Describe how one group differs from the selected baseline."""
 
     LEAVE_ONE_FLOAT = "leave_one_float"
     ENABLE_ONE = "enable_one"
@@ -88,8 +88,15 @@ class QuantizationSensitivity:
         mode: SensitivityMode = SensitivityMode.LEAVE_ONE_FLOAT,
         score_output: str,
         score_metric: str = "mae",
+        baseline_selector: SiteSelector | None = None,
     ) -> tuple[dict[str, dict[str, float | int | None]], list[SensitivityResult]]:
-        """Evaluate and rank the supplied quantization groups."""
+        """Evaluate and rank groups relative to a selectable baseline.
+
+        By default, ``LEAVE_ONE_FLOAT`` starts from every site enabled and
+        ``ENABLE_ONE`` starts from every site disabled. ``baseline_selector``
+        overrides that default and allows analysis relative to profiles such as
+        E:internal-full, where final-output domains remain floating point.
+        """
         if not samples:
             raise ValueError("Sensitivity analysis requires at least one sample.")
         if not groups:
@@ -101,32 +108,52 @@ class QuantizationSensitivity:
         sites = tuple(iter_quantization_sites(self.quantized_model))
         if not sites:
             raise ValueError("The candidate model does not contain WrapQ observers.")
+
+        selected_baseline = (
+            baseline_selector
+            if baseline_selector is not None
+            else _default_baseline_selector(mode)
+        )
+        effective_selectors = {
+            group.name: (
+                group.selector & selected_baseline
+                if mode is SensitivityMode.LEAVE_ONE_FLOAT
+                else group.selector & ~selected_baseline
+            )
+            for group in groups
+        }
         matched_sites = {
-            group.name: tuple(site.path for site in sites if group.selector(site))
+            group.name: tuple(
+                site.path for site in sites if effective_selectors[group.name](site)
+            )
             for group in groups
         }
         empty_groups = tuple(name for name, paths in matched_sites.items() if not paths)
         if empty_groups:
             raise ValueError(
-                "Sensitivity selectors matched no quantization sites for groups: "
-                f"{empty_groups}."
+                "Sensitivity selectors matched no quantization sites that can "
+                f"change relative to the baseline for groups: {empty_groups}."
             )
 
         with FakeQuantState(self.quantized_model) as state:
-            state.set_all(mode is SensitivityMode.LEAVE_ONE_FLOAT)
-            baseline = evaluate_models(
+            _apply_baseline(state, selected_baseline)
+            baseline_outputs = evaluate_models(
                 self.reference_model,
                 self.quantized_model,
                 samples,
                 output_adapter=self.output_adapter,
             )
-            baseline_score = _metric_value(baseline, score_output, score_metric)
+            baseline_score = _metric_value(
+                baseline_outputs,
+                score_output,
+                score_metric,
+            )
 
             results: list[SensitivityResult] = []
             for group in groups:
-                state.set_all(mode is SensitivityMode.LEAVE_ONE_FLOAT)
+                _apply_baseline(state, selected_baseline)
                 state.set_where(
-                    group.selector,
+                    effective_selectors[group.name],
                     mode is SensitivityMode.ENABLE_ONE,
                 )
                 outputs = evaluate_models(
@@ -152,7 +179,18 @@ class QuantizationSensitivity:
                 )
 
         results.sort(key=lambda result: result.sensitivity, reverse=True)
-        return baseline, results
+        return baseline_outputs, results
+
+
+def _default_baseline_selector(mode: SensitivityMode) -> SiteSelector:
+    if mode is SensitivityMode.LEAVE_ONE_FLOAT:
+        return SiteSelector.all()
+    return SiteSelector.none()
+
+
+def _apply_baseline(state: FakeQuantState, selector: SiteSelector) -> None:
+    state.set_all(False)
+    state.set_where(selector, True)
 
 
 def _metric_value(
