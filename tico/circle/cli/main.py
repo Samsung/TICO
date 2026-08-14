@@ -35,6 +35,7 @@ from tico.circle.passes import (
     CirclePassManager,
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
+    FoldConstantSubgraphPass,
     RemoveRedundantLayoutOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
@@ -46,6 +47,7 @@ _PASS_REGISTRY: dict[str, type[CirclePass]] = {
     "eliminate-transpose-bounded-layout-region": (
         EliminateTransposeBoundedLayoutRegionPass
     ),
+    "fold-constant-subgraph": FoldConstantSubgraphPass,
     "remove-redundant-layout-ops": RemoveRedundantLayoutOpsPass,
     "dce": DeadCodeEliminationPass,
     "compact": CompactIndicesPass,

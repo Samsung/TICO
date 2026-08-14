@@ -18,6 +18,7 @@ from tico.circle.cli.main import _build_parser, _parse_passes
 from tico.circle.passes import (
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
+    FoldConstantSubgraphPass,
     RemoveRedundantLayoutOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
@@ -47,17 +48,19 @@ class CircleCLITest(unittest.TestCase):
         self.assertEqual(args.to_tensor, ["output"])
 
     def test_optimization_and_cleanup_pass_names_are_resolved(self) -> None:
-        """Resolve the layout optimization and cleanup pass names in order."""
+        """Resolve optimization and cleanup pass names in order."""
 
         passes = _parse_passes(
             "eliminate-transpose-bounded-layout-region,"
+            "fold-constant-subgraph,"
             "remove-redundant-layout-ops,dce,compact"
         )
 
         self.assertIsInstance(passes[0], EliminateTransposeBoundedLayoutRegionPass)
-        self.assertIsInstance(passes[1], RemoveRedundantLayoutOpsPass)
-        self.assertIsInstance(passes[2], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[3], CompactIndicesPass)
+        self.assertIsInstance(passes[1], FoldConstantSubgraphPass)
+        self.assertIsInstance(passes[2], RemoveRedundantLayoutOpsPass)
+        self.assertIsInstance(passes[3], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[4], CompactIndicesPass)
 
     def test_optimize_accepts_restart_strategy(self) -> None:
         """Parse the restart scheduling strategy for a Circle pass pipeline."""

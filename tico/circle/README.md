@@ -20,6 +20,7 @@ CircleDocument
     ├── inspect                 stable summaries and text output
     ├── operations.extract      workflow-level graph extraction
     └── passes                  composable Circle-to-Circle rewrites
+            ├── FoldConstantSubgraphPass
             ├── RemoveRedundantLayoutOpsPass
             ├── DeadCodeEliminationPass
             └── CompactIndicesPass
@@ -128,7 +129,11 @@ result.document.save("attention.circle")
 ### Run optimization and cleanup passes
 
 ```python
-from tico.circle.passes import CirclePassManager, RemoveRedundantLayoutOpsPass
+from tico.circle.passes import (
+    CirclePassManager,
+    FoldConstantSubgraphPass,
+    RemoveRedundantLayoutOpsPass,
+)
 from tico.circle.passes.cleanup import (
     CompactIndicesPass,
     DeadCodeEliminationPass,
@@ -136,6 +141,7 @@ from tico.circle.passes.cleanup import (
 
 pipeline = CirclePassManager(
     [
+        FoldConstantSubgraphPass(),
         RemoveRedundantLayoutOpsPass(),
         DeadCodeEliminationPass(),
         CompactIndicesPass(),
@@ -150,6 +156,13 @@ model.save("model.optimized.circle")
 Transpose pairs so their redundant operators become dead. Run dead-code elimination
 after it to remove those operators, then compact the remaining tensor, buffer, and
 operator-code indices.
+
+`FoldConstantSubgraphPass` folds supported operators to a fixed point while preserving
+existing output tensor indices and contracts. The first evaluator set covers `ADD`,
+`MUL`, `CAST`, `RESHAPE`, `SHAPE`, `SQUEEZE`, and `GATHER`. Arithmetic folding is
+limited to conservative dense cases, while exact quantized view operations may retain
+their original qparams. Configurable storage and compute budgets prevent excessive
+compile-time work or model growth. Newly dead producers are removed by default.
 
 By default, `CirclePassManager` verifies the document after every pass. 
 Set `CirclePassContext(verify_after_each_pass=False)` only when a multi-step 
@@ -281,6 +294,7 @@ Available passes:
 | Name | Implementation | Behavior |
 |---|---|---|
 | `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
+| `fold-constant-subgraph` | `FoldConstantSubgraphPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
 | `remove-redundant-layout-ops` | `RemoveRedundantLayoutOpsPass` | Rewires consecutive Reshape operations and consecutive inverse Transpose pairs so redundant operators can be removed |
 | `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
@@ -288,6 +302,20 @@ Available passes:
 `--passes` defaults to `dce,compact`. To remove redundant layout patterns, select the
 three-pass pipeline shown above. Its order matters: the layout pass rewires dataflow,
 `dce` removes the newly dead operators, and `compact` removes and remaps unused objects.
+
+Fold supported constant subgraphs and compact the newly unused objects with:
+
+```bash
+tico-circle optimize model.circle \
+  --passes fold-constant-subgraph,compact \
+  -o model.constant-folded.circle
+```
+
+The constant-folding pass preserves existing output tensor indices, so graph outputs
+and signature output mappings remain stable. It skips dynamic contracts, external
+buffers, unsafe integer overflow, non-zero fused activations, unsupported qparams, and
+zero-element outputs that cannot yet be represented as owned constants. Signature-bound
+graph inputs are retained even when a metadata-only fold removes their data dependence.
 
 `EliminateTransposeBoundedLayoutRegionPass` moves a region into the source layout when
 all external data inputs cross one Transpose permutation and all external data outputs
@@ -409,16 +437,18 @@ Important test scenarios include:
 - generated Object API NumPy-vector round trips
 - scalar and vector control-flow subgraph reference remapping
 - metadata buffer preservation and remapping
+- constant-fold fixed points, budgets, overflow rejection, and multi-output rollback
 
 ## Current limitations
 
-This first implementation performs structural Circle transformations. It does not perform numerical equivalence
- testing, runtime execution, shape inference, or target-specific operator legalization.
+This implementation performs structural Circle rewrites and bounded constant evaluation. It does not perform
+ numerical equivalence testing, runtime execution, shape inference, or target-specific operator legalization.
 
 Additional limitations:
 
 - A constant is recognized by inline buffer data or a non-zero external buffer offset/size. A zero-sized constant
- with no payload metadata may be conservatively promoted to an extracted graph input.
+ with no payload metadata may be conservatively promoted to an extracted graph input. Constant folding skips
+ zero-element outputs until graph-level constant ownership can distinguish them from absent storage.
 - Tensor name selectors rely on names being present and stable. Operator indices remain useful for debugging
  but may change after any rewrite.
 - Signature synthesis is intentionally not attempted when extraction creates new boundaries; only an exactly
