@@ -253,6 +253,40 @@ pipeline:
     enabled: true
 ```
 
+### GPTQ-to-PTQ weight qparam reuse
+
+When GPTQ runs before PTQ, it updates the model weights and attaches the
+per-module weight qparams used for that update. By default, PTQ reuses those
+qparams in matching PTQ weight observers:
+
+```yaml
+pipeline:
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+    weight_bits_overrides:
+      model.visual.patch_embed.proj: 8
+
+  - name: ptq
+    enabled: true
+    reuse_gptq_qparams: true  # default: true
+    linear_weight: uint4
+    vision_patch_embed_weight: uint8
+```
+
+Keep the GPTQ and PTQ weight policies compatible for every reused module,
+including bit-width, signedness, qscheme, and channel granularity. The example
+uses 8-bit asymmetric per-channel quantization for the Qwen3-VL vision patch
+projection in both stages.
+
+Set `reuse_gptq_qparams: false` to let PTQ weight observers compute qparams
+from the current model weights. If GPTQ already ran, these are the GPTQ-updated
+weights, not the original pre-GPTQ floating-point weights.
+
+When reuse is enabled after an enabled GPTQ stage, PTQ fails if GPTQ metadata is
+missing or if no PTQ weight observer accepts the attached qparams. Successful
+reuse reports the number of matched PTQ weight observers.
+
 ## `evaluation`
 
 LLM example:

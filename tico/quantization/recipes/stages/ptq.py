@@ -60,11 +60,11 @@ def _find_enabled_stage(
     return None
 
 
-def _qparam_injection_verbose(
+def _qparam_reuse_verbose(
     ctx: RecipeContext,
     stage_cfg: Mapping[str, Any],
 ) -> bool:
-    """Return whether GPTQ-to-PTQ qparam injection should print a summary."""
+    """Return whether GPTQ-to-PTQ qparam reuse should print a summary."""
     if "verbose" in stage_cfg:
         return bool(stage_cfg.get("verbose"))
 
@@ -74,6 +74,16 @@ def _qparam_injection_verbose(
 
     gptq_stage = _find_enabled_stage(ctx.cfg, "gptq")
     return bool(gptq_stage and gptq_stage.get("verbose", False))
+
+
+def _reuse_gptq_qparams(stage_cfg: Mapping[str, Any]) -> bool:
+    """Return whether PTQ should reuse qparams produced by GPTQ."""
+    value = stage_cfg.get("reuse_gptq_qparams", True)
+    if not isinstance(value, bool):
+        raise TypeError(
+            "ptq.reuse_gptq_qparams must be a boolean. " f"got {type(value).__name__}"
+        )
+    return value
 
 
 def _resolve_configured_override_paths(
@@ -175,6 +185,7 @@ class PTQStage(Stage):
 
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         print("Wrapping model with PTQ wrappers …")
+        reuse_gptq_qparams = _reuse_gptq_qparams(stage_cfg)
         ptq_config = ctx.adapter.build_ptq_config(ctx, stage_cfg)
         ptq_config = apply_ptq_override_policies(
             ptq_config,
@@ -194,19 +205,45 @@ class PTQStage(Stage):
         q_model = prepare(ctx.require_model(), ptq_config)
 
         _, quantizers = find_gptq_quantizers(q_model)
-        if quantizers:
-            # Quantizers may live on the original FP owner, but weight observers
-            # always live in the prepared PTQ tree.
-            inject_gptq_qparams(
-                q_model,
-                quantizers,
-                verbose=_qparam_injection_verbose(ctx, stage_cfg),
+
+        if not reuse_gptq_qparams:
+            if quantizers is not None:
+                clear_gptq_quantizers(q_model)
+            print(
+                "[Info] GPTQ qparam reuse disabled by config "
+                "(reuse_gptq_qparams=false); PTQ weight observers will compute "
+                "qparams from the current weights."
             )
-            clear_gptq_quantizers(q_model)
-        else:
+        elif not quantizers:
+            if _find_enabled_stage(ctx.cfg, "gptq") is not None:
+                raise RuntimeError(
+                    "GPTQ qparam reuse was requested, but no GPTQ quantizers "
+                    "were found after an enabled GPTQ stage."
+                )
             print(
                 "[Warn] GPTQ quantizers were not found; "
                 "PTQ weight observers will use PTQ statistics."
+            )
+        else:
+            # Quantizers may live on the original FP owner, but weight observers
+            # always live in the prepared PTQ tree.
+            stats = inject_gptq_qparams(
+                q_model,
+                quantizers,
+                verbose=_qparam_reuse_verbose(ctx, stage_cfg),
+            )
+            clear_gptq_quantizers(q_model)
+
+            if stats["matched"] == 0:
+                raise RuntimeError(
+                    "GPTQ quantizers were found, but no PTQ weight observer "
+                    "reused their qparams. Check wrapper fp_name mappings and "
+                    "GPTQ/PTQ weight quantization policies."
+                )
+
+            print(
+                f"[Info] Reused GPTQ qparams for {stats['matched']} "
+                "PTQ weight observer(s)."
             )
 
         ctx.adapter.calibrate_prepared_model(ctx, q_model, stage_cfg)
