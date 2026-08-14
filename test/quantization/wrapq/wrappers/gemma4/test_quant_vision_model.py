@@ -15,6 +15,7 @@
 """Unit tests for the Gemma4 vision model PTQ wrapper."""
 
 import unittest
+from unittest import mock
 
 import torch
 
@@ -337,8 +338,32 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(output.last_hidden_state).all())
 
+    def test_forward_export_uses_static_encoder_adapter(self):
+        """forward_export should bypass the dynamic encoder wrapper."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
+            QuantGemma4VisionModel,
+        )
+
+        fp_model = self._make_vision_model()
+        q_model = QuantGemma4VisionModel(fp_model).eval()
+        sample = self._sample_inputs()
+        export_module = q_model.as_export_module(
+            mode="prefill",
+            pixel_position_ids=sample["pixel_position_ids"],
+        )
+
+        with mock.patch.object(
+            q_model.encoder,
+            "forward",
+            side_effect=AssertionError("dynamic encoder path was used"),
+        ):
+            with torch.no_grad():
+                output = export_module(**sample)
+
+        self.assertTrue(torch.isfinite(output.last_hidden_state).all())
+
     def test_as_export_module_creates_export_adapter_attributes(self):
-        """as_export_module should create patch_embedder_export and pooler_export attributes."""
+        """as_export_module should create all vision export adapter attributes."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
             QuantGemma4VisionModel,
         )
@@ -355,6 +380,7 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
 
         # Before as_export_module, no export adapter attributes
         self.assertFalse(hasattr(q_model, "patch_embedder_export"))
+        self.assertFalse(hasattr(q_model, "encoder_export"))
         self.assertFalse(hasattr(q_model, "pooler_export"))
 
         q_model.as_export_module(
@@ -364,12 +390,14 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
 
         # After as_export_module, export adapter attributes should exist
         self.assertTrue(hasattr(q_model, "patch_embedder_export"))
+        self.assertTrue(hasattr(q_model, "encoder_export"))
         self.assertTrue(hasattr(q_model, "pooler_export"))
 
         # Original wrappers should still be intact (not mutated)
         from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
         self.assertIsInstance(q_model.patch_embedder, PTQWrapper)
+        self.assertIsInstance(q_model.encoder, PTQWrapper)
         self.assertIsInstance(q_model.pooler, PTQWrapper)
 
     def test_submodules_are_wrapped(self):

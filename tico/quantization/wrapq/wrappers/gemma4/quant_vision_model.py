@@ -231,27 +231,16 @@ class QuantGemma4VisionModel(QuantModuleBase):
         # Create padding mask from pixel_position_ids
         padding_positions = self.padding_positions
 
-        # Patch embedder (use export adapter if available, otherwise original)
+        # Patch embedder
         patch_embedder = self.patch_embedder_export
         inputs_embeds = patch_embedder(
             pixel_values, pixel_position_ids, padding_positions
         )
 
-        # Encoder (no export adapter yet — uses original wrapper)
-        output = self.encoder(
-            inputs_embeds=inputs_embeds,
-            # Use ``== False`` instead of ``~`` to avoid ``aten::bitwise_not``
-            # which is not supported by the Circle conversion pipeline.
-            attention_mask=(padding_positions == False),
-            pixel_position_ids=pixel_position_ids,
-            return_dict=True,
-        )
+        # Encoder
+        encoder_hidden = self.encoder_export(inputs_embeds)
 
-        # The encoder may return a BaseModelOutputWithPast (HF original) or a
-        # plain tensor (QuantGemma4VisionEncoder wrapper).  Handle both cases.
-        encoder_hidden = output
-
-        # Pooler (use export adapter if available, otherwise original)
+        # Pooler
         pooler = self.pooler_export
         hidden_states, pooler_mask = pooler(
             hidden_states=encoder_hidden,
@@ -298,15 +287,15 @@ class QuantGemma4VisionModel(QuantModuleBase):
         3. Registers output_length and padding tensors for static export
 
         Submodule export adapters are stored as separate attributes
-        (e.g. ``patch_embedder_export``, ``pooler_export``) so that the
-        original wrapper attributes are not mutated.  ``forward_export()``
-        uses these export adapter attributes when they exist.
+        (``patch_embedder_export``, ``encoder_export``, and ``pooler_export``)
+        so that the original wrapper attributes are not mutated.
+        ``forward_export()`` uses only these static export paths.
 
         Args:
             mode: Export mode (only "prefill" is supported).
             pixel_position_ids: Patch position ids tensor with shape
-                ``(1, num_patches, 2)``.  Required by the pooler's
-                ``as_export_module()`` to precompute pooling weights.
+                ``(1, num_patches, 2)``. Required by the encoder and pooler
+                export adapters to precompute their static templates.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -336,12 +325,12 @@ class QuantGemma4VisionModel(QuantModuleBase):
         ), "max_patches must be divisible by pooling_kernel_size^2"
 
         # Recursively convert submodules to their export adapters.
-        # Store as separate attributes to avoid mutating the original wrappers.
-        # forward_export() will use these via getattr(..., self.<original>).
+        # Store them separately to keep the original wrappers intact.
         self.patch_embedder_export = self.patch_embedder.as_export_module(mode=mode)
-
-        # Encoder: no as_export_module yet — will use original wrapper
-        # in forward_export via getattr fallback.
+        self.encoder_export = self.encoder.as_export_module(
+            mode=mode,
+            pixel_position_ids=pixel_position_ids,
+        )
 
         # Pooler: requires pixel_position_ids to precompute pooling weights
         assert pixel_position_ids is not None, (

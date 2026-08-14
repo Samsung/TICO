@@ -255,20 +255,22 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         Returns:
             Output hidden states shaped ``(1, S, hidden_size)``.
         """
-        seq_len = inputs_embeds.shape[1]
-
-        # precomputed position embeddings.
-        cos = self.position_embeddings_cos_template
-        sin = self.position_embeddings_sin_template
-        # Fake-quantize position embeddings.
-        cos = self.obs_position_cos.fake_quant(cos)
-        sin = self.obs_position_sin.fake_quant(sin)
+        # Precomputed position embeddings.
+        cos = self._fq(
+            self.position_embeddings_cos_template,
+            self.obs_position_cos,
+        )
+        sin = self._fq(
+            self.position_embeddings_sin_template,
+            self.obs_position_sin,
+        )
         position_embeddings = (cos, sin)
 
-        # precomputed mask template.
-        attention_mask = self.attention_mask_template
-        # Fake-quantize attention mask.
-        attention_mask = self.obs_attention_mask.fake_quant(attention_mask)
+        # Precomputed attention mask.
+        attention_mask = self._fq(
+            self.attention_mask_template,
+            self.obs_attention_mask,
+        )
 
         hidden_states = self._fq(inputs_embeds, self.obs_act_in)
 
@@ -299,7 +301,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
 
         Args:
             mode: Export mode (only ``"prefill"`` is supported).
-            pixel_position_ids: Optional 2-D pixel position ids shaped
+            pixel_position_ids: Fixed 2-D pixel position ids shaped
                 ``(1, S, 2)``.
 
         Returns:
@@ -308,12 +310,16 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         if mode != "prefill":
             raise ValueError(f"Unsupported Gemma4 vision encoder export mode: {mode!r}")
 
-        # Assert QUANT mode
-        assert self._mode is Mode.QUANT, "Must be in QUANT mode for export"
+        if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
+            raise RuntimeError(
+                "Gemma4 vision encoder export requires NO_QUANT or QUANT mode, "
+                f"got {self._mode}."
+            )
 
-        # Make sure that all observers are calibrated
-        for obs in self._all_observers():
-            assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
+        if self._mode is Mode.QUANT:
+            # Make sure that all observers are calibrated.
+            for obs in self._all_observers():
+                assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
 
         cos, sin = self._gather_position_embeddings(pixel_position_ids)
         self.register_buffer("position_embeddings_cos_template", cos)
@@ -321,7 +327,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
 
         attention_mask = self._make_bidirectional_mask(
             pixel_position_ids,
-            dtype=pixel_position_ids.dtype,
+            dtype=cos.dtype,
         )
         self.register_buffer("attention_mask_template", attention_mask)
 

@@ -531,16 +531,41 @@ class TestQuantGemma4VisionEncoder(unittest.TestCase):
     # as_export_module
     # ------------------------------------------------------------------
 
-    def test_as_export_module_requires_quant_mode(self):
-        """as_export_module should assert that mode is QUANT."""
+    def test_as_export_module_supports_no_quant_mode(self):
+        """NO_QUANT export should use static templates without qparams."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4VisionEncoderPrefillExportAdapter,
+        )
+
         fp_encoder = _make_encoder(self.cfg)
         q_encoder = QuantGemma4VisionEncoder(fp_encoder).eval()
-
         pixel_position_ids = _vision_position_ids(1, self.seq_len)
 
-        # Should fail in NO_QUANT mode
-        with self.assertRaises(AssertionError):
-            q_encoder.as_export_module("prefill", pixel_position_ids=pixel_position_ids)
+        adapter = q_encoder.as_export_module(
+            "prefill",
+            pixel_position_ids=pixel_position_ids,
+        )
+
+        self.assertIsInstance(adapter, Gemma4VisionEncoderPrefillExportAdapter)
+        with torch.no_grad():
+            output = adapter(
+                torch.randn(1, self.seq_len, self.hidden_size),
+            )
+        self.assertEqual(output.shape, (1, self.seq_len, self.hidden_size))
+        self.assertTrue(torch.isfinite(output).all())
+
+    def test_as_export_module_rejects_calibration_mode(self):
+        """Export should reject CALIB mode because qparams are incomplete."""
+        fp_encoder = _make_encoder(self.cfg)
+        q_encoder = QuantGemma4VisionEncoder(fp_encoder).eval()
+        q_encoder.enable_calibration()
+        pixel_position_ids = _vision_position_ids(1, self.seq_len)
+
+        with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
+            q_encoder.as_export_module(
+                "prefill",
+                pixel_position_ids=pixel_position_ids,
+            )
 
     def test_as_export_module_returns_adapter(self):
         """as_export_module should return a Gemma4VisionEncoderPrefillExportAdapter."""
