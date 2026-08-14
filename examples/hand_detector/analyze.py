@@ -26,6 +26,11 @@ from examples.hand_detector._support.analysis import (
     OUTPUT_NAMES,
     summarize_percentile_observers,
 )
+from examples.hand_detector._support.cumulative_sensitivity import (
+    build_activation_sensitivity_path_report,
+    print_activation_sensitivity_path,
+    select_activation_sensitivity_groups,
+)
 from examples.hand_detector._support.data import (
     list_npy_inputs,
     load_npy_inputs,
@@ -146,8 +151,8 @@ def parse_args() -> argparse.Namespace:
     sensitivity = subparsers.add_parser(
         "activation-sensitivity",
         help=(
-            "Rank activation-domain blocks from a percentile-calibrated "
-            "E:internal-full baseline."
+            "Analyze independent, cumulative, or greedy activation-domain "
+            "paths from a percentile-calibrated E:internal-full baseline."
         ),
     )
     _add_model_arguments(sensitivity)
@@ -163,10 +168,48 @@ def parse_args() -> argparse.Namespace:
         default="regressors",
     )
     sensitivity.add_argument(
+        "--strategy",
+        choices=("independent", "cumulative", "ranked", "greedy"),
+        default="independent",
+        help=(
+            "Independent leave-one-float ranking, an explicitly ordered "
+            "cumulative path, a fixed initial ranking, or greedy re-ranking "
+            "after every selected group."
+        ),
+    )
+    sensitivity.add_argument(
+        "--groups",
+        nargs="+",
+        help=(
+            "Optional ordered group names. Required for cumulative strategy; "
+            "for ranked or greedy, restricts the candidate pool."
+        ),
+    )
+    sensitivity.add_argument(
+        "--max-steps",
+        type=int,
+        default=5,
+        help=(
+            "Maximum ranked or greedy selections; zero evaluates only the " "baseline."
+        ),
+    )
+    sensitivity.add_argument(
+        "--minimum-improvement",
+        type=float,
+        default=0.0,
+        help=(
+            "Stop greedy search when the best incremental score improvement "
+            "is not greater than this value. Ignored by other strategies."
+        ),
+    )
+    sensitivity.add_argument(
         "--top-k",
         type=int,
         default=20,
-        help="Number of groups printed to the console; zero prints all groups.",
+        help=(
+            "Number of independent groups printed to the console; zero prints "
+            "all groups."
+        ),
     )
     sensitivity.add_argument(
         "--report-json",
@@ -385,6 +428,10 @@ def _run_activation_sensitivity(args: argparse.Namespace) -> None:
     _validate_percentiles([args.percentile])
     if args.top_k < 0:
         raise ValueError("--top-k must be nonnegative.")
+    if args.max_steps < 0:
+        raise ValueError("--max-steps must be nonnegative.")
+    if args.strategy == "cumulative" and args.groups is None:
+        raise ValueError("--groups is required for cumulative sensitivity.")
 
     float_model = load_nhwc_hand_detector(args.weights, args.spec).eval()
     calibration, evaluation, data_metadata = _load_datasets(args)
@@ -401,33 +448,160 @@ def _run_activation_sensitivity(args: argparse.Namespace) -> None:
         },
     )
     boundaries = output_boundaries(candidate)
-    groups = build_activation_sensitivity_groups(candidate, boundaries)
+    all_groups = build_activation_sensitivity_groups(candidate, boundaries)
+    groups = select_activation_sensitivity_groups(all_groups, args.groups)
     baseline_selector = boundaries.selector_for(QuantizationProfile.INTERNAL_FULL)
     all_sites = tuple(iter_quantization_sites(candidate))
     baseline_site_count = sum(baseline_selector(site) for site in all_sites)
+    grouped_site_count = sum(group.site_count for group in all_groups)
 
-    baseline, results = QuantizationSensitivity(
+    runner = QuantizationSensitivity(
         float_model,
         candidate,
         output_adapter=OUTPUT_ADAPTER,
-    ).run(
-        evaluation,
-        tuple(group.group for group in groups),
-        mode=SensitivityMode.LEAVE_ONE_FLOAT,
-        score_output=args.score_output,
-        score_metric="mae",
-        baseline_selector=baseline_selector,
     )
-    print_activation_sensitivity(
-        dtype_name=quantization_name(args.bits),
-        percentile=args.percentile,
-        baseline=baseline,
-        results=results,
-        top_k=args.top_k,
-        baseline_site_count=baseline_site_count,
-        score_output=args.score_output,
-    )
-    grouped_site_count = sum(group.site_count for group in groups)
+    quantization_groups = tuple(group.group for group in groups)
+    common = {
+        "mode": SensitivityMode.LEAVE_ONE_FLOAT,
+        "score_output": args.score_output,
+        "score_metric": "mae",
+        "baseline_selector": baseline_selector,
+    }
+
+    report_body: dict[str, Any]
+    strategy_metadata: dict[str, Any] = {}
+    selected_group_count = 0
+    if args.strategy == "independent":
+        baseline, results = runner.run(
+            evaluation,
+            quantization_groups,
+            **common,
+        )
+        print_activation_sensitivity(
+            dtype_name=quantization_name(args.bits),
+            percentile=args.percentile,
+            baseline=baseline,
+            results=results,
+            top_k=args.top_k,
+            baseline_site_count=baseline_site_count,
+            score_output=args.score_output,
+        )
+        report_body = {
+            "groups": build_activation_sensitivity_report(
+                baseline=baseline,
+                results=results,
+                groups=groups,
+            )
+        }
+    elif args.strategy == "cumulative":
+        baseline, steps = runner.run_cumulative(
+            evaluation,
+            quantization_groups,
+            **common,
+        )
+        print_activation_sensitivity_path(
+            strategy=args.strategy,
+            dtype_name=quantization_name(args.bits),
+            percentile=args.percentile,
+            baseline=baseline,
+            results=steps,
+            baseline_site_count=baseline_site_count,
+            score_output=args.score_output,
+        )
+        selected_group_count = len(steps)
+        report_body = {
+            "steps": build_activation_sensitivity_path_report(
+                baseline=baseline,
+                results=steps,
+                groups=groups,
+            )
+        }
+    elif args.strategy == "ranked":
+        if args.max_steps == 0:
+            baseline, steps = runner.run_greedy(
+                evaluation,
+                quantization_groups,
+                max_steps=0,
+                **common,
+            )
+            initial_ranking = []
+            ranked_groups = ()
+        else:
+            _, independent_results = runner.run(
+                evaluation,
+                quantization_groups,
+                **common,
+            )
+            initial_ranking = [
+                {
+                    "rank": rank,
+                    "group": result.group,
+                    "score": result.score,
+                    "sensitivity": result.sensitivity,
+                }
+                for rank, result in enumerate(independent_results, start=1)
+            ]
+            group_by_name = {group.name: group for group in groups}
+            ranked_groups = tuple(
+                group_by_name[result.group]
+                for result in independent_results[: args.max_steps]
+            )
+            baseline, steps = runner.run_cumulative(
+                evaluation,
+                tuple(group.group for group in ranked_groups),
+                **common,
+            )
+        print_activation_sensitivity_path(
+            strategy=args.strategy,
+            dtype_name=quantization_name(args.bits),
+            percentile=args.percentile,
+            baseline=baseline,
+            results=steps,
+            baseline_site_count=baseline_site_count,
+            score_output=args.score_output,
+        )
+        selected_group_count = len(steps)
+        strategy_metadata = {
+            "max_steps": args.max_steps,
+            "initial_ranking": initial_ranking,
+        }
+        report_body = {
+            "steps": build_activation_sensitivity_path_report(
+                baseline=baseline,
+                results=steps,
+                groups=ranked_groups,
+            )
+        }
+    else:
+        baseline, steps = runner.run_greedy(
+            evaluation,
+            quantization_groups,
+            max_steps=args.max_steps,
+            minimum_improvement=args.minimum_improvement,
+            **common,
+        )
+        print_activation_sensitivity_path(
+            strategy=args.strategy,
+            dtype_name=quantization_name(args.bits),
+            percentile=args.percentile,
+            baseline=baseline,
+            results=steps,
+            baseline_site_count=baseline_site_count,
+            score_output=args.score_output,
+        )
+        selected_group_count = len(steps)
+        strategy_metadata = {
+            "max_steps": args.max_steps,
+            "minimum_improvement": args.minimum_improvement,
+        }
+        report_body = {
+            "steps": build_activation_sensitivity_path_report(
+                baseline=baseline,
+                results=steps,
+                groups=groups,
+            )
+        }
+
     _write_json(
         args.report_json,
         {
@@ -443,17 +617,18 @@ def _run_activation_sensitivity(args: argparse.Namespace) -> None:
                 "baseline_profile": QuantizationProfile.INTERNAL_FULL.value,
                 "baseline_site_count": baseline_site_count,
                 "mode": SensitivityMode.LEAVE_ONE_FLOAT.value,
+                "strategy": args.strategy,
                 "score_output": args.score_output,
                 "score_metric": "mae",
-                "group_count": len(groups),
+                "group_count": len(all_groups),
+                "candidate_group_count": len(groups),
+                "candidate_groups": [group.name for group in groups],
+                "selected_group_count": selected_group_count,
                 "grouped_activation_site_count": grouped_site_count,
+                **strategy_metadata,
             },
             "baseline": baseline,
-            "groups": build_activation_sensitivity_report(
-                baseline=baseline,
-                results=results,
-                groups=groups,
-            ),
+            **report_body,
         },
     )
 

@@ -64,11 +64,20 @@ independent evaluation set.
 `QuantizationSensitivity` evaluates named `QuantizationGroup` selectors in two
 modes:
 
-- `LEAVE_ONE_FLOAT`: start from full fake quantization and disable one group;
-- `ENABLE_ONE`: start from floating-point behavior and enable one group.
+- `LEAVE_ONE_FLOAT`: start from full fake quantization and disable groups;
+- `ENABLE_ONE`: start from floating-point behavior and enable groups.
+
+`run()` measures every group independently. `run_cumulative()` applies groups
+in the supplied order and reports both incremental and total sensitivity.
+A caller can feed the initial `run()` ranking into `run_cumulative()` for a
+fixed-ranked path. `run_greedy()` re-evaluates every remaining candidate after
+each selected group, so it captures interactions that independent
+leave-one-float scores cannot be added to estimate.
 
 Groups may contain one observer or a complete precision domain such as a
-producer output, consumer input, and shared Add/Concat boundary.
+producer output, consumer input, and shared Add/Concat boundary. Both cumulative
+and greedy paths reject groups that add no mutable quantization site relative to
+the selected baseline.
 
 Pass `baseline_selector` to analyze a custom profile rather than the default
 all-enabled or all-disabled baseline. For example, an E:internal-full selector
