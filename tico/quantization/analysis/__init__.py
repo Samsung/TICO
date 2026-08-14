@@ -51,6 +51,7 @@ from tico.quantization.analysis.sensitivity import (
     QuantizationGroup,
     QuantizationSensitivity,
     SensitivityMode,
+    SensitivityPathResult,
     SensitivityResult,
 )
 
@@ -73,6 +74,7 @@ __all__ = [
     "QuantizationReport",
     "QuantizationSensitivity",
     "SensitivityMode",
+    "SensitivityPathResult",
     "SensitivityResult",
     "SiteSelector",
     "TensorErrorMetrics",

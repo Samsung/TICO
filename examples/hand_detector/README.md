@@ -221,7 +221,60 @@ Producer `act_out` and downstream consumer `act_in` observers for the same
 tensor are assigned to the producer block where possible. The report includes
 the E baseline, all group metrics, matched observer paths, operation indices,
 and regressor/classifier MAE recovery. Positive recovery means that leaving the
-group floating point improved the selected baseline.
+group floating point improved the selected baseline. Independent gains are not
+additive because changing one block changes the sensitivity of later blocks.
+
+Evaluate an explicit cumulative path in the supplied order:
+
+```bash
+python -m examples.hand_detector.analyze activation-sensitivity \
+  --calibration-dir /path/to/npy \
+  --evaluation-dir /path/to/npy \
+  --bits 8 \
+  --percentile 99.99 \
+  --strategy cumulative \
+  --groups \
+    stem \
+    feature_block_00 \
+    feature_block_03 \
+    feature_block_04 \
+    feature_block_10 \
+    feature_block_28
+```
+
+Accumulate the initial independent ranking without recomputing it after each
+selection:
+
+```bash
+python -m examples.hand_detector.analyze activation-sensitivity \
+  --calibration-dir /path/to/npy \
+  --evaluation-dir /path/to/npy \
+  --bits 8 \
+  --percentile 99.99 \
+  --strategy ranked \
+  --max-steps 5
+```
+
+Run greedy cumulative selection, re-ranking the remaining groups after every
+step:
+
+```bash
+python -m examples.hand_detector.analyze activation-sensitivity \
+  --calibration-dir /path/to/npy \
+  --evaluation-dir /path/to/npy \
+  --bits 8 \
+  --percentile 99.99 \
+  --strategy greedy \
+  --max-steps 5 \
+  --minimum-improvement 0
+```
+
+Ranked search pays for one independent sweep and then follows that fixed
+ranking. Greedy search evaluates every remaining candidate at each step. Use
+`--groups` to restrict either candidate pool when a full search is too
+expensive. The JSON report stores cumulative, ranked, or greedy results under
+`steps`; every step includes the newly added group, all selected groups and
+sites, incremental recovery, and total recovery from the E baseline.
 
 ## Calibration and evaluation data
 
