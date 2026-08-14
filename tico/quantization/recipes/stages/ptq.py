@@ -193,10 +193,12 @@ class PTQStage(Stage):
 
         q_model = prepare(ctx.require_model(), ptq_config)
 
-        owner, quantizers = find_gptq_quantizers(q_model)
+        _, quantizers = find_gptq_quantizers(q_model)
         if quantizers:
+            # Quantizers may live on the original FP owner, but weight observers
+            # always live in the prepared PTQ tree.
             inject_gptq_qparams(
-                q_model if owner is q_model else owner,
+                q_model,
                 quantizers,
                 verbose=_qparam_injection_verbose(ctx, stage_cfg),
             )

@@ -57,10 +57,6 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         self.module = fp_model
         self.config = fp_model.config
 
-        # Carry over GPTQ quantizers so that find_gptq_quantizers()
-        # discovers them at the top-level wrapper during PTQ qparam injection.
-        self.quantizers = getattr(fp_model, "quantizers", None)
-
         # Wrap the vision-language model
         self.model = PTQWrapper(
             fp_model.model,
