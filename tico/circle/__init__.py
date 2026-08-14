@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.analysis import TensorContract
+from tico.circle.builder import CircleBuilder, ConstantKey, ConstantPool
 from tico.circle.document import CircleDocument
+from tico.circle.errors import CircleValueError
 from tico.circle.graph import CircleGraph, GraphBoundary
 from tico.circle.operations import (
     extract_by_operator_indices,
@@ -20,6 +23,13 @@ from tico.circle.operations import (
     extract_by_tensor_patterns,
     ExtractionResult,
     SignaturePolicy,
+)
+from tico.circle.value import (
+    TensorQuantization,
+    TensorTypeRegistry,
+    TensorTypeSpec,
+    TensorValue,
+    TensorValueCodec,
 )
 from tico.circle.verify import (
     CircleVerificationError,
@@ -30,12 +40,22 @@ from tico.circle.verify import (
 )
 
 __all__ = [
+    "CircleBuilder",
     "CircleDocument",
     "CircleGraph",
+    "CircleValueError",
     "CircleVerificationError",
+    "ConstantKey",
+    "ConstantPool",
     "ExtractionResult",
     "GraphBoundary",
     "SignaturePolicy",
+    "TensorContract",
+    "TensorQuantization",
+    "TensorTypeRegistry",
+    "TensorTypeSpec",
+    "TensorValue",
+    "TensorValueCodec",
     "VerificationIssue",
     "VerificationReport",
     "VerificationSeverity",

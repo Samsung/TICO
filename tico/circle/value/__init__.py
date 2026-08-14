@@ -12,22 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.value.codec import TensorValueCodec
+from tico.circle.value.dtype import (
+    circle_tensor_type_value,
+    default_tensor_type_registry,
+    TensorTypeRegistry,
+    TensorTypeSpec,
+)
+from tico.circle.value.tensor import TensorQuantization, TensorValue
 
-class CircleError(Exception):
-    """Base exception for Circle artifact processing failures."""
-
-
-class CircleIOError(CircleError):
-    """Raised when a Circle model cannot be read or written."""
-
-
-class CircleSelectionError(CircleError):
-    """Raised when a requested graph region cannot be selected."""
-
-
-class CircleRewriteError(CircleError):
-    """Raised when a Circle graph cannot be rewritten safely."""
-
-
-class CircleValueError(CircleError):
-    """Raised when a Circle tensor value or contract cannot be represented safely."""
+__all__ = [
+    "TensorQuantization",
+    "TensorTypeRegistry",
+    "TensorTypeSpec",
+    "TensorValue",
+    "TensorValueCodec",
+    "circle_tensor_type_value",
+    "default_tensor_type_registry",
+]

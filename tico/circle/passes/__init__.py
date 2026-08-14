@@ -23,6 +23,16 @@ from tico.circle.passes.optimization import (
     EliminateTransposeBoundedLayoutRegionPass,
     RemoveRedundantLayoutOpsPass,
 )
+from tico.circle.passes.rules import (
+    CircleRewriteRule,
+    CircleRulePass,
+    OperatorSnapshot,
+    RewriteApplication,
+    RewriteDiagnostic,
+    RewritePlan,
+    RewriteSeverity,
+    TensorSnapshot,
+)
 
 __all__ = [
     "CirclePass",
@@ -32,6 +42,14 @@ __all__ = [
     "CirclePassManagerResult",
     "CirclePassResult",
     "CirclePassStrategy",
+    "CircleRewriteRule",
+    "CircleRulePass",
     "EliminateTransposeBoundedLayoutRegionPass",
+    "OperatorSnapshot",
     "RemoveRedundantLayoutOpsPass",
+    "RewriteApplication",
+    "RewriteDiagnostic",
+    "RewritePlan",
+    "RewriteSeverity",
+    "TensorSnapshot",
 ]

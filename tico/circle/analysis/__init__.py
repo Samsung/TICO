@@ -12,22 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.analysis.tensor_contract import TensorContract
 
-class CircleError(Exception):
-    """Base exception for Circle artifact processing failures."""
-
-
-class CircleIOError(CircleError):
-    """Raised when a Circle model cannot be read or written."""
-
-
-class CircleSelectionError(CircleError):
-    """Raised when a requested graph region cannot be selected."""
-
-
-class CircleRewriteError(CircleError):
-    """Raised when a Circle graph cannot be rewritten safely."""
-
-
-class CircleValueError(CircleError):
-    """Raised when a Circle tensor value or contract cannot be represented safely."""
+__all__ = ["TensorContract"]
