@@ -330,6 +330,7 @@ class QuantizationSensitivity:
                     float,
                     float,
                 ] | None = None
+                best_improvement = float("-inf")
                 for group in remaining:
                     new_selector = (
                         context.effective_selectors[group.name] & ~changed_selector
@@ -350,7 +351,8 @@ class QuantizationSensitivity:
                         score_metric,
                     )
                     improvement = _score_improvement(mode, current_score, score)
-                    if best is None or improvement > best[5]:
+                    if improvement > best_improvement:
+                        best_improvement = improvement
                         best = (
                             group,
                             candidate_selector,
@@ -360,7 +362,7 @@ class QuantizationSensitivity:
                             improvement,
                         )
 
-                if best is None or best[5] <= minimum_improvement:
+                if best is None or best_improvement <= minimum_improvement:
                     break
 
                 group, changed_selector, new_sites, outputs, score, improvement = best
