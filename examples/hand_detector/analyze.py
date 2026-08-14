@@ -41,6 +41,11 @@ from examples.hand_detector._support.quantization import (
     quantization_name,
     quantize_candidate,
 )
+from examples.hand_detector._support.sensitivity import (
+    build_activation_sensitivity_groups,
+    build_activation_sensitivity_report,
+    print_activation_sensitivity,
+)
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 from tico.quantization.analysis import (
     AffineQuantizationPolicy,
@@ -50,7 +55,10 @@ from tico.quantization.analysis import (
     make_output_adapter,
     QuantizationAblation,
     QuantizationProfile,
+    QuantizationSensitivity,
+    SensitivityMode,
 )
+from tico.quantization.wrapq.control import iter_quantization_sites
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
@@ -134,6 +142,37 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DIRECTORY / "reports" / "observer_sweep.json",
     )
+
+    sensitivity = subparsers.add_parser(
+        "activation-sensitivity",
+        help=(
+            "Rank activation-domain blocks from a percentile-calibrated "
+            "E:internal-full baseline."
+        ),
+    )
+    _add_model_arguments(sensitivity)
+    _add_dataset_arguments(sensitivity, evaluation=True)
+    sensitivity.add_argument("--bits", type=int, default=8, choices=[8, 16])
+    sensitivity.add_argument("--percentile", type=float, default=99.99)
+    sensitivity.add_argument("--max-samples", type=int, default=131_072)
+    sensitivity.add_argument("--samples-per-batch", type=int, default=4_096)
+    sensitivity.add_argument("--sampling-seed", type=int, default=20260803)
+    sensitivity.add_argument(
+        "--score-output",
+        choices=OUTPUT_NAMES,
+        default="regressors",
+    )
+    sensitivity.add_argument(
+        "--top-k",
+        type=int,
+        default=20,
+        help="Number of groups printed to the console; zero prints all groups.",
+    )
+    sensitivity.add_argument(
+        "--report-json",
+        type=Path,
+        default=DIRECTORY / "reports" / "activation_sensitivity.json",
+    )
     return parser.parse_args()
 
 
@@ -180,6 +219,8 @@ def main() -> None:
         _run_output_clipping(args)
     elif args.command == "observer-sweep":
         _run_observer_sweep(args)
+    elif args.command == "activation-sensitivity":
+        _run_activation_sensitivity(args)
     else:
         raise RuntimeError(f"Unhandled analysis command: {args.command}")
 
@@ -336,6 +377,83 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
                 "outputs_alias_profile": QuantizationProfile.FULL.value,
             },
             "results": results,
+        },
+    )
+
+
+def _run_activation_sensitivity(args: argparse.Namespace) -> None:
+    _validate_percentiles([args.percentile])
+    if args.top_k < 0:
+        raise ValueError("--top-k must be nonnegative.")
+
+    float_model = load_nhwc_hand_detector(args.weights, args.spec).eval()
+    calibration, evaluation, data_metadata = _load_datasets(args)
+    candidate = quantize_candidate(
+        float_model,
+        args.bits,
+        calibration,
+        activation_observer=PercentileObserver,
+        activation_observer_kwargs={
+            "percentile": args.percentile,
+            "max_samples": args.max_samples,
+            "samples_per_batch": args.samples_per_batch,
+            "seed": args.sampling_seed,
+        },
+    )
+    boundaries = output_boundaries(candidate)
+    groups = build_activation_sensitivity_groups(candidate, boundaries)
+    baseline_selector = boundaries.selector_for(QuantizationProfile.INTERNAL_FULL)
+    all_sites = tuple(iter_quantization_sites(candidate))
+    baseline_site_count = sum(baseline_selector(site) for site in all_sites)
+
+    baseline, results = QuantizationSensitivity(
+        float_model,
+        candidate,
+        output_adapter=OUTPUT_ADAPTER,
+    ).run(
+        evaluation,
+        tuple(group.group for group in groups),
+        mode=SensitivityMode.LEAVE_ONE_FLOAT,
+        score_output=args.score_output,
+        score_metric="mae",
+        baseline_selector=baseline_selector,
+    )
+    print_activation_sensitivity(
+        dtype_name=quantization_name(args.bits),
+        percentile=args.percentile,
+        baseline=baseline,
+        results=results,
+        top_k=args.top_k,
+        baseline_site_count=baseline_site_count,
+        score_output=args.score_output,
+    )
+    grouped_site_count = sum(group.site_count for group in groups)
+    _write_json(
+        args.report_json,
+        {
+            "analysis": "activation_block_sensitivity",
+            "metadata": {
+                **data_metadata,
+                "dtype": quantization_name(args.bits),
+                "activation_observer": "PercentileObserver",
+                "activation_percentile": args.percentile,
+                "max_samples": args.max_samples,
+                "samples_per_batch": args.samples_per_batch,
+                "sampling_seed": args.sampling_seed,
+                "baseline_profile": QuantizationProfile.INTERNAL_FULL.value,
+                "baseline_site_count": baseline_site_count,
+                "mode": SensitivityMode.LEAVE_ONE_FLOAT.value,
+                "score_output": args.score_output,
+                "score_metric": "mae",
+                "group_count": len(groups),
+                "grouped_activation_site_count": grouped_site_count,
+            },
+            "baseline": baseline,
+            "groups": build_activation_sensitivity_report(
+                baseline=baseline,
+                results=results,
+                groups=groups,
+            ),
         },
     )
 
