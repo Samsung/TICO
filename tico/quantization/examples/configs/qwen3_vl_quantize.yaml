@@ -40,9 +40,12 @@ pipeline:
   - name: gptq
     enabled: true
     weight_bits: 4
+    weight_bits_overrides:
+      model.visual.patch_embed.proj: 8
 
   - name: ptq
     enabled: true
+    reuse_gptq_qparams: true
     activation: int16
     linear_weight: uint4
     vision_patch_embed_weight: uint8
