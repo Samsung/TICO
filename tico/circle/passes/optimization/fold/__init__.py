@@ -12,4 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__: list[str] = []
+from tico.circle.passes.optimization.fold.constant_subgraph import (
+    ConstantFoldPlan,
+    ConstantFoldPolicy,
+    FoldConstantSubgraphPass,
+)
+from tico.circle.passes.optimization.fold.evaluators import (
+    ConstantEvaluation,
+    ConstantEvaluationContext,
+    ConstantEvaluator,
+    ConstantEvaluatorRegistry,
+    default_constant_evaluator_registry,
+)
+
+__all__ = [
+    "ConstantEvaluation",
+    "ConstantEvaluationContext",
+    "ConstantEvaluator",
+    "ConstantEvaluatorRegistry",
+    "ConstantFoldPlan",
+    "ConstantFoldPolicy",
+    "FoldConstantSubgraphPass",
+    "default_constant_evaluator_registry",
+]
