@@ -36,6 +36,16 @@ from examples.hand_detector._support.data import (
     load_npy_inputs,
     make_synthetic_inputs,
 )
+from examples.hand_detector._support.group_observer_sweep import (
+    activation_group_override_paths,
+    build_group_observer_policies,
+    build_group_observer_sweep_result,
+    evaluate_internal_full,
+    EvaluatedGroupObserverPolicy,
+    make_group_observer_overrides,
+    print_group_observer_sweep,
+    validate_group_observer_overrides,
+)
 from examples.hand_detector._support.observer_sweep import (
     build_observer_sweep_result,
     evaluate_observer_profiles,
@@ -70,6 +80,7 @@ from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 DIRECTORY = Path(__file__).resolve().parent
 DEFAULT_PERCENTILES = (99.0, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999)
+DEFAULT_GROUP_PERCENTILES = (99.9, 99.95, 99.99, 99.995, 99.999)
 DEFAULT_TAIL_PERCENTAGES = (0.0, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5)
 OUTPUT_ADAPTER = make_output_adapter(OUTPUT_NAMES)
 
@@ -146,6 +157,61 @@ def parse_args() -> argparse.Namespace:
         "--report-json",
         type=Path,
         default=DIRECTORY / "reports" / "observer_sweep.json",
+    )
+
+    group_observer_sweep = subparsers.add_parser(
+        "group-observer-sweep",
+        help=(
+            "Keep a global percentile policy and sweep observer overrides for "
+            "selected activation-domain groups."
+        ),
+    )
+    _add_model_arguments(group_observer_sweep)
+    _add_dataset_arguments(group_observer_sweep, evaluation=True)
+    group_observer_sweep.add_argument(
+        "--bits",
+        type=int,
+        default=8,
+        choices=[8, 16],
+    )
+    group_observer_sweep.add_argument(
+        "--global-percentile",
+        type=float,
+        default=99.99,
+    )
+    group_observer_sweep.add_argument(
+        "--percentiles",
+        type=float,
+        nargs="+",
+        default=list(DEFAULT_GROUP_PERCENTILES),
+    )
+    group_observer_sweep.add_argument(
+        "--groups",
+        nargs="+",
+        required=True,
+        help="Activation sensitivity group names evaluated independently.",
+    )
+    group_observer_sweep.add_argument(
+        "--score-output",
+        choices=OUTPUT_NAMES,
+        default="regressors",
+    )
+    group_observer_sweep.add_argument("--skip-minmax", action="store_true")
+    group_observer_sweep.add_argument("--max-samples", type=int, default=131_072)
+    group_observer_sweep.add_argument(
+        "--samples-per-batch",
+        type=int,
+        default=4_096,
+    )
+    group_observer_sweep.add_argument(
+        "--sampling-seed",
+        type=int,
+        default=20260803,
+    )
+    group_observer_sweep.add_argument(
+        "--report-json",
+        type=Path,
+        default=DIRECTORY / "reports" / "group_observer_sweep.json",
     )
 
     sensitivity = subparsers.add_parser(
@@ -262,6 +328,8 @@ def main() -> None:
         _run_output_clipping(args)
     elif args.command == "observer-sweep":
         _run_observer_sweep(args)
+    elif args.command == "group-observer-sweep":
+        _run_group_observer_sweep(args)
     elif args.command == "activation-sensitivity":
         _run_activation_sensitivity(args)
     else:
@@ -420,6 +488,144 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
                 "outputs_alias_profile": QuantizationProfile.FULL.value,
             },
             "results": results,
+        },
+    )
+
+
+def _run_group_observer_sweep(args: argparse.Namespace) -> None:
+    _validate_percentiles([args.global_percentile, *args.percentiles])
+    float_model = load_nhwc_hand_detector(args.weights, args.spec).eval()
+    calibration, evaluation, data_metadata = _load_datasets(args)
+    global_observer_kwargs = {
+        "percentile": args.global_percentile,
+        "max_samples": args.max_samples,
+        "samples_per_batch": args.samples_per_batch,
+        "seed": args.sampling_seed,
+    }
+    baseline_candidate = quantize_candidate(
+        float_model,
+        args.bits,
+        calibration,
+        activation_observer=PercentileObserver,
+        activation_observer_kwargs=global_observer_kwargs,
+    )
+    baseline_boundaries = output_boundaries(baseline_candidate)
+    all_groups = build_activation_sensitivity_groups(
+        baseline_candidate,
+        baseline_boundaries,
+    )
+    groups = select_activation_sensitivity_groups(all_groups, args.groups)
+    override_paths_by_group = {
+        group.name: activation_group_override_paths(baseline_candidate, group)
+        for group in groups
+    }
+    baseline_outputs, baseline_site_count = evaluate_internal_full(
+        float_model,
+        baseline_candidate,
+        evaluation,
+        boundaries=baseline_boundaries,
+        output_adapter=OUTPUT_ADAPTER,
+    )
+    policies = build_group_observer_policies(
+        percentiles=args.percentiles,
+        global_percentile=args.global_percentile,
+        max_samples=args.max_samples,
+        samples_per_batch=args.samples_per_batch,
+        seed=args.sampling_seed,
+        include_minmax=not args.skip_minmax,
+    )
+    del baseline_candidate
+
+    total_evaluations = len(groups) * len(policies)
+    evaluation_index = 0
+    group_results: list[dict[str, object]] = []
+    for group in groups:
+        override_paths = override_paths_by_group[group.name]
+        evaluations: list[EvaluatedGroupObserverPolicy] = []
+        for policy in policies:
+            evaluation_index += 1
+            print(
+                f"[{evaluation_index}/{total_evaluations}] "
+                f"{group.name}: {policy.name}"
+            )
+            candidate = quantize_candidate(
+                float_model,
+                args.bits,
+                calibration,
+                activation_observer=PercentileObserver,
+                activation_observer_kwargs=global_observer_kwargs,
+                overrides=make_group_observer_overrides(
+                    policy,
+                    bit_width=args.bits,
+                    override_paths=override_paths,
+                ),
+            )
+            validate_group_observer_overrides(
+                candidate,
+                policy,
+                override_paths,
+            )
+            outputs, enabled_site_count = evaluate_internal_full(
+                float_model,
+                candidate,
+                evaluation,
+                boundaries=output_boundaries(candidate),
+                output_adapter=OUTPUT_ADAPTER,
+            )
+            evaluations.append(
+                EvaluatedGroupObserverPolicy(
+                    policy=policy,
+                    outputs=outputs,
+                    enabled_site_count=enabled_site_count,
+                )
+            )
+            del candidate
+        group_results.append(
+            build_group_observer_sweep_result(
+                group=group,
+                override_paths=override_paths,
+                global_percentile=args.global_percentile,
+                baseline_outputs=baseline_outputs,
+                baseline_site_count=baseline_site_count,
+                evaluations=evaluations,
+                score_output=args.score_output,
+            )
+        )
+
+    print_group_observer_sweep(
+        dtype_name=quantization_name(args.bits),
+        global_percentile=args.global_percentile,
+        baseline_outputs=baseline_outputs,
+        baseline_site_count=baseline_site_count,
+        group_results=group_results,
+        score_output=args.score_output,
+    )
+    _write_json(
+        args.report_json,
+        {
+            "analysis": "activation_group_observer_sweep",
+            "metadata": {
+                **data_metadata,
+                "dtype": quantization_name(args.bits),
+                "global_activation_observer": "PercentileObserver",
+                "global_percentile": args.global_percentile,
+                "candidate_percentiles": args.percentiles,
+                "candidate_policies": [policy.to_dict() for policy in policies],
+                "include_minmax": not args.skip_minmax,
+                "max_samples": args.max_samples,
+                "samples_per_batch": args.samples_per_batch,
+                "sampling_seed": args.sampling_seed,
+                "baseline_profile": QuantizationProfile.INTERNAL_FULL.value,
+                "baseline_site_count": baseline_site_count,
+                "score_output": args.score_output,
+                "score_metric": "mae",
+                "group_count": len(groups),
+                "groups": [group.name for group in groups],
+                "candidate_policy_count": len(policies),
+                "candidate_evaluation_count": total_evaluations,
+            },
+            "baseline": baseline_outputs,
+            "groups": group_results,
         },
     )
 
