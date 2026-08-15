@@ -27,7 +27,7 @@ from examples.hand_detector._support.circle import save_layout_optimized_circle
 from tico.ops import Concat, ResizeBilinear2d
 from tico.quantization import convert as freeze_quantization, prepare, QuantStub
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.specs import affine
+from tico.quantization.config.specs import affine, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
@@ -41,6 +41,9 @@ from tico.quantization.wrapq.wrappers.ops.quant_resize_bilinear import (
 )
 from tico.quantization.wrapq.wrappers.quant_stub import QuantStubWrapper
 from torch import nn
+
+
+ObserverOverride = QuantSpec | Mapping[str, object]
 
 
 _FLOAT_MODULE_TYPES = (
@@ -86,8 +89,9 @@ def make_ptq_config(
     *,
     activation_observer: type[ObserverBase] = MinMaxObserver,
     activation_observer_kwargs: Mapping[str, object] | None = None,
+    overrides: Mapping[str, ObserverOverride] | None = None,
 ) -> PTQConfig:
-    """Create the example PTQ policy with a selectable activation observer."""
+    """Create the example PTQ policy with optional observer-path overrides."""
     validate_bit_width(bit_width)
     if bit_width == 8:
         dtype = DType.uint(8)
@@ -110,6 +114,7 @@ def make_ptq_config(
             qscheme=weight_qscheme,
             observer=MinMaxObserver,
         ),
+        overrides=dict(overrides or {}),
         strict_wrap=False,
     )
 
@@ -130,6 +135,7 @@ def prepare_quantized_candidate(
     *,
     activation_observer: type[ObserverBase] = MinMaxObserver,
     activation_observer_kwargs: Mapping[str, object] | None = None,
+    overrides: Mapping[str, ObserverOverride] | None = None,
 ) -> nn.Module:
     """Clone, WrapQ-prepare, and validate one hand-detector candidate."""
     candidate = copy.deepcopy(float_model).eval()
@@ -142,6 +148,7 @@ def prepare_quantized_candidate(
             bit_width,
             activation_observer=activation_observer,
             activation_observer_kwargs=activation_observer_kwargs,
+            overrides=overrides,
         ),
         inplace=True,
     )
@@ -163,6 +170,7 @@ def quantize_candidate(
     *,
     activation_observer: type[ObserverBase] = MinMaxObserver,
     activation_observer_kwargs: Mapping[str, object] | None = None,
+    overrides: Mapping[str, ObserverOverride] | None = None,
 ) -> nn.Module:
     """Prepare, calibrate, and freeze one hand-detector candidate."""
     candidate = prepare_quantized_candidate(
@@ -170,6 +178,7 @@ def quantize_candidate(
         bit_width,
         activation_observer=activation_observer,
         activation_observer_kwargs=activation_observer_kwargs,
+        overrides=overrides,
     )
     calibrate(candidate, calibration_samples)
     candidate = freeze_quantization(candidate, inplace=True)

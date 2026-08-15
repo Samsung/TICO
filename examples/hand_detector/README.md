@@ -276,6 +276,49 @@ expensive. The JSON report stores cumulative, ranked, or greedy results under
 `steps`; every step includes the newly added group, all selected groups and
 sites, incremental recovery, and total recovery from the E baseline.
 
+### Group-specific activation observer overrides
+
+Keep a global activation policy and independently replace only the logical
+activation domains assigned to selected sensitivity groups:
+
+```bash
+python -m examples.hand_detector.analyze group-observer-sweep \
+  --calibration-dir /path/to/npy \
+  --calibration-offset 0 \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --bits 8 \
+  --global-percentile 99.99 \
+  --percentiles 99.9 99.95 99.99 99.995 99.999 \
+  --groups \
+    stem \
+    feature_block_00 \
+    feature_block_04 \
+    feature_block_13 \
+    feature_block_28 \
+  --score-output regressors \
+  --report-json examples/hand_detector/reports/group_observer_sweep.json
+```
+
+For each group, all other activation domains remain on the global percentile.
+The sweep compares the unchanged global policy, MinMax, and the requested
+percentiles under E:internal-full. The candidate equal to the global percentile
+is kept as the no-override control and is not recalibrated. Use
+`--skip-minmax` to evaluate only percentile overrides.
+
+Observer overrides are applied through exact floating-point `PTQConfig` paths,
+not prepared wrapper paths containing `.wrapped`. Each policy candidate is
+prepared and calibrated independently, and the command verifies that every
+requested path instantiated the expected observer class before evaluation.
+
+Group results are independent. Combining each group's individually best policy
+requires a separate validation run because observer choices may interact across
+blocks. The JSON report includes every override path and may retain the global
+policy as the best candidate when all overrides are worse.
+
 ## Calibration and evaluation data
 
 Supported NumPy shapes are:
@@ -340,6 +383,7 @@ commands:
 _support/circle.py
 _support/conversion.py
 _support/data.py
+_support/group_observer_sweep.py
 _support/quantization.py
 _support/sensitivity.py
 _support/tflite_flatbuffer.py
