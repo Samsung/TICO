@@ -212,7 +212,7 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
                 config=SimpleNamespace(standardize=False),
                 padding_positions=padding_positions,
                 patch_embedder_export=lambda pixels, positions, padding: pixels,
-                encoder=lambda **kwargs: kwargs["inputs_embeds"],
+                encoder_export=lambda inputs_embeds: inputs_embeds,
                 pooler_export=lambda **kwargs: (
                     kwargs["hidden_states"],
                     torch.ones(1, seq_len, dtype=torch.bool),
