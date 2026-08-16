@@ -755,7 +755,7 @@ class StaticQwen3VLTextLayerRuntime:
             }
         )
         wrapped_visual = prepare(self.qwen_model.visual, qcfg).to(self.device)
-        self.vision_prefill_adapter = Qwen3VLVisionPrefillExportAdapter(wrapped_visual)
+        self.vision_prefill_adapter = wrapped_visual.as_export_module(mode="prefill")
         self.vision_grid_thw = grid_tuple
 
     def _find_visual_span(

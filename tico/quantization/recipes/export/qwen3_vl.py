@@ -33,7 +33,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
     Qwen3VLLMHeadExportAdapter,
     Qwen3VLMultimodalEmbeddingExportAdapter,
     Qwen3VLTextEmbeddingExportAdapter,
-    Qwen3VLVisionPrefillExportAdapter,
 )
 from tico.utils.utils import SuppressWarning
 
@@ -367,8 +366,9 @@ def export_qwen3_vl_per_layer(
     vocab_size = int(config.vocab_size)
 
     pixel_values, image_grid_thw = _make_vision_inputs(qvision, grid_thw)
+    vision_export = qvision.as_export_module(mode="prefill")
     _convert_and_save(
-        Qwen3VLVisionPrefillExportAdapter(qwen_model.visual),
+        vision_export,
         (pixel_values, image_grid_thw),
         output_dir / _circle_name("vision_prefill", artifact_tag),
         strict=strict,

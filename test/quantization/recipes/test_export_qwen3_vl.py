@@ -67,6 +67,15 @@ class FakeDecoderLayer(torch.nn.Module):
         return torch.nn.Identity()
 
 
+class FakeVisionExport(torch.nn.Module):
+    """Represent the fixed-grid vision module returned for staged export."""
+
+    def forward(self, pixel_values, image_grid_thw):
+        """Return placeholder image and DeepStack outputs."""
+        del image_grid_thw
+        return pixel_values, ()
+
+
 class FakeVision(torch.nn.Module):
     """Minimal fixed-grid Qwen3-VL vision wrapper."""
 
@@ -80,6 +89,12 @@ class FakeVision(torch.nn.Module):
         self.spatial_merge_size = 2
         self.patch_embed = FakePTQWrapper(FakePatchEmbed())
         self.deepstack_merger_list = torch.nn.ModuleList([torch.nn.Identity()])
+
+    def as_export_module(self, mode="prefill"):
+        """Return the explicit static vision module used by the exporter."""
+        if mode != "prefill":
+            raise ValueError(f"Unsupported fake vision export mode: {mode!r}")
+        return FakeVisionExport()
 
 
 class FakeText(torch.nn.Module):
