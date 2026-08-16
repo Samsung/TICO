@@ -215,8 +215,7 @@ class Gemma4VisionEncoderLayerPrefillExportAdapter(nn.Module):
         ``hidden_states`` has shape ``(1, S, vision_hidden_size)``.
         ``attention_mask`` is a static additive or keep mask broadcastable to
         ``(1, heads, S, S)``. ``position_embeddings`` is the ``(cos, sin)`` tuple
-        for the fixed patch layout, and ``position_ids`` is the optional static
-        2-D pixel coordinate tensor shaped ``(1, S, 2)``.
+        for the fixed patch layout.
 
     Output contract:
         Returns output patch states with shape ``(1, S, vision_hidden_size)``.
@@ -231,14 +230,12 @@ class Gemma4VisionEncoderLayerPrefillExportAdapter(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        position_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Run a static vision encoder-layer prefill graph."""
         return self.wrapped(
             hidden_states,
             attention_mask=attention_mask,
             position_embeddings=position_embeddings,
-            position_ids=position_ids,
         )
 
 
@@ -437,43 +434,17 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
 
 
 class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
-    """Export adapter for the Gemma4 vision pooler with static-shape contract.
+    """Export adapter for Gemma4 vision pooling with a static input contract.
 
-    This adapter is a **self-contained quantization wrapper** that inherits from
-    ``QuantModuleBase`` and owns its own observers.  It replaces the original
-    pooler's dynamic operations (``F.one_hot``, ``torch.div``, data-dependent
-    conditionals) with a decomposed, ``torch.export``-friendly implementation
-    that uses a **precomputed weight matrix** and **precomputed output mask**
-    stored as buffers.
-
-    The relationship between ``QuantGemma4VisionPooler`` and this adapter is:
-
-    - ``QuantGemma4VisionPooler`` is more flexible — it supports conditional
-      branches and dynamic tensor shapes by delegating to the original module,
-      but it **cannot** be exported and converted to Circle.
-    - ``Gemma4VisionPoolerPrefillExportAdapter`` allows only static computations and
-      tensor shapes, but it **can** be exported and converted to Circle.
-
-    The weight matrix and mask are deterministic given the fixed image profile
-    (``seq_len``, ``output_length``, ``pixel_position_ids``), so they are
-    computed once at construction time and never change at runtime.
-
-    The adapter bakes ``output_length`` (the number of visual soft tokens) into
-    the graph at construction time so that it is not a runtime argument.  This
-    satisfies the static-shape contract required by ``torch.export`` and the
-    NPU runtime.
-
-    The CPU runtime is responsible for:
-    - Pre-computing ``pixel_position_ids`` as a fixed-shape tensor.
-    - Pre-computing ``padding_positions`` as a fixed-shape boolean mask.
-    - Ensuring that the input sequence length and ``output_length`` are
-      compatible with the static profile.
+    ``QuantGemma4VisionPooler.as_export_module`` precomputes the pooling weight
+    matrix and output mask from ``pixel_position_ids`` and ``output_length``.
+    The wrapped pooler's export path therefore consumes neither value at
+    runtime.
 
     Input contract:
         ``hidden_states`` has shape ``(1, S, D)`` where ``S`` is the fixed
         vision encoder sequence length.
-        ``pixel_position_ids`` has shape ``(1, S, 2)`` — pre-computed on CPU.
-        ``padding_positions`` has shape ``(1, S)`` — pre-computed on CPU.
+        ``padding_positions`` has shape ``(1, S)``.
 
     Output contract:
         Returns a tuple ``(pooled_features, updated_padding)`` where
@@ -492,9 +463,7 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
         padding_positions: torch.Tensor,
-        output_length: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.wrapped.forward_export(
             hidden_states=hidden_states, padding_positions=padding_positions

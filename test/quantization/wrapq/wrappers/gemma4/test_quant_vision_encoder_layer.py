@@ -191,12 +191,34 @@ class TestQuantGemma4VisionEncoderLayer(unittest.TestCase):
                 sample["hidden_states"],
                 sample["attention_mask"],
                 sample["position_embeddings"],
-                position_ids=sample["position_ids"],
             )
 
         self.assertIsInstance(output, torch.Tensor)
         self.assertEqual(output.shape, (1, 4, cfg.hidden_size))
         self.assertTrue(torch.isfinite(output).all())
+
+    def test_prefill_export_adapter_has_no_position_ids_placeholder(self):
+        """The static encoder-layer graph should not expose position_ids."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder_layer import (
+            QuantGemma4VisionEncoderLayer,
+        )
+
+        cfg = _make_vision_config()
+        qlayer = QuantGemma4VisionEncoderLayer(self._make_layer(cfg)).eval()
+        adapter = qlayer.as_export_module("prefill").eval()
+        sample = self._sample(cfg, batch_size=1, seq_len=4)
+
+        exported = torch.export.export(
+            adapter,
+            (
+                sample["hidden_states"],
+                sample["attention_mask"],
+                sample["position_embeddings"],
+            ),
+            strict=False,
+        )
+        placeholders = [n.name for n in exported.graph.nodes if n.op == "placeholder"]
+        self.assertFalse(any("position_ids" in name for name in placeholders))
 
     def test_unsupported_export_mode_raises(self):
         """Check that vision encoder layers expose only a prefill export graph."""

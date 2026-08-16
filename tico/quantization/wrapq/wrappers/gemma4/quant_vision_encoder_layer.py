@@ -36,10 +36,10 @@ class QuantGemma4VisionEncoderLayer(QuantModuleBase):
     observers can collect and fake-quantize the outputs of the attention residual
     block and the MLP residual block.
 
-    Static runtime code should construct ``attention_mask``, ``position_ids``,
-    and ``position_embeddings`` outside this wrapper. This wrapper only performs
-    fixed-shape tensor compute that can later be exported as an NPU-friendly
-    prefill graph.
+    Static runtime code should construct ``attention_mask`` and
+    ``position_embeddings`` outside this wrapper. ``position_ids`` remains in
+    the public forward signature only for Hugging Face call compatibility.
+    This wrapper performs fixed-shape tensor compute suitable for NPU export.
     """
 
     def __init__(
@@ -116,7 +116,8 @@ class QuantGemma4VisionEncoderLayer(QuantModuleBase):
                 ``Gemma4VisionRotaryEmbedding`` for the static patch layout.
             attention_mask: Optional additive or keep mask consumed by the
                 vision attention wrapper.
-            position_ids: Optional 2-D pixel position ids shaped ``(B, S, 2)``.
+            position_ids: Accepted for Hugging Face call compatibility. Gemma4
+                vision attention uses a fixed 2-D RoPE partition.
             **kwargs: Additional attention keyword arguments kept for Hugging
                 Face API compatibility.
 
@@ -136,7 +137,6 @@ class QuantGemma4VisionEncoderLayer(QuantModuleBase):
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
-            position_ids=position_ids,
             **kwargs,
         )
         hidden_states = self._extract_attention_hidden(attn_output)

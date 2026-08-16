@@ -1638,6 +1638,23 @@ class Gemma4VisionAttentionCase(Gemma4BaseCase):
         """Create the Gemma4 vision attention evaluation sample."""
         return self._sample()
 
+    def export_input(
+        self,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create static attention inputs without compatibility-only position ids."""
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        return ForwardInput(
+            (
+                kwargs["hidden_states"],
+                kwargs["position_embeddings"],
+                kwargs["attention_mask"],
+            ),
+            {},
+        )
+
 
 class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
     """Smoke case for one tiny Gemma4 vision encoder layer."""
@@ -1697,6 +1714,34 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
     ) -> ForwardInput:
         """Create the Gemma4 vision encoder-layer evaluation sample."""
         return self._sample()
+
+    def export_module(
+        self,
+        quantized: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> torch.nn.Module:
+        """Return the static vision encoder-layer prefill adapter."""
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if hasattr(wrapped, "as_export_module"):
+            return wrapped.as_export_module("prefill").eval()
+        return quantized
+
+    def export_input(
+        self,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Create static encoder-layer inputs without position ids."""
+        cloned = _clone_forward_input(eval_sample)
+        kwargs = dict(cloned.kwargs)
+        return ForwardInput(
+            (
+                kwargs["hidden_states"],
+                kwargs["attention_mask"],
+                kwargs["position_embeddings"],
+            ),
+            {},
+        )
 
 
 class Gemma4TextScaledWordEmbeddingCase(Gemma4BaseCase):
@@ -1929,9 +1974,8 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         cloned = _clone_forward_input(eval_sample)
         kwargs = dict(cloned.kwargs)
         hidden = kwargs["hidden_states"]
-        pixel_position_ids = kwargs["pixel_position_ids"]
         padding_positions = kwargs["padding_positions"]
-        return ForwardInput((hidden, pixel_position_ids, padding_positions), {})
+        return ForwardInput((hidden, padding_positions), {})
 
 
 class Gemma4VisionModelCase(Gemma4BaseCase):

@@ -244,9 +244,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
         pooler = self.pooler_export
         hidden_states, pooler_mask = pooler(
             hidden_states=encoder_hidden,
-            pixel_position_ids=pixel_position_ids,
             padding_positions=padding_positions,
-            output_length=self.output_length,
         )
 
         # Strip padding tokens

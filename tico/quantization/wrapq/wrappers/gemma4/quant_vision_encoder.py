@@ -228,7 +228,6 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
                 hidden_states,
                 attention_mask=attention_mask,
                 position_embeddings=position_embeddings,
-                position_ids=pixel_position_ids,
                 **kwargs,
             )
 
