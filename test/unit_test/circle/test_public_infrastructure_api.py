@@ -14,6 +14,7 @@
 
 import unittest
 
+import tico.circle.passes as circle_passes
 from tico.circle import (
     CircleBuilder,
     CircleValueError,
@@ -26,12 +27,15 @@ from tico.circle import (
     TensorValueCodec,
 )
 from tico.circle.passes import (
+    CanonicalizeEquivalentOpsPass,
     CircleRewriteRule,
     CircleRulePass,
+    RemoveNoOpOperatorsPass,
     RewriteApplication,
     RewriteDiagnostic,
     RewritePlan,
     RewriteSeverity,
+    SimplifyViewOpsPass,
 )
 
 
@@ -42,15 +46,18 @@ class PublicInfrastructureApiTest(unittest.TestCase):
         """Ensure all PR infrastructure symbols are importable from public packages."""
 
         values = (
+            CanonicalizeEquivalentOpsPass,
             CircleBuilder,
             CircleRewriteRule,
             CircleRulePass,
             CircleValueError,
             ConstantPool,
+            RemoveNoOpOperatorsPass,
             RewriteApplication,
             RewriteDiagnostic,
             RewritePlan,
             RewriteSeverity,
+            SimplifyViewOpsPass,
             TensorContract,
             TensorQuantization,
             TensorTypeRegistry,
@@ -59,6 +66,7 @@ class PublicInfrastructureApiTest(unittest.TestCase):
             TensorValueCodec,
         )
         self.assertTrue(all(isinstance(value, type) for value in values))
+        self.assertFalse(hasattr(circle_passes, "RemoveRedundantLayoutOpsPass"))
 
 
 if __name__ == "__main__":
