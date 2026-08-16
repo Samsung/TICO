@@ -170,7 +170,6 @@ class TestGemma4VisionEncoderLayerSmoke(unittest.TestCase):
                 sample["hidden_states"],
                 sample["attention_mask"],
                 sample["position_embeddings"],
-                position_ids=sample["position_ids"],
             )
 
         self.assertIsInstance(output, torch.Tensor)

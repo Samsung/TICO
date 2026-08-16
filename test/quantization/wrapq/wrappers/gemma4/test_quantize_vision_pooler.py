@@ -185,7 +185,6 @@ class TestGemma4VisionPoolerSmoke(unittest.TestCase):
         sample = self._sample()
         adapter_kwargs = {
             "hidden_states": sample["hidden_states"],
-            "pixel_position_ids": sample["pixel_position_ids"],
             "padding_positions": sample["padding_positions"],
         }
         with torch.no_grad():

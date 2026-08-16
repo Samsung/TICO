@@ -457,11 +457,21 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
 
         adapter_kwargs = {
             "hidden_states": inputs["hidden_states"],
-            "pixel_position_ids": inputs["pixel_position_ids"],
             "padding_positions": inputs["padding_positions"],
         }
         with torch.no_grad():
             adapter_out = adapter(**adapter_kwargs)
+
+        exported = torch.export.export(
+            adapter,
+            (
+                inputs["hidden_states"],
+                inputs["padding_positions"],
+            ),
+            strict=False,
+        )
+        placeholders = [n.name for n in exported.graph.nodes if n.op == "placeholder"]
+        self.assertFalse(any("pixel_position_ids" in name for name in placeholders))
 
         # Compare with direct wrapper call
         with torch.no_grad():

@@ -144,15 +144,8 @@ class QuantGemma4VisionPooler(QuantModuleBase):
             hidden_states: Vision encoder output with shape ``(B, S, D)``.
             pixel_position_ids: Patch position ids with shape ``(B, S, 2)``.
             padding_positions: Boolean padding mask with shape ``(B, S)``.
-            output_length: Number of soft tokens to produce.  When ``None``
-                the pooler returns the same sequence length.
+            output_length: Number of soft tokens to produce.
         """
-        if output_length > hidden_states.shape[1]:
-            raise ValueError(
-                f"Cannot output more soft tokens (requested {output_length}) than there are patches"
-                f" ({hidden_states.shape[1]}). Change the value of `num_soft_tokens` when processing."
-            )
-
         if output_length > hidden_states.shape[1]:
             raise ValueError(
                 f"Cannot output more soft tokens (requested {output_length}) than there are patches"
@@ -211,9 +204,6 @@ class QuantGemma4VisionPooler(QuantModuleBase):
 
         Args:
             hidden_states: Vision encoder output ``(1, S, D)``.
-            pixel_position_ids: Patch position ids ``(1, S, 2)``.
-                Not used in the decomposed forward (weights are precomputed),
-                but kept in the signature for API compatibility.
             padding_positions: Boolean padding mask ``(1, S)``.
 
         Returns:
