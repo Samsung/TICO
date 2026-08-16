@@ -411,3 +411,32 @@ python -m examples.hand_detector.test_hand_detector
 
 See `docs/layout_optimization.md` for the Circle layout-region optimization design
 and `THIRD_PARTY_NOTICES.md` for source-model attribution.
+
+
+## Activation block reconstruction
+
+The first reconstruction stage keeps W8 parameters fixed and optimizes
+per-tensor activation scale and zero-point against cached FP32 block outputs.
+Blocks are processed in model execution order and are evaluated under
+E (`internal-full`) after every committed block.
+
+```bash
+python -m examples.hand_detector.analyze block-reconstruction \
+  --calibration-dir /path/to/npy \
+  --calibration-offset 0 \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --bits 8 \
+  --percentile 99.99 \
+  --max-samples 524288 \
+  --groups stem feature_block_00 feature_block_04 \
+  --steps 500 \
+  --report-json examples/hand_detector/reports/block_reconstruction.json
+```
+
+The cache stores both FP32 and quantized-prefix inputs. PR 1 uses the
+quantized-prefix input and normalized block-output MSE; QDrop and adaptive
+weight rounding are intentionally left for follow-up changes.
