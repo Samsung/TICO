@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch.fx
 import copy
+import operator
 
 import torch
 from torch.export import ExportedProgram
@@ -32,6 +33,7 @@ from tico.utils.validate_args_kwargs import (
     PermuteArgs,
     ReshapeArgs,
     SliceArgs,
+    SplitWithSizesArgs,
 )
 
 
@@ -86,6 +88,28 @@ class PropagateQParamForward(PassBase):
             elif node.target == torch.ops.aten.reshape.default:
                 reshape_args = ReshapeArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(reshape_args.input, node)
+            elif node.target == torch.ops.aten.split_with_sizes.default:
+                split_args = SplitWithSizesArgs(*node.args, **node.kwargs)
+                input_ = split_args.input
+                if QPARAM_KEY not in input_.meta:
+                    continue
+
+                # A split preserves the input quantization domain when the input
+                # uses one per-tensor qparam. Per-channel propagation requires
+                # axis-aware qparam slicing and is intentionally not handled here.
+                input_qparam = input_.meta[QPARAM_KEY]
+                if input_qparam.quantized_dimension is not None:
+                    continue
+
+                for user in node.users:
+                    if (
+                        user.op == "call_function"
+                        and user.target == operator.getitem
+                        and len(user.args) >= 2
+                        and user.args[0] is node
+                        and isinstance(user.args[1], int)
+                    ):
+                        _propagate_qparam_if_possible(input_, user)
             elif node.target == torch.ops.aten.slice.Tensor:
                 slice_args = SliceArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(slice_args.input, node)

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import operator
 import unittest
 
 import torch
@@ -213,6 +214,86 @@ class SliceTest(SingleOpPropagateQParamForwardTest):
     def test_s16(self):
         self.setup(SliceModule(), torch.ops.aten.slice.Tensor, dtype="int16")
         self.run_test()
+
+
+class SplitWithSizesModule(torch.nn.Module):
+    def forward(self, x):
+        return torch.split(x, [2, 4], dim=1)
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 6),), {}
+
+
+class SplitWithSizesTest(unittest.TestCase):
+    def _setup(self, *, dtype: str, quantized_dimension: int | None = None):
+        module = SplitWithSizesModule().eval()
+        args, kwargs = module.get_example_inputs()
+        with torch.no_grad():
+            ep = torch.export.export(module, args, kwargs)
+
+        input_node = next(
+            node
+            for node in ep.graph.nodes
+            if node.op == "placeholder" and node.name in ep.graph_signature.user_inputs
+        )
+        split_node = next(
+            node
+            for node in ep.graph.nodes
+            if node.op == "call_function"
+            and node.target == torch.ops.aten.split_with_sizes.default
+        )
+        getitem_nodes = sorted(
+            (
+                user
+                for user in split_node.users
+                if user.op == "call_function"
+                and user.target == operator.getitem
+                and user.args[0] is split_node
+            ),
+            key=lambda node: node.args[1],
+        )
+        self.assertEqual(len(getitem_nodes), 2)
+
+        qparam_size = 1 if quantized_dimension is None else 6
+        qparam = QuantParam(
+            scale=[1.0] * qparam_size,
+            zero_point=[0] * qparam_size,
+            quantized_dimension=quantized_dimension,
+            dtype=dtype,
+        )
+        input_node.meta[QPARAM_KEY] = qparam
+        return ep, input_node, split_node, getitem_nodes
+
+    def _run_per_tensor_test(self, dtype: str):
+        ep, input_node, split_node, getitem_nodes = self._setup(dtype=dtype)
+        self.assertNotIn(QPARAM_KEY, split_node.meta)
+        self.assertTrue(all(QPARAM_KEY not in node.meta for node in getitem_nodes))
+
+        PropagateQParamForward().call(ep)
+
+        input_qparam = input_node.meta[QPARAM_KEY]
+        self.assertNotIn(QPARAM_KEY, split_node.meta)
+        for getitem_node in getitem_nodes:
+            self.assertIn(QPARAM_KEY, getitem_node.meta)
+            self.assertEqual(getitem_node.meta[QPARAM_KEY], input_qparam)
+            self.assertIsNot(getitem_node.meta[QPARAM_KEY], input_qparam)
+
+    def test_u8(self):
+        self._run_per_tensor_test("uint8")
+
+    def test_s16(self):
+        self._run_per_tensor_test("int16")
+
+    def test_per_channel_qparam_is_not_propagated(self):
+        ep, _, split_node, getitem_nodes = self._setup(
+            dtype="uint8",
+            quantized_dimension=1,
+        )
+
+        PropagateQParamForward().call(ep)
+
+        self.assertNotIn(QPARAM_KEY, split_node.meta)
+        self.assertTrue(all(QPARAM_KEY not in node.meta for node in getitem_nodes))
 
 
 class NegModule(torch.nn.Module):

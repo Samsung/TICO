@@ -132,6 +132,29 @@ class TestGemma4VisionAttentionSmoke(unittest.TestCase):
         self.assertEqual(quant_out.shape, fp_out.shape)
         self.assertTrue(torch.allclose(quant_out, fp_out, atol=1e-5, rtol=1e-5))
 
+    def test_vision_rope_dimension_is_fixed_to_two(self):
+        """The wrapper should not derive vision RoPE dimensions from position ids."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear import (  # noqa: F401
+            QuantGemma4ClippableLinear,
+        )
+        from tico.quantization.wrapq.wrappers.gemma4.quant_vision_attention import (
+            QuantGemma4VisionAttention,
+        )
+
+        wrapped = QuantGemma4VisionAttention(self.fp_attn, qcfg=PTQConfig()).eval()
+        sample = self._sample()
+        sample_without_position_ids = dict(sample)
+        sample_without_position_ids["position_ids"] = None
+
+        with torch.no_grad():
+            output_with_position_ids = wrapped(**sample)[0]
+            output_without_position_ids = wrapped(**sample_without_position_ids)[0]
+
+        self.assertEqual(wrapped._ROPE_NDIM, 2)
+        self.assertTrue(
+            torch.equal(output_with_position_ids, output_without_position_ids)
+        )
+
     def test_prepare_convert_vision_attention_flow(self):
         """Quantize Gemma4 vision attention and validate a synthetic output."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear import (  # noqa: F401
