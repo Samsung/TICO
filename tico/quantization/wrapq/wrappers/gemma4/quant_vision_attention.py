@@ -36,8 +36,10 @@ class QuantGemma4VisionAttention(QuantModuleBase):
 
     Dynamic image preprocessing and mask construction should stay outside this
     wrapper. The wrapper expects already static tensors, especially a fixed patch
-    sequence length and fixed 2-D pixel position ids.
+    sequence length and precomputed 2-D vision RoPE tables.
     """
+
+    _ROPE_NDIM = 2
 
     def __init__(
         self,
@@ -157,20 +159,6 @@ class QuantGemma4VisionAttention(QuantModuleBase):
             )
         return table
 
-    @staticmethod
-    def _rope_ndim(position_ids: Optional[torch.Tensor]) -> int:
-        """Return the number of spatial RoPE dimensions for pixel position ids."""
-        if position_ids is None:
-            # Vision attention is 2-D by construction. This fallback keeps export
-            # adapters usable when they precompute cos/sin and omit position ids.
-            return 2
-        if position_ids.dim() < 3:
-            raise RuntimeError(
-                "Gemma4 vision position_ids must be shaped as ``(B, S, ndim)``, "
-                f"got shape={tuple(position_ids.shape)}."
-            )
-        return int(position_ids.shape[-1])
-
     def _rot(
         self,
         tensor: torch.Tensor,
@@ -210,7 +198,6 @@ class QuantGemma4VisionAttention(QuantModuleBase):
         tensor: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        position_ids: Optional[torch.Tensor],
         obs_x1,
         obs_x2,
         obs_neg,
@@ -219,13 +206,14 @@ class QuantGemma4VisionAttention(QuantModuleBase):
         obs_sin,
         obs_rot,
     ) -> torch.Tensor:
-        """Apply Gemma4 multidimensional RoPE to Q or K.
+        """Apply Gemma4 2-D RoPE to Q or K.
 
-        ``Gemma4VisionRotaryEmbedding`` builds cos/sin tables by concatenating
-        one RoPE table per spatial dimension. The attention input is split using
-        the same partitioning rule and each part receives normal 1-D RoPE.
+        ``Gemma4VisionRotaryEmbedding`` concatenates one RoPE table for each of
+        the x and y dimensions. Gemma4 vision therefore always partitions the
+        head channels into exactly two parts instead of deriving the partition
+        count from ``position_ids`` at runtime.
         """
-        ndim = self._rope_ndim(position_ids)
+        ndim = self._ROPE_NDIM
         num_input_channels = int(tensor.shape[-1])
         num_rotated_channels_per_dim = 2 * (num_input_channels // (2 * ndim))
 
@@ -460,8 +448,8 @@ class QuantGemma4VisionAttention(QuantModuleBase):
                 shaped ``(B, S, head_dim)``.
             attention_mask: Optional additive or keep mask broadcastable to
                 ``(B, heads, S, S)``.
-            position_ids: Pixel position ids shaped ``(B, S, 2)``. Static export
-                adapters may omit this argument when they always use 2-D RoPE.
+            position_ids: Accepted for Hugging Face call compatibility. Gemma4
+                vision RoPE is always 2-D, so this tensor is not inspected.
 
         Returns:
             Tuple ``(attn_output, attn_weights)`` following the Hugging Face
@@ -487,7 +475,6 @@ class QuantGemma4VisionAttention(QuantModuleBase):
             query_states,
             cos,
             sin,
-            position_ids,
             self.obs_q_x1,
             self.obs_q_x2,
             self.obs_q_neg,
@@ -504,7 +491,6 @@ class QuantGemma4VisionAttention(QuantModuleBase):
             key_states,
             cos,
             sin,
-            position_ids,
             self.obs_k_x1,
             self.obs_k_x2,
             self.obs_k_neg,
