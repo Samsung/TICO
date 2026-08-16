@@ -38,6 +38,26 @@ def _find_vision_grid_thw(module: nn.Module) -> torch.Tensor:
     )
 
 
+def _find_vision_export_model(module: nn.Module) -> nn.Module:
+    """Find the wrapped Qwen3-VL vision model that owns ``forward_export``."""
+    current: Optional[nn.Module] = module
+    visited: set[int] = set()
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        forward_export = getattr(current, "forward_export", None)
+        if callable(forward_export):
+            return current
+
+        wrapped = getattr(current, "wrapped", None)
+        current = wrapped if isinstance(wrapped, nn.Module) else None
+
+    raise ValueError(
+        "Qwen3VLVisionPrefillExportAdapter requires a wrapped vision model "
+        "that implements forward_export()."
+    )
+
+
 def _make_attention_split_sizes(grid_thw: torch.Tensor) -> tuple[int, ...]:
     """Build static per-frame attention split sizes from a fixed THW grid."""
     if grid_thw.dim() != 2 or grid_thw.size(1) != 3:
@@ -283,29 +303,34 @@ class Qwen3VLTextDecoderLayerDecodeExportAdapter(nn.Module):
 
 
 class Qwen3VLVisionPrefillExportAdapter(nn.Module):
-    """
-    Export adapter for the fixed-grid Qwen3-VL vision prefill path.
+    """Export the fixed-grid Qwen3-VL vision prefill path.
+
+    The wrapped vision model owns the fixed-grid position, RoPE, and cumulative
+    sequence-length buffers. This adapter materializes only the Python attention
+    split sizes and always calls ``forward_export``. Eager runtime simulation
+    and ``torch.export`` therefore execute the same fixed-profile behavior.
 
     Input contract:
         pixel_values:
             Flattened image patches. The processor-native shape is
-            `(num_patches, patch_dim)`; static NPU export uses
-            `(1, num_patches, patch_dim)`.
+            ``(num_patches, patch_dim)``; static NPU export uses
+            ``(1, num_patches, patch_dim)``.
         image_grid_thw:
-            Static image grid tensor with shape `(1, 3)`.
+            Compatibility input with shape ``(1, 3)``. The fixed grid captured
+            by the wrapped model is authoritative; this tensor is not used to
+            select execution behavior.
 
     Return contract:
-        `(image_embeds, deepstack_features)`, where `image_embeds` is the merged
-        visual token tensor used to replace image placeholder tokens and
-        `deepstack_features` is a tuple of merged DeepStack tensors. Each tensor
-        is statically sized by the fixed `image_grid_thw` used during export.
+        ``(image_embeds, deepstack_features)``, where ``image_embeds`` is the
+        merged visual token tensor and ``deepstack_features`` is a tuple of
+        merged DeepStack tensors for the configured fixed grid.
     """
 
     def __init__(self, wrapped: nn.Module):
         super().__init__()
-        self.wrapped = wrapped
+        self.wrapped = _find_vision_export_model(wrapped)
         self.attention_split_sizes = _make_attention_split_sizes(
-            _find_vision_grid_thw(wrapped)
+            _find_vision_grid_thw(self.wrapped)
         )
 
     @staticmethod
@@ -334,9 +359,9 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
         **kwargs,
     ):
         """Run fixed-grid vision prefill and return merged visual features."""
-        vision_output = self.wrapped(
+        del image_grid_thw
+        vision_output = self.wrapped.forward_export(
             pixel_values,
-            grid_thw=image_grid_thw,
             attention_split_sizes=self.attention_split_sizes,
             **kwargs,
         )
