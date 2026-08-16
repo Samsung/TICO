@@ -20,6 +20,7 @@ RoPE and mask generation, KV cache writes, shared-KV bookkeeping, and sampling.
 NPU-exportable subgraphs own quantized tensor compute.
 """
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -27,13 +28,13 @@ import torch
 import torch.nn as nn
 from transformers import AutoProcessor
 
-from tico.quantization import prepare
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    build_gemma4_vision_prefill_export_module,
     Gemma4LMHeadExportAdapter,
     Gemma4MMFusionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
-    Gemma4VisionPrefillExportAdapter,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
@@ -44,6 +45,17 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
 # =============================================================================
 # CPU Helper Functions (pure Python, no model needed)
 # =============================================================================
+
+
+def _vision_profile_signature(
+    pixel_position_ids: torch.Tensor,
+) -> tuple[tuple[int, ...], str]:
+    """Return a stable signature for one static vision-position profile."""
+    normalized = (
+        pixel_position_ids.detach().to(device="cpu", dtype=torch.long).contiguous()
+    )
+    digest = hashlib.sha256(normalized.numpy().tobytes()).hexdigest()
+    return tuple(normalized.shape), digest
 
 
 def _normalize_valid_token_mask(
@@ -244,21 +256,29 @@ class StaticGemma4Runtime:
                 }
             },
         )
-        self.qmodel = prepare(model, qcfg).to(self.device).eval()
+        # Runtime simulation must stay in NO_QUANT mode until a calibrated
+        # checkpoint is supplied. This matches the floating-point Circle
+        # export path and keeps as_export_module() available.
+        self.qmodel = (
+            PTQWrapHelper(strict_wrap=True)
+            .wrap_supported(model, qcfg)
+            .to(self.device)
+            .eval()
+        )
 
         wrapped_top = (
             self.qmodel.wrapped if hasattr(self.qmodel, "wrapped") else self.qmodel
         )
         wrapped_model = wrapped_top.model.wrapped
+        self._wrapped_model = wrapped_model
 
         self.text_model = wrapped_model.language_model.wrapped
         self.token_embedding = Gemma4TokenEmbeddingExportAdapter(self.text_model).to(
             self.device
         )
 
-        self.vision_prefill = Gemma4VisionPrefillExportAdapter(wrapped_model).to(
-            self.device
-        )
+        self.vision_prefill: Optional[nn.Module] = None
+        self._vision_profile_key: Optional[tuple[tuple[int, ...], str]] = None
         self.mm_fusion = Gemma4MMFusionExportAdapter(
             visual_start_idx=layout.visual_start_idx,
             num_visual_tokens=layout.num_visual_tokens,
@@ -285,6 +305,58 @@ class StaticGemma4Runtime:
         """Reset all runtime-managed KV caches."""
         self.layer_caches = []
         self.past_len = 0
+
+    def _get_or_create_vision_prefill(
+        self,
+        image_position_ids: Optional[torch.Tensor],
+    ) -> nn.Module:
+        """Return the static vision module for this runtime's fixed profile.
+
+        ``QuantGemma4VisionModel.as_export_module`` stores profile-specific
+        buffers on the wrapped model. Re-specializing the same wrapper would
+        invalidate an adapter created for an earlier profile, so one runtime
+        instance intentionally accepts exactly one position-ID profile.
+        """
+        if image_position_ids is None:
+            raise ValueError(
+                "Gemma4 static vision prefill requires image_position_ids from "
+                "the processor."
+            )
+
+        profile_key = _vision_profile_signature(image_position_ids)
+        if self.vision_prefill is None:
+            static_position_ids = (
+                image_position_ids.detach()
+                .clone()
+                .to(
+                    device=self.device,
+                    dtype=torch.long,
+                )
+            )
+            self.vision_prefill = (
+                build_gemma4_vision_prefill_export_module(
+                    self._wrapped_model,
+                    pixel_position_ids=static_position_ids,
+                )
+                .to(self.device)
+                .eval()
+            )
+            self._vision_profile_key = profile_key
+            return self.vision_prefill
+
+        if profile_key != self._vision_profile_key:
+            expected_shape = (
+                self._vision_profile_key[0]
+                if self._vision_profile_key is not None
+                else None
+            )
+            raise ValueError(
+                "StaticGemma4Runtime supports one image_position_ids profile "
+                "per instance. Create a new runtime for a different image "
+                f"layout. expected_shape={expected_shape}, "
+                f"actual_shape={tuple(image_position_ids.shape)}."
+            )
+        return self.vision_prefill
 
     def _allocate_empty_cache(
         self, batch_size: int, dtype: torch.dtype
@@ -446,8 +518,9 @@ class StaticGemma4Runtime:
         pixel_values = pixel_values.to(self.device)
 
         image_position_ids = inputs.get("image_position_ids", None)
-        if image_position_ids is not None:
-            image_position_ids = image_position_ids.to(self.device)
+        if image_position_ids is None:
+            raise ValueError("Processor did not return image_position_ids")
+        image_position_ids = image_position_ids.to(self.device)
 
         valid_length = torch.tensor([seq_len], dtype=torch.long, device=self.device)
 
@@ -555,7 +628,11 @@ class StaticGemma4Runtime:
             image_position_ids = image_position_ids.to(self.device)
 
         text_embeds = self.token_embedding(llm_input_ids)
-        image_embeds = self.vision_prefill(pixel_values, image_position_ids)
+        vision_prefill = self._get_or_create_vision_prefill(image_position_ids)
+        image_embeds = vision_prefill(
+            pixel_values,
+            image_position_ids,
+        )
         hidden_states = self.mm_fusion(text_embeds, image_embeds)
         self.layer_caches = self._allocate_empty_cache(
             hidden_states.shape[0], hidden_states.dtype
@@ -1076,7 +1153,8 @@ def verify_step_vision_prefill(
         image_position_ids = image_position_ids.to(runtime.device)
 
     # --- Runtime side ---
-    rt_visual_embeds = runtime.vision_prefill(pixel_values, image_position_ids)
+    vision_prefill = runtime._get_or_create_vision_prefill(image_position_ids)
+    rt_visual_embeds = vision_prefill(pixel_values, image_position_ids)
 
     # --- HF reference ---
     # model.get_image_features() returns BaseModelOutputWithPooling whose
@@ -1102,12 +1180,10 @@ def verify_step_vision_prefill(
     peir = compute_peir(hf_visual_embeds, rt_visual_embeds)
     print(f"[verify_step_vision_prefill] PEIR = {peir * 100:.6f} %")
 
-    # --- Quantized reference (quantized model) ---
-    # Use the quantized model's get_image_features, not the original model's,
-    # because the runtime's vision_prefill adapter wraps the quantized vision
-    # tower (with fake Q-DQ ops).  The quantized QuantGemma4Model.get_image_features
-    # returns the projected visual soft tokens directly (not wrapped in
-    # BaseModelOutputWithPooling).
+    # --- Wrapped eager reference ---
+    # The runtime and floating-point Circle exporter both use a NO_QUANT
+    # structural wrapper. Its eager path is the direct parity reference for
+    # the static adapter.
     wrapped_top = (
         runtime.qmodel.wrapped if hasattr(runtime.qmodel, "wrapped") else runtime.qmodel
     )
@@ -1119,10 +1195,28 @@ def verify_step_vision_prefill(
     torch.testing.assert_close(
         rt_visual_embeds,
         ref_visual_embeds,
-        msg="vision_prefill mismatch: runtime vs quantized get_image_features",
+        msg="vision_prefill mismatch: static adapter vs wrapped eager path",
     )
 
-    print("[verify_step_vision_prefill] All checks passed.")
+    # --- torch.export reference ---
+    # Circle conversion starts from this same exported module, so checking the
+    # ExportedProgram output here also guards the graph handed to tico.convert.
+    exported_program = torch.export.export(
+        vision_prefill,
+        (pixel_values, image_position_ids),
+        strict=False,
+    )
+    exported_visual_embeds = exported_program.module()(
+        pixel_values,
+        image_position_ids,
+    )
+    torch.testing.assert_close(
+        exported_visual_embeds,
+        rt_visual_embeds,
+        msg="vision_prefill mismatch: torch.export vs static adapter",
+    )
+
+    print("[verify_step_vision_prefill] Eager/static/torch.export checks passed.")
     return rt_visual_embeds
 
 

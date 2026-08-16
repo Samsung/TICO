@@ -32,6 +32,9 @@ import tico.quantization.recipes.export.gemma4 as gemma_export
 import torch
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    Gemma4VisionPrefillExportAdapter,
+)
 
 
 class FakePTQWrapper(torch.nn.Module):
@@ -185,11 +188,14 @@ class TestGemma4PerLayerExport(unittest.TestCase):
     def test_exports_all_static_runtime_stages(self):
         """Gemma4 staged export should emit vision, prefill, and decode graphs."""
         calls = []
+        vision_modules = []
         export_model = FakeExportModel()
         dynamic_shapes = {"input_ids": {1: "S"}}
 
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
-            del module, example_inputs
+            del example_inputs
+            if save_path.name == "vision_prefill.q.circle":
+                vision_modules.append(module)
             calls.append((save_path.name, kwargs.get("dynamic_shapes")))
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
@@ -230,6 +236,8 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             shapes for name, shapes in calls if name == "token_embedding.q.circle"
         ]
         self.assertEqual(token_embedding_shapes, [dynamic_shapes])
+        self.assertEqual(len(vision_modules), 1)
+        self.assertIsInstance(vision_modules[0], Gemma4VisionPrefillExportAdapter)
 
     def test_prefill_only_export_uses_unsuffixed_stage_names(self):
         """Disabling decode export should omit all decode artifacts."""
