@@ -338,6 +338,51 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
 
         self.assertTrue(torch.isfinite(output.last_hidden_state).all())
 
+    def test_eager_static_and_torch_export_outputs_match(self):
+        """One fixed profile should match through all vision export stages."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4VisionPrefillExportAdapter,
+        )
+        from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
+            QuantGemma4VisionModel,
+        )
+
+        fp_model = self._make_vision_model()
+        q_model = QuantGemma4VisionModel(fp_model).eval()
+        sample = self._sample_inputs()
+
+        with torch.no_grad():
+            eager_output = q_model(**sample).last_hidden_state
+
+        static_vision_model = q_model.as_export_module(
+            mode="prefill",
+            pixel_position_ids=sample["pixel_position_ids"],
+        )
+        vision_prefill = Gemma4VisionPrefillExportAdapter(
+            vision_model=static_vision_model,
+            vision_projection=torch.nn.Identity(),
+        ).eval()
+
+        with torch.no_grad():
+            static_output = vision_prefill(
+                sample["pixel_values"],
+                sample["pixel_position_ids"],
+            )
+
+        exported_program = torch.export.export(
+            vision_prefill,
+            (sample["pixel_values"], sample["pixel_position_ids"]),
+            strict=False,
+        )
+        with torch.no_grad():
+            exported_output = exported_program.module()(
+                sample["pixel_values"],
+                sample["pixel_position_ids"],
+            )
+
+        torch.testing.assert_close(static_output, eager_output, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(exported_output, static_output)
+
     def test_forward_export_uses_static_encoder_adapter(self):
         """forward_export should bypass the dynamic encoder wrapper."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (

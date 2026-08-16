@@ -25,6 +25,7 @@ import tico
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    build_gemma4_vision_prefill_export_module,
     Gemma4LMHeadExportAdapter,
     Gemma4MMFusionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
@@ -34,28 +35,6 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
 )
 from tico.utils.utils import SuppressWarning
-
-
-class _Gemma4VisionPrefillStage(torch.nn.Module):
-    """Run the static vision model and project soft tokens to text width."""
-
-    def __init__(
-        self,
-        vision_model: torch.nn.Module,
-        vision_projection: torch.nn.Module,
-    ) -> None:
-        super().__init__()
-        self.vision_model = vision_model
-        self.vision_projection = vision_projection
-
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return projected visual soft tokens for one static image profile."""
-        vision_outputs = self.vision_model(pixel_values, pixel_position_ids)
-        return self.vision_projection(vision_outputs.last_hidden_state)
 
 
 def _convert_and_save(
@@ -443,12 +422,12 @@ def export_gemma4_per_layer(
         num_valid_patches=num_valid_patches,
         num_patches=num_patches,
     )
-    vision_model = qvision.as_export_module(
-        mode="prefill",
+    vision_prefill = build_gemma4_vision_prefill_export_module(
+        gemma_model,
         pixel_position_ids=pixel_position_ids,
     )
     _convert_and_save(
-        _Gemma4VisionPrefillStage(vision_model, gemma_model.embed_vision),
+        vision_prefill,
         (pixel_values, pixel_position_ids),
         output_dir / _circle_name("vision_prefill", artifact_tag),
         strict=strict,

@@ -101,33 +101,91 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
 
 
 class Gemma4VisionPrefillExportAdapter(nn.Module):
-    """Export adapter for Gemma4 vision tower and multimodal projection.
+    """Export the complete static Gemma4 vision-prefill stage.
+
+    ``vision_model`` must already be specialized for one fixed
+    ``pixel_position_ids`` profile through
+    ``QuantGemma4VisionModel.as_export_module``. This adapter then applies the
+    multimodal projection used to map vision hidden states to text width.
 
     Input contract:
-        ``pixel_values`` and ``image_position_ids`` must use the static shape
-        selected by the runtime profile.
+        ``pixel_values`` and ``pixel_position_ids`` use the fixed patch layout
+        selected when ``vision_model`` was created.
 
     Output contract:
         Returns visual soft tokens with shape ``(1, V, text_hidden_size)``.
     """
 
-    def __init__(self, wrapped_model: nn.Module):
+    def __init__(
+        self,
+        vision_model: nn.Module,
+        vision_projection: nn.Module,
+    ) -> None:
         super().__init__()
-        self.vision_tower = wrapped_model.vision_tower
-        self.embed_vision = wrapped_model.embed_vision
+        self.vision_model = vision_model
+        self.vision_projection = vision_projection
 
     def forward(
         self,
         pixel_values: torch.Tensor,
-        image_position_ids: Optional[torch.Tensor] = None,
+        pixel_position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """Run the vision tower and project features into text hidden space."""
-        vision_outputs = self.vision_tower(
-            pixel_values=pixel_values,
-            pixel_position_ids=image_position_ids,
-            return_dict=True,
+        """Run the static vision model and project its soft tokens."""
+        vision_outputs = self.vision_model(
+            pixel_values,
+            pixel_position_ids,
         )
-        return self.embed_vision(vision_outputs.last_hidden_state)
+        hidden_states = (
+            vision_outputs
+            if isinstance(vision_outputs, torch.Tensor)
+            else vision_outputs.last_hidden_state
+        )
+        return self.vision_projection(hidden_states)
+
+
+def build_gemma4_vision_prefill_export_module(
+    wrapped_model: nn.Module,
+    *,
+    pixel_position_ids: torch.Tensor,
+    mode: str = "prefill",
+) -> Gemma4VisionPrefillExportAdapter:
+    """Build the canonical static Gemma4 vision-prefill export module.
+
+    Both the Circle exporter and the static runtime must call this helper so
+    that they exercise exactly the same specialized vision graph.
+    """
+    if pixel_position_ids.dim() != 3 or pixel_position_ids.shape[0] != 1:
+        raise ValueError(
+            "Gemma4 vision export requires pixel_position_ids with shape "
+            "(1, num_patches, 2), got "
+            f"{tuple(pixel_position_ids.shape)}."
+        )
+    if pixel_position_ids.shape[-1] != 2:
+        raise ValueError(
+            "Gemma4 vision export requires two-dimensional patch coordinates, "
+            f"got trailing dimension {pixel_position_ids.shape[-1]}."
+        )
+
+    vision_tower = getattr(wrapped_model, "vision_tower", None)
+    if vision_tower is None:
+        raise ValueError("Gemma4 vision prefill requires a vision tower.")
+    quant_vision_model = getattr(vision_tower, "wrapped", vision_tower)
+    as_export_module = getattr(quant_vision_model, "as_export_module", None)
+    if not callable(as_export_module):
+        raise TypeError("Gemma4 vision tower does not expose as_export_module().")
+
+    vision_projection = getattr(wrapped_model, "embed_vision", None)
+    if vision_projection is None:
+        raise ValueError("Gemma4 vision prefill requires embed_vision.")
+
+    vision_model = as_export_module(
+        mode=mode,
+        pixel_position_ids=pixel_position_ids,
+    )
+    return Gemma4VisionPrefillExportAdapter(
+        vision_model=vision_model,
+        vision_projection=vision_projection,
+    )
 
 
 class Gemma4MMFusionExportAdapter(nn.Module):
@@ -510,7 +568,7 @@ class Gemma4VisionModelPrefillExportAdapter(nn.Module):
     for export via ``as_export_module()``.  Calling ``forward()`` delegates
     to the wrapped model's ``forward_export()`` method, which uses the
     export-friendly submodule adapters (``patch_embedder_export``,
-    ``pooler_export``) when they are available.
+    ``encoder_export``, and ``pooler_export``).
 
     Input contract:
         ``pixel_values`` has shape ``(1, num_patches, 3*patch_size^2)``.
