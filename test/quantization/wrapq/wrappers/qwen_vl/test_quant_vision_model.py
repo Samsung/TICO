@@ -15,6 +15,7 @@
 import math
 import unittest
 from typing import Tuple
+from unittest import mock
 
 import torch
 
@@ -101,6 +102,40 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         hidden_states = torch.randn(1, num_patches, patch_dim)
         grid_tensor = torch.tensor([grid_thw])
         return hidden_states, grid_tensor
+
+    @staticmethod
+    def _normalize_vision_output(
+        output,
+    ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, ...]]:
+        """Normalize version-dependent vision outputs for direct comparison."""
+        if hasattr(output, "pooler_output"):
+            image_embeds = output.pooler_output
+            deepstack_features = getattr(output, "deepstack_features", None)
+        else:
+            image_embeds, deepstack_features = output
+
+        if deepstack_features is None:
+            normalized_features: Tuple[torch.Tensor, ...] = ()
+        else:
+            normalized_features = tuple(deepstack_features)
+        return image_embeds, normalized_features
+
+    def _assert_vision_outputs_equal(self, expected, actual) -> None:
+        """Assert exact parity for merged and DeepStack vision outputs."""
+        expected_image, expected_deepstack = self._normalize_vision_output(expected)
+        actual_image, actual_deepstack = self._normalize_vision_output(actual)
+
+        torch.testing.assert_close(expected_image, actual_image, rtol=0.0, atol=0.0)
+        self.assertEqual(len(expected_deepstack), len(actual_deepstack))
+        for expected_feature, actual_feature in zip(
+            expected_deepstack, actual_deepstack
+        ):
+            torch.testing.assert_close(
+                expected_feature,
+                actual_feature,
+                rtol=0.0,
+                atol=0.0,
+            )
 
     def test_get_vision_grid_thw_from_config(self):
         """Test _get_vision_grid_thw static method with valid config."""
@@ -216,6 +251,7 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         self.assertTrue(hasattr(q_model, "rope_inv_freq"))
         self.assertTrue(hasattr(q_model, "rope_cos_template"))
         self.assertTrue(hasattr(q_model, "rope_sin_template"))
+        self.assertFalse(q_model.pos_embed_template.requires_grad)
 
         # Check submodule wrapping
         self.assertIsNotNone(q_model.patch_embed)
@@ -225,25 +261,165 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
             len(q_model.deepstack_merger_list), len(self.fp_model.deepstack_merger_list)
         )
 
-    def test_non_strict_export_with_temporal_grid(self):
-        """Fixed temporal grids should not create data-dependent split sizes."""
-        grid_thw = (2, 4, 4)
-        ptq_config = self._make_ptq_config(grid_thw)
+    def test_as_export_module_returns_static_adapter(self):
+        """The vision wrapper should expose its fixed-grid export adapter."""
         q_model = QuantQwen3VLVisionModel(
             self.fp_model,
-            qcfg=ptq_config,
-            fp_name="test_temporal_export",
+            qcfg=self._make_ptq_config((1, 8, 8)),
+            fp_name="test_export_adapter",
+        ).eval()
+
+        export_module = q_model.as_export_module(mode="prefill")
+
+        self.assertIsInstance(export_module, Qwen3VLVisionPrefillExportAdapter)
+        self.assertIs(export_module.wrapped, q_model)
+
+    def test_static_adapter_unwraps_transparent_wrapper(self):
+        """The adapter should resolve a vision model behind a transparent wrapper."""
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config((1, 8, 8)),
+            fp_name="test_export_unwrap",
+        ).eval()
+        transparent = torch.nn.Module()
+        transparent.wrapped = q_model
+
+        export_module = Qwen3VLVisionPrefillExportAdapter(transparent)
+
+        self.assertIs(export_module.wrapped, q_model)
+
+    def test_wrapper_smoke_case_uses_static_adapter(self):
+        """The vision-model smoke export should select the static adapter."""
+        from tico.quantization.recipes.debug.wrapper_smoke.cases.qwen3_vl import (
+            QwenVisionModelCase,
+        )
+
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config((1, 8, 8)),
+            fp_name="test_smoke_export_adapter",
+        ).eval()
+
+        export_module = QwenVisionModelCase().export_module(q_model, {})
+
+        self.assertIsInstance(export_module, Qwen3VLVisionPrefillExportAdapter)
+
+    def test_as_export_module_supports_quant_mode(self):
+        """A calibrated vision wrapper should expose the static adapter."""
+        grid_thw = (1, 8, 8)
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config(grid_thw),
+            fp_name="test_quant_export_adapter",
+        ).eval()
+        hidden_states, grid_tensor = self._create_test_inputs(grid_thw)
+        q_model.enable_calibration()
+        with torch.no_grad():
+            q_model(hidden_states, grid_tensor)
+        q_model.freeze_qparams()
+
+        export_module = q_model.as_export_module(mode="prefill")
+
+        self.assertIsInstance(export_module, Qwen3VLVisionPrefillExportAdapter)
+
+    def test_as_export_module_rejects_calibration_mode(self):
+        """Static export should reject a wrapper with incomplete qparams."""
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config((1, 8, 8)),
+            fp_name="test_export_calibration",
+        ).eval()
+        q_model.enable_calibration()
+
+        with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
+            q_model.as_export_module(mode="prefill")
+
+    def test_as_export_module_rejects_unsupported_mode(self):
+        """The vision export adapter should support prefill mode only."""
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config((1, 8, 8)),
+            fp_name="test_export_mode",
+        ).eval()
+
+        with self.assertRaisesRegex(ValueError, "Unsupported Qwen3-VL vision"):
+            q_model.as_export_module(mode="decode")
+
+    def test_static_adapter_bypasses_dynamic_forward(self):
+        """The static adapter should call ``forward_export`` directly."""
+        grid_thw = (1, 8, 8)
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config(grid_thw),
+            fp_name="test_static_dispatch",
         ).eval()
         export_module = Qwen3VLVisionPrefillExportAdapter(q_model).eval()
         hidden_states, grid_tensor = self._create_test_inputs(grid_thw)
 
+        with mock.patch.object(
+            q_model,
+            "forward",
+            side_effect=AssertionError("dynamic forward was used"),
+        ):
+            output = export_module(hidden_states, grid_tensor)
+
+        image_embeds, _ = self._normalize_vision_output(output)
+        self.assertEqual(image_embeds.shape[0], math.prod(grid_thw) // 4)
+
+    def test_dynamic_forward_uses_runtime_grid(self):
+        """Eager execution should derive metadata from the runtime grid."""
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config((1, 8, 8)),
+            fp_name="test_dynamic_runtime_grid",
+        ).eval()
+        hidden_states, runtime_grid = self._create_test_inputs((1, 4, 4))
+
+        with torch.no_grad():
+            output = q_model(hidden_states, runtime_grid)
+
+        image_embeds, _ = self._normalize_vision_output(output)
+        self.assertEqual(image_embeds.shape[0], 4)
+
+    def test_static_adapter_matches_dynamic_forward_for_fixed_grid(self):
+        """Dynamic and fixed-profile metadata should produce identical outputs."""
+        grid_thw = (1, 8, 8)
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config(grid_thw),
+            fp_name="test_static_parity",
+        ).eval()
+        export_module = q_model.as_export_module(mode="prefill").eval()
+        hidden_states, grid_tensor = self._create_test_inputs(grid_thw)
+
+        with torch.no_grad():
+            dynamic_output = q_model(hidden_states, grid_tensor)
+            static_output = export_module(hidden_states, grid_tensor)
+
+        self._assert_vision_outputs_equal(dynamic_output, static_output)
+
+    def test_non_strict_export_with_temporal_grid(self):
+        """Fixed temporal grids should export without data-dependent split sizes."""
+        grid_thw = (2, 4, 4)
+        q_model = QuantQwen3VLVisionModel(
+            self.fp_model,
+            qcfg=self._make_ptq_config(grid_thw),
+            fp_name="test_temporal_export",
+        ).eval()
+        export_module = q_model.as_export_module(mode="prefill").eval()
+        hidden_states, grid_tensor = self._create_test_inputs(grid_thw)
+
+        with torch.no_grad():
+            expected = export_module(hidden_states, grid_tensor)
         exported_program = torch.export.export(
             export_module,
             (hidden_states, grid_tensor),
             strict=False,
         )
+        with torch.no_grad():
+            actual = exported_program.module()(hidden_states, grid_tensor)
 
-        self.assertIsNotNone(exported_program)
+        self._assert_vision_outputs_equal(expected, actual)
 
     def test_init_missing_vision_grid_thw(self):
         """Test initialization fails without vision_grid_thw."""

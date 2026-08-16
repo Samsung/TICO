@@ -17,7 +17,7 @@ from typing import Any, Iterable, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
@@ -73,7 +73,9 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             pos_embedder=fp_model.pos_embed,
             grid_thw=self.vision_grid_thw,
         )
-        self.register_buffer("pos_embed_template", pos_embeds, persistent=False)
+        self.register_buffer(
+            "pos_embed_template", pos_embeds.detach(), persistent=False
+        )
 
         # Precompute rotary frequency table for RoPE
         self.dim = (
@@ -342,86 +344,64 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
         return patch_pos_embeds
 
-    def forward(
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
-        grid_thw: torch.Tensor,
+        *,
+        pos_embeds: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        cu_seqlens: torch.Tensor,
+        attention_split_sizes: Optional[tuple[int, ...]] = None,
         **kwargs,
     ) -> Union[torch.Tensor, tuple]:
-        """
-        Forward pass with fake quantization.
+        """Run the shared vision tensor path with explicit metadata.
+
+        Dynamic eager execution and fixed-profile export differ only in how
+        position embeddings, rotary embeddings, cumulative sequence lengths,
+        and attention split sizes are produced. Both paths delegate the actual
+        patch, transformer-block, and merger computation to this method.
 
         Args:
-            hidden_states: Flattened patches with shape (seq_len, patch_dim)
-                or the static export ABI (1, seq_len, patch_dim).
-            grid_thw: Grid dimensions (num_images, 3) with (temporal, height, width)
+            hidden_states: Flattened patches with shape ``(seq_len, patch_dim)``
+                or the static batch-one ABI ``(1, seq_len, patch_dim)``.
+            pos_embeds: Spatial position embeddings for every patch.
+            position_embeddings: RoPE cosine and sine tensors.
+            cu_seqlens: Cumulative sequence lengths for image or frame chunks.
+            attention_split_sizes: Optional static Python split sizes used by
+                export to avoid deriving Python integers from tensors.
+            **kwargs: Additional keyword arguments forwarded to vision blocks.
 
         Returns:
-            BaseModelOutputWithDeepstackFeatures or similar
+            The version-compatible Qwen3-VL vision output.
         """
-        # Patch embedding (already quantized by wrapper)
         hidden_states = self.patch_embed(hidden_states)
 
-        # Model export mode (torch.export.export) requires the use of fixed `grid_thw` and precomputed values (`position_embeddings`,`cu_seqlens').
-        # `torch.compiler.is_compiling()` controls the conditional behavior of the model:
-        # - precomputed values are used in export mode
-        # - otherwise, the calculation is performed dynamically(e.g. benchmarks evaluation)
-
-        # Position embedding
-        if torch.compiler.is_compiling():
-            # Use precomputed position embedding
-            pos_embeds = self.pos_embed_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            )
-        else:
-            pos_embeds = QuantQwen3VLVisionModel._fast_pos_embed_interpolate(
-                merge_size=self.spatial_merge_size,
-                num_grid_per_side=self.num_grid_per_side,
-                pos_embedder=self.module.pos_embed,
-                grid_thw=grid_thw,
-            )
+        pos_embeds = pos_embeds.to(
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
         pos_embeds = self._fq(pos_embeds, self.obs_pos_embeds)
         hidden_states = hidden_states + pos_embeds
         hidden_states = self._fq(hidden_states, self.obs_pos_add)
 
-        # Reshape hidden states
         seq_len, _ = hidden_states.size()
         hidden_states = hidden_states.reshape(seq_len, -1)
 
-        # RoPE position embeddings (cos, sin)
-        if torch.compiler.is_compiling():
-            # Use precomputed RoPE position embeddings (cos, sin) and quantize
-            cos = self.rope_cos_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            )
-            sin = self.rope_sin_template.to(
-                dtype=hidden_states.dtype, device=hidden_states.device
-            )
-        else:
-            inv_freq = self.rope_inv_freq.to(hidden_states.device)
-            cos, sin = QuantQwen3VLVisionModel._precompute_rope_position_embeddings(
-                merge_size=self.spatial_merge_size,
-                rope_inv_freq=inv_freq,
-                grid_thw=grid_thw,
-            )
-
+        cos, sin = position_embeddings
+        cos = cos.to(dtype=hidden_states.dtype, device=hidden_states.device)
+        sin = sin.to(dtype=hidden_states.dtype, device=hidden_states.device)
         position_embeddings = (
             self._fq(cos, self.obs_rope_cos),
             self._fq(sin, self.obs_rope_sin),
         )
 
-        if torch.compiler.is_compiling():
-            cu_seqlens = self.cu_seqlens_template
-        else:
-            cu_seqlens = QuantQwen3VLVisionModel._precompute_cu_seqlens(grid_thw)
-
-        # Process through transformer blocks
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 position_embeddings=position_embeddings,
+                attention_split_sizes=attention_split_sizes,
                 **kwargs,
             )
             if layer_num in self.deepstack_visual_indexes:
@@ -430,10 +410,8 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
                 ](hidden_states)
                 deepstack_feature_lists.append(deepstack_feature)
 
-        # Merge patches (already quantized by wrapper)
         merged_hidden_states = self.merger(hidden_states)
 
-        # Return in the same format as the original
         if self.has_deepstack_model_output:
             from transformers.models.qwen3_vl.modeling_qwen3_vl import (
                 BaseModelOutputWithDeepstackFeatures,
@@ -444,8 +422,114 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
                 pooler_output=merged_hidden_states,
                 deepstack_features=deepstack_feature_lists,
             )
-        else:
-            return merged_hidden_states, deepstack_feature_lists
+        return merged_hidden_states, deepstack_feature_lists
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: torch.Tensor,
+        attention_split_sizes: Optional[tuple[int, ...]] = None,
+        **kwargs,
+    ) -> Union[torch.Tensor, tuple]:
+        """Run the dynamic eager/PTQ vision path.
+
+        Metadata is computed from the actual ``grid_thw`` argument on every
+        call. This path is used for calibration, evaluation, and ordinary eager
+        execution. Static NPU export must use :meth:`as_export_module` instead.
+
+        Args:
+            hidden_states: Flattened patches with shape ``(seq_len, patch_dim)``
+                or the static batch-one ABI ``(1, seq_len, patch_dim)``.
+            grid_thw: Image or video grids with shape ``(num_items, 3)``.
+            attention_split_sizes: Optional eager split sizes supplied by a
+                caller that already knows the image or frame boundaries.
+            **kwargs: Additional keyword arguments forwarded to vision blocks.
+
+        Returns:
+            The version-compatible Qwen3-VL vision output.
+        """
+        pos_embeds = QuantQwen3VLVisionModel._fast_pos_embed_interpolate(
+            merge_size=self.spatial_merge_size,
+            num_grid_per_side=self.num_grid_per_side,
+            pos_embedder=self.module.pos_embed,
+            grid_thw=grid_thw,
+        )
+
+        inv_freq = self.rope_inv_freq.to(hidden_states.device)
+        cos, sin = QuantQwen3VLVisionModel._precompute_rope_position_embeddings(
+            merge_size=self.spatial_merge_size,
+            rope_inv_freq=inv_freq,
+            grid_thw=grid_thw,
+        )
+        cu_seqlens = QuantQwen3VLVisionModel._precompute_cu_seqlens(grid_thw)
+
+        return self._forward_impl(
+            hidden_states,
+            pos_embeds=pos_embeds,
+            position_embeddings=(cos, sin),
+            cu_seqlens=cu_seqlens,
+            attention_split_sizes=attention_split_sizes,
+            **kwargs,
+        )
+
+    def forward_export(
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        attention_split_sizes: tuple[int, ...],
+        **kwargs,
+    ) -> Union[torch.Tensor, tuple]:
+        """Run the fixed-profile vision path used by static export.
+
+        All grid-dependent metadata is read from buffers materialized when the
+        wrapper is constructed. No tracing-state inspection or tensor-to-Python
+        conversion is required inside the exported graph.
+
+        Args:
+            hidden_states: Flattened patches for the configured fixed grid.
+            attention_split_sizes: Static Python split sizes derived from the
+                configured grid before graph capture.
+            **kwargs: Additional keyword arguments forwarded to vision blocks.
+
+        Returns:
+            The version-compatible Qwen3-VL vision output.
+        """
+        return self._forward_impl(
+            hidden_states,
+            pos_embeds=self.pos_embed_template,
+            position_embeddings=(
+                self.rope_cos_template,
+                self.rope_sin_template,
+            ),
+            cu_seqlens=self.cu_seqlens_template,
+            attention_split_sizes=attention_split_sizes,
+            **kwargs,
+        )
+
+    def as_export_module(self, mode: ExportMode = "prefill") -> nn.Module:
+        """Return the fixed-grid vision adapter for static prefill export.
+
+        The adapter always calls :meth:`forward_export`, so eager runtime
+        simulation and ``torch.export`` execute the same fixed-profile path.
+        """
+        if mode != "prefill":
+            raise ValueError(f"Unsupported Qwen3-VL vision export mode: {mode!r}")
+        if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
+            raise RuntimeError(
+                "Qwen3-VL vision export requires NO_QUANT or QUANT mode, "
+                f"got {self._mode}."
+            )
+        if self._mode is Mode.QUANT:
+            for observer in self._all_observers():
+                assert (
+                    observer.has_qparams
+                ), f"Observer {observer.name} has not been calibrated"
+
+        from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
+            Qwen3VLVisionPrefillExportAdapter,
+        )
+
+        return Qwen3VLVisionPrefillExportAdapter(self)
 
     def _all_observers(self) -> Iterable:
         """Yield all observers from this module."""

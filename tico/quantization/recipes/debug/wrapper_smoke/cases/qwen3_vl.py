@@ -1315,6 +1315,14 @@ class QwenVisionModelCase(QwenBaseCase):
 
         return PTQConfig(model_args={"vision": {"grid_thw": self.grid_tuple}})
 
+    def export_module(
+        self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
+    ) -> torch.nn.Module:
+        """Return the fixed-grid vision adapter used by static export."""
+        del cfg
+        wrapped = getattr(quantized, "wrapped", quantized)
+        return wrapped.as_export_module("prefill").eval()
+
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny vision model and reference copy."""
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
