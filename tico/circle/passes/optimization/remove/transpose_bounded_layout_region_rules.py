@@ -20,7 +20,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from tico.circle.graph import as_indices, as_list
-from tico.circle.passes.optimization.remove.layout_ops import (
+from tico.circle.passes.optimization.remove._layout_utils import (
     _builtin_operator_value,
     _get_const_data,
 )

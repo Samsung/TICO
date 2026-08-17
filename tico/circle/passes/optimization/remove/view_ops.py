@@ -529,6 +529,7 @@ class _CommuteReshapeThroughElementwiseRule(_ViewRule):
         outputs = as_indices(operator.outputs)
         if len(outputs) != 1 or not operator_is_plain(operator):
             return None
+        broadcast_value = None
         if builtin_code in self.unary_codes:
             if len(inputs) != 1:
                 return None
@@ -550,13 +551,13 @@ class _CommuteReshapeThroughElementwiseRule(_ViewRule):
                 return None
             reshape_position = reshape_positions[0]
             scalar_position = 1 - reshape_position
-            scalar = decode_constant_value(
+            broadcast_value = decode_constant_value(
                 self.codec,
                 document.model,
                 subgraph_index=graph.subgraph_index,
                 tensor_index=inputs[scalar_position],
             )
-            if scalar is None or scalar.shape != ():
+            if broadcast_value is None or broadcast_value.element_count != 1:
                 return None
         else:
             return None
@@ -587,6 +588,18 @@ class _CommuteReshapeThroughElementwiseRule(_ViewRule):
             return None
         if reshaped.shape != output.shape:
             return None
+        if broadcast_value is not None:
+            try:
+                source_broadcast = tuple(
+                    np.broadcast_shapes(source.shape, broadcast_value.shape)
+                )
+                reshaped_broadcast = tuple(
+                    np.broadcast_shapes(reshaped.shape, broadcast_value.shape)
+                )
+            except ValueError:
+                return None
+            if source_broadcast != source.shape or reshaped_broadcast != reshaped.shape:
+                return None
         if not view_contracts_compatible(source, reshaped):
             return None
         new_intermediate = replace(

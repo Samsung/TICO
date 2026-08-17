@@ -461,6 +461,67 @@ class SimplifyViewOpsTest(unittest.TestCase):
         )
         self.assertEqual(operators[0].inputs, [source, scalar])
 
+    def test_reshape_moves_after_single_element_vector_binary_operand(self) -> None:
+        """Treat a broadcastable one-element vector like a scalar operand."""
+
+        document = make_empty_document()
+        builder = make_builder(document, self.codec)
+        source = add_runtime_tensor(
+            document,
+            subgraph_index=0,
+            name="source",
+            shape=[2, 3],
+        )
+        document.subgraph().inputs = [source]
+        reshaped = self._reshape(builder, source, [3, 2], "reshaped")
+        scalar_like = add_f32(builder, "scalar_like", [2.0])
+        output = builder.add_operator(
+            MUL,
+            inputs=(reshaped, scalar_like),
+            output_contracts=(static_contract((3, 2)),),
+            output_names=("output",),
+        )[0]
+        document.subgraph().outputs = [output]
+
+        result = self._pass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertTrue(result.modified)
+        operators = document.subgraph().operators
+        self.assertEqual(operators[0].inputs, [source, scalar_like])
+
+    def test_reshape_keeps_non_scalar_binary_broadcast_in_place(self) -> None:
+        """Reject binary motion when the other operand contains multiple values."""
+
+        document = make_empty_document()
+        builder = make_builder(document, self.codec)
+        source = add_runtime_tensor(
+            document,
+            subgraph_index=0,
+            name="source",
+            shape=[2, 3],
+        )
+        document.subgraph().inputs = [source]
+        reshaped = self._reshape(builder, source, [3, 2], "reshaped")
+        vector = add_f32(builder, "vector", [[2.0, 3.0]])
+        output = builder.add_operator(
+            MUL,
+            inputs=(reshaped, vector),
+            output_contracts=(static_contract((3, 2)),),
+            output_names=("output",),
+        )[0]
+        document.subgraph().outputs = [output]
+
+        result = self._pass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(document.subgraph().operators[1].inputs[0], reshaped)
+
     def test_reshape_moves_after_compatible_keep_dims_mean(self) -> None:
         """Move RESHAPE after MEAN when dimensions through its axis are unchanged."""
 

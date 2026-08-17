@@ -24,10 +24,10 @@ from tico.circle.passes import (
     CirclePassManager,
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
-    RemoveRedundantLayoutOpsPass,
+    SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
-from tico.circle.passes.optimization.remove.layout_ops import _TRANSPOSE_BUILTIN_CODE
+from tico.circle.passes.optimization.remove._layout_utils import _TRANSPOSE_BUILTIN_CODE
 from tico.circle.passes.optimization.remove.transpose_bounded_layout_region import (
     _ADD_BUILTIN_CODE,
     _PAD_BUILTIN_CODE,
@@ -558,7 +558,7 @@ class EliminateTransposeBoundedLayoutRegionPassTest(unittest.TestCase):
         pipeline = CirclePassManager(
             [
                 EliminateTransposeBoundedLayoutRegionPass(),
-                RemoveRedundantLayoutOpsPass(),
+                SimplifyViewOpsPass(),
                 DeadCodeEliminationPass(),
                 CompactIndicesPass(),
             ],

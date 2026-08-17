@@ -174,7 +174,7 @@ def _freeze_object(value: Any, *, active: set[int]) -> FrozenValue:
             return ("dataclass", type(value).__qualname__, *fields)
 
         attributes = _public_attributes(value)
-        if attributes:
+        if attributes or _is_circle_object_api_table(value):
             fields = tuple(
                 (
                     name,
@@ -189,6 +189,20 @@ def _freeze_object(value: Any, *, active: set[int]) -> FrozenValue:
     raise CircleValueError(
         f"Unsupported Object API fingerprint value: {type(value).__name__}."
     )
+
+
+def _is_circle_object_api_table(value: Any) -> bool:
+    """Return whether a value is a generated Circle Object API table."""
+
+    value_type = type(value)
+    type_name = value_type.__name__
+    if len(type_name) <= 1 or not type_name.endswith("T"):
+        return False
+    try:
+        generated_type = object_api_type(type_name[:-1])
+    except (ImportError, RuntimeError):
+        return False
+    return isinstance(value, generated_type)
 
 
 def _public_attributes(value: Any) -> tuple[tuple[str, Any], ...]:

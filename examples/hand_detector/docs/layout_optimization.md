@@ -14,7 +14,7 @@ After serialization, the example runs this Circle-to-Circle pipeline:
 
 ```text
 EliminateTransposeBoundedLayoutRegionPass
-RemoveRedundantLayoutOpsPass
+SimplifyViewOpsPass
 DeadCodeEliminationPass
 CompactIndicesPass
 ```
@@ -137,7 +137,7 @@ The pass is opt-in and does not change the default `tico.convert` pipeline:
 ```bash
 tico-circle optimize input.circle \
   --passes \
-eliminate-transpose-bounded-layout-region,remove-redundant-layout-ops,dce,compact \
+eliminate-transpose-bounded-layout-region,simplify-view-ops,dce,compact \
   --strategy restart \
   -o output.circle
 ```
