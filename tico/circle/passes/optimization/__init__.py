@@ -12,18 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.passes.optimization.canon import CanonicalizeEquivalentOpsPass
 from tico.circle.passes.optimization.fold import (
     ConstantFoldPolicy,
     FoldConstantSubgraphPass,
 )
 from tico.circle.passes.optimization.remove import (
     EliminateTransposeBoundedLayoutRegionPass,
-    RemoveRedundantLayoutOpsPass,
+    RemoveNoOpOperatorsPass,
+    SimplifyViewOpsPass,
 )
 
 __all__ = [
+    "CanonicalizeEquivalentOpsPass",
     "ConstantFoldPolicy",
     "EliminateTransposeBoundedLayoutRegionPass",
     "FoldConstantSubgraphPass",
-    "RemoveRedundantLayoutOpsPass",
+    "RemoveNoOpOperatorsPass",
+    "SimplifyViewOpsPass",
 ]

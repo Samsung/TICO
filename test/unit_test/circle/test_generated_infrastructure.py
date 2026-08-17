@@ -30,6 +30,18 @@ from tico.circle import CircleBuilder, CircleDocument, TensorValue
 class GeneratedInfrastructureTest(unittest.TestCase):
     """Check new infrastructure against generated Object API tables and binary IO."""
 
+    def test_empty_generated_options_have_stable_fingerprint(self):
+        """Fingerprint empty Object API option tables by their generated type."""
+
+        from circle_schema import circle
+
+        from tico.circle._object import freeze_object
+
+        first = circle.TransposeOptions.TransposeOptionsT()
+        second = circle.TransposeOptions.TransposeOptionsT()
+
+        self.assertEqual(freeze_object(first), freeze_object(second))
+
     def test_constant_builder_survives_circle_binary_round_trip(self):
         """Create, serialize, restore, verify, and decode one generated constant."""
 

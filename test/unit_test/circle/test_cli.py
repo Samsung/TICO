@@ -16,10 +16,12 @@ import unittest
 
 from tico.circle.cli.main import _build_parser, _parse_passes
 from tico.circle.passes import (
+    CanonicalizeEquivalentOpsPass,
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
-    RemoveRedundantLayoutOpsPass,
+    RemoveNoOpOperatorsPass,
+    SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
 
@@ -51,16 +53,26 @@ class CircleCLITest(unittest.TestCase):
         """Resolve optimization and cleanup pass names in order."""
 
         passes = _parse_passes(
+            "canonicalize-equivalent-ops,"
             "eliminate-transpose-bounded-layout-region,"
             "fold-constant-subgraph,"
-            "remove-redundant-layout-ops,dce,compact"
+            "remove-no-op-operators,"
+            "simplify-view-ops,dce,compact"
         )
 
-        self.assertIsInstance(passes[0], EliminateTransposeBoundedLayoutRegionPass)
-        self.assertIsInstance(passes[1], FoldConstantSubgraphPass)
-        self.assertIsInstance(passes[2], RemoveRedundantLayoutOpsPass)
-        self.assertIsInstance(passes[3], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[4], CompactIndicesPass)
+        self.assertIsInstance(passes[0], CanonicalizeEquivalentOpsPass)
+        self.assertIsInstance(passes[1], EliminateTransposeBoundedLayoutRegionPass)
+        self.assertIsInstance(passes[2], FoldConstantSubgraphPass)
+        self.assertIsInstance(passes[3], RemoveNoOpOperatorsPass)
+        self.assertIsInstance(passes[4], SimplifyViewOpsPass)
+        self.assertIsInstance(passes[5], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[6], CompactIndicesPass)
+
+    def test_removed_layout_pass_name_is_rejected(self) -> None:
+        """Reject the removed compatibility pass name from the CLI registry."""
+
+        with self.assertRaisesRegex(ValueError, "remove-redundant-layout-ops"):
+            _parse_passes("remove-redundant-layout-ops")
 
     def test_optimize_accepts_restart_strategy(self) -> None:
         """Parse the restart scheduling strategy for a Circle pass pipeline."""

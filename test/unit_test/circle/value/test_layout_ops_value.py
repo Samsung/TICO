@@ -14,11 +14,8 @@
 
 import numpy as np
 
-from tico.circle.passes import CirclePassContext, CirclePassManager
+from tico.circle.passes import CirclePassContext, CirclePassManager, SimplifyViewOpsPass
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
-from tico.circle.passes.optimization.remove.layout_ops import (
-    RemoveRedundantLayoutOpsPass,
-)
 
 from test.support.circle.builder import CircleModelBuilder
 from test.support.circle.value_test import CircleValueTestCase
@@ -39,7 +36,7 @@ class CircleLayoutOpsValueTest(CircleValueTestCase):
 
         pipeline = CirclePassManager(
             [
-                RemoveRedundantLayoutOpsPass(),
+                SimplifyViewOpsPass(),
                 DeadCodeEliminationPass(),
                 CompactIndicesPass(),
             ]
@@ -75,7 +72,7 @@ class CircleLayoutOpsValueTest(CircleValueTestCase):
 
         pipeline = CirclePassManager(
             [
-                RemoveRedundantLayoutOpsPass(),
+                SimplifyViewOpsPass(),
                 DeadCodeEliminationPass(),
                 CompactIndicesPass(),
             ]

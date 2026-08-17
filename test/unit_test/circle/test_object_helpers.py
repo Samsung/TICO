@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -35,6 +36,14 @@ class SlottedValue:
 
         self.first = first
         self.second = second
+
+
+class EmptyOptionsT:
+    """Provide an empty generated-table substitute for fingerprint tests."""
+
+
+class EmptyValue:
+    """Provide an unsupported opaque empty object."""
 
 
 class ObjectHelpersTest(unittest.TestCase):
@@ -63,6 +72,24 @@ class ObjectHelpersTest(unittest.TestCase):
         first = SlottedValue(1, [2, 3])
         second = SlottedValue(1, [2, 3])
         self.assertEqual(freeze_object(first), freeze_object(second))
+
+    def test_freeze_object_handles_empty_generated_tables(self):
+        """Fingerprint generated option tables that intentionally have no fields."""
+
+        with patch(
+            "tico.circle._object.object_api_type",
+            return_value=EmptyOptionsT,
+        ):
+            self.assertEqual(
+                freeze_object(EmptyOptionsT()),
+                ("object", "EmptyOptionsT"),
+            )
+
+    def test_freeze_object_rejects_unrecognized_empty_objects(self):
+        """Keep rejecting opaque empty values outside the generated Object API."""
+
+        with self.assertRaisesRegex(CircleValueError, "Unsupported"):
+            freeze_object(EmptyValue())
 
     def test_freeze_object_rejects_cycles_in_object_arrays(self):
         """Reject self-referential NumPy object arrays with a clear value error."""

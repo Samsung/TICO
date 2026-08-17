@@ -26,13 +26,13 @@ from tico.circle.passes import (
     CirclePassManager,
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
-    RemoveRedundantLayoutOpsPass,
+    SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
 from tico.circle.passes.optimization.remove import (
     transpose_bounded_layout_region_rules as rules,
 )
-from tico.circle.passes.optimization.remove.layout_ops import _TRANSPOSE_BUILTIN_CODE
+from tico.circle.passes.optimization.remove._layout_utils import _TRANSPOSE_BUILTIN_CODE
 
 from test.unit_test.circle.fixture import (
     FakeBuffer,
@@ -659,7 +659,7 @@ class AxisRemapRegionPassTest(unittest.TestCase):
         pipeline = CirclePassManager(
             [
                 EliminateTransposeBoundedLayoutRegionPass(),
-                RemoveRedundantLayoutOpsPass(),
+                SimplifyViewOpsPass(),
                 DeadCodeEliminationPass(),
                 CompactIndicesPass(),
             ],

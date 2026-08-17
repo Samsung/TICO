@@ -23,7 +23,7 @@ from typing import Any, Iterable
 from tico.circle.document import CircleDocument
 from tico.circle.graph import as_indices, as_list
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
-from tico.circle.passes.optimization.remove.layout_ops import (
+from tico.circle.passes.optimization.remove._layout_utils import (
     _check_perm,
     _get_const_data,
     _is_transpose_op,

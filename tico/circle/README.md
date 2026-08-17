@@ -20,8 +20,10 @@ CircleDocument
     ├── inspect                 stable summaries and text output
     ├── operations.extract      workflow-level graph extraction
     └── passes                  composable Circle-to-Circle rewrites
+            ├── CanonicalizeEquivalentOpsPass
             ├── FoldConstantSubgraphPass
-            ├── RemoveRedundantLayoutOpsPass
+            ├── RemoveNoOpOperatorsPass
+            ├── SimplifyViewOpsPass
             ├── DeadCodeEliminationPass
             └── CompactIndicesPass
 ```
@@ -130,9 +132,11 @@ result.document.save("attention.circle")
 
 ```python
 from tico.circle.passes import (
+    CanonicalizeEquivalentOpsPass,
     CirclePassManager,
     FoldConstantSubgraphPass,
-    RemoveRedundantLayoutOpsPass,
+    RemoveNoOpOperatorsPass,
+    SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import (
     CompactIndicesPass,
@@ -141,8 +145,10 @@ from tico.circle.passes.cleanup import (
 
 pipeline = CirclePassManager(
     [
+        CanonicalizeEquivalentOpsPass(),
         FoldConstantSubgraphPass(),
-        RemoveRedundantLayoutOpsPass(),
+        SimplifyViewOpsPass(),
+        RemoveNoOpOperatorsPass(),
         DeadCodeEliminationPass(),
         CompactIndicesPass(),
     ]
@@ -152,17 +158,34 @@ print(result.changes)
 model.save("model.optimized.circle")
 ```
 
-`RemoveRedundantLayoutOpsPass` rewires consecutive Reshape operations and inverse
-Transpose pairs so their redundant operators become dead. Run dead-code elimination
-after it to remove those operators, then compact the remaining tensor, buffer, and
-operator-code indices.
-
 `FoldConstantSubgraphPass` folds supported operators to a fixed point while preserving
 existing output tensor indices and contracts. The first evaluator set covers `ADD`,
 `MUL`, `CAST`, `RESHAPE`, `SHAPE`, `SQUEEZE`, and `GATHER`. Arithmetic folding is
 limited to conservative dense cases, while exact quantized view operations may retain
 their original qparams. Configurable storage and compute budgets prevent excessive
 compile-time work or model growth. Newly dead producers are removed by default.
+
+`CanonicalizeEquivalentOpsPass` reduces equivalent operator forms to a canonical
+vocabulary. It converts static `EXPAND_DIMS`, one-input `PACK`, `SQUEEZE`, view-only
+`STRIDED_SLICE`, and unit-dimension-only `TRANSPOSE` to `RESHAPE`; zero-valued
+`PADV2` to `PAD`; and equal-size `SPLIT_V` to `SPLIT`.
+
+`SimplifyViewOpsPass` rewires identity `RESHAPE` and `TRANSPOSE`, composes
+compatible view chains, and moves `RESHAPE` after supported unary, scalar-binary, and
+keep-dims `MEAN` operations. It intentionally leaves operators made unreachable by
+rewiring in the graph. Schedule `DeadCodeEliminationPass` after it, followed by
+`CompactIndicesPass`, to remove and compact those dead objects.
+
+`RemoveNoOpOperatorsPass` removes contract-preserving `ADD` with an exact zero,
+same-type `CAST`, full-range `SLICE`, identity `STRIDED_SLICE`, and one-output
+`SPLIT` or `SPLIT_V`. Quantized arithmetic is kept conservative because fixed-point
+requantization may remain observable even when real-number algebra suggests an
+identity.
+
+The canonicalization and rank-changing view rules reject dynamic, sparse, variable,
+or unsupported per-axis-quantized patterns rather than guessing their semantics.
+Contract-exact no-op rules may still handle dynamic tensors when the operator remains
+an identity for every runtime shape.
 
 By default, `CirclePassManager` verifies the document after every pass. 
 Set `CirclePassContext(verify_after_each_pass=False)` only when a multi-step 
@@ -285,7 +308,7 @@ Signatures for untouched subgraphs remain intact when `--keep-other-subgraphs` i
 
 ```bash
 tico-circle optimize model.circle \
-  --passes remove-redundant-layout-ops,dce,compact \
+  --passes simplify-view-ops,dce,compact \
   -o model.optimized.circle
 ```
 
@@ -293,15 +316,17 @@ Available passes:
 
 | Name | Implementation | Behavior |
 |---|---|---|
+| `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator forms with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
 | `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
 | `fold-constant-subgraph` | `FoldConstantSubgraphPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
-| `remove-redundant-layout-ops` | `RemoveRedundantLayoutOpsPass` | Rewires consecutive Reshape operations and consecutive inverse Transpose pairs so redundant operators can be removed |
+| `remove-no-op-operators` | `RemoveNoOpOperatorsPass` | Removes operators that preserve the complete input tensor contract |
+| `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
 | `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
 
-`--passes` defaults to `dce,compact`. To remove redundant layout patterns, select the
-three-pass pipeline shown above. Its order matters: the layout pass rewires dataflow,
-`dce` removes the newly dead operators, and `compact` removes and remaps unused objects.
+`--passes` defaults to `dce,compact`. View simplification is intentionally split
+across three passes: `simplify-view-ops` rewires dataflow, `dce` removes newly dead
+operators, and `compact` removes and remaps unused tensors, buffers, and operator codes.
 
 Fold supported constant subgraphs and compact the newly unused objects with:
 
@@ -310,6 +335,17 @@ tico-circle optimize model.circle \
   --passes fold-constant-subgraph,compact \
   -o model.constant-folded.circle
 ```
+
+Canonicalize and simplify equivalent view and no-op patterns with restart scheduling:
+
+```bash
+tico-circle optimize model.circle \
+  --passes canonicalize-equivalent-ops,simplify-view-ops,remove-no-op-operators,dce,compact \
+  --strategy restart \
+  -o model.simplified.circle
+```
+
+Restart scheduling lets a later rewrite expose an earlier canonicalization candidate.
 
 The constant-folding pass preserves existing output tensor indices, so graph outputs
 and signature output mappings remain stable. It skips dynamic contracts, external
@@ -349,7 +385,7 @@ Run the bounded-region pass with restart scheduling and cleanup:
 
 ```bash
 tico-circle optimize model.circle \
-  --passes eliminate-transpose-bounded-layout-region,remove-redundant-layout-ops,dce,compact \
+  --passes eliminate-transpose-bounded-layout-region,simplify-view-ops,dce,compact \
   --strategy restart \
   -o model.optimized.circle
 ```
@@ -361,7 +397,7 @@ Use `-` for a binary stream:
 ```bash
 tico-circle extract model.circle --ops 0-100 -o - \
   | tico-circle optimize - \
-      --passes remove-redundant-layout-ops,dce,compact \
+      --passes simplify-view-ops,dce,compact \
       -o output.circle
 ```
 
@@ -438,6 +474,10 @@ Important test scenarios include:
 - scalar and vector control-flow subgraph reference remapping
 - metadata buffer preservation and remapping
 - constant-fold fixed points, budgets, overflow rejection, and multi-output rollback
+- equivalent-op canonicalization with static constants and output-contract checks
+- no-op removal with graph-output and signature remapping
+- identity and chained view simplification with malformed-pattern rejection
+- generated Circle round-trip value preservation for representative PR 3 rewrites
 
 ## Current limitations
 
