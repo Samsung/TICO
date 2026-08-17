@@ -25,13 +25,14 @@ from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokeniz
 from tico.quantization import prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
+from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
-    Qwen3VLVisionPrefillExportAdapter,
     Qwen3VLVisualEmbeddingFusionAdapter,
 )
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer import (
     QuantQwen3VLTextDecoderLayer,
 )
+from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
 
 DEFAULT_IMAGE_MAX_PIXELS = 1280 * 28 * 28
@@ -467,20 +468,8 @@ def _append_token_type_zero(
 
 
 def _image_grid_tuple(image_grid_thw: torch.Tensor) -> tuple[int, int, int]:
-    """Convert a single-image grid tensor to a Python tuple."""
-    if image_grid_thw is None:
-        raise ValueError("image_grid_thw is required for image prefill.")
-    if (
-        image_grid_thw.dim() != 2
-        or image_grid_thw.size(0) != 1
-        or image_grid_thw.size(1) != 3
-    ):
-        raise ValueError(
-            "Only one fixed image is supported. Expected image_grid_thw shape `(1, 3)`, "
-            f"got {tuple(image_grid_thw.shape)}."
-        )
-    values = [int(x) for x in image_grid_thw[0].tolist()]
-    return (values[0], values[1], values[2])
+    """Normalize a single-image grid through the shared profile contract."""
+    return Qwen3VLVisionProfile.from_grid_thw(image_grid_thw).grid_thw
 
 
 def _processor_input_keys(batch: dict[str, Any]) -> dict[str, Any]:
@@ -540,6 +529,16 @@ class StaticQwen3VLTextLayerRuntime:
         self.rotate_lm_head = getattr(self.model, "rotate_lm_head", None)
         self.layers_ref = self.text_model.layers
 
+        self._vision_model = (
+            PTQWrapHelper(strict_wrap=True)
+            .wrap_supported(
+                self.qwen_model.visual,
+                PTQConfig(),
+            )
+            .to(self.device)
+            .eval()
+        )
+
         if layers is None:
             self.layers = nn.ModuleList(
                 [_clone_quant_layer(layer) for layer in self.layers_ref]
@@ -575,8 +574,7 @@ class StaticQwen3VLTextLayerRuntime:
         self.layer_caches: list[LayerCache] = []
         self.past_len = 0
         self.rope_delta = torch.zeros(1, 1, dtype=torch.long, device=self.device)
-        self.vision_prefill_adapter: Optional[Qwen3VLVisionPrefillExportAdapter] = None
-        self.vision_grid_thw: Optional[tuple[int, int, int]] = None
+        self.vision_prefill_adapters: dict[Qwen3VLVisionProfile, nn.Module] = {}
         self.visual_fusion_adapter: Optional[Qwen3VLVisualEmbeddingFusionAdapter] = None
 
     def reset_cache(self) -> None:
@@ -731,32 +729,29 @@ class StaticQwen3VLTextLayerRuntime:
         position_ids[:, 0, attention_mask[0].bool()] = valid_positions
         return position_ids
 
-    def _create_vision_prefill_adapter(
+    def _get_or_create_vision_prefill_adapter(
         self,
         image_grid_thw: torch.Tensor,
-        visual_start_idx: int,
-    ) -> None:
-        """Create or refresh the fixed-grid vision prefill adapter."""
-        grid_tuple = _image_grid_tuple(image_grid_thw)
-        if (
-            self.vision_prefill_adapter is not None
-            and self.vision_grid_thw == grid_tuple
-        ):
-            return
-
+    ) -> nn.Module:
+        """Select or create the static adapter for one CPU-owned profile."""
         spatial_merge_size = int(self.qwen_model.visual.spatial_merge_size)
-        qcfg = PTQConfig(
-            model_args={
-                "vision": {
-                    "grid_thw": grid_tuple,
-                    "visual_start_idx": visual_start_idx,
-                    "spatial_merge_size": spatial_merge_size,
-                }
-            }
+        profile = Qwen3VLVisionProfile.from_grid_thw(image_grid_thw)
+        profile.validate_spatial_merge_size(spatial_merge_size)
+
+        adapter = self.vision_prefill_adapters.get(profile)
+        if adapter is not None:
+            return adapter
+
+        adapter = (
+            self._vision_model.as_export_module(
+                mode="prefill",
+                grid_thw=profile,
+            )
+            .to(self.device)
+            .eval()
         )
-        wrapped_visual = prepare(self.qwen_model.visual, qcfg).to(self.device)
-        self.vision_prefill_adapter = wrapped_visual.as_export_module(mode="prefill")
-        self.vision_grid_thw = grid_tuple
+        self.vision_prefill_adapters[profile] = adapter
+        return adapter
 
     def _find_visual_span(
         self,
@@ -833,14 +828,11 @@ class StaticQwen3VLTextLayerRuntime:
         self,
         pixel_values: torch.Tensor,
         image_grid_thw: torch.Tensor,
-        visual_start_idx: int,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-        """Run the fixed-grid vision adapter and return image/DeepStack features."""
-        self._create_vision_prefill_adapter(image_grid_thw, visual_start_idx)
-        assert self.vision_prefill_adapter is not None
-        image_embeds, deepstack_features = self.vision_prefill_adapter(
+        """Run the selected pixel-only vision profile adapter."""
+        vision_prefill = self._get_or_create_vision_prefill_adapter(image_grid_thw)
+        image_embeds, deepstack_features = vision_prefill(
             pixel_values.to(self.device),
-            image_grid_thw.to(self.device),
         )
         return image_embeds.to(self.device), tuple(
             feature.to(self.device) for feature in deepstack_features
@@ -870,24 +862,17 @@ class StaticQwen3VLTextLayerRuntime:
                 "image_grid_thw is required when pixel_values is provided."
             )
 
-        # Bootstrap visual_start_idx from input IDs if the caller did not fix it.
+        # Validate image placeholders before running the vision profile.
         image_token_id = int(self.model.config.image_token_id)
         bootstrap_mask = input_ids[0].eq(image_token_id) & valid[0]
         if bootstrap_mask.sum().item() == 0:
             raise ValueError(
                 "pixel_values were provided but no image tokens were found."
             )
-        bootstrap_start = int(torch.nonzero(bootstrap_mask, as_tuple=True)[0][0].item())
-        configured_start = (
-            self.visual_start_idx
-            if self.visual_start_idx is not None
-            else bootstrap_start
-        )
 
         image_embeds, deepstack_features = self._run_vision_prefill(
             pixel_values,
             image_grid_thw,
-            configured_start,
         )
         visual_start_idx, visual_len = self._find_visual_span(
             input_ids,

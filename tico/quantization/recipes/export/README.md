@@ -55,17 +55,24 @@ effective_config.yaml
 export_inputs.pt
 ```
 
-Qwen3-VL `circle_per_layer` export uses stable runtime-stage names:
+Qwen3-VL `circle_per_layer` export profile-qualifies every graph whose tensor
+shape depends on the vision grid. Text-only stages keep stable shared names:
 
 ```text
-vision_prefill.q.circle
+vision_prefill_t<T>_h<H>_w<W>.q.circle
 token_embedding.q.circle
-multimodal_embedding_prefill.q.circle
+multimodal_embedding_prefill_t<T>_h<H>_w<W>.q.circle
 decoder_layer_prefill_<index>.q.circle
-deepstack_fusion_<index>.q.circle
+deepstack_fusion_<index>_t<T>_h<H>_w<W>.q.circle
 decoder_layer_decode_<index>.q.circle
 lm_head.q.circle
 ```
+
+For example, `grid_thw: [1, 54, 72]` produces
+`vision_prefill_t1_h54_w72.q.circle`. The vision profile is baked into the
+vision, multimodal-embedding, and DeepStack graph shapes. The vision NPU graph
+accepts only `pixel_values`; `image_grid_thw` remains a CPU-runtime value used
+to select the matching profile-specific artifacts.
 
 The output directory should come from `export.output_dir`.
 
@@ -90,7 +97,11 @@ Return a `Path` so callers can store it in `ctx.artifacts` or assert it in tests
 For very simple helpers, positional arguments are acceptable:
 
 ```python
-def save_checkpoint(model: Any, output_dir: str | Path, name: str = "quantized_model.pt") -> Path:
+def save_checkpoint(
+    model: Any,
+    output_dir: str | Path,
+    name: str = "quantized_model.pt",
+) -> Path:
     ...
 ```
 

@@ -19,9 +19,13 @@ import torch.nn as nn
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
+from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
+    Qwen3VLVisionGridInput,
+    Qwen3VLVisionProfile,
+)
 from tico.quantization.wrapq.wrappers.registry import try_register
 from tico.utils.compat.transformers import qwen3_vl_has_deepstack_model_output
 
@@ -31,12 +35,10 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
     """
     Quantization wrapper for Qwen3VLVisionModel module.
 
-    This is the main vision model that processes image/video patches through:
-    - Patch embedding
-    - Position embedding (spatial)
-    - Rotary position embedding (RoPE)
-    - Transformer blocks
-    - Patch merger
+    The wrapper owns quantized model computation and observer state, but no
+    deployment grid. Eager calibration and evaluation derive metadata from the
+    runtime ``grid_thw`` argument, while fixed-grid export adapters materialize
+    their own profile-specific tensors.
     """
 
     has_deepstack_model_output: bool = qwen3_vl_has_deepstack_model_output()
@@ -59,24 +61,6 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self.num_grid_per_side = int(cfg.num_position_embeddings**0.5)
         self.deepstack_visual_indexes = cfg.deepstack_visual_indexes
 
-        # Extract vision_grid_thw from config for precomputing RoPE embeddings
-        self.vision_grid_thw = self._get_vision_grid_thw(qcfg)
-
-        # Precompute cumulative sequence lengths
-        cu_seqlens = self._precompute_cu_seqlens(self.vision_grid_thw)
-        self.register_buffer("cu_seqlens_template", cu_seqlens, persistent=False)
-
-        # Precompute fast position embeddings
-        pos_embeds = QuantQwen3VLVisionModel._fast_pos_embed_interpolate(
-            merge_size=self.spatial_merge_size,
-            num_grid_per_side=self.num_grid_per_side,
-            pos_embedder=fp_model.pos_embed,
-            grid_thw=self.vision_grid_thw,
-        )
-        self.register_buffer(
-            "pos_embed_template", pos_embeds.detach(), persistent=False
-        )
-
         # Precompute rotary frequency table for RoPE
         self.dim = (
             fp_model.rotary_pos_emb.dim
@@ -90,15 +74,6 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         )
         inv_freq = self._precompute_rope_inv_freq(dim=self.dim, theta=self.theta)
         self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
-
-        # Precompute RoPE position embeddings for fixed vision_grid_thw
-        cos_t, sin_t = QuantQwen3VLVisionModel._precompute_rope_position_embeddings(
-            merge_size=self.spatial_merge_size,
-            rope_inv_freq=self.rope_inv_freq,
-            grid_thw=self.vision_grid_thw,
-        )
-        self.register_buffer("rope_cos_template", cos_t, persistent=False)
-        self.register_buffer("rope_sin_template", sin_t, persistent=False)
 
         # Wrap patch embedder
         self.patch_embed = PTQWrapper(
@@ -152,30 +127,6 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self.obs_rope_sin = mk("rope_sin")
 
     @staticmethod
-    def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> torch.Tensor:
-        grid_thw = get_model_arg(qcfg, "vision", "grid_thw", default=None)
-        if grid_thw is None:
-            raise ValueError(
-                "vision.grid_thw must be specified in PTQConfig.model_args for "
-                "QuantQwen3VLVisionModel.\n"
-                "Example:\n"
-                "PTQConfig(\n"
-                "    model_args={\n"
-                "        'vision': {\n"
-                "            'grid_thw': (8, 24, 24),\n"
-                "        }\n"
-                "    }\n"
-                ")"
-            )
-
-        if type(grid_thw) is not tuple or len(grid_thw) != 3:
-            raise ValueError(
-                f"vision.grid_thw must be a tuple of length 3, but got {grid_thw}."
-            )
-
-        return torch.tensor([grid_thw], dtype=torch.long)
-
-    @staticmethod
     def _precompute_rope_inv_freq(dim: int, theta: float) -> torch.Tensor:
         """Precompute rotary frequency table for RoPE."""
         # Compute inverse frequencies
@@ -184,7 +135,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
 
     @staticmethod
     def _precompute_cu_seqlens(grid_thw: torch.Tensor) -> torch.Tensor:
-        """Precompute cumulative sequence lengths for fixed vision_grid_thw."""
+        """Compute cumulative sequence lengths for concrete vision grids."""
         # Compute cumulative sequence lengths
         from torch.nn import functional as F
 
@@ -199,7 +150,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
     def _precompute_rope_position_embeddings(
         merge_size: int, rope_inv_freq: torch.Tensor, grid_thw: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Precompute RoPE position embeddings (cos, sin) for fixed vision_grid_thw."""
+        """Compute RoPE cosine and sine tensors for concrete vision grids."""
         seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
         rotary_pos_emb = QuantQwen3VLVisionModel._rot_pos_emb(
             merge_size, rope_inv_freq, grid_thw
@@ -476,19 +427,26 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self,
         hidden_states: torch.Tensor,
         *,
+        pos_embeds: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        cu_seqlens: torch.Tensor,
         attention_split_sizes: tuple[int, ...],
         **kwargs,
     ) -> Union[torch.Tensor, tuple]:
-        """Run the fixed-profile vision path used by static export.
+        """Run the fixed-profile tensor path with adapter-owned metadata.
 
-        All grid-dependent metadata is read from buffers materialized when the
-        wrapper is constructed. No tracing-state inspection or tensor-to-Python
-        conversion is required inside the exported graph.
+        The static adapter materializes every grid-dependent tensor before graph
+        capture and passes those tensors explicitly. The quantization wrapper
+        therefore owns only model computation and observers, while each adapter
+        owns one deployment profile.
 
         Args:
-            hidden_states: Flattened patches for the configured fixed grid.
+            hidden_states: Flattened patches for the adapter's fixed grid.
+            pos_embeds: Precomputed spatial position embeddings.
+            position_embeddings: Precomputed RoPE cosine and sine tensors.
+            cu_seqlens: Precomputed cumulative sequence lengths.
             attention_split_sizes: Static Python split sizes derived from the
-                configured grid before graph capture.
+                adapter's fixed grid.
             **kwargs: Additional keyword arguments forwarded to vision blocks.
 
         Returns:
@@ -496,24 +454,36 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         """
         return self._forward_impl(
             hidden_states,
-            pos_embeds=self.pos_embed_template,
-            position_embeddings=(
-                self.rope_cos_template,
-                self.rope_sin_template,
-            ),
-            cu_seqlens=self.cu_seqlens_template,
+            pos_embeds=pos_embeds,
+            position_embeddings=position_embeddings,
+            cu_seqlens=cu_seqlens,
             attention_split_sizes=attention_split_sizes,
             **kwargs,
         )
 
-    def as_export_module(self, mode: ExportMode = "prefill") -> nn.Module:
-        """Return the fixed-grid vision adapter for static prefill export.
+    def as_export_module(
+        self,
+        mode: ExportMode = "prefill",
+        *,
+        grid_thw: (Qwen3VLVisionProfile | Qwen3VLVisionGridInput | None) = None,
+    ) -> nn.Module:
+        """Return a static vision adapter for one explicit THW profile.
 
-        The adapter always calls :meth:`forward_export`, so eager runtime
-        simulation and ``torch.export`` execute the same fixed-profile path.
+        Args:
+            mode: Export mode. Qwen3-VL vision supports prefill only.
+            grid_thw: Fixed ``(temporal, height, width)`` profile materialized
+                by the returned adapter. Ordinary eager/PTQ execution does not
+                require this value.
+
+        Returns:
+            A fixed-profile vision prefill adapter.
         """
         if mode != "prefill":
             raise ValueError(f"Unsupported Qwen3-VL vision export mode: {mode!r}")
+        if grid_thw is None:
+            raise ValueError(
+                "Qwen3-VL vision export requires an explicit grid_thw profile."
+            )
         if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
             raise RuntimeError(
                 "Qwen3-VL vision export requires NO_QUANT or QUANT mode, "
@@ -529,7 +499,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             Qwen3VLVisionPrefillExportAdapter,
         )
 
-        return Qwen3VLVisionPrefillExportAdapter(self)
+        return Qwen3VLVisionPrefillExportAdapter(self, grid_thw=grid_thw)
 
     def _all_observers(self) -> Iterable:
         """Yield all observers from this module."""
