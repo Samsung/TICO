@@ -41,17 +41,17 @@ class _QuantizedIdentity(QuantModuleBase):
     def __init__(self) -> None:
         super().__init__()
         self.weight = nn.Parameter(torch.tensor(1.0))
-        self.act_in = MinMaxObserver(
+        self.obs_act_in = MinMaxObserver(
             name="act_in",
             dtype=DType.uint(8),
             qscheme=QScheme.PER_TENSOR_ASYMM,
         )
-        self.act_out = MinMaxObserver(
+        self.obs_act_out = MinMaxObserver(
             name="act_out",
             dtype=DType.uint(8),
             qscheme=QScheme.PER_TENSOR_ASYMM,
         )
-        for observer in (self.act_in, self.act_out):
+        for observer in (self.obs_act_in, self.obs_act_out):
             observer.load_qparams(
                 torch.tensor(0.25),
                 torch.tensor(0, dtype=torch.int),
@@ -59,12 +59,12 @@ class _QuantizedIdentity(QuantModuleBase):
             )
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        value = self.act_in.fake_quant(input_)
+        value = self.obs_act_in.fake_quant(input_)
         value = value * self.weight
-        return self.act_out.fake_quant(value)
+        return self.obs_act_out.fake_quant(value)
 
     def _all_observers(self):
-        return self.act_in, self.act_out
+        return self.obs_act_in, self.obs_act_out
 
 
 class _Model(nn.Module):
@@ -130,15 +130,15 @@ class BlockReconstructionTest(unittest.TestCase):
         )
         torch.testing.assert_close(model.block.weight, weight_before)
         self.assertEqual(model.block.weight.requires_grad, requires_grad_before)
-        in_scale, in_zero_point = model.block.act_in.compute_qparams()
-        out_scale, out_zero_point = model.block.act_out.compute_qparams()
+        in_scale, in_zero_point = model.block.obs_act_in.compute_qparams()
+        out_scale, out_zero_point = model.block.obs_act_out.compute_qparams()
         torch.testing.assert_close(in_scale, out_scale)
         torch.testing.assert_close(in_zero_point, out_zero_point)
         self.assertNotAlmostEqual(float(in_scale), 0.25)
 
     def test_tied_group_rejects_inconsistent_initial_qparams(self) -> None:
         model = _Model()
-        model.block.act_out.load_qparams(
+        model.block.obs_act_out.load_qparams(
             torch.tensor(0.125),
             torch.tensor(0, dtype=torch.int),
             lock=True,

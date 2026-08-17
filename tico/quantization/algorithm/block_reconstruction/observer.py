@@ -191,6 +191,7 @@ class LearnableObserverBinding:
     site_path: str
     owner: nn.Module
     observer_name: str
+    attribute_names: tuple[str, ...]
     original: AffineObserverBase
     proxy: LearnableAffineObserver
 
@@ -235,20 +236,15 @@ class LearnableObserverSet:
         group_bindings: list[LearnableObserverGroupBinding] = []
         try:
             for group in requested:
-                originals: list[tuple[str, QuantizationSite]] = []
+                originals: list[tuple[str, QuantizationSite, tuple[str, ...]]] = []
                 for path in group.site_paths:
                     site = sites[path]
                     if not isinstance(site.observer, AffineObserverBase):
                         raise TypeError(
                             f"Quantization site {path!r} is not an affine observer."
                         )
-                    current = getattr(site.module, site.observer_name, None)
-                    if current is not site.observer:
-                        raise RuntimeError(
-                            f"Observer attribute {site.observer_name!r} for site "
-                            f"{path!r} does not reference the reported observer."
-                        )
-                    originals.append((path, site))
+                    attribute_names = _observer_attribute_names(site)
+                    originals.append((path, site, attribute_names))
 
                 representative = originals[0][1].observer
                 assert isinstance(representative, AffineObserverBase)
@@ -267,18 +263,19 @@ class LearnableObserverSet:
                     minimum_scale=minimum_scale,
                 )
                 bindings: list[LearnableObserverBinding] = []
-                for path, site in originals:
+                for path, site, attribute_names in originals:
                     assert isinstance(site.observer, AffineObserverBase)
-                    setattr(site.module, site.observer_name, proxy)
                     binding = LearnableObserverBinding(
                         site_path=path,
                         owner=site.module,
                         observer_name=site.observer_name,
+                        attribute_names=attribute_names,
                         original=site.observer,
                         proxy=proxy,
                     )
                     installed.append(binding)
                     bindings.append(binding)
+                    _replace_observer(binding, proxy)
                 group_bindings.append(
                     LearnableObserverGroupBinding(
                         group=group,
@@ -288,7 +285,7 @@ class LearnableObserverSet:
                 )
         except Exception:
             for binding in reversed(installed):
-                setattr(binding.owner, binding.observer_name, binding.original)
+                _replace_observer(binding, binding.original)
             raise
 
         self.groups = tuple(group_bindings)
@@ -333,7 +330,7 @@ class LearnableObserverSet:
             for binding in group.sites:
                 _store_qparams(binding.original, scale, zero_point)
                 binding.original.fake_quant_enabled = group.proxy.fake_quant_enabled
-                setattr(binding.owner, binding.observer_name, binding.original)
+                _replace_observer(binding, binding.original)
         self._closed = True
         return qparams
 
@@ -343,12 +340,42 @@ class LearnableObserverSet:
             return
         for group in self.groups:
             for binding in group.sites:
-                setattr(binding.owner, binding.observer_name, binding.original)
+                _replace_observer(binding, binding.original)
         self._closed = True
 
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("The learnable observer set is already closed.")
+
+
+def _observer_attribute_names(site: QuantizationSite) -> tuple[str, ...]:
+    """Return direct module attributes that reference a reported observer.
+
+    QuantizationSite.observer_name is a logical observer name such as
+    ``act_out``. WrapQ modules commonly register the actual child module under
+    an attribute such as ``obs_act_out``. Resolve replacements by object
+    identity instead of assuming those two names are identical.
+    """
+    names = tuple(
+        name for name, child in site.module._modules.items() if child is site.observer
+    )
+    if names:
+        return names
+    registered = tuple(site.module._modules)
+    raise RuntimeError(
+        f"Quantization site {site.path!r} reports observer "
+        f"{site.observer_name!r}, but its owner does not directly register that "
+        f"observer; registered child modules={registered}."
+    )
+
+
+def _replace_observer(
+    binding: LearnableObserverBinding,
+    observer: ObserverBase,
+) -> None:
+    """Replace every direct attribute alias for one observer binding."""
+    for attribute_name in binding.attribute_names:
+        setattr(binding.owner, attribute_name, observer)
 
 
 def _validate_tied_observers(
