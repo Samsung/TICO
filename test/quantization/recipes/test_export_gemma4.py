@@ -180,6 +180,10 @@ def _model_args():
             "visual_start_idx": 0,
             "num_visual_tokens": 4,
             "max_soft_tokens": 4,
+            "patch_grid_height": 4,
+            "patch_grid_width": 4,
+            "image_height": 8,
+            "image_width": 8,
         }
     }
 

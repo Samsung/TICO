@@ -20,7 +20,6 @@ RoPE and mask generation, KV cache writes, shared-KV bookkeeping, and sampling.
 NPU-exportable subgraphs own quantized tensor compute.
 """
 
-import hashlib
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -36,6 +35,11 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4MMFusionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
+    Gemma4StaticVisionProfile,
+    get_gemma4_static_vision_profile,
+)
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
     build_decode_attention_mask,
@@ -45,17 +49,6 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
 # =============================================================================
 # CPU Helper Functions (pure Python, no model needed)
 # =============================================================================
-
-
-def _vision_profile_signature(
-    pixel_position_ids: torch.Tensor,
-) -> tuple[tuple[int, ...], str]:
-    """Return a stable signature for one static vision-position profile."""
-    normalized = (
-        pixel_position_ids.detach().to(device="cpu", dtype=torch.long).contiguous()
-    )
-    digest = hashlib.sha256(normalized.numpy().tobytes()).hexdigest()
-    return tuple(normalized.shape), digest
 
 
 def _normalize_valid_token_mask(
@@ -212,13 +205,14 @@ class StaticGemma4RuntimeConfig:
 
     model: str = "google/gemma-4-e2b-it"
     max_seq: int = 2048
-    image_height: int = 896
-    image_width: int = 896
-    visual_start_idx: int = 1
-    num_visual_tokens: int = 256
+    vision_profile: str = DEFAULT_GEMMA4_STATIC_VISION_PROFILE
+    image_height: Optional[int] = None
+    image_width: Optional[int] = None
+    visual_start_idx: Optional[int] = None
+    num_visual_tokens: Optional[int] = None
     padding_side: str = "right"
     device: str = "cpu"
-    prompt: str = "Describe the image."
+    prompt: str = "<|image|>Describe the image."
     verify_steps: int = 4
     gen_steps: int = 16
 
@@ -232,6 +226,7 @@ class StaticGemma4Runtime:
         processor: AutoProcessor,
         *,
         layout: StaticGemma4Layout,
+        vision_profile: Optional[Gemma4StaticVisionProfile] = None,
         device: str = "cpu",
     ):
         """Create a runtime around a Gemma4 E2B model."""
@@ -245,16 +240,33 @@ class StaticGemma4Runtime:
         self.device = torch.device(device)
         self.config = model.config
         self.text_config = model.config.get_text_config()
+        if vision_profile is None:
+            vision_profile = get_gemma4_static_vision_profile(
+                DEFAULT_GEMMA4_STATIC_VISION_PROFILE
+            )
+        vision_profile.validate(
+            max_seq_len=layout.max_seq,
+            vision_config=model.config.vision_config,
+        )
+        vision_profile.validate_processor(processor)
+        if layout.visual_start_idx != vision_profile.visual_start_idx:
+            raise ValueError(
+                "StaticGemma4Layout.visual_start_idx does not match the vision "
+                f"profile: layout={layout.visual_start_idx}, "
+                f"profile={vision_profile.visual_start_idx}."
+            )
+        if layout.num_visual_tokens != vision_profile.num_visual_tokens:
+            raise ValueError(
+                "StaticGemma4Layout.num_visual_tokens does not match the vision "
+                f"profile: layout={layout.num_visual_tokens}, "
+                f"profile={vision_profile.num_visual_tokens}."
+            )
+        self.vision_profile = vision_profile
 
         qcfg = build_gemma4_e2b_ptq_config(
             num_text_layers=int(self.text_config.num_hidden_layers),
             num_vision_layers=int(model.config.vision_config.num_hidden_layers),
-            model_args={
-                "vision": {
-                    "visual_start_idx": layout.visual_start_idx,
-                    "num_visual_tokens": layout.num_visual_tokens,
-                }
-            },
+            model_args={"vision": vision_profile.to_vision_model_args()},
         )
         # Runtime simulation must stay in NO_QUANT mode until a calibrated
         # checkpoint is supplied. This matches the floating-point Circle
@@ -278,10 +290,9 @@ class StaticGemma4Runtime:
         )
 
         self.vision_prefill: Optional[nn.Module] = None
-        self._vision_profile_key: Optional[tuple[tuple[int, ...], str]] = None
         self.mm_fusion = Gemma4MMFusionExportAdapter(
-            visual_start_idx=layout.visual_start_idx,
-            num_visual_tokens=layout.num_visual_tokens,
+            visual_start_idx=vision_profile.visual_start_idx,
+            num_visual_tokens=vision_profile.num_visual_tokens,
         ).to(self.device)
         self.lm_head = Gemma4LMHeadExportAdapter(wrapped_top).to(self.device)
 
@@ -310,28 +321,17 @@ class StaticGemma4Runtime:
         self,
         image_position_ids: Optional[torch.Tensor],
     ) -> nn.Module:
-        """Return the static vision module for this runtime's fixed profile.
-
-        ``QuantGemma4VisionModel.as_export_module`` stores profile-specific
-        buffers on the wrapped model. Re-specializing the same wrapper would
-        invalidate an adapter created for an earlier profile, so one runtime
-        instance intentionally accepts exactly one position-ID profile.
-        """
+        """Return the static vision module for the canonical runtime profile."""
         if image_position_ids is None:
             raise ValueError(
                 "Gemma4 static vision prefill requires image_position_ids from "
                 "the processor."
             )
+        self.vision_profile.validate_image_position_ids(image_position_ids)
 
-        profile_key = _vision_profile_signature(image_position_ids)
         if self.vision_prefill is None:
-            static_position_ids = (
-                image_position_ids.detach()
-                .clone()
-                .to(
-                    device=self.device,
-                    dtype=torch.long,
-                )
+            static_position_ids = self.vision_profile.build_image_position_ids(
+                device=self.device
             )
             self.vision_prefill = (
                 build_gemma4_vision_prefill_export_module(
@@ -340,21 +340,6 @@ class StaticGemma4Runtime:
                 )
                 .to(self.device)
                 .eval()
-            )
-            self._vision_profile_key = profile_key
-            return self.vision_prefill
-
-        if profile_key != self._vision_profile_key:
-            expected_shape = (
-                self._vision_profile_key[0]
-                if self._vision_profile_key is not None
-                else None
-            )
-            raise ValueError(
-                "StaticGemma4Runtime supports one image_position_ids profile "
-                "per instance. Create a new runtime for a different image "
-                f"layout. expected_shape={expected_shape}, "
-                f"actual_shape={tuple(image_position_ids.shape)}."
             )
         return self.vision_prefill
 
@@ -465,39 +450,12 @@ class StaticGemma4Runtime:
         # CRITICAL: image_token_id from self.config, NOT self.text_config
         image_token_id = getattr(self.config, "image_token_id", None)
 
-        # Validate that image placeholder positions match the static export profile
-        if image_token_id is not None:
-            raw_input_ids = inputs["input_ids"]  # (1, seq_len)
-            image_mask = raw_input_ids[0] == image_token_id
-            image_positions = torch.nonzero(image_mask, as_tuple=True)[0]
-            if image_positions.numel() == 0:
-                raise ValueError(
-                    "No image placeholder tokens found in processor output"
-                )
-            actual_start = int(image_positions[0].item())
-            actual_count = int(image_positions.numel())
-            expected_positions = torch.arange(
-                actual_start,
-                actual_start + actual_count,
-                device=image_positions.device,
-            )
-            if not torch.equal(image_positions, expected_positions):
-                raise ValueError(
-                    "Image placeholder tokens must form one contiguous span. "
-                    f"positions={image_positions.tolist()}"
-                )
-            if actual_start != self.layout.visual_start_idx:
-                raise ValueError(
-                    "Processor output does not match the static export profile: "
-                    f"expected visual_start_idx={self.layout.visual_start_idx}, "
-                    f"actual={actual_start}"
-                )
-            if actual_count != self.layout.num_visual_tokens:
-                raise ValueError(
-                    "Processor output does not match the static export profile: "
-                    f"expected num_visual_tokens={self.layout.num_visual_tokens}, "
-                    f"actual={actual_count}"
-                )
+        if image_token_id is None:
+            raise ValueError("Gemma4 config.image_token_id is required.")
+        self.vision_profile.validate_processor_outputs(
+            inputs,
+            image_token_id=int(image_token_id),
+        )
 
         padded_input_ids = torch.full(
             (max_seq,), pad_token_id, dtype=input_ids.dtype, device=self.device
@@ -1867,10 +1825,29 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
     model = AutoModelForImageTextToText.from_pretrained(cfg.model)
     processor = AutoProcessor.from_pretrained(cfg.model)
 
+    vision_profile = get_gemma4_static_vision_profile(cfg.vision_profile)
+    vision_profile.validate(
+        max_seq_len=cfg.max_seq,
+        vision_config=model.config.vision_config,
+    )
+    legacy_fields = {
+        "image_height": vision_profile.image_height,
+        "image_width": vision_profile.image_width,
+        "visual_start_idx": vision_profile.visual_start_idx,
+        "num_visual_tokens": vision_profile.num_visual_tokens,
+    }
+    for field_name, expected in legacy_fields.items():
+        configured = getattr(cfg, field_name)
+        if configured is not None and int(configured) != expected:
+            raise ValueError(
+                f"StaticGemma4RuntimeConfig.{field_name} conflicts with vision "
+                f"profile {vision_profile.name!r}: "
+                f"configured={int(configured)}, expected={expected}."
+            )
     layout = StaticGemma4Layout(
         max_seq=cfg.max_seq,
-        visual_start_idx=cfg.visual_start_idx,
-        num_visual_tokens=cfg.num_visual_tokens,
+        visual_start_idx=vision_profile.visual_start_idx,
+        num_visual_tokens=vision_profile.num_visual_tokens,
     )
 
     print("[run_static_gemma4_runtime] Creating StaticGemma4Runtime ...")
@@ -1878,13 +1855,18 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         model=model,
         processor=processor,
         layout=layout,
+        vision_profile=vision_profile,
         device=cfg.device,
     )
 
     # --- Load a test image ---
     from PIL import Image
 
-    image = Image.new("RGB", (cfg.image_width, cfg.image_height), color="white")
+    image = Image.new(
+        "RGB",
+        (vision_profile.image_width, vision_profile.image_height),
+        color="white",
+    )
 
     # --- Step 1: build_static_inputs validation ---
     print("[run_static_gemma4_runtime] Step 1: verify build_static_inputs")

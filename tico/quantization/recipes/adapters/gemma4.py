@@ -54,6 +54,10 @@ from tico.quantization.recipes.utils import (
     quant_spec_from_config,
     torch_dtype_from_name,
 )
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    build_gemma4_static_vision_profile,
+    canonicalize_gemma4_static_vision_model_args,
+)
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
 
 
@@ -139,6 +143,29 @@ class Gemma4Adapter(ModelAdapter):
                 int(ctx.model.config.text_config.max_position_embeddings),
                 int(calib_seq_len),
             )
+
+        model_args = ctx.cfg.get("model_args", {})
+        if isinstance(model_args, Mapping):
+            vision_args = model_args.get("vision", {})
+            if (
+                isinstance(vision_args, Mapping)
+                and vision_args.get("profile") is not None
+            ):
+                normalized_model_args = canonicalize_gemma4_static_vision_model_args(
+                    model_args
+                )
+                max_seq_len = int(
+                    calib_seq_len
+                    or ctx.model.config.get_text_config().max_position_embeddings
+                )
+                profile = build_gemma4_static_vision_profile(
+                    normalized_model_args,
+                    vision_config=ctx.model.config.vision_config,
+                    max_seq_len=max_seq_len,
+                )
+                profile.validate_processor(ctx.processor)
+                ctx.cfg["model_args"] = normalized_model_args
+                ctx.artifacts["gemma4_static_vision_profile"] = profile
         return ctx
 
     @staticmethod

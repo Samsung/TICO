@@ -17,12 +17,9 @@ calibration:
 
 model_args:
   vision:
-    visual_start_idx: 0
-    num_visual_tokens: 256
-    max_soft_tokens: 280
-    image_height: 896
-    image_width: 896
+    profile: e2b_57x42_266
     validate_static_layout: false
+
 
 pipeline: []
 

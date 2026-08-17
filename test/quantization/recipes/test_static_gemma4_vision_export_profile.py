@@ -34,6 +34,9 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
     Gemma4VisionPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    Gemma4StaticVisionProfile,
+)
 
 
 class _FakePTQWrapper(nn.Module):
@@ -107,6 +110,16 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
             dtype=torch.long,
         )
         self.pixel_values = torch.randn(1, 4, 3)
+        self.profile = Gemma4StaticVisionProfile(
+            name="tiny",
+            visual_start_idx=0,
+            num_visual_tokens=4,
+            max_soft_tokens=4,
+            patch_grid_height=2,
+            patch_grid_width=2,
+            patch_size=1,
+            pooling_kernel_size=1,
+        )
 
     def test_builder_returns_complete_static_vision_stage(self) -> None:
         """The shared builder should specialize vision and retain projection."""
@@ -135,7 +148,7 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
             _wrapped_model=wrapped_model,
             device=torch.device("cpu"),
             vision_prefill=None,
-            _vision_profile_key=None,
+            vision_profile=self.profile,
         )
 
         first = StaticGemma4Runtime._get_or_create_vision_prefill(
@@ -157,7 +170,7 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
             _wrapped_model=wrapped_model,
             device=torch.device("cpu"),
             vision_prefill=None,
-            _vision_profile_key=None,
+            vision_profile=self.profile,
         )
         StaticGemma4Runtime._get_or_create_vision_prefill(
             runtime,
@@ -166,7 +179,7 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
         changed = self.position_ids.clone()
         changed[0, 0, 0] = 7
 
-        with self.assertRaisesRegex(ValueError, "one image_position_ids profile"):
+        with self.assertRaisesRegex(ValueError, "does not match"):
             StaticGemma4Runtime._get_or_create_vision_prefill(runtime, changed)
 
     def test_runtime_requires_processor_position_ids(self) -> None:
@@ -175,7 +188,7 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
             _wrapped_model=_FakeWrappedModel(),
             device=torch.device("cpu"),
             vision_prefill=None,
-            _vision_profile_key=None,
+            vision_profile=self.profile,
         )
 
         with self.assertRaisesRegex(ValueError, "requires image_position_ids"):

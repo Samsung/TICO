@@ -15,7 +15,6 @@
 """Smoke cases for Gemma4 wrapper checks."""
 
 from dataclasses import dataclass
-from math import isqrt
 from typing import Any, Mapping
 
 import torch
@@ -28,6 +27,11 @@ from tico.quantization.recipes.debug.wrapper_smoke.case import (
 from tico.quantization.recipes.debug.wrapper_smoke.utils import (
     clone_module,
     smoke_section,
+)
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
+    Gemma4StaticVisionProfile,
+    get_gemma4_static_vision_profile,
 )
 
 
@@ -60,9 +64,14 @@ _GEMMA4_E2B_WIDTH_PROFILES = frozenset(
 
 _GEMMA4_E2B_PLE_DIM = 256
 _GEMMA4_E2B_STATIC_MAX_SEQ = 2_048
-_GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS = 256
-_GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS = 280
-_GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE = 3
+_GEMMA4_E2B_STATIC_PROFILE = get_gemma4_static_vision_profile(
+    DEFAULT_GEMMA4_STATIC_VISION_PROFILE
+)
+_GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS = _GEMMA4_E2B_STATIC_PROFILE.num_visual_tokens
+_GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS = _GEMMA4_E2B_STATIC_PROFILE.max_soft_tokens
+_GEMMA4_E2B_STATIC_PATCH_GRID_HEIGHT = _GEMMA4_E2B_STATIC_PROFILE.patch_grid_height
+_GEMMA4_E2B_STATIC_PATCH_GRID_WIDTH = _GEMMA4_E2B_STATIC_PROFILE.patch_grid_width
+_GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE = _GEMMA4_E2B_STATIC_PROFILE.pooling_kernel_size
 _GEMMA4_SUPPORTED_MAX_SOFT_TOKENS = frozenset({70, 140, 280, 560, 1_120})
 
 # The E2B-width profiles intentionally cover bounded module-level cases and
@@ -108,23 +117,14 @@ class Gemma4StaticRuntimeShape:
     max_seq: int = _GEMMA4_E2B_STATIC_MAX_SEQ
     num_visual_tokens: int = _GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS
     max_soft_tokens: int = _GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS
+    patch_grid_height: int = _GEMMA4_E2B_STATIC_PATCH_GRID_HEIGHT
+    patch_grid_width: int = _GEMMA4_E2B_STATIC_PATCH_GRID_WIDTH
     pooling_kernel_size: int = _GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE
 
     def __post_init__(self) -> None:
         if self.max_seq < 2:
             raise ValueError(
                 f"Gemma4 static max_seq must be at least 2, got {self.max_seq}."
-            )
-        if self.num_visual_tokens <= 0:
-            raise ValueError(
-                "Gemma4 static num_visual_tokens must be positive, got "
-                f"{self.num_visual_tokens}."
-            )
-        if self.max_soft_tokens < self.num_visual_tokens:
-            raise ValueError(
-                "Gemma4 static max_soft_tokens must be greater than or equal to "
-                f"num_visual_tokens, got {self.max_soft_tokens} < "
-                f"{self.num_visual_tokens}."
             )
         if self.max_soft_tokens not in _GEMMA4_SUPPORTED_MAX_SOFT_TOKENS:
             supported = ", ".join(
@@ -134,33 +134,33 @@ class Gemma4StaticRuntimeShape:
                 "Gemma4 static max_soft_tokens must match a processor-supported "
                 f"budget ({supported}), got {self.max_soft_tokens}."
             )
-        if self.pooling_kernel_size != _GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE:
-            raise ValueError(
-                "Gemma4 E2B static-runtime smoke currently requires "
-                f"pooling_kernel_size={_GEMMA4_E2B_VISION_POOLING_KERNEL_SIZE}."
-            )
 
-        visual_side = isqrt(self.num_visual_tokens)
-        if visual_side * visual_side != self.num_visual_tokens:
-            raise ValueError(
-                "Gemma4 static num_visual_tokens must form a square visual grid, "
-                f"got {self.num_visual_tokens}."
-            )
-
-    @property
-    def visual_grid_side(self) -> int:
-        """Return the valid post-pooling visual-grid width and height."""
-        return isqrt(self.num_visual_tokens)
+        profile = Gemma4StaticVisionProfile(
+            name="wrapper_smoke",
+            visual_start_idx=_GEMMA4_E2B_STATIC_PROFILE.visual_start_idx,
+            num_visual_tokens=self.num_visual_tokens,
+            max_soft_tokens=self.max_soft_tokens,
+            patch_grid_height=self.patch_grid_height,
+            patch_grid_width=self.patch_grid_width,
+            patch_size=_GEMMA4_E2B_STATIC_PROFILE.patch_size,
+            pooling_kernel_size=self.pooling_kernel_size,
+        )
+        profile.validate(max_seq_len=self.max_seq)
 
     @property
-    def patch_grid_side(self) -> int:
-        """Return the valid pre-pooling patch-grid width and height."""
-        return self.visual_grid_side * self.pooling_kernel_size
+    def visual_grid_height(self) -> int:
+        """Return the valid post-pooling visual-grid height."""
+        return self.patch_grid_height // self.pooling_kernel_size
+
+    @property
+    def visual_grid_width(self) -> int:
+        """Return the valid post-pooling visual-grid width."""
+        return self.patch_grid_width // self.pooling_kernel_size
 
     @property
     def num_valid_patches(self) -> int:
         """Return the number of non-padding patches in the fixed input."""
-        return self.num_visual_tokens * self.pooling_kernel_size**2
+        return self.patch_grid_height * self.patch_grid_width
 
     @property
     def num_patches(self) -> int:
@@ -250,13 +250,23 @@ def _gemma4_static_runtime_shape(
     if not isinstance(static_cfg, Mapping):
         raise ValueError("debug.wrapper_smoke.gemma4.static_runtime must be a mapping.")
 
+    profile = get_gemma4_static_vision_profile(
+        str(static_cfg.get("profile", DEFAULT_GEMMA4_STATIC_VISION_PROFILE))
+    )
     return Gemma4StaticRuntimeShape(
         max_seq=int(static_cfg.get("max_seq", _GEMMA4_E2B_STATIC_MAX_SEQ)),
         num_visual_tokens=int(
-            static_cfg.get("num_visual_tokens", _GEMMA4_E2B_STATIC_NUM_VISUAL_TOKENS)
+            static_cfg.get("num_visual_tokens", profile.num_visual_tokens)
         ),
-        max_soft_tokens=int(
-            static_cfg.get("max_soft_tokens", _GEMMA4_E2B_STATIC_MAX_SOFT_TOKENS)
+        max_soft_tokens=int(static_cfg.get("max_soft_tokens", profile.max_soft_tokens)),
+        patch_grid_height=int(
+            static_cfg.get("patch_grid_height", profile.patch_grid_height)
+        ),
+        patch_grid_width=int(
+            static_cfg.get("patch_grid_width", profile.patch_grid_width)
+        ),
+        pooling_kernel_size=int(
+            static_cfg.get("pooling_kernel_size", profile.pooling_kernel_size)
         ),
     )
 
@@ -503,14 +513,14 @@ def _static_pixel_position_ids(
 ) -> torch.Tensor:
     """Create the padded 2-D patch layout used by the E2B image processor.
 
-    The default contract contains a valid ``48 x 48`` patch grid (2,304
-    patches) followed by 216 ``(-1, -1)`` padding slots. Pooling by ``3 x 3``
-    produces 280 fixed output slots, of which 24 are padding and 256 are valid
+    The default contract contains a valid ``42 x 57`` patch grid (2,394
+    patches) followed by 126 ``(-1, -1)`` padding slots. Pooling by ``3 x 3``
+    produces 280 fixed output slots, of which 14 are padding and 266 are valid
     visual tokens.
     """
     coords = torch.arange(shape.num_valid_patches)
     valid = torch.stack(
-        (coords % shape.patch_grid_side, coords // shape.patch_grid_side),
+        (coords % shape.patch_grid_width, coords // shape.patch_grid_width),
         dim=-1,
     )
     padding = torch.full(
