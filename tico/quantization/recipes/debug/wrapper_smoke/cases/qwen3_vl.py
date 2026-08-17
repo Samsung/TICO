@@ -1310,10 +1310,11 @@ class QwenVisionModelCase(QwenBaseCase):
     inplace_convert = True
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
-        """Build the vision PTQ config with static grid metadata."""
+        """Build a profile-agnostic PTQ config for the vision wrapper."""
         from tico.quantization.config.ptq import PTQConfig
 
-        return PTQConfig(model_args={"vision": {"grid_thw": self.grid_tuple}})
+        del cfg
+        return PTQConfig()
 
     def export_module(
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
@@ -1321,7 +1322,10 @@ class QwenVisionModelCase(QwenBaseCase):
         """Return the fixed-grid vision adapter used by static export."""
         del cfg
         wrapped = getattr(quantized, "wrapped", quantized)
-        return wrapped.as_export_module("prefill").eval()
+        return wrapped.as_export_module(
+            "prefill",
+            grid_thw=self.grid_tuple,
+        ).eval()
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny vision model and reference copy."""
@@ -1358,6 +1362,14 @@ class QwenVisionModelCase(QwenBaseCase):
     ) -> ForwardInput:
         """Create the vision-model evaluation sample."""
         return self._sample()
+
+    def export_input(
+        self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
+    ) -> ForwardInput:
+        """Remove the CPU-owned grid tensor from the static vision ABI."""
+        del cfg
+        pixel_values, _grid_thw = eval_sample.args
+        return ForwardInput((pixel_values,))
 
     def output_tensor(self, output: Any) -> torch.Tensor:
         """Select a stable vision-model output tensor."""

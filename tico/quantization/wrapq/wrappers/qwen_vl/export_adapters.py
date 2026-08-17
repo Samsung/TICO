@@ -17,25 +17,10 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-
-def _find_vision_grid_thw(module: nn.Module) -> torch.Tensor:
-    """Find the fixed vision grid owned by a wrapped Qwen3-VL vision model."""
-    current: Optional[nn.Module] = module
-    visited: set[int] = set()
-
-    while current is not None and id(current) not in visited:
-        visited.add(id(current))
-        grid_thw = getattr(current, "vision_grid_thw", None)
-        if isinstance(grid_thw, torch.Tensor):
-            return grid_thw
-
-        wrapped = getattr(current, "wrapped", None)
-        current = wrapped if isinstance(wrapped, nn.Module) else None
-
-    raise ValueError(
-        "Qwen3VLVisionPrefillExportAdapter requires a wrapped vision model "
-        "with fixed vision_grid_thw metadata."
-    )
+from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
+    Qwen3VLVisionGridInput,
+    Qwen3VLVisionProfile,
+)
 
 
 def _find_vision_export_model(module: nn.Module) -> nn.Module:
@@ -56,28 +41,6 @@ def _find_vision_export_model(module: nn.Module) -> nn.Module:
         "Qwen3VLVisionPrefillExportAdapter requires a wrapped vision model "
         "that implements forward_export()."
     )
-
-
-def _make_attention_split_sizes(grid_thw: torch.Tensor) -> tuple[int, ...]:
-    """Build static per-frame attention split sizes from a fixed THW grid."""
-    if grid_thw.dim() != 2 or grid_thw.size(1) != 3:
-        raise ValueError(
-            "vision_grid_thw must have shape `(N, 3)`, " f"got {tuple(grid_thw.shape)}."
-        )
-
-    split_sizes: list[int] = []
-    for temporal, height, width in grid_thw.detach().cpu().tolist():
-        temporal = int(temporal)
-        height = int(height)
-        width = int(width)
-        if temporal <= 0 or height <= 0 or width <= 0:
-            raise ValueError(
-                "vision_grid_thw values must be positive, "
-                f"got {(temporal, height, width)}."
-            )
-        split_sizes.extend([height * width] * temporal)
-
-    return tuple(split_sizes)
 
 
 class Qwen3VLTextAttentionPrefillExportAdapter(nn.Module):
@@ -303,39 +266,97 @@ class Qwen3VLTextDecoderLayerDecodeExportAdapter(nn.Module):
 
 
 class Qwen3VLVisionPrefillExportAdapter(nn.Module):
-    """Export the fixed-grid Qwen3-VL vision prefill path.
+    """Export one fixed-grid Qwen3-VL vision prefill profile.
 
-    The wrapped vision model owns the fixed-grid position, RoPE, and cumulative
-    sequence-length buffers. This adapter materializes only the Python attention
-    split sizes and always calls ``forward_export``. Eager runtime simulation
-    and ``torch.export`` therefore execute the same fixed-profile behavior.
+    The adapter owns all grid-dependent metadata. It materializes spatial
+    position embeddings, RoPE tensors, cumulative sequence lengths, attention
+    split sizes, and the stable profile identifier at construction time. The
+    wrapped quantization model remains profile-agnostic and can be reused for
+    eager calibration or evaluation with arbitrary runtime grids.
 
     Input contract:
         pixel_values:
-            Flattened image patches. The processor-native shape is
-            ``(num_patches, patch_dim)``; static NPU export uses
-            ``(1, num_patches, patch_dim)``.
-        image_grid_thw:
-            Compatibility input with shape ``(1, 3)``. The fixed grid captured
-            by the wrapped model is authoritative; this tensor is not used to
-            select execution behavior.
+            Flattened image or video patches for this adapter's fixed profile.
+            The processor-native shape is ``(num_patches, patch_dim)``; the
+            static batch-one ABI may use ``(1, num_patches, patch_dim)``.
 
     Return contract:
         ``(image_embeds, deepstack_features)``, where ``image_embeds`` is the
         merged visual token tensor and ``deepstack_features`` is a tuple of
-        merged DeepStack tensors for the configured fixed grid.
+        merged DeepStack tensors for this adapter's profile.
     """
 
-    def __init__(self, wrapped: nn.Module):
+    def __init__(
+        self,
+        wrapped: nn.Module,
+        *,
+        grid_thw: Qwen3VLVisionProfile | Qwen3VLVisionGridInput,
+    ):
         super().__init__()
         self.wrapped = _find_vision_export_model(wrapped)
-        self.attention_split_sizes = _make_attention_split_sizes(
-            _find_vision_grid_thw(self.wrapped)
+        self.profile = Qwen3VLVisionProfile.from_grid_thw(grid_thw)
+        spatial_merge_size = int(self.wrapped.spatial_merge_size)
+        self.profile.validate_spatial_merge_size(spatial_merge_size)
+        self.attention_split_sizes = self.profile.attention_split_sizes
+
+        profile_tensor = self.profile.to_tensor()
+        with torch.no_grad():
+            pos_embeds = self.wrapped._fast_pos_embed_interpolate(
+                merge_size=spatial_merge_size,
+                num_grid_per_side=self.wrapped.num_grid_per_side,
+                pos_embedder=self.wrapped.module.pos_embed,
+                grid_thw=profile_tensor,
+            ).detach()
+            cos, sin = self.wrapped._precompute_rope_position_embeddings(
+                merge_size=spatial_merge_size,
+                rope_inv_freq=self.wrapped.rope_inv_freq,
+                grid_thw=profile_tensor,
+            )
+            cu_seqlens = self.wrapped._precompute_cu_seqlens(profile_tensor)
+
+        target_device = self.wrapped.rope_inv_freq.device
+        self.register_buffer(
+            "vision_grid_thw",
+            profile_tensor.to(device=target_device),
+            persistent=False,
         )
+        self.register_buffer(
+            "pos_embed_template",
+            pos_embeds.to(device=target_device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "rope_cos_template",
+            cos.detach().to(device=target_device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "rope_sin_template",
+            sin.detach().to(device=target_device),
+            persistent=False,
+        )
+        self.register_buffer(
+            "cu_seqlens_template",
+            cu_seqlens.to(device=target_device),
+            persistent=False,
+        )
+
+    @property
+    def profile_key(self) -> str:
+        """Return the stable key for this fixed vision profile."""
+        return self.profile.key
+
+    def circle_filename(self, artifact_tag: str) -> str:
+        """Return the profile-specific vision-prefill Circle filename."""
+        return self.profile.circle_filename(artifact_tag)
+
+    def artifact_filename(self, stage: str, artifact_tag: str) -> str:
+        """Return a profile-specific filename for a shape-dependent stage."""
+        return self.profile.stage_filename(stage, artifact_tag)
 
     @staticmethod
     def _unwrap_vision_output(vision_output):
-        """Normalize Qwen3-VL vision outputs into image embeds and DeepStack features."""
+        """Normalize vision outputs into image embeds and DeepStack features."""
         if hasattr(vision_output, "pooler_output"):
             image_embeds = vision_output.pooler_output
             deepstack_features = getattr(vision_output, "deepstack_features", None)
@@ -355,15 +376,35 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        image_grid_thw: torch.Tensor,
-        **kwargs,
     ):
-        """Run fixed-grid vision prefill and return merged visual features."""
-        del image_grid_thw
+        """Run fixed-profile vision prefill and return merged features."""
+        if pixel_values.dim() not in (2, 3):
+            raise RuntimeError(
+                "pixel_values must have rank 2 or 3, "
+                f"got shape {tuple(pixel_values.shape)}."
+            )
+        if pixel_values.dim() == 3 and pixel_values.size(0) != 1:
+            raise RuntimeError(
+                "Static Qwen3-VL vision export supports batch size one, "
+                f"got shape {tuple(pixel_values.shape)}."
+            )
+        if pixel_values.size(-2) != self.profile.num_patch_tokens:
+            raise RuntimeError(
+                "pixel_values patch count does not match the static vision "
+                f"profile: expected={self.profile.num_patch_tokens}, "
+                f"actual={pixel_values.size(-2)}, "
+                f"grid_thw={self.profile.grid_thw}."
+            )
+
         vision_output = self.wrapped.forward_export(
             pixel_values,
+            pos_embeds=self.pos_embed_template,
+            position_embeddings=(
+                self.rope_cos_template,
+                self.rope_sin_template,
+            ),
+            cu_seqlens=self.cu_seqlens_template,
             attention_split_sizes=self.attention_split_sizes,
-            **kwargs,
         )
         return self._unwrap_vision_output(vision_output)
 

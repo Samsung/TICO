@@ -34,6 +34,7 @@ from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
     Qwen3VLMultimodalEmbeddingExportAdapter,
     Qwen3VLTextEmbeddingExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 from tico.utils.utils import SuppressWarning
 
 
@@ -101,12 +102,7 @@ def _normalize_model_args(model_args: Mapping[str, Any] | None) -> dict[str, Any
     grid_thw = vision.get("grid_thw")
     if grid_thw is None:
         raise ValueError("Qwen3-VL Circle export requires model_args.vision.grid_thw.")
-    if not isinstance(grid_thw, (list, tuple)) or len(grid_thw) != 3:
-        raise ValueError(
-            "model_args.vision.grid_thw must contain exactly three values "
-            "(temporal, height, width)."
-        )
-    vision["grid_thw"] = tuple(int(value) for value in grid_thw)
+    vision["grid_thw"] = Qwen3VLVisionProfile.from_grid_thw(grid_thw).grid_thw
 
     if "visual_start_idx" not in vision:
         raise ValueError(
@@ -133,10 +129,11 @@ def _prepare_qwen3_vl_export_model(
 ) -> tuple[torch.nn.Module, str]:
     """Normalize a checkpoint or FP model for staged Qwen3-VL export.
 
-    Floating-point models are structurally wrapped with the configured fixed
-    vision layout. The wrappers stay in ``NO_QUANT`` mode, so no calibration or
-    fake quantization is introduced. Converted checkpoints retain their
-    existing quantization state.
+    Floating-point models are structurally wrapped in ``NO_QUANT`` mode, so
+    no calibration or fake quantization is introduced. The vision wrapper does
+    not store fixed-grid templates; the selected vision profile is materialized
+    later by its export adapter. Converted checkpoints retain their existing
+    quantization state.
     """
     model = model.eval().cpu()
     if _is_wrapped_export_model(model):
@@ -196,19 +193,10 @@ def _resolve_vision_contract(
     qvision: torch.nn.Module,
     model_args: Mapping[str, Any],
     max_seq_len: int,
-) -> tuple[tuple[int, int, int], int, int, int]:
-    """Validate and resolve the fixed image/video export contract."""
+) -> tuple[Qwen3VLVisionProfile, int, int]:
+    """Validate and resolve the fixed image or video export profile."""
     vision_args = model_args["vision"]
-    requested_grid = tuple(int(value) for value in vision_args["grid_thw"])
-    wrapped_grid_tensor = getattr(qvision, "vision_grid_thw", None)
-    if not isinstance(wrapped_grid_tensor, torch.Tensor):
-        raise TypeError("Wrapped Qwen3-VL vision model has no vision_grid_thw tensor.")
-    wrapped_grid = tuple(int(value) for value in wrapped_grid_tensor[0].tolist())
-    if requested_grid != wrapped_grid:
-        raise ValueError(
-            "Configured grid_thw does not match the wrapped checkpoint: "
-            f"configured={requested_grid}, wrapped={wrapped_grid}."
-        )
+    vision_profile = Qwen3VLVisionProfile.from_grid_thw(vision_args["grid_thw"])
 
     visual_start_idx = int(vision_args["visual_start_idx"])
     wrapped_start_idx = int(getattr(qwen_model, "visual_start_idx"))
@@ -226,18 +214,8 @@ def _resolve_vision_contract(
             f"configured={spatial_merge_size}, wrapped={wrapped_merge_size}."
         )
 
-    grid_t, grid_h, grid_w = wrapped_grid
-    if min(grid_t, grid_h, grid_w) <= 0:
-        raise ValueError(f"grid_thw values must be positive, got {wrapped_grid}.")
-    if grid_h % spatial_merge_size or grid_w % spatial_merge_size:
-        raise ValueError(
-            "Vision grid height and width must be divisible by spatial_merge_size: "
-            f"grid_thw={wrapped_grid}, spatial_merge_size={spatial_merge_size}."
-        )
-
-    visual_tokens = (
-        grid_t * (grid_h // spatial_merge_size) * (grid_w // spatial_merge_size)
-    )
+    vision_profile.validate_spatial_merge_size(spatial_merge_size)
+    visual_tokens = vision_profile.num_visual_tokens(spatial_merge_size)
     if visual_start_idx + visual_tokens > max_seq_len:
         raise ValueError(
             "The fixed visual-token span exceeds max_seq_len: "
@@ -245,14 +223,14 @@ def _resolve_vision_contract(
             f"max_seq_len={max_seq_len}."
         )
 
-    return (grid_t, grid_h, grid_w), visual_start_idx, spatial_merge_size, visual_tokens
+    return vision_profile, visual_start_idx, visual_tokens
 
 
 def _make_vision_inputs(
     qvision: torch.nn.Module,
-    grid_thw: tuple[int, int, int],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create flattened processor-style pixel values for fixed-grid export."""
+    vision_profile: Qwen3VLVisionProfile,
+) -> torch.Tensor:
+    """Create flattened processor-style pixels for one fixed profile."""
     patch_embed = qvision.patch_embed.wrapped
     patch_vector_size = (
         int(patch_embed.in_channels)
@@ -260,10 +238,11 @@ def _make_vision_inputs(
         * int(patch_embed.patch_size)
         * int(patch_embed.patch_size)
     )
-    patch_count = int(grid_thw[0] * grid_thw[1] * grid_thw[2])
-    pixel_values = torch.randn(patch_count, patch_vector_size, device="cpu")
-    image_grid_thw = torch.tensor([grid_thw], dtype=torch.long, device="cpu")
-    return pixel_values, image_grid_thw
+    return torch.randn(
+        vision_profile.num_patch_tokens,
+        patch_vector_size,
+        device="cpu",
+    )
 
 
 def _make_prefill_attention_mask(max_seq_len: int) -> torch.Tensor:
@@ -307,8 +286,8 @@ def export_qwen3_vl_per_layer(
     The exported contract mirrors the static Qwen3-VL runtime: the vision model,
     text/multimodal embedding stages, every text decoder layer, optional
     DeepStack additions, and the final norm/LM head are separate Circle models.
-    KV-cache storage, attention-mask construction, and mRoPE lookup remain
-    runtime responsibilities.
+    KV-cache storage, attention-mask construction, mRoPE lookup, and vision
+    profile selection remain runtime responsibilities.
 
     Args:
         q_model: Floating-point or converted PTQ Qwen3-VL model.
@@ -344,12 +323,7 @@ def export_qwen3_vl_per_layer(
             f"max_seq_len={max_seq_len}, capacity={text_capacity}."
         )
 
-    (
-        grid_thw,
-        visual_start_idx,
-        _spatial_merge_size,
-        visual_tokens,
-    ) = _resolve_vision_contract(
+    vision_profile, visual_start_idx, visual_tokens = _resolve_vision_contract(
         qwen_model=qwen_model,
         qvision=qvision,
         model_args=normalized_model_args,
@@ -365,12 +339,15 @@ def export_qwen3_vl_per_layer(
     num_kv_heads = int(config.num_key_value_heads)
     vocab_size = int(config.vocab_size)
 
-    pixel_values, image_grid_thw = _make_vision_inputs(qvision, grid_thw)
-    vision_export = qvision.as_export_module(mode="prefill")
+    pixel_values = _make_vision_inputs(qvision, vision_profile)
+    vision_export = qvision.as_export_module(
+        mode="prefill",
+        grid_thw=vision_profile,
+    )
     _convert_and_save(
         vision_export,
-        (pixel_values, image_grid_thw),
-        output_dir / _circle_name("vision_prefill", artifact_tag),
+        (pixel_values,),
+        output_dir / vision_profile.circle_filename(artifact_tag),
         strict=strict,
     )
 
@@ -406,7 +383,11 @@ def export_qwen3_vl_per_layer(
             visual_start_idx=visual_start_idx,
         ),
         (prefill_input_ids, image_embeds),
-        output_dir / _circle_name(multimodal_embedding_name, artifact_tag),
+        output_dir
+        / vision_profile.stage_filename(
+            multimodal_embedding_name,
+            artifact_tag,
+        ),
         strict=strict,
     )
 
@@ -456,7 +437,10 @@ def export_qwen3_vl_per_layer(
                 ),
                 (prefill_hidden, deepstack_features),
                 output_dir
-                / _circle_name(f"deepstack_fusion_{layer_idx}", artifact_tag),
+                / vision_profile.stage_filename(
+                    f"deepstack_fusion_{layer_idx}",
+                    artifact_tag,
+                ),
                 strict=strict,
             )
 

@@ -32,6 +32,7 @@ import tico.quantization.recipes.export.qwen3_vl as qwen_export
 import torch
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
 
 class FakePTQWrapper(torch.nn.Module):
@@ -68,33 +69,37 @@ class FakeDecoderLayer(torch.nn.Module):
 
 
 class FakeVisionExport(torch.nn.Module):
-    """Represent the fixed-grid vision module returned for staged export."""
+    """Represent one profile-specialized vision graph."""
 
-    def forward(self, pixel_values, image_grid_thw):
+    def __init__(self, grid_thw):
+        super().__init__()
+        self.profile = Qwen3VLVisionProfile.from_grid_thw(grid_thw)
+
+    def forward(self, pixel_values):
         """Return placeholder image and DeepStack outputs."""
-        del image_grid_thw
         return pixel_values, ()
 
 
 class FakeVision(torch.nn.Module):
-    """Minimal fixed-grid Qwen3-VL vision wrapper."""
+    """Minimal profile-independent Qwen3-VL vision wrapper."""
 
     def __init__(self):
         super().__init__()
-        self.register_buffer(
-            "vision_grid_thw",
-            torch.tensor([[1, 4, 4]], dtype=torch.long),
-            persistent=False,
-        )
         self.spatial_merge_size = 2
         self.patch_embed = FakePTQWrapper(FakePatchEmbed())
         self.deepstack_merger_list = torch.nn.ModuleList([torch.nn.Identity()])
+        self.last_export_grid_thw = None
 
-    def as_export_module(self, mode="prefill"):
+    def as_export_module(self, mode="prefill", *, grid_thw=None):
         """Return the explicit static vision module used by the exporter."""
         if mode != "prefill":
             raise ValueError(f"Unsupported fake vision export mode: {mode!r}")
-        return FakeVisionExport()
+        if grid_thw is None:
+            raise ValueError("Fake vision export requires grid_thw.")
+        self.last_export_grid_thw = Qwen3VLVisionProfile.from_grid_thw(
+            grid_thw
+        ).grid_thw
+        return FakeVisionExport(grid_thw)
 
 
 class FakeText(torch.nn.Module):
@@ -138,7 +143,7 @@ class FakeTopLevelQwen(torch.nn.Module):
 
 
 class FakeExportModel(torch.nn.Module):
-    """Outer PTQWrapper-like model returned by prepare/convert."""
+    """Outer PTQWrapper-like model returned by prepare or convert."""
 
     def __init__(self):
         super().__init__()
@@ -157,15 +162,19 @@ def _model_args():
 
 
 class TestQwen3VLPerLayerExport(unittest.TestCase):
+    """Validate the staged exporter and profile-specific vision contract."""
+
     def test_exports_all_static_runtime_stages(self):
-        """Qwen3-VL staged export should emit prefill, decode, and DeepStack graphs."""
+        """The exporter should emit prefill, decode, and DeepStack graphs."""
         calls = []
+        vision_inputs = []
         export_model = FakeExportModel()
         dynamic_shapes = {"input_ids": {1: "S"}}
 
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
-            del module, example_inputs
             calls.append((save_path.name, kwargs.get("dynamic_shapes")))
+            if save_path.name.startswith("vision_prefill_"):
+                vision_inputs.append((module, example_inputs))
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             qwen_export,
@@ -192,11 +201,11 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
         self.assertEqual(
             [name for name, _ in calls],
             [
-                "vision_prefill.q.circle",
+                "vision_prefill_t1_h4_w4.q.circle",
                 "token_embedding.q.circle",
-                "multimodal_embedding_prefill.q.circle",
+                "multimodal_embedding_prefill_t1_h4_w4.q.circle",
                 "decoder_layer_prefill_0.q.circle",
-                "deepstack_fusion_0.q.circle",
+                "deepstack_fusion_0_t1_h4_w4.q.circle",
                 "decoder_layer_decode_0.q.circle",
                 "lm_head.q.circle",
             ],
@@ -206,9 +215,17 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
         ]
         self.assertEqual(token_embedding_calls, [dynamic_shapes])
         register_meta.assert_called_once_with()
+        self.assertEqual(len(vision_inputs), 1)
+        vision_module, example_inputs = vision_inputs[0]
+        self.assertEqual(vision_module.profile.grid_thw, (1, 4, 4))
+        self.assertEqual(len(example_inputs), 1)
+        self.assertEqual(
+            export_model.wrapped.model.wrapped.visual.wrapped.last_export_grid_thw,
+            (1, 4, 4),
+        )
 
-    def test_prefill_only_export_uses_unsuffixed_stage_names(self):
-        """Disabling decode export should omit all decode artifacts."""
+    def test_prefill_only_export_omits_decode_artifacts(self):
+        """Disabling decode should omit decode artifacts and retain profile naming."""
         names = []
         export_model = FakeExportModel()
 
@@ -232,14 +249,22 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
         self.assertEqual(
             names,
             [
-                "vision_prefill.f32.circle",
+                "vision_prefill_t1_h4_w4.f32.circle",
                 "token_embedding.f32.circle",
-                "multimodal_embedding.f32.circle",
+                "multimodal_embedding_t1_h4_w4.f32.circle",
                 "decoder_layer_0.f32.circle",
-                "deepstack_fusion_0.f32.circle",
+                "deepstack_fusion_0_t1_h4_w4.f32.circle",
                 "lm_head.f32.circle",
             ],
         )
+
+    def test_rejects_non_integer_vision_profile(self):
+        """Export profile normalization should not truncate floating values."""
+        args = _model_args()
+        args["vision"]["grid_thw"] = [1.5, 4, 4]
+
+        with self.assertRaisesRegex(TypeError, "integers"):
+            qwen_export._normalize_model_args(args)
 
     def test_rejects_visual_span_larger_than_static_sequence(self):
         """The fixed visual span must fit inside max_seq_len."""

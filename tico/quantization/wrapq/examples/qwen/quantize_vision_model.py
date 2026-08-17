@@ -39,6 +39,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
     QuantQwen3VLVisionModel,
 )
+from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
 
 def generate_calibration_data(batch_size: int, sample_shape: tuple) -> list:
@@ -58,8 +59,7 @@ def main():
     orig_model = copy.deepcopy(model)
     model.eval()
 
-    # Fixed grid for static export. The processor supplies one flattened vector
-    # for each temporal/spatial patch.
+    # The processor supplies one flattened vector for each temporal/spatial patch.
     THW = namedtuple(
         "THW", ["num_temporal_patches", "num_height_patches", "num_width_patches"]
     )
@@ -84,14 +84,9 @@ def main():
         sample_shape=input_shape,
     )
 
-    ptq_config = tico.quantization.config.ptq.PTQConfig(
-        model_args={
-            "vision": {
-                "grid_thw": tuple(vision_grid_thw),
-            }
-        }
-    )
-
+    # Calibration and eager evaluation are profile-agnostic. Each sample supplies
+    # its actual grid to the vision wrapper at call time.
+    ptq_config = tico.quantization.config.ptq.PTQConfig()
     prepared_model = tico.quantization.prepare(model, ptq_config, inplace=True)
 
     with torch.no_grad():
@@ -118,10 +113,17 @@ def main():
     print("└──────────────────────────────────────────────────────")
     print(plot_two_outputs(fp_out, quant_out))
 
-    example_input = (calibration_data[0], grid_thw)
-    circle_model = tico.convert(quantized_model.eval(), example_input)
+    # Static export owns one explicit deployment profile and exposes a pixel-only
+    # graph ABI. The CPU runtime uses the profile to select the matching artifact.
+    profile = Qwen3VLVisionProfile.from_grid_thw(grid_thw)
+    profile.validate_spatial_merge_size(int(cfg.spatial_merge_size))
+    export_model = quantized_model.as_export_module(
+        mode="prefill",
+        grid_thw=profile,
+    ).eval()
+    circle_model = tico.convert(export_model, (calibration_data[0],))
 
-    filename = "qwen3vl_vision_model.q.circle"
+    filename = profile.circle_filename("q")
     circle_model.save(filename)
     print(f"Circle model saved as '{filename}'")
 
