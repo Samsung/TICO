@@ -242,6 +242,40 @@ def get_item_alpaca(ex: dict[str, Any]) -> dict[str, Any]:
     return {"text": text}
 
 
+def get_item_mmmu_calib(ex: dict[str, Any]) -> dict[str, Any]:
+    """
+    Adapt an MMMU/MMMU_Pro sample for VLM calibration.
+
+    MMMU samples may contain multiple images (image_1, image_2, ...).
+    Only single-image samples are used; multi-image samples are skipped
+    by returning ``None`` for the image field, which the caller filters out.
+
+    The returned schema is:
+
+    `{"image": image, "question": question, "golds": gold_answers}`
+
+    Args:
+        ex: Raw dataset example.
+
+    Returns:
+        A normalized calibration item.
+    """
+    # Skip multi-image samples
+    if ex.get("image_2") is not None:
+        return {"image": None, "question": "", "golds": []}
+
+    image = ex.get("image_1") or ex.get("image")
+    question = ex.get("question", "")
+    answer = ex.get("answer", "")
+    golds = [str(answer)] if answer else []
+
+    return {
+        "image": image,
+        "question": question,
+        "golds": golds,
+    }
+
+
 DATASETS: dict[str, dict[str, Any]] = {
     "vqav2": {
         "default_split": "validation",
@@ -282,6 +316,13 @@ DATASETS: dict[str, dict[str, Any]] = {
         "adapter": get_item_alpaca,
         "candidates": ["tatsu-lab/alpaca"],
         "is_text_only": True,
+    },
+    "mmmu_pro_vision": {
+        "default_split": "test",
+        "adapter": get_item_mmmu_calib,
+        "candidates": ["MMMU/MMMU_Pro"],
+        "config": "vision",
+        "is_text_only": False,
     },
 }
 
@@ -337,6 +378,79 @@ def build_prompt(processor, question: str) -> str:
     )
 
 
+def _coerce_int_attr(value: Any, default: int) -> int:
+    """Convert scalar or one-element processor attributes to an integer."""
+    if value is None:
+        return default
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return default
+        return int(value[0])
+    return int(value)
+
+
+def _processor_vision_factor(processor: Any) -> int:
+    """Return the pixel stride of one merged visual token step.
+
+    For Qwen3-VL the vision factor is ``patch_size × merge_size`` (default
+    ``16 × 2 = 32``).  Each visual token covers a ``vision_factor ×
+    vision_factor`` pixel region, so ``tokens = pixels / vision_factor²``.
+    """
+    image_processor = getattr(processor, "image_processor", None)
+    patch_size = _coerce_int_attr(getattr(image_processor, "patch_size", None), 16)
+    merge_size = _coerce_int_attr(getattr(image_processor, "merge_size", None), 2)
+    return max(1, patch_size * merge_size)
+
+
+def _compute_image_max_pixels_for_budget(
+    *,
+    max_seq_len: int,
+    processor: Any,
+    text_token_margin: int = 256,
+) -> tuple[int, int]:
+    """Compute ``max_pixels``/``min_pixels`` for a single calibration image.
+
+    This mirrors the logic in ``lmms_eval_utils._compute_video_max_pixels_for_budget``
+    but adapted for single-image calibration: the entire visual budget is
+    available for one image (no frame splitting).
+
+    Args:
+        max_seq_len: Static context length (e.g. ``calibration.seq_len``).
+        processor: The Hugging Face processor (used to determine vision factor).
+        text_token_margin: Extra margin for text tokens (system prompt,
+            special tokens, etc.).
+
+    Returns:
+        A ``(max_pixels, min_pixels)`` tuple to pass to the processor.
+    """
+    vision_factor = _processor_vision_factor(processor)
+
+    # visual_budget = tokens available for visual tokens (excluding text margin)
+    visual_budget = max_seq_len - text_token_margin
+    if visual_budget <= 0:
+        raise ValueError(
+            f"Not enough context budget for image: "
+            f"max_seq_len={max_seq_len}, "
+            f"text_token_margin={text_token_margin}. "
+            f"Visual budget would be {visual_budget}."
+        )
+
+    # Convert tokens to pixels
+    # tokens = (H / vision_factor) × (W / vision_factor)
+    # pixels = H × W = tokens × vision_factor²
+    max_pixels = visual_budget * vision_factor * vision_factor
+
+    # Ensure min_pixels is at most max_pixels (default min_pixels=200,704
+    # can exceed the computed max_pixels for tight budgets).
+    # (comes from processor.image_processor)
+    min_pixels = min(256 * 28 * 28, max_pixels)
+
+    # Ensure max_pixels is at least min_pixels
+    max_pixels = max(max_pixels, min_pixels)
+
+    return max_pixels, min_pixels
+
+
 def build_vlm_inputs(
     processor,
     image,
@@ -353,7 +467,8 @@ def build_vlm_inputs(
         question: User question associated with the image.
         return_tensors: Tensor format requested from the processor.
         max_seq_len: Optional maximum text sequence length. If provided,
-                     text inputs are truncated to this length.
+                     text inputs are truncated to this length (text-only) or
+                     used to auto-compute image pixel budget (multimodal).
 
     Returns:
         A processor output object containing model-ready multimodal inputs.
@@ -364,9 +479,24 @@ def build_vlm_inputs(
         "images": image,
         "return_tensors": return_tensors,
     }
-    if max_seq_len is not None and max_seq_len > 0:
-        processor_kwargs["truncation"] = True
-        processor_kwargs["max_length"] = max_seq_len
+
+    if image is not None:
+        # For multimodal inputs, do NOT use truncation/max_length because
+        # the processor expands image placeholder tokens and truncation
+        # would cut off image tokens, causing _check_special_mm_tokens to fail.
+        # Instead, control image size via max_pixels to fit the sequence budget.
+        if max_seq_len is not None and max_seq_len > 0:
+            image_max_pixels, image_min_pixels = _compute_image_max_pixels_for_budget(
+                max_seq_len=max_seq_len,
+                processor=processor,
+            )
+            processor_kwargs["max_pixels"] = int(image_max_pixels)
+            processor_kwargs["min_pixels"] = int(image_min_pixels)
+    else:
+        # Text-only: truncation is safe
+        if max_seq_len is not None and max_seq_len > 0:
+            processor_kwargs["truncation"] = True
+            processor_kwargs["max_length"] = max_seq_len
 
     return processor(**processor_kwargs)
 
@@ -504,9 +634,23 @@ def generate_image_only_answer(
         "images": image,
         "return_tensors": "pt",
     }
-    if max_seq_len is not None and max_seq_len > 0:
-        processor_kwargs["truncation"] = True
-        processor_kwargs["max_length"] = max_seq_len
+
+    if image is not None:
+        # For multimodal inputs, do NOT use truncation/max_length because
+        # the processor expands image placeholder tokens and truncation
+        # would cut off image tokens, causing _check_special_mm_tokens to fail.
+        # Instead, control image size via max_pixels to fit the sequence budget.
+        if max_seq_len is not None and max_seq_len > 0:
+            image_max_pixels, image_min_pixels = _compute_image_max_pixels_for_budget(
+                max_seq_len=max_seq_len,
+                processor=processor,
+            )
+            processor_kwargs["max_pixels"] = int(image_max_pixels)
+            processor_kwargs["min_pixels"] = int(image_min_pixels)
+    else:
+        if max_seq_len is not None and max_seq_len > 0:
+            processor_kwargs["truncation"] = True
+            processor_kwargs["max_length"] = max_seq_len
 
     inputs = processor(**processor_kwargs)
     inputs = move_inputs_to_device(inputs, device)
@@ -1141,6 +1285,9 @@ def get_calib_inputs(
     calib_inputs = []
     for ex in ds:
         item = adapter(ex)
+        # Skip samples without a valid image (e.g. multi-image MMMU samples)
+        if item.get("image") is None:
+            continue
         inputs = build_vlm_inputs(
             processor=processor,
             image=item["image"],
@@ -1326,6 +1473,9 @@ def get_mixed_calib_inputs(
 
             for ex in ds:
                 item = adapter(ex)
+                # Skip samples without a valid image (e.g. multi-image MMMU samples)
+                if item.get("image") is None:
+                    continue
                 inputs = build_vlm_inputs(
                     processor=processor,
                     image=item["image"],
