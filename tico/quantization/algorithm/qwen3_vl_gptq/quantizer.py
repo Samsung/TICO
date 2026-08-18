@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
+import functools
 import types
 from typing import Any, Callable, Optional
 
@@ -39,6 +41,46 @@ from tico.quantization.algorithm.qwen3_vl_gptq.utils import (
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
+
+
+class FPInputsCache:
+    """
+    Cache for saving full-precision inputs to each quantizable submodule (GPTQv2).
+
+    Registers forward hooks on the specified modules and stores their FP inputs
+    per batch. The cached inputs are later assigned to ``GPTQ.native_inp`` so that
+    ``add_batch`` can compute the dXXT correction matrix.
+    """
+
+    def __init__(self, names: list[str]):
+        self.names = tuple(names)
+        self.fp_cache: dict[str, list] = {name: [] for name in self.names}
+        self.handles: list = []
+
+    def _cache_fp_input(self, m, inp, out, name):
+        if not inp or not isinstance(inp[0], torch.Tensor):
+            return
+        self.fp_cache[name].append(inp[0].detach().cpu())
+
+    def add_hook(self, full: dict[str, nn.Module]):
+        for name in self.names:
+            if name in full:
+                self.handles.append(
+                    full[name].register_forward_hook(
+                        functools.partial(self._cache_fp_input, name=name)
+                    )
+                )
+
+    def clear_hook(self):
+        for h in self.handles:
+            h.remove()
+        self.handles = []
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def clear_cache(self):
+        for name in self.names:
+            self.fp_cache[name] = []
 
 
 class StopReplay(Exception):
@@ -83,6 +125,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         self._vision_cache_args: list[list[Any]] = []
         self._vision_cache_kwargs: dict[str, list[Any]] = {}
         self._num_vision_batches: int = 0
+
+        # GPTQv2: reference to original FP model for collecting FP inputs
+        self.orig_model: Optional[nn.Module] = None
 
     def _resolve_weight_bits(
         self,
@@ -205,67 +250,115 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         components = resolve_qwen3_vl_components(model, gptq_conf)
         module_name = build_module_name_map(model)
 
-        if should_quantize_vision_stage(gptq_conf, stage="patch_embed"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.visual_patch_embed,
-                module_name=module_name,
-                stage_desc="vision.patch_embed",
-                vision_only=True,  # Only use vision inputs for vision stages
-            )
+        # GPTQv2: create a deep copy of the original (unquantized) model.
+        # This pristine copy is used to collect true FP inputs for the dXXT
+        # correction matrix.
+        orig_model: Optional[nn.Module] = None
+        orig_components: Optional[Qwen3VLComponents] = None
+        orig_model_use_cache: dict[str, Any] = {}
 
-        if should_quantize_vision_stage(gptq_conf, stage="blocks"):
-            self._quantize_vision_blocks(
-                model=model,
-                components=components,
-                module_name=module_name,
-            )
+        if gptq_conf.gptq_v2:
+            orig_model = self._copy_original_model(model)
+            self.orig_model = orig_model
+            orig_model_use_cache = self._disable_model_cache(orig_model)
+            orig_components = resolve_qwen3_vl_components(orig_model, gptq_conf)
 
-        if should_quantize_vision_stage(gptq_conf, stage="merger"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.visual_merger,
-                module_name=module_name,
-                stage_desc="vision.merger",
-                vision_only=True,  # Only use vision inputs for vision stages
-            )
-
-        if should_quantize_vision_stage(gptq_conf, stage="deepstack_mergers"):
-            for idx, merger in enumerate(components.visual_deepstack_mergers):
+        try:
+            if should_quantize_vision_stage(gptq_conf, stage="patch_embed"):
                 self._quantize_stage_from_raw_replay(
                     model=model,
-                    stage_module=merger,
+                    stage_module=components.visual_patch_embed,
                     module_name=module_name,
-                    stage_desc=f"vision.deepstack_merger[{idx}]",
+                    stage_desc="vision.patch_embed",
                     vision_only=True,  # Only use vision inputs for vision stages
+                    orig_model=orig_model,
+                    orig_stage_module=(
+                        orig_components.visual_patch_embed
+                        if orig_components is not None
+                        else None
+                    ),
                 )
 
-        if should_quantize_text_stage(gptq_conf, stage="layers"):
-            self._quantize_text_layers(
-                model=model,
-                components=components,
-                module_name=module_name,
-            )
+            if should_quantize_vision_stage(gptq_conf, stage="blocks"):
+                self._quantize_vision_blocks(
+                    model=model,
+                    components=components,
+                    module_name=module_name,
+                    orig_model=orig_model,
+                    orig_components=orig_components,
+                )
 
-        if should_quantize_text_stage(gptq_conf, stage="lm_head"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.lm_head,
-                module_name=module_name,
-                stage_desc="lm_head",
-            )
+            if should_quantize_vision_stage(gptq_conf, stage="merger"):
+                self._quantize_stage_from_raw_replay(
+                    model=model,
+                    stage_module=components.visual_merger,
+                    module_name=module_name,
+                    stage_desc="vision.merger",
+                    vision_only=True,  # Only use vision inputs for vision stages
+                    orig_model=orig_model,
+                    orig_stage_module=(
+                        orig_components.visual_merger
+                        if orig_components is not None
+                        else None
+                    ),
+                )
 
-        self._restore_model_cache(model, orig_use_cache)
+            if should_quantize_vision_stage(gptq_conf, stage="deepstack_mergers"):
+                for idx, merger in enumerate(components.visual_deepstack_mergers):
+                    self._quantize_stage_from_raw_replay(
+                        model=model,
+                        stage_module=merger,
+                        module_name=module_name,
+                        stage_desc=f"vision.deepstack_merger[{idx}]",
+                        vision_only=True,  # Only use vision inputs for vision stages
+                        orig_model=orig_model,
+                        orig_stage_module=(
+                            orig_components.visual_deepstack_mergers[idx]
+                            if orig_components is not None
+                            else None
+                        ),
+                    )
 
-        self.cache_args.clear()
-        self.cache_kwargs.clear()
-        self.num_batches = 0
-        # Clear vision cache
-        self._vision_cache_args.clear()
-        self._vision_cache_kwargs.clear()
-        self._num_vision_batches = 0
-        model.quantizers = self._quantizers
-        return model
+            if should_quantize_text_stage(gptq_conf, stage="layers"):
+                self._quantize_text_layers(
+                    model=model,
+                    components=components,
+                    module_name=module_name,
+                    orig_model=orig_model,
+                    orig_components=orig_components,
+                )
+
+            if should_quantize_text_stage(gptq_conf, stage="lm_head"):
+                self._quantize_stage_from_raw_replay(
+                    model=model,
+                    stage_module=components.lm_head,
+                    module_name=module_name,
+                    stage_desc="lm_head",
+                    orig_model=orig_model,
+                    orig_stage_module=(
+                        orig_components.lm_head if orig_components is not None else None
+                    ),
+                )
+
+            model.quantizers = self._quantizers
+            return model
+        finally:
+            self._restore_model_cache(model, orig_use_cache)
+            if orig_model is not None:
+                self._restore_model_cache(orig_model, orig_model_use_cache)
+                orig_model.cpu()
+            self.orig_model = None
+
+            self.cache_args.clear()
+            self.cache_kwargs.clear()
+            self.num_batches = 0
+            # Clear vision cache
+            self._vision_cache_args.clear()
+            self._vision_cache_kwargs.clear()
+            self._num_vision_batches = 0
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     # Vision path
@@ -277,6 +370,8 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         model: nn.Module,
         components: Qwen3VLComponents,
         module_name: dict[nn.Module, str],
+        orig_model: Optional[nn.Module] = None,
+        orig_components: Optional[Qwen3VLComponents] = None,
     ) -> None:
         """
         Quantize Qwen3-VL vision blocks in layerwise order using first-block entry
@@ -298,6 +393,33 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             return
 
         assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # GPTQv2: collect native (FP) entry inputs from the original model
+        native_block_args: Optional[list[list[Any]]] = None
+        native_block_kwargs: Optional[dict[str, list[Any]]] = None
+
+        if self.config.gptq_v2:
+            assert orig_model is not None and orig_components is not None
+            self._move_module_to_device(orig_model, self._module_device(model))
+            try:
+                (
+                    native_block_args,
+                    native_block_kwargs,
+                    native_num_batches,
+                ) = self._collect_stage_entry_inputs(
+                    model=orig_model,
+                    target_module=orig_components.visual_blocks[0],
+                    desc="native vision block entry capture",
+                    vision_only=True,
+                )
+            finally:
+                orig_model.cpu()
+            if native_num_batches != num_vision_batches:
+                raise RuntimeError(
+                    "Native/current vision block cache sizes differ: "
+                    f"{native_num_batches} vs {num_vision_batches}"
+                )
+
         for block_idx, block in enumerate(
             tqdm(
                 components.visual_blocks,
@@ -307,6 +429,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             )
         ):
             stage_name = module_name.get(block, f"visual.blocks.{block_idx}")
+            orig_block = (
+                orig_components.visual_blocks[block_idx]
+                if orig_components is not None
+                else None
+            )
 
             self._quantize_stage_from_stage_cache(
                 stage_module=block,
@@ -315,6 +442,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 cached_kwargs=block_kwargs,
                 stage_desc=stage_name,
                 num_batches=num_vision_batches,
+                orig_stage_module=orig_block,
+                native_cached_args=native_block_args,
+                native_cached_kwargs=native_block_kwargs,
             )
 
             for batch_idx in tqdm(
@@ -338,6 +468,43 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     dtype=self.config.cache_dtype,
                 )
 
+            # GPTQv2: re-forward through the original (unquantized) block to
+            # keep the native cache in sync with a pristine model.
+            if native_block_args is not None and native_block_kwargs is not None:
+                assert orig_block is not None
+                self._move_module_to_device(orig_block, self._module_device(block))
+                try:
+                    for batch_idx in tqdm(
+                        range(num_vision_batches),
+                        desc=f"[native vision block {block_idx}] re-forward",
+                        leave=False,
+                        unit="batch",
+                        disable=not self.config.show_progress,
+                    ):
+                        args_batch = gather_single_batch_from_list(
+                            native_block_args, batch_idx
+                        )
+                        kwargs_batch = gather_single_batch_from_dict(
+                            native_block_kwargs, batch_idx
+                        )
+                        args_batch = self._move_batch_to_stage_device(
+                            orig_block, args_batch
+                        )
+                        kwargs_batch = self._move_batch_to_stage_device(
+                            orig_block, kwargs_batch
+                        )
+
+                        outs = orig_block(*args_batch, **kwargs_batch)
+                        hidden_states = extract_primary_output(outs)
+
+                        native_block_args[0][batch_idx] = maybe_move_cache_to_cpu(
+                            hidden_states.detach().clone(),
+                            enabled=self.config.move_cache_to_cpu,
+                            dtype=self.config.cache_dtype,
+                        )
+                finally:
+                    orig_block.cpu()
+
     # ------------------------------------------------------------------
     # Text path
     # ------------------------------------------------------------------
@@ -348,6 +515,8 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         model: nn.Module,
         components: Qwen3VLComponents,
         module_name: dict[nn.Module, str],
+        orig_model: Optional[nn.Module] = None,
+        orig_components: Optional[Qwen3VLComponents] = None,
     ) -> None:
         """
         Quantize text decoder layers in layerwise order using first-layer entry
@@ -361,6 +530,33 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             vision_only=False,  # Text layers process all inputs
         )
         assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # GPTQv2: collect native (FP) entry inputs from the original model
+        native_layer_args: Optional[list[list[Any]]] = None
+        native_layer_kwargs: Optional[dict[str, list[Any]]] = None
+
+        if self.config.gptq_v2:
+            assert orig_model is not None and orig_components is not None
+            self._move_module_to_device(orig_model, self._module_device(model))
+            try:
+                (
+                    native_layer_args,
+                    native_layer_kwargs,
+                    native_num_batches,
+                ) = self._collect_stage_entry_inputs(
+                    model=orig_model,
+                    target_module=orig_components.text_layers[0],
+                    desc="native text layer entry capture",
+                    vision_only=False,
+                )
+            finally:
+                orig_model.cpu()
+            if native_num_batches != num_batches:
+                raise RuntimeError(
+                    "Native/current text layer cache sizes differ: "
+                    f"{native_num_batches} vs {num_batches}"
+                )
+
         for layer_idx, layer in enumerate(
             tqdm(
                 components.text_layers,
@@ -370,6 +566,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             )
         ):
             stage_name = module_name.get(layer, f"text.layers.{layer_idx}")
+            orig_layer = (
+                orig_components.text_layers[layer_idx]
+                if orig_components is not None
+                else None
+            )
 
             self._quantize_stage_from_stage_cache(
                 stage_module=layer,
@@ -378,6 +579,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 cached_kwargs=layer_kwargs,
                 stage_desc=stage_name,
                 num_batches=num_batches,
+                orig_stage_module=orig_layer,
+                native_cached_args=native_layer_args,
+                native_cached_kwargs=native_layer_kwargs,
             )
 
             for batch_idx in tqdm(
@@ -408,6 +612,49 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     enabled=self.config.move_cache_to_cpu,
                     dtype=self.config.cache_dtype,
                 )
+
+            # GPTQv2: re-forward through the original (unquantized) layer to
+            # keep the native cache in sync with a pristine model.
+            if native_layer_args is not None and native_layer_kwargs is not None:
+                assert orig_layer is not None and orig_components is not None
+                self._move_module_to_device(orig_layer, self._module_device(layer))
+                try:
+                    for batch_idx in tqdm(
+                        range(num_batches),
+                        desc=f"[native text layer {layer_idx}] re-forward",
+                        leave=False,
+                        unit="batch",
+                        disable=not self.config.show_progress,
+                    ):
+                        args_batch = gather_single_batch_from_list(
+                            native_layer_args, batch_idx
+                        )
+                        kwargs_batch = gather_single_batch_from_dict(
+                            native_layer_kwargs, batch_idx
+                        )
+                        args_batch = self._move_batch_to_stage_device(
+                            orig_layer, args_batch
+                        )
+                        kwargs_batch = self._move_batch_to_stage_device(
+                            orig_layer, kwargs_batch
+                        )
+
+                        outs = orig_layer(*args_batch, **kwargs_batch)
+                        hidden_states = extract_primary_output(outs)
+                        hidden_states = self._apply_text_post_layer_processing(
+                            components=orig_components,
+                            layer_idx=layer_idx,
+                            hidden_states=hidden_states,
+                            kwargs_batch=kwargs_batch,
+                        )
+
+                        native_layer_args[0][batch_idx] = maybe_move_cache_to_cpu(
+                            hidden_states.detach().clone(),
+                            enabled=self.config.move_cache_to_cpu,
+                            dtype=self.config.cache_dtype,
+                        )
+                finally:
+                    orig_layer.cpu()
 
     @torch.no_grad()
     def _apply_text_post_layer_processing(
@@ -444,6 +691,103 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
+    def _collect_native_inputs_from_raw_replay(
+        self,
+        model: nn.Module,
+        subset: dict[str, nn.Module],
+        module_name: dict[nn.Module, str],
+        cache_args: list[list[Any]],
+        cache_kwargs: dict[str, list[Any]],
+        num_batches: int,
+        stage_desc: str,
+    ) -> dict[str, list[torch.Tensor]]:
+        """
+        GPTQv2: Collect full-precision inputs from the original (unquantized) model
+        by replaying raw model inputs.
+
+        Returns:
+            Dictionary mapping local_name -> list of FP input tensors (one per batch).
+        """
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # Build full module name -> local name mapping
+        full_to_local: dict[str, str] = {}
+        for local_name, submodule in subset.items():
+            full_name = module_name.get(submodule, local_name)
+            full_to_local[full_name] = local_name
+
+        fp_cache = FPInputsCache(list(full_to_local.keys()))
+
+        # Build full name -> module mapping for hook registration
+        full_modules: dict[str, nn.Module] = {}
+        for local_name, submodule in subset.items():
+            full_name = module_name.get(submodule, local_name)
+            full_modules[full_name] = submodule
+
+        fp_cache.add_hook(full_modules)
+
+        try:
+            for batch_idx in tqdm(
+                range(num_batches),
+                desc=f"[{stage_desc}] FP input collection",
+                leave=False,
+                unit="batch",
+                disable=not self.config.show_progress,
+            ):
+                args_batch = gather_single_batch_from_list(cache_args, batch_idx)
+                kwargs_batch = gather_single_batch_from_dict(cache_kwargs, batch_idx)
+                args_batch = self._move_batch_to_model_device(model, args_batch)
+                kwargs_batch = self._move_batch_to_model_device(model, kwargs_batch)
+                model(*args_batch, **kwargs_batch)
+        finally:
+            fp_cache.clear_hook()
+
+        # Remap from full_name -> local_name
+        result: dict[str, list[torch.Tensor]] = {}
+        for full_name, local_name in full_to_local.items():
+            result[local_name] = fp_cache.fp_cache.get(full_name, [])
+
+        return result
+
+    @torch.no_grad()
+    def _collect_native_inputs_from_stage_cache(
+        self,
+        stage_module: nn.Module,
+        subset: dict[str, nn.Module],
+        cached_args: list[list[Any]],
+        cached_kwargs: dict[str, list[Any]],
+        stage_desc: str,
+        num_batches: int,
+    ) -> dict[str, list[torch.Tensor]]:
+        """
+        GPTQv2: Collect full-precision inputs from the original (unquantized) stage
+        module by replaying cached stage-entry inputs.
+        """
+        fp_cache = FPInputsCache(list(subset.keys()))
+        full_modules: dict[str, nn.Module] = {}
+        for local_name, submodule in subset.items():
+            full_modules[local_name] = submodule
+        fp_cache.add_hook(full_modules)
+
+        try:
+            for args_batch, kwargs_batch in tqdm(
+                iter_cached_batches(cached_args, cached_kwargs, num_batches),
+                desc=f"[{stage_desc}] FP input collection",
+                leave=False,
+                unit="batch",
+                disable=not self.config.show_progress,
+            ):
+                args_batch = self._move_batch_to_stage_device(stage_module, args_batch)
+                kwargs_batch = self._move_batch_to_stage_device(
+                    stage_module, kwargs_batch
+                )
+                stage_module(*args_batch, **kwargs_batch)
+        finally:
+            fp_cache.clear_hook()
+
+        return fp_cache.fp_cache
+
+    @torch.no_grad()
     def _quantize_stage_from_raw_replay(
         self,
         model: nn.Module,
@@ -451,6 +795,8 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         module_name: dict[nn.Module, str],
         stage_desc: str,
         vision_only: bool = False,
+        orig_model: Optional[nn.Module] = None,
+        orig_stage_module: Optional[nn.Module] = None,
     ) -> None:
         """
         Quantize a stage by replaying raw model inputs and collecting statistics
@@ -464,6 +810,8 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             vision_only: If True, only replay batches that have vision inputs
                 (pixel_values). This is needed for vision stages to avoid errors
                 when text-only inputs lack image tokens.
+            orig_model: GPTQv2 original (unquantized) model for FP input collection.
+            orig_stage_module: GPTQv2 original stage module for FP input collection.
         """
         subset = get_quantizable_layers(stage_module)
         if not subset:
@@ -474,13 +822,6 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             module_name=module_name,
         )
 
-        handles = []
-        for local_name, submodule in subset.items():
-            handles.append(
-                submodule.register_forward_hook(
-                    self._make_add_batch_hook(gptq_objs, local_name)
-                )
-            )
         assert isinstance(self.config, Qwen3VLGPTQConfig)
 
         # Use separate vision cache for vision-only quantization
@@ -490,8 +831,6 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     f"[{stage_desc}] Warning: No vision inputs found in calibration data. "
                     f"Skipping vision stage quantization."
                 )
-                for handle in handles:
-                    handle.remove()
                 return
             cache_args = self._vision_cache_args
             cache_kwargs = self._vision_cache_kwargs
@@ -500,6 +839,33 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             cache_args = self.cache_args
             cache_kwargs = self.cache_kwargs
             num_batches = self.num_batches
+
+        # GPTQv2: Collect FP inputs from the ORIGINAL (unquantized) model
+        if self.config.gptq_v2:
+            assert orig_model is not None and orig_stage_module is not None
+            orig_subset = get_quantizable_layers(orig_stage_module)
+            self._move_module_to_device(orig_model, self._module_device(model))
+            try:
+                native_inputs = self._collect_native_inputs_from_raw_replay(
+                    model=orig_model,
+                    subset=orig_subset,
+                    module_name=module_name,
+                    cache_args=cache_args,
+                    cache_kwargs=cache_kwargs,
+                    num_batches=num_batches,
+                    stage_desc=stage_desc,
+                )
+            finally:
+                orig_model.cpu()
+            self._assign_native_inputs(gptq_objs, native_inputs)
+
+        handles = []
+        for local_name, submodule in subset.items():
+            handles.append(
+                submodule.register_forward_hook(
+                    self._make_add_batch_hook(gptq_objs, local_name)
+                )
+            )
 
         try:
             for batch_idx in tqdm(
@@ -534,6 +900,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         cached_kwargs: dict[str, list[Any]],
         stage_desc: str,
         num_batches: Optional[int] = None,
+        orig_stage_module: Optional[nn.Module] = None,
+        native_cached_args: Optional[list[list[Any]]] = None,
+        native_cached_kwargs: Optional[dict[str, list[Any]]] = None,
     ) -> None:
         """
         Quantize a stage by replaying cached stage-entry inputs.
@@ -545,6 +914,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             cached_kwargs: Cached keyword arguments.
             stage_desc: Description for logging.
             num_batches: Number of batches to use. If None, uses self.num_batches.
+            orig_stage_module: GPTQv2 original (unquantized) stage module for FP
+                input collection.
+            native_cached_args: GPTQv2 native entry cache args.
+            native_cached_kwargs: GPTQv2 native entry cache kwargs.
         """
         subset = get_quantizable_layers(stage_module)
         if not subset:
@@ -558,6 +931,34 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             module_name=module_name,
         )
 
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # GPTQv2: Collect FP inputs from the ORIGINAL (unquantized) stage module.
+        # The native cache contains entry inputs from the pristine model, so
+        # forwarding them through orig_stage_module gives true FP submodule inputs.
+        if self.config.gptq_v2:
+            assert (
+                orig_stage_module is not None
+                and native_cached_args is not None
+                and native_cached_kwargs is not None
+            )
+            orig_subset = get_quantizable_layers(orig_stage_module)
+            self._move_module_to_device(
+                orig_stage_module, self._module_device(stage_module)
+            )
+            try:
+                native_inputs = self._collect_native_inputs_from_stage_cache(
+                    stage_module=orig_stage_module,
+                    subset=orig_subset,
+                    cached_args=native_cached_args,
+                    cached_kwargs=native_cached_kwargs,
+                    stage_desc=stage_desc,
+                    num_batches=num_batches,
+                )
+            finally:
+                orig_stage_module.cpu()
+            self._assign_native_inputs(gptq_objs, native_inputs)
+
         handles = []
         for local_name, submodule in subset.items():
             handles.append(
@@ -565,7 +966,6 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     self._make_add_batch_hook(gptq_objs, local_name)
                 )
             )
-        assert isinstance(self.config, Qwen3VLGPTQConfig)
         try:
             for args_batch, kwargs_batch in tqdm(
                 iter_cached_batches(cached_args, cached_kwargs, num_batches),
@@ -603,7 +1003,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
         gptq_objs: dict[str, GPTQ] = {}
         for local_name, submodule in subset.items():
-            gptq_obj = GPTQ(submodule)
+            gptq_obj = GPTQ(submodule, normalize_H=gptq_conf.normalize_H)
 
             full_name = module_name.get(submodule, local_name)
             weight_bits = self._resolve_weight_bits(
@@ -628,9 +1028,26 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 mse=gptq_conf.mse,
                 sensitivity=cur_sensitivity,
             )
+
+            # GPTQv2: initialize native_inp list if enabled
+            if gptq_conf.gptq_v2:
+                gptq_obj.native_inp = []
+
             gptq_objs[local_name] = gptq_obj
 
         return gptq_objs
+
+    def _assign_native_inputs(
+        self,
+        gptq_objs: dict[str, Any],
+        native_inputs: dict[str, list[torch.Tensor]],
+    ) -> None:
+        """
+        Assign collected FP inputs to GPTQ objects' native_inp attribute.
+        """
+        for local_name, gptq_obj in gptq_objs.items():
+            if local_name in native_inputs:
+                gptq_obj.native_inp = list(native_inputs[local_name])
 
     def _make_add_batch_hook(
         self,
@@ -683,6 +1100,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 actorder=gptq_conf.actorder,
                 static_groups=gptq_conf.static_groups,
                 verbose=gptq_conf.verbose,
+                alpha=gptq_conf.gptq_v2_alpha,
             )
 
             full_name = module_name.get(submodule, local_name)
@@ -814,6 +1232,42 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         except StopIteration:
             return batch
         return move_tensor_tree(batch, device=device)
+
+    def _module_device(self, module: nn.Module) -> torch.device:
+        """
+        Get the device of a module (from parameters, buffers, or CPU fallback).
+        """
+        try:
+            return next(module.parameters()).device
+        except StopIteration:
+            try:
+                return next(module.buffers()).device
+            except StopIteration:
+                return torch.device("cpu")
+
+    def _move_module_to_device(
+        self,
+        module: nn.Module,
+        device: torch.device | str,
+    ) -> None:
+        """
+        Move a module to the specified device.
+        """
+        module.to(device)
+
+    def _copy_original_model(self, model: nn.Module) -> nn.Module:
+        """
+        Create a deep copy of the model on CPU for GPTQv2 FP input collection.
+
+        The original model is moved to CPU before copying to avoid GPU memory
+        duplication, then moved back to its original device.
+        """
+        device = self._module_device(model)
+        model.cpu()
+        orig_model = copy.deepcopy(model)
+        model.to(device)
+        orig_model.eval()
+        return orig_model
 
     # ------------------------------------------------------------------
     # Cache control helpers

@@ -268,16 +268,20 @@ class GPTQ:
     and then performs blockwise GPTQ quantization of the layer weights.
     """
 
-    def __init__(self, layer: nn.Module):
+    def __init__(self, layer: nn.Module, normalize_H: bool = True):
         """
         Initialize GPTQ state for a single layer.
 
         Args:
             layer: Quantizable layer. Supported types are Linear, Conv1d,
                 Conv2d, Conv3d, and ConvTranspose2d.
+            normalize_H: If True, use running average with sqrt(2/N)
+                normalization for Hessian accumulation.
+                If False, use simple summation.
         """
         self.layer = layer
         self.dev = self.layer.weight.device
+        self.normalize_H = normalize_H
 
         w = layer.weight.data.clone()
         if isinstance(layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
@@ -295,16 +299,34 @@ class GPTQ:
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
 
+        # GPTQv2: for tracking FP vs quantized input difference
+        self.dXXT: Optional[torch.Tensor] = None
+        self.native_inp: Optional[list] = None
+
     @torch.no_grad()
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor) -> None:
         """
         Accumulate Hessian statistics from one calibration batch.
 
+        For GPTQv2, also processes native_inp (FP inputs) and computes dXXT.
+
         Args:
-            inp: Layer input tensor.
+            inp: Layer input tensor (from the model being quantized).
             out: Layer output tensor. Present for interface consistency.
         """
         del out
+
+        # Process native input for GPTQv2 (before reshaping inp)
+        native_inp_raw = None
+        if hasattr(self, "native_inp") and self.native_inp is not None:
+            if len(self.native_inp) == 0:
+                raise RuntimeError(
+                    "GPTQv2: native inputs exhausted. "
+                    "Number of add_batch calls exceeds collected FP inputs."
+                )
+            native_inp_raw = self.native_inp.pop(0)
+            if native_inp_raw is not None:
+                native_inp_raw = native_inp_raw.to(self.dev)
 
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
@@ -359,11 +381,92 @@ class GPTQ:
         elif isinstance(self.layer, nn.Conv3d):
             inp = _conv3d_input_to_unfolded(self.layer, inp)
 
-        self.H *= self.nsamples / (self.nsamples + batch_size)
+        # GPTQv2: Apply the same reshaping to native_inp
+        native_inp = None
+        if native_inp_raw is not None:
+            native_inp = native_inp_raw
+            if len(native_inp.shape) == 2:
+                native_inp = native_inp.unsqueeze(0)
+
+            if isinstance(self.layer, nn.Linear):
+                if len(native_inp.shape) > 2:
+                    native_inp = native_inp.reshape(-1, native_inp.shape[-1])
+                native_inp = native_inp.t()
+
+            elif isinstance(self.layer, nn.Conv2d):
+                padding = _normalize_2d_padding(self.layer.padding)
+                unfold = nn.Unfold(
+                    kernel_size=self.layer.kernel_size,
+                    dilation=self.layer.dilation,
+                    padding=padding,
+                    stride=self.layer.stride,
+                )
+
+                if self.layer.groups != 1:
+                    native_inp = native_inp.reshape(
+                        native_inp.size(0) * self.layer.groups,
+                        native_inp.size(1) // self.layer.groups,
+                        native_inp.shape[2],
+                        native_inp.shape[3],
+                    )
+
+                native_inp = unfold(native_inp).permute(1, 0, 2).flatten(1)
+
+            elif isinstance(self.layer, nn.Conv1d):
+                unfold = nn.Unfold(
+                    kernel_size=(1, self.layer.kernel_size[0]),
+                    dilation=(1, self.layer.dilation[0]),
+                    padding=(0, self.layer.padding[0]),
+                    stride=(1, self.layer.stride[0]),
+                )
+
+                if self.layer.groups != 1:
+                    native_inp = native_inp.reshape(
+                        native_inp.size(0) * self.layer.groups,
+                        native_inp.size(1) // self.layer.groups,
+                        native_inp.shape[2],
+                    )
+
+                native_inp = native_inp.unsqueeze(-2)
+                native_inp = unfold(native_inp).permute(1, 0, 2).flatten(1)
+
+            elif isinstance(self.layer, nn.ConvTranspose2d):
+                native_inp = get_matmul_input_for_convtranspose2d(
+                    self.layer, native_inp
+                )
+
+            elif isinstance(self.layer, nn.Conv3d):
+                native_inp = _conv3d_input_to_unfolded(self.layer, native_inp)
+
         self.nsamples += batch_size
-        inp = math.sqrt(2.0 / self.nsamples) * inp.float()
+
+        if self.normalize_H:
+            # Running average with sqrt(2/N) normalization
+            self.H *= (self.nsamples - batch_size) / self.nsamples
+            if self.dXXT is not None:
+                self.dXXT *= (self.nsamples - batch_size) / self.nsamples
+            inp = math.sqrt(2.0 / self.nsamples) * inp.double()
+        else:
+            inp = inp.double()
+
         assert self.H is not None
         self.H += inp.matmul(inp.t()).to(self.H.device)
+
+        # GPTQv2: Compute dXXT using native (FP) vs processed input difference
+        if native_inp is not None:
+            if self.dXXT is None:
+                self.dXXT = torch.zeros_like(self.H)
+
+            # Scale native_inp the same way as inp
+            if self.normalize_H:
+                native_inp = math.sqrt(2.0 / self.nsamples) * native_inp.double()
+            else:
+                native_inp = native_inp.double()
+
+            dX = native_inp.to(inp.device) - inp
+            self.dXXT += dX.matmul(inp.t()).to(dtype=self.H.dtype)
+            del native_inp_raw, native_inp
+            native_inp_raw = native_inp = None
 
     @torch.no_grad()
     def fasterquant(
@@ -374,6 +477,7 @@ class GPTQ:
         actorder: bool = False,
         static_groups: bool = False,
         verbose: bool = False,
+        alpha: float = 0.25,
     ) -> None:
         """
         Run blockwise GPTQ quantization on the layer weights.
@@ -419,6 +523,10 @@ class GPTQ:
         h[dead, dead] = 1
         w[:, dead] = 0
 
+        # GPTQv2: Zero out dead elements in dXXT
+        if self.dXXT is not None:
+            self.dXXT[:, dead] = 0
+
         if groupsize != -1 and self.quantizer.mse in {"mse_for_gptq", "smse_for_gptq"}:
             raise ValueError(
                 "GPTQ-adjusted MSE currently does not support groupsize != -1"
@@ -440,6 +548,8 @@ class GPTQ:
             w = w[:, perm]
             h = h[perm][:, perm]
             invperm = torch.argsort(perm)
+            if self.dXXT is not None:
+                self.dXXT = self.dXXT[perm][:, perm]
 
         losses = torch.zeros_like(w)
         q_all = torch.zeros_like(w)
@@ -452,6 +562,12 @@ class GPTQ:
         h = torch.linalg.cholesky(h, upper=True)
         hinv = h
 
+        # GPTQv2: Compute P correction matrix from dXXT
+        P = None
+        if self.dXXT is not None:
+            dXXT = self.dXXT.to(hinv.dtype)
+            P = alpha * ((dXXT @ hinv.T).triu(diagonal=1)) @ hinv
+
         self.quantizer.update(w, hinv, perm)
 
         for i1 in range(0, self.columns, blocksize):
@@ -463,6 +579,7 @@ class GPTQ:
             err1 = torch.zeros_like(w1)
             losses1 = torch.zeros_like(w1)
             hinv1 = hinv[i1:i2, i1:i2]
+            P1 = P[i1:i2, i1:i2] if P is not None else None
 
             for i in range(count):
                 w_col = w1[:, i]
@@ -493,11 +610,17 @@ class GPTQ:
 
                 cur_err = (w_col - q_col) / d
                 w1[:, i:] -= cur_err.unsqueeze(1).matmul(hinv1[i, i:].unsqueeze(0))
+                # GPTQv2: Apply P correction
+                if P1 is not None:
+                    w1[:, i:] += w_col.unsqueeze(1).matmul(P1[i, i:].unsqueeze(0))
                 err1[:, i] = cur_err
 
             q_all[:, i1:i2] = q1
             losses[:, i1:i2] = losses1 / 2
             w[:, i2:] -= err1.matmul(hinv[i1:i2, i2:])
+            # GPTQv2: Apply P correction to remaining weights
+            if P is not None:
+                w[:, i2:] += w1.matmul(P[i1:i2, i2:])
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -559,5 +682,7 @@ class GPTQ:
         self.H = None
         self.Losses = None
         self.Trace = None
+        self.dXXT = None
+        self.native_inp = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
