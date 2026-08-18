@@ -513,9 +513,9 @@ def _static_pixel_position_ids(
 ) -> torch.Tensor:
     """Create the padded 2-D patch layout used by the E2B image processor.
 
-    The default contract contains a valid ``42 x 57`` patch grid (2,394
-    patches) followed by 126 ``(-1, -1)`` padding slots. Pooling by ``3 x 3``
-    produces 280 fixed output slots, of which 14 are padding and 266 are valid
+    The default contract contains a valid ``36 x 66`` patch grid (2,376
+    patches) followed by 144 ``(-1, -1)`` padding slots. Pooling by ``3 x 3``
+    produces 280 fixed output slots, of which 16 are padding and 264 are valid
     visual tokens.
     """
     coords = torch.arange(shape.num_valid_patches)

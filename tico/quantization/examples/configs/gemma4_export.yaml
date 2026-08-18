@@ -17,7 +17,7 @@ calibration:
 
 model_args:
   vision:
-    profile: e2b_57x42_266
+    profile: e2b_66x36_264
     validate_static_layout: false
 
 

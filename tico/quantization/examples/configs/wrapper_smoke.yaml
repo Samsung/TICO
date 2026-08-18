@@ -37,4 +37,4 @@ debug:
       size_profile: tiny
       static_runtime:
         max_seq: 2048
-        profile: e2b_57x42_266
+        profile: e2b_66x36_264

@@ -27,7 +27,7 @@ from typing import Any, Mapping
 import torch
 
 
-DEFAULT_GEMMA4_STATIC_VISION_PROFILE = "e2b_57x42_266"
+DEFAULT_GEMMA4_STATIC_VISION_PROFILE = "e2b_66x36_264"
 
 
 @dataclass(frozen=True)
@@ -453,8 +453,8 @@ class Gemma4StaticVisionProfile:
 
 
 _PROFILE_REGISTRY: dict[str, Gemma4StaticVisionProfile] = {
-    DEFAULT_GEMMA4_STATIC_VISION_PROFILE: Gemma4StaticVisionProfile(
-        name=DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
+    "e2b_57x42_266": Gemma4StaticVisionProfile(
+        name="e2b_57x42_266",
         visual_start_idx=1,
         num_visual_tokens=266,
         max_soft_tokens=280,
@@ -462,7 +462,17 @@ _PROFILE_REGISTRY: dict[str, Gemma4StaticVisionProfile] = {
         patch_grid_width=57,
         patch_size=16,
         pooling_kernel_size=3,
-    )
+    ),
+    DEFAULT_GEMMA4_STATIC_VISION_PROFILE: Gemma4StaticVisionProfile(
+        name=DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
+        visual_start_idx=1,
+        num_visual_tokens=264,
+        max_soft_tokens=280,
+        patch_grid_height=36,
+        patch_grid_width=66,
+        patch_size=16,
+        pooling_kernel_size=3,
+    ),
 }
 
 
