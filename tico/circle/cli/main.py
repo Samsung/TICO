@@ -30,6 +30,7 @@ from tico.circle.operations import (
     SignaturePolicy,
 )
 from tico.circle.passes import (
+    CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
     CirclePass,
     CirclePassContext,
@@ -37,8 +38,10 @@ from tico.circle.passes import (
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
+    FuseCompositeOpsPass,
     FuseLinearOpsPass,
     RemoveNoOpOperatorsPass,
+    SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
@@ -47,13 +50,16 @@ from tico.circle.selector import parse_operator_spec
 LOGGER = logging.getLogger("tico.circle.cli")
 
 _PASS_REGISTRY: dict[str, type[CirclePass]] = {
+    "canonicalize-arithmetic": CanonicalizeArithmeticPass,
     "canonicalize-equivalent-ops": CanonicalizeEquivalentOpsPass,
     "eliminate-transpose-bounded-layout-region": (
         EliminateTransposeBoundedLayoutRegionPass
     ),
     "fold-constant-subgraph": FoldConstantSubgraphPass,
+    "fuse-composite-ops": FuseCompositeOpsPass,
     "fuse-linear-ops": FuseLinearOpsPass,
     "remove-no-op-operators": RemoveNoOpOperatorsPass,
+    "simplify-reduction-ops": SimplifyReductionOpsPass,
     "simplify-view-ops": SimplifyViewOpsPass,
     "dce": DeadCodeEliminationPass,
     "compact": CompactIndicesPass,
