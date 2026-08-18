@@ -12,24 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.optimization.fusion.composite_ops import (
-    CompositeFusionPolicy,
-    FuseCompositeOpsPass,
-)
-from tico.circle.passes.optimization.fusion.linear_ops import (
-    FuseLinearOpsPass,
-    LinearFusionPolicy,
-)
-from tico.circle.passes.optimization.fusion.reduction_ops import (
-    ReductionSimplificationPolicy,
-    SimplifyReductionOpsPass,
-)
+from __future__ import annotations
 
-__all__ = [
-    "CompositeFusionPolicy",
-    "FuseCompositeOpsPass",
-    "FuseLinearOpsPass",
-    "LinearFusionPolicy",
-    "ReductionSimplificationPolicy",
-    "SimplifyReductionOpsPass",
-]
+from enum import Enum
+
+
+class FloatingPointRewritePolicy(str, Enum):
+    """Control whether rewrites may change floating-point evaluation order."""
+
+    STRICT = "strict"
+    ALLOW_REASSOCIATION = "allow-reassociation"
+
+    @property
+    def allows_reassociation(self) -> bool:
+        """Return whether algebraic floating-point rewrites are enabled."""
+
+        return self is FloatingPointRewritePolicy.ALLOW_REASSOCIATION

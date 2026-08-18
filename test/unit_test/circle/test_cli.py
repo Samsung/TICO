@@ -16,12 +16,15 @@ import unittest
 
 from tico.circle.cli.main import _build_parser, _parse_passes
 from tico.circle.passes import (
+    CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
+    FuseCompositeOpsPass,
     FuseLinearOpsPass,
     RemoveNoOpOperatorsPass,
+    SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
@@ -54,21 +57,24 @@ class CircleCLITest(unittest.TestCase):
         """Resolve optimization and cleanup pass names in order."""
 
         passes = _parse_passes(
-            "canonicalize-equivalent-ops,"
+            "canonicalize-arithmetic,canonicalize-equivalent-ops,"
             "eliminate-transpose-bounded-layout-region,"
-            "fold-constant-subgraph,fuse-linear-ops,"
-            "remove-no-op-operators,"
+            "fold-constant-subgraph,fuse-composite-ops,fuse-linear-ops,"
+            "remove-no-op-operators,simplify-reduction-ops,"
             "simplify-view-ops,dce,compact"
         )
 
-        self.assertIsInstance(passes[0], CanonicalizeEquivalentOpsPass)
-        self.assertIsInstance(passes[1], EliminateTransposeBoundedLayoutRegionPass)
-        self.assertIsInstance(passes[2], FoldConstantSubgraphPass)
-        self.assertIsInstance(passes[3], FuseLinearOpsPass)
-        self.assertIsInstance(passes[4], RemoveNoOpOperatorsPass)
-        self.assertIsInstance(passes[5], SimplifyViewOpsPass)
-        self.assertIsInstance(passes[6], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[7], CompactIndicesPass)
+        self.assertIsInstance(passes[0], CanonicalizeArithmeticPass)
+        self.assertIsInstance(passes[1], CanonicalizeEquivalentOpsPass)
+        self.assertIsInstance(passes[2], EliminateTransposeBoundedLayoutRegionPass)
+        self.assertIsInstance(passes[3], FoldConstantSubgraphPass)
+        self.assertIsInstance(passes[4], FuseCompositeOpsPass)
+        self.assertIsInstance(passes[5], FuseLinearOpsPass)
+        self.assertIsInstance(passes[6], RemoveNoOpOperatorsPass)
+        self.assertIsInstance(passes[7], SimplifyReductionOpsPass)
+        self.assertIsInstance(passes[8], SimplifyViewOpsPass)
+        self.assertIsInstance(passes[9], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[10], CompactIndicesPass)
 
     def test_removed_layout_pass_name_is_rejected(self) -> None:
         """Reject the removed compatibility pass name from the CLI registry."""

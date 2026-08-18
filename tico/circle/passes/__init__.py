@@ -20,13 +20,20 @@ from tico.circle.passes.manager import (
     CirclePassStrategy,
 )
 from tico.circle.passes.optimization import (
+    ArithmeticCanonicalizationPolicy,
+    CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
+    CompositeFusionPolicy,
     ConstantFoldPolicy,
     EliminateTransposeBoundedLayoutRegionPass,
+    FloatingPointRewritePolicy,
     FoldConstantSubgraphPass,
+    FuseCompositeOpsPass,
     FuseLinearOpsPass,
     LinearFusionPolicy,
+    ReductionSimplificationPolicy,
     RemoveNoOpOperatorsPass,
+    SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.rules import (
@@ -41,6 +48,9 @@ from tico.circle.passes.rules import (
 )
 
 __all__ = [
+    "ArithmeticCanonicalizationPolicy",
+    "CanonicalizeArithmeticPass",
+    "CanonicalizeEquivalentOpsPass",
     "CirclePass",
     "CirclePassContext",
     "CirclePassExecution",
@@ -50,18 +60,22 @@ __all__ = [
     "CirclePassStrategy",
     "CircleRewriteRule",
     "CircleRulePass",
-    "CanonicalizeEquivalentOpsPass",
+    "CompositeFusionPolicy",
     "ConstantFoldPolicy",
     "EliminateTransposeBoundedLayoutRegionPass",
+    "FloatingPointRewritePolicy",
     "FoldConstantSubgraphPass",
+    "FuseCompositeOpsPass",
     "FuseLinearOpsPass",
     "LinearFusionPolicy",
     "OperatorSnapshot",
+    "ReductionSimplificationPolicy",
     "RemoveNoOpOperatorsPass",
     "RewriteApplication",
     "RewriteDiagnostic",
     "RewritePlan",
     "RewriteSeverity",
+    "SimplifyReductionOpsPass",
     "SimplifyViewOpsPass",
     "TensorSnapshot",
 ]

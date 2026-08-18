@@ -12,12 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.optimization.canon import CanonicalizeEquivalentOpsPass
+from tico.circle.passes.optimization.canon import (
+    ArithmeticCanonicalizationPolicy,
+    CanonicalizeArithmeticPass,
+    CanonicalizeEquivalentOpsPass,
+)
 from tico.circle.passes.optimization.fold import (
     ConstantFoldPolicy,
     FoldConstantSubgraphPass,
 )
-from tico.circle.passes.optimization.fusion import FuseLinearOpsPass, LinearFusionPolicy
+from tico.circle.passes.optimization.fusion import (
+    CompositeFusionPolicy,
+    FuseCompositeOpsPass,
+    FuseLinearOpsPass,
+    LinearFusionPolicy,
+    ReductionSimplificationPolicy,
+    SimplifyReductionOpsPass,
+)
+from tico.circle.passes.optimization.policy import FloatingPointRewritePolicy
 from tico.circle.passes.optimization.remove import (
     EliminateTransposeBoundedLayoutRegionPass,
     RemoveNoOpOperatorsPass,
@@ -25,12 +37,19 @@ from tico.circle.passes.optimization.remove import (
 )
 
 __all__ = [
+    "ArithmeticCanonicalizationPolicy",
+    "CanonicalizeArithmeticPass",
     "CanonicalizeEquivalentOpsPass",
+    "CompositeFusionPolicy",
     "ConstantFoldPolicy",
     "EliminateTransposeBoundedLayoutRegionPass",
+    "FloatingPointRewritePolicy",
     "FoldConstantSubgraphPass",
+    "FuseCompositeOpsPass",
     "FuseLinearOpsPass",
     "LinearFusionPolicy",
+    "ReductionSimplificationPolicy",
     "RemoveNoOpOperatorsPass",
+    "SimplifyReductionOpsPass",
     "SimplifyViewOpsPass",
 ]

@@ -12,8 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.passes.optimization.canon.arithmetic import (
+    ArithmeticCanonicalizationPolicy,
+    CanonicalizeArithmeticPass,
+)
 from tico.circle.passes.optimization.canon.equivalent_ops import (
     CanonicalizeEquivalentOpsPass,
 )
 
-__all__ = ["CanonicalizeEquivalentOpsPass"]
+__all__ = [
+    "ArithmeticCanonicalizationPolicy",
+    "CanonicalizeArithmeticPass",
+    "CanonicalizeEquivalentOpsPass",
+]
