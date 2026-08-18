@@ -411,3 +411,58 @@ python -m examples.hand_detector.test_hand_detector
 
 See `docs/layout_optimization.md` for the Circle layout-region optimization design
 and `THIRD_PARTY_NOTICES.md` for source-model attribution.
+
+## Activation block reconstruction
+
+The `block-reconstruction` analysis keeps model parameters and weight qparams
+fixed while optimizing per-tensor activation scale and, for asymmetric
+qschemes, zero-point against cached floating-point block outputs. Reconstruction
+runs under E (`internal-full`), with quantized-prefix inputs and floating-point
+block targets.
+
+Use `--groups` to reconstruct semantic groups in model execution order. With
+`--selection-count`, calibration inputs are split into optimization and held-out
+selection subsets. Step zero remains a valid checkpoint, and a reconstructed
+window is committed only when the held-out primary metric improves without
+violating the auxiliary-output tolerance. Otherwise its original qparams are
+restored.
+
+```bash
+python -m examples.hand_detector.analyze block-reconstruction \
+  --calibration-dir /path/to/npy \
+  --calibration-offset 0 \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --bits 8 \
+  --percentile 99.99 \
+  --max-samples 524288 \
+  --groups stem feature_block_00 \
+  --selection-count 40 \
+  --reconstruction-loss normalized-l1 \
+  --report-json examples/hand_detector/reports/block_reconstruction.json
+```
+
+Use `--windows` to optimize contiguous semantic groups atomically. Join group
+names with `+`:
+
+```bash
+python -m examples.hand_detector.analyze block-reconstruction \
+  --calibration-dir /path/to/npy \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --windows \
+    stem+feature_block_00 \
+    feature_block_03+feature_block_04 \
+  --selection-count 40
+```
+
+A joint window includes every required live-in tensor and reconstructs all
+live-out tensors consumed outside the window. The external evaluation set is
+reported after each accepted or rolled-back window and is never used for
+checkpoint selection.

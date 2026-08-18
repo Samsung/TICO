@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from examples.hand_detector import block_reconstruction as block_reconstruction_cli
 from examples.hand_detector._support.analysis import (
     output_boundaries,
     OUTPUT_NAMES,
@@ -53,6 +54,7 @@ from examples.hand_detector._support.observer_sweep import (
     print_observer_sweep,
 )
 from examples.hand_detector._support.quantization import (
+    export_quantized_circle,
     quantization_name,
     quantize_candidate,
 )
@@ -214,6 +216,8 @@ def parse_args() -> argparse.Namespace:
         default=DIRECTORY / "reports" / "group_observer_sweep.json",
     )
 
+    block_reconstruction_cli.add_subparser(subparsers)
+
     sensitivity = subparsers.add_parser(
         "activation-sensitivity",
         help=(
@@ -330,6 +334,8 @@ def main() -> None:
         _run_observer_sweep(args)
     elif args.command == "group-observer-sweep":
         _run_group_observer_sweep(args)
+    elif args.command == "block-reconstruction":
+        block_reconstruction_cli.run(args)
     elif args.command == "activation-sensitivity":
         _run_activation_sensitivity(args)
     else:

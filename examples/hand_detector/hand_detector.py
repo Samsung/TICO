@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -112,17 +113,38 @@ class HandDetector(nn.Module):
                 layers.append(nn.Identity())
         self.layers = nn.ModuleList(layers)
 
-    def _forward_core(
+    def execute_segment(
         self,
-        input_: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the static detector graph from an already quantized NCHW tensor."""
-        values: dict[int, torch.Tensor] = {self.input_tensor: input_}
-        for operation, layer in zip(self.operations, self.layers):
+        initial_values: Mapping[int, torch.Tensor],
+        operation_positions: Sequence[int],
+    ) -> dict[int, torch.Tensor]:
+        """Execute selected static-graph operations from supplied tensor values."""
+        values = {int(tensor_id): value for tensor_id, value in initial_values.items()}
+        for position in operation_positions:
+            if position < 0 or position >= len(self.operations):
+                raise IndexError(f"Operation position {position} is out of range.")
+            operation = self.operations[position]
+            layer = self.layers[position]
             name = operation["name"]
             inputs = operation["inputs"]
             output = int(operation["outputs"][0])
             config = operation["config"]
+            runtime_inputs = (
+                inputs
+                if name == "CONCATENATION"
+                else inputs[:2]
+                if name == "ADD"
+                else inputs[:1]
+            )
+            missing = tuple(
+                int(tensor_id)
+                for tensor_id in runtime_inputs
+                if int(tensor_id) not in values
+            )
+            if missing:
+                raise KeyError(
+                    f"Operation {position} ({name}) is missing input tensors {missing}."
+                )
             if name in {
                 "CONV_2D",
                 "DEPTHWISE_CONV_2D",
@@ -143,6 +165,33 @@ class HandDetector(nn.Module):
                 values[output] = layer(tuple(values[int(index)] for index in inputs))
             else:
                 raise RuntimeError(f"Unsupported converted operation: {name}")
+        return values
+
+    def forward_values(self, input_: torch.Tensor) -> dict[int, torch.Tensor]:
+        """Run the complete graph and return every materialized NCHW tensor."""
+        quantized = self.input_quantizer(input_)
+        return self.execute_segment(
+            {self.input_tensor: quantized},
+            tuple(range(len(self.operations))),
+        )
+
+    def forward_nhwc_values(self, input_: torch.Tensor) -> dict[int, torch.Tensor]:
+        """Run the complete graph from NHWC input and return all tensor values."""
+        quantized = self.input_quantizer(input_).permute(0, 3, 1, 2)
+        return self.execute_segment(
+            {self.input_tensor: quantized},
+            tuple(range(len(self.operations))),
+        )
+
+    def _forward_core(
+        self,
+        input_: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Run the static detector graph from an already quantized NCHW tensor."""
+        values = self.execute_segment(
+            {self.input_tensor: input_},
+            tuple(range(len(self.operations))),
+        )
         return values[self.output_tensors[0]], values[self.output_tensors[1]]
 
     def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

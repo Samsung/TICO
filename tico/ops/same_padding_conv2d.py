@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
+
 from torch import nn
 
 
@@ -26,6 +28,12 @@ class SamePaddingConv2d(nn.Conv2d):
     PyTorch rejects ``padding="same"`` for strided convolutions. This module
     keeps the normal ``nn.Conv2d`` parameter layout while lowering through the
     Circle custom Conv2D or DepthwiseConv2D operator with SAME padding.
+
+    Gradient-based quantization algorithms need an autograd-enabled execution
+    path. When the activation input participates in a gradient graph, the
+    module therefore evaluates the same padding and convolution with native
+    ATen operators. Normal inference and export keep using the Circle custom
+    operators so the serialized graph contract is unchanged.
     """
 
     def __init__(
@@ -74,7 +82,17 @@ class SamePaddingConv2d(nn.Conv2d):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Lower one NCHW convolution through a channel-last Circle custom op."""
+        """Run an autograd-safe native path or lower through a Circle custom op."""
+        if torch.is_grad_enabled() and input_.requires_grad:
+            return _native_same_padding_conv2d(
+                input_,
+                weight,
+                bias,
+                stride=self.stride,
+                dilation=self.dilation,
+                groups=self.groups,
+            )
+
         input_nhwc = torch.ops.aten.permute.default(input_, [0, 2, 3, 1])
         stride = list(self.stride)
         dilation = list(self.dilation)
@@ -103,3 +121,74 @@ class SamePaddingConv2d(nn.Conv2d):
             )
 
         return torch.ops.aten.permute.default(output_nhwc, [0, 3, 1, 2])
+
+
+def _native_same_padding_conv2d(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    stride: tuple[int, int],
+    dilation: tuple[int, int],
+    groups: int,
+) -> torch.Tensor:
+    """Evaluate Circle SAME padding with differentiable PyTorch operators."""
+    padding = _same_padding_2d(
+        input_height=int(input_.shape[-2]),
+        input_width=int(input_.shape[-1]),
+        kernel_height=int(weight.shape[-2]),
+        kernel_width=int(weight.shape[-1]),
+        stride=stride,
+        dilation=dilation,
+    )
+    padded = F.pad(input_, padding) if any(padding) else input_
+    return F.conv2d(
+        padded,
+        weight,
+        bias,
+        stride=stride,
+        padding=0,
+        dilation=dilation,
+        groups=groups,
+    )
+
+
+def _same_padding_2d(
+    *,
+    input_height: int,
+    input_width: int,
+    kernel_height: int,
+    kernel_width: int,
+    stride: tuple[int, int],
+    dilation: tuple[int, int],
+) -> tuple[int, int, int, int]:
+    """Return ``F.pad`` order for Circle/TensorFlow SAME padding."""
+    top, bottom = _same_padding_1d(
+        input_height,
+        kernel_height,
+        stride[0],
+        dilation[0],
+    )
+    left, right = _same_padding_1d(
+        input_width,
+        kernel_width,
+        stride[1],
+        dilation[1],
+    )
+    return left, right, top, bottom
+
+
+def _same_padding_1d(
+    input_size: int,
+    kernel_size: int,
+    stride: int,
+    dilation: int,
+) -> tuple[int, int]:
+    """Return before/after padding for one SAME-padded spatial dimension."""
+    if min(input_size, kernel_size, stride, dilation) <= 0:
+        raise ValueError("SAME-padding dimensions must be positive.")
+    output_size = (input_size + stride - 1) // stride
+    effective_kernel = (kernel_size - 1) * dilation + 1
+    total = max((output_size - 1) * stride + effective_kernel - input_size, 0)
+    before = total // 2
+    return before, total - before
