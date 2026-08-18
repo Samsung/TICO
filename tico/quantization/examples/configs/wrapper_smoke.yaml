@@ -37,5 +37,4 @@ debug:
       size_profile: tiny
       static_runtime:
         max_seq: 2048
-        num_visual_tokens: 256
-        max_soft_tokens: 280
+        profile: e2b_66x36_264

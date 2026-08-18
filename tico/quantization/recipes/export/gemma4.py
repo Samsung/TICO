@@ -15,7 +15,6 @@
 """Static per-stage Circle export for Gemma4 E2B."""
 
 from copy import deepcopy
-from math import isqrt
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -29,6 +28,11 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4LMHeadExportAdapter,
     Gemma4MMFusionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
+)
+from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
+    build_gemma4_static_vision_profile,
+    canonicalize_gemma4_static_vision_model_args,
+    Gemma4StaticVisionProfile,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
@@ -90,7 +94,7 @@ def _normalize_model_args(
     max_seq_len: int,
 ) -> dict[str, Any]:
     """Normalize the fixed Gemma4 runtime contract used by export wrappers."""
-    normalized = deepcopy(dict(model_args or {}))
+    normalized = canonicalize_gemma4_static_vision_model_args(model_args)
 
     vision = normalized.setdefault("vision", {})
     if not isinstance(vision, dict):
@@ -116,6 +120,13 @@ def _normalize_model_args(
         vision["max_soft_tokens"] = int(vision["max_soft_tokens"])
         if vision["max_soft_tokens"] <= 0:
             raise ValueError("model_args.vision.max_soft_tokens must be positive.")
+
+    for key in ("patch_grid_height", "patch_grid_width"):
+        if key not in vision:
+            raise ValueError(f"Gemma4 Circle export requires model_args.vision.{key}.")
+        vision[key] = int(vision[key])
+        if vision[key] <= 0:
+            raise ValueError(f"model_args.vision.{key} must be positive.")
 
     text = normalized.setdefault("text", {})
     if not isinstance(text, dict):
@@ -187,97 +198,31 @@ def _resolve_vision_contract(
     qvision: torch.nn.Module,
     model_args: Mapping[str, Any],
     max_seq_len: int,
-) -> tuple[int, int, int, int]:
-    """Validate the fixed padded-patch and visual-token layout."""
-    vision_args = model_args["vision"]
-    visual_start_idx = int(vision_args["visual_start_idx"])
-    num_visual_tokens = int(vision_args["num_visual_tokens"])
-
-    wrapped_start_idx = int(getattr(gemma_model, "visual_start_idx"))
-    if visual_start_idx != wrapped_start_idx:
-        raise ValueError(
-            "Configured visual_start_idx does not match the wrapped checkpoint: "
-            f"configured={visual_start_idx}, wrapped={wrapped_start_idx}."
-        )
-
-    wrapped_visual_tokens = int(getattr(gemma_model, "num_visual_tokens"))
-    if num_visual_tokens != wrapped_visual_tokens:
-        raise ValueError(
-            "Configured num_visual_tokens does not match the wrapped checkpoint: "
-            f"configured={num_visual_tokens}, wrapped={wrapped_visual_tokens}."
-        )
-
-    if visual_start_idx + num_visual_tokens > max_seq_len:
-        raise ValueError(
-            "The fixed visual-token span exceeds max_seq_len: "
-            f"start={visual_start_idx}, visual_tokens={num_visual_tokens}, "
-            f"max_seq_len={max_seq_len}."
-        )
-
-    vision_config = qvision.config
-    pooling_kernel_size = int(vision_config.pooling_kernel_size)
-    if pooling_kernel_size <= 0:
-        raise ValueError(
-            "Gemma4 vision pooling_kernel_size must be positive, got "
-            f"{pooling_kernel_size}."
-        )
-
-    max_soft_tokens = int(
-        vision_args.get(
-            "max_soft_tokens",
-            getattr(vision_config, "default_output_length", num_visual_tokens),
-        )
+) -> Gemma4StaticVisionProfile:
+    """Build and validate the canonical static vision profile."""
+    profile = build_gemma4_static_vision_profile(
+        model_args,
+        vision_config=qvision.config,
+        max_seq_len=max_seq_len,
     )
-    if max_soft_tokens < num_visual_tokens:
-        raise ValueError(
-            "model_args.vision.max_soft_tokens must be greater than or equal "
-            f"to num_visual_tokens, got {max_soft_tokens} < {num_visual_tokens}."
-        )
-
-    visual_side = isqrt(num_visual_tokens)
-    if visual_side * visual_side != num_visual_tokens:
-        raise ValueError(
-            "Gemma4 num_visual_tokens must form a square visual grid, got "
-            f"{num_visual_tokens}."
-        )
-
-    num_valid_patches = num_visual_tokens * pooling_kernel_size**2
-    num_patches = max_soft_tokens * pooling_kernel_size**2
-    return visual_start_idx, num_visual_tokens, num_valid_patches, num_patches
+    profile.validate_wrapped_model(gemma_model)
+    return profile
 
 
 def _make_vision_inputs(
     *,
-    qvision: torch.nn.Module,
-    num_visual_tokens: int,
-    num_valid_patches: int,
-    num_patches: int,
+    profile: Gemma4StaticVisionProfile,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create processor-style padded patch values and 2-D position IDs."""
-    pooling_kernel_size = int(qvision.config.pooling_kernel_size)
-    visual_side = isqrt(num_visual_tokens)
-    patch_grid_side = visual_side * pooling_kernel_size
-
-    coords = torch.arange(num_valid_patches, dtype=torch.long)
-    valid_positions = torch.stack(
-        (coords % patch_grid_side, coords // patch_grid_side),
-        dim=-1,
+    """Create padded patch values and canonical 2-D position IDs."""
+    pixel_position_ids = profile.build_image_position_ids()
+    pixel_values = torch.rand(
+        1,
+        profile.num_patches,
+        profile.patch_vector_size,
+        device="cpu",
     )
-    padding_positions = torch.full(
-        (num_patches - num_valid_patches, 2),
-        -1,
-        dtype=torch.long,
-    )
-    pixel_position_ids = torch.cat(
-        (valid_positions, padding_positions),
-        dim=0,
-    ).unsqueeze(0)
-
-    patch_size = int(qvision.config.patch_size)
-    patch_vector_size = 3 * patch_size * patch_size
-    pixel_values = torch.rand(1, num_patches, patch_vector_size, device="cpu")
-    if num_patches > num_valid_patches:
-        pixel_values[:, num_valid_patches:, :] = 0.0
+    if profile.num_padding_patches:
+        pixel_values[:, profile.num_valid_patches :, :] = 0.0
     return pixel_values, pixel_position_ids
 
 
@@ -399,17 +344,14 @@ def export_gemma4_per_layer(
             f"max_seq_len={max_seq_len}, capacity={text_capacity}."
         )
 
-    (
-        visual_start_idx,
-        num_visual_tokens,
-        num_valid_patches,
-        num_patches,
-    ) = _resolve_vision_contract(
+    vision_profile = _resolve_vision_contract(
         gemma_model=gemma_model,
         qvision=qvision,
         model_args=normalized_model_args,
         max_seq_len=max_seq_len,
     )
+    visual_start_idx = vision_profile.visual_start_idx
+    num_visual_tokens = vision_profile.num_visual_tokens
 
     config = qtext.config
     hidden_size = int(config.hidden_size)
@@ -417,11 +359,9 @@ def export_gemma4_per_layer(
     ple_dim = int(getattr(config, "hidden_size_per_layer_input", 0) or 0)
 
     pixel_values, pixel_position_ids = _make_vision_inputs(
-        qvision=qvision,
-        num_visual_tokens=num_visual_tokens,
-        num_valid_patches=num_valid_patches,
-        num_patches=num_patches,
+        profile=vision_profile,
     )
+    vision_profile.save_manifest(output_dir / "vision_profile.json")
     vision_prefill = build_gemma4_vision_prefill_export_module(
         gemma_model,
         pixel_position_ids=pixel_position_ids,

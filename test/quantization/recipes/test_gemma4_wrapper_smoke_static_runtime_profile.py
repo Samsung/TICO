@@ -44,8 +44,7 @@ def _static_cfg(**overrides: int) -> dict:
     """Build a minimal E2B static-runtime wrapper-smoke config."""
     static_runtime = {
         "max_seq": 2_048,
-        "num_visual_tokens": 256,
-        "max_soft_tokens": 280,
+        "profile": "e2b_66x36_264",
     }
     static_runtime.update(overrides)
     return {
@@ -68,12 +67,14 @@ class TestGemma4StaticRuntimeShape(unittest.TestCase):
         shape = Gemma4StaticRuntimeShape()
 
         self.assertEqual(shape.max_seq, 2_048)
-        self.assertEqual(shape.visual_grid_side, 16)
-        self.assertEqual(shape.patch_grid_side, 48)
-        self.assertEqual(shape.num_valid_patches, 2_304)
+        self.assertEqual(shape.visual_grid_height, 12)
+        self.assertEqual(shape.visual_grid_width, 22)
+        self.assertEqual(shape.patch_grid_height, 36)
+        self.assertEqual(shape.patch_grid_width, 66)
+        self.assertEqual(shape.num_valid_patches, 2_376)
         self.assertEqual(shape.num_patches, 2_520)
-        self.assertEqual(shape.num_padding_patches, 216)
-        self.assertEqual(shape.num_padding_soft_tokens, 24)
+        self.assertEqual(shape.num_padding_patches, 144)
+        self.assertEqual(shape.num_padding_soft_tokens, 16)
 
     def test_static_position_ids_encode_valid_grid_then_padding(self):
         """The synthetic layout should match Gemma4 processor padding semantics."""
@@ -82,21 +83,23 @@ class TestGemma4StaticRuntimeShape(unittest.TestCase):
         padding = _padding_positions_from_ids(position_ids)
 
         self.assertEqual(tuple(position_ids.shape), (1, 2_520, 2))
-        self.assertEqual(int(padding.sum().item()), 216)
+        self.assertEqual(int(padding.sum().item()), 144)
         self.assertTrue(torch.equal(position_ids[0, 0], torch.tensor([0, 0])))
         last_valid = position_ids[0, shape.num_valid_patches - 1]
-        self.assertTrue(torch.equal(last_valid, torch.tensor([47, 47])))
+        self.assertTrue(torch.equal(last_valid, torch.tensor([65, 35])))
         self.assertTrue((position_ids[0, shape.num_valid_patches :] == -1).all())
 
     def test_invalid_static_layouts_are_rejected(self):
         """Malformed runtime profiles should fail before any module allocation."""
         with self.assertRaisesRegex(ValueError, "at least 2"):
             Gemma4StaticRuntimeShape(max_seq=1)
-        with self.assertRaisesRegex(ValueError, "square visual grid"):
-            Gemma4StaticRuntimeShape(num_visual_tokens=255)
+        with self.assertRaisesRegex(ValueError, "visual-token count"):
+            Gemma4StaticRuntimeShape(num_visual_tokens=265)
+        with self.assertRaisesRegex(ValueError, "patch_grid_width"):
+            Gemma4StaticRuntimeShape(patch_grid_width=56)
         with self.assertRaisesRegex(ValueError, "processor-supported"):
             Gemma4StaticRuntimeShape(max_soft_tokens=300)
-        with self.assertRaisesRegex(ValueError, "greater than or equal"):
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
             Gemma4StaticRuntimeShape(num_visual_tokens=400, max_soft_tokens=280)
 
     def test_case_shape_helpers_select_static_dimensions(self):
@@ -117,7 +120,7 @@ class TestGemma4StaticRuntimeShape(unittest.TestCase):
 
         embedder = Gemma4MultimodalEmbedderCase()
         embedder.validate_config(cfg)
-        self.assertEqual(embedder._visual_token_seq_len(default=16), 256)
+        self.assertEqual(embedder._visual_token_seq_len(default=16), 264)
 
     def test_profile_rejects_synthetic_or_unbounded_cases(self):
         """Static runtime should cover real bounded E2B branches only."""
