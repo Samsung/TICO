@@ -69,6 +69,19 @@ class GPTQConfig(BaseConfig):
     # use this option to stabilize GPTQ for deep models
     use_orig_model_inference: bool = False
 
+    # GPTQv2: uses FP inference for collecting inputs during quantization
+    gptq_v2: bool = False
+
+    # GPTQv2: scaling factor for the asymmetric correction (P matrix)
+    # `alpha` is the correction strength for GPTQv2's input-error compensation.
+    # It scales the `P` matrix that adjusts weight updates to account for upstream quantization error in the activations.
+    # A value of `0` disables the correction (standard GPTQ), while values around `0.25` provide the best empirical results.
+    gptq_v2_alpha: float = 0.25
+
+    # Use running average for Hessian accumulation.
+    # When False, uses summation.
+    normalize_H: bool = False
+
     @property
     def name(self) -> str:
         return "gptq"
