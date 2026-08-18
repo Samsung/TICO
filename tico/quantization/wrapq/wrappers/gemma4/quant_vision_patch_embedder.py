@@ -88,47 +88,59 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         # Collect position_embedding_table statistics
         self.obs_emb_table.collect(self.position_embedding_table)
 
-    def _quant_position_embeddings(
+    def _project_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Normalize and project flattened pixel patches into hidden space."""
+        pixel_values = self._fq(pixel_values, self.obs_act_in)
+        pixel_values = pixel_values - 0.5
+        pixel_values = self._fq(pixel_values, self.obs_pixel_values_m_0_5)
+        pixel_values = 2.0 * pixel_values
+        pixel_values = self._fq(pixel_values, self.obs_pixel_values)
+
+        hidden_states = self.input_proj(pixel_values)
+        return self._fq(hidden_states, self.obs_hidden_states)
+
+    def _lookup_position_embeddings(
         self,
         pixel_position_ids: torch.Tensor,
-        padding_positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute quantized 2D patch position embeddings via embedding lookup.
-
-        Args:
-            pixel_position_ids: (batch, num_patches, 2) with x,y indices
-            padding_positions: (batch, num_patches) boolean mask
-
-        Returns:
-            position_embeddings: (batch, num_patches, hidden_size)
-        """
-        # Clamp only lower bound for valid indexing
+        """Look up fixed-profile 2D position embeddings before activation PTQ."""
         clamped_positions = pixel_position_ids.clamp(min=0)
 
-        # Quantize position embedding table in QUANT mode
         emb_table = self.position_embedding_table
         if self._mode is Mode.QUANT:
             emb_table = self.obs_emb_table.fake_quant(emb_table)
 
-        # Lookup x and y embeddings
         x_emb = F.embedding(clamped_positions[..., 0], emb_table[0])
         y_emb = F.embedding(clamped_positions[..., 1], emb_table[1])
+        return x_emb + y_emb
 
-        # Sum x and y embeddings
-        position_embeddings = x_emb + y_emb
+    def _finalize_position_embeddings(
+        self,
+        position_embeddings: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply activation PTQ and zero the baked profile's padding slots."""
         position_embeddings = self._fq(
-            position_embeddings, self.obs_position_embeddings
+            position_embeddings,
+            self.obs_position_embeddings,
         )
-
-        # Apply padding mask (zero out padding positions)
-        # Use zeros_like to avoid torch.export lifting issues with torch.tensor()
-        position_embeddings = torch.where(
+        return torch.where(
             padding_positions.unsqueeze(-1),
             torch.zeros_like(position_embeddings),
             position_embeddings,
         )
 
-        return position_embeddings
+    def _quant_position_embeddings(
+        self,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute quantized 2D position embeddings for eager execution."""
+        position_embeddings = self._lookup_position_embeddings(pixel_position_ids)
+        return self._finalize_position_embeddings(
+            position_embeddings,
+            padding_positions,
+        )
 
     def forward(
         self,
@@ -136,38 +148,28 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         pixel_position_ids: torch.Tensor,
         padding_positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Run quantized patch projection and positional embedding addition.
-
-        Args:
-            pixel_values: (batch, num_patches, 3 * patch_size^2) raw pixel values
-            pixel_position_ids: (batch, num_patches, 2) 2D grid coordinates
-            padding_positions: (batch, num_patches) boolean padding mask
-
-        Returns:
-            hidden_states: (batch, num_patches, hidden_size) patch embeddings
-        """
-        pixel_values = self._fq(pixel_values, self.obs_act_in)
-
-        # Step 1: Pixel scaling (no normalization, just centering to [-1, 1])
-        pixel_values = pixel_values - 0.5
-        pixel_values = self._fq(pixel_values, self.obs_pixel_values_m_0_5)
-        pixel_values = 2.0 * pixel_values
-        pixel_values = self._fq(pixel_values, self.obs_pixel_values)
-
-        # Apply linear projection (no bias)
-        hidden_states = self.input_proj(pixel_values)
-        hidden_states = self._fq(hidden_states, self.obs_hidden_states)
-
-        # Step 3: Position embeddings
+        """Run eager patch projection with runtime position coordinates."""
+        hidden_states = self._project_pixel_values(pixel_values)
         position_embeddings = self._quant_position_embeddings(
-            pixel_position_ids, padding_positions
+            pixel_position_ids,
+            padding_positions,
         )
+        return self._fq(hidden_states + position_embeddings, self.obs_output)
 
-        # Step 4: Add position embeddings to hidden states
-        hidden_states = hidden_states + position_embeddings
-
-        # Step 5: Quantize output
-        return self._fq(hidden_states, self.obs_output)
+    def forward_export(
+        self,
+        pixel_values: torch.Tensor,
+        *,
+        position_embeddings: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run static patch projection with a baked positional template."""
+        hidden_states = self._project_pixel_values(pixel_values)
+        position_embeddings = self._finalize_position_embeddings(
+            position_embeddings,
+            padding_positions,
+        )
+        return self._fq(hidden_states + position_embeddings, self.obs_output)
 
     def _all_observers(self) -> Iterable:
         """Return all observers owned by this wrapper."""
@@ -181,8 +183,15 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
             self.obs_output,
         )
 
-    def as_export_module(self, mode: str = "prefill", **kwargs) -> nn.Module:
-        """Return self for export (this wrapper is already exportable)."""
+    def as_export_module(
+        self,
+        mode: str = "prefill",
+        *,
+        pixel_position_ids: Optional[torch.Tensor] = None,
+        padding_positions: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> nn.Module:
+        """Build a pixel-values-only adapter for one fixed position profile."""
         if self._mode not in (Mode.NO_QUANT, Mode.QUANT):
             raise RuntimeError(
                 "Gemma4 VisionPatchEmbedder export requires NO_QUANT or "
@@ -192,4 +201,52 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
             raise ValueError(
                 f"Unsupported Gemma4 VisionPatchEmbedder export mode: {mode!r}"
             )
-        return self
+        if pixel_position_ids is None:
+            raise ValueError(
+                "Gemma4 VisionPatchEmbedder export requires construction-time "
+                "pixel_position_ids."
+            )
+        if (
+            pixel_position_ids.dim() != 3
+            or pixel_position_ids.shape[0] != 1
+            or pixel_position_ids.shape[-1] != 2
+        ):
+            raise ValueError(
+                "pixel_position_ids must have shape (1, num_patches, 2), "
+                f"got {tuple(pixel_position_ids.shape)}."
+            )
+
+        expected_padding = (pixel_position_ids == -1).all(dim=-1)
+        if padding_positions is None:
+            padding_positions = expected_padding
+        else:
+            padding_positions = padding_positions.to(
+                device=expected_padding.device,
+                dtype=torch.bool,
+            )
+            if tuple(padding_positions.shape) != tuple(expected_padding.shape):
+                raise ValueError(
+                    "padding_positions shape must match pixel_position_ids: "
+                    f"expected={tuple(expected_padding.shape)}, "
+                    f"actual={tuple(padding_positions.shape)}."
+                )
+            if not torch.equal(padding_positions, expected_padding):
+                raise ValueError(
+                    "padding_positions must match the -1 entries in "
+                    "pixel_position_ids."
+                )
+
+        with torch.no_grad():
+            position_embeddings = self._lookup_position_embeddings(
+                pixel_position_ids
+            ).detach()
+
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4VisionPatchEmbedderPrefillExportAdapter,
+        )
+
+        return Gemma4VisionPatchEmbedderPrefillExportAdapter(
+            self,
+            position_embeddings=position_embeddings,
+            padding_positions=padding_positions,
+        )

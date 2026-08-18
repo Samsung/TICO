@@ -321,7 +321,7 @@ class StaticGemma4Runtime:
         self,
         image_position_ids: Optional[torch.Tensor],
     ) -> nn.Module:
-        """Return the static vision module for the canonical runtime profile."""
+        """Validate processor coordinates and return a pixel-values-only module."""
         if image_position_ids is None:
             raise ValueError(
                 "Gemma4 static vision prefill requires image_position_ids from "
@@ -587,10 +587,9 @@ class StaticGemma4Runtime:
 
         text_embeds = self.token_embedding(llm_input_ids)
         vision_prefill = self._get_or_create_vision_prefill(image_position_ids)
-        image_embeds = vision_prefill(
-            pixel_values,
-            image_position_ids,
-        )
+        # Processor coordinates select and validate the baked module above;
+        # they are intentionally absent from the vision-prefill runtime ABI.
+        image_embeds = vision_prefill(pixel_values)
         hidden_states = self.mm_fusion(text_embeds, image_embeds)
         self.layer_caches = self._allocate_empty_cache(
             hidden_states.shape[0], hidden_states.dtype

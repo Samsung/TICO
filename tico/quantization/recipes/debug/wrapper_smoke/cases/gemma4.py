@@ -1842,10 +1842,9 @@ class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
         patch_dim = 3 * self.patch_size**2
         if self._static_runtime_shape() is None:
             pixel_values = torch.randn(self.batch_size, self.num_patches, patch_dim)
-            pixel_position_ids = torch.randint(
-                0,
-                self.position_embedding_size,
-                (self.batch_size, self.num_patches, 2),
+            pixel_position_ids = _pixel_position_ids(
+                self.batch_size,
+                self.num_patches,
             )
             padding_positions = torch.zeros(
                 self.batch_size, self.num_patches, dtype=torch.bool
@@ -1877,6 +1876,30 @@ class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
     ) -> ForwardInput:
         """Create the Gemma4 vision patch embedder evaluation sample."""
         return self._sample()
+
+    def export_module(
+        self,
+        quantized: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> torch.nn.Module:
+        """Bake the fixed patch-coordinate profile into an export adapter."""
+        wrapped = getattr(quantized, "wrapped", quantized)
+        if not hasattr(wrapped, "as_export_module"):
+            return quantized
+        return wrapped.as_export_module(
+            mode="prefill",
+            pixel_position_ids=self._case_pixel_position_ids(self.batch_size),
+            padding_positions=self._case_padding_positions(self.batch_size),
+        ).eval()
+
+    def export_input(
+        self,
+        eval_sample: ForwardInput,
+        cfg: Mapping[str, Any],
+    ) -> ForwardInput:
+        """Keep only pixel values in the static patch-embedder ABI."""
+        cloned = _clone_forward_input(eval_sample)
+        return ForwardInput((cloned.args[0],), {})
 
 
 class Gemma4VisionPoolerCase(Gemma4BaseCase):
@@ -2074,11 +2097,11 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
     def export_module(
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
-        """Export the wrapped vision model in prefill mode.
+        """Export one vision model specialized for a fixed position profile.
 
-        Passes ``pixel_position_ids`` so the pooler's export adapter can
-        precompute the pooling weight matrix and output mask at construction
-        time.
+        Construction-time position IDs materialize patch embeddings, encoder
+        templates, and pooler geometry. The returned runtime module accepts only
+        pixel values.
         """
         wrapped = getattr(quantized, "wrapped", quantized)
         if hasattr(wrapped, "as_export_module"):
@@ -2092,15 +2115,10 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
     def export_input(
         self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
     ) -> ForwardInput:
-        """Create static export inputs expected by the vision model adapter.
-
-        The export adapter's forward() takes pixel_values and pixel_position_ids.
-        """
+        """Keep only pixel values in the static vision-model ABI."""
         cloned = _clone_forward_input(eval_sample)
-        kwargs = dict(cloned.kwargs)
-        pixel_values = kwargs["pixel_values"]
-        pixel_position_ids = kwargs["pixel_position_ids"]
-        return ForwardInput((pixel_values, pixel_position_ids), {})
+        pixel_values = dict(cloned.kwargs)["pixel_values"]
+        return ForwardInput((pixel_values,), {})
 
 
 class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):

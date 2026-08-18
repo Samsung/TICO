@@ -204,55 +204,28 @@ class QuantGemma4VisionModel(QuantModuleBase):
 
         return BaseModelOutputWithPast(last_hidden_state=hidden_states)
 
-    def forward_export(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-    ):
-        """Run Gemma4 vision model with static shapes for torch.export.
+    def forward_export(self, pixel_values: torch.Tensor):
+        """Run the pixel-values-only static vision graph for torch.export.
 
-        This forward method assumes:
-        - ``config.standardize`` is fixed when the module is constructed
-        - output_length is precomputed and fixed
-        - No data-dependent branching
-        - as_export_module() has been called to set up export adapters
-
-        This method IS exportable via torch.export.
-
-        Args:
-            pixel_values: Image pixels with shape (batch, channels, height, width).
-            pixel_position_ids: Patch positions with shape (batch_size, max_patches, 2).
-
-        Returns:
-            BaseModelOutputWithPast with last_hidden_state containing visual soft tokens.
+        All position-dependent tensors are materialized by ``as_export_module``.
+        The exported ABI therefore contains only the processor's padded patch
+        values and cannot mix runtime coordinates with baked encoder or pooler
+        templates.
         """
         from transformers.models.gemma4.modeling_gemma4 import BaseModelOutputWithPast
 
-        # Create padding mask from pixel_position_ids
         padding_positions = self.padding_positions
-
-        # Patch embedder
-        patch_embedder = self.patch_embedder_export
-        inputs_embeds = patch_embedder(
-            pixel_values, pixel_position_ids, padding_positions
-        )
-
-        # Encoder
+        inputs_embeds = self.patch_embedder_export(pixel_values)
         encoder_hidden = self.encoder_export(inputs_embeds)
 
-        # Pooler
-        pooler = self.pooler_export
-        hidden_states, pooler_mask = pooler(
+        hidden_states, pooler_mask = self.pooler_export(
             hidden_states=encoder_hidden,
             padding_positions=padding_positions,
         )
 
-        # Strip padding tokens
         hidden_states = hidden_states[pooler_mask]
         hidden_states = self._fq(hidden_states, self.obs_strip_padding)
 
-        # The configuration-time branch is constant for torch.export and keeps
-        # the real E2B ``standardize=False`` contract exportable.
         if self.config.standardize:
             assert self.obs_std_bias is not None
             assert self.obs_std_scale is not None
@@ -262,12 +235,8 @@ class QuantGemma4VisionModel(QuantModuleBase):
             hidden_states = self._fq(hidden_states, self.obs_minus_bias)
             hidden_states = hidden_states * std_scale.float()
 
-        # Cast to input dtype
         hidden_states = hidden_states.to(inputs_embeds.dtype)
-
-        # Quantize output
         hidden_states = self._fq(hidden_states, self.obs_last_hidden_state)
-
         return BaseModelOutputWithPast(last_hidden_state=hidden_states)
 
     def as_export_module(
@@ -281,8 +250,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
 
         This method:
         1. Requires either NO_QUANT or QUANT mode
-        2. Recursively converts submodules to their export adapters
-        3. Registers output_length and padding tensors for static export
+        2. Recursively converts submodules to fixed-profile export adapters
+        3. Bakes patch positions, padding, encoder, and pooler templates
+        4. Returns a module whose runtime ABI accepts only ``pixel_values``
 
         Submodule export adapters are stored as separate attributes
         (``patch_embedder_export``, ``encoder_export``, and ``pooler_export``)
@@ -291,9 +261,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
 
         Args:
             mode: Export mode (only "prefill" is supported).
-            pixel_position_ids: Patch position ids tensor with shape
-                ``(1, num_patches, 2)``. Required by the encoder and pooler
-                export adapters to precompute their static templates.
+            pixel_position_ids: Construction-time patch positions with shape
+                ``(1, num_patches, 2)``. They specialize all position-dependent
+                templates and do not remain as a runtime graph input.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -313,7 +283,16 @@ class QuantGemma4VisionModel(QuantModuleBase):
             for obs in self._all_observers():
                 assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
 
-        # Store output_length for use in forward_export
+        if (
+            pixel_position_ids.dim() != 3
+            or pixel_position_ids.shape[0] != 1
+            or pixel_position_ids.shape[-1] != 2
+        ):
+            raise ValueError(
+                "pixel_position_ids must have shape (1, num_patches, 2), "
+                f"got {tuple(pixel_position_ids.shape)}."
+            )
+
         pooling_kernel_size = self.config.pooling_kernel_size
         max_patches = pixel_position_ids.shape[-2]
         self.output_length = max_patches // (pooling_kernel_size * pooling_kernel_size)
@@ -322,28 +301,23 @@ class QuantGemma4VisionModel(QuantModuleBase):
             == max_patches
         ), "max_patches must be divisible by pooling_kernel_size^2"
 
-        # Recursively convert submodules to their export adapters.
-        # Store them separately to keep the original wrappers intact.
-        self.patch_embedder_export = self.patch_embedder.as_export_module(mode=mode)
+        padding_positions = (pixel_position_ids == -1).all(dim=-1)
+        self.register_buffer("padding_positions", padding_positions)
+
+        self.patch_embedder_export = self.patch_embedder.as_export_module(
+            mode=mode,
+            pixel_position_ids=pixel_position_ids,
+            padding_positions=padding_positions,
+        )
         self.encoder_export = self.encoder.as_export_module(
             mode=mode,
             pixel_position_ids=pixel_position_ids,
-        )
-
-        # Pooler: requires pixel_position_ids to precompute pooling weights
-        assert pixel_position_ids is not None, (
-            "pixel_position_ids is required by the pooler's as_export_module() "
-            "to precompute pooling weights for static export."
         )
         self.pooler_export = self.pooler.as_export_module(
             mode=mode,
             output_length=self.output_length,
             pixel_position_ids=pixel_position_ids,
         )
-
-        # Precompute padding mask from pixel_position_ids
-        padding_positions = (pixel_position_ids == -1).all(dim=-1)
-        self.register_buffer("padding_positions", padding_positions)
 
         if self._mode is Mode.QUANT:
             register_fake_quant_meta_kernels_for_dynamic_export()

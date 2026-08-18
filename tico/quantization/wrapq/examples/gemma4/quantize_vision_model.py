@@ -171,8 +171,8 @@ def main():
     print(plot_two_outputs(fp_out, quant_out))
 
     # Export and convert to Circle format.
-    # The vision model's as_export_module requires pixel_position_ids to
-    # precompute the pooler's static weight matrix.
+    # Position IDs specialize patch embeddings, encoder templates, and pooler
+    # geometry at construction time. The exported module accepts only pixels.
     wrapped = getattr(quantized_model, "wrapped", quantized_model)
     if hasattr(wrapped, "as_export_module"):
         pixel_pos_ids = _pixel_position_ids(batch_size, num_patches)
@@ -181,10 +181,7 @@ def main():
             pixel_position_ids=pixel_pos_ids,
         ).eval()
 
-        example_inputs = (
-            torch.randn(batch_size, num_patches, 3 * patch_size**2),  # pixel_values
-            _pixel_position_ids(batch_size, num_patches),  # pixel_position_ids
-        )
+        example_inputs = (torch.randn(batch_size, num_patches, 3 * patch_size**2),)
 
         print("\nConverting to Circle format...")
         circle_model = tico.convert(export_module, example_inputs)

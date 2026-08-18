@@ -50,13 +50,8 @@ class _FakePTQWrapper(nn.Module):
 class _FakeStaticVisionModel(nn.Module):
     """Return a model-output-like object from a static vision graph."""
 
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-    ) -> SimpleNamespace:
-        """Return deterministic hidden states independent of orchestration."""
-        del pixel_position_ids
+    def forward(self, pixel_values: torch.Tensor) -> SimpleNamespace:
+        """Return deterministic hidden states from the pixel-values-only ABI."""
         return SimpleNamespace(last_hidden_state=pixel_values + 1.0)
 
 
@@ -137,7 +132,7 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
             self.position_ids,
         )
         torch.testing.assert_close(
-            module(self.pixel_values, self.position_ids),
+            module(self.pixel_values),
             (self.pixel_values + 1.0) * 2.0,
         )
 

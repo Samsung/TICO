@@ -368,7 +368,7 @@ def export_gemma4_per_layer(
     )
     _convert_and_save(
         vision_prefill,
-        (pixel_values, pixel_position_ids),
+        (pixel_values,),
         output_dir / _circle_name("vision_prefill", artifact_tag),
         strict=strict,
     )

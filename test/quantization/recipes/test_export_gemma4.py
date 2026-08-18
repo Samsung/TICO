@@ -52,9 +52,9 @@ class FakePTQWrapper(torch.nn.Module):
 class FakeVisionExport(torch.nn.Module):
     """Return a model-output-like object for the vision stage."""
 
-    def forward(self, pixel_values, pixel_position_ids):
-        """Return four tiny visual tokens."""
-        del pixel_values, pixel_position_ids
+    def forward(self, pixel_values):
+        """Return four tiny visual tokens from a pixel-values-only ABI."""
+        del pixel_values
         return SimpleNamespace(last_hidden_state=torch.zeros(4, 8))
 
 
@@ -197,9 +197,9 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         dynamic_shapes = {"input_ids": {1: "S"}}
 
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
-            del example_inputs
             if save_path.name == "vision_prefill.q.circle":
                 vision_modules.append(module)
+                self.assertEqual(len(example_inputs), 1)
             calls.append((save_path.name, kwargs.get("dynamic_shapes")))
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
