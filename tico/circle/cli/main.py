@@ -37,6 +37,7 @@ from tico.circle.passes import (
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
+    FuseLinearOpsPass,
     RemoveNoOpOperatorsPass,
     SimplifyViewOpsPass,
 )
@@ -51,6 +52,7 @@ _PASS_REGISTRY: dict[str, type[CirclePass]] = {
         EliminateTransposeBoundedLayoutRegionPass
     ),
     "fold-constant-subgraph": FoldConstantSubgraphPass,
+    "fuse-linear-ops": FuseLinearOpsPass,
     "remove-no-op-operators": RemoveNoOpOperatorsPass,
     "simplify-view-ops": SimplifyViewOpsPass,
     "dce": DeadCodeEliminationPass,

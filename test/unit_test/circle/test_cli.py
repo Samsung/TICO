@@ -20,6 +20,7 @@ from tico.circle.passes import (
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
+    FuseLinearOpsPass,
     RemoveNoOpOperatorsPass,
     SimplifyViewOpsPass,
 )
@@ -55,7 +56,7 @@ class CircleCLITest(unittest.TestCase):
         passes = _parse_passes(
             "canonicalize-equivalent-ops,"
             "eliminate-transpose-bounded-layout-region,"
-            "fold-constant-subgraph,"
+            "fold-constant-subgraph,fuse-linear-ops,"
             "remove-no-op-operators,"
             "simplify-view-ops,dce,compact"
         )
@@ -63,10 +64,11 @@ class CircleCLITest(unittest.TestCase):
         self.assertIsInstance(passes[0], CanonicalizeEquivalentOpsPass)
         self.assertIsInstance(passes[1], EliminateTransposeBoundedLayoutRegionPass)
         self.assertIsInstance(passes[2], FoldConstantSubgraphPass)
-        self.assertIsInstance(passes[3], RemoveNoOpOperatorsPass)
-        self.assertIsInstance(passes[4], SimplifyViewOpsPass)
-        self.assertIsInstance(passes[5], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[6], CompactIndicesPass)
+        self.assertIsInstance(passes[3], FuseLinearOpsPass)
+        self.assertIsInstance(passes[4], RemoveNoOpOperatorsPass)
+        self.assertIsInstance(passes[5], SimplifyViewOpsPass)
+        self.assertIsInstance(passes[6], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[7], CompactIndicesPass)
 
     def test_removed_layout_pass_name_is_rejected(self) -> None:
         """Reject the removed compatibility pass name from the CLI registry."""

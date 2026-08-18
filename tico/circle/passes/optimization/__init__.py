@@ -17,6 +17,7 @@ from tico.circle.passes.optimization.fold import (
     ConstantFoldPolicy,
     FoldConstantSubgraphPass,
 )
+from tico.circle.passes.optimization.fusion import FuseLinearOpsPass, LinearFusionPolicy
 from tico.circle.passes.optimization.remove import (
     EliminateTransposeBoundedLayoutRegionPass,
     RemoveNoOpOperatorsPass,
@@ -28,6 +29,8 @@ __all__ = [
     "ConstantFoldPolicy",
     "EliminateTransposeBoundedLayoutRegionPass",
     "FoldConstantSubgraphPass",
+    "FuseLinearOpsPass",
+    "LinearFusionPolicy",
     "RemoveNoOpOperatorsPass",
     "SimplifyViewOpsPass",
 ]

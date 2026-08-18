@@ -22,6 +22,7 @@ CircleDocument
     └── passes                  composable Circle-to-Circle rewrites
             ├── CanonicalizeEquivalentOpsPass
             ├── FoldConstantSubgraphPass
+            ├── FuseLinearOpsPass
             ├── RemoveNoOpOperatorsPass
             ├── SimplifyViewOpsPass
             ├── DeadCodeEliminationPass
@@ -135,6 +136,7 @@ from tico.circle.passes import (
     CanonicalizeEquivalentOpsPass,
     CirclePassManager,
     FoldConstantSubgraphPass,
+    FuseLinearOpsPass,
     RemoveNoOpOperatorsPass,
     SimplifyViewOpsPass,
 )
@@ -149,6 +151,7 @@ pipeline = CirclePassManager(
         FoldConstantSubgraphPass(),
         SimplifyViewOpsPass(),
         RemoveNoOpOperatorsPass(),
+        FuseLinearOpsPass(),
         DeadCodeEliminationPass(),
         CompactIndicesPass(),
     ]
@@ -181,6 +184,23 @@ same-type `CAST`, full-range `SLICE`, identity `STRIDED_SLICE`, and one-output
 `SPLIT` or `SPLIT_V`. Quantized arithmetic is kept conservative because fixed-point
 requantization may remain observable even when real-number algebra suggests an
 identity.
+
+`FuseLinearOpsPass` absorbs supported static FLOAT32 affine patterns into
+`FULLY_CONNECTED`, `CONV_2D`, `DEPTHWISE_CONV_2D`, and `TRANSPOSE_CONV` parameters.
+It folds channel-wise post-linear `ADD`, `SUB`, and `MUL`; pre-FC affine input
+transforms; decomposed BatchNorm-style `SUB`/`MUL`/`ADD` chains; and sums of two
+compatible FC branches with a shared input. Existing weight and bias tensors are never
+mutated in place, so shared parameters remain valid.
+
+The pass replaces only the matched anchor operator. Superseded linear and affine
+operators remain structurally valid but unreachable until an external
+`DeadCodeEliminationPass` removes them. Run `CompactIndicesPass` afterward to remove
+unused tensors, buffers, and operator codes. The initial implementation intentionally
+skips quantized, sparse, variable, dynamic, non-finite, or unsupported broadcast
+patterns. Floating-point parameter fusion is algebraically equivalent in real
+arithmetic but may change rounding because it reassociates operations. Python callers
+can set `LinearFusionPolicy(allow_float_reassociation=False)` to disable these
+rewrites in a strict floating-point pipeline.
 
 The canonicalization and rank-changing view rules reject dynamic, sparse, variable,
 or unsupported per-axis-quantized patterns rather than guessing their semantics.
@@ -319,6 +339,7 @@ Available passes:
 | `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator forms with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
 | `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
 | `fold-constant-subgraph` | `FoldConstantSubgraphPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
+| `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases; dead branches are left for DCE |
 | `remove-no-op-operators` | `RemoveNoOpOperatorsPass` | Removes operators that preserve the complete input tensor contract |
 | `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
 | `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
@@ -346,6 +367,15 @@ tico-circle optimize model.circle \
 ```
 
 Restart scheduling lets a later rewrite expose an earlier canonicalization candidate.
+
+Fuse static FLOAT32 linear and affine chains, then remove the superseded branches with:
+
+```bash
+tico-circle optimize model.circle \
+  --passes fuse-linear-ops,dce,compact \
+  --strategy restart \
+  -o model.linear-fused.circle
+```
 
 The constant-folding pass preserves existing output tensor indices, so graph outputs
 and signature output mappings remain stable. It skips dynamic contracts, external
