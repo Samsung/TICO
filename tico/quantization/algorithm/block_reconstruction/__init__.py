@@ -29,7 +29,14 @@ from tico.quantization.algorithm.block_reconstruction.runner import (
     BlockReconstructionConfig,
     BlockReconstructionResult,
     BlockReconstructor,
+    normalized_l1_loss,
     normalized_mse_loss,
+    reconstruction_loss,
+    ReconstructionCheckpoint,
+    ReconstructionLoss,
+)
+from tico.quantization.algorithm.block_reconstruction.selection import (
+    ValidationObjective,
 )
 
 __all__ = [
@@ -41,7 +48,12 @@ __all__ = [
     "LearnableAffineObserver",
     "LearnableObserverSet",
     "ReconstructionCache",
+    "ReconstructionCheckpoint",
+    "ReconstructionLoss",
     "ReconstructionSample",
     "TensorTree",
+    "ValidationObjective",
+    "normalized_l1_loss",
     "normalized_mse_loss",
+    "reconstruction_loss",
 ]

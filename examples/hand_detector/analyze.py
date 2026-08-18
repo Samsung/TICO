@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from examples.hand_detector import block_reconstruction as block_reconstruction_cli
 from examples.hand_detector._support.analysis import (
     output_boundaries,
     OUTPUT_NAMES,
@@ -57,18 +58,12 @@ from examples.hand_detector._support.quantization import (
     quantization_name,
     quantize_candidate,
 )
-from examples.hand_detector._support.reconstruction import (
-    build_hand_detector_reconstruction_report,
-    print_hand_detector_reconstruction,
-    reconstruct_hand_detector_blocks,
-)
 from examples.hand_detector._support.sensitivity import (
     build_activation_sensitivity_groups,
     build_activation_sensitivity_report,
     print_activation_sensitivity,
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
-from tico.quantization.algorithm.block_reconstruction import BlockReconstructionConfig
 from tico.quantization.analysis import (
     AffineQuantizationPolicy,
     build_clipping_candidates,
@@ -221,72 +216,7 @@ def parse_args() -> argparse.Namespace:
         default=DIRECTORY / "reports" / "group_observer_sweep.json",
     )
 
-    reconstruction = subparsers.add_parser(
-        "block-reconstruction",
-        help=(
-            "Optimize activation qparams against cached floating-point block "
-            "outputs while keeping weights fixed."
-        ),
-    )
-    _add_model_arguments(reconstruction)
-    _add_dataset_arguments(reconstruction, evaluation=True)
-    reconstruction.add_argument("--bits", type=int, default=8, choices=[8, 16])
-    reconstruction.add_argument("--percentile", type=float, default=99.99)
-    reconstruction.add_argument("--max-samples", type=int, default=524_288)
-    reconstruction.add_argument("--samples-per-batch", type=int, default=4_096)
-    reconstruction.add_argument("--sampling-seed", type=int, default=20260803)
-    reconstruction.add_argument(
-        "--groups",
-        nargs="+",
-        required=True,
-        help=(
-            "Stem/feature sensitivity groups. They are reconstructed in model "
-            "execution order regardless of argument order."
-        ),
-    )
-    reconstruction.add_argument("--steps", type=int, default=500)
-    reconstruction.add_argument("--batch-size", type=int, default=8)
-    reconstruction.add_argument(
-        "--evaluation-batch-size",
-        type=int,
-        default=16,
-    )
-    reconstruction.add_argument(
-        "--evaluation-interval",
-        type=int,
-        default=25,
-    )
-    reconstruction.add_argument(
-        "--scale-learning-rate",
-        type=float,
-        default=1.0e-3,
-    )
-    reconstruction.add_argument(
-        "--zero-point-learning-rate",
-        type=float,
-        default=1.0e-2,
-    )
-    reconstruction.add_argument(
-        "--freeze-zero-point",
-        action="store_true",
-        help="Optimize activation scales only.",
-    )
-    reconstruction.add_argument(
-        "--gradient-clip-norm",
-        type=float,
-        default=1.0,
-    )
-    reconstruction.add_argument(
-        "--reconstruction-seed",
-        type=int,
-        default=20260816,
-    )
-    reconstruction.add_argument("--export-circle", type=Path)
-    reconstruction.add_argument(
-        "--report-json",
-        type=Path,
-        default=DIRECTORY / "reports" / "block_reconstruction.json",
-    )
+    block_reconstruction_cli.add_subparser(subparsers)
 
     sensitivity = subparsers.add_parser(
         "activation-sensitivity",
@@ -405,7 +335,7 @@ def main() -> None:
     elif args.command == "group-observer-sweep":
         _run_group_observer_sweep(args)
     elif args.command == "block-reconstruction":
-        _run_block_reconstruction(args)
+        block_reconstruction_cli.run(args)
     elif args.command == "activation-sensitivity":
         _run_activation_sensitivity(args)
     else:
@@ -702,95 +632,6 @@ def _run_group_observer_sweep(args: argparse.Namespace) -> None:
             },
             "baseline": baseline_outputs,
             "groups": group_results,
-        },
-    )
-
-
-def _run_block_reconstruction(args: argparse.Namespace) -> None:
-    _validate_percentiles([args.percentile])
-    float_model = load_nhwc_hand_detector(args.weights, args.spec).eval()
-    calibration, evaluation, data_metadata = _load_datasets(args)
-    candidate = quantize_candidate(
-        float_model,
-        args.bits,
-        calibration,
-        activation_observer=PercentileObserver,
-        activation_observer_kwargs={
-            "percentile": args.percentile,
-            "max_samples": args.max_samples,
-            "samples_per_batch": args.samples_per_batch,
-            "seed": args.sampling_seed,
-        },
-    )
-    boundaries = output_boundaries(candidate)
-    config = BlockReconstructionConfig(
-        steps=args.steps,
-        batch_size=args.batch_size,
-        evaluation_batch_size=args.evaluation_batch_size,
-        evaluation_interval=args.evaluation_interval,
-        scale_learning_rate=args.scale_learning_rate,
-        zero_point_learning_rate=args.zero_point_learning_rate,
-        optimize_scale=True,
-        optimize_zero_point=not args.freeze_zero_point,
-        gradient_clip_norm=args.gradient_clip_norm,
-        seed=args.reconstruction_seed,
-    )
-    baseline, baseline_site_count, steps = reconstruct_hand_detector_blocks(
-        float_model,
-        candidate,
-        calibration,
-        evaluation,
-        boundaries=boundaries,
-        output_adapter=OUTPUT_ADAPTER,
-        config=config,
-        group_names=args.groups,
-    )
-    print_hand_detector_reconstruction(
-        dtype_name=quantization_name(args.bits),
-        percentile=args.percentile,
-        baseline=baseline,
-        baseline_site_count=baseline_site_count,
-        steps=steps,
-    )
-    exported = None
-    if args.export_circle is not None:
-        exported = export_quantized_circle(candidate, args.export_circle)
-
-    final_outputs = steps[-1].outputs if steps else baseline
-    _write_json(
-        args.report_json,
-        {
-            "analysis": "activation_block_reconstruction",
-            "metadata": {
-                **data_metadata,
-                "dtype": quantization_name(args.bits),
-                "activation_observer": "PercentileObserver",
-                "activation_percentile": args.percentile,
-                "max_samples": args.max_samples,
-                "samples_per_batch": args.samples_per_batch,
-                "sampling_seed": args.sampling_seed,
-                "baseline_profile": QuantizationProfile.INTERNAL_FULL.value,
-                "baseline_site_count": baseline_site_count,
-                "groups": list(args.groups),
-                "weight_qparams_fixed": True,
-                "loss": "normalized_mse",
-                "steps_per_block": config.steps,
-                "batch_size": config.batch_size,
-                "evaluation_batch_size": config.evaluation_batch_size,
-                "evaluation_interval": config.evaluation_interval,
-                "scale_learning_rate": config.scale_learning_rate,
-                "zero_point_learning_rate": config.zero_point_learning_rate,
-                "optimize_zero_point": config.optimize_zero_point,
-                "gradient_clip_norm": config.gradient_clip_norm,
-                "reconstruction_seed": config.seed,
-                "exported_circle": None if exported is None else str(exported),
-            },
-            "baseline": baseline,
-            "steps": build_hand_detector_reconstruction_report(
-                baseline=baseline,
-                steps=steps,
-            ),
-            "final": {name: dict(metrics) for name, metrics in final_outputs.items()},
         },
     )
 

@@ -12,33 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Execution-order activation block reconstruction for the palm detector."""
+"""Hand-detector caches, joint windows, and validated reconstruction flow."""
 
 from __future__ import annotations
 
 import re
-import weakref
-
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 
-from examples.hand_detector._support.analysis import OUTPUT_NAMES
+from examples.hand_detector._support.analysis import output_boundaries
 from examples.hand_detector._support.sensitivity import (
-    ActivationSensitivityGroup,
     build_activation_sensitivity_groups,
 )
-from examples.hand_detector.hand_detector import HandDetector
+from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 from tico.quantization.algorithm.block_reconstruction import (
     AffineObserverGroup,
     BlockInvocation,
     BlockReconstructionConfig,
-    BlockReconstructionResult,
     BlockReconstructor,
     ReconstructionCache,
     ReconstructionSample,
+    ValidationObjective,
 )
 from tico.quantization.analysis import (
     evaluate_models,
@@ -46,14 +44,11 @@ from tico.quantization.analysis import (
     QuantizationBoundaries,
     QuantizationProfile,
 )
-from tico.quantization.analysis.inputs import ModelInput
 from tico.quantization.wrapq.control import (
     FakeQuantState,
     iter_quantization_sites,
-    QuantizationSite,
     SiteRole,
 )
-
 from torch import nn
 
 
@@ -68,494 +63,540 @@ _ACTIVATION_ROLES = frozenset(
 
 
 @dataclass(frozen=True)
-class HandDetectorReconstructionBlock:
-    """Describe one executable feature block and its logical qparam groups."""
+class ReconstructionWindow:
+    """Describe one single-group or joint semantic reconstruction window."""
 
     name: str
-    kind: str
+    group_names: tuple[str, ...]
     operation_positions: tuple[int, ...]
-    operation_indices: tuple[int, ...]
-    operation_names: tuple[str, ...]
     input_tensor_ids: tuple[int, ...]
     output_tensor_ids: tuple[int, ...]
-    observer_groups: tuple[AffineObserverGroup, ...]
-    reference_module: nn.Module
-    quantized_module: nn.Module
+    site_paths: tuple[str, ...]
 
     @property
-    def site_paths(self) -> tuple[str, ...]:
-        """Return all tied observer sites optimized by this block."""
-        return tuple(
-            path for group in self.observer_groups for path in group.site_paths
-        )
+    def is_joint(self) -> bool:
+        return len(self.group_names) > 1
 
     def to_dict(self) -> dict[str, object]:
-        """Return JSON-compatible block metadata."""
         return {
-            "block": self.name,
-            "kind": self.kind,
+            "name": self.name,
+            "group_names": list(self.group_names),
+            "is_joint": self.is_joint,
             "operation_positions": list(self.operation_positions),
-            "operation_indices": list(self.operation_indices),
-            "operation_names": list(self.operation_names),
             "input_tensor_ids": list(self.input_tensor_ids),
             "output_tensor_ids": list(self.output_tensor_ids),
-            "qparam_group_count": len(self.observer_groups),
-            "qparam_groups": [
-                {
-                    "name": group.name,
-                    "site_paths": list(group.site_paths),
-                }
-                for group in self.observer_groups
-            ],
+            "site_count": len(self.site_paths),
+            "site_paths": list(self.site_paths),
         }
 
 
-@dataclass(frozen=True)
-class HandDetectorReconstructionStep:
-    """Store one local reconstruction and the resulting full-model metrics."""
+class DetectorWindow(nn.Module):
+    """Execute a selected static subgraph from cached live-in tensors."""
 
-    block: HandDetectorReconstructionBlock
-    local: BlockReconstructionResult
-    outputs: Mapping[str, Mapping[str, float | int | None]]
-
-    def to_dict(
-        self,
-        baseline: Mapping[str, Mapping[str, float | int | None]],
-    ) -> dict[str, object]:
-        """Return JSON-compatible local and cumulative model results."""
-        value = self.block.to_dict()
-        value["reconstruction"] = self.local.to_dict()
-        value["outputs"] = {
-            name: dict(metrics) for name, metrics in self.outputs.items()
-        }
-        value["regressor_mae_improvement"] = _mae(baseline, "regressors") - _mae(
-            self.outputs,
-            "regressors",
-        )
-        value["classifier_mae_improvement"] = _mae(baseline, "classifiers") - _mae(
-            self.outputs,
-            "classifiers",
-        )
-        return value
-
-
-class _DetectorSubgraph(nn.Module):
-    """Execute selected detector operations from explicit boundary tensors."""
-
-    def __init__(
-        self,
-        detector: HandDetector,
-        positions: Sequence[int],
-        input_tensor_ids: Sequence[int],
-        output_tensor_ids: Sequence[int],
-    ) -> None:
+    def __init__(self, detector: HandDetector, window: ReconstructionWindow) -> None:
         super().__init__()
-        object.__setattr__(self, "_detector_reference", weakref.ref(detector))
-        self.positions = tuple(positions)
-        self.input_tensor_ids = tuple(input_tensor_ids)
-        self.output_tensor_ids = tuple(output_tensor_ids)
+        # Keep the executable view from registering the full detector as a
+        # second child-module tree. The candidate model remains the sole owner.
+        object.__setattr__(self, "_detector", detector)
+        self.window = window
 
-    @property
-    def detector(self) -> HandDetector:
-        """Return the detector referenced without registering it as a child."""
-        detector = self._detector_reference()
-        if detector is None:
-            raise RuntimeError("The detector used by this block no longer exists.")
-        return detector
-
-    def forward(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        if len(inputs) != len(self.input_tensor_ids):
+    def forward(self, *inputs: torch.Tensor):
+        if len(inputs) != len(self.window.input_tensor_ids):
             raise ValueError(
-                f"Expected {len(self.input_tensor_ids)} block inputs, "
-                f"but received {len(inputs)}."
+                f"Window {self.window.name!r} expected "
+                f"{len(self.window.input_tensor_ids)} inputs, got {len(inputs)}."
             )
-        values = self.detector.execute_segment(
-            dict(zip(self.input_tensor_ids, inputs)),
-            self.positions,
+        values = dict(zip(self.window.input_tensor_ids, inputs))
+        for position in self.window.operation_positions:
+            _execute_operation(
+                self._detector.operations[position],
+                self._detector.layers[position],
+                values,
+            )
+        outputs = tuple(
+            values[tensor_id] for tensor_id in self.window.output_tensor_ids
         )
-        return tuple(values[tensor_id] for tensor_id in self.output_tensor_ids)
+        return outputs[0] if len(outputs) == 1 else outputs
 
 
-def build_hand_detector_reconstruction_blocks(
-    reference_model: nn.Module,
-    quantized_model: nn.Module,
+def split_reconstruction_samples(
+    calibration_samples: Sequence[torch.Tensor],
+    selection_count: int,
+    *,
+    seed: int = 20260803,
+) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+    """Create deterministic disjoint optimization and held-out subsets."""
+    if selection_count <= 0:
+        raise ValueError("selection_count must be positive.")
+    if selection_count >= len(calibration_samples):
+        raise ValueError(
+            "selection_count must be smaller than the calibration sample count."
+        )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    permutation = torch.randperm(
+        len(calibration_samples),
+        generator=generator,
+    ).tolist()
+    selection_indices = frozenset(permutation[:selection_count])
+    train = tuple(
+        sample
+        for index, sample in enumerate(calibration_samples)
+        if index not in selection_indices
+    )
+    selection = tuple(
+        sample
+        for index, sample in enumerate(calibration_samples)
+        if index in selection_indices
+    )
+    return train, selection
+
+
+def build_reconstruction_windows(
+    model: nn.Module,
     boundaries: QuantizationBoundaries,
     *,
-    group_names: Sequence[str],
-) -> tuple[HandDetectorReconstructionBlock, ...]:
-    """Build selected stem/feature blocks in model execution order."""
-    if not group_names:
-        raise ValueError("At least one reconstruction group name is required.")
-    reference_detector = _find_detector(reference_model)
-    quantized_detector = _find_detector(quantized_model)
-    all_groups = tuple(
-        group
-        for group in build_activation_sensitivity_groups(
-            quantized_model,
-            boundaries,
-        )
-        if group.kind in {"stem", "feature"}
-    )
-    by_name = {group.name: group for group in all_groups}
-    requested = tuple(group_names)
-    if len(set(requested)) != len(requested):
-        raise ValueError("Reconstruction group names must be unique.")
-    unknown = tuple(name for name in requested if name not in by_name)
-    if unknown:
-        raise KeyError(
-            f"Unknown reconstruction groups {unknown}; available groups: "
-            f"{tuple(by_name)}."
-        )
-    selected = tuple(
-        sorted(
-            (by_name[name] for name in requested),
-            key=lambda group: min(group.operation_positions),
-        )
-    )
-
-    sites = {site.path: site for site in iter_quantization_sites(quantized_model)}
-    blocks = []
-    for group in selected:
-        positions = tuple(sorted(group.operation_positions))
-        input_tensor_ids, output_tensor_ids = _boundary_tensor_ids(
-            quantized_detector,
-            positions,
-        )
-        observer_groups = _logical_observer_groups(
-            group,
-            sites,
-            quantized_detector,
-            positions,
-        )
-        operations = tuple(
-            quantized_detector.operations[position] for position in positions
-        )
-        blocks.append(
-            HandDetectorReconstructionBlock(
-                name=group.name,
-                kind=group.kind,
-                operation_positions=positions,
-                operation_indices=tuple(int(op["index"]) for op in operations),
-                operation_names=tuple(str(op["name"]) for op in operations),
-                input_tensor_ids=input_tensor_ids,
-                output_tensor_ids=output_tensor_ids,
-                observer_groups=observer_groups,
-                reference_module=_DetectorSubgraph(
-                    reference_detector,
-                    positions,
-                    input_tensor_ids,
-                    output_tensor_ids,
-                ),
-                quantized_module=_DetectorSubgraph(
-                    quantized_detector,
-                    positions,
-                    input_tensor_ids,
-                    output_tensor_ids,
-                ),
+    groups: Sequence[str] | None = None,
+    windows: Sequence[str] | None = None,
+) -> tuple[ReconstructionWindow, ...]:
+    """Build single or joint windows from activation-sensitivity group names."""
+    if groups and windows:
+        raise ValueError("Specify either groups or windows, not both.")
+    specifications = tuple(windows or groups or ())
+    if not specifications:
+        raise ValueError("At least one reconstruction group or window is required.")
+    semantic_groups = build_activation_sensitivity_groups(model, boundaries)
+    group_map = {group.name: group for group in semantic_groups}
+    group_order = {group.name: index for index, group in enumerate(semantic_groups)}
+    detector = _find_detector(model)
+    seen_groups: set[str] = set()
+    seen_sites: set[str] = set()
+    result: list[ReconstructionWindow] = []
+    for specification in specifications:
+        names = tuple(part for part in specification.split("+") if part)
+        if not names:
+            raise ValueError(f"Invalid reconstruction window {specification!r}.")
+        if len(set(names)) != len(names):
+            raise ValueError(f"Window {specification!r} repeats a group.")
+        missing = tuple(name for name in names if name not in group_map)
+        if missing:
+            raise KeyError(
+                f"Unknown reconstruction groups {missing}; available groups: "
+                f"{tuple(group_map)}."
+            )
+        overlap = seen_groups.intersection(names)
+        if overlap:
+            raise ValueError(
+                "Reconstruction windows reuse groups: " f"{tuple(sorted(overlap))}."
+            )
+        _validate_consecutive_groups(names, group_order)
+        selected = tuple(group_map[name] for name in names)
+        if any(not group.operation_positions for group in selected):
+            raise ValueError(
+                f"Window {specification!r} contains a group without operations."
+            )
+        positions = tuple(
+            sorted(
+                {
+                    position
+                    for group in selected
+                    for position in group.operation_positions
+                }
             )
         )
-    return tuple(blocks)
+        sites = tuple(sorted({path for group in selected for path in group.site_paths}))
+        site_overlap = seen_sites.intersection(sites)
+        if site_overlap:
+            raise ValueError(
+                f"Reconstruction windows overlap quantization sites: "
+                f"{tuple(sorted(site_overlap))}."
+            )
+        inputs, outputs = _window_boundaries(detector, positions)
+        name = "+".join(names)
+        result.append(
+            ReconstructionWindow(
+                name=name,
+                group_names=names,
+                operation_positions=positions,
+                input_tensor_ids=inputs,
+                output_tensor_ids=outputs,
+                site_paths=sites,
+            )
+        )
+        seen_groups.update(names)
+        seen_sites.update(sites)
+    result.sort(key=lambda window: min(window.operation_positions))
+    return tuple(result)
 
 
-def collect_hand_detector_reconstruction_cache(
-    block: HandDetectorReconstructionBlock,
+def _validate_consecutive_groups(
+    names: tuple[str, ...],
+    group_order: Mapping[str, int],
+) -> None:
+    """Require joint-window names to follow semantic execution order."""
+    indices = tuple(group_order[name] for name in names)
+    expected = tuple(range(indices[0], indices[0] + len(indices)))
+    if indices != expected:
+        raise ValueError(
+            "Joint reconstruction windows must contain consecutive groups in "
+            f"model execution order; names={names}, indices={indices}."
+        )
+
+
+def build_window_observer_groups(
+    model: nn.Module,
+    window: ReconstructionWindow,
+) -> tuple[AffineObserverGroup, ...]:
+    """Tie producer/consumer observer sites by static logical tensor domain."""
+    detector = _find_detector(model)
+    sites = {site.path: site for site in iter_quantization_sites(model)}
+    entries: list[tuple[str, frozenset[int]]] = []
+    for path in window.site_paths:
+        site = sites.get(path)
+        if site is None:
+            raise KeyError(f"Window {window.name!r} references unknown site {path!r}.")
+        if site.role not in _ACTIVATION_ROLES:
+            raise ValueError(f"Window site {path!r} is not an activation site.")
+        entries.append((path, frozenset(_site_tensor_domain(site, detector))))
+
+    # A tensor-ID intersection describes graph connectivity, not qparam
+    # identity. For example, QuantMaxPool2d owns one shared observer spanning
+    # both its input and output tensors. That observer represents a distinct
+    # requantization domain from an upstream producer observer, even though the
+    # two domains both mention the MaxPool input tensor. Merging by transitive
+    # intersection would force different calibrated qparams into one learnable
+    # proxy and would also make step zero differ from the entry model state.
+    #
+    # Tie only observers that report the exact same static tensor-domain set.
+    # Producer/consumer observers for one tensor still tie as ``(tensor_id,)``,
+    # while a shared operator domain such as ``(input_id, output_id)`` remains
+    # independent and preserves the original quantization boundary.
+    components: dict[tuple[int, ...], list[str]] = defaultdict(list)
+    for path, tensor_ids in entries:
+        components[tuple(sorted(tensor_ids))].append(path)
+
+    definitions: list[tuple[tuple[int, ...], tuple[str, ...]]] = []
+    for tensor_ids, paths in components.items():
+        definitions.append((tensor_ids, tuple(sorted(paths))))
+    definitions.sort(key=lambda item: (item[0], item[1]))
+    groups = tuple(
+        AffineObserverGroup(
+            name="tensor_" + "_".join(str(value) for value in tensor_ids),
+            site_paths=paths,
+        )
+        for tensor_ids, paths in definitions
+    )
+    assigned = tuple(sorted(path for group in groups for path in group.site_paths))
+    if assigned != tuple(sorted(window.site_paths)):
+        raise RuntimeError(
+            f"Observer groups do not cover window {window.name!r} exactly once."
+        )
+    return groups
+
+
+def collect_reconstruction_cache(
     reference_model: nn.Module,
-    quantized_model: nn.Module,
-    samples: Sequence[ModelInput],
+    candidate_model: nn.Module,
+    samples: Sequence[torch.Tensor],
+    window: ReconstructionWindow,
+    *,
+    boundaries: QuantizationBoundaries,
 ) -> ReconstructionCache:
-    """Collect float targets plus float and quantized-prefix boundary inputs."""
+    """Collect float inputs, quantized-prefix inputs, and all float live-outs."""
     if not samples:
-        raise ValueError("Block reconstruction cache requires at least one sample.")
+        raise ValueError("Reconstruction cache collection requires samples.")
     reference_detector = _find_detector(reference_model)
-    quantized_detector = _find_detector(quantized_model)
+    candidate_detector = _find_detector(candidate_model)
+    selector = boundaries.selector_for(QuantizationProfile.INTERNAL_FULL)
     cached: list[ReconstructionSample] = []
-    with torch.inference_mode():
+    with torch.inference_mode(), FakeQuantState(candidate_model) as state:
+        state.set_all(False)
+        state.set_where(selector, True)
         for sample in samples:
-            if not isinstance(sample, torch.Tensor):
-                raise TypeError(
-                    "The hand detector reconstruction example expects Tensor samples."
+            float_values = execute_detector_values(reference_detector, sample)
+            quantized_values = execute_detector_values(candidate_detector, sample)
+            float_input = BlockInvocation(
+                args=_tensor_values(
+                    float_values,
+                    window.input_tensor_ids,
+                    window=window,
+                    context="float live-in",
                 )
-            reference_values = reference_detector.forward_nhwc_values(sample)
-            quantized_values = quantized_detector.forward_nhwc_values(sample)
+            )
+            quantized_input = BlockInvocation(
+                args=_tensor_values(
+                    quantized_values,
+                    window.input_tensor_ids,
+                    window=window,
+                    context="quantized live-in",
+                )
+            )
+            targets = _tensor_values(
+                float_values,
+                window.output_tensor_ids,
+                window=window,
+                context="float live-out",
+            )
+            target = targets[0] if len(targets) == 1 else targets
             cached.append(
                 ReconstructionSample(
-                    float_input=BlockInvocation(
-                        args=tuple(
-                            reference_values[tensor_id]
-                            for tensor_id in block.input_tensor_ids
-                        )
-                    ),
-                    quantized_input=BlockInvocation(
-                        args=tuple(
-                            quantized_values[tensor_id]
-                            for tensor_id in block.input_tensor_ids
-                        )
-                    ),
-                    target=tuple(
-                        reference_values[tensor_id]
-                        for tensor_id in block.output_tensor_ids
-                    ),
+                    float_input=float_input,
+                    quantized_input=quantized_input,
+                    target=target,
                 )
             )
     return ReconstructionCache(cached)
 
 
-def reconstruct_hand_detector_blocks(
+def evaluate_internal_full(
     reference_model: nn.Module,
-    quantized_model: nn.Module,
-    calibration_samples: Sequence[ModelInput],
-    evaluation_samples: Sequence[ModelInput],
+    candidate_model: nn.Module,
+    samples: Sequence[torch.Tensor],
     *,
     boundaries: QuantizationBoundaries,
-    output_adapter: OutputAdapter | None,
-    config: BlockReconstructionConfig,
-    group_names: Sequence[str],
-) -> tuple[
-    dict[str, dict[str, float | int | None]],
-    int,
-    tuple[HandDetectorReconstructionStep, ...],
-]:
-    """Reconstruct selected blocks sequentially from an E baseline."""
-    blocks = build_hand_detector_reconstruction_blocks(
-        reference_model,
-        quantized_model,
-        boundaries,
-        group_names=group_names,
-    )
+    output_adapter: OutputAdapter,
+) -> dict[str, dict[str, float | int | None]]:
+    """Evaluate one candidate under E:internal-full."""
     selector = boundaries.selector_for(QuantizationProfile.INTERNAL_FULL)
-    all_sites = tuple(iter_quantization_sites(quantized_model))
-    baseline_site_count = sum(selector(site) for site in all_sites)
-    if baseline_site_count == 0:
-        raise ValueError("E:internal-full did not select any quantization sites.")
-
-    reconstructor = BlockReconstructor(config)
-    with FakeQuantState(quantized_model) as state:
+    with FakeQuantState(candidate_model) as state:
         state.set_all(False)
         state.set_where(selector, True)
-        baseline = evaluate_models(
+        return evaluate_models(
             reference_model,
-            quantized_model,
-            evaluation_samples,
+            candidate_model,
+            samples,
             output_adapter=output_adapter,
         )
-        steps = []
-        for block in blocks:
-            cache = collect_hand_detector_reconstruction_cache(
-                block,
+
+
+def reconstruct_hand_detector_windows(
+    reference_model: nn.Module,
+    candidate_model: nn.Module,
+    *,
+    train_samples: Sequence[torch.Tensor],
+    selection_samples: Sequence[torch.Tensor],
+    evaluation_samples: Sequence[torch.Tensor],
+    windows: Sequence[ReconstructionWindow],
+    config: BlockReconstructionConfig,
+    objective: ValidationObjective,
+    output_adapter: OutputAdapter,
+    device: torch.device | str | None = None,
+) -> dict[str, object]:
+    """Reconstruct windows in execution order with validation-aware rollback."""
+    boundaries = output_boundaries(candidate_model)
+    selector = boundaries.selector_for(QuantizationProfile.INTERNAL_FULL)
+    site_count = sum(
+        selector(site) for site in iter_quantization_sites(candidate_model)
+    )
+    baseline_selection = evaluate_internal_full(
+        reference_model,
+        candidate_model,
+        selection_samples,
+        boundaries=boundaries,
+        output_adapter=output_adapter,
+    )
+    baseline_evaluation = evaluate_internal_full(
+        reference_model,
+        candidate_model,
+        evaluation_samples,
+        boundaries=boundaries,
+        output_adapter=output_adapter,
+    )
+    current_selection = baseline_selection
+    current_evaluation = baseline_evaluation
+    steps: list[dict[str, object]] = []
+
+    for step, window in enumerate(windows, start=1):
+        train_cache = collect_reconstruction_cache(
+            reference_model,
+            candidate_model,
+            train_samples,
+            window,
+            boundaries=boundaries,
+        )
+        selection_cache = collect_reconstruction_cache(
+            reference_model,
+            candidate_model,
+            selection_samples,
+            window,
+            boundaries=boundaries,
+        )
+        block = DetectorWindow(_find_detector(candidate_model), window)
+        observer_groups = build_window_observer_groups(candidate_model, window)
+        reconstructor = BlockReconstructor(config)
+
+        def selection_evaluator():
+            return evaluate_internal_full(
                 reference_model,
-                quantized_model,
-                calibration_samples,
-            )
-            result = reconstructor.reconstruct(
-                block_name=block.name,
-                observer_model=quantized_model,
-                block=block.quantized_module,
-                cache=cache,
-                observer_groups=block.observer_groups,
-            )
-            outputs = evaluate_models(
-                reference_model,
-                quantized_model,
-                evaluation_samples,
+                candidate_model,
+                selection_samples,
+                boundaries=boundaries,
                 output_adapter=output_adapter,
             )
-            steps.append(
-                HandDetectorReconstructionStep(
-                    block=block,
-                    local=result,
-                    outputs=outputs,
-                )
-            )
-    return baseline, baseline_site_count, tuple(steps)
+
+        result = reconstructor.reconstruct(
+            block_name=window.name,
+            observer_model=candidate_model,
+            block=block,
+            cache=train_cache,
+            selection_cache=selection_cache,
+            observer_groups=observer_groups,
+            selection_evaluator=selection_evaluator,
+            selection_objective=objective,
+            device=device,
+        )
+        after_selection = evaluate_internal_full(
+            reference_model,
+            candidate_model,
+            selection_samples,
+            boundaries=boundaries,
+            output_adapter=output_adapter,
+        )
+        after_evaluation = evaluate_internal_full(
+            reference_model,
+            candidate_model,
+            evaluation_samples,
+            boundaries=boundaries,
+            output_adapter=output_adapter,
+        )
+        step_value = {
+            "step": step,
+            "window": window.to_dict(),
+            "observer_group_count": len(observer_groups),
+            "observer_groups": [
+                {"name": group.name, "site_paths": list(group.site_paths)}
+                for group in observer_groups
+            ],
+            "reconstruction": result.to_dict(),
+            "selection_before": current_selection,
+            "selection_after": after_selection,
+            "evaluation_before": current_evaluation,
+            "evaluation_after": after_evaluation,
+        }
+        steps.append(step_value)
+        current_selection = after_selection
+        current_evaluation = after_evaluation
+
+    return {
+        "baseline_profile": "E",
+        "baseline_site_count": site_count,
+        "train_sample_count": len(train_samples),
+        "selection_sample_count": len(selection_samples),
+        "evaluation_sample_count": len(evaluation_samples),
+        "baseline_selection": baseline_selection,
+        "baseline_evaluation": baseline_evaluation,
+        "steps": steps,
+        "final_selection": current_selection,
+        "final_evaluation": current_evaluation,
+    }
 
 
-def print_hand_detector_reconstruction(
-    *,
-    dtype_name: str,
-    percentile: float,
-    baseline: Mapping[str, Mapping[str, float | int | None]],
-    baseline_site_count: int,
-    steps: Sequence[HandDetectorReconstructionStep],
+def execute_detector_values(
+    detector: HandDetector,
+    input_nhwc: torch.Tensor,
+) -> dict[int, torch.Tensor]:
+    """Execute the static detector and return every materialized tensor value."""
+    quantized = detector.input_quantizer(input_nhwc)
+    values: dict[int, torch.Tensor] = {
+        detector.input_tensor: quantized.permute(0, 3, 1, 2)
+    }
+    for operation, layer in zip(detector.operations, detector.layers):
+        _execute_operation(operation, layer, values)
+    return values
+
+
+def _execute_operation(
+    operation: Mapping[str, Any],
+    layer: nn.Module,
+    values: dict[int, torch.Tensor],
 ) -> None:
-    """Print local losses and cumulative E metrics after every block."""
-    baseline_reg = _mae(baseline, "regressors")
-    baseline_cls = _mae(baseline, "classifiers")
-    print(f"\n{dtype_name.upper()} P{percentile:g} block reconstruction")
-    print(
-        "Baseline E:internal-full: "
-        f"REG_MAE={baseline_reg:.6e}, "
-        f"CLS_MAE={baseline_cls:.6e}, "
-        f"SITES={baseline_site_count}"
-    )
-    print(
-        f"{'step':>4s} {'block':30s} {'LOCAL_IN':>11s} {'LOCAL_OUT':>11s} "
-        f"{'REG_MAE':>13s} {'GAIN_REG':>13s} "
-        f"{'CLS_MAE':>13s} {'GAIN_CLS':>13s} {'QGROUPS':>7s}"
-    )
-    for index, step in enumerate(steps, start=1):
-        regressor_mae = _mae(step.outputs, "regressors")
-        classifier_mae = _mae(step.outputs, "classifiers")
-        print(
-            f"{index:4d} "
-            f"{step.block.name[:30]:30s} "
-            f"{step.local.initial_loss:11.4e} "
-            f"{step.local.final_loss:11.4e} "
-            f"{regressor_mae:13.6e} "
-            f"{baseline_reg - regressor_mae:13.6e} "
-            f"{classifier_mae:13.6e} "
-            f"{baseline_cls - classifier_mae:13.6e} "
-            f"{len(step.block.observer_groups):7d}"
-        )
-
-
-def build_hand_detector_reconstruction_report(
-    *,
-    baseline: Mapping[str, Mapping[str, float | int | None]],
-    steps: Sequence[HandDetectorReconstructionStep],
-) -> list[dict[str, object]]:
-    """Serialize reconstruction steps with cumulative model improvements."""
-    return [step.to_dict(baseline) for step in steps]
-
-
-def _logical_observer_groups(
-    group: ActivationSensitivityGroup,
-    sites: Mapping[str, QuantizationSite],
-    detector: HandDetector,
-    positions: Sequence[int],
-) -> tuple[AffineObserverGroup, ...]:
-    """Tie producer/consumer observers that represent the same tensor domain."""
-    selected_positions = frozenset(positions)
-    entries: list[tuple[str, frozenset[int], int | None]] = []
-    for path in group.site_paths:
-        site = sites.get(path)
-        if site is None:
-            raise KeyError(f"Unknown activation site {path!r} in group {group.name!r}.")
-        if site.role not in _ACTIVATION_ROLES:
-            raise ValueError(
-                f"Group {group.name!r} includes non-activation site {path!r}."
-            )
-        tensor_ids = frozenset(_site_tensor_ids(site, detector))
-        position = _site_operation_position(site)
-        entries.append((path, tensor_ids, position))
-
-    parents = list(range(len(entries)))
-
-    def find(index: int) -> int:
-        while parents[index] != index:
-            parents[index] = parents[parents[index]]
-            index = parents[index]
-        return index
-
-    def union(left: int, right: int) -> None:
-        left_root = find(left)
-        right_root = find(right)
-        if left_root != right_root:
-            parents[right_root] = left_root
-
-    for left in range(len(entries)):
-        for right in range(left + 1, len(entries)):
-            if entries[left][1] & entries[right][1]:
-                union(left, right)
-
-    components: dict[int, list[int]] = {}
-    for index in range(len(entries)):
-        components.setdefault(find(index), []).append(index)
-
-    result = []
-    for indices in components.values():
-        if not any(
-            entries[index][2] is not None and entries[index][2] in selected_positions
-            for index in indices
-        ):
-            continue
-        tensor_ids = sorted(set().union(*(entries[index][1] for index in indices)))
-        name = (
-            f"tensor_{tensor_ids[0]}"
-            if len(tensor_ids) == 1
-            else "tensors_" + "_".join(str(value) for value in tensor_ids)
-        )
-        result.append(
-            AffineObserverGroup(
-                name=f"{group.name}.{name}",
-                site_paths=tuple(entries[index][0] for index in indices),
-            )
-        )
-    if not result:
-        raise ValueError(
-            f"Reconstruction block {group.name!r} has no in-block activation qparams."
-        )
-    return tuple(result)
-
-
-def _site_tensor_ids(
-    site: QuantizationSite,
-    detector: HandDetector,
-) -> tuple[int, ...]:
-    fp_name = getattr(site.module, "fp_name", None) or site.module_path
-    if "input_quantizer" in fp_name:
-        return (detector.input_tensor,)
-    match = _LAYER_PATTERN.search(fp_name)
-    if match is None:
-        raise RuntimeError(f"Cannot map activation site {site.path!r} to a layer.")
-    position = int(match.group(1))
-    operation = detector.operations[position]
+    name = str(operation["name"])
     inputs = tuple(int(value) for value in operation["inputs"])
-    outputs = tuple(int(value) for value in operation["outputs"])
-    if site.role is SiteRole.ACTIVATION_INPUT:
-        if operation["name"] == "MAX_POOL_2D":
-            return (inputs[0], *outputs)
-        return inputs[:1]
-    if site.role in {SiteRole.ACTIVATION_OUTPUT, SiteRole.ACTIVATION}:
-        return outputs
-    raise RuntimeError(f"Unsupported activation site role: {site.role.value!r}.")
+    output = int(operation["outputs"][0])
+    config = operation["config"]
+    if name in {
+        "CONV_2D",
+        "DEPTHWISE_CONV_2D",
+        "PRELU",
+        "MAX_POOL_2D",
+        "PAD",
+        "RESIZE_BILINEAR",
+    }:
+        values[output] = layer(values[inputs[0]])
+    elif name == "ADD":
+        values[output] = values[inputs[0]] + values[inputs[1]]
+    elif name == "RESHAPE":
+        source = values[inputs[0]]
+        if bool(config["nhwc_memory_order"]):
+            source = source.permute(0, 2, 3, 1)
+        values[output] = source.reshape(tuple(config["shape"]))
+    elif name == "CONCATENATION":
+        values[output] = layer(tuple(values[index] for index in inputs))
+    else:
+        raise RuntimeError(f"Unsupported converted operation: {name}")
 
 
-def _site_operation_position(site: QuantizationSite) -> int | None:
-    fp_name = getattr(site.module, "fp_name", None) or site.module_path
-    match = _LAYER_PATTERN.search(fp_name)
-    return None if match is None else int(match.group(1))
-
-
-def _boundary_tensor_ids(
+def _window_boundaries(
     detector: HandDetector,
-    positions: Sequence[int],
+    positions: tuple[int, ...],
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
     selected = frozenset(positions)
-    produced = {
-        int(output)
-        for position in selected
-        for output in detector.operations[position]["outputs"]
-    }
-    external_inputs: list[int] = []
-    produced_order: list[int] = []
-    for position in sorted(selected):
+    producers = _producer_positions(detector.operations)
+    consumers = _consumer_positions(detector.operations)
+    input_ids: list[int] = []
+    output_ids: list[int] = []
+    for position in positions:
         operation = detector.operations[position]
         for tensor_id in _activation_inputs(operation):
-            if tensor_id not in produced and tensor_id not in external_inputs:
-                external_inputs.append(tensor_id)
-        for output in operation["outputs"]:
-            tensor_id = int(output)
-            if tensor_id not in produced_order:
-                produced_order.append(tensor_id)
-
-    consumers: dict[int, set[int]] = {}
-    for position, operation in enumerate(detector.operations):
-        for tensor_id in _activation_inputs(operation):
-            consumers.setdefault(tensor_id, set()).add(position)
-    external_outputs = tuple(
-        tensor_id
-        for tensor_id in produced_order
-        if tensor_id in detector.output_tensors
-        or any(position not in selected for position in consumers.get(tensor_id, ()))
-    )
-    if not external_inputs or not external_outputs:
+            if producers.get(tensor_id) not in selected and tensor_id not in input_ids:
+                input_ids.append(tensor_id)
+        for output_value in operation["outputs"]:
+            tensor_id = int(output_value)
+            external_consumer = any(
+                consumer not in selected for consumer in consumers.get(tensor_id, ())
+            )
+            if (
+                external_consumer
+                or tensor_id in detector.output_tensors
+                or not consumers.get(tensor_id)
+            ) and tensor_id not in output_ids:
+                output_ids.append(tensor_id)
+    if not input_ids:
         raise RuntimeError(
-            "A reconstruction block must have at least one external input and output."
+            "A reconstruction window must expose at least one live-in tensor."
         )
-    return tuple(external_inputs), external_outputs
+    if not output_ids:
+        last = detector.operations[positions[-1]]
+        output_ids.extend(int(value) for value in last["outputs"])
+    return tuple(input_ids), tuple(output_ids)
+
+
+def _tensor_values(
+    values: Mapping[int, torch.Tensor],
+    tensor_ids: Sequence[int],
+    *,
+    window: ReconstructionWindow,
+    context: str,
+) -> tuple[torch.Tensor, ...]:
+    """Return materialized tensor values with a diagnostic boundary error."""
+    missing = tuple(tensor_id for tensor_id in tensor_ids if tensor_id not in values)
+    if missing:
+        raise RuntimeError(
+            f"Window {window.name!r} requires unavailable {context} tensors "
+            f"{missing}. This usually means a constant parameter tensor was "
+            "mistaken for a runtime activation boundary."
+        )
+    return tuple(values[tensor_id] for tensor_id in tensor_ids)
 
 
 def _activation_inputs(operation: Mapping[str, Any]) -> tuple[int, ...]:
+    """Return runtime activation inputs, excluding embedded constant tensors.
+
+    The converted detector specification retains original TFLite input tensor
+    IDs, including Conv weights/biases, PReLU slopes, padding constants, and
+    reshape shapes. Those constants are already embedded in the PyTorch layer
+    or operation config and are not materialized by ``execute_detector_values``.
+    """
     name = str(operation["name"])
     inputs = tuple(int(value) for value in operation["inputs"])
     if name == "ADD":
@@ -565,20 +606,54 @@ def _activation_inputs(operation: Mapping[str, Any]) -> tuple[int, ...]:
     return inputs[:1]
 
 
+def _site_tensor_domain(site, detector: HandDetector) -> tuple[int, ...]:
+    module_name = getattr(site.module, "fp_name", None) or site.module_path
+    if "input_quantizer" in module_name:
+        return (detector.input_tensor,)
+    match = _LAYER_PATTERN.search(module_name)
+    if match is None:
+        raise RuntimeError(f"Cannot map site {site.path!r} to a detector layer.")
+    position = int(match.group(1))
+    operation = detector.operations[position]
+    if site.role is SiteRole.ACTIVATION_INPUT:
+        inputs = _activation_inputs(operation)
+        if operation["name"] == "MAX_POOL_2D":
+            return tuple((*inputs, *(int(value) for value in operation["outputs"])))
+        return inputs
+    if site.role in {SiteRole.ACTIVATION_OUTPUT, SiteRole.ACTIVATION}:
+        return tuple(int(value) for value in operation["outputs"])
+    raise RuntimeError(f"Unsupported activation site role: {site.role.value!r}.")
+
+
 def _find_detector(model: nn.Module) -> HandDetector:
-    for module in model.modules():
-        if isinstance(module, HandDetector):
-            return module
-    raise TypeError("Expected a HandDetector inside the supplied model.")
+    if isinstance(model, HandDetector):
+        return model
+    if isinstance(model, NHWCInputAdapter):
+        return model.detector
+    detectors = tuple(
+        module for module in model.modules() if isinstance(module, HandDetector)
+    )
+    if len(detectors) != 1:
+        raise ValueError(f"Expected exactly one HandDetector, found {len(detectors)}.")
+    return detectors[0]
 
 
-def _mae(
-    outputs: Mapping[str, Mapping[str, float | int | None]],
-    output_name: str,
-) -> float:
-    if output_name not in OUTPUT_NAMES:
-        raise KeyError(f"Unknown detector output: {output_name!r}.")
-    value = outputs[output_name].get("mae")
-    if not isinstance(value, (float, int)):
-        raise TypeError(f"Output {output_name!r} does not contain numeric MAE.")
-    return float(value)
+def _producer_positions(operations: Sequence[Mapping[str, Any]]) -> dict[int, int]:
+    result: dict[int, int] = {}
+    for position, operation in enumerate(operations):
+        for output in operation["outputs"]:
+            tensor_id = int(output)
+            if tensor_id in result:
+                raise RuntimeError(f"Tensor {tensor_id} has multiple producers.")
+            result[tensor_id] = position
+    return result
+
+
+def _consumer_positions(
+    operations: Sequence[Mapping[str, Any]],
+) -> dict[int, tuple[int, ...]]:
+    values: dict[int, list[int]] = defaultdict(list)
+    for position, operation in enumerate(operations):
+        for tensor_id in _activation_inputs(operation):
+            values[tensor_id].append(position)
+    return {tensor_id: tuple(positions) for tensor_id, positions in values.items()}

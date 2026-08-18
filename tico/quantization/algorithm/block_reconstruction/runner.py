@@ -12,18 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gradient-based block reconstruction with fixed weights and learnable qparams."""
+"""Validation-aware block reconstruction with fixed weights and learnable qparams."""
 
 from __future__ import annotations
 
 import math
 
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
-from typing import Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Mapping, Sequence
 
 import torch
-
 from torch import nn
 
 from tico.quantization.algorithm.block_reconstruction.cache import (
@@ -36,11 +36,23 @@ from tico.quantization.algorithm.block_reconstruction.observer import (
     AffineObserverGroup,
     LearnableObserverSet,
 )
+from tico.quantization.algorithm.block_reconstruction.selection import (
+    copy_outputs,
+    OutputMetrics,
+    ValidationObjective,
+)
+
+
+class ReconstructionLoss(str, Enum):
+    """Supported local reconstruction objectives."""
+
+    NORMALIZED_MSE = "normalized-mse"
+    NORMALIZED_L1 = "normalized-l1"
 
 
 @dataclass(frozen=True)
 class BlockReconstructionConfig:
-    """Configure one activation-qparam block reconstruction run."""
+    """Configure one activation-qparam block or joint-window run."""
 
     steps: int = 500
     batch_size: int = 8
@@ -54,6 +66,7 @@ class BlockReconstructionConfig:
     minimum_scale: float = 1.0e-12
     loss_epsilon: float = 1.0e-8
     seed: int = 20260816
+    loss: ReconstructionLoss = ReconstructionLoss.NORMALIZED_MSE
 
     def validate(self) -> None:
         """Reject invalid or numerically unsafe reconstruction settings."""
@@ -79,11 +92,42 @@ class BlockReconstructionConfig:
             not math.isfinite(self.gradient_clip_norm) or self.gradient_clip_norm <= 0.0
         ):
             raise ValueError("gradient_clip_norm must be finite and positive, or None.")
+        if not isinstance(self.loss, ReconstructionLoss):
+            raise TypeError("loss must be a ReconstructionLoss value.")
+
+
+@dataclass(frozen=True)
+class ReconstructionCheckpoint:
+    """Record one locally and globally evaluated optimizer checkpoint."""
+
+    step: int
+    train_loss: float | None
+    local_loss: float
+    selection_outputs: OutputMetrics | None
+    primary_score: float | None
+    selected_as_best: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-compatible checkpoint record."""
+        return {
+            "step": self.step,
+            "train_loss": self.train_loss,
+            "local_loss": self.local_loss,
+            "selection_outputs": (
+                copy_outputs(self.selection_outputs)
+                if self.selection_outputs is not None
+                else None
+            ),
+            "primary_score": self.primary_score,
+            "selected_as_best": self.selected_as_best,
+            "reason": self.reason,
+        }
 
 
 @dataclass(frozen=True)
 class BlockReconstructionResult:
-    """Summarize one optimized block and its persisted affine qparams."""
+    """Summarize local optimization and held-out end-to-end acceptance."""
 
     block: str
     steps: int
@@ -95,10 +139,18 @@ class BlockReconstructionResult:
     qparams: Mapping[str, Mapping[str, object]]
     training_loss_history: tuple[float, ...]
     evaluation_loss_history: tuple[tuple[int, float], ...]
+    selected_qparams: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    selection_cache_samples: int = 0
+    loss_name: str = ReconstructionLoss.NORMALIZED_MSE.value
+    accepted: bool = True
+    acceptance_reason: str = "local best state committed"
+    entry_selection_outputs: OutputMetrics | None = None
+    selected_outputs: OutputMetrics | None = None
+    checkpoint_history: tuple[ReconstructionCheckpoint, ...] = ()
 
     @property
     def loss_improvement(self) -> float:
-        """Return the local normalized-MSE reduction."""
+        """Return the selected-cache local-loss reduction."""
         return self.initial_loss - self.final_loss
 
     def to_dict(self) -> dict[str, object]:
@@ -107,23 +159,46 @@ class BlockReconstructionResult:
             "block": self.block,
             "steps": self.steps,
             "cache_samples": self.cache_samples,
+            "selection_cache_samples": self.selection_cache_samples,
             "qparam_group_count": len(self.qparam_groups),
             "qparam_groups": list(self.qparam_groups),
+            "loss": self.loss_name,
             "initial_loss": self.initial_loss,
             "final_loss": self.final_loss,
             "best_step": self.best_step,
             "loss_improvement": self.loss_improvement,
+            "accepted": self.accepted,
+            "acceptance_reason": self.acceptance_reason,
+            "entry_selection_outputs": (
+                copy_outputs(self.entry_selection_outputs)
+                if self.entry_selection_outputs is not None
+                else None
+            ),
+            "selected_outputs": (
+                copy_outputs(self.selected_outputs)
+                if self.selected_outputs is not None
+                else None
+            ),
             "qparams": {name: dict(values) for name, values in self.qparams.items()},
+            "selected_qparams": {
+                name: dict(values) for name, values in self.selected_qparams.items()
+            },
             "training_loss_history": list(self.training_loss_history),
             "evaluation_loss_history": [
                 {"step": step, "loss": loss}
                 for step, loss in self.evaluation_loss_history
             ],
+            "checkpoint_history": [
+                checkpoint.to_dict() for checkpoint in self.checkpoint_history
+            ],
         }
 
 
+SelectionEvaluator = Callable[[], OutputMetrics]
+
+
 class BlockReconstructor:
-    """Optimize affine activation qparams for one executable block."""
+    """Optimize activation qparams and commit only validated states."""
 
     def __init__(self, config: BlockReconstructionConfig | None = None) -> None:
         self.config = config or BlockReconstructionConfig()
@@ -137,14 +212,22 @@ class BlockReconstructor:
         block: nn.Module,
         cache: ReconstructionCache,
         observer_groups: Sequence[AffineObserverGroup],
+        selection_cache: ReconstructionCache | None = None,
+        selection_evaluator: SelectionEvaluator | None = None,
+        selection_objective: ValidationObjective | None = None,
         device: torch.device | str | None = None,
     ) -> BlockReconstructionResult:
-        """Optimize selected activation qparams while keeping weights fixed."""
+        """Optimize one block/window and accept or rollback its best state."""
         if not block_name:
             raise ValueError("block_name must be non-empty.")
         groups = tuple(observer_groups)
         if not groups:
             raise ValueError("At least one trainable observer group is required.")
+        if selection_evaluator is None and selection_objective is not None:
+            raise ValueError("selection_objective requires selection_evaluator.")
+        if selection_evaluator is not None and selection_objective is None:
+            selection_objective = ValidationObjective()
+        selected_cache = selection_cache or cache
         optimization_device = torch.device(device or _module_device(observer_model))
         block.eval()
 
@@ -167,14 +250,39 @@ class BlockReconstructor:
                 optimizer = _make_optimizer(observers, self.config)
                 initial_loss = self.evaluate_loss(
                     block,
-                    cache,
+                    selected_cache,
                     device=optimization_device,
+                )
+                entry_outputs = (
+                    copy_outputs(selection_evaluator())
+                    if selection_evaluator is not None
+                    else None
                 )
                 best_loss = initial_loss
                 best_step = 0
-                best_state = observers.state_snapshot()
+                entry_state = observers.state_snapshot()
+                entry_qparams = observers.qparams_dict()
+                best_state = entry_state
+                best_outputs = entry_outputs
                 training_history: list[float] = []
                 evaluation_history: list[tuple[int, float]] = [(0, initial_loss)]
+                checkpoint_history: list[ReconstructionCheckpoint] = [
+                    ReconstructionCheckpoint(
+                        step=0,
+                        train_loss=None,
+                        local_loss=initial_loss,
+                        selection_outputs=entry_outputs,
+                        primary_score=(
+                            selection_objective.score(entry_outputs)
+                            if selection_objective is not None
+                            and entry_outputs is not None
+                            else initial_loss
+                        ),
+                        selected_as_best=True,
+                        reason="entry state",
+                    )
+                ]
+                last_train_loss: float | None = None
 
                 for step in range(1, self.config.steps + 1):
                     invocation, target = cache.random_batch(
@@ -185,9 +293,10 @@ class BlockReconstructor:
                     )
                     optimizer.zero_grad(set_to_none=True)
                     output = invoke_block(block, invocation)
-                    loss = normalized_mse_loss(
+                    loss = reconstruction_loss(
                         output,
                         target,
+                        self.config.loss,
                         epsilon=self.config.loss_epsilon,
                     )
                     if not torch.isfinite(loss):
@@ -201,30 +310,85 @@ class BlockReconstructor:
                             self.config.gradient_clip_norm,
                         )
                     optimizer.step()
-                    training_history.append(float(loss.detach().cpu().item()))
+                    last_train_loss = float(loss.detach().cpu().item())
+                    training_history.append(last_train_loss)
 
-                    if (
+                    evaluate = (
                         step % self.config.evaluation_interval == 0
                         or step == self.config.steps
-                    ):
-                        evaluation_loss = self.evaluate_loss(
-                            block,
-                            cache,
-                            device=optimization_device,
+                    )
+                    if not evaluate:
+                        continue
+                    local_value = self.evaluate_loss(
+                        block,
+                        selected_cache,
+                        device=optimization_device,
+                    )
+                    evaluation_history.append((step, local_value))
+                    candidate_outputs = (
+                        copy_outputs(selection_evaluator())
+                        if selection_evaluator is not None
+                        else None
+                    )
+                    selected, reason = _candidate_is_better(
+                        local_value=local_value,
+                        candidate_outputs=candidate_outputs,
+                        best_local=best_loss,
+                        best_outputs=best_outputs,
+                        entry_outputs=entry_outputs,
+                        objective=selection_objective,
+                    )
+                    if selected:
+                        best_loss = local_value
+                        best_step = step
+                        best_state = observers.state_snapshot()
+                        best_outputs = candidate_outputs
+                    checkpoint_history.append(
+                        ReconstructionCheckpoint(
+                            step=step,
+                            train_loss=last_train_loss,
+                            local_loss=local_value,
+                            selection_outputs=candidate_outputs,
+                            primary_score=(
+                                selection_objective.score(candidate_outputs)
+                                if selection_objective is not None
+                                and candidate_outputs is not None
+                                else local_value
+                            ),
+                            selected_as_best=selected,
+                            reason=reason,
                         )
-                        evaluation_history.append((step, evaluation_loss))
-                        if evaluation_loss < best_loss:
-                            best_loss = evaluation_loss
-                            best_step = step
-                            best_state = observers.state_snapshot()
+                    )
 
                 observers.load_state_snapshot(best_state)
                 final_loss = self.evaluate_loss(
                     block,
-                    cache,
+                    selected_cache,
                     device=optimization_device,
                 )
-                qparams = observers.finalize()
+                selected_qparams = observers.qparams_dict()
+                if (
+                    selection_objective is not None
+                    and best_outputs is not None
+                    and entry_outputs is not None
+                ):
+                    accepted, acceptance_reason = selection_objective.accepted(
+                        best_outputs,
+                        entry_outputs,
+                    )
+                else:
+                    # Preserve PR 1 behavior when no held-out evaluator is supplied:
+                    # commit the best local state, including unchanged step zero.
+                    accepted = True
+                    acceptance_reason = (
+                        "local best state committed; improvement "
+                        f"{initial_loss - final_loss:.6e}"
+                    )
+                if accepted:
+                    committed_qparams = observers.finalize()
+                else:
+                    observers.restore()
+                    committed_qparams = entry_qparams
             except Exception:
                 observers.restore()
                 raise
@@ -233,13 +397,21 @@ class BlockReconstructor:
             block=block_name,
             steps=self.config.steps,
             cache_samples=len(cache),
+            selection_cache_samples=len(selected_cache),
             qparam_groups=tuple(group.name for group in groups),
+            loss_name=self.config.loss.value,
             initial_loss=initial_loss,
             final_loss=final_loss,
             best_step=best_step,
-            qparams=qparams,
+            qparams=committed_qparams,
+            selected_qparams=selected_qparams,
             training_loss_history=tuple(training_history),
             evaluation_loss_history=tuple(evaluation_history),
+            accepted=accepted,
+            acceptance_reason=acceptance_reason,
+            entry_selection_outputs=entry_outputs,
+            selected_outputs=best_outputs,
+            checkpoint_history=tuple(checkpoint_history),
         )
 
     def evaluate_loss(
@@ -249,7 +421,7 @@ class BlockReconstructor:
         *,
         device: torch.device | str,
     ) -> float:
-        """Evaluate normalized reconstruction loss over the full cache."""
+        """Evaluate the selected normalized local loss over the full cache."""
         numerator = torch.zeros((), dtype=torch.float64, device=device)
         denominator = torch.zeros((), dtype=torch.float64, device=device)
         with torch.no_grad():
@@ -259,9 +431,10 @@ class BlockReconstructor:
                 use_quantized_input=True,
             ):
                 output = invoke_block(block, invocation)
-                batch_numerator, batch_denominator = normalized_mse_terms(
+                batch_numerator, batch_denominator = reconstruction_loss_terms(
                     output,
                     target,
+                    self.config.loss,
                 )
                 numerator += batch_numerator.to(dtype=torch.float64)
                 denominator += batch_denominator.to(dtype=torch.float64)
@@ -271,34 +444,108 @@ class BlockReconstructor:
         return float(value.detach().cpu().item())
 
 
+def reconstruction_loss(
+    candidate: TensorTree,
+    target: TensorTree,
+    loss: ReconstructionLoss,
+    *,
+    epsilon: float = 1.0e-8,
+) -> torch.Tensor:
+    """Return normalized MSE or normalized L1 over all output tensors."""
+    if epsilon <= 0.0 or not math.isfinite(epsilon):
+        raise ValueError("epsilon must be finite and positive.")
+    numerator, denominator = reconstruction_loss_terms(candidate, target, loss)
+    return numerator / denominator.clamp_min(epsilon)
+
+
 def normalized_mse_loss(
     candidate: TensorTree,
     target: TensorTree,
     *,
     epsilon: float = 1.0e-8,
 ) -> torch.Tensor:
-    """Return energy-normalized squared error over all block-output tensors."""
-    if epsilon <= 0.0 or not math.isfinite(epsilon):
-        raise ValueError("epsilon must be finite and positive.")
-    numerator, denominator = normalized_mse_terms(candidate, target)
-    return numerator / denominator.clamp_min(epsilon)
+    """Preserve the PR 1 normalized-MSE public helper."""
+    return reconstruction_loss(
+        candidate,
+        target,
+        ReconstructionLoss.NORMALIZED_MSE,
+        epsilon=epsilon,
+    )
+
+
+def normalized_l1_loss(
+    candidate: TensorTree,
+    target: TensorTree,
+    *,
+    epsilon: float = 1.0e-8,
+) -> torch.Tensor:
+    """Return magnitude-normalized absolute error over all output tensors."""
+    return reconstruction_loss(
+        candidate,
+        target,
+        ReconstructionLoss.NORMALIZED_L1,
+        epsilon=epsilon,
+    )
 
 
 def normalized_mse_terms(
     candidate: TensorTree,
     target: TensorTree,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return differentiable squared-error and target-energy sums."""
+    """Preserve the PR 1 differentiable MSE-term helper."""
+    return reconstruction_loss_terms(
+        candidate,
+        target,
+        ReconstructionLoss.NORMALIZED_MSE,
+    )
+
+
+def reconstruction_loss_terms(
+    candidate: TensorTree,
+    target: TensorTree,
+    loss: ReconstructionLoss,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return differentiable error and target-normalization terms."""
     pairs = tree_tensor_pairs(candidate, target)
-    numerator = sum(
-        (candidate_tensor - target_tensor).to(dtype=torch.float32).square().sum()
-        for candidate_tensor, target_tensor in pairs
-    )
-    denominator = sum(
-        target_tensor.to(dtype=torch.float32).square().sum()
-        for _, target_tensor in pairs
-    )
+    if loss is ReconstructionLoss.NORMALIZED_MSE:
+        numerator = sum(
+            (candidate_tensor - target_tensor).to(dtype=torch.float32).square().sum()
+            for candidate_tensor, target_tensor in pairs
+        )
+        denominator = sum(
+            target_tensor.to(dtype=torch.float32).square().sum()
+            for _, target_tensor in pairs
+        )
+    elif loss is ReconstructionLoss.NORMALIZED_L1:
+        numerator = sum(
+            (candidate_tensor - target_tensor).to(dtype=torch.float32).abs().sum()
+            for candidate_tensor, target_tensor in pairs
+        )
+        denominator = sum(
+            target_tensor.to(dtype=torch.float32).abs().sum()
+            for _, target_tensor in pairs
+        )
+    else:
+        raise ValueError(f"Unsupported reconstruction loss: {loss!r}")
     return numerator, denominator
+
+
+def _candidate_is_better(
+    *,
+    local_value: float,
+    candidate_outputs: OutputMetrics | None,
+    best_local: float,
+    best_outputs: OutputMetrics | None,
+    entry_outputs: OutputMetrics | None,
+    objective: ValidationObjective | None,
+) -> tuple[bool, str]:
+    if objective is None:
+        improvement = best_local - local_value
+        return improvement > 0.0, f"local improvement {improvement:.6e}"
+    assert candidate_outputs is not None
+    assert best_outputs is not None
+    assert entry_outputs is not None
+    return objective.better(candidate_outputs, best_outputs, entry_outputs)
 
 
 def _make_optimizer(
@@ -319,17 +566,11 @@ def _make_optimizer(
     parameter_groups: list[dict[str, object]] = []
     if scale_parameters:
         parameter_groups.append(
-            {
-                "params": scale_parameters,
-                "lr": config.scale_learning_rate,
-            }
+            {"params": scale_parameters, "lr": config.scale_learning_rate}
         )
     if zero_point_parameters:
         parameter_groups.append(
-            {
-                "params": zero_point_parameters,
-                "lr": config.zero_point_learning_rate,
-            }
+            {"params": zero_point_parameters, "lr": config.zero_point_learning_rate}
         )
     if not parameter_groups:
         raise ValueError("No learnable activation qparams were configured.")
