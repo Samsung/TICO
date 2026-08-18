@@ -22,6 +22,8 @@ from tico.quantization.recipes.debug.wrapper_smoke.case import ForwardInput
 from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
     Gemma4VisionAttentionCase,
     Gemma4VisionEncoderLayerCase,
+    Gemma4VisionModelCase,
+    Gemma4VisionPatchEmbedderCase,
     Gemma4VisionPoolerCase,
 )
 
@@ -103,6 +105,37 @@ class TestGemma4VisionExportInputContracts(unittest.TestCase):
         torch.testing.assert_close(export_input.args[1], self.attention_mask)
         torch.testing.assert_close(export_input.args[2][0], self.cos)
         torch.testing.assert_close(export_input.args[2][1], self.sin)
+
+    def test_patch_embedder_export_input_omits_baked_profile_tensors(self) -> None:
+        """Static patch embedding should export only processor pixel values."""
+        pixel_values = torch.randn(1, 4, 12)
+        sample = ForwardInput(
+            (pixel_values, self.position_ids, self.padding_positions),
+        )
+
+        export_input = Gemma4VisionPatchEmbedderCase().export_input(sample, {})
+
+        self.assertEqual(dict(export_input.kwargs), {})
+        self.assertEqual(len(export_input.args), 1)
+        torch.testing.assert_close(export_input.args[0], pixel_values)
+
+    def test_vision_model_export_input_omits_baked_position_ids(self) -> None:
+        """The full static vision model should expose only pixel values."""
+        pixel_values = torch.randn(1, 4, 12)
+        sample = ForwardInput(
+            (),
+            {
+                "pixel_values": pixel_values,
+                "pixel_position_ids": self.position_ids,
+                "return_dict": True,
+            },
+        )
+
+        export_input = Gemma4VisionModelCase().export_input(sample, {})
+
+        self.assertEqual(dict(export_input.kwargs), {})
+        self.assertEqual(len(export_input.args), 1)
+        torch.testing.assert_close(export_input.args[0], pixel_values)
 
     def test_pooler_export_input_omits_precomputed_position_ids(self) -> None:
         """Static pooler export should keep only hidden states and padding."""

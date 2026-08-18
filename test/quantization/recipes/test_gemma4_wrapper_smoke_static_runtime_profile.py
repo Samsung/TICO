@@ -214,7 +214,7 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
             SimpleNamespace(
                 config=SimpleNamespace(standardize=False),
                 padding_positions=padding_positions,
-                patch_embedder_export=lambda pixels, positions, padding: pixels,
+                patch_embedder_export=lambda pixels: pixels,
                 encoder_export=lambda inputs_embeds: inputs_embeds,
                 pooler_export=lambda **kwargs: (
                     kwargs["hidden_states"],
@@ -230,9 +230,8 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
             ),
         )
         pixel_values = torch.randn(1, seq_len, hidden_size)
-        position_ids = torch.zeros(1, seq_len, 2, dtype=torch.long)
 
-        output = QuantGemma4VisionModel.forward_export(fake, pixel_values, position_ids)
+        output = QuantGemma4VisionModel.forward_export(fake, pixel_values)
 
         self.assertEqual(tuple(output.last_hidden_state.shape), (seq_len, hidden_size))
 

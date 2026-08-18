@@ -332,9 +332,9 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
             pixel_position_ids=sample["pixel_position_ids"],
         )
 
-        # Test forward (adapter delegates to wrapped_model.forward_export)
+        # Test the pixel-values-only static forward contract.
         with torch.no_grad():
-            output = export_module(**sample)
+            output = export_module(sample["pixel_values"])
 
         self.assertTrue(torch.isfinite(output.last_hidden_state).all())
 
@@ -364,21 +364,22 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
         ).eval()
 
         with torch.no_grad():
-            static_output = vision_prefill(
-                sample["pixel_values"],
-                sample["pixel_position_ids"],
-            )
+            static_output = vision_prefill(sample["pixel_values"])
 
         exported_program = torch.export.export(
             vision_prefill,
-            (sample["pixel_values"], sample["pixel_position_ids"]),
+            (sample["pixel_values"],),
             strict=False,
         )
+        self.assertEqual(len(exported_program.graph_signature.user_inputs), 1)
+        call_targets = {
+            str(node.target)
+            for node in exported_program.graph.nodes
+            if node.op == "call_function"
+        }
+        self.assertNotIn("aten.embedding.default", call_targets)
         with torch.no_grad():
-            exported_output = exported_program.module()(
-                sample["pixel_values"],
-                sample["pixel_position_ids"],
-            )
+            exported_output = exported_program.module()(sample["pixel_values"])
 
         torch.testing.assert_close(static_output, eager_output, atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(exported_output, static_output)
@@ -403,7 +404,7 @@ class TestQuantGemma4VisionModel(unittest.TestCase):
             side_effect=AssertionError("dynamic encoder path was used"),
         ):
             with torch.no_grad():
-                output = export_module(**sample)
+                output = export_module(sample["pixel_values"])
 
         self.assertTrue(torch.isfinite(output.last_hidden_state).all())
 

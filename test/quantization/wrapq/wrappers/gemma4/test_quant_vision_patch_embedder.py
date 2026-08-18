@@ -15,6 +15,7 @@
 """Unit tests for the Gemma4 vision patch embedder PTQ wrapper."""
 
 import unittest
+from unittest import mock
 
 import torch
 
@@ -282,15 +283,53 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_as_export_module_supports_no_quant_mode(self):
-        """Floating-point export should be available in NO_QUANT mode."""
+        """Floating-point export should bake coordinates into a static adapter."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4VisionPatchEmbedderPrefillExportAdapter,
+        )
+
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
             position_embedding_size=self.position_embedding_size,
         )
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
+        pixel_values, pixel_position_ids, padding_positions = self._sample_inputs()
 
-        self.assertIs(q_module.as_export_module(mode="prefill"), q_module)
+        export_module = q_module.as_export_module(
+            mode="prefill",
+            pixel_position_ids=pixel_position_ids,
+            padding_positions=padding_positions,
+        )
+
+        self.assertIsInstance(
+            export_module,
+            Gemma4VisionPatchEmbedderPrefillExportAdapter,
+        )
+        with torch.no_grad():
+            expected = q_module(
+                pixel_values,
+                pixel_position_ids,
+                padding_positions,
+            )
+            actual = export_module(pixel_values)
+        torch.testing.assert_close(actual, expected)
+
+        exported = torch.export.export(
+            export_module,
+            (pixel_values,),
+            strict=False,
+        )
+        self.assertEqual(len(exported.graph_signature.user_inputs), 1)
+        call_targets = {
+            str(node.target)
+            for node in exported.graph.nodes
+            if node.op == "call_function"
+        }
+        self.assertNotIn("aten.embedding.default", call_targets)
+        with torch.no_grad():
+            exported_output = exported.module()(pixel_values)
+        torch.testing.assert_close(exported_output, actual)
 
     def test_as_export_module_rejects_calibration_mode(self):
         """Export should reject CALIB mode because its qparams are incomplete."""
@@ -301,12 +340,17 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         )
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
         q_module.enable_calibration()
+        _, pixel_position_ids, padding_positions = self._sample_inputs()
 
         with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
-            q_module.as_export_module(mode="prefill")
+            q_module.as_export_module(
+                mode="prefill",
+                pixel_position_ids=pixel_position_ids,
+                padding_positions=padding_positions,
+            )
 
-    def test_as_export_module_returns_self(self):
-        """as_export_module should return self."""
+    def test_export_adapter_bakes_profile_and_has_one_user_input(self):
+        """The exported patch embedder should not read position IDs at runtime."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -320,8 +364,26 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             _ = q_module(pixel_values, pixel_position_ids, padding_positions)
         q_module.freeze_qparams()
 
-        export_module = q_module.as_export_module(mode="prefill")
-        self.assertIs(export_module, q_module)
+        with torch.no_grad():
+            expected = q_module(
+                pixel_values,
+                pixel_position_ids,
+                padding_positions,
+            )
+        export_module = q_module.as_export_module(
+            mode="prefill",
+            pixel_position_ids=pixel_position_ids,
+            padding_positions=padding_positions,
+        )
+
+        with mock.patch.object(
+            q_module,
+            "_lookup_position_embeddings",
+            side_effect=AssertionError("runtime position lookup was used"),
+        ):
+            with torch.no_grad():
+                actual = export_module(pixel_values)
+        torch.testing.assert_close(actual, expected)
 
 
 if __name__ == "__main__":

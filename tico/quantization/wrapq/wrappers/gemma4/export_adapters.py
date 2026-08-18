@@ -100,17 +100,53 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
         return self.embed_tokens(input_ids)
 
 
+class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
+    """Export a patch embedder specialized for one fixed position profile.
+
+    The construction-time position IDs are converted into a positional-embedding
+    template before export. The resulting runtime ABI accepts only pixel values;
+    no coordinate or padding tensor remains as a graph input.
+    """
+
+    def __init__(
+        self,
+        wrapped: nn.Module,
+        *,
+        position_embeddings: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> None:
+        super().__init__()
+        self.wrapped = wrapped
+        self.register_buffer(
+            "position_embeddings_template",
+            position_embeddings.detach().clone(),
+            persistent=False,
+        )
+        self.register_buffer(
+            "padding_positions_template",
+            padding_positions.detach().to(dtype=torch.bool).clone(),
+            persistent=False,
+        )
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Project pixels and add the baked positional-embedding template."""
+        return self.wrapped.forward_export(
+            pixel_values,
+            position_embeddings=self.position_embeddings_template,
+            padding_positions=self.padding_positions_template,
+        )
+
+
 class Gemma4VisionPrefillExportAdapter(nn.Module):
     """Export the complete static Gemma4 vision-prefill stage.
 
-    ``vision_model`` must already be specialized for one fixed
-    ``pixel_position_ids`` profile through
-    ``QuantGemma4VisionModel.as_export_module``. This adapter then applies the
-    multimodal projection used to map vision hidden states to text width.
+    ``vision_model`` is specialized for one fixed ``pixel_position_ids`` profile
+    through ``QuantGemma4VisionModel.as_export_module``. All profile-dependent
+    tensors are owned by nested export adapters, and this stage then applies the
+    multimodal projection that maps vision hidden states to text width.
 
     Input contract:
-        ``pixel_values`` and ``pixel_position_ids`` use the fixed patch layout
-        selected when ``vision_model`` was created.
+        ``pixel_values`` has the fixed patch layout selected at construction.
 
     Output contract:
         Returns visual soft tokens with shape ``(1, V, text_hidden_size)``.
@@ -125,16 +161,9 @@ class Gemma4VisionPrefillExportAdapter(nn.Module):
         self.vision_model = vision_model
         self.vision_projection = vision_projection
 
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        pixel_position_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Run the static vision model and project its soft tokens."""
-        vision_outputs = self.vision_model(
-            pixel_values,
-            pixel_position_ids,
-        )
+        vision_outputs = self.vision_model(pixel_values)
         hidden_states = (
             vision_outputs
             if isinstance(vision_outputs, torch.Tensor)
@@ -149,10 +178,11 @@ def build_gemma4_vision_prefill_export_module(
     pixel_position_ids: torch.Tensor,
     mode: str = "prefill",
 ) -> Gemma4VisionPrefillExportAdapter:
-    """Build the canonical static Gemma4 vision-prefill export module.
+    """Build a pixel-values-only Gemma4 vision-prefill export module.
 
-    Both the Circle exporter and the static runtime must call this helper so
-    that they exercise exactly the same specialized vision graph.
+    ``pixel_position_ids`` is construction-time specialization data. Both the
+    Circle exporter and static runtime pass the canonical profile to this helper,
+    but the returned module exposes only ``pixel_values`` as a runtime input.
     """
     if pixel_position_ids.dim() != 3 or pixel_position_ids.shape[0] != 1:
         raise ValueError(
@@ -533,15 +563,12 @@ class Gemma4ModelPrefillExportAdapter(nn.Module):
 class Gemma4VisionModelPrefillExportAdapter(nn.Module):
     """Export adapter for the Gemma4 vision model with static-shape contract.
 
-    This adapter wraps a ``QuantGemma4VisionModel`` that has been prepared
-    for export via ``as_export_module()``.  Calling ``forward()`` delegates
-    to the wrapped model's ``forward_export()`` method, which uses the
-    export-friendly submodule adapters (``patch_embedder_export``,
-    ``encoder_export``, and ``pooler_export``).
+    This adapter wraps a ``QuantGemma4VisionModel`` prepared through
+    ``as_export_module()``. Position IDs, padding, RoPE, attention masks, and
+    pooler geometry are construction-time data owned by nested adapters.
 
     Input contract:
         ``pixel_values`` has shape ``(1, num_patches, 3*patch_size^2)``.
-        ``pixel_position_ids`` has shape ``(1, num_patches, 2)``.
 
     Output contract:
         Returns ``BaseModelOutputWithPast`` with ``last_hidden_state``
@@ -555,13 +582,6 @@ class Gemma4VisionModelPrefillExportAdapter(nn.Module):
         super().__init__()
         self.wrapped_model = wrapped_model
 
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        pixel_position_ids: torch.LongTensor,
-    ):
-        """Run the vision model export path via the wrapped model's forward_export."""
-        return self.wrapped_model.forward_export(
-            pixel_values=pixel_values,
-            pixel_position_ids=pixel_position_ids,
-        )
+    def forward(self, pixel_values: torch.FloatTensor):
+        """Run the pixel-values-only static vision model export path."""
+        return self.wrapped_model.forward_export(pixel_values=pixel_values)

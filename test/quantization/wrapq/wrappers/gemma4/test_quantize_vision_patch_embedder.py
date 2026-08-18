@@ -164,12 +164,16 @@ class TestGemma4VisionPatchEmbedderSmoke(unittest.TestCase):
 
         quantized = convert(prepared)
 
-        export_module = quantized.wrapped.as_export_module(mode="prefill")
-
-        # Verify export module forward works
         sample = self._sample()
+        export_module = quantized.wrapped.as_export_module(
+            mode="prefill",
+            pixel_position_ids=sample["pixel_position_ids"],
+            padding_positions=sample["padding_positions"],
+        )
+
+        # Verify the pixel-values-only export module forward works.
         with torch.no_grad():
-            out = export_module(**sample)
+            out = export_module(sample["pixel_values"])
 
         self.assertEqual(out.shape, (1, self.num_patches, self.cfg.hidden_size))
         self.assertTrue(torch.isfinite(out).all())

@@ -190,19 +190,23 @@ def main():
     print(f"└──────────────────────────────────────────────────────")
     print(plot_two_outputs(fp_out, quant_out))
 
-    # Export and convert to Circle format.
-    # The wrapper is already exportable, so as_export_module returns self.
+    # Export and convert to Circle format. Position coordinates are
+    # construction-time specialization data and are not Circle inputs.
     wrapped = getattr(quantized_model, "wrapped", quantized_model)
     if hasattr(wrapped, "as_export_module"):
-        export_module = wrapped.as_export_module(mode="prefill").eval()
-
-        example_inputs = (
-            torch.randn(batch_size, num_patches, 3 * patch_size**2),  # pixel_values
-            _pixel_position_ids(
-                batch_size, num_patches, position_embedding_size
-            ),  # pixel_position_ids
-            _padding_positions(batch_size, num_patches),  # padding_positions
+        pixel_position_ids = _pixel_position_ids(
+            batch_size,
+            num_patches,
+            position_embedding_size,
         )
+        padding_positions = _padding_positions(batch_size, num_patches)
+        export_module = wrapped.as_export_module(
+            mode="prefill",
+            pixel_position_ids=pixel_position_ids,
+            padding_positions=padding_positions,
+        ).eval()
+
+        example_inputs = (torch.randn(batch_size, num_patches, 3 * patch_size**2),)
 
         print("\nConverting to Circle format...")
         circle_model = tico.convert(export_module, example_inputs)

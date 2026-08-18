@@ -193,9 +193,9 @@ class TestGemma4VisionModelSmoke(unittest.TestCase):
         # as_export_module returns Gemma4VisionModelPrefillExportAdapter
         self.assertIsInstance(export_module, Gemma4VisionModelPrefillExportAdapter)
 
-        # Verify forward works (adapter delegates to wrapped_model.forward_export)
+        # Verify the pixel-values-only static forward contract.
         with torch.no_grad():
-            output = export_module(**sample)
+            output = export_module(sample["pixel_values"])
 
         self.assertTrue(torch.isfinite(output.last_hidden_state).all())
 
