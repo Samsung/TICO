@@ -369,11 +369,13 @@ class DepthwiseConv2DEvaluator(ConstantEvaluator):
             depth_multiplier,
         )
         output_view = result.reshape(
-            batch,
-            output_height,
-            output_width,
-            input_channels,
-            depth_multiplier,
+            (
+                batch,
+                output_height,
+                output_width,
+                input_channels,
+                depth_multiplier,
+            )
         )
         for output_y in range(output_height):
             input_y_origin = output_y * stride_h - pad_top
