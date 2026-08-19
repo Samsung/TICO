@@ -184,8 +184,8 @@ def main():
     print(plot_two_outputs(fp_pooled, quant_pooled))
 
     # Export the static-shape export adapter and convert to Circle format.
-    # The export adapter bakes output_length as a construction-time constant,
-    # so the forward signature is (hidden_states, pixel_position_ids, padding_positions).
+    # The export adapter bakes positions, padding, and output_length into its
+    # pooling matrix, so the runtime signature contains only hidden_states.
     wrapped = getattr(quantized_model, "wrapped", quantized_model)
     if hasattr(wrapped, "as_export_module"):
         export_module = wrapped.as_export_module(
@@ -195,8 +195,6 @@ def main():
 
         example_inputs = (
             torch.randn(batch_size, seq_len, hidden_size),  # hidden_states
-            _pixel_position_ids(batch_size, seq_len),  # pixel_position_ids
-            _padding_positions(batch_size, seq_len),  # padding_positions
         )
         circle_model = tico.convert(export_module, example_inputs)
 

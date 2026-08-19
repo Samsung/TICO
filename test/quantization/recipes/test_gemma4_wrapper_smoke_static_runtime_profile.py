@@ -207,20 +207,16 @@ class TestQuantGemma4VisionModelObserverSelection(unittest.TestCase):
         """The real E2B export path should run without std buffers or observers."""
         hidden_size = 8
         seq_len = 4
-        padding_positions = torch.zeros(1, seq_len, dtype=torch.bool)
 
         fake = cast(
             QuantGemma4VisionModel,
             SimpleNamespace(
-                config=SimpleNamespace(standardize=False),
-                padding_positions=padding_positions,
+                config=SimpleNamespace(standardize=False, hidden_size=hidden_size),
                 patch_embedder_export=lambda pixels: pixels,
                 encoder_export=lambda inputs_embeds: inputs_embeds,
-                pooler_export=lambda **kwargs: (
-                    kwargs["hidden_states"],
-                    torch.ones(1, seq_len, dtype=torch.bool),
-                ),
+                pooler_export=lambda **kwargs: kwargs["hidden_states"],
                 output_length=seq_len,
+                num_valid_pool_outputs=seq_len,
                 obs_strip_padding=object(),
                 obs_last_hidden_state=object(),
                 obs_minus_bias=object(),

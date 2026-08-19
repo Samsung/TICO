@@ -1982,8 +1982,8 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         """Export the wrapped pooler in prefill mode with fixed output_length.
 
         Passes ``pixel_position_ids`` so the export adapter precomputes the
-        pooling weight matrix and output mask at construction time, replacing
-        the dynamic ``F.one_hot`` and ``torch.div`` operations with a static
+        padding-baked pooling weight matrix and valid-prefix length at
+        construction time, replacing dynamic mask operations with a static
         ``matmul``.
         """
         wrapped = getattr(quantized, "wrapped", quantized)
@@ -1999,16 +1999,15 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
     def export_input(
         self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
     ) -> ForwardInput:
-        """Create static export inputs expected by the pooler adapter.
+        """Keep only hidden states in the static pooler ABI.
 
-        The export adapter bakes ``output_length`` as a construction-time
-        constant, so it is not included in the forward signature.
+        Position IDs, padding, output length, and output validity are all
+        construction-time profile data.
         """
         cloned = _clone_forward_input(eval_sample)
         kwargs = dict(cloned.kwargs)
         hidden = kwargs["hidden_states"]
-        padding_positions = kwargs["padding_positions"]
-        return ForwardInput((hidden, padding_positions), {})
+        return ForwardInput((hidden,), {})
 
 
 class Gemma4VisionModelCase(Gemma4BaseCase):

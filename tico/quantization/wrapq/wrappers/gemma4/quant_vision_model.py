@@ -214,16 +214,18 @@ class QuantGemma4VisionModel(QuantModuleBase):
         """
         from transformers.models.gemma4.modeling_gemma4 import BaseModelOutputWithPast
 
-        padding_positions = self.padding_positions
         inputs_embeds = self.patch_embedder_export(pixel_values)
         encoder_hidden = self.encoder_export(inputs_embeds)
 
-        hidden_states, pooler_mask = self.pooler_export(
+        hidden_states = self.pooler_export(
             hidden_states=encoder_hidden,
-            padding_positions=padding_positions,
         )
 
-        hidden_states = hidden_states[pooler_mask]
+        # Static profiles place all valid pooled rows in one prefix.  Slice and
+        # reshape reproduce eager ``hidden_states[pooler_mask]`` without a
+        # Boolean tensor in the exported graph.
+        hidden_states = hidden_states[:, : self.num_valid_pool_outputs, :]
+        hidden_states = hidden_states.reshape(-1, self.config.hidden_size)
         hidden_states = self._fq(hidden_states, self.obs_strip_padding)
 
         if self.config.standardize:
@@ -302,7 +304,6 @@ class QuantGemma4VisionModel(QuantModuleBase):
         ), "max_patches must be divisible by pooling_kernel_size^2"
 
         padding_positions = (pixel_position_ids == -1).all(dim=-1)
-        self.register_buffer("padding_positions", padding_positions)
 
         self.patch_embedder_export = self.patch_embedder.as_export_module(
             mode=mode,
@@ -318,6 +319,13 @@ class QuantGemma4VisionModel(QuantModuleBase):
             output_length=self.output_length,
             pixel_position_ids=pixel_position_ids,
         )
+        self.num_valid_pool_outputs = int(self.pooler_export.num_valid_outputs)
+        if not 0 < self.num_valid_pool_outputs <= self.output_length:
+            raise ValueError(
+                "Gemma4 vision pooler produced an invalid static valid-output "
+                f"count: valid={self.num_valid_pool_outputs}, "
+                f"capacity={self.output_length}."
+            )
 
         if self._mode is Mode.QUANT:
             register_fake_quant_meta_kernels_for_dynamic_export()
