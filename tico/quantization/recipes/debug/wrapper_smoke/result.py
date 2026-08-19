@@ -22,19 +22,41 @@ from tico.quantization.recipes.debug.wrapper_smoke.utils import format_metric
 
 @dataclass
 class WrapperSmokeResult:
-    """Structured result for one wrapper smoke run."""
+    """Structured result for one wrapper smoke run.
+
+    ``failures`` holds deduplicated failure kind tags (e.g. ``UNAVAILABLE``,
+    ``CONFIG``, ``SHAPE``, ``NON-FINITE``, ``ACCURACY``, ``EXPORT``) in the
+    order they were first reported; ``messages`` keeps the matching details.
+    """
 
     case: str
     passed: bool
     metrics: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
     messages: list[str] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+    def add_failure(self, kind: str, message: str) -> None:
+        """Mark the run as failed with a failure kind tag and a detail message."""
+        self.passed = False
+        if kind not in self.failures:
+            self.failures.append(kind)
+        self.messages.append(message)
+
+    def status_text(self) -> str:
+        """Return the status label, including failure kinds when failed."""
+        if self.passed:
+            return "PASS"
+        if self.failures:
+            return f"FAIL ({', '.join(self.failures)})"
+        return "FAIL"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the result to a JSON-compatible dictionary."""
         return {
             "case": self.case,
             "passed": self.passed,
+            "failures": self.failures,
             "metrics": self.metrics,
             "artifacts": self.artifacts,
             "messages": self.messages,
@@ -44,14 +66,18 @@ class WrapperSmokeResult:
         """Raise a RuntimeError if the smoke run failed."""
         if not self.passed:
             details = "; ".join(self.messages) if self.messages else "no details"
-            raise RuntimeError(f"Wrapper smoke case '{self.case}' failed: {details}")
+            raise RuntimeError(
+                f"Wrapper smoke case '{self.case}' failed "
+                f"({', '.join(self.failures) if self.failures else 'unknown'}): "
+                f"{details}"
+            )
 
     def format_text(self) -> str:
         """Return a human-readable summary for CLI output."""
         lines = [
             "┌───────────── Wrapper Smoke Summary ─────────────",
             f"│ Case             : {self.case}",
-            f"│ Status           : {'PASS' if self.passed else 'FAIL'}",
+            f"│ Status           : {self.status_text()}",
             f"│ Mean |diff|      : {format_metric(self.metrics.get('mean_abs_diff'))}",
             f"│ Max  |diff|      : {format_metric(self.metrics.get('max_abs_diff'))}",
             f"│ PEIR             : {format_metric(self.metrics.get('peir'))}",

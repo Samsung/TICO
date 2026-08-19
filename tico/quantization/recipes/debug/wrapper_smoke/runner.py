@@ -120,8 +120,7 @@ def _export_circle(
         circle_model.save(path)
         result.artifacts["circle"] = str(path)
     except Exception as exc:
-        result.passed = False
-        result.messages.append(f"Circle export failed: {exc}")
+        result.add_failure("EXPORT", f"Circle export failed: {exc}")
 
 
 def run_wrapper_smoke(
@@ -141,10 +140,9 @@ def run_wrapper_smoke(
     case = get_case(case_name)
     availability = case.availability()
     if not availability.available:
-        result = WrapperSmokeResult(
-            case=case.name,
-            passed=False,
-            messages=[availability.reason or "case is not available"],
+        result = WrapperSmokeResult(case=case.name, passed=True)
+        result.add_failure(
+            "UNAVAILABLE", availability.reason or "case is not available"
         )
         if strict:
             result.raise_if_failed()
@@ -153,11 +151,8 @@ def run_wrapper_smoke(
     try:
         case.validate_config(cfg)
     except ValueError as exc:
-        result = WrapperSmokeResult(
-            case=case.name,
-            passed=False,
-            messages=[f"Invalid case configuration: {exc}"],
-        )
+        result = WrapperSmokeResult(case=case.name, passed=True)
+        result.add_failure("CONFIG", f"Invalid case configuration: {exc}")
         _write_report(result, report_json)
         print(result.format_text())
         if strict:
@@ -225,30 +220,30 @@ def run_wrapper_smoke(
     )
 
     if not shape_match:
-        result.passed = False
-        result.messages.append("output shape mismatch")
+        result.add_failure("SHAPE", "output shape mismatch")
     if not quant_finite:
-        result.passed = False
-        result.messages.append("quantized output has non-finite values")
+        result.add_failure("NON-FINITE", "quantized output has non-finite values")
     if not fp_finite:
-        result.passed = False
-        result.messages.append("floating-point reference output has non-finite values")
+        result.add_failure(
+            "NON-FINITE", "floating-point reference output has non-finite values"
+        )
     if mean_abs_diff is not None and case.max_mean_abs_diff is not None:
         if mean_abs_diff > case.max_mean_abs_diff:
-            result.passed = False
-            result.messages.append(
-                f"mean_abs_diff {mean_abs_diff:.6f} exceeds {case.max_mean_abs_diff:.6f}"
+            result.add_failure(
+                "ACCURACY",
+                f"mean_abs_diff {mean_abs_diff:.6f} exceeds {case.max_mean_abs_diff:.6f}",
             )
     if mean_abs_diff is not None and case.min_mean_abs_diff is not None:
         if mean_abs_diff < case.min_mean_abs_diff:
-            result.passed = False
-            result.messages.append(
-                f"mean_abs_diff {mean_abs_diff:.6f} is below {case.min_mean_abs_diff:.6f}"
+            result.add_failure(
+                "ACCURACY",
+                f"mean_abs_diff {mean_abs_diff:.6f} is below {case.min_mean_abs_diff:.6f}",
             )
     if peir is not None and case.max_peir is not None:
         if peir > case.max_peir:
-            result.passed = False
-            result.messages.append(f"PEIR {peir:.6f} exceeds {case.max_peir:.6f}")
+            result.add_failure(
+                "ACCURACY", f"PEIR {peir:.6f} exceeds {case.max_peir:.6f}"
+            )
 
     if export_requested:
         assert output_path is not None
@@ -258,14 +253,12 @@ def run_wrapper_smoke(
             else section.get("export", {}).get("artifact", "circle")
         )
         if export_kind != "circle":
-            result.passed = False
-            result.messages.append(f"unsupported export artifact: {export_kind}")
+            result.add_failure("EXPORT", f"unsupported export artifact: {export_kind}")
         elif not case.supports_circle_export:
-            result.passed = False
             reason = case.circle_export_unsupported_reason or (
                 f"Case '{case.name}' does not support Circle export."
             )
-            result.messages.append(reason)
+            result.add_failure("EXPORT", reason)
         else:
             _export_circle(case, quantized, eval_sample, cfg, output_path, result)
 
