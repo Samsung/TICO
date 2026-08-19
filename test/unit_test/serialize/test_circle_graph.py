@@ -17,6 +17,7 @@ import unittest
 import numpy as np
 import torch
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph, is_const
+from tico.serialize.circle_mapping import to_circle_dtype
 
 
 class CircleGraphTest(unittest.TestCase):
@@ -88,3 +89,23 @@ class CircleGraphTest(unittest.TestCase):
         self.assertTrue(g.has_tensor("name_0"))
         self.assertEqual(len(mod.buffers), 1)
         self.assertEqual([tensor.buffer for tensor in g.tensors], [0, 0])
+
+    def test_update_tensor_buffer_dtype_mismatch_has_actionable_message(self):
+        model = CircleModel()
+        graph = CircleSubgraph(model)
+        tensor = graph.add_tensor_from_scratch(
+            prefix="full_like",
+            shape=[1],
+            shape_signature=None,
+            dtype=to_circle_dtype(torch.float32),
+        )
+        expected_message = (
+            f"Failed to update buffer of tensor '{tensor.name}': "
+            "data dtype (torch.uint8) does not match "
+            "tensor dtype (torch.float32)."
+        )
+
+        with self.assertRaises(AssertionError) as context:
+            graph.update_tensor_buffer(torch.ones(1, dtype=torch.uint8), tensor.name)
+
+        self.assertEqual(str(context.exception), expected_message)

@@ -32,6 +32,7 @@ from tico.serialize.circle_mapping import (
 )
 from tico.serialize.pack import pack_buffer
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
+from tico.utils.dtype import circle_dtype_to_torch_dtype
 from tico.utils.utils import to_circle_qparam
 
 """
@@ -275,9 +276,17 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
         data_tensor = torch.as_tensor(data=data)
         data_shape = list(data_tensor.size())
         op_tensor = self.tensors[self.name_to_tid[tensor_name]]
-        assert op_tensor.type == to_circle_dtype(
-            data_tensor.dtype
-        ), f"{op_tensor.type}, {data_tensor.dtype}"
+        data_circle_dtype = to_circle_dtype(data_tensor.dtype)
+        if op_tensor.type != data_circle_dtype:
+            try:
+                tensor_dtype = str(circle_dtype_to_torch_dtype(op_tensor.type))
+            except RuntimeError:
+                tensor_dtype = f"circle dtype {op_tensor.type}"
+            raise AssertionError(
+                f"Failed to update buffer of tensor '{tensor_name}': "
+                f"data dtype ({data_tensor.dtype}) does not match "
+                f"tensor dtype ({tensor_dtype})."
+            )
         assert op_tensor.shape == data_shape
 
         buffer = circle.Buffer.BufferT()
