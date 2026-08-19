@@ -27,6 +27,15 @@ from tico.circle.passes.optimization.fold.evaluators.elementwise import (
     BinaryElementwiseEvaluator,
     CastEvaluator,
 )
+from tico.circle.passes.optimization.fold.evaluators.heavy import (
+    DensifyEvaluator,
+    DepthwiseConv2DEvaluator,
+    DequantizeEvaluator,
+    FullyConnectedEvaluator,
+    HeavyConstantEvaluatorPolicy,
+    register_heavy_constant_evaluators,
+    SparseToDenseEvaluator,
+)
 from tico.circle.passes.optimization.fold.evaluators.indexing import GatherEvaluator
 from tico.circle.passes.optimization.fold.evaluators.shape import (
     ReshapeEvaluator,
@@ -87,9 +96,16 @@ __all__ = [
     "ConstantEvaluationContext",
     "ConstantEvaluator",
     "ConstantEvaluatorRegistry",
+    "DensifyEvaluator",
+    "DepthwiseConv2DEvaluator",
+    "DequantizeEvaluator",
+    "FullyConnectedEvaluator",
+    "HeavyConstantEvaluatorPolicy",
+    "SparseToDenseEvaluator",
     "GatherEvaluator",
     "ReshapeEvaluator",
     "ShapeEvaluator",
     "SqueezeEvaluator",
     "default_constant_evaluator_registry",
+    "register_heavy_constant_evaluators",
 ]

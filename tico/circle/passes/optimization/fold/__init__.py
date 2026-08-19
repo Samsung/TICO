@@ -23,6 +23,12 @@ from tico.circle.passes.optimization.fold.evaluators import (
     ConstantEvaluator,
     ConstantEvaluatorRegistry,
     default_constant_evaluator_registry,
+    HeavyConstantEvaluatorPolicy,
+    register_heavy_constant_evaluators,
+)
+from tico.circle.passes.optimization.fold.heavy import (
+    FoldHeavyConstantSubgraphPass,
+    heavy_constant_evaluator_registry,
 )
 
 __all__ = [
@@ -33,5 +39,9 @@ __all__ = [
     "ConstantFoldPlan",
     "ConstantFoldPolicy",
     "FoldConstantSubgraphPass",
+    "FoldHeavyConstantSubgraphPass",
+    "HeavyConstantEvaluatorPolicy",
     "default_constant_evaluator_registry",
+    "heavy_constant_evaluator_registry",
+    "register_heavy_constant_evaluators",
 ]

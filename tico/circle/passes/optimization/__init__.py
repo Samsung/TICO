@@ -16,6 +16,11 @@ from tico.circle.passes.optimization.canon import (
     ArithmeticCanonicalizationPolicy,
     CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
+    CustomOptionDecoder,
+    DynamicFullyConnectedLegalizationPolicy,
+    LegacyCustomOpPolicy,
+    LegalizeDynamicFullyConnectedPass,
+    ResolveLegacyCustomOpsPass,
 )
 from tico.circle.passes.optimization.cse import (
     CommonSubexpressionEliminationPass,
@@ -24,14 +29,21 @@ from tico.circle.passes.optimization.cse import (
 from tico.circle.passes.optimization.fold import (
     ConstantFoldPolicy,
     FoldConstantSubgraphPass,
+    FoldHeavyConstantSubgraphPass,
+    heavy_constant_evaluator_registry,
+    HeavyConstantEvaluatorPolicy,
 )
 from tico.circle.passes.optimization.fusion import (
     CompositeFusionPolicy,
     FuseCompositeOpsPass,
+    FuseLegacyFCGeluFCPass,
     FuseLinearOpsPass,
+    FuseTransposeConvSlicePass,
+    LegacyFCGeluFCFusionPolicy,
     LinearFusionPolicy,
     ReductionSimplificationPolicy,
     SimplifyReductionOpsPass,
+    TransposeConvSliceFusionPolicy,
 )
 from tico.circle.passes.optimization.policy import FloatingPointRewritePolicy
 from tico.circle.passes.optimization.remove import (
@@ -48,14 +60,26 @@ __all__ = [
     "CommonSubexpressionEliminationPolicy",
     "CompositeFusionPolicy",
     "ConstantFoldPolicy",
+    "CustomOptionDecoder",
+    "DynamicFullyConnectedLegalizationPolicy",
     "EliminateTransposeBoundedLayoutRegionPass",
     "FloatingPointRewritePolicy",
     "FoldConstantSubgraphPass",
+    "FoldHeavyConstantSubgraphPass",
     "FuseCompositeOpsPass",
+    "FuseLegacyFCGeluFCPass",
     "FuseLinearOpsPass",
+    "FuseTransposeConvSlicePass",
+    "HeavyConstantEvaluatorPolicy",
+    "LegacyCustomOpPolicy",
+    "LegacyFCGeluFCFusionPolicy",
+    "LegalizeDynamicFullyConnectedPass",
     "LinearFusionPolicy",
     "ReductionSimplificationPolicy",
     "RemoveNoOpOperatorsPass",
+    "ResolveLegacyCustomOpsPass",
     "SimplifyReductionOpsPass",
     "SimplifyViewOpsPass",
+    "TransposeConvSliceFusionPolicy",
+    "heavy_constant_evaluator_registry",
 ]

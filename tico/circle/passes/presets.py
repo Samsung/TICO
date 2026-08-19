@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Iterable
 
 from tico.circle.document import CircleDocument
-from tico.circle.passes.base import CirclePassContext
+from tico.circle.passes.base import CirclePass, CirclePassContext
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
 from tico.circle.passes.manager import (
     CirclePassExecution,
@@ -33,9 +33,14 @@ from tico.circle.passes.optimization import (
     CommonSubexpressionEliminationPass,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
+    FoldHeavyConstantSubgraphPass,
     FuseCompositeOpsPass,
+    FuseLegacyFCGeluFCPass,
     FuseLinearOpsPass,
+    FuseTransposeConvSlicePass,
+    LegalizeDynamicFullyConnectedPass,
     RemoveNoOpOperatorsPass,
+    ResolveLegacyCustomOpsPass,
     SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
@@ -45,6 +50,43 @@ class CircleOptimizationPreset(str, Enum):
     """Name a supported built-in Circle optimization pipeline."""
 
     O1 = "o1"
+
+
+@dataclass(frozen=True)
+class O1CompatibilityOptions:
+    """Select opt-in heavy and legacy transformations for the O1 pipeline."""
+
+    heavy_constant_folding: bool = False
+    resolve_legacy_custom_ops: bool = False
+    legalize_dynamic_fully_connected: bool = False
+    fuse_transpose_conv_slice: bool = False
+    fuse_legacy_fc_gelu_fc: bool = False
+
+    def __post_init__(self) -> None:
+        """Normalize every compatibility switch to a plain bool."""
+
+        for field_name in (
+            "heavy_constant_folding",
+            "resolve_legacy_custom_ops",
+            "legalize_dynamic_fully_connected",
+            "fuse_transpose_conv_slice",
+            "fuse_legacy_fc_gelu_fc",
+        ):
+            object.__setattr__(self, field_name, bool(getattr(self, field_name)))
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether at least one optional transformation is selected."""
+
+        return any(
+            (
+                self.heavy_constant_folding,
+                self.resolve_legacy_custom_ops,
+                self.legalize_dynamic_fully_connected,
+                self.fuse_transpose_conv_slice,
+                self.fuse_legacy_fc_gelu_fc,
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -127,10 +169,21 @@ class CirclePassPipeline:
         return CirclePassPipelineResult(results)
 
 
-def create_o1_pipeline(*, maximum_steps: int = 1000) -> CirclePassPipeline:
-    """Create the O1 fixed-point optimization and one-shot compaction pipeline."""
+def create_o1_pipeline(
+    *,
+    maximum_steps: int = 1000,
+    compatibility: O1CompatibilityOptions | None = None,
+) -> CirclePassPipeline:
+    """Create O1 with optional heavy compatibility and one-shot compaction."""
 
-    optimization = CirclePassManager(
+    selected = compatibility or O1CompatibilityOptions()
+    optimization_passes: list[CirclePass] = []
+    if selected.resolve_legacy_custom_ops:
+        optimization_passes.append(ResolveLegacyCustomOpsPass())
+    if selected.legalize_dynamic_fully_connected:
+        optimization_passes.append(LegalizeDynamicFullyConnectedPass())
+
+    optimization_passes.extend(
         (
             CanonicalizeEquivalentOpsPass(),
             SimplifyViewOpsPass(),
@@ -138,12 +191,28 @@ def create_o1_pipeline(*, maximum_steps: int = 1000) -> CirclePassPipeline:
             SimplifyReductionOpsPass(),
             RemoveNoOpOperatorsPass(),
             CanonicalizeArithmeticPass(),
-            FuseCompositeOpsPass(),
+        )
+    )
+    if selected.fuse_legacy_fc_gelu_fc:
+        optimization_passes.append(FuseLegacyFCGeluFCPass())
+    optimization_passes.append(FuseCompositeOpsPass())
+    if selected.fuse_transpose_conv_slice:
+        optimization_passes.append(FuseTransposeConvSlicePass())
+    optimization_passes.extend(
+        (
             FuseLinearOpsPass(),
-            FoldConstantSubgraphPass(),
+            (
+                FoldHeavyConstantSubgraphPass()
+                if selected.heavy_constant_folding
+                else FoldConstantSubgraphPass()
+            ),
             CommonSubexpressionEliminationPass(),
             DeadCodeEliminationPass(),
-        ),
+        )
+    )
+
+    optimization = CirclePassManager(
+        optimization_passes,
         strategy=CirclePassStrategy.RESTART,
         maximum_steps=maximum_steps,
     )
@@ -163,10 +232,14 @@ def create_optimization_preset(
     preset: CircleOptimizationPreset | str,
     *,
     maximum_steps: int = 1000,
+    compatibility: O1CompatibilityOptions | None = None,
 ) -> CirclePassPipeline:
     """Create a supported optimization preset by enum or CLI value."""
 
     selected = CircleOptimizationPreset(preset)
     if selected is CircleOptimizationPreset.O1:
-        return create_o1_pipeline(maximum_steps=maximum_steps)
+        return create_o1_pipeline(
+            maximum_steps=maximum_steps,
+            compatibility=compatibility,
+        )
     raise AssertionError(f"Unhandled Circle optimization preset: {selected.value}.")

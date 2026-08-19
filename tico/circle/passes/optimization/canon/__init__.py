@@ -16,12 +16,26 @@ from tico.circle.passes.optimization.canon.arithmetic import (
     ArithmeticCanonicalizationPolicy,
     CanonicalizeArithmeticPass,
 )
+from tico.circle.passes.optimization.canon.dynamic_fully_connected import (
+    DynamicFullyConnectedLegalizationPolicy,
+    LegalizeDynamicFullyConnectedPass,
+)
 from tico.circle.passes.optimization.canon.equivalent_ops import (
     CanonicalizeEquivalentOpsPass,
+)
+from tico.circle.passes.optimization.canon.legacy_custom_ops import (
+    CustomOptionDecoder,
+    LegacyCustomOpPolicy,
+    ResolveLegacyCustomOpsPass,
 )
 
 __all__ = [
     "ArithmeticCanonicalizationPolicy",
     "CanonicalizeArithmeticPass",
     "CanonicalizeEquivalentOpsPass",
+    "CustomOptionDecoder",
+    "DynamicFullyConnectedLegalizationPolicy",
+    "LegacyCustomOpPolicy",
+    "LegalizeDynamicFullyConnectedPass",
+    "ResolveLegacyCustomOpsPass",
 ]
