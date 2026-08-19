@@ -24,6 +24,7 @@ install_optional_dependency_stubs()
 import contextlib
 import io
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import tico.quantization.evaluation.vlm_eval_utils as vlm_eval_utils
@@ -37,8 +38,10 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     _extract_golds,
     _get_required_coco_eval_modules,
     _processor_vision_factor,
+    _supports_qwen_style_pixel_budget,
     build_messages,
     build_text_only_inputs,
+    build_vlm_inputs,
     DATASETS,
     exact_match,
     get_item_alpaca,
@@ -350,6 +353,29 @@ class TestDatasetsRegistry(unittest.TestCase):
         self.assertFalse(meta["is_text_only"])
         self.assertIs(meta["adapter"], get_item_mmmu_calib)
 
+    def test_mmmu_pro_uses_registered_default_split(self):
+        dataset = MagicMock()
+        dataset.take.return_value = dataset
+
+        with patch.object(
+            vlm_eval_utils,
+            "load_dataset",
+            return_value=dataset,
+        ) as load_dataset_mock:
+            loaded, adapter = vlm_eval_utils.get_dataset(
+                "mmmu_pro_vision",
+                n=1,
+            )
+
+        self.assertIs(loaded, dataset)
+        self.assertIs(adapter, get_item_mmmu_calib)
+        load_dataset_mock.assert_called_once_with(
+            path="MMMU/MMMU_Pro",
+            name="vision",
+            split="test",
+            streaming=True,
+        )
+
     def test_all_datasets_have_required_keys(self):
         required_keys = {"default_split", "adapter", "candidates"}
         for name, meta in DATASETS.items():
@@ -446,62 +472,164 @@ class TestProcessorVisionFactor(unittest.TestCase):
 
 
 class TestComputeImageMaxPixelsForBudget(unittest.TestCase):
-    """Tests for _compute_image_max_pixels_for_budget (new function from git diff)."""
+    """Tests for prompt-aware Qwen image budgeting."""
 
-    def test_basic_budget(self):
-        """With vision_factor=32 and max_seq_len=1024, visual_budget=768."""
+    @staticmethod
+    def _processor(
+        *,
+        prompt_ids,
+        min_pixels=65536,
+        max_pixels=16777216,
+    ):
         processor = MagicMock()
-        processor.image_processor = None  # defaults: patch=16, merge=2 -> factor=32
-
-        max_pixels, min_pixels = _compute_image_max_pixels_for_budget(
-            max_seq_len=1024, processor=processor
+        processor.image_token_id = 99
+        processor.tokenizer.return_value = {"input_ids": prompt_ids}
+        processor.image_processor = SimpleNamespace(
+            patch_size=16,
+            merge_size=2,
+            size={
+                "shortest_edge": min_pixels,
+                "longest_edge": max_pixels,
+            },
+            valid_kwargs=SimpleNamespace(
+                __annotations__={"min_pixels": int, "max_pixels": int}
+            ),
         )
-        # visual_budget = 1024 - 256 = 768
-        # max_pixels = 768 * 32 * 32 = 786432
-        expected_max = 768 * 32 * 32
-        self.assertEqual(max_pixels, expected_max)
-        # min_pixels = min(256*28*28, max_pixels) = min(200704, 786432) = 200704
-        self.assertEqual(min_pixels, 200704)
+        return processor
 
-    def test_tight_budget_min_pixels_capped(self):
-        """When budget is very small, min_pixels should be capped to max_pixels."""
-        processor = MagicMock()
-        processor.image_processor = None
-
+    def test_uses_actual_prompt_tokens_and_processor_minimum(self):
+        processor = self._processor(prompt_ids=[1, 99, 2, 3])
         max_pixels, min_pixels = _compute_image_max_pixels_for_budget(
-            max_seq_len=300, processor=processor
+            max_seq_len=1024,
+            processor=processor,
+            prompt="prompt",
         )
-        # visual_budget = 300 - 256 = 44
-        # max_pixels = 44 * 32 * 32 = 45056
-        # min_pixels = min(200704, 45056) = 45056
-        # max_pixels = max(45056, 45056) = 45056
-        self.assertEqual(max_pixels, 45056)
-        self.assertEqual(min_pixels, 45056)
 
-    def test_raises_on_zero_budget(self):
-        processor = MagicMock()
-        processor.image_processor = None
-        with self.assertRaises(ValueError):
+        self.assertEqual(max_pixels, (1024 - 3) * 32 * 32)
+        self.assertEqual(min_pixels, 65536)
+        processor.tokenizer.assert_called_once_with("prompt")
+
+    def test_caps_at_processor_maximum(self):
+        processor = self._processor(
+            prompt_ids=[1, 99, 2],
+            max_pixels=123456,
+        )
+        max_pixels, _ = _compute_image_max_pixels_for_budget(
+            max_seq_len=1024,
+            processor=processor,
+            prompt="prompt",
+        )
+
+        self.assertEqual(max_pixels, 123456)
+
+    def test_tight_budget_caps_processor_minimum(self):
+        processor = self._processor(prompt_ids=[1, 99, 2, 3])
+        max_pixels, min_pixels = _compute_image_max_pixels_for_budget(
+            max_seq_len=10,
+            processor=processor,
+            prompt="prompt",
+        )
+
+        self.assertEqual(max_pixels, 7 * 32 * 32)
+        self.assertEqual(min_pixels, max_pixels)
+
+    def test_raises_when_prompt_consumes_context_budget(self):
+        processor = self._processor(prompt_ids=[1, 99, 2, 3])
+        with self.assertRaisesRegex(ValueError, "visual_budget=0"):
             _compute_image_max_pixels_for_budget(
-                max_seq_len=256, processor=processor  # visual_budget = 0
+                max_seq_len=3,
+                processor=processor,
+                prompt="prompt",
             )
 
-    def test_raises_on_negative_budget(self):
-        processor = MagicMock()
-        processor.image_processor = None
-        with self.assertRaises(ValueError):
-            _compute_image_max_pixels_for_budget(max_seq_len=100, processor=processor)
 
-    def test_custom_text_token_margin(self):
-        processor = MagicMock()
-        processor.image_processor = None
+class TestBuildVlmInputs(unittest.TestCase):
+    """Tests for processor-specific multimodal budgeting."""
 
-        max_pixels, min_pixels = _compute_image_max_pixels_for_budget(
-            max_seq_len=1024, processor=processor, text_token_margin=512
+    @staticmethod
+    def _qwen_processor(*, output_length=100):
+        processor = MagicMock()
+        processor.apply_chat_template.return_value = "prompt"
+        processor.image_token_id = 99
+        processor.tokenizer.return_value = {"input_ids": [1, 99, 2, 3]}
+        processor.image_processor = SimpleNamespace(
+            patch_size=16,
+            merge_size=2,
+            size={
+                "shortest_edge": 65536,
+                "longest_edge": 16777216,
+            },
+            valid_kwargs=SimpleNamespace(
+                __annotations__={"min_pixels": int, "max_pixels": int}
+            ),
         )
-        # visual_budget = 1024 - 512 = 512
-        # max_pixels = 512 * 32 * 32 = 524288
-        self.assertEqual(max_pixels, 524288)
+        processor.return_value = {
+            "input_ids": torch.zeros((1, output_length), dtype=torch.long)
+        }
+        return processor
+
+    @staticmethod
+    def _gemma_processor(*, output_length=100):
+        processor = MagicMock()
+        processor.apply_chat_template.return_value = "prompt"
+        processor.image_processor = SimpleNamespace(
+            patch_size=16,
+            pooling_kernel_size=3,
+            max_soft_tokens=280,
+            valid_kwargs=SimpleNamespace(__annotations__={"max_soft_tokens": int}),
+        )
+        processor.return_value = {
+            "input_ids": torch.zeros((1, output_length), dtype=torch.long)
+        }
+        return processor
+
+    def test_qwen_receives_prompt_aware_pixel_budget(self):
+        processor = self._qwen_processor()
+        result = build_vlm_inputs(
+            processor=processor,
+            image="image",
+            question="question",
+            max_seq_len=128,
+        )
+
+        self.assertIs(result, processor.return_value)
+        self.assertTrue(_supports_qwen_style_pixel_budget(processor))
+        processor.assert_called_once_with(
+            text="prompt",
+            images="image",
+            return_tensors="pt",
+            max_pixels=(128 - 3) * 32 * 32,
+            min_pixels=65536,
+        )
+
+    def test_gemma_does_not_receive_qwen_pixel_kwargs(self):
+        processor = self._gemma_processor()
+        build_vlm_inputs(
+            processor=processor,
+            image="image",
+            question="question",
+            max_seq_len=128,
+        )
+
+        self.assertFalse(_supports_qwen_style_pixel_budget(processor))
+        processor.assert_called_once_with(
+            text="prompt",
+            images="image",
+            return_tensors="pt",
+        )
+
+    def test_raises_when_processed_sequence_exceeds_budget(self):
+        processor = self._gemma_processor(output_length=129)
+        with self.assertRaisesRegex(
+            ValueError,
+            "sequence_length=129, max_seq_len=128",
+        ):
+            build_vlm_inputs(
+                processor=processor,
+                image="image",
+                question="question",
+                max_seq_len=128,
+            )
 
 
 class TestMoveInputsToDevice(unittest.TestCase):

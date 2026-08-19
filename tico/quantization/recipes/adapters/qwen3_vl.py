@@ -147,7 +147,7 @@ class Qwen3VLAdapter(ModelAdapter):
             dataset=calib.get("dataset", "vqav2"),
             datasets=calib.get("datasets"),
             n_samples=int(calib.get("n_samples", 128)),
-            split=calib.get("split", "testdev"),
+            split=calib.get("split"),
             max_seq_len=calib.get("seq_len"),
             seed=int(runtime.get("seed", 42)),
         )

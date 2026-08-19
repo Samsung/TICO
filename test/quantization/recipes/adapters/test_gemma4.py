@@ -115,14 +115,21 @@ class TestGemma4AdapterStaticCalibration(unittest.TestCase):
             processor=processor,
         )
 
+        captured = {}
+
+        def fake_build_vlm_calibration_inputs(**kwargs):
+            captured.update(kwargs)
+            return []
+
         with patch.object(
             gemma4_mod,
             "build_vlm_calibration_inputs",
-            lambda **kwargs: [],
+            fake_build_vlm_calibration_inputs,
         ):
             result = adapter.build_calibration_inputs(ctx)
 
         self.assertEqual(result, [])
+        self.assertIsNone(captured["split"])
         self.assertFalse(image_processor.do_resize)
         self.assertEqual(image_processor.size, {"height": 224, "width": 224})
 

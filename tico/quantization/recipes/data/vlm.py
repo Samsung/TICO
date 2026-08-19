@@ -169,7 +169,7 @@ def build_vlm_calibration_inputs(
     dataset: str | None = None,
     datasets: str | Mapping[str, Any] | Sequence[Any] | None = None,
     n_samples: int = 128,
-    split: str = "testdev",
+    split: str | None = None,
     max_seq_len: int | None = None,
     seed: int = 42,
 ) -> list[dict]:
@@ -183,7 +183,8 @@ def build_vlm_calibration_inputs(
             precedence over ``dataset``.
         n_samples: Default sample count used by single-dataset mode and by
             mixed dataset entries that omit their own ``n_samples``.
-        split: Dataset split used by single-dataset mode.
+        split: Optional split for single-dataset mode. If omitted, the
+            dataset registry default is used.
         max_seq_len: Optional maximum text sequence length.
         seed: Random seed for text-only mixed calibration sampling.
 
