@@ -114,6 +114,18 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         y_emb = F.embedding(clamped_positions[..., 1], emb_table[1])
         return x_emb + y_emb
 
+    @staticmethod
+    def _zero_padding_positions(
+        position_embeddings: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Zero padding slots in a position-embedding tensor."""
+        return torch.where(
+            padding_positions.unsqueeze(-1),
+            torch.zeros_like(position_embeddings),
+            position_embeddings,
+        )
+
     def _finalize_position_embeddings(
         self,
         position_embeddings: torch.Tensor,
@@ -124,10 +136,9 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
             position_embeddings,
             self.obs_position_embeddings,
         )
-        return torch.where(
-            padding_positions.unsqueeze(-1),
-            torch.zeros_like(position_embeddings),
+        return self._zero_padding_positions(
             position_embeddings,
+            padding_positions,
         )
 
     def _quant_position_embeddings(
@@ -161,13 +172,12 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         pixel_values: torch.Tensor,
         *,
         position_embeddings: torch.Tensor,
-        padding_positions: torch.Tensor,
     ) -> torch.Tensor:
-        """Run static patch projection with a baked positional template."""
+        """Run static patch projection with a pre-masked positional template."""
         hidden_states = self._project_pixel_values(pixel_values)
-        position_embeddings = self._finalize_position_embeddings(
+        position_embeddings = self._fq(
             position_embeddings,
-            padding_positions,
+            self.obs_position_embeddings,
         )
         return self._fq(hidden_states + position_embeddings, self.obs_output)
 
@@ -237,8 +247,10 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
                 )
 
         with torch.no_grad():
-            position_embeddings = self._lookup_position_embeddings(
-                pixel_position_ids
+            position_embeddings = self._lookup_position_embeddings(pixel_position_ids)
+            position_embeddings = self._zero_padding_positions(
+                position_embeddings,
+                padding_positions,
             ).detach()
 
         from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
@@ -248,5 +260,4 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         return Gemma4VisionPatchEmbedderPrefillExportAdapter(
             self,
             position_embeddings=position_embeddings,
-            padding_positions=padding_positions,
         )
