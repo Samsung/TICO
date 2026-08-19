@@ -15,9 +15,9 @@ outputs while keeping model parameters and weight qparams fixed.
 - Process model-specific blocks in execution order through a caller-provided
   adapter.
 
-The package does not implement QDrop, adaptive weight rounding, Fisher
-weighting, or task-aware detector losses. Those remain separate follow-up
-stages.
+The package optionally implements QDrop during reconstruction training.
+Adaptive weight rounding, Fisher weighting, and task-aware detector losses
+remain separate follow-up stages.
 
 ## Generic local-only usage
 
@@ -95,3 +95,23 @@ Joint-window construction is model-adapter responsibility. A window should:
 Only per-tensor affine activation observers are supported. Tied observers must
 start with the same dtype, qscheme, scale, zero-point, and fake-quant enabled
 state.
+
+## QDrop training
+
+Set `qdrop_probability` to randomly drop activation quantization element-wise
+only during gradient updates. A dropped element uses its floating-point value;
+all other elements use the quantized value. The same rule applies to the cached
+block input and to learnable activation observers inside the block/window.
+
+```python
+config = BlockReconstructionConfig(
+    qdrop_probability=0.5,
+    qdrop_seed=20260817,
+)
+```
+
+`qdrop_probability=0` is the exact pre-QDrop control path. Selection-cache local
+loss, held-out end-to-end checkpoint selection, rollback decisions, and
+external evaluation always use fully quantized-prefix inputs with every
+activation quantizer enabled. A separate QDrop seed keeps minibatch sampling
+unchanged when comparing drop probabilities.

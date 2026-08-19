@@ -175,6 +175,17 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
     parser.add_argument("--freeze-zero-point", action="store_true")
     parser.add_argument("--reconstruction-seed", type=int, default=20260816)
+    parser.add_argument(
+        "--qdrop-probability",
+        type=float,
+        default=0.0,
+        help=(
+            "Probability that each activation element bypasses quantization "
+            "during reconstruction training. Zero preserves the existing "
+            "fully quantized training path; the QDrop paper uses 0.5."
+        ),
+    )
+    parser.add_argument("--qdrop-seed", type=int, default=20260817)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--export-circle", type=Path)
     parser.add_argument(
@@ -255,6 +266,8 @@ def run(args: argparse.Namespace) -> None:
         optimize_zero_point=not args.freeze_zero_point,
         loss=ReconstructionLoss(args.reconstruction_loss),
         seed=args.reconstruction_seed,
+        qdrop_probability=args.qdrop_probability,
+        qdrop_seed=args.qdrop_seed,
     )
     auxiliary_output = _other_output(args.selection_score_output)
     objective = ValidationObjective(
@@ -286,6 +299,9 @@ def run(args: argparse.Namespace) -> None:
             "samples_per_batch": args.samples_per_batch,
             "sampling_seed": args.sampling_seed,
             "reconstruction_seed": args.reconstruction_seed,
+            "qdrop_probability": args.qdrop_probability,
+            "qdrop_seed": args.qdrop_seed,
+            "qdrop_granularity": "element",
             "selection_count": args.selection_count,
             "selection_seed": args.selection_seed,
             "selection_score_output": args.selection_score_output,
@@ -361,6 +377,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--auxiliary-tolerance must be nonnegative.")
     if args.minimum_selection_improvement < 0.0:
         raise ValueError("--minimum-selection-improvement must be nonnegative.")
+    if not 0.0 <= args.qdrop_probability <= 1.0:
+        raise ValueError("--qdrop-probability must be in [0, 1].")
 
 
 def _validate_disjoint(args: argparse.Namespace) -> None:
