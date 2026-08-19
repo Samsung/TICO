@@ -138,7 +138,7 @@ class TestGemma4VisionExportInputContracts(unittest.TestCase):
         torch.testing.assert_close(export_input.args[0], pixel_values)
 
     def test_pooler_export_input_omits_precomputed_position_ids(self) -> None:
-        """Static pooler export should keep only hidden states and padding."""
+        """Static pooler export should keep only hidden states."""
         sample = ForwardInput(
             (),
             {
@@ -152,9 +152,8 @@ class TestGemma4VisionExportInputContracts(unittest.TestCase):
         export_input = Gemma4VisionPoolerCase().export_input(sample, {})
 
         self.assertEqual(dict(export_input.kwargs), {})
-        self.assertEqual(len(export_input.args), 2)
+        self.assertEqual(len(export_input.args), 1)
         torch.testing.assert_close(export_input.args[0], self.hidden)
-        torch.testing.assert_close(export_input.args[1], self.padding_positions)
 
 
 if __name__ == "__main__":

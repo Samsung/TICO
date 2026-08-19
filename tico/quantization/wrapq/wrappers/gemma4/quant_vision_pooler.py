@@ -131,6 +131,74 @@ class QuantGemma4VisionPooler(QuantModuleBase):
 
         return weights, mask
 
+    @classmethod
+    def _build_export_pool_weights(
+        cls,
+        *,
+        seq_len: int,
+        output_length: int,
+        pixel_position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, int]:
+        """Build a padding-baked pooling matrix for one static profile.
+
+        ``padding_positions`` is completely determined by the construction-time
+        position profile.  Instead of exporting a Boolean mask and applying
+        ``masked_fill`` at runtime, this helper zeros the corresponding columns
+        of the pooling matrix before tracing.  For any input hidden states,
+
+        ``W_baked @ hidden == W @ hidden.masked_fill(padding, 0)``.
+
+        The full pooling output keeps ``output_length`` rows so standalone
+        pooler export preserves its eager pooled-feature shape.  The returned
+        integer records how many output rows are valid; the full vision-model
+        export uses it to remove the static invalid suffix without a Boolean
+        output mask.
+        """
+        if (
+            pixel_position_ids.dim() != 3
+            or pixel_position_ids.shape[0] != 1
+            or pixel_position_ids.shape[-1] != 2
+        ):
+            raise ValueError(
+                "Gemma4 VisionPooler export requires pixel_position_ids with "
+                "shape (1, num_patches, 2), got "
+                f"{tuple(pixel_position_ids.shape)}."
+            )
+
+        weights, _ = cls._build_pool_weights(
+            seq_len=seq_len,
+            output_length=output_length,
+            pixel_position_ids=pixel_position_ids,
+        )
+        padding_positions = (pixel_position_ids == -1).all(dim=-1)
+        weights = weights.masked_fill(padding_positions.unsqueeze(1), 0.0)
+
+        valid_outputs = torch.logical_not((weights == 0).all(dim=2))
+        valid_row = valid_outputs[0]
+        num_valid_outputs = int(valid_row.sum().item())
+        if num_valid_outputs <= 0:
+            raise ValueError(
+                "Gemma4 VisionPooler export profile contains no valid pooled "
+                "output positions."
+            )
+
+        # Static Gemma4 profiles use a row-major rectangular patch grid followed
+        # by padding.  Their valid pooled rows must therefore form one prefix,
+        # which can later be represented by Slice instead of a Boolean mask or
+        # an integer Gather input.
+        expected_valid_row = (
+            torch.arange(output_length, device=valid_row.device) < num_valid_outputs
+        )
+        if not torch.equal(valid_row, expected_valid_row):
+            valid_indices = torch.nonzero(valid_row, as_tuple=True)[0].tolist()
+            raise ValueError(
+                "Gemma4 VisionPooler static export requires valid pooled "
+                "positions to form a contiguous prefix, got indices "
+                f"{valid_indices}."
+            )
+
+        return weights, num_valid_outputs
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -191,55 +259,46 @@ class QuantGemma4VisionPooler(QuantModuleBase):
     def forward_export(
         self,
         hidden_states: torch.Tensor,
-        padding_positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """Run the decomposed static pooler forward.
 
-        This replaces the original pooler's dynamic operations with three
-        export-friendly steps:
+        Construction-time specialization has already baked padded input columns
+        into ``pool_weights``.  The runtime graph therefore contains neither a
+        Boolean padding input nor a ``masked_fill`` operation.
 
-        1. ``masked_fill`` — zero out padding positions
-        2. ``matmul`` — spatial pooling via precomputed weight matrix
-        3. scalar multiply — scale by ``sqrt(hidden_size)`` in float32
+        The returned tensor retains all fixed ``output_length`` rows.  Invalid
+        suffix rows are zero and are stripped by ``QuantGemma4VisionModel``
+        using the construction-time ``num_valid_outputs`` integer.
 
         Args:
             hidden_states: Vision encoder output ``(1, S, D)``.
-            padding_positions: Boolean padding mask ``(1, S)``.
 
         Returns:
-            Tuple of ``(pooled_features, updated_padding)`` where
-            ``pooled_features`` has shape ``(1, V, D)`` in float32 and
-            ``updated_padding`` has shape ``(1, V)``.
+            Pooled features with shape ``(1, V, D)`` in float32.
         """
         hidden_states = self._fq(hidden_states, self.obs_act_in)
 
-        # Step 1: Zero out padding positions.
-        hidden_states = hidden_states.masked_fill(padding_positions.unsqueeze(-1), 0)
-
-        # Step 2: Fake-quantize input (collects stats in CALIB, applies Q-DQ in QUANT).
+        # Step 1: Fake-quantize input (collects stats in CALIB, applies Q-DQ in QUANT).
         hidden_states = self._fq(hidden_states, self.obs_pool_in)
 
-        # Step 3: Fake-quantize pool_weights (weight quantization for matmul).
+        # Step 2: Fake-quantize padding-baked pool weights.
         pool_weights_q = self._fq(self.pool_weights, self.obs_pool_weight)
 
-        # Step 4: Spatial pooling via precomputed weight matrix.
+        # Step 3: Spatial pooling via precomputed weight matrix.
         # pool_weights_q: (1, V, S), hidden_states.float(): (1, S, D)
         pooled = pool_weights_q @ hidden_states.float()  # (1, V, D)
 
-        # Step 5: Fake-quantize matmul output (intermediate activation).
+        # Step 4: Fake-quantize matmul output (intermediate activation).
         pooled = self._fq(pooled, self.obs_pool_matmul_out)
 
-        # Step 6: Scale by sqrt(hidden_size) in float32.
+        # Step 5: Scale by sqrt(hidden_size) in float32.
         root_hidden_size = self._fq(self.root_hidden_size, self.obs_root_hidden_size)
         pooled = pooled * root_hidden_size
 
-        # Step 7: Fake-quantize final output (collects stats in CALIB, applies Q-DQ in QUANT).
+        # Step 6: Fake-quantize final output.
         pooled = self._fq(pooled, self.obs_pool_out)
 
-        # Step 8: Apply precomputed output mask.
-        updated_padding = self.pool_mask.expand(pooled.shape[0], -1)  # (1, V)
-
-        return pooled, updated_padding
+        return pooled
 
     def as_export_module(
         self,
@@ -267,14 +326,14 @@ class QuantGemma4VisionPooler(QuantModuleBase):
                 if isinstance(obs, AffineObserverBase):
                     assert obs.has_qparams
 
-        # Precompute static tensors
-        weights, mask = self._build_pool_weights(
+        # Precompute a numeric pooling matrix with padding already baked in.
+        weights, num_valid_outputs = self._build_export_pool_weights(
             seq_len=pixel_position_ids.shape[1],
             output_length=output_length,
             pixel_position_ids=pixel_position_ids,
         )
         self.register_buffer("pool_weights", weights)
-        self.register_buffer("pool_mask", mask)
+        self.num_valid_outputs = num_valid_outputs
 
         if self._mode is Mode.QUANT:
             # Collect statistics about generated pool weights and compute qparams.

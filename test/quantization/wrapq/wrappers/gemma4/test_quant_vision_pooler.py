@@ -283,7 +283,7 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_forward_export_requires_precomputed_buffers(self):
-        """forward_export requires pool_weights and pool_mask buffers."""
+        """forward_export requires a padding-baked pool_weights buffer."""
         fp_pooler = _make_pooler()
         q_pooler = QuantGemma4VisionPooler(fp_pooler).eval()
         q_pooler.enable_calibration()
@@ -295,13 +295,13 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
 
         # Precompute buffers like as_export_module does
         pixel_pos_ids = _pixel_position_ids(self.batch_size, self.seq_len)
-        weights, mask = q_pooler._build_pool_weights(
+        weights, num_valid_outputs = q_pooler._build_export_pool_weights(
             seq_len=self.seq_len,
             output_length=self.output_length,
             pixel_position_ids=pixel_pos_ids,
         )
         q_pooler.register_buffer("pool_weights", weights)
-        q_pooler.register_buffer("pool_mask", mask)
+        q_pooler.num_valid_outputs = num_valid_outputs
         q_pooler.obs_pool_weight.collect(weights)
         q_pooler.obs_pool_weight.compute_qparams()
 
@@ -309,10 +309,9 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
         with torch.no_grad():
             out = q_pooler.forward_export(
                 hidden_states=inputs["hidden_states"],
-                padding_positions=inputs["padding_positions"],
             )
-        self.assertIsInstance(out, tuple)
-        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out, torch.Tensor)
+        self.assertEqual(out.shape, (1, self.output_length, self.hidden_size))
 
     def test_forward_export_matches_forward(self):
         """forward_export should produce similar results to forward."""
@@ -327,13 +326,13 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
 
         # Precompute buffers
         pixel_pos_ids = _pixel_position_ids(self.batch_size, self.seq_len)
-        weights, mask = q_pooler._build_pool_weights(
+        weights, num_valid_outputs = q_pooler._build_export_pool_weights(
             seq_len=self.seq_len,
             output_length=self.output_length,
             pixel_position_ids=pixel_pos_ids,
         )
         q_pooler.register_buffer("pool_weights", weights)
-        q_pooler.register_buffer("pool_mask", mask)
+        q_pooler.num_valid_outputs = num_valid_outputs
         q_pooler.obs_pool_weight.collect(weights)
         q_pooler.obs_pool_weight.compute_qparams()
 
@@ -341,13 +340,12 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
             forward_out = q_pooler(**inputs)
             export_out = q_pooler.forward_export(
                 hidden_states=inputs["hidden_states"],
-                padding_positions=inputs["padding_positions"],
             )
 
         # Both should produce similar shaped outputs
-        self.assertEqual(export_out[0].shape, forward_out[0].shape)
+        self.assertEqual(export_out.shape, forward_out[0].shape)
         self.assertTrue(
-            torch.allclose(export_out[0], forward_out[0], atol=1e-4, rtol=1e-4)
+            torch.allclose(export_out, forward_out[0], atol=1e-4, rtol=1e-4)
         )
 
     # ------------------------------------------------------------------
@@ -371,7 +369,8 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
 
         self.assertIsInstance(export_module, Gemma4VisionPoolerPrefillExportAdapter)
         self.assertTrue(hasattr(q_pooler, "pool_weights"))
-        self.assertTrue(hasattr(q_pooler, "pool_mask"))
+        self.assertFalse(hasattr(q_pooler, "pool_mask"))
+        self.assertEqual(q_pooler.num_valid_outputs, self.output_length)
 
     def test_as_export_module_rejects_calibration_mode(self):
         """Export should reject CALIB mode because its qparams are incomplete."""
@@ -409,7 +408,7 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
         self.assertIsInstance(adapter, Gemma4VisionPoolerPrefillExportAdapter)
 
     def test_as_export_module_precomputes_buffers_on_wrapper(self):
-        """as_export_module should register pool_weights and pool_mask on the wrapper."""
+        """as_export_module should register only numeric static pooling state."""
         fp_pooler = _make_pooler()
         q_pooler = QuantGemma4VisionPooler(fp_pooler).eval()
         q_pooler.enable_calibration()
@@ -427,11 +426,12 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
 
         # Buffers should be on the wrapper
         self.assertTrue(hasattr(q_pooler, "pool_weights"))
-        self.assertTrue(hasattr(q_pooler, "pool_mask"))
+        self.assertFalse(hasattr(q_pooler, "pool_mask"))
         self.assertEqual(
             q_pooler.pool_weights.shape, (1, self.output_length, self.seq_len)
         )
-        self.assertEqual(q_pooler.pool_mask.shape, (1, self.output_length))
+        self.assertEqual(q_pooler.num_valid_outputs, self.output_length)
+        self.assertEqual(q_pooler.pool_weights.dtype, torch.float32)
 
     def test_export_adapter_decomposed_forward_matches_fp(self):
         """The decomposed export adapter should match the original pooler output."""
@@ -457,33 +457,35 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
 
         adapter_kwargs = {
             "hidden_states": inputs["hidden_states"],
-            "padding_positions": inputs["padding_positions"],
         }
         with torch.no_grad():
             adapter_out = adapter(**adapter_kwargs)
 
         exported = torch.export.export(
             adapter,
-            (
-                inputs["hidden_states"],
-                inputs["padding_positions"],
-            ),
+            (inputs["hidden_states"],),
             strict=False,
         )
         placeholders = [n.name for n in exported.graph.nodes if n.op == "placeholder"]
         self.assertFalse(any("pixel_position_ids" in name for name in placeholders))
+        self.assertFalse(any("padding_positions" in name for name in placeholders))
+        tensor_dtypes = {
+            node.meta["val"].dtype
+            for node in exported.graph.nodes
+            if isinstance(node.meta.get("val"), torch.Tensor)
+        }
+        self.assertNotIn(torch.bool, tensor_dtypes)
 
         # Compare with direct wrapper call
         with torch.no_grad():
             wrapper_out = q_pooler(**inputs)
 
-        self.assertIsInstance(adapter_out, tuple)
-        self.assertEqual(len(adapter_out), 2)
-        self.assertEqual(adapter_out[0].shape, wrapper_out[0].shape)
+        self.assertIsInstance(adapter_out, torch.Tensor)
+        self.assertEqual(adapter_out.shape, wrapper_out[0].shape)
         # The decomposed forward should produce numerically close results
         self.assertTrue(
-            torch.allclose(adapter_out[0], wrapper_out[0], atol=1e-4, rtol=1e-4),
-            f"Max diff: {(adapter_out[0] - wrapper_out[0]).abs().max().item()}",
+            torch.allclose(adapter_out, wrapper_out[0], atol=1e-4, rtol=1e-4),
+            f"Max diff: {(adapter_out - wrapper_out[0]).abs().max().item()}",
         )
 
     def test_build_pool_weights_matches_original(self):
@@ -519,6 +521,46 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
             torch.allclose(pooled, fp_out, atol=1e-4, rtol=1e-4),
             f"Max diff: {(pooled - fp_out).abs().max().item()}",
         )
+
+    def test_build_export_pool_weights_bakes_padding(self):
+        """Padding must be represented only by numeric zero weight columns."""
+        valid_patch_count = 8
+        coords = torch.arange(valid_patch_count)
+        valid_positions = torch.stack((coords % 4, coords // 4), dim=-1)
+        padded_positions = torch.full(
+            (self.seq_len - valid_patch_count, 2),
+            -1,
+            dtype=torch.long,
+        )
+        pixel_position_ids = torch.cat(
+            (valid_positions, padded_positions), dim=0
+        ).unsqueeze(0)
+        padding_positions = (pixel_position_ids == -1).all(dim=-1)
+
+        (
+            export_weights,
+            num_valid_outputs,
+        ) = QuantGemma4VisionPooler._build_export_pool_weights(
+            seq_len=self.seq_len,
+            output_length=self.output_length,
+            pixel_position_ids=pixel_position_ids,
+        )
+        full_weights, _ = QuantGemma4VisionPooler._build_pool_weights(
+            seq_len=self.seq_len,
+            output_length=self.output_length,
+            pixel_position_ids=pixel_position_ids,
+        )
+
+        self.assertEqual(num_valid_outputs, 2)
+        self.assertTrue((export_weights[..., valid_patch_count:] == 0).all())
+
+        hidden = torch.randn(1, self.seq_len, self.hidden_size)
+        expected = (
+            full_weights
+            @ hidden.masked_fill(padding_positions.unsqueeze(-1), 0.0).float()
+        )
+        actual = export_weights @ hidden.float()
+        torch.testing.assert_close(actual, expected)
 
 
 if __name__ == "__main__":

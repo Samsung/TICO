@@ -460,20 +460,19 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
     """Export adapter for Gemma4 vision pooling with a static input contract.
 
     ``QuantGemma4VisionPooler.as_export_module`` precomputes the pooling weight
-    matrix and output mask from ``pixel_position_ids`` and ``output_length``.
-    The wrapped pooler's export path therefore consumes neither value at
-    runtime.
+    matrix from ``pixel_position_ids`` and ``output_length``. Padding columns are
+    zeroed before tracing, so the wrapped export path consumes no Boolean mask
+    at runtime.
 
     Input contract:
         ``hidden_states`` has shape ``(1, S, D)`` where ``S`` is the fixed
         vision encoder sequence length.
-        ``padding_positions`` has shape ``(1, S)``.
 
     Output contract:
-        Returns a tuple ``(pooled_features, updated_padding)`` where
-        ``pooled_features`` has shape ``(1, V, D)`` in float32 with ``V``
-        equal to the fixed ``output_length``, and ``updated_padding`` has
-        shape ``(1, V)``.
+        Returns ``pooled_features`` with shape ``(1, V, D)`` in float32, where
+        ``V`` is the fixed ``output_length``. Any invalid suffix rows are zero.
+        ``num_valid_outputs`` records the static valid-prefix length for the
+        enclosing vision-model export.
     """
 
     def __init__(
@@ -482,15 +481,13 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
     ):
         super().__init__()
         self.wrapped = wrapped_pooler
+        self.num_valid_outputs = int(wrapped_pooler.num_valid_outputs)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        padding_positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.wrapped.forward_export(
-            hidden_states=hidden_states, padding_positions=padding_positions
-        )
+    ) -> torch.Tensor:
+        return self.wrapped.forward_export(hidden_states=hidden_states)
 
 
 class Gemma4LMHeadExportAdapter(nn.Module):
