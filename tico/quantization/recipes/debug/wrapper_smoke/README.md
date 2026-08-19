@@ -351,31 +351,34 @@ python -m tico.quantization.examples.inspector \
 ## Output Example
 
 ```text
-============================================================
-Wrapper Smoke Result
-============================================================
-
-Case:
-  llama_attention_prefill
-
-Mode:
-  quantized parity
-
-Metrics:
-  mean_abs_diff : 0.042131
-  max_abs_diff  : 0.319825
-  peir_percent  : 0.812314
-
-Output:
-  shape   : (2, 6, 16)
-  finite  : True
-
+┌───────────── Wrapper Smoke Summary ─────────────
+│ Case             : llama_attention_prefill
+│ Status           : PASS
+│ Mean |diff|      : 0.042131
+│ Max  |diff|      : 0.319825
+│ PEIR             : 0.812314
+│ Shape match      : True
+│ Quant finite     : True
+└─────────────────────────────────────────────────
 Artifacts:
-  circle_model : ./out/wrapper_smoke/llama_attention_prefill/model.circle
-
-Status:
-  PASS
+  - circle: ./out/wrapper_smoke/llama_attention_prefill/model.circle
 ```
+
+When a check fails, the status line lists the failure kinds and each detail is
+appended under `Messages:`:
+
+```text
+│ Status           : FAIL (ACCURACY, EXPORT)
+...
+Messages:
+  - mean_abs_diff 0.152357 exceeds 0.100000
+  - Circle export failed: ...
+```
+
+Failure kinds: `UNAVAILABLE` (case cannot run in this environment), `CONFIG`
+(invalid case configuration), `SHAPE` (output shape mismatch), `NON-FINITE`
+(NaN/Inf in an output), `ACCURACY` (parity threshold exceeded), `EXPORT`
+(Circle export unsupported or failed).
 
 ## Adding a New Case
 
