@@ -32,10 +32,13 @@ from tico.circle.operations import (
 from tico.circle.passes import (
     CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
+    CircleOptimizationPreset,
     CirclePass,
     CirclePassContext,
     CirclePassManager,
     CirclePassStrategy,
+    CommonSubexpressionEliminationPass,
+    create_optimization_preset,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
     FuseCompositeOpsPass,
@@ -49,9 +52,11 @@ from tico.circle.selector import parse_operator_spec
 
 LOGGER = logging.getLogger("tico.circle.cli")
 
+_DEFAULT_PASSES = "dce,compact"
 _PASS_REGISTRY: dict[str, type[CirclePass]] = {
     "canonicalize-arithmetic": CanonicalizeArithmeticPass,
     "canonicalize-equivalent-ops": CanonicalizeEquivalentOpsPass,
+    "cse": CommonSubexpressionEliminationPass,
     "eliminate-transpose-bounded-layout-region": (
         EliminateTransposeBoundedLayoutRegionPass
     ),
@@ -178,20 +183,30 @@ def _build_parser() -> argparse.ArgumentParser:
     optimize_parser.add_argument(
         "-o", "--output", required=True, help="Output .circle path or '-' for stdout."
     )
-    optimize_parser.add_argument(
-        "--passes",
-        default="dce,compact",
+    selection = optimize_parser.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--preset",
+        choices=[preset.value for preset in CircleOptimizationPreset],
         help=(
-            "Comma-separated passes. Available values: " f"{', '.join(_PASS_REGISTRY)}."
+            "Run a built-in optimization pipeline with fixed pass ordering and "
+            "scheduling."
+        ),
+    )
+    selection.add_argument(
+        "--passes",
+        help=(
+            "Comma-separated passes. Available values: "
+            f"{', '.join(_PASS_REGISTRY)}. Defaults to {_DEFAULT_PASSES!r} when "
+            "no preset is selected."
         ),
     )
     optimize_parser.add_argument(
         "--strategy",
         choices=[strategy.value for strategy in CirclePassStrategy],
-        default=CirclePassStrategy.ONCE.value,
         help=(
-            "Pass scheduling strategy. Use 'restart' when an earlier pass can "
-            "become applicable after a later rewrite."
+            "Pass scheduling strategy for --passes. Use 'restart' when an earlier "
+            "pass can become applicable after a later rewrite. Presets own their "
+            "scheduling and cannot be combined with this option."
         ),
     )
     optimize_parser.add_argument(
@@ -312,13 +327,23 @@ def _parse_passes(value: str) -> list[CirclePass]:
 def _optimize_command(args: argparse.Namespace) -> int:
     """Run a configured Circle pass pipeline and save its output."""
 
+    if args.preset is not None and args.strategy is not None:
+        raise ValueError(
+            "--strategy cannot be combined with --preset because presets own "
+            "their pass scheduling."
+        )
+
     document = CircleDocument.load(args.input)
-    passes = _parse_passes(args.passes)
     context = CirclePassContext(verify_after_each_pass=not args.no_verify)
-    result = CirclePassManager(
-        passes,
-        strategy=CirclePassStrategy(args.strategy),
-    ).run(document, context)
+    if args.preset is not None:
+        result = create_optimization_preset(args.preset).run(document, context)
+    else:
+        passes = _parse_passes(args.passes or _DEFAULT_PASSES)
+        strategy = CirclePassStrategy(args.strategy or CirclePassStrategy.ONCE.value)
+        result = CirclePassManager(
+            passes,
+            strategy=strategy,
+        ).run(document, context)
     if not args.no_verify:
         document.verify(raise_on_error=True)
     document.save(args.output)

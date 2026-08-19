@@ -17,6 +17,10 @@ from tico.circle.passes.optimization.canon import (
     CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
 )
+from tico.circle.passes.optimization.cse import (
+    CommonSubexpressionEliminationPass,
+    CommonSubexpressionEliminationPolicy,
+)
 from tico.circle.passes.optimization.fold import (
     ConstantFoldPolicy,
     FoldConstantSubgraphPass,
@@ -40,6 +44,8 @@ __all__ = [
     "ArithmeticCanonicalizationPolicy",
     "CanonicalizeArithmeticPass",
     "CanonicalizeEquivalentOpsPass",
+    "CommonSubexpressionEliminationPass",
+    "CommonSubexpressionEliminationPolicy",
     "CompositeFusionPolicy",
     "ConstantFoldPolicy",
     "EliminateTransposeBoundedLayoutRegionPass",
