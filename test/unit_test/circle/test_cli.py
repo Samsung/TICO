@@ -134,7 +134,10 @@ class CircleCLITest(unittest.TestCase):
             strategy=CirclePassStrategy.RESTART.value,
             no_verify=False,
         )
-        with mock.patch("tico.circle.cli.main.CircleDocument.load") as load:
+        # NOTE `tico.circle.cli`'s `main` attribute is the re-exported entry
+        # function, which shadows the `main` submodule during mock's getattr
+        # traversal. Patch the class where it is defined instead.
+        with mock.patch("tico.circle.document.CircleDocument.load") as load:
             with self.assertRaisesRegex(ValueError, "--strategy"):
                 _optimize_command(args)
 
