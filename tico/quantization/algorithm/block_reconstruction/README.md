@@ -115,3 +115,24 @@ loss, held-out end-to-end checkpoint selection, rollback decisions, and
 external evaluation always use fully quantized-prefix inputs with every
 activation quantizer enabled. A separate QDrop seed keeps minibatch sampling
 unchanged when comparing drop probabilities.
+
+## QDrop multi-start acceptance
+
+A fixed QDrop seed can overfit a checkpoint-selection split. Multi-start mode
+runs every requested probability/seed candidate from the same window-entry
+qparams, selects each candidate's optimizer checkpoint on one held-out subset,
+and chooses the final probability/seed on a second acceptance subset. The
+external evaluation set remains report-only.
+
+```text
+calibration 200
+  train       120
+  selection    40  # optimizer checkpoint
+  acceptance   40  # probability/seed winner and commit/rollback
+external       79  # report only
+```
+
+The p=0 control is deterministic and evaluated once even when multiple QDrop
+seeds are supplied. All nonzero probabilities are crossed with every seed.
+Legacy single-probability reconstruction remains unchanged when no acceptance
+subset or candidate lists are requested.
