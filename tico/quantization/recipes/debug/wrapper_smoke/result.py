@@ -53,7 +53,7 @@ class WrapperSmokeResult:
             f"│ Case             : {self.case}",
             f"│ Status           : {'PASS' if self.passed else 'FAIL'}",
             f"│ Mean |diff|      : {format_metric(self.metrics.get('mean_abs_diff'))}",
-            f"│ Max |diff|       : {format_metric(self.metrics.get('max_abs_diff'))}",
+            f"│ Max  |diff|      : {format_metric(self.metrics.get('max_abs_diff'))}",
             f"│ PEIR             : {format_metric(self.metrics.get('peir'))}",
             f"│ Shape match      : {self.metrics.get('shape_match')}",
             f"│ Quant finite     : {self.metrics.get('quant_finite')}",
