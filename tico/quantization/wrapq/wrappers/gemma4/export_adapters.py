@@ -103,9 +103,9 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
 class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
     """Export a patch embedder specialized for one fixed position profile.
 
-    The construction-time position IDs are converted into a positional-embedding
-    template before export. The resulting runtime ABI accepts only pixel values;
-    no coordinate or padding tensor remains as a graph input.
+    The construction-time position IDs and padding mask are folded into a
+    positional-embedding template before export. The resulting runtime ABI
+    accepts only pixel values.
     """
 
     def __init__(
@@ -113,7 +113,6 @@ class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
         wrapped: nn.Module,
         *,
         position_embeddings: torch.Tensor,
-        padding_positions: torch.Tensor,
     ) -> None:
         super().__init__()
         self.wrapped = wrapped
@@ -122,18 +121,12 @@ class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
             position_embeddings.detach().clone(),
             persistent=False,
         )
-        self.register_buffer(
-            "padding_positions_template",
-            padding_positions.detach().to(dtype=torch.bool).clone(),
-            persistent=False,
-        )
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Project pixels and add the baked positional-embedding template."""
         return self.wrapped.forward_export(
             pixel_values,
             position_embeddings=self.position_embeddings_template,
-            padding_positions=self.padding_positions_template,
         )
 
 

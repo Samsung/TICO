@@ -360,6 +360,8 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         q_module.enable_calibration()
 
         pixel_values, pixel_position_ids, padding_positions = self._sample_inputs()
+        pixel_position_ids[:, -2:] = -1
+        padding_positions[:, -2:] = True
         with torch.no_grad():
             _ = q_module(pixel_values, pixel_position_ids, padding_positions)
         q_module.freeze_qparams()
@@ -376,6 +378,16 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             padding_positions=padding_positions,
         )
 
+        export_buffers = dict(export_module.named_buffers())
+        self.assertIn("position_embeddings_template", export_buffers)
+        self.assertNotIn("padding_positions_template", export_buffers)
+        self.assertEqual(
+            torch.count_nonzero(
+                export_buffers["position_embeddings_template"][:, -2:]
+            ).item(),
+            0,
+        )
+
         with mock.patch.object(
             q_module,
             "_lookup_position_embeddings",
@@ -384,6 +396,33 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             with torch.no_grad():
                 actual = export_module(pixel_values)
         torch.testing.assert_close(actual, expected)
+
+        exported = torch.export.export(
+            export_module,
+            (pixel_values,),
+            strict=False,
+        )
+        self.assertEqual(len(exported.graph_signature.user_inputs), 1)
+        call_targets = {
+            str(node.target)
+            for node in exported.graph.nodes
+            if node.op == "call_function"
+        }
+        self.assertNotIn("aten.where.self", call_targets)
+        self.assertNotIn("aten.full_like.default", call_targets)
+        self.assertNotIn("aten.zeros_like.default", call_targets)
+
+        bool_nodes = [
+            node.name
+            for node in exported.graph.nodes
+            if isinstance(node.meta.get("val"), torch.Tensor)
+            and node.meta["val"].dtype == torch.bool
+        ]
+        self.assertEqual(bool_nodes, [])
+
+        with torch.no_grad():
+            exported_output = exported.module()(pixel_values)
+        torch.testing.assert_close(exported_output, actual)
 
 
 if __name__ == "__main__":
