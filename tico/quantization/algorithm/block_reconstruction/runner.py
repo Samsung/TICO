@@ -36,6 +36,10 @@ from tico.quantization.algorithm.block_reconstruction.observer import (
     AffineObserverGroup,
     LearnableObserverSet,
 )
+from tico.quantization.algorithm.block_reconstruction.qdrop import (
+    qdrop_context,
+    QDropController,
+)
 from tico.quantization.algorithm.block_reconstruction.selection import (
     copy_outputs,
     OutputMetrics,
@@ -67,6 +71,8 @@ class BlockReconstructionConfig:
     loss_epsilon: float = 1.0e-8
     seed: int = 20260816
     loss: ReconstructionLoss = ReconstructionLoss.NORMALIZED_MSE
+    qdrop_probability: float = 0.0
+    qdrop_seed: int = 20260817
 
     def validate(self) -> None:
         """Reject invalid or numerically unsafe reconstruction settings."""
@@ -94,6 +100,12 @@ class BlockReconstructionConfig:
             raise ValueError("gradient_clip_norm must be finite and positive, or None.")
         if not isinstance(self.loss, ReconstructionLoss):
             raise TypeError("loss must be a ReconstructionLoss value.")
+        if not math.isfinite(self.qdrop_probability) or not (
+            0.0 <= self.qdrop_probability <= 1.0
+        ):
+            raise ValueError("QDrop probability must be finite and in [0, 1].")
+        if not isinstance(self.qdrop_seed, int):
+            raise TypeError("qdrop_seed must be an integer.")
 
 
 @dataclass(frozen=True)
@@ -147,6 +159,9 @@ class BlockReconstructionResult:
     entry_selection_outputs: OutputMetrics | None = None
     selected_outputs: OutputMetrics | None = None
     checkpoint_history: tuple[ReconstructionCheckpoint, ...] = ()
+    qdrop_probability: float = 0.0
+    qdrop_seed: int = 20260817
+    qdrop_statistics: Mapping[str, float | int | str] = field(default_factory=dict)
 
     @property
     def loss_improvement(self) -> float:
@@ -191,6 +206,9 @@ class BlockReconstructionResult:
             "checkpoint_history": [
                 checkpoint.to_dict() for checkpoint in self.checkpoint_history
             ],
+            "qdrop_probability": self.qdrop_probability,
+            "qdrop_seed": self.qdrop_seed,
+            "qdrop_statistics": dict(self.qdrop_statistics),
         }
 
 
@@ -233,6 +251,10 @@ class BlockReconstructor:
 
         generator = torch.Generator(device="cpu")
         generator.manual_seed(self.config.seed)
+        qdrop = QDropController(
+            self.config.qdrop_probability,
+            seed=self.config.qdrop_seed,
+        )
         with _RequiresGradState(observer_model):
             observers = LearnableObserverSet(
                 observer_model,
@@ -285,14 +307,31 @@ class BlockReconstructor:
                 last_train_loss: float | None = None
 
                 for step in range(1, self.config.steps + 1):
-                    invocation, target = cache.random_batch(
-                        self.config.batch_size,
+                    indices = torch.randint(
+                        len(cache),
+                        (self.config.batch_size,),
                         generator=generator,
+                    ).tolist()
+                    quantized_invocation, target = cache.batch(
+                        indices,
                         device=optimization_device,
                         use_quantized_input=True,
                     )
+                    if qdrop.enabled:
+                        float_invocation, _ = cache.batch(
+                            indices,
+                            device=optimization_device,
+                            use_quantized_input=False,
+                        )
+                        invocation = qdrop.mix_invocations(
+                            float_invocation,
+                            quantized_invocation,
+                        )
+                    else:
+                        invocation = quantized_invocation
                     optimizer.zero_grad(set_to_none=True)
-                    output = invoke_block(block, invocation)
+                    with qdrop_context(qdrop):
+                        output = invoke_block(block, invocation)
                     loss = reconstruction_loss(
                         output,
                         target,
@@ -412,6 +451,9 @@ class BlockReconstructor:
             entry_selection_outputs=entry_outputs,
             selected_outputs=best_outputs,
             checkpoint_history=tuple(checkpoint_history),
+            qdrop_probability=self.config.qdrop_probability,
+            qdrop_seed=self.config.qdrop_seed,
+            qdrop_statistics=qdrop.statistics().to_dict(),
         )
 
     def evaluate_loss(

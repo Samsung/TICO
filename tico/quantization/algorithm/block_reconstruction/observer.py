@@ -25,6 +25,9 @@ import torch
 
 from torch import nn
 
+from tico.quantization.algorithm.block_reconstruction.qdrop import (
+    maybe_qdrop_activation,
+)
 from tico.quantization.wrapq.control import iter_quantization_sites, QuantizationSite
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
@@ -146,7 +149,8 @@ class LearnableAffineObserver(ObserverBase):
         zero_point = self.projected_zero_point.to(device=x.device, dtype=x.dtype)
         quantized = _round_ste(x / scale) + zero_point
         quantized = quantized.clamp(self.dtype.qmin, self.dtype.qmax)
-        return (quantized - zero_point) * scale
+        dequantized = (quantized - zero_point) * scale
+        return maybe_qdrop_activation(x, dequantized)
 
     def trainable_parameters(self) -> tuple[nn.Parameter, ...]:
         """Return only enabled qparam parameters."""

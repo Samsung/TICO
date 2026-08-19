@@ -466,3 +466,28 @@ A joint window includes every required live-in tensor and reconstructs all
 live-out tensors consumed outside the window. The external evaluation set is
 reported after each accepted or rolled-back window and is never used for
 checkpoint selection.
+
+### QDrop reconstruction
+
+QDrop randomly bypasses activation quantization element-wise during
+reconstruction training while keeping checkpoint selection and evaluation fully
+quantized. Use `0` as the control and compare it with the paper default `0.5`:
+
+```bash
+python -m examples.hand_detector.analyze block-reconstruction \
+  --calibration-dir /path/to/npy \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --groups stem feature_block_00 feature_block_10 \
+  --selection-count 40 \
+  --reconstruction-loss normalized-l1 \
+  --qdrop-probability 0.5 \
+  --qdrop-seed 20260817
+```
+
+The JSON report stores the configured drop rate, seed, and the number of input
+and internal activation elements exposed to QDrop. Sweep `0`, `0.25`, `0.5`,
+and `0.75` with the same observer, selection, and reconstruction seeds.

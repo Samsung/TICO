@@ -25,6 +25,11 @@ from tico.quantization.algorithm.block_reconstruction.observer import (
     LearnableAffineObserver,
     LearnableObserverSet,
 )
+from tico.quantization.algorithm.block_reconstruction.qdrop import (
+    qdrop_context,
+    QDropController,
+    QDropStatistics,
+)
 from tico.quantization.algorithm.block_reconstruction.runner import (
     BlockReconstructionConfig,
     BlockReconstructionResult,
@@ -47,6 +52,8 @@ __all__ = [
     "BlockReconstructor",
     "LearnableAffineObserver",
     "LearnableObserverSet",
+    "QDropController",
+    "QDropStatistics",
     "ReconstructionCache",
     "ReconstructionCheckpoint",
     "ReconstructionLoss",
@@ -55,5 +62,6 @@ __all__ = [
     "ValidationObjective",
     "normalized_l1_loss",
     "normalized_mse_loss",
+    "qdrop_context",
     "reconstruction_loss",
 ]
