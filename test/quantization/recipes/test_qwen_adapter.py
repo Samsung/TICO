@@ -206,6 +206,7 @@ class TestQwen3VLAdapter(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertTrue(torch.equal(result[0]["input_ids"], torch.ones(1, 2)))
         self.assertEqual(captured["datasets"], datasets)
+        self.assertIsNone(captured["split"])
         self.assertEqual(captured["max_seq_len"], 128)
         self.assertEqual(captured["seed"], 7)
 
@@ -238,6 +239,27 @@ class TestQwen3VLAdapter(unittest.TestCase):
         )
         self.assertEqual(captured["max_seq_len"], 128)
         self.assertEqual(captured["seed"], 11)
+
+    def test_vlm_data_helper_defers_single_dataset_split_to_registry(self):
+        """Single-dataset mode should let the registry choose its default split."""
+        captured = {}
+
+        def fake_get_calib_inputs(*args, **kwargs):
+            captured["args"] = args
+            captured.update(kwargs)
+            return ["single"]
+
+        with patch.object(vlm_data, "get_calib_inputs", fake_get_calib_inputs):
+            result = vlm_data.build_vlm_calibration_inputs(
+                processor=object(),
+                dataset="mmmu_pro_vision",
+                n_samples=2,
+                max_seq_len=128,
+            )
+
+        self.assertEqual(result, ["single"])
+        self.assertEqual(captured["args"][0], "mmmu_pro_vision")
+        self.assertIsNone(captured["split"])
 
     def test_apply_smoothquant_maps_component_selection_to_excluded_appliers(self):
         """SmoothQuant component selection should translate to excluded applier names."""

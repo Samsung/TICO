@@ -393,7 +393,7 @@ def _processor_vision_factor(processor: Any) -> int:
     """Return the pixel stride of one merged visual token step.
 
     For Qwen3-VL the vision factor is ``patch_size × merge_size`` (default
-    ``16 × 2 = 32``).  Each visual token covers a ``vision_factor ×
+    ``16 × 2 = 32``). Each visual token covers a ``vision_factor ×
     vision_factor`` pixel region, so ``tokens = pixels / vision_factor²``.
     """
     image_processor = getattr(processor, "image_processor", None)
@@ -402,53 +402,226 @@ def _processor_vision_factor(processor: Any) -> int:
     return max(1, patch_size * merge_size)
 
 
+def _supports_qwen_style_pixel_budget(processor: Any) -> bool:
+    """Return whether the image processor accepts Qwen-style pixel budgets."""
+    image_processor = getattr(processor, "image_processor", None)
+    valid_kwargs = getattr(image_processor, "valid_kwargs", None)
+    annotations = getattr(valid_kwargs, "__annotations__", {}) or {}
+    return (
+        "max_pixels" in annotations
+        and "min_pixels" in annotations
+        and getattr(image_processor, "merge_size", None) is not None
+    )
+
+
+def _processor_size_value(processor: Any, key: str) -> Any:
+    """Read one value from a dict-like or attribute-based processor size."""
+    image_processor = getattr(processor, "image_processor", None)
+    size = getattr(image_processor, "size", None)
+    if isinstance(size, dict):
+        return size.get(key)
+    return getattr(size, key, None)
+
+
+def _processor_min_pixels(processor: Any, default: int) -> int:
+    """Return the processor's configured minimum image area."""
+    image_processor = getattr(processor, "image_processor", None)
+    value = getattr(image_processor, "min_pixels", None)
+    if value is None:
+        value = _processor_size_value(processor, "shortest_edge")
+    return max(1, _coerce_int_attr(value, default))
+
+
+def _processor_max_pixels(processor: Any, default: int) -> int:
+    """Return the processor's configured maximum image area."""
+    image_processor = getattr(processor, "image_processor", None)
+    value = getattr(image_processor, "max_pixels", None)
+    if value is None:
+        value = _processor_size_value(processor, "longest_edge")
+    return max(1, _coerce_int_attr(value, default))
+
+
+def _prompt_non_visual_token_count(processor: Any, prompt: str) -> int:
+    """Count tokens left after one-token image placeholders are expanded."""
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is None:
+        raise ValueError("Processor must expose a tokenizer to compute image budget.")
+
+    encoded = tokenizer(prompt)
+    try:
+        input_ids = encoded["input_ids"]
+    except (KeyError, TypeError):
+        input_ids = encoded.input_ids
+
+    if hasattr(input_ids, "tolist"):
+        input_ids = input_ids.tolist()
+    if input_ids and isinstance(input_ids[0], (list, tuple)):
+        if len(input_ids) != 1:
+            raise ValueError("Image budget computation expects a single prompt.")
+        input_ids = input_ids[0]
+
+    image_token_id = getattr(processor, "image_token_id", None)
+    if image_token_id is None:
+        image_token = getattr(processor, "image_token", None)
+        if image_token is not None and hasattr(tokenizer, "convert_tokens_to_ids"):
+            image_token_id = tokenizer.convert_tokens_to_ids(image_token)
+    if image_token_id is None:
+        raise ValueError("Processor does not expose an image placeholder token ID.")
+
+    image_token_count = sum(
+        int(token_id) == int(image_token_id) for token_id in input_ids
+    )
+    if image_token_count <= 0:
+        raise ValueError(
+            "Rendered prompt does not contain an image placeholder token; "
+            "cannot compute image budget."
+        )
+    return len(input_ids) - image_token_count
+
+
 def _compute_image_max_pixels_for_budget(
     *,
     max_seq_len: int,
     processor: Any,
-    text_token_margin: int = 256,
+    prompt: str,
 ) -> tuple[int, int]:
-    """Compute ``max_pixels``/``min_pixels`` for a single calibration image.
-
-    This mirrors the logic in ``lmms_eval_utils._compute_video_max_pixels_for_budget``
-    but adapted for single-image calibration: the entire visual budget is
-    available for one image (no frame splitting).
+    """Compute a Qwen-style image budget from the actual prompt length.
 
     Args:
-        max_seq_len: Static context length (e.g. ``calibration.seq_len``).
-        processor: The Hugging Face processor (used to determine vision factor).
-        text_token_margin: Extra margin for text tokens (system prompt,
-            special tokens, etc.).
+        max_seq_len: Maximum allowed processed sequence length.
+        processor: Hugging Face processor with a Qwen-style image processor.
+        prompt: Rendered prompt before image placeholder expansion.
 
     Returns:
         A ``(max_pixels, min_pixels)`` tuple to pass to the processor.
     """
     vision_factor = _processor_vision_factor(processor)
-
-    # visual_budget = tokens available for visual tokens (excluding text margin)
-    visual_budget = max_seq_len - text_token_margin
+    non_visual_tokens = _prompt_non_visual_token_count(processor, prompt)
+    visual_budget = max_seq_len - non_visual_tokens
     if visual_budget <= 0:
         raise ValueError(
-            f"Not enough context budget for image: "
+            "Not enough context budget for image: "
             f"max_seq_len={max_seq_len}, "
-            f"text_token_margin={text_token_margin}. "
-            f"Visual budget would be {visual_budget}."
+            f"non_visual_tokens={non_visual_tokens}, "
+            f"visual_budget={visual_budget}."
         )
 
-    # Convert tokens to pixels
-    # tokens = (H / vision_factor) × (W / vision_factor)
-    # pixels = H × W = tokens × vision_factor²
-    max_pixels = visual_budget * vision_factor * vision_factor
-
-    # Ensure min_pixels is at most max_pixels (default min_pixels=200,704
-    # can exceed the computed max_pixels for tight budgets).
-    # (comes from processor.image_processor)
-    min_pixels = min(256 * 28 * 28, max_pixels)
-
-    # Ensure max_pixels is at least min_pixels
-    max_pixels = max(max_pixels, min_pixels)
-
+    budget_max_pixels = visual_budget * vision_factor * vision_factor
+    max_pixels = min(
+        budget_max_pixels,
+        _processor_max_pixels(processor, budget_max_pixels),
+    )
+    min_pixels = min(
+        _processor_min_pixels(processor, vision_factor * vision_factor),
+        max_pixels,
+    )
     return max_pixels, min_pixels
+
+
+def _input_sequence_length(inputs: Any) -> Optional[int]:
+    """Return the sequence length of a processor output when available."""
+    try:
+        input_ids = inputs["input_ids"]
+    except (KeyError, TypeError):
+        input_ids = getattr(inputs, "input_ids", None)
+    if input_ids is None:
+        return None
+
+    shape = getattr(input_ids, "shape", None)
+    if shape is not None:
+        try:
+            if len(shape) > 0:
+                return int(shape[-1])
+        except TypeError:
+            pass
+
+    if hasattr(input_ids, "tolist"):
+        input_ids = input_ids.tolist()
+    if not input_ids:
+        return 0
+    if isinstance(input_ids[0], (list, tuple)):
+        return len(input_ids[0])
+    return len(input_ids)
+
+
+def _validate_input_sequence_length(
+    inputs: Any,
+    *,
+    max_seq_len: Optional[int],
+    processor: Any,
+) -> None:
+    """Validate the final processor output against the sequence budget."""
+    if max_seq_len is None or max_seq_len <= 0:
+        return
+
+    sequence_length = _input_sequence_length(inputs)
+    if sequence_length is not None and sequence_length > max_seq_len:
+        raise ValueError(
+            "Processed sequence exceeds the configured context budget: "
+            f"sequence_length={sequence_length}, max_seq_len={max_seq_len}, "
+            f"processor={type(processor).__name__}. "
+            "Reduce the prompt length or configure a smaller model-specific "
+            "visual budget."
+        )
+
+
+def _build_processor_inputs(
+    *,
+    processor: Any,
+    prompt: str,
+    image: Any,
+    return_tensors: str,
+    max_seq_len: Optional[int],
+):
+    """Build inputs with processor-specific visual budgeting and validation."""
+    processor_kwargs: Dict[str, Any] = {
+        "text": prompt,
+        "images": image,
+        "return_tensors": return_tensors,
+    }
+
+    if image is not None:
+        # Tokenizer truncation is unsafe after multimodal placeholder expansion.
+        # Only pass pixel kwargs to processors that explicitly support them.
+        if (
+            max_seq_len is not None
+            and max_seq_len > 0
+            and _supports_qwen_style_pixel_budget(processor)
+        ):
+            image_max_pixels, image_min_pixels = _compute_image_max_pixels_for_budget(
+                max_seq_len=max_seq_len,
+                processor=processor,
+                prompt=prompt,
+            )
+            processor_kwargs["max_pixels"] = int(image_max_pixels)
+            processor_kwargs["min_pixels"] = int(image_min_pixels)
+    elif max_seq_len is not None and max_seq_len > 0:
+        processor_kwargs["truncation"] = True
+        processor_kwargs["max_length"] = max_seq_len
+
+    inputs = processor(**processor_kwargs)
+    _validate_input_sequence_length(
+        inputs,
+        max_seq_len=max_seq_len,
+        processor=processor,
+    )
+    return inputs
+
+
+def _generation_input_max_seq_len(
+    max_seq_len: Optional[int], max_new_tokens: int
+) -> Optional[int]:
+    """Reserve generation tokens from a model's total sequence budget."""
+    if max_seq_len is None:
+        return None
+
+    input_max_seq_len = max_seq_len - max_new_tokens
+    if input_max_seq_len <= 0:
+        raise ValueError(
+            "Generation token budget must be smaller than max_seq_len: "
+            f"max_seq_len={max_seq_len}, max_new_tokens={max_new_tokens}."
+        )
+    return input_max_seq_len
 
 
 def build_vlm_inputs(
@@ -466,39 +639,22 @@ def build_vlm_inputs(
         image: Input image object accepted by the processor.
         question: User question associated with the image.
         return_tensors: Tensor format requested from the processor.
-        max_seq_len: Optional maximum text sequence length. If provided,
-                     text inputs are truncated to this length (text-only) or
-                     used to auto-compute image pixel budget (multimodal).
+        max_seq_len: Optional maximum processed sequence length. Qwen-style
+            processors use it to compute an image pixel budget; other
+            processors retain their model-specific visual settings. The final
+            sequence length is always validated when ``input_ids`` are present.
 
     Returns:
         A processor output object containing model-ready multimodal inputs.
     """
     prompt = build_prompt(processor, question)
-    processor_kwargs: Dict[str, Any] = {
-        "text": prompt,
-        "images": image,
-        "return_tensors": return_tensors,
-    }
-
-    if image is not None:
-        # For multimodal inputs, do NOT use truncation/max_length because
-        # the processor expands image placeholder tokens and truncation
-        # would cut off image tokens, causing _check_special_mm_tokens to fail.
-        # Instead, control image size via max_pixels to fit the sequence budget.
-        if max_seq_len is not None and max_seq_len > 0:
-            image_max_pixels, image_min_pixels = _compute_image_max_pixels_for_budget(
-                max_seq_len=max_seq_len,
-                processor=processor,
-            )
-            processor_kwargs["max_pixels"] = int(image_max_pixels)
-            processor_kwargs["min_pixels"] = int(image_min_pixels)
-    else:
-        # Text-only: truncation is safe
-        if max_seq_len is not None and max_seq_len > 0:
-            processor_kwargs["truncation"] = True
-            processor_kwargs["max_length"] = max_seq_len
-
-    return processor(**processor_kwargs)
+    return _build_processor_inputs(
+        processor=processor,
+        prompt=prompt,
+        image=image,
+        return_tensors=return_tensors,
+        max_seq_len=max_seq_len,
+    )
 
 
 def move_inputs_to_device(inputs, device: str | torch.device):
@@ -549,14 +705,13 @@ def generate_answer(
     Returns:
         The decoded model answer string.
     """
+    input_max_seq_len = _generation_input_max_seq_len(max_seq_len, max_new_tokens)
     inputs = build_vlm_inputs(
         processor=processor,
         image=image,
         question=question,
         return_tensors="pt",
-        # length of (inputs + max_new_tokens) should not exceed model's max_seq_len
-        # because quantized model has precomputed static causal mask and RoPE for max_seq_len
-        max_seq_len=max_seq_len - max_new_tokens,  # type: ignore[operator]
+        max_seq_len=input_max_seq_len,
     )
     inputs = move_inputs_to_device(inputs, device)
 
@@ -629,30 +784,14 @@ def generate_image_only_answer(
         add_generation_prompt=True,
     )
 
-    processor_kwargs: dict[str, Any] = {
-        "text": prompt,
-        "images": image,
-        "return_tensors": "pt",
-    }
-
-    if image is not None:
-        # For multimodal inputs, do NOT use truncation/max_length because
-        # the processor expands image placeholder tokens and truncation
-        # would cut off image tokens, causing _check_special_mm_tokens to fail.
-        # Instead, control image size via max_pixels to fit the sequence budget.
-        if max_seq_len is not None and max_seq_len > 0:
-            image_max_pixels, image_min_pixels = _compute_image_max_pixels_for_budget(
-                max_seq_len=max_seq_len,
-                processor=processor,
-            )
-            processor_kwargs["max_pixels"] = int(image_max_pixels)
-            processor_kwargs["min_pixels"] = int(image_min_pixels)
-    else:
-        if max_seq_len is not None and max_seq_len > 0:
-            processor_kwargs["truncation"] = True
-            processor_kwargs["max_length"] = max_seq_len
-
-    inputs = processor(**processor_kwargs)
+    input_max_seq_len = _generation_input_max_seq_len(max_seq_len, max_new_tokens)
+    inputs = _build_processor_inputs(
+        processor=processor,
+        prompt=prompt,
+        image=image,
+        return_tensors="pt",
+        max_seq_len=input_max_seq_len,
+    )
     inputs = move_inputs_to_device(inputs, device)
 
     do_sample = temperature > 0.0
@@ -1261,7 +1400,7 @@ def get_calib_inputs(
     dataset: str,
     processor,
     n_samples: int = 28,
-    split: str = "testdev",
+    split: Optional[str] = None,
     max_seq_len: Optional[int] = None,
 ):
     """
@@ -1274,7 +1413,7 @@ def get_calib_inputs(
         dataset: Dataset key defined in ``DATASETS``.
         processor: Hugging Face multimodal processor.
         n_samples: Number of calibration examples to prepare.
-        split: Dataset split to load.
+        split: Optional dataset split. If omitted, the registry default is used.
         max_seq_len: Optional maximum text sequence length.
 
     Returns:
