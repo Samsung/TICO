@@ -12,6 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.analysis.purity import OperatorPurityAnalysis
+from tico.circle.analysis.structural_hash import build_expression_key, ExpressionKey
 from tico.circle.analysis.tensor_contract import TensorContract
 
-__all__ = ["TensorContract"]
+__all__ = [
+    "ExpressionKey",
+    "OperatorPurityAnalysis",
+    "TensorContract",
+    "build_expression_key",
+]

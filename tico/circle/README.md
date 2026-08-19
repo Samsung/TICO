@@ -135,6 +135,7 @@ result.document.save("attention.circle")
 from tico.circle.passes import (
     CanonicalizeEquivalentOpsPass,
     CirclePassManager,
+    CommonSubexpressionEliminationPass,
     FoldConstantSubgraphPass,
     FuseLinearOpsPass,
     RemoveNoOpOperatorsPass,
@@ -152,6 +153,7 @@ pipeline = CirclePassManager(
         SimplifyViewOpsPass(),
         RemoveNoOpOperatorsPass(),
         FuseLinearOpsPass(),
+        CommonSubexpressionEliminationPass(),
         DeadCodeEliminationPass(),
         CompactIndicesPass(),
     ]
@@ -201,6 +203,26 @@ patterns. Floating-point parameter fusion is algebraically equivalent in real
 arithmetic but may change rounding because it reassociates operations. Python callers
 can set `LinearFusionPolicy(allow_float_reassociation=False)` to disable these
 rewrites in a strict floating-point pipeline.
+
+`CommonSubexpressionEliminationPass` reuses the outputs of structurally identical
+pure operators. Its expression key includes the effective operator code and version,
+ordered input identities, serialized options, intermediate contracts, and complete
+output contracts including quantization metadata. Stateful, variable, control-flow,
+random, and custom operators are skipped conservatively. Duplicate graph-output
+producers are preserved so public tensor identities and names remain stable. Schedule
+`DeadCodeEliminationPass` and `CompactIndicesPass` after CSE to remove superseded
+operators and objects.
+
+The built-in O1 preset runs the canonicalization, simplification, fusion, constant
+folding, CSE, and dead-code passes with restart scheduling until a fixed point, then
+runs index compaction exactly once:
+
+```python
+from tico.circle.passes import create_o1_pipeline
+
+result = create_o1_pipeline().run(model)
+print(result.changes)
+```
 
 The canonicalization and rank-changing view rules reject dynamic, sparse, variable,
 or unsupported per-axis-quantized patterns rather than guessing their semantics.
@@ -337,6 +359,7 @@ Available passes:
 | Name | Implementation | Behavior |
 |---|---|---|
 | `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator forms with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
+| `cse` | `CommonSubexpressionEliminationPass` | Reuses structurally identical pure expressions while preserving graph-output tensor identities |
 | `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
 | `fold-constant-subgraph` | `FoldConstantSubgraphPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
 | `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases; dead branches are left for DCE |
@@ -344,6 +367,17 @@ Available passes:
 | `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
 | `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
+
+Run the built-in O1 pipeline with:
+
+```bash
+tico-circle optimize model.circle \
+  --preset o1 \
+  -o model.o1.circle
+```
+
+O1 owns its restart scheduling, so `--strategy` cannot be combined with `--preset`.
+Use `--passes` and `--strategy` instead when a custom pass sequence is required.
 
 `--passes` defaults to `dce,compact`. View simplification is intentionally split
 across three passes: `simplify-view-ops` rewires dataflow, `dce` removes newly dead

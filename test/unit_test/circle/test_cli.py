@@ -12,13 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import unittest
+from unittest import mock
 
-from tico.circle.cli.main import _build_parser, _parse_passes
+from tico.circle.cli.main import _build_parser, _optimize_command, _parse_passes
 from tico.circle.passes import (
     CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
+    CircleOptimizationPreset,
     CirclePassStrategy,
+    CommonSubexpressionEliminationPass,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
     FuseCompositeOpsPass,
@@ -57,7 +61,7 @@ class CircleCLITest(unittest.TestCase):
         """Resolve optimization and cleanup pass names in order."""
 
         passes = _parse_passes(
-            "canonicalize-arithmetic,canonicalize-equivalent-ops,"
+            "canonicalize-arithmetic,canonicalize-equivalent-ops,cse,"
             "eliminate-transpose-bounded-layout-region,"
             "fold-constant-subgraph,fuse-composite-ops,fuse-linear-ops,"
             "remove-no-op-operators,simplify-reduction-ops,"
@@ -66,15 +70,16 @@ class CircleCLITest(unittest.TestCase):
 
         self.assertIsInstance(passes[0], CanonicalizeArithmeticPass)
         self.assertIsInstance(passes[1], CanonicalizeEquivalentOpsPass)
-        self.assertIsInstance(passes[2], EliminateTransposeBoundedLayoutRegionPass)
-        self.assertIsInstance(passes[3], FoldConstantSubgraphPass)
-        self.assertIsInstance(passes[4], FuseCompositeOpsPass)
-        self.assertIsInstance(passes[5], FuseLinearOpsPass)
-        self.assertIsInstance(passes[6], RemoveNoOpOperatorsPass)
-        self.assertIsInstance(passes[7], SimplifyReductionOpsPass)
-        self.assertIsInstance(passes[8], SimplifyViewOpsPass)
-        self.assertIsInstance(passes[9], DeadCodeEliminationPass)
-        self.assertIsInstance(passes[10], CompactIndicesPass)
+        self.assertIsInstance(passes[2], CommonSubexpressionEliminationPass)
+        self.assertIsInstance(passes[3], EliminateTransposeBoundedLayoutRegionPass)
+        self.assertIsInstance(passes[4], FoldConstantSubgraphPass)
+        self.assertIsInstance(passes[5], FuseCompositeOpsPass)
+        self.assertIsInstance(passes[6], FuseLinearOpsPass)
+        self.assertIsInstance(passes[7], RemoveNoOpOperatorsPass)
+        self.assertIsInstance(passes[8], SimplifyReductionOpsPass)
+        self.assertIsInstance(passes[9], SimplifyViewOpsPass)
+        self.assertIsInstance(passes[10], DeadCodeEliminationPass)
+        self.assertIsInstance(passes[11], CompactIndicesPass)
 
     def test_removed_layout_pass_name_is_rejected(self) -> None:
         """Reject the removed compatibility pass name from the CLI registry."""
@@ -83,7 +88,7 @@ class CircleCLITest(unittest.TestCase):
             _parse_passes("remove-redundant-layout-ops")
 
     def test_optimize_accepts_restart_strategy(self) -> None:
-        """Parse the restart scheduling strategy for a Circle pass pipeline."""
+        """Parse the restart scheduling strategy for a custom Circle pipeline."""
 
         parser = _build_parser()
         args = parser.parse_args(
@@ -98,6 +103,60 @@ class CircleCLITest(unittest.TestCase):
         )
 
         self.assertEqual(args.strategy, CirclePassStrategy.RESTART.value)
+
+    def test_optimize_accepts_o1_preset(self) -> None:
+        """Parse the built-in O1 optimization preset."""
+
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "optimize",
+                "input.circle",
+                "-o",
+                "output.circle",
+                "--preset",
+                CircleOptimizationPreset.O1.value,
+            ]
+        )
+
+        self.assertEqual(args.preset, CircleOptimizationPreset.O1.value)
+        self.assertIsNone(args.passes)
+        self.assertIsNone(args.strategy)
+
+    def test_optimize_rejects_preset_strategy_before_loading(self) -> None:
+        """Reject preset-owned scheduling before reading the input artifact."""
+
+        args = argparse.Namespace(
+            input="missing.circle",
+            output="output.circle",
+            preset=CircleOptimizationPreset.O1.value,
+            passes=None,
+            strategy=CirclePassStrategy.RESTART.value,
+            no_verify=False,
+        )
+        with mock.patch("tico.circle.cli.main.CircleDocument.load") as load:
+            with self.assertRaisesRegex(ValueError, "--strategy"):
+                _optimize_command(args)
+
+        load.assert_not_called()
+
+    def test_optimize_rejects_preset_with_explicit_passes(self) -> None:
+        """Reject ambiguous preset and explicit-pass selection."""
+
+        parser = _build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "optimize",
+                    "input.circle",
+                    "-o",
+                    "output.circle",
+                    "--preset",
+                    CircleOptimizationPreset.O1.value,
+                    "--passes",
+                    "cse,dce,compact",
+                ]
+            )
 
 
 if __name__ == "__main__":
