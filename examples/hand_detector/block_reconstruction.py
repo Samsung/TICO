@@ -29,6 +29,10 @@ from examples.hand_detector._support.data import (
     load_npy_inputs,
     make_synthetic_inputs,
 )
+from examples.hand_detector._support.multistart_reconstruction import (
+    reconstruct_hand_detector_windows_multistart,
+    split_reconstruction_samples_three_way,
+)
 from examples.hand_detector._support.quantization import (
     export_quantized_circle,
     quantization_name,
@@ -42,6 +46,7 @@ from examples.hand_detector._support.reconstruction import (
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 from tico.quantization.algorithm.block_reconstruction import (
     BlockReconstructionConfig,
+    build_qdrop_candidates,
     ReconstructionLoss,
     ValidationObjective,
 )
@@ -186,6 +191,42 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument("--qdrop-seed", type=int, default=20260817)
+    parser.add_argument(
+        "--qdrop-probabilities",
+        type=float,
+        nargs="+",
+        help=(
+            "Per-window QDrop probabilities competed from one entry state. "
+            "When omitted, the legacy --qdrop-probability path is used."
+        ),
+    )
+    parser.add_argument(
+        "--qdrop-seeds",
+        type=int,
+        nargs="+",
+        help=(
+            "QDrop mask seeds crossed with every nonzero multi-start "
+            "probability. The p=0 control is evaluated once."
+        ),
+    )
+    parser.add_argument(
+        "--acceptance-count",
+        type=int,
+        default=0,
+        help=(
+            "Calibration samples held out from both gradient updates and "
+            "checkpoint selection, then used to choose the winning QDrop "
+            "probability/seed. Zero preserves the existing two-way split."
+        ),
+    )
+    parser.add_argument(
+        "--minimum-acceptance-improvement",
+        type=float,
+        help=(
+            "Minimum entry-state improvement required on the acceptance "
+            "subset. Defaults to --minimum-selection-improvement."
+        ),
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--export-circle", type=Path)
     parser.add_argument(
@@ -230,11 +271,23 @@ def run(args: argparse.Namespace) -> None:
         )
     calibration = tuple(sample.to(device=device) for sample in calibration)
     evaluation = tuple(sample.to(device=device) for sample in evaluation)
-    train, selection = split_reconstruction_samples(
-        calibration,
-        args.selection_count,
-        seed=args.selection_seed,
-    )
+    use_multistart = _uses_qdrop_multistart(args)
+    if use_multistart:
+        data_split = split_reconstruction_samples_three_way(
+            calibration,
+            args.selection_count,
+            args.acceptance_count,
+            seed=args.selection_seed,
+        )
+        train = data_split.train
+        selection = data_split.selection
+    else:
+        train, selection = split_reconstruction_samples(
+            calibration,
+            args.selection_count,
+            seed=args.selection_seed,
+        )
+        data_split = None
     candidate = quantize_candidate(
         float_model,
         args.bits,
@@ -278,18 +331,53 @@ def run(args: argparse.Namespace) -> None:
             auxiliary_output: args.auxiliary_tolerance,
         },
     )
-    report = reconstruct_hand_detector_windows(
-        float_model,
-        candidate,
-        train_samples=train,
-        selection_samples=selection,
-        evaluation_samples=evaluation,
-        windows=windows,
-        config=config,
-        objective=objective,
-        output_adapter=OUTPUT_ADAPTER,
-        device=args.device,
-    )
+    if use_multistart:
+        assert data_split is not None
+        acceptance_minimum = (
+            args.minimum_selection_improvement
+            if args.minimum_acceptance_improvement is None
+            else args.minimum_acceptance_improvement
+        )
+        acceptance_objective = ValidationObjective(
+            primary_output=args.selection_score_output,
+            primary_metric=args.selection_score_metric,
+            minimum_improvement=acceptance_minimum,
+            output_tolerances={
+                auxiliary_output: args.auxiliary_tolerance,
+            },
+        )
+        qdrop_candidates = build_qdrop_candidates(
+            args.qdrop_probabilities or (args.qdrop_probability,),
+            args.qdrop_seeds or (args.qdrop_seed,),
+        )
+        report = reconstruct_hand_detector_windows_multistart(
+            float_model,
+            candidate,
+            data_split=data_split,
+            evaluation_samples=evaluation,
+            windows=windows,
+            config=config,
+            candidates=qdrop_candidates,
+            selection_objective=objective,
+            acceptance_objective=acceptance_objective,
+            output_adapter=OUTPUT_ADAPTER,
+            device=args.device,
+        )
+    else:
+        qdrop_candidates = ()
+        acceptance_minimum = None
+        report = reconstruct_hand_detector_windows(
+            float_model,
+            candidate,
+            train_samples=train,
+            selection_samples=selection,
+            evaluation_samples=evaluation,
+            windows=windows,
+            config=config,
+            objective=objective,
+            output_adapter=OUTPUT_ADAPTER,
+            device=args.device,
+        )
     payload = {
         "analysis": "validation_aware_block_reconstruction",
         "metadata": {
@@ -302,7 +390,11 @@ def run(args: argparse.Namespace) -> None:
             "qdrop_probability": args.qdrop_probability,
             "qdrop_seed": args.qdrop_seed,
             "qdrop_granularity": "element",
+            "qdrop_multistart": use_multistart,
+            "qdrop_candidates": [candidate.to_dict() for candidate in qdrop_candidates],
             "selection_count": args.selection_count,
+            "acceptance_count": args.acceptance_count,
+            "minimum_acceptance_improvement": acceptance_minimum,
             "selection_seed": args.selection_seed,
             "selection_score_output": args.selection_score_output,
             "selection_score_metric": args.selection_score_metric,
@@ -356,7 +448,38 @@ def _print_report(report: dict[str, object]) -> None:
             f"{float(outputs['classifiers']['mae']):13.6e} "
             f"{baseline_cls - float(outputs['classifiers']['mae']):13.6e}"
         )
-        print("     selection: " f"{reconstruction['acceptance_reason']}")
+        multistart = value.get("multistart")
+        if isinstance(multistart, dict):
+            winner = multistart.get("winner")
+            winner_name = (
+                str(winner.get("name")) if isinstance(winner, dict) else "entry"
+            )
+            print(
+                f"     acceptance winner: {winner_name}; "
+                f"{multistart['acceptance_reason']}"
+            )
+            for candidate in multistart["candidates"]:
+                candidate_meta = candidate["candidate"]
+                marker = "*" if candidate["selected_as_winner"] else " "
+                selection_result = (
+                    "ACCEPT" if candidate["selection_accepted"] else "ROLLBACK"
+                )
+                print(
+                    f"       {marker}{candidate_meta['name']}: "
+                    f"selection={selection_result}, "
+                    f"acceptance_score={float(candidate['acceptance_score']):.6e}, "
+                    f"eligible={candidate['acceptance_eligible']}"
+                )
+        else:
+            print("     selection: " f"{reconstruction['acceptance_reason']}")
+
+
+def _uses_qdrop_multistart(args: argparse.Namespace) -> bool:
+    return bool(
+        args.acceptance_count > 0
+        or args.qdrop_probabilities is not None
+        or args.qdrop_seeds is not None
+    )
 
 
 def _other_output(output_name: str) -> str:
@@ -379,6 +502,25 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--minimum-selection-improvement must be nonnegative.")
     if not 0.0 <= args.qdrop_probability <= 1.0:
         raise ValueError("--qdrop-probability must be in [0, 1].")
+    if args.acceptance_count < 0:
+        raise ValueError("--acceptance-count must be nonnegative.")
+    if (
+        args.qdrop_probabilities is not None or args.qdrop_seeds is not None
+    ) and args.acceptance_count <= 0:
+        raise ValueError(
+            "--qdrop-probabilities/--qdrop-seeds require a positive "
+            "--acceptance-count."
+        )
+    if (
+        args.minimum_acceptance_improvement is not None
+        and args.minimum_acceptance_improvement < 0.0
+    ):
+        raise ValueError("--minimum-acceptance-improvement must be nonnegative.")
+    if _uses_qdrop_multistart(args):
+        build_qdrop_candidates(
+            args.qdrop_probabilities or (args.qdrop_probability,),
+            args.qdrop_seeds or (args.qdrop_seed,),
+        )
 
 
 def _validate_disjoint(args: argparse.Namespace) -> None:

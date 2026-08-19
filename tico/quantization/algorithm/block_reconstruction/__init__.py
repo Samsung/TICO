@@ -20,6 +20,14 @@ from tico.quantization.algorithm.block_reconstruction.cache import (
     ReconstructionSample,
     TensorTree,
 )
+from tico.quantization.algorithm.block_reconstruction.multistart import (
+    AffineQParamSnapshot,
+    build_qdrop_candidates,
+    QDropCandidate,
+    QDropCandidateResult,
+    QDropMultiStartReconstructor,
+    QDropMultiStartResult,
+)
 from tico.quantization.algorithm.block_reconstruction.observer import (
     AffineObserverGroup,
     LearnableAffineObserver,
@@ -46,13 +54,18 @@ from tico.quantization.algorithm.block_reconstruction.selection import (
 
 __all__ = [
     "AffineObserverGroup",
+    "AffineQParamSnapshot",
     "BlockInvocation",
     "BlockReconstructionConfig",
     "BlockReconstructionResult",
     "BlockReconstructor",
     "LearnableAffineObserver",
     "LearnableObserverSet",
+    "QDropCandidate",
+    "QDropCandidateResult",
     "QDropController",
+    "QDropMultiStartReconstructor",
+    "QDropMultiStartResult",
     "QDropStatistics",
     "ReconstructionCache",
     "ReconstructionCheckpoint",
@@ -60,6 +73,7 @@ __all__ = [
     "ReconstructionSample",
     "TensorTree",
     "ValidationObjective",
+    "build_qdrop_candidates",
     "normalized_l1_loss",
     "normalized_mse_loss",
     "qdrop_context",

@@ -491,3 +491,17 @@ python -m examples.hand_detector.analyze block-reconstruction \
 The JSON report stores the configured drop rate, seed, and the number of input
 and internal activation elements exposed to QDrop. Sweep `0`, `0.25`, `0.5`,
 and `0.75` with the same observer, selection, and reconstruction seeds.
+
+### Per-window QDrop multi-start selection
+
+Compete the deterministic control and QDrop seeds independently at every
+reconstruction window:
+
+```bash
+python -m examples.hand_detector.analyze block-reconstruction   --calibration-dir /path/to/npy   --calibration-limit 200   --evaluation-dir /path/to/npy   --evaluation-offset 200   --evaluation-limit 79   --require-disjoint   --groups stem feature_block_00 feature_block_10 feature_block_28   --selection-count 40   --acceptance-count 40   --minimum-selection-improvement 1e-3   --minimum-acceptance-improvement 1e-3   --qdrop-probabilities 0 0.25   --qdrop-seeds 20260817 20260827 20260837
+```
+
+Every candidate starts from identical entry qparams. Checkpoint selection uses
+the selection subset, while probability/seed competition and whole-window
+commit/rollback use the acceptance subset. The JSON report records all
+candidate checkpoint histories, acceptance metrics, and the committed winner.
