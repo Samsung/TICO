@@ -21,7 +21,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from examples.hand_detector import block_reconstruction as block_reconstruction_cli
+from examples.hand_detector import (
+    adaround as adaround_cli,
+    block_reconstruction as block_reconstruction_cli,
+)
 from examples.hand_detector._support.analysis import (
     output_boundaries,
     OUTPUT_NAMES,
@@ -217,6 +220,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     block_reconstruction_cli.add_subparser(subparsers)
+    adaround_cli.add_subparser(subparsers)
 
     sensitivity = subparsers.add_parser(
         "activation-sensitivity",
@@ -336,6 +340,8 @@ def main() -> None:
         _run_group_observer_sweep(args)
     elif args.command == "block-reconstruction":
         block_reconstruction_cli.run(args)
+    elif args.command == "adaround":
+        adaround_cli.run(args)
     elif args.command == "activation-sensitivity":
         _run_activation_sensitivity(args)
     else:

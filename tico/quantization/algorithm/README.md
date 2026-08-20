@@ -10,6 +10,7 @@ step, ensuring minimal performance loss and improved quantization accuracy.
 |---|---|---|
 | GPTQ | [`gptq/`](./gptq/README.md) | Accurate post-training weight quantization |
 | Block reconstruction | [`block_reconstruction/`](./block_reconstruction/README.md) | Fixed-weight activation-qparam reconstruction |
+| AdaRound | [`adaround/`](./adaround/README.md) | Validation-aware hard Conv2d weight rounding |
 | SmoothQuant | [`smoothquant/`](./smoothquant/README.md) | Migrates activation outliers into weights via per-channel smoothing |
 | SpinQuant | [`spinquant/`](./spinquant/README.md) | Rotation-based outlier reduction |
 | CLE | [`cle/`](./cle/README.md) | Cross-Layer Equalization |

@@ -70,7 +70,10 @@ class SamePaddingConv2dTest(unittest.TestCase):
         """Match asymmetric 5x5 stride-two SAME padding."""
         module = SamePaddingConv2d(3, 4, kernel_size=5, stride=2).eval()
         input_ = torch.randn(2, 3, 12, 14)
-        torch.testing.assert_close(module(input_), _reference(module, input_))
+        with torch.no_grad():
+            actual = module(input_)
+            expected = _reference(module, input_)
+        torch.testing.assert_close(actual, expected)
 
     def test_depthwise_stride_two_matches_reference(self) -> None:
         """Match depthwise asymmetric SAME padding."""
@@ -82,7 +85,40 @@ class SamePaddingConv2dTest(unittest.TestCase):
             groups=4,
         ).eval()
         input_ = torch.randn(2, 4, 11, 13)
-        torch.testing.assert_close(module(input_), _reference(module, input_))
+        with torch.no_grad():
+            actual = module(input_)
+            expected = _reference(module, input_)
+        torch.testing.assert_close(actual, expected)
+
+    def test_weight_only_autograd_uses_native_path(self) -> None:
+        """Support AdaRound when only a replacement weight requires gradients."""
+        cases = (
+            (3, 4, 1),
+            (4, 8, 4),
+        )
+        for in_channels, out_channels, groups in cases:
+            with self.subTest(groups=groups):
+                module = SamePaddingConv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=5,
+                    stride=2,
+                    groups=groups,
+                ).eval()
+                input_ = torch.randn(2, in_channels, 11, 13)
+                self.assertFalse(input_.requires_grad)
+                self.assertTrue(module.weight.requires_grad)
+
+                module.zero_grad(set_to_none=True)
+                loss = module(input_).square().mean()
+                loss.backward()
+
+                self.assertIsNotNone(module.weight.grad)
+                assert module.weight.grad is not None
+                self.assertTrue(torch.isfinite(module.weight.grad).all())
+                self.assertIsNotNone(module.bias)
+                assert module.bias is not None
+                self.assertIsNotNone(module.bias.grad)
 
     def test_torch_export_keeps_circle_same_conv(self) -> None:
         """Keep one opaque Circle Conv2D and avoid an explicit pad node."""
