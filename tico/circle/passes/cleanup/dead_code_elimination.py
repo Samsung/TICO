@@ -44,7 +44,7 @@ class DeadCodeEliminationPass(CirclePass):
         self.prune_unused_inputs = bool(prune_unused_inputs)
         self.preserve_zero_output_operators = bool(preserve_zero_output_operators)
         self.preserve_effectful_operators = bool(preserve_effectful_operators)
-        self.effect_analysis = effect_analysis or OperatorEffectAnalysis.from_schema()
+        self.effect_analysis = effect_analysis
 
     def run(
         self,
@@ -60,6 +60,9 @@ class DeadCodeEliminationPass(CirclePass):
         )
         removed_operators = 0
         diagnostics: list[str] = []
+        effect_analysis = self.effect_analysis or OperatorEffectAnalysis.from_model(
+            document.model
+        )
 
         for subgraph_index in indices:
             graph = document.graph(subgraph_index)
@@ -85,7 +88,7 @@ class DeadCodeEliminationPass(CirclePass):
                     queue.append(operator_index)
                 if (
                     self.preserve_effectful_operators
-                    and self.effect_analysis.has_observable_effect(
+                    and effect_analysis.has_observable_effect(
                         graph,
                         operator_index,
                     )

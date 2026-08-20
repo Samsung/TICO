@@ -58,6 +58,41 @@ class CircleCleanupPassTest(unittest.TestCase):
         self.assertEqual(len(document.model.operatorCodes), 2)
         self.assertTrue(document.verify(raise_on_error=False).ok)
 
+    def test_default_dce_does_not_apply_schema_codes_to_fixture_model(self):
+        """Do not reinterpret arbitrary fixture integers as Circle enum values."""
+
+        schema_effects = OperatorEffectAnalysis.from_schema().effectful_builtin_codes
+        self.assertTrue(schema_effects)
+        colliding_code = next(iter(schema_effects))
+        document = CircleDocument(
+            FakeModel(
+                subgraphs=[
+                    FakeSubGraph(
+                        tensors=[
+                            FakeTensor("input", shape=[1]),
+                            FakeTensor("dead", shape=[1]),
+                        ],
+                        inputs=[0],
+                        outputs=[],
+                        operators=[
+                            FakeOperator(opcodeIndex=0, inputs=[0], outputs=[1]),
+                        ],
+                    )
+                ],
+                buffers=[FakeBuffer()],
+                operatorCodes=[FakeOperatorCode(builtinCode=colliding_code)],
+            )
+        )
+
+        result = DeadCodeEliminationPass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertTrue(result.modified)
+        self.assertEqual(document.subgraph(0).operators, [])
+        self.assertEqual(document.subgraph(0).inputs, [])
+
     def test_dce_preserves_effectful_operator_and_its_predecessor(self):
         """Keep a disconnected stateful root and the values required to execute it."""
 

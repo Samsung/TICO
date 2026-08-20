@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from numbers import Integral
 from typing import Any
 
-from tico.circle._schema import circle_schema
+from tico.circle._schema import circle_schema, object_api_type
 from tico.circle.errors import CircleRewriteError
 from tico.circle.graph import as_indices, as_list, CircleGraph, OPTIONAL_TENSOR_INDEX
 
@@ -101,6 +101,40 @@ class OperatorEffectAnalysis:
             self,
             "preserve_variable_operators",
             bool(preserve_variable_operators),
+        )
+
+    @classmethod
+    def from_model(
+        cls,
+        model: Any,
+        *,
+        effectful_builtin_names: Iterable[str] = DEFAULT_EFFECTFUL_BUILTIN_NAMES,
+        builtin_codes: Mapping[str, int] | None = None,
+        preserve_custom_operators: bool = True,
+        preserve_variable_operators: bool = True,
+    ) -> OperatorEffectAnalysis:
+        """Create a default analysis appropriate for one Object API model.
+
+        Generated Circle models use the real ``BuiltinOperator`` numeric values, so
+        their effectful builtin set can be resolved from the schema. Tests and other
+        schema-independent clients often use arbitrary integers for operator codes;
+        interpreting those integers as generated enum values would incorrectly keep
+        pure dead operators. Such clients still receive conservative custom,
+        subgraph-reference, mutation, and variable-tensor handling, and may supply an
+        explicit ``builtin_codes`` mapping when numeric builtin classification is
+        required.
+        """
+
+        if builtin_codes is not None or _uses_generated_circle_model(model):
+            return cls.from_schema(
+                effectful_builtin_names=effectful_builtin_names,
+                builtin_codes=builtin_codes,
+                preserve_custom_operators=preserve_custom_operators,
+                preserve_variable_operators=preserve_variable_operators,
+            )
+        return cls(
+            preserve_custom_operators=preserve_custom_operators,
+            preserve_variable_operators=preserve_variable_operators,
         )
 
     @classmethod
@@ -292,6 +326,15 @@ def _operator_references_subgraph(operator: Any) -> bool:
             if isinstance(value, Integral):
                 return True
     return False
+
+
+def _uses_generated_circle_model(model: Any) -> bool:
+    """Return whether a model uses the generated Circle Object API type."""
+
+    try:
+        return isinstance(model, object_api_type("Model"))
+    except (AttributeError, ImportError, RuntimeError, TypeError):
+        return False
 
 
 def _maybe_builtin_code(name: str) -> int | None:
