@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from tico.circle.analysis import (
     build_expression_key,
+    DEFAULT_EFFECTFUL_BUILTIN_NAMES,
     ExpressionKey,
     OperatorPurityAnalysis,
 )
@@ -34,45 +35,12 @@ from tico.circle.passes.optimization._utils import (
 from tico.circle.rewrite import replace_tensor_uses_many, TensorUseReplacement
 
 
-_DEFAULT_IMPURE_BUILTIN_NAMES = (
-    "ASSIGN_VARIABLE",
-    "BIDIRECTIONAL_SEQUENCE_LSTM",
-    "BIDIRECTIONAL_SEQUENCE_RNN",
-    "CALL",
-    "CALL_ONCE",
-    "DELEGATE",
-    "HASHTABLE",
-    "HASHTABLE_FIND",
-    "HASHTABLE_IMPORT",
-    "HASHTABLE_LOOKUP",
-    "HASHTABLE_SIZE",
-    "IF",
-    "LSTM",
-    "MULTINOMIAL",
-    "RANDOM_STANDARD_NORMAL",
-    "RANDOM_UNIFORM",
-    "READ_VARIABLE",
-    "RESOURCE_GATHER",
-    "RESOURCE_SCATTER_ADD",
-    "RNN",
-    "STABLEHLO_CASE",
-    "STABLEHLO_CUSTOM_CALL",
-    "STABLEHLO_RNG_BIT_GENERATOR",
-    "STABLEHLO_WHILE",
-    "SVDF",
-    "UNIDIRECTIONAL_SEQUENCE_LSTM",
-    "UNIDIRECTIONAL_SEQUENCE_RNN",
-    "VAR_HANDLE",
-    "WHILE",
-)
-
-
 @dataclass(frozen=True)
 class CommonSubexpressionEliminationPolicy:
     """Control conservative eligibility and convergence limits for Circle CSE."""
 
     allow_custom_operators: bool = False
-    impure_builtin_names: tuple[str, ...] = _DEFAULT_IMPURE_BUILTIN_NAMES
+    impure_builtin_names: tuple[str, ...] = DEFAULT_EFFECTFUL_BUILTIN_NAMES
     maximum_rounds: int = 1000
 
     def __post_init__(self) -> None:

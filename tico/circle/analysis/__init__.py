@@ -12,13 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.analysis.effects import (
+    DEFAULT_EFFECTFUL_BUILTIN_NAMES,
+    effective_builtin_code,
+    OperatorEffectAnalysis,
+)
 from tico.circle.analysis.purity import OperatorPurityAnalysis
 from tico.circle.analysis.structural_hash import build_expression_key, ExpressionKey
 from tico.circle.analysis.tensor_contract import TensorContract
 
 __all__ = [
+    "DEFAULT_EFFECTFUL_BUILTIN_NAMES",
     "ExpressionKey",
+    "OperatorEffectAnalysis",
     "OperatorPurityAnalysis",
     "TensorContract",
     "build_expression_key",
+    "effective_builtin_code",
 ]

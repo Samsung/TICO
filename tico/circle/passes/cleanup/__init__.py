@@ -14,5 +14,10 @@
 
 from tico.circle.passes.cleanup.compact_indices import CompactIndicesPass
 from tico.circle.passes.cleanup.dead_code_elimination import DeadCodeEliminationPass
+from tico.circle.passes.cleanup.graph_inputs import prune_unused_graph_inputs
 
-__all__ = ["CompactIndicesPass", "DeadCodeEliminationPass"]
+__all__ = [
+    "CompactIndicesPass",
+    "DeadCodeEliminationPass",
+    "prune_unused_graph_inputs",
+]

@@ -365,8 +365,12 @@ Available passes:
 | `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases; dead branches are left for DCE |
 | `remove-no-op-operators` | `RemoveNoOpOperatorsPass` | Removes operators that preserve the complete input tensor contract |
 | `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
-| `dce` | `DeadCodeEliminationPass` | Removes operators that cannot contribute to graph outputs and prunes unused graph inputs |
+| `dce` | `DeadCodeEliminationPass` | Removes unreachable pure operators while preserving observable effects and public or caller-owned graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
+
+Dead-code elimination treats stateful, non-deterministic, custom, variable, and
+subgraph-referencing operators as roots. Input pruning retains signature-bound inputs
+and the complete input arity of subgraphs referenced by call or control-flow operators.
 
 Run the built-in O1 pipeline with:
 
