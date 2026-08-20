@@ -54,11 +54,11 @@ TENSOR_TYPE_NAMES = {
     TENSOR_INT16: "INT16",
 }
 
-# This table captures target-backend constraints for data-preserving operators.
-# ResizeBilinear is intentionally False because the target NPU accepts distinct
-# affine qparams for the input and output tensors.
+# This table captures target-backend constraints for data operators.
+# MaxPool2D and ResizeBilinear intentionally allow distinct per-tensor
+# affine qparams for their input and output tensors.
 _DATA_OPERATOR_REQUIRES_SHARED_QPARAMS = {
-    MAX_POOL_2D: True,
+    MAX_POOL_2D: False,
     RESHAPE: True,
     RESIZE_BILINEAR: False,
     PAD: True,
@@ -273,6 +273,17 @@ def _require_same_qparams(
             )
 
 
+def _require_data_operator_qparams(
+    builtin_code: int,
+    tensors: Iterable[CircleTensorInfo],
+    *,
+    context: str,
+) -> None:
+    """Enforce shared qparams only when required by the target NPU."""
+    if _DATA_OPERATOR_REQUIRES_SHARED_QPARAMS.get(builtin_code, False):
+        _require_same_qparams(tensors, context=context)
+
+
 def _tensor_indices(indices: Iterable[int]) -> list[int]:
     """Drop optional negative tensor indices from an operator input list."""
     return [index for index in indices if index >= 0]
@@ -347,6 +358,7 @@ def verify_quantized_circle(
     bias_count = 0
     prelu_slope_count = 0
     same_padding_conv_count = 0
+    distinct_max_pool_qparam_count = 0
 
     for operator_index, operator in enumerate(operators):
         name = OPERATOR_NAMES.get(
@@ -471,8 +483,16 @@ def verify_quantized_circle(
                 expected_type,
                 context=f"{name} data tensor",
             )
-            if _DATA_OPERATOR_REQUIRES_SHARED_QPARAMS[operator.builtin_code]:
-                _require_same_qparams(connected, context=name)
+            _require_data_operator_qparams(
+                operator.builtin_code,
+                connected,
+                context=name,
+            )
+            if (
+                operator.builtin_code == MAX_POOL_2D
+                and connected[0].quantization != connected[1].quantization
+            ):
+                distinct_max_pool_qparam_count += 1
 
             if operator.builtin_code == RESIZE_BILINEAR:
                 if operator.options_table is None:
@@ -558,6 +578,7 @@ def verify_quantized_circle(
         "quantized_biases": bias_count,
         "prelu_slopes": prelu_slope_count,
         "same_padding_convolutions": same_padding_conv_count,
+        "max_pool_distinct_qparams": distinct_max_pool_qparam_count,
         "operator_counts": counts,
         "resize_options": [list(value) for value in resize_options],
         "input_tensors": [asdict(tensors[index]) for index in inputs],
@@ -595,6 +616,10 @@ def main() -> None:
         f"{summary['quantized_tensors']} quantized tensors and "
         f"{summary['operator_counts']['RESIZE_BILINEAR']} "
         f"RESIZE_BILINEAR operators: {args.circle}"
+    )
+    print(
+        "MAX_POOL_2D operators with distinct input/output qparams: "
+        f"{summary['max_pool_distinct_qparams']}"
     )
 
 

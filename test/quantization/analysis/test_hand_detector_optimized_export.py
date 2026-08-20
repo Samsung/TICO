@@ -22,14 +22,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from torch import nn
-
 from examples.hand_detector._support.optimized_export import (
     build_export_manifest,
     default_manifest_path,
     export_full_integer_circle,
     write_export_manifest,
 )
+
+from torch import nn
 
 
 class OptimizedExportTest(unittest.TestCase):

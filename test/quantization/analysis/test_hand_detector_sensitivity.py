@@ -22,6 +22,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from examples.hand_detector._support.sensitivity import (
+    _OperationGroup,
+    _site_group,
     build_activation_sensitivity_groups,
 )
 from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
@@ -100,6 +102,53 @@ class HandDetectorSensitivityGroupsTest(unittest.TestCase):
             group_by_path["detector.layers.2.conv.act_out"],
             "classifiers_low_resolution_head",
         )
+
+    def test_max_pool_sites_follow_input_and_output_tensor_ownership(self) -> None:
+        """Assign pool input to its producer and output to the pool block."""
+        detector = SimpleNamespace(
+            operations=(
+                {"name": "PRELU", "inputs": [0], "outputs": [1]},
+                {"name": "MAX_POOL_2D", "inputs": [1], "outputs": [2]},
+            )
+        )
+        producer_group = _OperationGroup("producer", "feature", (0,))
+        pool_group = _OperationGroup("pool", "feature", (1,))
+        input_group = _OperationGroup("input", "input", ())
+        operation_to_group = {0: producer_group, 1: pool_group}
+        producer_by_tensor = {1: 0, 2: 1}
+
+        pool_input = _site(
+            "detector.layers.1.act_in",
+            "detector.layers.1",
+            "act_in",
+            SiteRole.ACTIVATION_INPUT,
+        )
+        pool_output = _site(
+            "detector.layers.1.act_out",
+            "detector.layers.1",
+            "act_out",
+            SiteRole.ACTIVATION_OUTPUT,
+        )
+
+        input_owner, input_tensors = _site_group(
+            pool_input,
+            detector,
+            operation_to_group,
+            producer_by_tensor,
+            input_group,
+        )
+        output_owner, output_tensors = _site_group(
+            pool_output,
+            detector,
+            operation_to_group,
+            producer_by_tensor,
+            input_group,
+        )
+
+        self.assertEqual(input_owner, producer_group)
+        self.assertEqual(input_tensors, (1,))
+        self.assertEqual(output_owner, pool_group)
+        self.assertEqual(output_tensors, (2,))
 
 
 def _activation_sites() -> tuple[QuantizationSite, ...]:

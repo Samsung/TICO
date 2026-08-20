@@ -259,18 +259,10 @@ def build_window_observer_groups(
             raise ValueError(f"Window site {path!r} is not an activation site.")
         entries.append((path, frozenset(_site_tensor_domain(site, detector))))
 
-    # A tensor-ID intersection describes graph connectivity, not qparam
-    # identity. For example, QuantMaxPool2d owns one shared observer spanning
-    # both its input and output tensors. That observer represents a distinct
-    # requantization domain from an upstream producer observer, even though the
-    # two domains both mention the MaxPool input tensor. Merging by transitive
-    # intersection would force different calibrated qparams into one learnable
-    # proxy and would also make step zero differ from the entry model state.
-    #
-    # Tie only observers that report the exact same static tensor-domain set.
-    # Producer/consumer observers for one tensor still tie as ``(tensor_id,)``,
-    # while a shared operator domain such as ``(input_id, output_id)`` remains
-    # independent and preserves the original quantization boundary.
+    # Tie only observers that report the exact same static tensor-domain
+    # set. Producer outputs and consumer inputs for one tensor tie as
+    # ``(tensor_id,)``. Operators with independent input/output observers
+    # remain separate because the two sites map to different tensor IDs.
     components: dict[tuple[int, ...], list[str]] = defaultdict(list)
     for path, tensor_ids in entries:
         components[tuple(sorted(tensor_ids))].append(path)
@@ -616,10 +608,7 @@ def _site_tensor_domain(site, detector: HandDetector) -> tuple[int, ...]:
     position = int(match.group(1))
     operation = detector.operations[position]
     if site.role is SiteRole.ACTIVATION_INPUT:
-        inputs = _activation_inputs(operation)
-        if operation["name"] == "MAX_POOL_2D":
-            return tuple((*inputs, *(int(value) for value in operation["outputs"])))
-        return inputs
+        return _activation_inputs(operation)
     if site.role in {SiteRole.ACTIVATION_OUTPUT, SiteRole.ACTIVATION}:
         return tuple(int(value) for value in operation["outputs"])
     raise RuntimeError(f"Unsupported activation site role: {site.role.value!r}.")

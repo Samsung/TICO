@@ -93,10 +93,9 @@ def build_activation_sensitivity_groups(
 ) -> tuple[ActivationSensitivityGroup, ...]:
     """Group every internal activation site by its logical producer block.
 
-    Producer ``act_out`` and consumer ``act_in`` sites for the same tensor are
-    assigned to the producer block whenever the wrappers expose separate
-    observers. Shared-domain wrappers such as MaxPool remain in the block that
-    owns the operation because one observer covers both sides of the operator.
+    Producer ``act_out`` and consumer ``act_in`` sites for the same
+    tensor are assigned to the producer block. Operator output observers
+    remain in the block that owns the producing operation.
     """
     detector = _find_detector(model)
     operation_groups = _partition_operations(detector)
@@ -367,13 +366,6 @@ def _site_group(
 
     if site.role is SiteRole.ACTIVATION_INPUT:
         input_tensor = int(operation["inputs"][0])
-        # MaxPool exposes one observer on both sides, so keep the shared domain
-        # in the block that owns the pooling operation.
-        if operation["name"] == "MAX_POOL_2D":
-            return _operation_group(operation_to_group, position), (
-                input_tensor,
-                *(int(value) for value in operation["outputs"]),
-            )
         producer_position = producer_by_tensor.get(input_tensor)
         if producer_position is None:
             return input_group, (input_tensor,)

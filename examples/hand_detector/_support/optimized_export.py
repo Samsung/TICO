@@ -90,9 +90,7 @@ def export_full_integer_circle(
         summary["quantization_verification"] = _json_value(
             verify_quantized_circle(exported, bit_width)
         )
-        summary["layout_verification"] = _json_value(
-            verify_circle_layout(exported)
-        )
+        summary["layout_verification"] = _json_value(verify_circle_layout(exported))
     return summary
 
 

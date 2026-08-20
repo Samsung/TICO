@@ -37,6 +37,10 @@ from tico.utils.validate_args_kwargs import (
 )
 
 
+_QPARAM_PRESERVING_UNARY_TARGETS = frozenset({torch.ops.aten.constant_pad_nd.default})
+_QPARAM_FALLBACK_UNARY_TARGETS = frozenset({torch.ops.circle_custom.maxpool2d.default})
+
+
 @trace_graph_diff_on_pass
 class PropagateQParamForward(PassBase):
     """
@@ -78,12 +82,13 @@ class PropagateQParamForward(PassBase):
             if node.target == torch.ops.aten.permute.default:
                 permute_args = PermuteArgs(*node.args, **node.kwargs)
                 _propagate_qparam_if_possible(permute_args.input, node)
-            elif node.target in {
-                torch.ops.aten.constant_pad_nd.default,
-                torch.ops.circle_custom.maxpool2d.default,
-            }:
+            elif node.target in _QPARAM_PRESERVING_UNARY_TARGETS:
                 input_ = node.args[0]
                 if isinstance(input_, torch.fx.Node):
+                    _propagate_qparam_if_possible(input_, node)
+            elif node.target in _QPARAM_FALLBACK_UNARY_TARGETS:
+                input_ = node.args[0]
+                if isinstance(input_, torch.fx.Node) and QPARAM_KEY not in node.meta:
                     _propagate_qparam_if_possible(input_, node)
             elif node.target == torch.ops.aten.reshape.default:
                 reshape_args = ReshapeArgs(*node.args, **node.kwargs)

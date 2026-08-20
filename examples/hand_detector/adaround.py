@@ -27,7 +27,7 @@ from examples.hand_detector._support.adaround import (
     apply_activation_reconstruction_report,
     run_hand_detector_adaround,
 )
-from examples.hand_detector._support.analysis import OUTPUT_NAMES, output_boundaries
+from examples.hand_detector._support.analysis import output_boundaries, OUTPUT_NAMES
 from examples.hand_detector._support.data import (
     list_npy_inputs,
     load_npy_inputs,
@@ -47,9 +47,7 @@ from examples.hand_detector._support.quantization import (
     quantization_name,
     quantize_candidate,
 )
-from examples.hand_detector._support.reconstruction import (
-    build_reconstruction_windows,
-)
+from examples.hand_detector._support.reconstruction import build_reconstruction_windows
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 from tico.quantization.algorithm.adaround import AdaRoundConfig
 from tico.quantization.algorithm.block_reconstruction import (
@@ -320,12 +318,8 @@ def run(args: argparse.Namespace) -> None:
             "selection_score_metric": args.selection_score_metric,
             "auxiliary_output": auxiliary_output,
             "auxiliary_tolerance": args.auxiliary_tolerance,
-            "minimum_selection_improvement": (
-                args.minimum_selection_improvement
-            ),
-            "minimum_acceptance_improvement": (
-                args.minimum_acceptance_improvement
-            ),
+            "minimum_selection_improvement": (args.minimum_selection_improvement),
+            "minimum_acceptance_improvement": (args.minimum_acceptance_improvement),
             "reconstruction_loss": args.reconstruction_loss,
             "steps": args.steps,
             "alpha_learning_rate": args.alpha_learning_rate,
