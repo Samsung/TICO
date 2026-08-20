@@ -26,7 +26,10 @@ from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleRewriteError, CircleValueError
 from tico.circle.graph import as_indices, as_list, CircleGraph, OPTIONAL_TENSOR_INDEX
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
-from tico.circle.passes.cleanup import DeadCodeEliminationPass
+from tico.circle.passes.cleanup import (
+    DeadCodeEliminationPass,
+    prune_unused_graph_inputs,
+)
 from tico.circle.passes.optimization.fold.evaluators import (
     ConstantEvaluation,
     ConstantEvaluationContext,
@@ -513,7 +516,7 @@ class FoldConstantSubgraphPass(CirclePass):
                 prune_unused_inputs=False,
             ).run(document, context)
             if self.policy.prune_unused_inputs:
-                input_cleanup_result = _prune_unused_graph_inputs(
+                input_cleanup_result = prune_unused_graph_inputs(
                     document,
                     folded_subgraphs,
                 )
@@ -542,60 +545,6 @@ class FoldConstantSubgraphPass(CirclePass):
                 *input_cleanup_result.diagnostics,
             ),
         )
-
-
-def _prune_unused_graph_inputs(
-    document: CircleDocument,
-    subgraph_indices: Iterable[int],
-) -> CirclePassResult:
-    """Remove unused graph inputs even when a folded graph has no operators."""
-
-    removed_inputs = 0
-    diagnostics: list[str] = []
-    signature_inputs: dict[int, set[int]] = {}
-    for signature in as_list(getattr(document.model, "signatureDefs", None)):
-        subgraph_index = int(getattr(signature, "subgraphIndex", -1))
-        mapped_inputs = signature_inputs.setdefault(subgraph_index, set())
-        mapped_inputs.update(
-            int(getattr(tensor_map, "tensorIndex", -1))
-            for tensor_map in as_list(getattr(signature, "inputs", None))
-        )
-
-    for subgraph_index in subgraph_indices:
-        subgraph_index = int(subgraph_index)
-        subgraph = document.subgraph(subgraph_index)
-        consumed = {
-            tensor_index
-            for operator in as_list(getattr(subgraph, "operators", None))
-            for tensor_index in as_indices(getattr(operator, "inputs", None))
-            if tensor_index != OPTIONAL_TENSOR_INDEX
-        }
-        output_set = set(as_indices(getattr(subgraph, "outputs", None)))
-        protected_inputs = output_set | signature_inputs.get(subgraph_index, set())
-        old_inputs = as_indices(getattr(subgraph, "inputs", None))
-        removed = [
-            tensor_index
-            for tensor_index in old_inputs
-            if tensor_index not in consumed and tensor_index not in protected_inputs
-        ]
-        if not removed:
-            continue
-        removed_set = set(removed)
-        subgraph.inputs = [
-            tensor_index
-            for tensor_index in old_inputs
-            if tensor_index not in removed_set
-        ]
-        removed_inputs += len(removed)
-        diagnostics.append(
-            f"Subgraph {subgraph_index}: removed graph inputs {removed}."
-        )
-
-    return CirclePassResult(
-        modified=removed_inputs > 0,
-        changes=removed_inputs,
-        diagnostics=tuple(diagnostics),
-    )
 
 
 def _truncate_sequence(owner: Any, field_name: str, size: int) -> None:

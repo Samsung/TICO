@@ -14,10 +14,22 @@
 
 import unittest
 
+from tico.circle.analysis import OperatorEffectAnalysis
+from tico.circle.document import CircleDocument
 from tico.circle.passes import CirclePassContext
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
 
-from test.unit_test.circle.fixture import make_test_document
+from test.unit_test.circle.fixture import (
+    FakeBuffer,
+    FakeModel,
+    FakeOperator,
+    FakeOperatorCode,
+    FakeSignatureDef,
+    FakeSubGraph,
+    FakeTensor,
+    FakeTensorMap,
+    make_test_document,
+)
 
 
 class CircleCleanupPassTest(unittest.TestCase):
@@ -45,3 +57,189 @@ class CircleCleanupPassTest(unittest.TestCase):
         self.assertEqual(len(document.model.buffers), 2)
         self.assertEqual(len(document.model.operatorCodes), 2)
         self.assertTrue(document.verify(raise_on_error=False).ok)
+
+    def test_default_dce_does_not_apply_schema_codes_to_fixture_model(self):
+        """Do not reinterpret arbitrary fixture integers as Circle enum values."""
+
+        schema_effects = OperatorEffectAnalysis.from_schema().effectful_builtin_codes
+        self.assertTrue(schema_effects)
+        colliding_code = next(iter(schema_effects))
+        document = CircleDocument(
+            FakeModel(
+                subgraphs=[
+                    FakeSubGraph(
+                        tensors=[
+                            FakeTensor("input", shape=[1]),
+                            FakeTensor("dead", shape=[1]),
+                        ],
+                        inputs=[0],
+                        outputs=[],
+                        operators=[
+                            FakeOperator(opcodeIndex=0, inputs=[0], outputs=[1]),
+                        ],
+                    )
+                ],
+                buffers=[FakeBuffer()],
+                operatorCodes=[FakeOperatorCode(builtinCode=colliding_code)],
+            )
+        )
+
+        result = DeadCodeEliminationPass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertTrue(result.modified)
+        self.assertEqual(document.subgraph(0).operators, [])
+        self.assertEqual(document.subgraph(0).inputs, [])
+
+    def test_dce_preserves_effectful_operator_and_its_predecessor(self):
+        """Keep a disconnected stateful root and the values required to execute it."""
+
+        document = CircleDocument(
+            FakeModel(
+                subgraphs=[
+                    FakeSubGraph(
+                        tensors=[
+                            FakeTensor("input", shape=[1]),
+                            FakeTensor("middle", shape=[1]),
+                            FakeTensor("state_result", shape=[1]),
+                        ],
+                        inputs=[0],
+                        outputs=[],
+                        operators=[
+                            FakeOperator(opcodeIndex=0, inputs=[0], outputs=[1]),
+                            FakeOperator(opcodeIndex=1, inputs=[1], outputs=[2]),
+                        ],
+                    )
+                ],
+                buffers=[FakeBuffer()],
+                operatorCodes=[
+                    FakeOperatorCode(builtinCode=10),
+                    FakeOperatorCode(builtinCode=20),
+                ],
+            )
+        )
+        effects = OperatorEffectAnalysis(effectful_builtin_codes=(20,))
+
+        result = DeadCodeEliminationPass(effect_analysis=effects).run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(len(document.subgraph(0).operators), 2)
+        self.assertEqual(document.subgraph(0).inputs, [0])
+
+    def test_dce_removes_dead_pure_graph_without_outputs(self):
+        """A graph without outputs may still discard a disconnected pure chain."""
+
+        document = CircleDocument(
+            FakeModel(
+                subgraphs=[
+                    FakeSubGraph(
+                        tensors=[
+                            FakeTensor("input", shape=[1]),
+                            FakeTensor("dead", shape=[1]),
+                        ],
+                        inputs=[0],
+                        outputs=[],
+                        operators=[
+                            FakeOperator(opcodeIndex=0, inputs=[0], outputs=[1]),
+                        ],
+                    )
+                ],
+                buffers=[FakeBuffer()],
+                operatorCodes=[FakeOperatorCode(builtinCode=10)],
+            )
+        )
+        effects = OperatorEffectAnalysis()
+
+        result = DeadCodeEliminationPass(effect_analysis=effects).run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertTrue(result.modified)
+        self.assertEqual(document.subgraph(0).operators, [])
+        self.assertEqual(document.subgraph(0).inputs, [])
+
+    def test_dce_preserves_unknown_custom_operator(self):
+        """Treat custom implementations as effectful unless explicitly classified."""
+
+        document = CircleDocument(
+            FakeModel(
+                subgraphs=[
+                    FakeSubGraph(
+                        tensors=[
+                            FakeTensor("input", shape=[1]),
+                            FakeTensor("custom_result", shape=[1]),
+                        ],
+                        inputs=[0],
+                        outputs=[],
+                        operators=[
+                            FakeOperator(opcodeIndex=0, inputs=[0], outputs=[1]),
+                        ],
+                    )
+                ],
+                buffers=[FakeBuffer()],
+                operatorCodes=[
+                    FakeOperatorCode(builtinCode=99, customCode="StatefulCustom"),
+                ],
+            )
+        )
+        effects = OperatorEffectAnalysis(custom_builtin_code=99)
+
+        result = DeadCodeEliminationPass(effect_analysis=effects).run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(len(document.subgraph(0).operators), 1)
+        self.assertEqual(document.subgraph(0).inputs, [0])
+
+    def test_dce_preserves_signature_bound_unused_input(self):
+        """Do not invalidate a signature when optimization removes data dependence."""
+
+        subgraph = FakeSubGraph(
+            tensors=[
+                FakeTensor("used", shape=[1]),
+                FakeTensor("public_unused", shape=[1]),
+                FakeTensor("output", shape=[1]),
+            ],
+            inputs=[0, 1],
+            outputs=[2],
+            operators=[FakeOperator(opcodeIndex=0, inputs=[0], outputs=[2])],
+        )
+        document = CircleDocument(
+            FakeModel(
+                subgraphs=[subgraph],
+                buffers=[FakeBuffer()],
+                operatorCodes=[FakeOperatorCode(builtinCode=10)],
+                signatureDefs=[
+                    FakeSignatureDef(
+                        signatureKey="serving_default",
+                        subgraphIndex=0,
+                        inputs=[
+                            FakeTensorMap("used", 0),
+                            FakeTensorMap("public_unused", 1),
+                        ],
+                        outputs=[FakeTensorMap("output", 2)],
+                    )
+                ],
+            )
+        )
+
+        result = DeadCodeEliminationPass(effect_analysis=OperatorEffectAnalysis()).run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(document.subgraph(0).inputs, [0, 1])
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+
+
+if __name__ == "__main__":
+    unittest.main()
