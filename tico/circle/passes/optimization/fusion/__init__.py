@@ -16,6 +16,10 @@ from tico.circle.passes.optimization.fusion.composite_ops import (
     CompositeFusionPolicy,
     FuseCompositeOpsPass,
 )
+from tico.circle.passes.optimization.fusion.legacy_fc_gelu_fc import (
+    FuseLegacyFCGeluFCPass,
+    LegacyFCGeluFCFusionPolicy,
+)
 from tico.circle.passes.optimization.fusion.linear_ops import (
     FuseLinearOpsPass,
     LinearFusionPolicy,
@@ -24,12 +28,20 @@ from tico.circle.passes.optimization.fusion.reduction_ops import (
     ReductionSimplificationPolicy,
     SimplifyReductionOpsPass,
 )
+from tico.circle.passes.optimization.fusion.transpose_conv_slice import (
+    FuseTransposeConvSlicePass,
+    TransposeConvSliceFusionPolicy,
+)
 
 __all__ = [
     "CompositeFusionPolicy",
     "FuseCompositeOpsPass",
+    "FuseLegacyFCGeluFCPass",
     "FuseLinearOpsPass",
+    "FuseTransposeConvSlicePass",
+    "LegacyFCGeluFCFusionPolicy",
     "LinearFusionPolicy",
     "ReductionSimplificationPolicy",
     "SimplifyReductionOpsPass",
+    "TransposeConvSliceFusionPolicy",
 ]

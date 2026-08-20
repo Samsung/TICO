@@ -41,9 +41,15 @@ from tico.circle.passes import (
     create_optimization_preset,
     EliminateTransposeBoundedLayoutRegionPass,
     FoldConstantSubgraphPass,
+    FoldHeavyConstantSubgraphPass,
     FuseCompositeOpsPass,
+    FuseLegacyFCGeluFCPass,
     FuseLinearOpsPass,
+    FuseTransposeConvSlicePass,
+    LegalizeDynamicFullyConnectedPass,
+    O1CompatibilityOptions,
     RemoveNoOpOperatorsPass,
+    ResolveLegacyCustomOpsPass,
     SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
@@ -61,9 +67,14 @@ _PASS_REGISTRY: dict[str, type[CirclePass]] = {
         EliminateTransposeBoundedLayoutRegionPass
     ),
     "fold-constant-subgraph": FoldConstantSubgraphPass,
+    "fold-heavy-constant-subgraph": FoldHeavyConstantSubgraphPass,
     "fuse-composite-ops": FuseCompositeOpsPass,
+    "fuse-legacy-fc-gelu-fc": FuseLegacyFCGeluFCPass,
     "fuse-linear-ops": FuseLinearOpsPass,
+    "fuse-transpose-conv-slice": FuseTransposeConvSlicePass,
+    "legalize-dynamic-fully-connected": LegalizeDynamicFullyConnectedPass,
     "remove-no-op-operators": RemoveNoOpOperatorsPass,
+    "resolve-legacy-custom-ops": ResolveLegacyCustomOpsPass,
     "simplify-reduction-ops": SimplifyReductionOpsPass,
     "simplify-view-ops": SimplifyViewOpsPass,
     "dce": DeadCodeEliminationPass,
@@ -209,6 +220,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "scheduling and cannot be combined with this option."
         ),
     )
+    compatibility = optimize_parser.add_argument_group(
+        "O1 heavy and compatibility options"
+    )
+    compatibility.add_argument(
+        "--heavy-constant-folding",
+        action="store_true",
+        help="Enable expensive constant evaluators in the O1 fixed point.",
+    )
+    compatibility.add_argument(
+        "--resolve-legacy-custom-ops",
+        action="store_true",
+        help="Recover selected former TensorFlow custom operators during O1.",
+    )
+    compatibility.add_argument(
+        "--legalize-dynamic-fully-connected",
+        action="store_true",
+        help="Lower dynamic-weight FLOAT32 FullyConnected operators during O1.",
+    )
+    compatibility.add_argument(
+        "--fuse-transpose-conv-slice",
+        action="store_true",
+        help="Enable the optional static TransposeConv-Slice fusion during O1.",
+    )
+    compatibility.add_argument(
+        "--fuse-legacy-fc-gelu-fc",
+        action="store_true",
+        help="Recognize the legacy FC-Erf GELU pattern during O1.",
+    )
     optimize_parser.add_argument(
         "--no-verify",
         action="store_true",
@@ -333,10 +372,30 @@ def _optimize_command(args: argparse.Namespace) -> int:
             "their pass scheduling."
         )
 
+    compatibility = O1CompatibilityOptions(
+        heavy_constant_folding=getattr(args, "heavy_constant_folding", False),
+        resolve_legacy_custom_ops=getattr(args, "resolve_legacy_custom_ops", False),
+        legalize_dynamic_fully_connected=getattr(
+            args,
+            "legalize_dynamic_fully_connected",
+            False,
+        ),
+        fuse_transpose_conv_slice=getattr(args, "fuse_transpose_conv_slice", False),
+        fuse_legacy_fc_gelu_fc=getattr(args, "fuse_legacy_fc_gelu_fc", False),
+    )
+    if compatibility.enabled and args.preset is None:
+        raise ValueError(
+            "O1 heavy and compatibility flags require --preset o1; use "
+            "--passes to run the corresponding standalone pass."
+        )
+
     document = CircleDocument.load(args.input)
     context = CirclePassContext(verify_after_each_pass=not args.no_verify)
     if args.preset is not None:
-        result = create_optimization_preset(args.preset).run(document, context)
+        result = create_optimization_preset(
+            args.preset,
+            compatibility=compatibility,
+        ).run(document, context)
     else:
         passes = _parse_passes(args.passes or _DEFAULT_PASSES)
         strategy = CirclePassStrategy(args.strategy or CirclePassStrategy.ONCE.value)
