@@ -399,6 +399,38 @@ python -m tico.quantization.examples.evaluate \
   --set 'evaluation.vlm_tasks=[vqav2,textvqa]'
 ```
 
+## `evaluation.mmmu` prompt modes
+
+MMMU-Pro vision evaluation uses the benchmark's official direct prompt by
+default:
+
+```yaml
+evaluation:
+  mmmu:
+    enabled: true
+    dataset: MMMU/MMMU_Pro
+    subjects:
+      - vision
+    prompt_mode: official_direct
+    max_new_tokens: 50
+```
+
+Supported `prompt_mode` values are:
+
+- `official_direct`: the official MMMU-Pro `direct.vision` prompt. This is the
+  default and should be used for benchmark comparisons.
+- `official_cot`: the official MMMU-Pro `cot.vision` prompt.
+
+When `max_new_tokens` is omitted or `null`, MMMU-Pro vision uses 50 tokens for
+both official modes, matching the official Transformers inference example.
+Other MMMU subjects keep the existing 16-token default. An explicit positive
+value always overrides the mode default.
+
+The answer parser prefers the final explicit declaration such as `Answer: C`,
+then accepts a punctuated leading answer or a bare final line. Unparseable
+natural-language output is counted as incorrect rather than being mistaken for
+an option based only on its first character.
+
 ## `evaluation.llava_bench` for judge-based LLaVA-Bench scoring
 
 `qwen3_vl_eval_suite.yaml` uses the standard example entry point:

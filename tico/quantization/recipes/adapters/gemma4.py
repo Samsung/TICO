@@ -554,10 +554,19 @@ class Gemma4Adapter(ModelAdapter):
                 device=str(ctx.device),
                 n_shots=int(mmmu.get("n_shots", 5)),
                 n_samples=int(mmmu.get("n_samples", -1)),
-                max_new_tokens=int(mmmu.get("max_new_tokens", 16)),
+                max_new_tokens=(
+                    None
+                    if mmmu.get("max_new_tokens") is None
+                    else int(mmmu["max_new_tokens"])
+                ),
                 max_seq_len=max_seq_len,
                 temperature=float(mmmu.get("temperature", 0.0)),
                 verbose=bool(mmmu.get("verbose", verbose)),
+                prompt_mode=(
+                    "official_direct"
+                    if mmmu.get("prompt_mode") is None
+                    else str(mmmu["prompt_mode"])
+                ),
             )
 
         if should_run_mapping_evaluation(eval_cfg, "ppl"):
