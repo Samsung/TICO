@@ -17,12 +17,6 @@ import re
 from typing import Any, Iterable
 
 import torch
-from datasets import load_dataset
-
-from tico.quantization.evaluation.vlm_eval_utils import (
-    generate_answer,
-    generate_image_only_answer,
-)
 
 
 MMMU_DATASETS = ["MMMU/MMMU", "MMMU/MMMU_Pro"]
@@ -123,6 +117,68 @@ _BARE_ANSWER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+_DATASETS_REQUIRED_MESSAGE = (
+    "The optional 'datasets' package is required for MMMU evaluation. "
+    "Install the optional evaluation dependencies."
+)
+
+
+def _load_vlm_eval_utils() -> Any:
+    """Import VLM generation helpers only when MMMU evaluation runs."""
+    try:
+        from tico.quantization.evaluation import vlm_eval_utils
+    except ModuleNotFoundError as error:
+        if error.name != "datasets":
+            raise
+        raise RuntimeError(_DATASETS_REQUIRED_MESSAGE) from error
+    return vlm_eval_utils
+
+
+def generate_answer(
+    model,
+    processor,
+    image,
+    question: str,
+    device: str | torch.device,
+    max_new_tokens: int = 16,
+    temperature: float = 0.0,
+    max_seq_len: int | None = None,
+) -> str:
+    """Lazily dispatch to the shared VLM answer generator."""
+    return _load_vlm_eval_utils().generate_answer(
+        model=model,
+        processor=processor,
+        image=image,
+        question=question,
+        device=device,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        max_seq_len=max_seq_len,
+    )
+
+
+def generate_image_only_answer(
+    model,
+    processor,
+    image,
+    device: str | torch.device,
+    question: str | None = None,
+    max_new_tokens: int = 16,
+    temperature: float = 0.0,
+    max_seq_len: int | None = None,
+) -> str:
+    """Lazily dispatch to the shared image-only answer generator."""
+    return _load_vlm_eval_utils().generate_image_only_answer(
+        model=model,
+        processor=processor,
+        image=image,
+        device=device,
+        question=question,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        max_seq_len=max_seq_len,
+    )
+
 
 def take_from_dataset(ds, start: int, n: int) -> Iterable[dict[str, Any]]:
     assert start >= 0
@@ -152,6 +208,13 @@ def load_data(
 
     if split not in MMMU_SPLITS[dataset]:
         raise ValueError(f"Invalid split '{split}'")
+
+    try:
+        from datasets import load_dataset
+    except ModuleNotFoundError as error:
+        if error.name != "datasets":
+            raise
+        raise RuntimeError(_DATASETS_REQUIRED_MESSAGE) from error
 
     ds: Iterable[dict[str, Any]] = load_dataset(
         path=dataset,

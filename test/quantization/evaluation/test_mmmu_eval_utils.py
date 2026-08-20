@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import unittest
 from unittest.mock import Mock, patch
 
@@ -20,6 +21,7 @@ from tico.quantization.evaluation.mmmu_eval_utils import (
     evaluate_subject,
     extract_answer,
     get_mmmu_pro_vision_prompt,
+    load_data,
     MMMU_PRO_VISION_PROMPTS,
     resolve_mmmu_max_new_tokens,
 )
@@ -55,6 +57,21 @@ class TestExtractAnswer(unittest.TestCase):
     def test_returns_none_for_empty_or_unparseable_output(self):
         self.assertIsNone(extract_answer(""))
         self.assertIsNone(extract_answer("The image contains a diagram."))
+
+
+class TestMmmuDataLoading(unittest.TestCase):
+    def test_missing_datasets_dependency_is_reported_at_runtime(self):
+        with patch.dict(sys.modules, {"datasets": None}):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "optional 'datasets' package is required",
+            ):
+                load_data(
+                    dataset="MMMU/MMMU_Pro",
+                    subject="vision",
+                    split="test",
+                    n_samples=1,
+                )
 
 
 class TestMmmuProVisionPrompt(unittest.TestCase):
