@@ -86,7 +86,7 @@ class CircleCompatibilityCLITest(unittest.TestCase):
                 "--heavy-constant-folding",
             ]
         )
-        with mock.patch("tico.circle.cli.main.CircleDocument.load") as load:
+        with mock.patch("tico.circle.document.CircleDocument.load") as load:
             with self.assertRaisesRegex(ValueError, "require --preset o1"):
                 _optimize_command(args)
 
