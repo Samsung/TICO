@@ -27,7 +27,7 @@ from examples.hand_detector._support.adaround import (
     apply_activation_reconstruction_report,
     run_hand_detector_adaround,
 )
-from examples.hand_detector._support.analysis import output_boundaries, OUTPUT_NAMES
+from examples.hand_detector._support.analysis import OUTPUT_NAMES, output_boundaries
 from examples.hand_detector._support.data import (
     list_npy_inputs,
     load_npy_inputs,
@@ -36,12 +36,20 @@ from examples.hand_detector._support.data import (
 from examples.hand_detector._support.multistart_reconstruction import (
     split_reconstruction_samples_three_way,
 )
+from examples.hand_detector._support.optimized_export import (
+    build_export_manifest,
+    default_manifest_path,
+    evaluate_full_quantized_model,
+    export_full_integer_circle,
+    write_export_manifest,
+)
 from examples.hand_detector._support.quantization import (
-    export_quantized_circle,
     quantization_name,
     quantize_candidate,
 )
-from examples.hand_detector._support.reconstruction import build_reconstruction_windows
+from examples.hand_detector._support.reconstruction import (
+    build_reconstruction_windows,
+)
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 from tico.quantization.algorithm.adaround import AdaRoundConfig
 from tico.quantization.algorithm.block_reconstruction import (
@@ -166,6 +174,22 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--adaround-seed", type=int, default=20260820)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--export-circle", type=Path)
+    parser.add_argument(
+        "--export-manifest-json",
+        type=Path,
+        help=(
+            "Optional optimized-export manifest. Defaults to a JSON sidecar "
+            "next to --export-circle."
+        ),
+    )
+    parser.add_argument(
+        "--skip-export-verification",
+        action="store_true",
+        help=(
+            "Skip static Circle quantization and layout verification. The "
+            "full fake-quant deployment profile is still used for export."
+        ),
+    )
     parser.add_argument(
         "--report-json",
         type=Path,
@@ -296,8 +320,12 @@ def run(args: argparse.Namespace) -> None:
             "selection_score_metric": args.selection_score_metric,
             "auxiliary_output": auxiliary_output,
             "auxiliary_tolerance": args.auxiliary_tolerance,
-            "minimum_selection_improvement": (args.minimum_selection_improvement),
-            "minimum_acceptance_improvement": (args.minimum_acceptance_improvement),
+            "minimum_selection_improvement": (
+                args.minimum_selection_improvement
+            ),
+            "minimum_acceptance_improvement": (
+                args.minimum_acceptance_improvement
+            ),
             "reconstruction_loss": args.reconstruction_loss,
             "steps": args.steps,
             "alpha_learning_rate": args.alpha_learning_rate,
@@ -317,9 +345,51 @@ def run(args: argparse.Namespace) -> None:
     args.report_json.parent.mkdir(parents=True, exist_ok=True)
     args.report_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     print(f"\nWrote {args.report_json}")
+
     if args.export_circle is not None:
-        output = export_quantized_circle(candidate, args.export_circle)
-        print(f"Wrote {output}")
+        final_full = evaluate_full_quantized_model(
+            float_model,
+            candidate,
+            evaluation,
+            output_adapter=OUTPUT_ADAPTER,
+        )
+        export_summary = export_full_integer_circle(
+            candidate,
+            args.export_circle,
+            bit_width=args.bits,
+            verify=not args.skip_export_verification,
+        )
+        payload["final_full_evaluation"] = final_full
+        payload["export"] = export_summary
+        args.report_json.write_text(
+            json.dumps(payload, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+
+        manifest = build_export_manifest(
+            bit_width=args.bits,
+            circle_summary=export_summary,
+            optimization_report_path=args.report_json,
+            activation_report_path=args.activation_report,
+            optimization_metadata=payload["metadata"],
+            baseline_internal_full=payload["baseline_evaluation"],
+            final_internal_full=payload["final_evaluation"],
+            final_full=final_full,
+            steps=payload["steps"],
+        )
+        manifest_path = (
+            args.export_manifest_json
+            if args.export_manifest_json is not None
+            else default_manifest_path(args.export_circle)
+        )
+        written_manifest = write_export_manifest(manifest_path, manifest)
+        print(
+            "Full deployment profile: "
+            f"REG_MAE={float(final_full['regressors']['mae']):.6e}, "
+            f"CLS_MAE={float(final_full['classifiers']['mae']):.6e}"
+        )
+        print(f"Wrote {export_summary['path']}")
+        print(f"Wrote {written_manifest}")
 
 
 def _print_report(report: dict[str, object]) -> None:
@@ -369,6 +439,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("minimum-selection-improvement must be nonnegative.")
     if args.minimum_acceptance_improvement < 0.0:
         raise ValueError("minimum-acceptance-improvement must be nonnegative.")
+    if args.export_manifest_json is not None and args.export_circle is None:
+        raise ValueError("export-manifest-json requires --export-circle.")
 
 
 def _validate_disjoint(args: argparse.Namespace) -> None:
