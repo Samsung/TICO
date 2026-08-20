@@ -24,7 +24,7 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.propagate_qparam_forward import (
-    _QPARAM_FALLBACK_UNARY_TARGETS,
+    _is_qparam_fallback_unary_target,
     _QPARAM_PRESERVING_UNARY_TARGETS,
     PropagateQParamForward,
 )
@@ -158,13 +158,17 @@ class QParamPreservingUnaryTargetsTest(unittest.TestCase):
 
     def test_max_pool_is_not_a_qparam_preserving_target(self) -> None:
         """Keep an independently calibrated MaxPool output domain."""
-        self.assertNotIn(
-            torch.ops.circle_custom.maxpool2d.default,
-            _QPARAM_PRESERVING_UNARY_TARGETS,
-        )
-        self.assertIn(
-            torch.ops.circle_custom.maxpool2d.default,
-            _QPARAM_FALLBACK_UNARY_TARGETS,
+
+        class FakeSchema:
+            name = "circle_custom::maxpool2d"
+
+        class FakeTarget:
+            _schema = FakeSchema()
+
+        self.assertNotIn(FakeTarget(), _QPARAM_PRESERVING_UNARY_TARGETS)
+        self.assertTrue(_is_qparam_fallback_unary_target(FakeTarget()))
+        self.assertFalse(
+            _is_qparam_fallback_unary_target(torch.ops.aten.constant_pad_nd.default)
         )
 
     def test_zero_padding_remains_a_qparam_preserving_target(self) -> None:

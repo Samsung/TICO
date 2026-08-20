@@ -38,7 +38,18 @@ from tico.utils.validate_args_kwargs import (
 
 
 _QPARAM_PRESERVING_UNARY_TARGETS = frozenset({torch.ops.aten.constant_pad_nd.default})
-_QPARAM_FALLBACK_UNARY_TARGETS = frozenset({torch.ops.circle_custom.maxpool2d.default})
+_QPARAM_FALLBACK_UNARY_SCHEMA_NAMES = frozenset({"circle_custom::maxpool2d"})
+
+
+def _is_qparam_fallback_unary_target(target: object) -> bool:
+    """Return whether ``target`` uses input qparams only as a fallback.
+
+    Custom operators are not guaranteed to be registered when ``tico`` imports
+    this module. Inspecting an existing FX target's schema avoids resolving
+    ``torch.ops.circle_custom.maxpool2d`` during module import.
+    """
+    schema = getattr(target, "_schema", None)
+    return getattr(schema, "name", None) in _QPARAM_FALLBACK_UNARY_SCHEMA_NAMES
 
 
 @trace_graph_diff_on_pass
@@ -86,7 +97,7 @@ class PropagateQParamForward(PassBase):
                 input_ = node.args[0]
                 if isinstance(input_, torch.fx.Node):
                     _propagate_qparam_if_possible(input_, node)
-            elif node.target in _QPARAM_FALLBACK_UNARY_TARGETS:
+            elif _is_qparam_fallback_unary_target(node.target):
                 input_ = node.args[0]
                 if isinstance(input_, torch.fx.Node) and QPARAM_KEY not in node.meta:
                     _propagate_qparam_if_possible(input_, node)
