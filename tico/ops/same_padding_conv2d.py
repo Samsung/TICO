@@ -30,10 +30,10 @@ class SamePaddingConv2d(nn.Conv2d):
     Circle custom Conv2D or DepthwiseConv2D operator with SAME padding.
 
     Gradient-based quantization algorithms need an autograd-enabled execution
-    path. When the activation input participates in a gradient graph, the
-    module therefore evaluates the same padding and convolution with native
-    ATen operators. Normal inference and export keep using the Circle custom
-    operators so the serialized graph contract is unchanged.
+    path. During eager execution, the module evaluates the same padding and
+    convolution with native ATen operators whenever the activation, replacement
+    weight, or bias participates in a gradient graph. Export keeps using the
+    Circle custom operators so the serialized graph contract is unchanged.
     """
 
     def __init__(
@@ -83,7 +83,16 @@ class SamePaddingConv2d(nn.Conv2d):
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
         """Run an autograd-safe native path or lower through a Circle custom op."""
-        if torch.is_grad_enabled() and input_.requires_grad:
+        eager_autograd = (
+            torch.is_grad_enabled()
+            and not torch.compiler.is_compiling()
+            and (
+                input_.requires_grad
+                or weight.requires_grad
+                or (bias is not None and bias.requires_grad)
+            )
+        )
+        if eager_autograd:
             return _native_same_padding_conv2d(
                 input_,
                 weight,

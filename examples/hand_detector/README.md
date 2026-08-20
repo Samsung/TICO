@@ -505,3 +505,41 @@ Every candidate starts from identical entry qparams. Checkpoint selection uses
 the selection subset, while probability/seed competition and whole-window
 commit/rollback use the acceptance subset. The JSON report records all
 candidate checkpoint histories, acceptance metrics, and the committed winner.
+
+## Validation-aware AdaRound
+
+AdaRound optimizes hard floor/ceil choices for calibrated Conv2d weights while
+keeping per-output-channel weight scale/zero-point and all activation qparams
+fixed. It uses the same train/selection/acceptance split and E:internal-full
+end-to-end guards as block reconstruction.
+
+Replay an accepted activation-reconstruction report before weight rounding:
+
+```bash
+python -m examples.hand_detector.analyze adaround \
+  --calibration-dir /path/to/npy \
+  --calibration-offset 0 \
+  --calibration-limit 200 \
+  --evaluation-dir /path/to/npy \
+  --evaluation-offset 200 \
+  --evaluation-limit 79 \
+  --require-disjoint \
+  --bits 8 \
+  --percentile 99.99 \
+  --max-samples 524288 \
+  --activation-report \
+    examples/hand_detector/reports/qdrop_simplified_recipe/simplified_split_20260803.json \
+  --groups stem feature_block_00 feature_block_28 \
+  --selection-count 40 \
+  --acceptance-count 40 \
+  --selection-score-output regressors \
+  --auxiliary-tolerance 0 \
+  --minimum-selection-improvement 1e-3 \
+  --minimum-acceptance-improvement 1e-3 \
+  --reconstruction-loss normalized-l1 \
+  --steps 1000
+```
+
+The activation report is optional. When omitted, AdaRound starts from the global
+percentile-calibrated W8A8 model. Only Conv2d rounding decisions are optimized;
+weight qparams, PReLU slopes, biases, and activation qparams remain fixed.
