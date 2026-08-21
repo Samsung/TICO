@@ -24,6 +24,7 @@ import numpy as np
 from tico.circle import (
     CircleBuilder,
     ConstantPool,
+    optimization_session_for,
     TensorContract,
     TensorValue,
     TensorValueCodec,
@@ -33,7 +34,6 @@ from tico.circle.passes import (
     CirclePassContext,
     CirclePassManager,
     CirclePassResult,
-    optimization_session_for,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass
 
