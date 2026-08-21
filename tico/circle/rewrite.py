@@ -220,13 +220,21 @@ def replace_tensor_uses_many(
     if not mapping:
         return RewriteStats()
 
+    from tico.circle.mutation import current_mutation
+
+    transaction = current_mutation(
+        model=model,
+        subgraph_index=subgraph_index,
+    )
     replacements_count = 0
-    for operator in as_list(subgraph.operators):
+    for operator_index, operator in enumerate(as_list(subgraph.operators)):
         inputs, changes = _replace_tensor_indices(
             getattr(operator, "inputs", None),
             mapping,
         )
         if changes:
+            if transaction is not None:
+                transaction.watch_operator(operator_index)
             operator.inputs = inputs
             replacements_count += changes
 
@@ -235,9 +243,12 @@ def replace_tensor_uses_many(
         mapping,
     )
     if changes:
+        if transaction is not None:
+            transaction.watch_subgraph_field("outputs")
         subgraph.outputs = outputs
         replacements_count += changes
 
+    signature_field_watched = False
     for signature in as_list(getattr(model, "signatureDefs", None)):
         if int(getattr(signature, "subgraphIndex", -1)) != subgraph_index:
             continue
@@ -246,9 +257,18 @@ def replace_tensor_uses_many(
             new_index = mapping.get(old_index)
             if new_index is None:
                 continue
+            if transaction is not None and not signature_field_watched:
+                transaction.watch_model_field("signatureDefs")
+                signature_field_watched = True
             tensor_map.tensorIndex = new_index
             replacements_count += 1
 
+    if replacements_count and transaction is None:
+        from tico.circle.session import existing_optimization_session
+
+        session = existing_optimization_session(model)
+        if session is not None:
+            session.mark_modified((subgraph_index,))
     return RewriteStats(remapped_references=replacements_count)
 
 

@@ -59,13 +59,14 @@ class DeadCodeEliminationPass(CirclePass):
             else self.subgraph_indices
         )
         removed_operators = 0
+        modified_subgraphs: set[int] = set()
         diagnostics: list[str] = []
         effect_analysis = self.effect_analysis or OperatorEffectAnalysis.from_model(
             document.model
         )
 
         for subgraph_index in indices:
-            graph = document.graph(subgraph_index)
+            graph = context.graph(document, subgraph_index)
             subgraph = graph.subgraph
             operators = as_list(subgraph.operators)
             if not operators:
@@ -110,6 +111,7 @@ class DeadCodeEliminationPass(CirclePass):
                     if operator_index in live
                 ]
                 removed_operators += len(dead)
+                modified_subgraphs.add(subgraph_index)
                 diagnostics.append(
                     f"Subgraph {subgraph_index}: removed operators {dead}."
                 )
@@ -119,6 +121,8 @@ class DeadCodeEliminationPass(CirclePass):
             input_cleanup = prune_unused_graph_inputs(document, indices)
 
         changes = removed_operators + input_cleanup.changes
+        if modified_subgraphs:
+            context.session(document).mark_modified(tuple(sorted(modified_subgraphs)))
         context.logger.debug(
             "Dead-code elimination removed %d operators and %d graph inputs.",
             removed_operators,

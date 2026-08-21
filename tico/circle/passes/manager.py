@@ -84,6 +84,7 @@ class CirclePassManager:
         executions: list[CirclePassExecution] = []
         if not self.passes:
             return CirclePassManagerResult(())
+        session = context.session(document)
 
         step = 0
         pass_index = 0
@@ -96,7 +97,19 @@ class CirclePassManager:
                 )
             circle_pass = self.passes[pass_index]
             context.logger.debug("Running Circle pass %s", circle_pass.name)
-            result = circle_pass.run(document, context)
+            revision_before = session.revision
+            try:
+                with session.activate():
+                    result = circle_pass.run(document, context)
+            except Exception:
+                # A legacy pass may have mutated directly before failing. Keep any
+                # surviving model state visible instead of retaining stale analyses.
+                session.mark_modified(rebuild_constant_pools=True)
+                raise
+            session.after_pass(
+                modified=result.modified,
+                revision_before=revision_before,
+            )
             executions.append(CirclePassExecution(circle_pass.name, result))
             step += 1
 

@@ -110,8 +110,13 @@ class CircleDocument:
         return subgraphs[index]
 
     def graph(self, index: int = 0) -> CircleGraph:
-        """Build a graph index for a subgraph."""
+        """Return an active session cache or build a standalone graph index."""
 
+        from tico.circle.session import active_optimization_session
+
+        session = active_optimization_session(self._model)
+        if session is not None:
+            return session.graph(index)
         return CircleGraph(self._model, index)
 
     def verify(self, *, raise_on_error: bool = True) -> VerificationReport:

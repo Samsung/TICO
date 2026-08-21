@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Generic, Iterable, Sequence, TypeVar
 
@@ -193,6 +193,7 @@ class RewritePlan:
     anchor: OperatorSnapshot
     tensors: tuple[TensorSnapshot, ...] = ()
     diagnostics: tuple[RewriteDiagnostic, ...] = ()
+    _session_revision: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def capture(
@@ -207,6 +208,9 @@ class RewritePlan:
     ) -> RewritePlan:
         """Create a plan from current graph state and optional subclass fields."""
 
+        from tico.circle.session import active_optimization_session
+
+        session = active_optimization_session(document.model)
         return cls(
             subgraph_index=int(subgraph_index),
             anchor=OperatorSnapshot.capture(
@@ -223,6 +227,7 @@ class RewritePlan:
                 for tensor_index in tensor_indices
             ),
             diagnostics=tuple(diagnostics),
+            _session_revision=(None if session is None else session.revision),
             **plan_fields,
         )
 
@@ -234,6 +239,13 @@ class RewritePlan:
 
     def validate(self, document: CircleDocument) -> None:
         """Reject application when any captured operator, tensor, or buffer changed."""
+
+        if self._session_revision is not None:
+            from tico.circle.session import active_optimization_session
+
+            session = active_optimization_session(document.model)
+            if session is not None and session.revision == self._session_revision:
+                return
 
         try:
             current_anchor = OperatorSnapshot.capture(
@@ -350,6 +362,16 @@ class CircleRulePass(CirclePass):
     ) -> CirclePassResult:
         """Apply one match, restart scanning, and repeat to a fixed point."""
 
+        with context.activate(document):
+            return self._run_active(document, context)
+
+    def _run_active(
+        self,
+        document: CircleDocument,
+        context: CirclePassContext,
+    ) -> CirclePassResult:
+        """Run while session services are visible to builders and helpers."""
+
         total_changes = 0
         applications = 0
         diagnostics: list[RewriteDiagnostic] = []
@@ -357,7 +379,7 @@ class CircleRulePass(CirclePass):
         while True:
             applied = False
             for subgraph_index in range(document.subgraph_count):
-                graph = document.graph(subgraph_index)
+                graph = context.graph(document, subgraph_index)
                 operator_count = graph.operator_count
                 for operator_index in range(operator_count):
                     for rule in self.rules:
@@ -386,11 +408,17 @@ class CircleRulePass(CirclePass):
                             )
 
                         plan.validate(document)
-                        application = rule.apply(document, plan, context)
-                        if not application.modified:
-                            raise CircleRewriteError(
-                                f"Rule {rule.name} matched but reported no change."
-                            )
+                        with context.mutation(
+                            document,
+                            subgraph_index=subgraph_index,
+                            plan=plan,
+                        ) as mutation:
+                            application = rule.apply(document, plan, context)
+                            if not application.modified:
+                                raise CircleRewriteError(
+                                    f"Rule {rule.name} matched but reported no change."
+                                )
+                            mutation.commit()
                         applications += 1
                         total_changes += application.changes
                         diagnostics.extend(

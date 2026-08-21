@@ -45,6 +45,7 @@ def prune_unused_graph_inputs(
     )
 
     removed_inputs = 0
+    modified_subgraphs: set[int] = set()
     diagnostics: list[str] = []
     for subgraph_index in indices:
         subgraph = document.subgraph(subgraph_index)
@@ -75,10 +76,17 @@ def prune_unused_graph_inputs(
             if tensor_index not in removed_set
         ]
         removed_inputs += len(removed)
+        modified_subgraphs.add(subgraph_index)
         diagnostics.append(
             f"Subgraph {subgraph_index}: removed graph inputs {removed}."
         )
 
+    if modified_subgraphs:
+        from tico.circle.session import existing_optimization_session
+
+        session = existing_optimization_session(document.model)
+        if session is not None:
+            session.mark_modified(tuple(sorted(modified_subgraphs)))
     return CirclePassResult(
         modified=removed_inputs > 0,
         changes=removed_inputs,
