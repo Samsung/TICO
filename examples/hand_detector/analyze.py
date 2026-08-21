@@ -25,6 +25,7 @@ from examples.hand_detector import (
     adaround as adaround_cli,
     block_reconstruction as block_reconstruction_cli,
     precision_ablation as precision_ablation_cli,
+    reverse_weight_precision as reverse_weight_precision_cli,
     weight_precision_sensitivity as weight_precision_sensitivity_cli,
 )
 from examples.hand_detector._support.analysis import (
@@ -224,6 +225,7 @@ def parse_args() -> argparse.Namespace:
     block_reconstruction_cli.add_subparser(subparsers)
     adaround_cli.add_subparser(subparsers)
     precision_ablation_cli.add_subparser(subparsers)
+    reverse_weight_precision_cli.add_subparser(subparsers)
     weight_precision_sensitivity_cli.add_subparser(subparsers)
 
     sensitivity = subparsers.add_parser(
@@ -348,6 +350,8 @@ def main() -> None:
         adaround_cli.run(args)
     elif args.command == "precision-ablation":
         precision_ablation_cli.run(args)
+    elif args.command == "reverse-weight-precision":
+        reverse_weight_precision_cli.run(args)
     elif args.command == "weight-precision-sensitivity":
         weight_precision_sensitivity_cli.run(args)
     elif args.command == "activation-sensitivity":
