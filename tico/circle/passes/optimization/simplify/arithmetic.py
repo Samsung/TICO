@@ -739,8 +739,3 @@ def _mul_dynamic_scalar(
             continue
         return dynamic_tensor, constant_tensor, info[0]
     return None
-
-
-# Backward-compatible class spelling. The implementation lives under the
-# semantic simplification name.
-CanonicalizeArithmeticPass = SimplifyArithmeticPass

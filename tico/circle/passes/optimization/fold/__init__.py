@@ -12,11 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from tico.circle.passes.optimization.fold.constant_subgraph import (
     ConstantFoldPlan,
     ConstantFoldPolicy,
-    FoldConstantSubgraphPass,
 )
 from tico.circle.passes.optimization.fold.evaluators import (
     ConstantEvaluation,
@@ -30,7 +28,6 @@ from tico.circle.passes.optimization.fold.evaluators import (
 from tico.circle.passes.optimization.fold.profiles import (
     ConstantFoldingProfile,
     FoldConstantsPass,
-    FoldHeavyConstantSubgraphPass,
     heavy_constant_evaluator_registry,
 )
 
@@ -43,8 +40,6 @@ __all__ = [
     "ConstantFoldPolicy",
     "ConstantFoldingProfile",
     "FoldConstantsPass",
-    "FoldConstantSubgraphPass",
-    "FoldHeavyConstantSubgraphPass",
     "HeavyConstantEvaluatorPolicy",
     "default_constant_evaluator_registry",
     "heavy_constant_evaluator_registry",

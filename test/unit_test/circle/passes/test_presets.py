@@ -29,10 +29,10 @@ from test.unit_test.circle.infrastructure_fixture import make_empty_document
 
 
 class CircleOptimizationPresetTest(unittest.TestCase):
-    """Check O1 pass ordering, scheduling, fresh instances, and idempotence."""
+    """Check O1 ordering, scheduling, fresh instances, and idempotence."""
 
-    def test_o1_uses_restart_fixed_point_then_one_compaction(self) -> None:
-        """Keep O1 optimization and finalization in distinct scheduling phases."""
+    def test_o1_uses_round_fixed_point_then_one_compaction(self) -> None:
+        """Run complete optimization rounds before one final compaction."""
 
         pipeline = create_o1_pipeline(maximum_steps=123)
 
@@ -42,7 +42,10 @@ class CircleOptimizationPresetTest(unittest.TestCase):
         )
         optimization = pipeline.phases[0].manager
         finalization = pipeline.phases[1].manager
-        self.assertIs(optimization.strategy, CirclePassStrategy.RESTART)
+        self.assertIs(
+            optimization.strategy,
+            CirclePassStrategy.UNTIL_NO_CHANGE,
+        )
         self.assertEqual(optimization.maximum_steps, 123)
         self.assertEqual(
             [circle_pass.__class__.__name__ for circle_pass in optimization.passes],

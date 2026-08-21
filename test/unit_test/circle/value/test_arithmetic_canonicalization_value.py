@@ -29,9 +29,9 @@ if _HAS_GENERATED_SCHEMA:
     from circle_schema import circle
 
     from tico.circle.passes import (
-        CanonicalizeArithmeticPass,
         CirclePassContext,
         CirclePassManager,
+        SimplifyArithmeticPass,
     )
     from tico.circle.passes.cleanup import DeadCodeEliminationPass
 
@@ -40,7 +40,7 @@ if _HAS_GENERATED_SCHEMA:
     from test.support.circle.value_test import CircleValueTestCase
 else:
     circle = None
-    CanonicalizeArithmeticPass = None
+    SimplifyArithmeticPass = None
     CirclePassContext = None
     CirclePassManager = None
     DeadCodeEliminationPass = None
@@ -122,7 +122,7 @@ class ArithmeticCanonicalizationValueTest(CircleValueTestCase):
             source,
             (input_value,),
             lambda document: CirclePassManager(
-                [CanonicalizeArithmeticPass(), DeadCodeEliminationPass()]
+                [SimplifyArithmeticPass(), DeadCodeEliminationPass()]
             ).run(
                 document,
                 CirclePassContext(verify_after_each_pass=True),

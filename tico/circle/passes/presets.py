@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -137,69 +136,6 @@ class O1PipelineOptions:
 
 
 @dataclass(frozen=True)
-class O1CompatibilityOptions:
-    """Backward-compatible adapter for the former mixed option object."""
-
-    heavy_constant_folding: bool = False
-    resolve_legacy_custom_ops: bool = False
-    legalize_dynamic_fully_connected: bool = False
-    fuse_transpose_conv_slice: bool = False
-    fuse_legacy_fc_gelu_fc: bool = False
-
-    def __post_init__(self) -> None:
-        """Normalize every legacy adapter switch to a plain bool."""
-
-        for field_name in (
-            "heavy_constant_folding",
-            "resolve_legacy_custom_ops",
-            "legalize_dynamic_fully_connected",
-            "fuse_transpose_conv_slice",
-            "fuse_legacy_fc_gelu_fc",
-        ):
-            object.__setattr__(
-                self,
-                field_name,
-                bool(getattr(self, field_name)),
-            )
-
-    @property
-    def enabled(self) -> bool:
-        """Return whether at least one former switch is selected."""
-
-        return any(
-            (
-                self.heavy_constant_folding,
-                self.resolve_legacy_custom_ops,
-                self.legalize_dynamic_fully_connected,
-                self.fuse_transpose_conv_slice,
-                self.fuse_legacy_fc_gelu_fc,
-            )
-        )
-
-    def to_pipeline_options(self) -> O1PipelineOptions:
-        """Translate legacy switches into the separated option domains."""
-
-        profile = (
-            ConstantFoldingProfile.HEAVY
-            if self.heavy_constant_folding
-            else ConstantFoldingProfile.BASIC
-        )
-        return O1PipelineOptions(
-            optimization=O1OptimizationOptions(
-                constant_folding_profile=profile,
-                fuse_transpose_conv_slice=self.fuse_transpose_conv_slice,
-            ),
-            legalization=O1LegalizationOptions(
-                dynamic_fully_connected=(self.legalize_dynamic_fully_connected)
-            ),
-            compatibility=O1LegacyCompatibilityOptions(
-                resolve_custom_ops=self.resolve_legacy_custom_ops,
-                fuse_fc_gelu_fc=self.fuse_legacy_fc_gelu_fc,
-            ),
-        )
-
-
-@dataclass(frozen=True)
 class CirclePassPipelinePhase:
     """Pair a stable phase name with one configured pass manager."""
 
@@ -279,23 +215,6 @@ class CirclePassPipeline:
         return CirclePassPipelineResult(results)
 
 
-def _selected_o1_options(
-    options: O1PipelineOptions | None,
-    compatibility: O1CompatibilityOptions | None,
-) -> O1PipelineOptions:
-    """Select native options or translate the legacy adapter."""
-
-    if options is not None and compatibility is not None:
-        raise ValueError(
-            "Specify either options or the legacy compatibility adapter, " "not both."
-        )
-    if options is not None:
-        return options
-    if compatibility is not None:
-        return compatibility.to_pipeline_options()
-    return O1PipelineOptions()
-
-
 def _phase(
     name: str,
     passes: Iterable[CirclePass],
@@ -319,11 +238,10 @@ def create_o1_pipeline(
     *,
     maximum_steps: int = 1000,
     options: O1PipelineOptions | None = None,
-    compatibility: O1CompatibilityOptions | None = None,
 ) -> CirclePassPipeline:
-    """Create O1 with explicitly separated transformation domains."""
+    """Create O1 with separated domains and round-based fixed-point scheduling."""
 
-    selected = _selected_o1_options(options, compatibility)
+    selected = options or O1PipelineOptions()
     phases: list[CirclePassPipelinePhase] = []
 
     compatibility_passes: list[CirclePass] = []
@@ -358,9 +276,9 @@ def create_o1_pipeline(
         EliminateIdentityOpsPass(),
         SimplifyArithmeticPass(),
     ]
-    # Keep the legacy FC-GELU-FC recognizer at its former semantic
-    # position. It is a compatibility-controlled transform, but moving
-    # it before canonicalization would change which patterns it sees.
+    # Keep the legacy FC-GELU-FC recognizer at its pattern-sensitive position.
+    # It is controlled by compatibility options, but moving it before generic
+    # canonicalization would change which decompositions it can observe.
     if selected.compatibility.fuse_fc_gelu_fc:
         optimization_passes.append(FuseLegacyFCGeluFCPass())
     optimization_passes.append(FuseCompositeOpsPass())
@@ -378,7 +296,7 @@ def create_o1_pipeline(
         _phase(
             "optimize",
             optimization_passes,
-            strategy=CirclePassStrategy.RESTART,
+            strategy=CirclePassStrategy.UNTIL_NO_CHANGE,
             maximum_steps=maximum_steps,
         )
     )
@@ -397,7 +315,6 @@ def create_optimization_preset(
     *,
     maximum_steps: int = 1000,
     options: O1PipelineOptions | None = None,
-    compatibility: O1CompatibilityOptions | None = None,
 ) -> CirclePassPipeline:
     """Create a supported optimization preset by enum or CLI value."""
 
@@ -406,6 +323,5 @@ def create_optimization_preset(
         return create_o1_pipeline(
             maximum_steps=maximum_steps,
             options=options,
-            compatibility=compatibility,
         )
     raise AssertionError(f"Unhandled Circle optimization preset: {selected.value}.")

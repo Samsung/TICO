@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from __future__ import annotations
 
+import importlib
 import unittest
 
+import tico.circle.passes.optimization.fold as fold
+import tico.circle.passes.optimization.simplify as simplify
 from tico.circle.passes.optimization.canonicalize import CanonicalizeEquivalentOpsPass
 from tico.circle.passes.optimization.compatibility import ResolveLegacyCustomOpsPass
 from tico.circle.passes.optimization.legalize import LegalizeDynamicFullyConnectedPass
@@ -24,59 +26,40 @@ from tico.circle.passes.optimization.simplify import (
     EliminateIdentityOpsPass,
     SimplifyArithmeticPass,
 )
-from tico.circle.passes.optimization.simplify.arithmetic import (
-    CanonicalizeArithmeticPass as LegacyArithmetic,
-)
-from tico.circle.passes.optimization.simplify.identity_ops import (
-    RemoveNoOpOperatorsPass as LegacyIdentity,
-)
 
 
 class CirclePassTaxonomyTest(unittest.TestCase):
-    """Keep the semantic package layout and compatibility imports stable."""
+    """Keep one semantic package layout without forwarding compatibility shims."""
 
     def test_semantic_packages_export_expected_passes(self) -> None:
-        """Expose the new taxonomy through stable package imports."""
+        """Expose canonicalization, simplification, compatibility, and legalization."""
 
-        self.assertEqual(
-            CanonicalizeEquivalentOpsPass.__name__,
-            "CanonicalizeEquivalentOpsPass",
+        values = (
+            CanonicalizeEquivalentOpsPass,
+            EliminateIdentityOpsPass,
+            SimplifyArithmeticPass,
+            ResolveLegacyCustomOpsPass,
+            LegalizeDynamicFullyConnectedPass,
         )
-        self.assertEqual(
-            EliminateIdentityOpsPass.__name__,
-            "EliminateIdentityOpsPass",
-        )
-        self.assertEqual(
-            SimplifyArithmeticPass.__name__,
-            "SimplifyArithmeticPass",
-        )
-        self.assertEqual(
-            ResolveLegacyCustomOpsPass.__name__,
-            "ResolveLegacyCustomOpsPass",
-        )
-        self.assertEqual(
-            LegalizeDynamicFullyConnectedPass.__name__,
-            "LegalizeDynamicFullyConnectedPass",
-        )
-        self.assertIs(LegacyArithmetic, SimplifyArithmeticPass)
-        self.assertIs(LegacyIdentity, EliminateIdentityOpsPass)
+        self.assertTrue(all(isinstance(value, type) for value in values))
+        self.assertFalse(hasattr(simplify, "CanonicalizeArithmeticPass"))
+        self.assertFalse(hasattr(simplify, "RemoveNoOpOperatorsPass"))
+        self.assertFalse(hasattr(fold, "FoldConstantSubgraphPass"))
+        self.assertFalse(hasattr(fold, "FoldHeavyConstantSubgraphPass"))
 
-    def test_former_module_paths_forward_to_same_implementations(self) -> None:
-        """Keep the former module paths as identity-preserving shims."""
+    def test_former_module_paths_are_removed(self) -> None:
+        """Reject imports through the temporary PR C forwarding packages."""
 
-        from tico.circle.passes.optimization.canon.dynamic_fully_connected import (
-            LegalizeDynamicFullyConnectedPass as LegacyLegalize,
+        modules = (
+            "tico.circle.passes.optimization.canon",
+            "tico.circle.passes.optimization.fusion",
+            "tico.circle.passes.optimization.remove",
+            "tico.circle.passes.optimization.fold.heavy",
         )
-        from tico.circle.passes.optimization.canon.equivalent_ops import (
-            CanonicalizeEquivalentOpsPass as LegacyCanonicalize,
-        )
-        from tico.circle.passes.optimization.canon.legacy_custom_ops import (
-            ResolveLegacyCustomOpsPass as LegacyResolve,
-        )
-
-        self.assertIs(LegacyCanonicalize, CanonicalizeEquivalentOpsPass)
-        self.assertIs(LegacyResolve, ResolveLegacyCustomOpsPass)
-        self.assertIs(LegacyLegalize, LegalizeDynamicFullyConnectedPass)
+        for module_name in modules:
+            with self.subTest(module_name=module_name):
+                with self.assertRaises(ModuleNotFoundError):
+                    importlib.import_module(module_name)
 
 
 if __name__ == "__main__":

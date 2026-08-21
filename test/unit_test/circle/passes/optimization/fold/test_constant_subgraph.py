@@ -21,15 +21,12 @@ import numpy as np
 
 from tico.circle.analysis import TensorContract
 from tico.circle.builder import CircleBuilder
-from tico.circle.passes import (
-    CirclePassContext,
-    ConstantFoldPolicy,
-    FoldConstantSubgraphPass,
-)
+from tico.circle.passes import CirclePassContext, FoldConstantsPass
 from tico.circle.passes.optimization.fold import (
     ConstantEvaluation,
     ConstantEvaluator,
     ConstantEvaluatorRegistry,
+    ConstantFoldPolicy,
 )
 from tico.circle.passes.optimization.fold.evaluators import (
     BinaryElementwiseEvaluator,
@@ -174,7 +171,7 @@ class ConstantSubgraphFoldTest(unittest.TestCase):
     def _pass(self, *, policy=None, registry=None):
         """Create a pass using fake Object API tables and explicit registries."""
 
-        return FoldConstantSubgraphPass(
+        return FoldConstantsPass(
             policy=policy,
             evaluator_registry=registry or self.registry,
             codec=self.codec,
@@ -903,7 +900,7 @@ class ConstantSubgraphFoldTest(unittest.TestCase):
         ]
 
         failing_factory = FailSecondBufferFactory()
-        constant_fold = FoldConstantSubgraphPass(
+        constant_fold = FoldConstantsPass(
             evaluator_registry=registry,
             codec=self.codec,
             object_factory=failing_factory,

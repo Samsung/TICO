@@ -1,17 +1,42 @@
 # Performance Benchmarks
 
-This directory contains benchmark scripts that verify the performance requirements
-specified in **docs/system_test.md**:
+This directory contains explicit, opt-in performance scripts. They are not part of the
+model-independent unit-test suite.
 
-* **RNF‑1 – Conversion Speed**
-* **RNF‑2 – Model Size**
+## Conversion speed and model size
 
-Both requirements can be tested with:
+The existing model benchmark covers the performance requirements documented in
+`docs/system_test.md`:
 
 ```bash
 python3 -m test.performance.benchmark_perf
 ```
 
-The test uses baseline models (`Llama-3.2-1B` and `Llama-3.2-3B`).
+It uses the configured Llama baseline models and therefore requires their model-test
+dependencies.
 
-Feel free to adjust thresholds or models as needed.
+## Full Circle O1 scheduler benchmark
+
+Use a locally generated or downloaded full `.circle` artifact to compare the former
+restart scheduler with O1's round-based fixed-point scheduler:
+
+```bash
+python3 -m test.performance.benchmark_circle_optimizer \
+  model.circle \
+  --repeat 3
+```
+
+The benchmark clones the input for every run, verifies each output, and requires the
+two scheduler variants to produce byte-identical Circle binaries. It reports elapsed
+time, pass-execution counts, the reduction in pass invocations, and the output SHA-256.
+No model artifact is stored in this repository.
+
+Heavy constant folding and optional O1 transforms can be selected explicitly:
+
+```bash
+python3 -m test.performance.benchmark_circle_optimizer \
+  model.circle \
+  --constant-folding-profile heavy \
+  --fuse-transpose-conv-slice \
+  --json
+```

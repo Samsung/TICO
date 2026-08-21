@@ -35,6 +35,22 @@ class ChangeDescriptionOnce(CirclePass):
         return CirclePassResult(modified=False)
 
 
+class SetDescriptionTokenOnce(CirclePass):
+    """Set one independent character in a synthetic scheduler state."""
+
+    def __init__(self, token_index: int) -> None:
+        self.token_index = int(token_index)
+
+    def run(self, document, context):
+        del context
+        tokens = list(document.model.description)
+        if tokens[self.token_index] == "1":
+            return CirclePassResult(modified=False)
+        tokens[self.token_index] = "1"
+        document.model.description = "".join(tokens)
+        return CirclePassResult(modified=True, changes=1)
+
+
 class CirclePassManagerTest(unittest.TestCase):
     def test_until_no_change_reaches_a_fixed_point(self):
         document = make_test_document()
@@ -51,3 +67,39 @@ class CirclePassManagerTest(unittest.TestCase):
         self.assertTrue(result.modified)
         self.assertEqual(len(result.executions), 2)
         self.assertEqual(document.model.description, "changed")
+
+    def test_round_scheduling_matches_restart_with_fewer_pass_invocations(self):
+        """Reach the same fixed point without triangular restart rescanning."""
+
+        pass_count = 8
+        restart_document = make_test_document()
+        restart_document.model.description = "0" * pass_count
+        round_document = restart_document.clone()
+        restart_passes = [SetDescriptionTokenOnce(index) for index in range(pass_count)]
+        round_passes = [SetDescriptionTokenOnce(index) for index in range(pass_count)]
+        context = CirclePassContext(verify_after_each_pass=False)
+
+        restart_result = CirclePassManager(
+            restart_passes,
+            strategy=CirclePassStrategy.RESTART,
+        ).run(restart_document, context)
+        round_result = CirclePassManager(
+            round_passes,
+            strategy=CirclePassStrategy.UNTIL_NO_CHANGE,
+        ).run(round_document, CirclePassContext(verify_after_each_pass=False))
+
+        self.assertEqual(restart_document.model.description, "1" * pass_count)
+        self.assertEqual(
+            round_document.model.description,
+            restart_document.model.description,
+        )
+        self.assertEqual(round_result.changes, restart_result.changes)
+        self.assertEqual(len(round_result.executions), pass_count * 2)
+        self.assertLess(
+            len(round_result.executions),
+            len(restart_result.executions),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

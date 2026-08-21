@@ -472,8 +472,3 @@ class EliminateIdentityOpsPass(CirclePass):
             self.rules,
             maximum_rewrites=self.maximum_rewrites,
         ).run(document, context)
-
-
-# Backward-compatible class spelling. The implementation lives under the
-# semantic identity-elimination name.
-RemoveNoOpOperatorsPass = EliminateIdentityOpsPass

@@ -12,17 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
 from __future__ import annotations
 
 import unittest
 
 from tico.circle.passes import (
+    CirclePassStrategy,
     ConstantFoldingProfile,
     create_o1_pipeline,
-    create_optimization_preset,
     FoldConstantsPass,
-    O1CompatibilityOptions,
     O1LegacyCompatibilityOptions,
     O1LegalizationOptions,
     O1OptimizationOptions,
@@ -35,17 +33,22 @@ def _phase_pass_names(pipeline, phase_name: str) -> list[str]:
     return [circle_pass.__class__.__name__ for circle_pass in phase.manager.passes]
 
 
-class O1CompatibilityPresetTest(unittest.TestCase):
-    """Check separated O1 option domains and the legacy adapter."""
+class O1OptionsTest(unittest.TestCase):
+    """Check the separated native O1 option domains."""
 
-    def test_default_o1_sequence_uses_semantic_pass_names(self) -> None:
-        """Use semantic pass names without enabling optional phases."""
+    def test_default_o1_uses_semantic_passes_and_round_scheduling(self) -> None:
+        """Use the semantic pass set without enabling optional phases."""
 
         pipeline = create_o1_pipeline()
 
         self.assertEqual(
             [phase.name for phase in pipeline.phases],
             ["optimize", "compact"],
+        )
+        optimize = next(phase for phase in pipeline.phases if phase.name == "optimize")
+        self.assertIs(
+            optimize.manager.strategy,
+            CirclePassStrategy.UNTIL_NO_CHANGE,
         )
         self.assertEqual(
             _phase_pass_names(pipeline, "optimize"),
@@ -115,8 +118,8 @@ class O1CompatibilityPresetTest(unittest.TestCase):
         )
         self.assertIs(fold_pass.profile, ConstantFoldingProfile.HEAVY)
 
-    def test_legacy_fusion_keeps_its_previous_optimize_position(self) -> None:
-        """Do not move pattern-sensitive legacy fusion before canonicalization."""
+    def test_legacy_fusion_keeps_its_pattern_sensitive_position(self) -> None:
+        """Do not move the legacy recognizer before generic canonicalization."""
 
         pipeline = create_o1_pipeline(
             options=O1PipelineOptions(
@@ -126,10 +129,6 @@ class O1CompatibilityPresetTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            [phase.name for phase in pipeline.phases],
-            ["optimize", "compact"],
-        )
         names = _phase_pass_names(pipeline, "optimize")
         self.assertLess(
             names.index("SimplifyArithmeticPass"),
@@ -139,42 +138,6 @@ class O1CompatibilityPresetTest(unittest.TestCase):
             names.index("FuseLegacyFCGeluFCPass"),
             names.index("FuseCompositeOpsPass"),
         )
-
-    def test_legacy_adapter_preserves_all_former_switches(self) -> None:
-        """Translate every former mixed switch into native options."""
-
-        legacy = O1CompatibilityOptions(
-            heavy_constant_folding=True,
-            resolve_legacy_custom_ops=True,
-            legalize_dynamic_fully_connected=True,
-            fuse_transpose_conv_slice=True,
-            fuse_legacy_fc_gelu_fc=True,
-        )
-
-        pipeline = create_optimization_preset(
-            "o1",
-            compatibility=legacy,
-        )
-
-        self.assertTrue(legacy.enabled)
-        self.assertEqual(
-            [phase.name for phase in pipeline.phases],
-            ["compatibility", "legalize", "optimize", "compact"],
-        )
-
-    def test_options_and_legacy_adapter_are_mutually_exclusive(self) -> None:
-        """Reject ambiguous native and legacy option selection."""
-
-        with self.assertRaisesRegex(ValueError, "either options"):
-            create_o1_pipeline(
-                options=O1PipelineOptions(),
-                compatibility=O1CompatibilityOptions(),
-            )
-
-    def test_default_compatibility_options_are_disabled(self) -> None:
-        """Keep the legacy adapter disabled by default."""
-
-        self.assertFalse(O1CompatibilityOptions().enabled)
 
 
 if __name__ == "__main__":
