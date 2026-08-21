@@ -153,6 +153,18 @@ def _builtin_code(model, operator) -> int:
     return model.operatorCodes[operator.opcodeIndex].builtinCode
 
 
+def _affine_qparams(tensor) -> tuple[tuple[float, ...], tuple[int, ...], int]:
+    """Return one serialized tensor's affine quantization tuple."""
+    quantization = tensor.quantization
+    if quantization is None:
+        raise AssertionError("Expected tensor quantization metadata.")
+    return (
+        tuple(quantization.scale),
+        tuple(quantization.zeroPoint),
+        int(quantization.quantizedDimension),
+    )
+
+
 class CNNQuantizedExportTest(unittest.TestCase):
     """Verify quantized CNN Circle types, qparams, and resize options."""
 
@@ -271,12 +283,17 @@ class CNNQuantizedExportTest(unittest.TestCase):
                     self.assertIsNotNone(tensor.quantization)
 
     def test_pool_and_pad_shortcut_remains_quantized(self) -> None:
-        """Propagate quantized qparams through MaxPool2D and zero padding."""
+        """Preserve independent MaxPool qparams and quantized padding."""
+        pattern = torch.tensor(
+            [[-10.0, -9.0], [-8.0, 1.0]],
+            dtype=torch.float32,
+        )
+        tiled = pattern.repeat(4, 4)
+        sample = tiled.unsqueeze(0).unsqueeze(0).repeat(1, 3, 1, 1)
         for bit_width in (8, 16):
             with self.subTest(bit_width=bit_width):
                 torch.manual_seed(20260730)
                 model = ResidualDownsampleCNN().eval()
-                sample = torch.randn(1, 3, 8, 8)
                 prepared = prepare(model, _quant_config(bit_width), inplace=True)
                 with torch.inference_mode():
                     prepared(sample)
@@ -289,7 +306,13 @@ class CNNQuantizedExportTest(unittest.TestCase):
                     if bit_width == 8
                     else circle.TensorType.TensorType.INT16
                 )
+                producers = {
+                    output: operator
+                    for operator in graph.operators
+                    for output in operator.outputs
+                }
                 checked = 0
+                max_pool_checked = 0
                 for operator in graph.operators:
                     builtin = _builtin_code(exported, operator)
                     if builtin not in {
@@ -303,8 +326,21 @@ class CNNQuantizedExportTest(unittest.TestCase):
                     self.assertEqual(data_output.type, expected_type)
                     self.assertIsNotNone(data_input.quantization)
                     self.assertIsNotNone(data_output.quantization)
+                    if builtin == circle.BuiltinOperator.BuiltinOperator.MAX_POOL_2D:
+                        self.assertNotEqual(
+                            _affine_qparams(data_input),
+                            _affine_qparams(data_output),
+                        )
+                        producer = producers.get(operator.inputs[0])
+                        if producer is not None:
+                            self.assertNotEqual(
+                                _builtin_code(exported, producer),
+                                circle.BuiltinOperator.BuiltinOperator.QUANTIZE,
+                            )
+                        max_pool_checked += 1
                     checked += 1
                 self.assertEqual(checked, 2)
+                self.assertEqual(max_pool_checked, 1)
 
     def test_uint8_circle_export(self) -> None:
         """Export the CNN as a fully quantized UINT8 Circle model."""

@@ -28,7 +28,7 @@ from tico.quantization.wrapq.wrappers.registry import register
 
 @register(nn.MaxPool2d)
 class QuantMaxPool2d(QuantModuleBase):
-    """Use one shared activation observer on both sides of MaxPool2d."""
+    """Fake-quantize MaxPool2d input and output with independent qparams."""
 
     def __init__(
         self,
@@ -37,24 +37,20 @@ class QuantMaxPool2d(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ) -> None:
-        """Create one shared activation quantization domain for MaxPool2d."""
+        """Create independent activation domains on both sides of MaxPool2d."""
         super().__init__(qcfg, fp_name=fp_name)
         if fp.return_indices:
             raise ValueError("QuantMaxPool2d does not support return_indices=True.")
         self.module = fp
         self.obs_act_in = self._make_obs("act_in")
-
-    @property
-    def obs_act_out(self):
-        """Return the shared output observer alias."""
-        return self.obs_act_in
+        self.obs_act_out = self._make_obs("act_out")
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        """Execute MaxPool2d with identical input and output qparams."""
+        """Execute MaxPool2d and quantize its input and output independently."""
         input_q = self._fq(input_, self.obs_act_in)
         output = self.module(input_q)
-        return self._fq(output, self.obs_act_in)
+        return self._fq(output, self.obs_act_out)
 
     def _all_observers(self):
-        """Return the single shared activation observer."""
-        return (self.obs_act_in,)
+        """Return the independent input and output activation observers."""
+        return self.obs_act_in, self.obs_act_out

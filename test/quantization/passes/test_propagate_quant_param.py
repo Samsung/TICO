@@ -23,7 +23,11 @@ from tico.passes.decompose_fake_quantize_tensor_qparams import (
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
-from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
+from tico.quantization.passes.propagate_qparam_forward import (
+    _is_qparam_fallback_unary_target,
+    _QPARAM_PRESERVING_UNARY_TARGETS,
+    PropagateQParamForward,
+)
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.compat.torch import export_produces_slice
 
@@ -147,6 +151,32 @@ class SingleOpPropagateQParamForwardTest(unittest.TestCase):
         self.assertTrue(self.target.meta[QPARAM_KEY].scale == [self.scale])
         self.assertTrue(self.target.meta[QPARAM_KEY].zero_point == [self.zp])
         self.assertTrue(self.target.meta[QPARAM_KEY].dtype == self.dtype)
+
+
+class QParamPreservingUnaryTargetsTest(unittest.TestCase):
+    """Verify backend-specific forward-qparam propagation."""
+
+    def test_max_pool_is_not_a_qparam_preserving_target(self) -> None:
+        """Keep an independently calibrated MaxPool output domain."""
+
+        class FakeSchema:
+            name = "circle_custom::maxpool2d"
+
+        class FakeTarget:
+            _schema = FakeSchema()
+
+        self.assertNotIn(FakeTarget(), _QPARAM_PRESERVING_UNARY_TARGETS)
+        self.assertTrue(_is_qparam_fallback_unary_target(FakeTarget()))
+        self.assertFalse(
+            _is_qparam_fallback_unary_target(torch.ops.aten.constant_pad_nd.default)
+        )
+
+    def test_zero_padding_remains_a_qparam_preserving_target(self) -> None:
+        """Retain the shared-domain backend contract for Pad."""
+        self.assertIn(
+            torch.ops.aten.constant_pad_nd.default,
+            _QPARAM_PRESERVING_UNARY_TARGETS,
+        )
 
 
 class PermuteModule(torch.nn.Module):

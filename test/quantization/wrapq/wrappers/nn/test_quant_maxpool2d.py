@@ -48,20 +48,46 @@ def _quant_config(bit_width: int) -> PTQConfig:
 
 
 class QuantMaxPool2dTest(unittest.TestCase):
-    """Verify registration and shared MaxPool2d qparams."""
+    """Verify registration and independent MaxPool2d activation domains."""
 
     def test_registry_maps_maxpool2d(self) -> None:
         """Resolve the native MaxPool2d wrapper."""
         self.assertIs(lookup(nn.MaxPool2d), QuantMaxPool2d)
 
-    def test_input_and_output_share_one_observer(self) -> None:
-        """Expose the exact same observer for both sides of MaxPool2d."""
+    def test_input_and_output_use_distinct_observers(self) -> None:
+        """Expose separate observer objects for the input and output tensors."""
         wrapper = QuantMaxPool2d(
             nn.MaxPool2d(kernel_size=2, stride=2),
             qcfg=_quant_config(8),
         )
-        self.assertIs(wrapper.obs_act_in, wrapper.obs_act_out)
-        self.assertEqual(len(tuple(wrapper._all_observers())), 1)
+        self.assertIsNot(wrapper.obs_act_in, wrapper.obs_act_out)
+        self.assertEqual(wrapper.obs_act_in.name, "act_in")
+        self.assertEqual(wrapper.obs_act_out.name, "act_out")
+        self.assertEqual(len(tuple(wrapper._all_observers())), 2)
+
+    def test_calibration_produces_independent_qparams(self) -> None:
+        """Calibrate each side from its own observed value distribution."""
+        wrapper = QuantMaxPool2d(
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            qcfg=_quant_config(8),
+        )
+        input_ = torch.tensor([[[[-8.0, -7.0], [-6.0, 4.0]]]])
+
+        wrapper.enable_calibration()
+        output = wrapper(input_)
+
+        torch.testing.assert_close(output, torch.tensor([[[[4.0]]]]))
+        torch.testing.assert_close(wrapper.obs_act_in.min_val, torch.tensor(-8.0))
+        torch.testing.assert_close(wrapper.obs_act_in.max_val, torch.tensor(4.0))
+        torch.testing.assert_close(wrapper.obs_act_out.min_val, torch.tensor(4.0))
+        torch.testing.assert_close(wrapper.obs_act_out.max_val, torch.tensor(4.0))
+
+        input_scale, input_zero_point = wrapper.obs_act_in.compute_qparams()
+        output_scale, output_zero_point = wrapper.obs_act_out.compute_qparams()
+        self.assertFalse(
+            torch.equal(input_scale, output_scale)
+            and torch.equal(input_zero_point, output_zero_point)
+        )
 
     def test_uint8_int16_execution(self) -> None:
         """Calibrate and execute UINT8 and INT16 quantization."""

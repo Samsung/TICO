@@ -191,7 +191,7 @@ class HandDetectorJointWindowTest(unittest.TestCase):
 
         self.assertEqual(_site_tensor_domain(site, detector), (0,))
 
-    def test_shared_operator_domain_does_not_bridge_distinct_qparams(self) -> None:
+    def test_max_pool_input_and_output_use_distinct_tensor_domains(self) -> None:
         detector = SimpleNamespace(
             operations=(
                 {"name": "PRELU", "inputs": [0], "outputs": [1], "config": {}},
@@ -210,12 +210,17 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             ),
         )
         window = ReconstructionWindow(
-            name="shared-domain",
-            group_names=("shared-domain",),
+            name="independent-pool-domains",
+            group_names=("independent-pool-domains",),
             operation_positions=(0, 1, 2),
             input_tensor_ids=(0,),
             output_tensor_ids=(2, 3),
-            site_paths=("producer", "consumer", "shared"),
+            site_paths=(
+                "producer",
+                "consumer",
+                "pool_input",
+                "pool_output",
+            ),
         )
         sites = (
             SimpleNamespace(
@@ -231,10 +236,16 @@ class HandDetectorJointWindowTest(unittest.TestCase):
                 role=SiteRole.ACTIVATION_INPUT,
             ),
             SimpleNamespace(
-                path="shared",
+                path="pool_input",
                 module=SimpleNamespace(fp_name="detector.layers.2"),
                 module_path="detector.layers.2",
                 role=SiteRole.ACTIVATION_INPUT,
+            ),
+            SimpleNamespace(
+                path="pool_output",
+                module=SimpleNamespace(fp_name="detector.layers.2"),
+                module_path="detector.layers.2",
+                role=SiteRole.ACTIVATION_OUTPUT,
             ),
         )
         with patch(
@@ -248,9 +259,12 @@ class HandDetectorJointWindowTest(unittest.TestCase):
 
         self.assertEqual(len(groups), 2)
         self.assertEqual(groups[0].name, "tensor_1")
-        self.assertEqual(groups[0].site_paths, ("consumer", "producer"))
-        self.assertEqual(groups[1].name, "tensor_1_3")
-        self.assertEqual(groups[1].site_paths, ("shared",))
+        self.assertEqual(
+            groups[0].site_paths,
+            ("consumer", "pool_input", "producer"),
+        )
+        self.assertEqual(groups[1].name, "tensor_3")
+        self.assertEqual(groups[1].site_paths, ("pool_output",))
 
     def test_builder_accepts_consecutive_joint_groups(self) -> None:
         groups = (
