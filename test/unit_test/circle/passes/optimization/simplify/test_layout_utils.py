@@ -29,20 +29,17 @@ class LayoutUtilsTest(unittest.TestCase):
     """Test helpers retained after removing the legacy layout pass module."""
 
     def test_retained_region_modules_import_without_legacy_layout_ops(self) -> None:
-        """Import both retained modules after deleting the legacy pass module."""
+        """Import both retained modules after deleting the legacy pass package."""
 
         importlib.import_module(
-            "tico.circle.passes.optimization.remove." "transpose_bounded_layout_region"
+            "tico.circle.passes.optimization.simplify.transpose_region"
         )
         importlib.import_module(
-            "tico.circle.passes.optimization.remove."
-            "transpose_bounded_layout_region_rules"
+            "tico.circle.passes.optimization.simplify.transpose_region_rules"
         )
 
         self.assertIsNone(
-            importlib.util.find_spec(
-                "tico.circle.passes.optimization.remove.layout_ops"
-            )
+            importlib.util.find_spec("tico.circle.passes.optimization.remove")
         )
 
     def test_inverse_permutations_are_recognized(self) -> None:
