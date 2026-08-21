@@ -29,8 +29,8 @@ from tico.circle.operations import (
     extract_by_tensor_patterns,
     SignaturePolicy,
 )
+
 from tico.circle.passes import (
-    CanonicalizeArithmeticPass,
     CanonicalizeEquivalentOpsPass,
     CircleOptimizationPreset,
     CirclePass,
@@ -38,18 +38,22 @@ from tico.circle.passes import (
     CirclePassManager,
     CirclePassStrategy,
     CommonSubexpressionEliminationPass,
+    ConstantFoldingProfile,
     create_optimization_preset,
+    EliminateIdentityOpsPass,
     EliminateTransposeBoundedLayoutRegionPass,
-    FoldConstantSubgraphPass,
-    FoldHeavyConstantSubgraphPass,
+    FoldConstantsPass,
     FuseCompositeOpsPass,
     FuseLegacyFCGeluFCPass,
     FuseLinearOpsPass,
     FuseTransposeConvSlicePass,
     LegalizeDynamicFullyConnectedPass,
-    O1CompatibilityOptions,
-    RemoveNoOpOperatorsPass,
+    O1LegacyCompatibilityOptions,
+    O1LegalizationOptions,
+    O1OptimizationOptions,
+    O1PipelineOptions,
     ResolveLegacyCustomOpsPass,
+    SimplifyArithmeticPass,
     SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
@@ -58,27 +62,35 @@ from tico.circle.selector import parse_operator_spec
 
 LOGGER = logging.getLogger("tico.circle.cli")
 
+
 _DEFAULT_PASSES = "dce,compact"
 _PASS_REGISTRY: dict[str, type[CirclePass]] = {
-    "canonicalize-arithmetic": CanonicalizeArithmeticPass,
     "canonicalize-equivalent-ops": CanonicalizeEquivalentOpsPass,
     "cse": CommonSubexpressionEliminationPass,
+    "eliminate-identity-ops": EliminateIdentityOpsPass,
     "eliminate-transpose-bounded-layout-region": (
         EliminateTransposeBoundedLayoutRegionPass
     ),
-    "fold-constant-subgraph": FoldConstantSubgraphPass,
-    "fold-heavy-constant-subgraph": FoldHeavyConstantSubgraphPass,
+    "fold-constants": FoldConstantsPass,
     "fuse-composite-ops": FuseCompositeOpsPass,
     "fuse-legacy-fc-gelu-fc": FuseLegacyFCGeluFCPass,
     "fuse-linear-ops": FuseLinearOpsPass,
     "fuse-transpose-conv-slice": FuseTransposeConvSlicePass,
     "legalize-dynamic-fully-connected": LegalizeDynamicFullyConnectedPass,
-    "remove-no-op-operators": RemoveNoOpOperatorsPass,
     "resolve-legacy-custom-ops": ResolveLegacyCustomOpsPass,
+    "simplify-arithmetic": SimplifyArithmeticPass,
     "simplify-reduction-ops": SimplifyReductionOpsPass,
     "simplify-view-ops": SimplifyViewOpsPass,
     "dce": DeadCodeEliminationPass,
     "compact": CompactIndicesPass,
+}
+_DEPRECATED_PASS_NAMES: dict[str, str] = {
+    "canonicalize-arithmetic": "simplify-arithmetic",
+    "fold-constant-subgraph": "fold-constants",
+    "fold-heavy-constant-subgraph": (
+        "fold-constants with --constant-folding-profile heavy"
+    ),
+    "remove-no-op-operators": "eliminate-identity-ops",
 }
 
 
@@ -215,35 +227,43 @@ def _build_parser() -> argparse.ArgumentParser:
         "--strategy",
         choices=[strategy.value for strategy in CirclePassStrategy],
         help=(
-            "Pass scheduling strategy for --passes. Use 'restart' when an earlier "
-            "pass can become applicable after a later rewrite. Presets own their "
-            "scheduling and cannot be combined with this option."
+            "Pass scheduling strategy for --passes. Use 'until-no-change' for "
+            "complete rounds or 'restart' for legacy restart behavior. "
+            "Presets own their scheduling and cannot be combined with this option."
         ),
     )
-    compatibility = optimize_parser.add_argument_group(
-        "O1 heavy and compatibility options"
+
+    optimization_options = optimize_parser.add_argument_group(
+        "O1 and constant-folding optimization options"
     )
-    compatibility.add_argument(
-        "--heavy-constant-folding",
-        action="store_true",
-        help="Enable expensive constant evaluators in the O1 fixed point.",
+    optimization_options.add_argument(
+        "--constant-folding-profile",
+        choices=[profile.value for profile in ConstantFoldingProfile],
+        default=ConstantFoldingProfile.BASIC.value,
+        help=(
+            "Select the evaluator family for O1 or a standalone " "fold-constants pass."
+        ),
     )
-    compatibility.add_argument(
-        "--resolve-legacy-custom-ops",
-        action="store_true",
-        help="Recover selected former TensorFlow custom operators during O1.",
-    )
-    compatibility.add_argument(
-        "--legalize-dynamic-fully-connected",
-        action="store_true",
-        help="Lower dynamic-weight FLOAT32 FullyConnected operators during O1.",
-    )
-    compatibility.add_argument(
+    optimization_options.add_argument(
         "--fuse-transpose-conv-slice",
         action="store_true",
         help="Enable the optional static TransposeConv-Slice fusion during O1.",
     )
-    compatibility.add_argument(
+    legalization_options = optimize_parser.add_argument_group("O1 legalization options")
+    legalization_options.add_argument(
+        "--legalize-dynamic-fully-connected",
+        action="store_true",
+        help="Lower dynamic-weight FLOAT32 FullyConnected operators during O1.",
+    )
+    compatibility_options = optimize_parser.add_argument_group(
+        "O1 legacy compatibility options"
+    )
+    compatibility_options.add_argument(
+        "--resolve-legacy-custom-ops",
+        action="store_true",
+        help="Recover selected former TensorFlow custom operators during O1.",
+    )
+    compatibility_options.add_argument(
         "--fuse-legacy-fc-gelu-fc",
         action="store_true",
         help="Recognize the legacy FC-Erf GELU pattern during O1.",
@@ -343,21 +363,34 @@ def _extract_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _parse_passes(value: str) -> list[CirclePass]:
-    """Create Circle pass instances from a comma-separated CLI value."""
+def _parse_passes(
+    value: str,
+    *,
+    constant_folding_profile: ConstantFoldingProfile
+    | str = (ConstantFoldingProfile.BASIC),
+) -> list[CirclePass]:
+    """Create Circle pass instances from canonical comma-separated names."""
 
+    profile = ConstantFoldingProfile(constant_folding_profile)
     passes: list[CirclePass] = []
     for raw_name in value.split(","):
         name = raw_name.strip().lower()
         if not name:
             continue
+        replacement = _DEPRECATED_PASS_NAMES.get(name)
+        if replacement is not None:
+            raise ValueError(f"Circle pass {name!r} was removed; use {replacement}.")
         try:
-            passes.append(_PASS_REGISTRY[name]())
+            pass_type = _PASS_REGISTRY[name]
         except KeyError as error:
             raise ValueError(
                 f"Unknown Circle pass {name!r}; available passes are "
                 f"{sorted(_PASS_REGISTRY)}."
             ) from error
+        if name == "fold-constants":
+            passes.append(FoldConstantsPass(profile=profile))
+        else:
+            passes.append(pass_type())
     if not passes:
         raise ValueError("At least one Circle pass must be selected.")
     return passes
@@ -372,35 +405,75 @@ def _optimize_command(args: argparse.Namespace) -> int:
             "their pass scheduling."
         )
 
-    compatibility = O1CompatibilityOptions(
-        heavy_constant_folding=getattr(args, "heavy_constant_folding", False),
-        resolve_legacy_custom_ops=getattr(args, "resolve_legacy_custom_ops", False),
-        legalize_dynamic_fully_connected=getattr(
+    profile = ConstantFoldingProfile(
+        getattr(
             args,
-            "legalize_dynamic_fully_connected",
-            False,
-        ),
-        fuse_transpose_conv_slice=getattr(args, "fuse_transpose_conv_slice", False),
-        fuse_legacy_fc_gelu_fc=getattr(args, "fuse_legacy_fc_gelu_fc", False),
+            "constant_folding_profile",
+            ConstantFoldingProfile.BASIC.value,
+        )
     )
-    if compatibility.enabled and args.preset is None:
+    resolve_custom_ops = bool(getattr(args, "resolve_legacy_custom_ops", False))
+    legalize_dynamic_fc = bool(getattr(args, "legalize_dynamic_fully_connected", False))
+    fuse_transpose_conv_slice = bool(getattr(args, "fuse_transpose_conv_slice", False))
+    fuse_legacy_fc_gelu_fc = bool(getattr(args, "fuse_legacy_fc_gelu_fc", False))
+    o1_only_options = any(
+        (
+            resolve_custom_ops,
+            legalize_dynamic_fc,
+            fuse_transpose_conv_slice,
+            fuse_legacy_fc_gelu_fc,
+        )
+    )
+    if o1_only_options and args.preset is None:
         raise ValueError(
-            "O1 heavy and compatibility flags require --preset o1; use "
-            "--passes to run the corresponding standalone pass."
+            "O1 legalization and compatibility flags require --preset o1; "
+            "use --passes for standalone transformations."
+        )
+
+    selected_passes = args.passes or _DEFAULT_PASSES
+    if profile is ConstantFoldingProfile.HEAVY and args.preset is None:
+        pass_names = {
+            name.strip().lower() for name in selected_passes.split(",") if name.strip()
+        }
+        if "fold-constants" not in pass_names:
+            raise ValueError(
+                "--constant-folding-profile heavy requires --preset o1 or "
+                "a fold-constants pass."
+            )
+
+    custom_passes: list[CirclePass] | None = None
+    if args.preset is None:
+        custom_passes = _parse_passes(
+            selected_passes,
+            constant_folding_profile=profile,
         )
 
     document = CircleDocument.load(args.input)
     context = CirclePassContext(verify_after_each_pass=not args.no_verify)
     if args.preset is not None:
+        options = O1PipelineOptions(
+            optimization=O1OptimizationOptions(
+                constant_folding_profile=profile,
+                fuse_transpose_conv_slice=fuse_transpose_conv_slice,
+            ),
+            legalization=O1LegalizationOptions(
+                dynamic_fully_connected=legalize_dynamic_fc,
+            ),
+            compatibility=O1LegacyCompatibilityOptions(
+                resolve_custom_ops=resolve_custom_ops,
+                fuse_fc_gelu_fc=fuse_legacy_fc_gelu_fc,
+            ),
+        )
         result = create_optimization_preset(
             args.preset,
-            compatibility=compatibility,
+            options=options,
         ).run(document, context)
     else:
-        passes = _parse_passes(args.passes or _DEFAULT_PASSES)
+        if custom_passes is None:
+            raise AssertionError("Custom pass selection was not initialized.")
         strategy = CirclePassStrategy(args.strategy or CirclePassStrategy.ONCE.value)
         result = CirclePassManager(
-            passes,
+            custom_passes,
             strategy=strategy,
         ).run(document, context)
     if not args.no_verify:

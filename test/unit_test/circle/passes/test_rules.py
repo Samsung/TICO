@@ -46,9 +46,14 @@ class MarkPlan(RewritePlan):
 class MarkOpcodeRule(CircleRewriteRule[MarkPlan]):
     """Replace opcode zero with opcode one for rule-runner tests."""
 
+    def __init__(self) -> None:
+        self.match_calls = 0
+
     def match(self, document, graph, operator_index, context):
         """Match synthetic operators whose opcode index is zero."""
 
+        del context
+        self.match_calls += 1
         operator = graph.subgraph.operators[operator_index]
         if int(operator.opcodeIndex) != 0:
             return None
@@ -73,6 +78,7 @@ class MarkOpcodeRule(CircleRewriteRule[MarkPlan]):
     def apply(self, document, plan, context):
         """Replace the matched synthetic opcode index with one."""
 
+        del context
         operator = document.subgraph(plan.subgraph_index).operators[
             plan.anchor_operator_index
         ]
@@ -98,8 +104,30 @@ class NonMutatingRule(MarkOpcodeRule):
         return RewriteApplication(changes=0)
 
 
+class DeleteOpcodeRule(CircleRewriteRule[RewritePlan]):
+    """Delete every synthetic opcode-zero operator for index-shift coverage."""
+
+    def match(self, document, graph, operator_index, context):
+        del context
+        operator = graph.subgraph.operators[operator_index]
+        if int(operator.opcodeIndex) != 0:
+            return None
+        return RewritePlan.capture(
+            document,
+            subgraph_index=graph.subgraph_index,
+            anchor_operator_index=operator_index,
+            tensor_indices=(*operator.inputs, *operator.outputs),
+        )
+
+    def apply(self, document, plan, context):
+        del context
+        operators = document.subgraph(plan.subgraph_index).operators
+        del operators[plan.anchor_operator_index]
+        return RewriteApplication(changes=1)
+
+
 class CircleRewriteRuleTest(unittest.TestCase):
-    """Check plan validation, diagnostics, and fixed-point rule scheduling."""
+    """Check plan validation, diagnostics, and worklist rule scheduling."""
 
     def _make_document(self, operator_count=1):
         """Create a graph with synthetic operators that all use opcode zero."""
@@ -136,8 +164,8 @@ class CircleRewriteRuleTest(unittest.TestCase):
         subgraph.outputs = [previous_tensor]
         return document
 
-    def test_rule_pass_restarts_until_all_matches_are_rewritten(self):
-        """Rebuild graph indexes and restart scanning after every mutation."""
+    def test_rule_pass_worklist_rewrites_all_matches(self):
+        """Rebuild graph indexes and revisit locally affected operators."""
 
         document = self._make_document(operator_count=2)
         result = CircleRulePass([MarkOpcodeRule()]).run(
@@ -153,6 +181,37 @@ class CircleRewriteRuleTest(unittest.TestCase):
         )
         self.assertEqual(len(result.diagnostics), 4)
         self.assertIn("MarkOpcodeRule", result.diagnostics[0])
+
+    def test_rule_worklist_scales_linearly_on_a_long_chain(self):
+        """Avoid rescanning the complete prefix after every local mutation."""
+
+        operator_count = 512
+        document = self._make_document(operator_count=operator_count)
+        rule = MarkOpcodeRule()
+
+        result = CircleRulePass([rule]).run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertEqual(result.changes, operator_count)
+        self.assertTrue(
+            all(operator.opcodeIndex == 1 for operator in document.subgraph().operators)
+        )
+        self.assertLessEqual(rule.match_calls, operator_count * 4)
+
+    def test_rule_worklist_does_not_skip_shifted_operators(self):
+        """Revisit the anchor index when deleting an operator shifts its successor."""
+
+        document = self._make_document(operator_count=32)
+
+        result = CircleRulePass([DeleteOpcodeRule()]).run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertEqual(result.changes, 32)
+        self.assertEqual(document.subgraph().operators, [])
 
     def test_plan_validation_rejects_changed_anchor_options(self):
         """Detect stale plans before applying mutation to a changed operator."""
@@ -231,7 +290,7 @@ class CircleRewriteRuleTest(unittest.TestCase):
             )
 
     def test_rule_pass_enforces_application_limit_before_extra_mutation(self):
-        """Stop a non-converging rule sequence before applying one rewrite too many."""
+        """Stop a non-converging rule sequence before one rewrite too many."""
 
         document = self._make_document(operator_count=2)
         with self.assertRaisesRegex(RuntimeError, "exceeded 1 applications"):

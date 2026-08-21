@@ -24,7 +24,7 @@ from tico.circle.passes.optimization._utils import operator_builtin_code
 from tico.circle.passes.optimization.policy import FloatingPointRewritePolicy
 from tico.circle.passes.optimization.simplify.arithmetic import (
     ArithmeticCanonicalizationPolicy,
-    CanonicalizeArithmeticPass,
+    SimplifyArithmeticPass,
 )
 
 from test.unit_test.circle.infrastructure_fixture import (
@@ -53,7 +53,7 @@ from test.unit_test.circle.passes.optimization._operator_rewrite_fixture import 
 )
 
 
-class CanonicalizeArithmeticPassTest(unittest.TestCase):
+class SimplifyArithmeticPassTest(unittest.TestCase):
     """Check scalar MUL/DIV canonicalization and RSQRT transformation."""
 
     def setUp(self) -> None:
@@ -66,10 +66,10 @@ class CanonicalizeArithmeticPassTest(unittest.TestCase):
         self,
         *,
         policy: ArithmeticCanonicalizationPolicy | None = None,
-    ) -> CanonicalizeArithmeticPass:
+    ) -> SimplifyArithmeticPass:
         """Create the arithmetic pass with fake schema identities."""
 
-        return CanonicalizeArithmeticPass(
+        return SimplifyArithmeticPass(
             builtin_codes=BUILTIN_CODES,
             builtin_options_types=BUILTIN_OPTIONS_TYPES,
             tensor_types=TENSOR_TYPES,

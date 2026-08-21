@@ -30,60 +30,93 @@ from tico.circle import (
     TensorValue,
     TensorValueCodec,
 )
-from tico.circle.passes import (
-    ArithmeticCanonicalizationPolicy,
-    CanonicalizeArithmeticPass,
-    CanonicalizeEquivalentOpsPass,
-    CircleRewriteRule,
-    CircleRulePass,
-    CompositeFusionPolicy,
-    FloatingPointRewritePolicy,
-    FuseCompositeOpsPass,
-    FuseLinearOpsPass,
-    LinearFusionPolicy,
-    ReductionSimplificationPolicy,
-    RemoveNoOpOperatorsPass,
-    RewriteApplication,
-    RewriteDiagnostic,
-    RewritePlan,
-    RewriteSeverity,
-    SimplifyReductionOpsPass,
-    SimplifyViewOpsPass,
-)
+
+
+_EXPECTED_PASS_API = {
+    "CanonicalizeEquivalentOpsPass",
+    "CircleOptimizationPreset",
+    "CirclePass",
+    "CirclePassContext",
+    "CirclePassExecution",
+    "CirclePassManager",
+    "CirclePassManagerResult",
+    "CirclePassPipeline",
+    "CirclePassPipelinePhase",
+    "CirclePassPipelinePhaseResult",
+    "CirclePassPipelineResult",
+    "CirclePassResult",
+    "CirclePassStrategy",
+    "CircleRewriteRule",
+    "CircleRulePass",
+    "CommonSubexpressionEliminationPass",
+    "ConstantFoldingProfile",
+    "EliminateIdentityOpsPass",
+    "EliminateTransposeBoundedLayoutRegionPass",
+    "FoldConstantsPass",
+    "FuseCompositeOpsPass",
+    "FuseLegacyFCGeluFCPass",
+    "FuseLinearOpsPass",
+    "FuseTransposeConvSlicePass",
+    "LegalizeDynamicFullyConnectedPass",
+    "O1LegacyCompatibilityOptions",
+    "O1LegalizationOptions",
+    "O1OptimizationOptions",
+    "O1PipelineOptions",
+    "ResolveLegacyCustomOpsPass",
+    "RewriteApplication",
+    "RewriteDiagnostic",
+    "RewritePlan",
+    "RewriteSeverity",
+    "SimplifyArithmeticPass",
+    "SimplifyReductionOpsPass",
+    "SimplifyViewOpsPass",
+    "create_o1_pipeline",
+    "create_optimization_preset",
+}
 
 
 class PublicInfrastructureApiTest(unittest.TestCase):
-    """Keep common Circle infrastructure available through stable package imports."""
+    """Keep the pass façade small while retaining infrastructure at its owner."""
 
-    def test_public_exports_resolve_to_classes(self):
-        """Ensure all PR infrastructure symbols are importable from public packages."""
+    def test_pass_package_exports_only_supported_facade_symbols(self) -> None:
+        """Expose scheduling, rewrite, pipeline, and semantic pass APIs only."""
+
+        self.assertEqual(set(circle_passes.__all__), _EXPECTED_PASS_API)
+        self.assertTrue(
+            all(hasattr(circle_passes, name) for name in _EXPECTED_PASS_API)
+        )
+
+    def test_removed_compatibility_and_internal_symbols_are_absent(self) -> None:
+        """Do not preserve temporary aliases or duplicate infrastructure exports."""
+
+        removed = (
+            "CanonicalizeArithmeticPass",
+            "RemoveNoOpOperatorsPass",
+            "FoldConstantSubgraphPass",
+            "FoldHeavyConstantSubgraphPass",
+            "O1CompatibilityOptions",
+            "CircleMutationTransaction",
+            "CircleOptimizationSession",
+            "CircleOptimizationStatistics",
+            "CircleSessionRevision",
+            "OperatorSnapshot",
+            "TensorSnapshot",
+        )
+        for name in removed:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(circle_passes, name))
+
+    def test_circle_package_remains_the_owner_of_shared_infrastructure(self) -> None:
+        """Keep builders, values, mutations, and sessions under tico.circle."""
 
         values = (
-            ArithmeticCanonicalizationPolicy,
-            CanonicalizeArithmeticPass,
-            CanonicalizeEquivalentOpsPass,
             CircleBuilder,
             CircleMutationTransaction,
             CircleOptimizationSession,
             CircleOptimizationStatistics,
-            CircleRewriteRule,
             CircleSessionRevision,
-            CircleRulePass,
             CircleValueError,
             ConstantPool,
-            CompositeFusionPolicy,
-            FloatingPointRewritePolicy,
-            FuseCompositeOpsPass,
-            FuseLinearOpsPass,
-            LinearFusionPolicy,
-            ReductionSimplificationPolicy,
-            RemoveNoOpOperatorsPass,
-            RewriteApplication,
-            RewriteDiagnostic,
-            RewritePlan,
-            RewriteSeverity,
-            SimplifyReductionOpsPass,
-            SimplifyViewOpsPass,
             TensorContract,
             TensorQuantization,
             TensorTypeRegistry,
@@ -92,7 +125,6 @@ class PublicInfrastructureApiTest(unittest.TestCase):
             TensorValueCodec,
         )
         self.assertTrue(all(isinstance(value, type) for value in values))
-        self.assertFalse(hasattr(circle_passes, "RemoveRedundantLayoutOpsPass"))
 
 
 if __name__ == "__main__":

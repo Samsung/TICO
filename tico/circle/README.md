@@ -214,7 +214,7 @@ producers are preserved so public tensor identities and names remain stable. Sch
 operators and objects.
 
 The built-in O1 preset runs the canonicalization, simplification, fusion, constant
-folding, CSE, and dead-code passes with restart scheduling until a fixed point, then
+folding, CSE, and dead-code passes in complete rounds until no pass reports a change, then
 runs index compaction exactly once:
 
 ```python
@@ -255,6 +255,19 @@ invalidates cached analyses when such a pass reports a change, and conservativel
 rebuilds session state when a pass fails. Standalone code that mutates outside a pass
 manager should call `context.session(document).mark_modified(...)` before reusing
 cached analyses.
+
+
+### Rule and pipeline scheduling
+
+`CircleRulePass` uses a deterministic local worklist. After a rewrite it
+revisits the captured producer/consumer neighborhood instead of rescanning the
+complete graph prefix. Once local work is exhausted, one ordered full-graph
+sweep validates that no non-local match was missed.
+
+O1 uses `CirclePassStrategy.UNTIL_NO_CHANGE`: every optimization pass runs in
+order for a complete round, and another round starts only when at least one
+pass changed the document. The legacy `RESTART` strategy remains available for
+explicitly custom pipelines and for scheduler comparison benchmarks.
 
 ## Command-line interface
 
@@ -383,9 +396,9 @@ Available passes:
 | `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator forms with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
 | `cse` | `CommonSubexpressionEliminationPass` | Reuses structurally identical pure expressions while preserving graph-output tensor identities |
 | `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
-| `fold-constant-subgraph` | `FoldConstantsPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
+| `fold-constants` | `FoldConstantsPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
 | `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases; dead branches are left for DCE |
-| `remove-no-op-operators` | `EliminateIdentityOpsPass` | Removes operators that preserve the complete input tensor contract |
+| `eliminate-identity-ops` | `EliminateIdentityOpsPass` | Removes operators that preserve the complete input tensor contract |
 | `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
 | `dce` | `DeadCodeEliminationPass` | Removes unreachable pure operators while preserving observable effects and public or caller-owned graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
@@ -402,7 +415,7 @@ tico-circle optimize model.circle \
   -o model.o1.circle
 ```
 
-O1 owns its restart scheduling, so `--strategy` cannot be combined with `--preset`.
+O1 owns its round-based fixed-point scheduling, so `--strategy` cannot be combined with `--preset`.
 Use `--passes` and `--strategy` instead when a custom pass sequence is required.
 
 `--passes` defaults to `dce,compact`. View simplification is intentionally split
@@ -600,8 +613,9 @@ Circle transformations are grouped by semantic responsibility under
 - `legalize`: lower representations that are not directly executable
 - `compatibility`: recover legacy ONE or frontend-specific graph patterns
 
-The former `canon`, `fusion`, and `remove` module paths are forwarding
-compatibility shims. New code should import the semantic packages above.
+The temporary `canon`, `fusion`, and `remove` forwarding packages were
+removed after the taxonomy migration. Import the semantic packages above;
+deprecated class and CLI spellings are no longer accepted.
 
 Constant folding uses one pass with an explicit profile instead of separate
 basic and heavy pass implementations:
@@ -611,3 +625,17 @@ from tico.circle.passes import ConstantFoldingProfile, FoldConstantsPass
 
 folding = FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY)
 ```
+
+### Benchmark full-model O1 scheduling
+
+A caller-provided full Circle artifact can compare the former restart
+scheduler with the round scheduler while requiring byte-identical output:
+
+```bash
+python3 -m test.performance.benchmark_circle_optimizer \
+  model.circle \
+  --repeat 3
+```
+
+The benchmark does not download or commit model artifacts. It reports elapsed
+time, pass executions, output size, and SHA-256.

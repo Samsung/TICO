@@ -17,7 +17,7 @@ import unittest
 import numpy as np
 
 from tico.circle.analysis import TensorContract
-from tico.circle.passes import CirclePassContext, RemoveNoOpOperatorsPass
+from tico.circle.passes import CirclePassContext, EliminateIdentityOpsPass
 from tico.circle.passes.optimization._utils import operator_builtin_code
 from tico.circle.value import TensorQuantization, TensorValue
 
@@ -59,10 +59,10 @@ class RemoveNoOpOperatorsTest(unittest.TestCase):
 
         self.codec = make_codec()
 
-    def _pass(self) -> RemoveNoOpOperatorsPass:
+    def _pass(self) -> EliminateIdentityOpsPass:
         """Create the no-op pass with fake schema identities."""
 
-        return RemoveNoOpOperatorsPass(
+        return EliminateIdentityOpsPass(
             builtin_codes=BUILTIN_CODES,
             activation_none=0,
             codec=self.codec,

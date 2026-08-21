@@ -19,7 +19,10 @@ import unittest
 import numpy as np
 
 from tico.circle.passes import CirclePassContext
-from tico.circle.passes.optimization.fold import FoldHeavyConstantSubgraphPass
+from tico.circle.passes.optimization.fold import (
+    ConstantFoldingProfile,
+    FoldConstantsPass,
+)
 from tico.circle.passes.optimization.fold.evaluators import (
     ConstantEvaluatorRegistry,
     register_heavy_constant_evaluators,
@@ -72,10 +75,11 @@ class HeavyConstantFoldingTest(unittest.TestCase):
             padding_values=PADDING_VALUES,
         )
 
-    def _pass(self) -> FoldHeavyConstantSubgraphPass:
+    def _pass(self) -> FoldConstantsPass:
         """Create a heavy fold pass using fake Object API tables."""
 
-        return FoldHeavyConstantSubgraphPass(
+        return FoldConstantsPass(
+            profile=ConstantFoldingProfile.HEAVY,
             evaluator_registry=self.registry,
             codec=self.codec,
             object_factory=compatibility_object_factory,

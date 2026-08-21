@@ -18,7 +18,7 @@ from tico.circle.passes import (
     CanonicalizeEquivalentOpsPass,
     CirclePassContext,
     CirclePassManager,
-    RemoveNoOpOperatorsPass,
+    EliminateIdentityOpsPass,
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import DeadCodeEliminationPass
@@ -97,7 +97,7 @@ class CircleSimplificationValueTest(CircleValueTestCase):
         result = self.assert_pass_preserves_value(
             source,
             (input_value,),
-            lambda document: RemoveNoOpOperatorsPass().run(
+            lambda document: EliminateIdentityOpsPass().run(
                 document,
                 CirclePassContext(verify_after_each_pass=True),
             ),

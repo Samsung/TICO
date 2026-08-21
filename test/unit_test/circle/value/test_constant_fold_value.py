@@ -14,7 +14,7 @@
 
 import numpy as np
 
-from tico.circle.passes import CirclePassContext, FoldConstantSubgraphPass
+from tico.circle.passes import CirclePassContext, FoldConstantsPass
 
 from test.support.circle.builder import CircleModelBuilder
 from test.support.circle.value_test import CircleValueTestCase
@@ -39,7 +39,7 @@ class CircleConstantFoldValueTest(CircleValueTestCase):
         result = self.assert_pass_preserves_value(
             source,
             (),
-            lambda document: FoldConstantSubgraphPass().run(
+            lambda document: FoldConstantsPass().run(
                 document,
                 CirclePassContext(verify_after_each_pass=True),
             ),

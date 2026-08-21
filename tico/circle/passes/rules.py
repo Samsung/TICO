@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from typing import Any, Generic, Iterable, Sequence, TypeVar
 
@@ -26,6 +26,7 @@ from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleRewriteError
 from tico.circle.graph import as_indices, as_list, CircleGraph
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
+from tico.circle.passes.worklist import CircleRuleWorklist
 
 
 class RewriteSeverity(str, Enum):
@@ -338,7 +339,7 @@ class CircleRewriteRule(ABC, Generic[PlanT]):
 
 
 class CircleRulePass(CirclePass):
-    """Run registered rewrite rules to a fixed point with restart scheduling."""
+    """Run rewrite rules to a fixed point with local worklist scheduling."""
 
     def __init__(
         self,
@@ -346,7 +347,7 @@ class CircleRulePass(CirclePass):
         *,
         maximum_rewrites: int = 10_000,
     ) -> None:
-        """Create a rule pass and reject empty or non-converging configurations."""
+        """Create a rule pass and reject empty or invalid configurations."""
 
         self.rules = tuple(rules)
         self.maximum_rewrites = int(maximum_rewrites)
@@ -360,7 +361,7 @@ class CircleRulePass(CirclePass):
         document: CircleDocument,
         context: CirclePassContext,
     ) -> CirclePassResult:
-        """Apply one match, restart scanning, and repeat to a fixed point."""
+        """Apply local work until stable, then confirm with a global sweep."""
 
         with context.activate(document):
             return self._run_active(document, context)
@@ -375,78 +376,159 @@ class CircleRulePass(CirclePass):
         total_changes = 0
         applications = 0
         diagnostics: list[RewriteDiagnostic] = []
+        worklist = CircleRuleWorklist(document.subgraph_count)
 
         while True:
-            applied = False
-            for subgraph_index in range(document.subgraph_count):
-                graph = context.graph(document, subgraph_index)
-                operator_count = graph.operator_count
-                for operator_index in range(operator_count):
-                    for rule in self.rules:
-                        plan = rule.match(
-                            document,
-                            graph,
-                            operator_index,
-                            context,
-                        )
-                        if plan is None:
-                            continue
-                        if plan.subgraph_index != subgraph_index or (
-                            plan.anchor_operator_index != operator_index
-                        ):
-                            raise CircleRewriteError(
-                                f"Rule {rule.name} returned a plan anchored at "
-                                f"subgraph {plan.subgraph_index}, operator "
-                                f"{plan.anchor_operator_index} while matching "
-                                f"subgraph {subgraph_index}, operator "
-                                f"{operator_index}."
-                            )
-                        if applications >= self.maximum_rewrites:
-                            raise RuntimeError(
-                                f"Circle rule pass exceeded {self.maximum_rewrites} "
-                                "applications; a non-converging rule is suspected."
-                            )
+            item = worklist.pop()
+            if item is None:
+                if worklist.refill_for_validation(document.subgraph_count):
+                    continue
+                break
 
-                        plan.validate(document)
-                        with context.mutation(
-                            document,
-                            subgraph_index=subgraph_index,
-                            plan=plan,
-                        ) as mutation:
-                            application = rule.apply(document, plan, context)
-                            if not application.modified:
-                                raise CircleRewriteError(
-                                    f"Rule {rule.name} matched but reported no change."
-                                )
-                            mutation.commit()
-                        applications += 1
-                        total_changes += application.changes
-                        diagnostics.extend(
-                            diagnostic.for_rule(rule.name)
-                            for diagnostic in (
-                                *plan.diagnostics,
-                                *application.diagnostics,
+            graph = context.graph(document, item.subgraph_index)
+            start = min(item.start_operator_index, graph.operator_count)
+            applied = False
+            for operator_index in range(start, graph.operator_count):
+                for rule in self.rules:
+                    plan = rule.match(
+                        document,
+                        graph,
+                        operator_index,
+                        context,
+                    )
+                    if plan is None:
+                        continue
+                    if plan.subgraph_index != item.subgraph_index or (
+                        plan.anchor_operator_index != operator_index
+                    ):
+                        raise CircleRewriteError(
+                            f"Rule {rule.name} returned a plan anchored at "
+                            f"subgraph {plan.subgraph_index}, operator "
+                            f"{plan.anchor_operator_index} while matching "
+                            f"subgraph {item.subgraph_index}, operator "
+                            f"{operator_index}."
+                        )
+                    if applications >= self.maximum_rewrites:
+                        raise RuntimeError(
+                            f"Circle rule pass exceeded {self.maximum_rewrites} "
+                            "applications; a non-converging rule is suspected."
+                        )
+
+                    revisit = _worklist_start_for_plan(plan, graph)
+                    plan.validate(document)
+                    with context.mutation(
+                        document,
+                        subgraph_index=item.subgraph_index,
+                        plan=plan,
+                    ) as mutation:
+                        application = rule.apply(document, plan, context)
+                        if not application.modified:
+                            raise CircleRewriteError(
+                                f"Rule {rule.name} matched but reported no change."
                             )
+                        mutation.commit()
+
+                    applications += 1
+                    total_changes += application.changes
+                    diagnostics.extend(
+                        diagnostic.for_rule(rule.name)
+                        for diagnostic in (
+                            *plan.diagnostics,
+                            *application.diagnostics,
                         )
-                        context.logger.debug(
-                            "Applied Circle rewrite rule %s at subgraph %d, "
-                            "operator %d with %d changes.",
-                            rule.name,
-                            subgraph_index,
-                            operator_index,
-                            application.changes,
-                        )
-                        applied = True
-                        break
-                    if applied:
-                        break
+                    )
+                    context.logger.debug(
+                        "Applied Circle rewrite rule %s at subgraph %d, "
+                        "operator %d with %d changes.",
+                        rule.name,
+                        item.subgraph_index,
+                        operator_index,
+                        application.changes,
+                    )
+                    worklist.mark_modified()
+                    worklist.schedule(
+                        item.subgraph_index,
+                        revisit,
+                        front=True,
+                    )
+                    applied = True
+                    break
                 if applied:
                     break
-            if not applied:
-                break
 
         return CirclePassResult(
             modified=total_changes > 0,
             changes=total_changes,
             diagnostics=tuple(diagnostic.format() for diagnostic in diagnostics),
         )
+
+
+def _worklist_start_for_plan(
+    plan: RewritePlan,
+    graph: CircleGraph,
+) -> int:
+    """Return the earliest operator in the captured local dependency region."""
+
+    operators, tensors = _captured_rewrite_objects(plan)
+    candidates = {snapshot.operator_index for snapshot in operators}
+    tensor_indices = {snapshot.tensor_index for snapshot in tensors}
+    for snapshot in operators:
+        tensor_indices.update(snapshot.inputs)
+        tensor_indices.update(snapshot.outputs)
+
+    for tensor_index in tensor_indices:
+        if tensor_index < 0:
+            continue
+        producer = graph.producer(tensor_index)
+        if producer is not None:
+            candidates.add(producer)
+        candidates.update(graph.consumers(tensor_index))
+
+    valid = [index for index in candidates if 0 <= index < graph.operator_count]
+    if valid:
+        return min(valid)
+    return max(0, plan.anchor_operator_index)
+
+
+def _captured_rewrite_objects(
+    plan: RewritePlan,
+) -> tuple[tuple[OperatorSnapshot, ...], tuple[TensorSnapshot, ...]]:
+    """Collect operator and tensor snapshots nested in one rewrite plan."""
+
+    pending: list[Any] = [plan]
+    visited: set[int] = set()
+    operators: dict[int, OperatorSnapshot] = {}
+    tensors: dict[int, TensorSnapshot] = {}
+    primitives = (bool, int, float, str, bytes, bytearray, memoryview)
+
+    while pending:
+        value = pending.pop()
+        if value is None or isinstance(value, primitives):
+            continue
+        identity = id(value)
+        if identity in visited:
+            continue
+        visited.add(identity)
+
+        if isinstance(value, OperatorSnapshot):
+            operators[value.operator_index] = value
+            continue
+        if isinstance(value, TensorSnapshot):
+            tensors[value.tensor_index] = value
+            continue
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+            continue
+        if isinstance(value, (tuple, list, set, frozenset)):
+            pending.extend(value)
+            continue
+        if is_dataclass(value) and (
+            isinstance(value, RewritePlan) or type(value).__name__.endswith("Plan")
+        ):
+            pending.extend(getattr(value, field.name) for field in fields(value))
+
+    return (
+        tuple(operators[index] for index in sorted(operators)),
+        tuple(tensors[index] for index in sorted(tensors)),
+    )

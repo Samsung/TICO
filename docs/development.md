@@ -420,3 +420,13 @@ current PR matrix.
 - [Requirements](./requirements.md)
 - [System Test Guide](./system_test.md)
 - [Quantization recipes developer guide](../tico/quantization/recipes/README.md)
+
+
+### Benchmark Circle optimization scheduling
+
+Use a caller-provided full Circle artifact to compare O1 schedulers:
+
+```bash
+python3 -m test.performance.benchmark_circle_optimizer \
+  model.circle --repeat 3
+```
