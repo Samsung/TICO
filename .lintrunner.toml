@@ -38,9 +38,8 @@ exclude_patterns = [
     'tico/utils/mx/**',
 ]
 command = [
-    'lintrunner_adapters',
-    'run',
-    'ufmt_linter',
+    'python',
+    'infra/style/adapters/ufmt_linter.py',
     '--',
     '@{{PATHSFILE}}'
 ]

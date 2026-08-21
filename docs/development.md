@@ -317,6 +317,13 @@ Check only files changed from the local `main` branch:
 ./ccex format --diff-only --no-apply-patches
 ```
 
+Apply only the code formatter and skip the slower pylint/mypy checks (those still run
+in CI and in the default mode):
+
+```bash
+./ccex format --diff-only --formatter-only
+```
+
 The current lintrunner configuration executes:
 
 - Pylint
