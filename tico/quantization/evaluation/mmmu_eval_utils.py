@@ -377,7 +377,7 @@ def evaluate_subject(
                     model=model,
                     processor=processor,
                     image=item["image"],
-                    question="Answer the multiple-choice question shown in the image. Return only one letter from A to J.",
+                    question="You are a strict single-letter answering machine. Answer the multiple-choice question shown in the image. Return only one letter from A to J.",
                     device=device,
                     max_new_tokens=max_new_tokens,
                     max_seq_len=max_seq_len,
