@@ -20,13 +20,10 @@ CircleDocument
     ├── inspect                 stable summaries and text output
     ├── operations.extract      workflow-level graph extraction
     └── passes                  composable Circle-to-Circle rewrites
-            ├── CanonicalizeEquivalentOpsPass
-            ├── FoldConstantsPass
-            ├── FuseLinearOpsPass
-            ├── EliminateIdentityOpsPass
-            ├── SimplifyViewOpsPass
-            ├── DeadCodeEliminationPass
-            └── CompactIndicesPass
+            ├── compatibility     optional legacy custom-op recovery
+            ├── legalize          optional dynamic-FC lowering
+            ├── optimize          generic passes plus optional pattern fusions
+            └── finalize          one-shot index compaction
 ```
 
 ## What verification means
@@ -256,7 +253,6 @@ rebuilds session state when a pass fails. Standalone code that mutates outside a
 manager should call `context.session(document).mark_modified(...)` before reusing
 cached analyses.
 
-
 ### Rule and pipeline scheduling
 
 `CircleRulePass` uses a deterministic local worklist. After a rewrite it
@@ -393,14 +389,21 @@ Available passes:
 
 | Name | Implementation | Behavior |
 |---|---|---|
-| `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator forms with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
+| `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator spellings with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
 | `cse` | `CommonSubexpressionEliminationPass` | Reuses structurally identical pure expressions while preserving graph-output tensor identities |
-| `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
-| `fold-constants` | `FoldConstantsPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
-| `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases; dead branches are left for DCE |
 | `eliminate-identity-ops` | `EliminateIdentityOpsPass` | Removes operators that preserve the complete input tensor contract |
-| `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
-| `dce` | `DeadCodeEliminationPass` | Removes unreachable pure operators while preserving observable effects and public or caller-owned graph inputs |
+| `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites supported Transpose-bounded layout regions into the source layout |
+| `fold-constants` | `FoldConstantsPass` | Folds supported constant operators with the selected `basic` or `heavy` evaluator profile |
+| `fuse-composite-ops` | `FuseCompositeOpsPass` | Recognizes supported composite activation, normalization, and arithmetic patterns |
+| `fuse-legacy-fc-gelu-fc` | `FuseLegacyFCGeluFCPass` | Recognizes the optional legacy FC-Erf GELU pattern |
+| `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases |
+| `fuse-transpose-conv-slice` | `FuseTransposeConvSlicePass` | Fuses a supported static TransposeConv-Slice spatial pattern |
+| `legalize-dynamic-fully-connected` | `LegalizeDynamicFullyConnectedPass` | Lowers supported dynamic-weight FLOAT32 FullyConnected operators |
+| `resolve-legacy-custom-ops` | `ResolveLegacyCustomOpsPass` | Recovers selected former TensorFlow custom operators as Circle builtins |
+| `simplify-arithmetic` | `SimplifyArithmeticPass` | Applies policy-controlled arithmetic canonicalization and simplification |
+| `simplify-reduction-ops` | `SimplifyReductionOpsPass` | Simplifies supported consecutive or layout-adjacent reduction patterns |
+| `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views |
+| `dce` | `DeadCodeEliminationPass` | Removes unreachable pure operators while preserving observable effects and protected graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
 
 Dead-code elimination treats stateful, non-deterministic, custom, variable, and
@@ -418,6 +421,24 @@ tico-circle optimize model.circle \
 O1 owns its round-based fixed-point scheduling, so `--strategy` cannot be combined with `--preset`.
 Use `--passes` and `--strategy` instead when a custom pass sequence is required.
 
+Select the heavy evaluator profile or enable optional O1 phases explicitly:
+
+```bash
+tico-circle optimize model.circle \
+  --preset o1 \
+  --constant-folding-profile heavy \
+  --fuse-transpose-conv-slice \
+  --legalize-dynamic-fully-connected \
+  --resolve-legacy-custom-ops \
+  --fuse-legacy-fc-gelu-fc \
+  -o model.o1.extended.circle
+```
+
+The constant-folding profile is an optimization option. Dynamic FullyConnected lowering
+belongs to legalization, while custom-op recovery and the legacy FC-GELU-FC matcher are
+compatibility options. These optional O1 flags require `--preset o1`; each underlying
+transformation can also be selected directly by its canonical `--passes` name.
+
 `--passes` defaults to `dce,compact`. View simplification is intentionally split
 across three passes: `simplify-view-ops` rewires dataflow, `dce` removes newly dead
 operators, and `compact` removes and remaps unused tensors, buffers, and operator codes.
@@ -426,27 +447,29 @@ Fold supported constant subgraphs and compact the newly unused objects with:
 
 ```bash
 tico-circle optimize model.circle \
-  --passes fold-constant-subgraph,compact \
+  --passes fold-constants,compact \
   -o model.constant-folded.circle
 ```
 
-Canonicalize and simplify equivalent view and no-op patterns with restart scheduling:
+Canonicalize and simplify equivalent view and identity patterns with round scheduling:
 
 ```bash
 tico-circle optimize model.circle \
-  --passes canonicalize-equivalent-ops,simplify-view-ops,remove-no-op-operators,dce,compact \
-  --strategy restart \
+  --passes canonicalize-equivalent-ops,simplify-view-ops,eliminate-identity-ops,dce,compact \
+  --strategy until-no-change \
   -o model.simplified.circle
 ```
 
-Restart scheduling lets a later rewrite expose an earlier canonicalization candidate.
+Round scheduling lets a later rewrite expose an earlier canonicalization candidate
+during the next complete pass round. Use `restart` only for an explicitly legacy
+custom pipeline or scheduler comparison.
 
 Fuse static FLOAT32 linear and affine chains, then remove the superseded branches with:
 
 ```bash
 tico-circle optimize model.circle \
   --passes fuse-linear-ops,dce,compact \
-  --strategy restart \
+  --strategy until-no-change \
   -o model.linear-fused.circle
 ```
 
@@ -484,12 +507,12 @@ size-splits constants, permits at most one inferred `-1` size, and validates eve
 output shape. Rank-changing or unsupported axis-sensitive operators such as `PRELU`,
 `RESHAPE`, and `SOFTMAX` remain region boundaries.
 
-Run the bounded-region pass with restart scheduling and cleanup:
+Run the bounded-region pass with round scheduling and cleanup:
 
 ```bash
 tico-circle optimize model.circle \
   --passes eliminate-transpose-bounded-layout-region,simplify-view-ops,dce,compact \
-  --strategy restart \
+  --strategy until-no-change \
   -o model.optimized.circle
 ```
 
@@ -542,12 +565,21 @@ class RenameDescriptionPass(CirclePass):
 
 Pass requirements:
 
-- mutate only the supplied `CircleDocument`
-- report `modified=True` only when model state changed
-- preserve Circle structural invariants at pass boundaries unless verification is explicitly disabled by the caller
-- use `CircleGraph` instead of rebuilding producer and consumer maps independently
-- use the helpers in `rewrite.py` whenever deleting indexed objects
-- add unit tests that include multi-subgraph and shared-buffer cases when the pass touches global state
+- place the implementation in the semantic package that owns its responsibility:
+  `canonicalize`, `simplify`, `fold`, `fuse`, `legalize`, `compatibility`, or `cleanup`
+- mutate only the supplied `CircleDocument` and report `modified=True` only when model
+  state changed
+- use `CircleRewriteRule` for local patterns so the shared worklist, optimization
+  session, and atomic mutation transaction can manage invalidation and rollback
+- use `CircleGraph` or the session graph cache instead of rebuilding producer and
+  consumer maps independently
+- preserve Circle structural invariants at pass boundaries unless verification is
+  explicitly disabled by the caller
+- use the helpers in `rewrite.py` whenever deleting or remapping indexed objects
+- register one canonical CLI name when the pass is user-selectable, and update
+  `presets.py` only when a built-in pipeline should schedule it
+- add positive and close non-matching tests; include multi-subgraph, shared-buffer,
+  effect, signature, rollback, and fixed-point cases when applicable
 
 ## Testing
 
@@ -580,12 +612,16 @@ Important test scenarios include:
 - equivalent-op canonicalization with static constants and output-contract checks
 - no-op removal with graph-output and signature remapping
 - identity and chained view simplification with malformed-pattern rejection
-- generated Circle round-trip value preservation for representative PR 3 rewrites
+- generated Circle round-trip value preservation for representative semantic rewrites
+- atomic mutation rollback and optimization-session invalidation
+- non-empty O1 idempotence and scheduler-equivalence coverage
 
 ## Current limitations
 
-This implementation performs structural Circle rewrites and bounded constant evaluation. It does not perform
- numerical equivalence testing, runtime execution, shape inference, or target-specific operator legalization.
+This implementation performs structural Circle rewrites, bounded constant evaluation,
+and the documented optional legalizations. It does not perform numerical equivalence
+testing, runtime execution, general shape inference, backend capability validation,
+or comprehensive target-specific legalization.
 
 Additional limitations:
 

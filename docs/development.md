@@ -173,6 +173,29 @@ to the complete suite for cross-cutting changes.
 `--all` and `--keyword` cannot be combined. `--model` also cannot be combined with
 `--all` or `--keyword`.
 
+### Performance benchmarks
+
+`./ccex test -p` runs the configured conversion-time and serialized-size threshold
+benchmark:
+
+```bash
+./ccex test -p
+```
+
+The full Circle O1 scheduler comparison needs a caller-provided `.circle` artifact and
+is invoked directly:
+
+```bash
+python3 -m test.performance.benchmark_circle_optimizer \
+  model.circle \
+  --repeat 3
+```
+
+It compares the legacy `RESTART` scheduler with O1's round-based
+`UNTIL_NO_CHANGE` scheduler, verifies both outputs, and requires byte-identical Circle
+binaries. It is an opt-in diagnostic benchmark rather than a repository threshold.
+See [`test/performance/README.md`](../test/performance/README.md) for all options.
+
 ## Test organization
 
 ```text
@@ -190,7 +213,7 @@ test/
 │   └── utils/
 ├── quantization/            # Algorithms, WrapQ, recipes, configs, export, and analysis
 ├── support/                 # Shared runtime and test-builder utilities
-├── performance/             # Llama decoder-layer conversion/size benchmarks
+├── performance/             # Conversion/size and Circle O1 scheduler benchmarks
 └── pt2_to_circle_test/      # CLI/API and end-to-end conversion tests
 ```
 
@@ -286,6 +309,7 @@ not commit generated images.
 tico-circle inspect model.circle --tensors --operators
 tico-circle verify model.circle
 tico-circle extract model.circle --ops 20-64 -o region.circle
+tico-circle optimize model.circle --preset o1 -o model.o1.circle
 ```
 
 Use `tico-circle verify` for static Circle consistency. Use an end-to-end runtime test
@@ -315,13 +339,6 @@ Check only files changed from the local `main` branch:
 
 ```bash
 ./ccex format --diff-only --no-apply-patches
-```
-
-Apply only the code formatter and skip the slower pylint/mypy checks (those still run
-in CI and in the default mode):
-
-```bash
-./ccex format --diff-only --formatter-only
 ```
 
 The current lintrunner configuration executes:
@@ -381,8 +398,9 @@ complete supported/candidate/`nightly-latest` matrix weekly. Official package
 publication runs the full suite on every qualified stable family before publishing. See the
 [PyTorch Version Policy](./torch_version_policy.md) for the exact tiers.
 
-Performance tests are available through `./ccex test -p`, but are not part of the
-current PR matrix.
+The conversion/size threshold benchmark is available through `./ccex test -p`.
+The full Circle O1 scheduler benchmark is invoked directly with a caller-provided
+artifact. Neither benchmark is part of the current PR matrix.
 
 ## Change-specific guidance
 
@@ -428,12 +446,3 @@ current PR matrix.
 - [System Test Guide](./system_test.md)
 - [Quantization recipes developer guide](../tico/quantization/recipes/README.md)
 
-
-### Benchmark Circle optimization scheduling
-
-Use a caller-provided full Circle artifact to compare O1 schedulers:
-
-```bash
-python3 -m test.performance.benchmark_circle_optimizer \
-  model.circle --repeat 3
-```
