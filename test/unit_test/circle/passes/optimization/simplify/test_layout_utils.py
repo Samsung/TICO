@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from tico.circle.passes.optimization.remove import _layout_utils
+from tico.circle.passes.optimization.simplify import _layout_utils
 
 
 class LayoutUtilsTest(unittest.TestCase):
