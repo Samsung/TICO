@@ -24,6 +24,7 @@ from typing import Any
 from examples.hand_detector import (
     adaround as adaround_cli,
     block_reconstruction as block_reconstruction_cli,
+    precision_ablation as precision_ablation_cli,
 )
 from examples.hand_detector._support.analysis import (
     output_boundaries,
@@ -221,6 +222,7 @@ def parse_args() -> argparse.Namespace:
 
     block_reconstruction_cli.add_subparser(subparsers)
     adaround_cli.add_subparser(subparsers)
+    precision_ablation_cli.add_subparser(subparsers)
 
     sensitivity = subparsers.add_parser(
         "activation-sensitivity",
@@ -342,6 +344,8 @@ def main() -> None:
         block_reconstruction_cli.run(args)
     elif args.command == "adaround":
         adaround_cli.run(args)
+    elif args.command == "precision-ablation":
+        precision_ablation_cli.run(args)
     elif args.command == "activation-sensitivity":
         _run_activation_sensitivity(args)
     else:
