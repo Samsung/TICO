@@ -16,10 +16,16 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from tico.circle.document import CircleDocument
+
+if TYPE_CHECKING:
+    from tico.circle.graph import CircleGraph
+    from tico.circle.mutation import CircleMutationTransaction
+    from tico.circle.session import CircleOptimizationSession
 
 
 @dataclass
@@ -31,6 +37,56 @@ class CirclePassContext:
     )
     verify_after_each_pass: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    _sessions: dict[int, tuple[Any, CircleOptimizationSession]] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
+
+    def session(self, document: CircleDocument) -> CircleOptimizationSession:
+        """Return the model-scoped optimization session for this pass context."""
+
+        from tico.circle.session import optimization_session_for
+
+        model = document.model
+        key = id(model)
+        cached = self._sessions.get(key)
+        if cached is not None and cached[0] is model:
+            return cached[1]
+        session = optimization_session_for(document)
+        self._sessions[key] = (model, session)
+        return session
+
+    def graph(
+        self,
+        document: CircleDocument,
+        subgraph_index: int = 0,
+    ) -> CircleGraph:
+        """Return a revision-checked producer/consumer graph index."""
+
+        return self.session(document).graph(subgraph_index)
+
+    def activate(
+        self,
+        document: CircleDocument,
+    ) -> AbstractContextManager[CircleOptimizationSession]:
+        """Activate shared session services for builders and rewrite helpers."""
+
+        return self.session(document).activate()
+
+    def mutation(
+        self,
+        document: CircleDocument,
+        *,
+        subgraph_index: int,
+        plan: Any = None,
+    ) -> CircleMutationTransaction:
+        """Create an atomic local rewrite transaction."""
+
+        return self.session(document).transaction(
+            subgraph_index=subgraph_index,
+            plan=plan,
+        )
 
 
 @dataclass(frozen=True)

@@ -74,6 +74,15 @@ class AppendedObjectCheckpoint:
         )
         _truncate_field(subgraph, "tensors", self.tensor_count)
 
+        from tico.circle.session import existing_optimization_session
+
+        session = existing_optimization_session(document.model)
+        if session is not None:
+            session.invalidate(
+                (self.subgraph_index,),
+                rebuild_constant_pools=True,
+            )
+
 
 class OptimizationSchemaResolver:
     """Resolve Circle schema enums with optional schema-independent overrides."""

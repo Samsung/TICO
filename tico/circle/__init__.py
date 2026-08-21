@@ -17,12 +17,21 @@ from tico.circle.builder import CircleBuilder, ConstantKey, ConstantPool
 from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleValueError
 from tico.circle.graph import CircleGraph, GraphBoundary
+from tico.circle.mutation import CircleMutationTransaction
 from tico.circle.operations import (
     extract_by_operator_indices,
     extract_by_tensor_indices,
     extract_by_tensor_patterns,
     ExtractionResult,
     SignaturePolicy,
+)
+from tico.circle.session import (
+    active_optimization_session,
+    CircleOptimizationSession,
+    CircleOptimizationStatistics,
+    CircleSessionRevision,
+    existing_optimization_session,
+    optimization_session_for,
 )
 from tico.circle.value import (
     TensorQuantization,
@@ -43,7 +52,11 @@ __all__ = [
     "CircleBuilder",
     "CircleDocument",
     "CircleGraph",
+    "CircleMutationTransaction",
+    "CircleOptimizationSession",
+    "CircleOptimizationStatistics",
     "CircleValueError",
+    "CircleSessionRevision",
     "CircleVerificationError",
     "ConstantKey",
     "ConstantPool",
@@ -62,5 +75,8 @@ __all__ = [
     "extract_by_operator_indices",
     "extract_by_tensor_indices",
     "extract_by_tensor_patterns",
+    "active_optimization_session",
+    "existing_optimization_session",
+    "optimization_session_for",
     "verify_document",
 ]

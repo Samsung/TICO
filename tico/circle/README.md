@@ -234,6 +234,28 @@ Set `CirclePassContext(verify_after_each_pass=False)` only when a multi-step
 transformation intentionally has a temporary invalid state and performs 
 explicit verification at the end.
 
+### Optimization sessions and atomic rewrites
+
+`CirclePassContext` retains one model-scoped `CircleOptimizationSession` for the
+lifetime of a pass pipeline. The session caches `CircleGraph` producer/consumer
+indexes by subgraph revision and lets builders that use the same tensor-type registry
+and object factory share one canonical `ConstantPool`. A committed mutation advances
+the affected revision and invalidates only the corresponding graph cache.
+
+`CircleRulePass` applies each matched `CircleRewriteRule` in a
+`CircleMutationTransaction`. Builders and tensor-use replacement helpers join the
+active transaction automatically. If `apply()` raises or leaves the scope without
+committing, appended buffers, operator codes, tensors, and operators are discarded;
+captured operators and tensors, subgraph interfaces, and signature mappings are
+restored. A custom rule that mutates an existing buffer payload directly must first
+register that buffer with `current_mutation().watch_buffer(...)`.
+
+Passes that still mutate the Object API directly remain supported. `CirclePassManager`
+invalidates cached analyses when such a pass reports a change, and conservatively
+rebuilds session state when a pass fails. Standalone code that mutates outside a pass
+manager should call `context.session(document).mark_modified(...)` before reusing
+cached analyses.
+
 ## Command-line interface
 
 The package installs one executable with subcommands:

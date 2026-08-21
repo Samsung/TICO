@@ -43,6 +43,8 @@ class CompactIndicesPass(CirclePass):
             f"{stats.removed_operator_codes} operator codes; "
             f"remapped {stats.remapped_references} references."
         )
+        if stats.modified:
+            context.session(document).mark_modified(rebuild_constant_pools=True)
         context.logger.debug(diagnostic)
         return CirclePassResult(
             modified=stats.modified,

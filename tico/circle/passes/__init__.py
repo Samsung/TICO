@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from tico.circle.mutation import CircleMutationTransaction
 from tico.circle.passes.base import CirclePass, CirclePassContext, CirclePassResult
 from tico.circle.passes.manager import (
     CirclePassExecution,
@@ -70,6 +71,14 @@ from tico.circle.passes.rules import (
     RewriteSeverity,
     TensorSnapshot,
 )
+from tico.circle.session import (
+    active_optimization_session,
+    CircleOptimizationSession,
+    CircleOptimizationStatistics,
+    CircleSessionRevision,
+    existing_optimization_session,
+    optimization_session_for,
+)
 
 __all__ = [
     "ArithmeticCanonicalizationPolicy",
@@ -77,6 +86,9 @@ __all__ = [
     "CanonicalizeEquivalentOpsPass",
     "CircleOptimizationPreset",
     "CirclePass",
+    "CircleMutationTransaction",
+    "CircleOptimizationSession",
+    "CircleOptimizationStatistics",
     "CirclePassContext",
     "CirclePassExecution",
     "CirclePassManager",
@@ -87,6 +99,7 @@ __all__ = [
     "CirclePassPipelineResult",
     "CirclePassResult",
     "CirclePassStrategy",
+    "CircleSessionRevision",
     "CircleRewriteRule",
     "CircleRulePass",
     "CommonSubexpressionEliminationPass",
@@ -123,5 +136,8 @@ __all__ = [
     "TransposeConvSliceFusionPolicy",
     "create_o1_pipeline",
     "create_optimization_preset",
+    "active_optimization_session",
+    "existing_optimization_session",
     "heavy_constant_evaluator_registry",
+    "optimization_session_for",
 ]

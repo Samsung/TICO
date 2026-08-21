@@ -17,6 +17,10 @@ import unittest
 import tico.circle.passes as circle_passes
 from tico.circle import (
     CircleBuilder,
+    CircleMutationTransaction,
+    CircleOptimizationSession,
+    CircleOptimizationStatistics,
+    CircleSessionRevision,
     CircleValueError,
     ConstantPool,
     TensorContract,
@@ -59,7 +63,11 @@ class PublicInfrastructureApiTest(unittest.TestCase):
             CanonicalizeArithmeticPass,
             CanonicalizeEquivalentOpsPass,
             CircleBuilder,
+            CircleMutationTransaction,
+            CircleOptimizationSession,
+            CircleOptimizationStatistics,
             CircleRewriteRule,
+            CircleSessionRevision,
             CircleRulePass,
             CircleValueError,
             ConstantPool,

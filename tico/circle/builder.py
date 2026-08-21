@@ -52,11 +52,38 @@ class ConstantPool:
         self.object_factory = object_factory
         self._buffers: dict[bytes, int] = {}
         self._tensors: dict[tuple[int, ConstantKey], int] = {}
+        self._buffer_count = 0
+        self._tensor_counts: tuple[int, ...] = ()
+        self._rebuilds = 0
+        self._incremental_updates = 0
+        self._delegate: ConstantPool | None = None
+
+        # Pools constructed directly by a pass still participate in an active
+        # model-scoped session. Equivalent pools skip indexing and delegate to one
+        # canonical instance. Import lazily to keep builder/session imports acyclic.
+        from tico.circle.session import existing_optimization_session
+
+        session = existing_optimization_session(self.model)
+        if session is not None:
+            canonical = session.existing_constant_pool(
+                codec=self.codec,
+                object_factory=self.object_factory,
+            )
+            if canonical is not None:
+                self._delegate = canonical
+                return
+
         self._index_existing_objects()
+        if session is not None:
+            canonical = session.register_constant_pool(self)
+            if canonical is not self:
+                self._delegate = canonical
 
     def add_buffer(self, payload: bytes, *, deduplicate: bool = True) -> int:
         """Add inline bytes and optionally reuse an existing exact payload."""
 
+        if self._delegate is not None:
+            return self._delegate.add_buffer(payload, deduplicate=deduplicate)
         normalized = bytes(payload)
         existing = self._buffers.get(normalized)
         if deduplicate and existing is not None:
@@ -72,6 +99,8 @@ class ConstantPool:
         buffers.append(buffer)
         index = len(buffers) - 1
         self._buffers.setdefault(normalized, index)
+        self._buffer_count = len(buffers)
+        self._incremental_updates += 1
         return index
 
     def intern_buffer(self, payload: bytes) -> int:
@@ -89,6 +118,13 @@ class ConstantPool:
     ) -> int:
         """Return a constant tensor index, creating storage and metadata if needed."""
 
+        if self._delegate is not None:
+            return self._delegate.intern_constant(
+                subgraph_index=subgraph_index,
+                name=name,
+                value=value,
+                contract=contract,
+            )
         subgraph = _subgraph(self.model, subgraph_index)
         resolved_contract = contract or TensorContract.from_value(value)
         _validate_constant_contract(value, resolved_contract)
@@ -109,7 +145,86 @@ class ConstantPool:
         tensors.append(tensor)
         tensor_index = len(tensors) - 1
         self._tensors[(subgraph_index, key)] = tensor_index
+        self._tensor_counts = self._current_tensor_counts()
+        self._incremental_updates += 1
         return tensor_index
+
+    @property
+    def statistics(self) -> dict[str, int]:
+        """Return stable index maintenance counters for tests and diagnostics."""
+
+        if self._delegate is not None:
+            return self._delegate.statistics
+        return {
+            "buffers": len(self._buffers),
+            "tensors": len(self._tensors),
+            "rebuilds": self._rebuilds,
+            "incremental_updates": self._incremental_updates,
+        }
+
+    def synchronize(
+        self,
+        *,
+        force: bool = False,
+        subgraph_index: int | None = None,
+        tensor_indices: Iterable[int] = (),
+    ) -> None:
+        """Refresh indexes after graph mutation without rebuilding when possible."""
+
+        if self._delegate is not None:
+            self._delegate.synchronize(
+                force=force,
+                subgraph_index=subgraph_index,
+                tensor_indices=tensor_indices,
+            )
+            return
+        buffers = as_list(getattr(self.model, "buffers", None))
+        tensor_counts = self._current_tensor_counts()
+        if (
+            force
+            or self._buffer_count > len(buffers)
+            or len(self._tensor_counts) != len(tensor_counts)
+            or any(
+                previous > current
+                for previous, current in zip(self._tensor_counts, tensor_counts)
+            )
+        ):
+            self._buffers.clear()
+            self._tensors.clear()
+            self._index_existing_objects()
+            self._rebuilds += 1
+            return
+
+        changed = False
+        for buffer_index in range(max(1, self._buffer_count), len(buffers)):
+            payload = _inline_buffer_payload(buffers[buffer_index])
+            if payload is not None:
+                self._buffers.setdefault(payload, buffer_index)
+            changed = True
+
+        previous_counts = self._tensor_counts or (0,) * len(tensor_counts)
+        for current_subgraph_index, subgraph in enumerate(
+            as_list(getattr(self.model, "subgraphs", None))
+        ):
+            tensors = as_list(getattr(subgraph, "tensors", None))
+            start = (
+                previous_counts[current_subgraph_index]
+                if current_subgraph_index < len(previous_counts)
+                else 0
+            )
+            for tensor_index in range(start, len(tensors)):
+                self._index_tensor(current_subgraph_index, tensor_index)
+                changed = True
+
+        selected = tuple(dict.fromkeys(int(index) for index in tensor_indices))
+        if subgraph_index is not None and selected:
+            self._refresh_tensors(int(subgraph_index), selected)
+            changed = True
+
+        self._buffer_count = len(buffers)
+        self._tensor_counts = tensor_counts
+        if changed:
+            self._incremental_updates += 1
 
     def _index_existing_objects(self) -> None:
         """Populate buffer and tensor keys from existing model contents."""
@@ -131,23 +246,95 @@ class ConstantPool:
         for subgraph_index, subgraph in enumerate(
             as_list(getattr(self.model, "subgraphs", None))
         ):
-            for tensor_index, tensor in enumerate(
+            for tensor_index, _tensor in enumerate(
                 as_list(getattr(subgraph, "tensors", None))
             ):
-                if bool(getattr(tensor, "isVariable", False)):
-                    continue
-                buffer_index = int(getattr(tensor, "buffer", 0) or 0)
-                if buffer_index <= 0 or buffer_index >= len(buffers):
-                    continue
-                payload = _inline_buffer_payload(buffers[buffer_index])
-                if payload is None:
-                    continue
-                try:
-                    contract = TensorContract.from_tensor(tensor)
-                except CircleValueError:
-                    continue
-                key = ConstantKey(contract, payload)
-                self._tensors.setdefault((subgraph_index, key), tensor_index)
+                self._index_tensor(subgraph_index, tensor_index)
+        self._buffer_count = len(buffers)
+        self._tensor_counts = self._current_tensor_counts()
+
+    def _index_tensor(self, subgraph_index: int, tensor_index: int) -> None:
+        """Index one immutable inline tensor when its contract is representable."""
+
+        key = self._constant_key_for_tensor(subgraph_index, tensor_index)
+        if key is None:
+            return
+        self._tensors.setdefault((subgraph_index, key), tensor_index)
+
+    def _constant_key_for_tensor(
+        self,
+        subgraph_index: int,
+        tensor_index: int,
+    ) -> ConstantKey | None:
+        """Return one tensor's semantic constant key when it has inline storage."""
+
+        subgraph = _subgraph(self.model, subgraph_index)
+        tensors = as_list(getattr(subgraph, "tensors", None))
+        if tensor_index < 0 or tensor_index >= len(tensors):
+            return None
+        tensor = tensors[tensor_index]
+        if bool(getattr(tensor, "isVariable", False)):
+            return None
+        buffer_index = int(getattr(tensor, "buffer", 0) or 0)
+        buffers = as_list(getattr(self.model, "buffers", None))
+        if buffer_index <= 0 or buffer_index >= len(buffers):
+            return None
+        payload = _inline_buffer_payload(buffers[buffer_index])
+        if payload is None:
+            return None
+        try:
+            contract = TensorContract.from_tensor(tensor)
+        except CircleValueError:
+            return None
+        return ConstantKey(contract, payload)
+
+    def _refresh_tensors(
+        self,
+        subgraph_index: int,
+        tensor_indices: Iterable[int],
+    ) -> None:
+        """Replace entries for existing tensors whose contract or buffer changed."""
+
+        selected = {int(index) for index in tensor_indices}
+        stale = [
+            key
+            for key, tensor_index in self._tensors.items()
+            if key[0] == subgraph_index and tensor_index in selected
+        ]
+        for key in stale:
+            self._tensors.pop(key, None)
+        tensors = as_list(
+            getattr(_subgraph(self.model, subgraph_index), "tensors", None)
+        )
+        for tensor_index in sorted(selected):
+            if 0 <= tensor_index < len(tensors):
+                self._index_tensor(subgraph_index, tensor_index)
+
+        # A touched tensor may have been the representative for a key that is still
+        # provided by an equivalent sibling constant. Restore such representatives
+        # without rebuilding every pool index.
+        missing = [key for key in stale if key not in self._tensors]
+        if not missing:
+            return
+        missing_keys = {key[1] for key in missing}
+        for tensor_index in range(len(tensors)):
+            if tensor_index in selected:
+                continue
+            key = self._constant_key_for_tensor(subgraph_index, tensor_index)
+            if key not in missing_keys:
+                continue
+            self._tensors.setdefault((subgraph_index, key), tensor_index)
+            missing_keys.discard(key)
+            if not missing_keys:
+                break
+
+    def _current_tensor_counts(self) -> tuple[int, ...]:
+        """Return current subgraph-local tensor sequence lengths."""
+
+        return tuple(
+            len(as_list(getattr(subgraph, "tensors", None)))
+            for subgraph in as_list(getattr(self.model, "subgraphs", None))
+        )
 
 
 class CircleBuilder:
@@ -167,6 +354,9 @@ class CircleBuilder:
         self.model = getattr(document_or_model, "model", document_or_model)
         self.subgraph_index = int(subgraph_index)
         self.subgraph = _subgraph(self.model, self.subgraph_index)
+        from tico.circle.session import optimization_session_for
+
+        self._session = optimization_session_for(document_or_model)
         if constant_pool is not None and constant_pool.model is not self.model:
             raise ValueError("constant_pool must belong to the same Circle model.")
         if constant_pool is not None and codec is not None:
@@ -179,29 +369,30 @@ class CircleBuilder:
                 raise ValueError(
                     "object_factory must match the supplied constant_pool factory."
                 )
-        self.codec = (
-            constant_pool.codec
-            if constant_pool is not None
-            else codec or TensorValueCodec()
-        )
-        self.object_factory = (
-            constant_pool.object_factory
-            if constant_pool is not None
-            else object_factory
-        )
-        self.constant_pool = constant_pool or ConstantPool(
-            self.model,
-            codec=self.codec,
-            object_factory=self.object_factory,
-        )
+        if constant_pool is not None:
+            canonical_pool = self._session.register_constant_pool(constant_pool)
+            self.codec = canonical_pool.codec
+            self.object_factory = canonical_pool.object_factory
+            self.constant_pool = canonical_pool
+        else:
+            self.constant_pool = self._session.constant_pool(
+                codec=codec,
+                object_factory=object_factory,
+            )
+            self.codec = self.constant_pool.codec
+            self.object_factory = self.constant_pool.object_factory
 
     def add_buffer(self, payload: bytes, *, deduplicate: bool = True) -> int:
         """Add an inline buffer or return an existing exact payload match."""
 
-        return self.constant_pool.add_buffer(
+        before = len(as_list(getattr(self.model, "buffers", None)))
+        index = self.constant_pool.add_buffer(
             payload,
             deduplicate=deduplicate,
         )
+        if len(as_list(getattr(self.model, "buffers", None))) != before:
+            self._record_model_mutation()
+        return index
 
     def add_tensor(
         self,
@@ -220,7 +411,9 @@ class CircleBuilder:
         )
         tensors = _mutable_list(self.subgraph, "tensors")
         tensors.append(tensor)
-        return len(tensors) - 1
+        tensor_index = len(tensors) - 1
+        self._record_graph_mutation(touched_tensors=(tensor_index,))
+        return tensor_index
 
     def add_constant(
         self,
@@ -231,12 +424,16 @@ class CircleBuilder:
     ) -> int:
         """Intern one immutable tensor value as a subgraph-local constant."""
 
-        return self.constant_pool.intern_constant(
+        tensor_count = len(as_list(getattr(self.subgraph, "tensors", None)))
+        tensor_index = self.constant_pool.intern_constant(
             subgraph_index=self.subgraph_index,
             name=name,
             value=value,
             contract=contract,
         )
+        if len(as_list(getattr(self.subgraph, "tensors", None))) != tensor_count:
+            self._record_graph_mutation(touched_tensors=(tensor_index,))
+        return tensor_index
 
     def find_or_add_operator_code(
         self,
@@ -278,6 +475,7 @@ class CircleBuilder:
             else int(deprecated_builtin_code)
         )
         operator_codes.append(operator_code)
+        self._record_model_mutation()
         return len(operator_codes) - 1
 
     def make_operator(
@@ -370,7 +568,9 @@ class CircleBuilder:
         )
         operators = _mutable_list(self.subgraph, "operators")
         operators.append(operator)
-        return len(operators) - 1
+        operator_index = len(operators) - 1
+        self._record_graph_mutation()
+        return operator_index
 
     def add_operator(
         self,
@@ -463,6 +663,9 @@ class CircleBuilder:
                 f"Operator index {operator_index} is outside 0..{len(operators) - 1}."
             )
         self._validate_operator(replacement)
+        transaction = self._current_mutation()
+        if transaction is not None:
+            transaction.watch_operator(operator_index)
         previous = operators[operator_index]
         if require_same_outputs and as_indices(previous.outputs) != as_indices(
             replacement.outputs
@@ -471,7 +674,43 @@ class CircleBuilder:
                 "Replacement operators must preserve output tensor indices."
             )
         operators[operator_index] = replacement
+        self._record_graph_mutation()
         return previous
+
+    def _current_mutation(self) -> Any:
+        """Return the active transaction for this builder's model and subgraph."""
+
+        from tico.circle.mutation import current_mutation
+
+        return current_mutation(
+            model=self.model,
+            subgraph_index=self.subgraph_index,
+        )
+
+    def _record_model_mutation(self) -> None:
+        """Record a model-global mutation without invalidating graph topology."""
+
+        if self._current_mutation() is not None:
+            return
+        self._session.mark_modified(())
+
+    def _record_graph_mutation(
+        self,
+        *,
+        touched_tensors: Iterable[int] = (),
+    ) -> None:
+        """Defer invalidation to a transaction or update the session immediately."""
+
+        indices = tuple(dict.fromkeys(int(index) for index in touched_tensors))
+        transaction = self._current_mutation()
+        if transaction is not None:
+            for tensor_index in indices:
+                transaction.touch_tensor(tensor_index)
+            return
+        self._session.mark_modified(
+            (self.subgraph_index,),
+            touched_tensors=({self.subgraph_index: indices} if indices else None),
+        )
 
     def _validate_operator(self, operator: Any) -> None:
         """Check one operator's opcode and tensor index references."""
