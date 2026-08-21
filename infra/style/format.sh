@@ -4,6 +4,7 @@
 set -e
 
 APPLY_PATCH_OPTION="-a"
+TAKE_OPTION=""
 while [[ "$#" -gt 0 ]]; do
   case $1 in
     --no-apply-patches)
@@ -12,6 +13,12 @@ while [[ "$#" -gt 0 ]]; do
       ;;
     -d|--diff-only)
       CHECK_DIFF_ONLY="1"
+      shift
+      ;;
+    -f|--formatter-only)
+      # Run only the code formatter (UFMT). Skips the slower pylint/mypy checks,
+      # which still run in CI and in the default full mode.
+      TAKE_OPTION="--take UFMT"
       shift
       ;;
     *) echo "[ERROR] Unknown parameter passed: $1"; exit 255 ;;
@@ -43,7 +50,7 @@ if [[ "${CHECK_DIFF_ONLY}" = "1" ]]; then
     FILES_TO_CHECK=$(git ls-files -c -s --exclude-standard ${FILES_TO_CHECK[@]} | egrep -v '^1[26]0000' | cut -f2)
   fi
 
-  lintrunner --force-color $APPLY_PATCH_OPTION --config "${GIT_ROOT}/.lintrunner.toml" $FILES_TO_CHECK
+  lintrunner --force-color $TAKE_OPTION $APPLY_PATCH_OPTION --config "${GIT_ROOT}/.lintrunner.toml" $FILES_TO_CHECK
 else
-  lintrunner --force-color --all-files $APPLY_PATCH_OPTION --config "${GIT_ROOT}/.lintrunner.toml"
+  lintrunner --force-color --all-files $TAKE_OPTION $APPLY_PATCH_OPTION --config "${GIT_ROOT}/.lintrunner.toml"
 fi
