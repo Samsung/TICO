@@ -15,6 +15,7 @@
 from typing import Any
 
 from tico.quantization.evaluation.mmmu_eval_utils import (
+    DEFAULT_MMMU_PRO_VISION_PROMPT_MODE,
     evaluate_mmmu,
     print_mmmu_results,
 )
@@ -29,10 +30,11 @@ def evaluate_and_print_mmmu(
     device: str,
     n_shots: int,
     n_samples: int,
-    max_new_tokens: int,
+    max_new_tokens: int | None,
     max_seq_len: int | None,
     temperature: float,
     verbose: bool,
+    prompt_mode: str = DEFAULT_MMMU_PRO_VISION_PROMPT_MODE,
 ):
     results = evaluate_mmmu(
         model=model,
@@ -46,6 +48,7 @@ def evaluate_and_print_mmmu(
         max_seq_len=max_seq_len,
         temperature=temperature,
         verbose=verbose,
+        prompt_mode=prompt_mode,
     )
     print_mmmu_results(results)
     return results
