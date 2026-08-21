@@ -209,27 +209,26 @@ class CircleMutationTransaction:
         self._committed = True
 
     def rollback(self) -> None:
-        """Restore sequence order, watched values, interfaces, and shared indexes."""
+        """Restore original object identities, state, interfaces, and shared indexes."""
 
-        restored_operators = list(self._initial_operators)
-        for index, operator in self._operator_snapshots.items():
-            restored_operators[index] = operator
-        restored_tensors = list(self._initial_tensors)
-        for index, tensor in self._tensor_snapshots.items():
-            restored_tensors[index] = tensor
+        # Existing Circle objects may be referenced by callers, pass-local rollback
+        # code, or generated Object API parents. Restore their fields in place and
+        # then put the original objects back into their original sequence positions.
+        # Replacing them with deep-copied snapshots would make the model structurally
+        # equal while breaking observable Python object identity.
+        for index, snapshot in self._operator_snapshots.items():
+            _restore_object_state(self._initial_operators[index], snapshot)
+        for index, snapshot in self._tensor_snapshots.items():
+            _restore_object_state(self._initial_tensors[index], snapshot)
+        for index, snapshot in self._buffer_snapshots.items():
+            _restore_object_state(self._initial_buffers[index], snapshot)
+        for index, snapshot in self._operator_code_snapshots.items():
+            _restore_object_state(self._initial_operator_codes[index], snapshot)
 
-        restored_buffers = list(self._initial_buffers)
-        for index, buffer in self._buffer_snapshots.items():
-            restored_buffers[index] = buffer
-
-        restored_operator_codes = list(self._initial_operator_codes)
-        for index, operator_code in self._operator_code_snapshots.items():
-            restored_operator_codes[index] = operator_code
-
-        self.model.buffers = restored_buffers
-        self.model.operatorCodes = restored_operator_codes
-        self.subgraph.tensors = restored_tensors
-        self.subgraph.operators = restored_operators
+        self.model.buffers = list(self._initial_buffers)
+        self.model.operatorCodes = list(self._initial_operator_codes)
+        self.subgraph.tensors = list(self._initial_tensors)
+        self.subgraph.operators = list(self._initial_operators)
         for field_name, value in self._subgraph_fields.items():
             setattr(self.subgraph, field_name, clone_object(value))
         for field_name, value in self._model_fields.items():
@@ -274,6 +273,49 @@ class CircleMutationTransaction:
                 pending.extend(
                     getattr(value, field.name) for field in dataclasses.fields(value)
                 )
+
+
+def _restore_object_state(target: Any, snapshot: Any) -> None:
+    """Restore one mutable Circle table without changing its Python identity."""
+
+    if type(target) is not type(snapshot):
+        raise TypeError(
+            "Cannot restore Circle object state across different concrete types: "
+            f"{type(target).__name__} and {type(snapshot).__name__}."
+        )
+
+    target_dict = getattr(target, "__dict__", None)
+    snapshot_dict = getattr(snapshot, "__dict__", None)
+    if isinstance(target_dict, dict) and isinstance(snapshot_dict, dict):
+        target_dict.clear()
+        target_dict.update(clone_object(snapshot_dict))
+        return
+
+    field_names: list[str] = []
+    if dataclasses.is_dataclass(snapshot) and not isinstance(snapshot, type):
+        field_names.extend(field.name for field in dataclasses.fields(snapshot))
+    for owner in type(snapshot).__mro__:
+        slots = getattr(owner, "__slots__", ())
+        if isinstance(slots, str):
+            slots = (slots,)
+        field_names.extend(str(name) for name in slots)
+
+    restored = False
+    for field_name in dict.fromkeys(field_names):
+        if field_name in {"__dict__", "__weakref__"} or not hasattr(
+            snapshot, field_name
+        ):
+            continue
+        try:
+            setattr(target, field_name, clone_object(getattr(snapshot, field_name)))
+        except (AttributeError, TypeError):
+            continue
+        restored = True
+
+    if not restored:
+        raise TypeError(
+            f"Cannot restore mutable state for {type(target).__name__} in place."
+        )
 
 
 def current_mutation(

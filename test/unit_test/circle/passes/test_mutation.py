@@ -152,6 +152,10 @@ class CircleMutationTransactionTest(unittest.TestCase):
 
         document, codec = self._document()
         before = freeze_object(document.model)
+        original_operators = tuple(document.subgraph().operators)
+        original_tensors = tuple(document.subgraph().tensors)
+        original_operator_codes = tuple(document.model.operatorCodes)
+        original_buffers = tuple(document.model.buffers)
         session = CirclePassContext().session(document)
         cached = session.graph(0)
 
@@ -162,6 +166,16 @@ class CircleMutationTransactionTest(unittest.TestCase):
             )
 
         self.assertEqual(freeze_object(document.model), before)
+        for current, original in zip(document.subgraph().operators, original_operators):
+            self.assertIs(current, original)
+        for current, original in zip(document.subgraph().tensors, original_tensors):
+            self.assertIs(current, original)
+        for current, original in zip(
+            document.model.operatorCodes, original_operator_codes
+        ):
+            self.assertIs(current, original)
+        for current, original in zip(document.model.buffers, original_buffers):
+            self.assertIs(current, original)
         self.assertTrue(document.verify(raise_on_error=False).ok)
         self.assertIsNot(session.graph(0), cached)
 
