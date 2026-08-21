@@ -40,7 +40,7 @@ TICO currently provides:
 - conditional handling of graphs that already contain quantization operations
 - Circle serialization through ATen-target-specific visitors
 - a Python `CircleModel` wrapper for saving, loading, and local execution
-- post-serialization Circle inspection, verification, extraction, and cleanup tools
+- post-serialization Circle inspection, verification, extraction, optimization, and cleanup tools
 - a separate model quantization subsystem with public `prepare()` and `convert()` APIs
 - config-driven quantization recipes for model-family workflows
 
@@ -86,7 +86,7 @@ Saved .pt2                    In-memory ExportedProgram
                Circle bytes
                    │
                    ├─ CircleModel.save/load/__call__
-                   └─ tico.circle inspect/verify/extract/passes
+                   └─ tico.circle inspect/verify/extract/optimize
 ```
 
 The working graph remains an `ExportedProgram`; TICO does not introduce a separate
@@ -516,16 +516,48 @@ the exported-graph pass pipeline.
 ```text
 Circle bytes
     -> CircleDocument
-        -> inspect summaries
-        -> static verification
-        -> operator/tensor-boundary extraction
-        -> CirclePassManager transformations
-        -> save Circle bytes
+        ├── inspect summaries
+        ├── static verification
+        ├── operator/tensor-boundary extraction
+        └── CirclePassPipeline
+              ├── compatibility   optional legacy custom-op recovery
+              ├── legalize        optional dynamic-FC lowering
+              ├── optimize        round-based generic and pattern rewrites
+              │     ├── canonicalize
+              │     ├── simplify
+              │     ├── fold
+              │     ├── fuse
+              │     ├── CSE
+              │     └── DCE
+              └── compact         one-shot index compaction
 ```
+
+Circle transformations are grouped by semantic responsibility under
+`tico/circle/passes/optimization/`: `canonicalize`, `simplify`, `fold`, `fuse`,
+`legalize`, and `compatibility`. Global CSE remains separate, while dead-code
+elimination and index compaction live under `passes/cleanup/`.
+
+The built-in O1 pipeline uses `CirclePassStrategy.UNTIL_NO_CHANGE` for the optimize
+phase: all optimization passes complete one ordered round, and another round starts
+only if at least one pass changed the document. Legacy custom-op recovery and dynamic
+FullyConnected legalization create optional one-shot phases before optimization.
+The compatibility-owned FC-GELU-FC recognizer is instead scheduled inside the
+optimization phase at its pattern-sensitive position. `CompactIndicesPass` runs
+exactly once in the final `compact` phase. The legacy `RESTART` scheduler remains available
+for explicit custom pipelines and scheduler-comparison benchmarks.
+
+A `CirclePassContext` owns a model-scoped optimization session. The session caches
+producer/consumer analyses by subgraph revision and shares a canonical constant pool.
+Local rewrite rules run through a deterministic neighborhood worklist and an atomic
+mutation transaction, so failed rewrites roll back appended objects and watched
+state. Direct Object API passes remain supported, but must report modifications
+accurately so cached analyses are invalidated.
 
 The artifact verifier checks structural and referential consistency, including
 containers, indices, dataflow, tensor interfaces, signatures, and control-flow
-subgraph references. It reports warnings for graph hygiene issues.
+subgraph references. Dead-code elimination preserves signature-bound and caller-owned
+inputs and treats stateful, non-deterministic, custom, variable, and
+subgraph-referencing operators as observable roots.
 
 Verification does not execute inference or validate numerical parity or target-backend
 support. Those concerns belong to runtime tests and backend compilation tests.
@@ -587,9 +619,21 @@ dimensions.
 
 ### Add a Circle-to-Circle pass
 
-Implement it under `tico/circle/passes/`, use `CirclePassManager`, define index-remapping
-and verification behavior, and test multi-subgraph/global-resource interactions when
-applicable.
+1. Put the transformation in the semantic package that owns its responsibility:
+   `canonicalize`, `simplify`, `fold`, `fuse`, `legalize`, `compatibility`, or
+   `cleanup`.
+2. Use `CircleRewriteRule` and the shared mutation/session infrastructure for local
+   rewrites; reserve a direct `CirclePass` for graph-global algorithms.
+3. Preserve tensor contracts, signatures, subgraph references, shared buffers, and
+   observable effects.
+4. Register a canonical CLI name in `tico/circle/cli/main.py` when the pass is
+   user-selectable, and add it to `tico/circle/passes/presets.py` only when a built-in
+   preset should schedule it.
+5. Add focused positive and close non-matching tests, plus multi-subgraph or
+   global-resource coverage when applicable.
+
+See [`tico/circle/README.md`](../tico/circle/README.md#writing-a-new-circle-pass) for
+the detailed rewrite and testing contract.
 
 ## 14. Current limitations
 
@@ -626,5 +670,7 @@ Use these files as the source of truth when updating this document:
 | Input binding and dynamic signatures | `tico/utils/signature.py` |
 | Built-in runtime | `tico/utils/model.py`, `tico/interpreter/` |
 | Quantization public API | `tico/quantization/public_interface.py` |
-| Circle artifact tools | `tico/circle/README.md`, `tico/circle/` |
+| Circle artifact APIs and pass taxonomy | `tico/circle/README.md`, `tico/circle/passes/optimization/` |
+| Circle optimization presets and scheduling | `tico/circle/passes/presets.py`, `tico/circle/passes/manager.py` |
+| Circle CLI pass registry | `tico/circle/cli/main.py` |
 | Source tooling and CI | `infra/`, `.github/workflows/check-pr.yaml` |

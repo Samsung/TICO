@@ -9,10 +9,12 @@ The existing model benchmark covers the performance requirements documented in
 `docs/system_test.md`:
 
 ```bash
+./ccex test -p
+# Direct equivalent:
 python3 -m test.performance.benchmark_perf
 ```
 
-It uses the configured Llama baseline models and therefore requires their model-test
+`./ccex test -p` selects this threshold benchmark. It uses the configured Llama baseline models and therefore requires their model-test
 dependencies.
 
 ## Full Circle O1 scheduler benchmark
@@ -40,3 +42,8 @@ python3 -m test.performance.benchmark_circle_optimizer \
   --fuse-transpose-conv-slice \
   --json
 ```
+
+The scheduler comparison requires a caller-provided full Circle artifact and is run
+directly; it is not selected by `./ccex test -p` and has no repository pass/fail
+threshold. See [`tico/circle/README.md`](../../tico/circle/README.md) for O1 pass
+selection and scheduling semantics.

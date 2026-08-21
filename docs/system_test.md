@@ -41,12 +41,14 @@ The test suite is designed to answer distinct questions:
    - Does TICO reject unsupported or invalid patterns with the expected diagnostic?
 5. **Version compatibility**
    - Does the package satisfy the tiered PR and scheduled PyTorch compatibility policy?
-6. **Performance regression detection**
+6. **Performance and scheduler regression detection**
    - Do the opt-in synthetic Llama conversion and size benchmarks remain within their
      repository thresholds?
+   - Does the full-model Circle O1 round scheduler reduce pass executions while
+     producing the same serialized result as the legacy restart scheduler?
 7. **Artifact-tool correctness**
-   - Do Circle verification, extraction, cleanup, and index remapping preserve their
-     documented structural contracts?
+   - Do Circle verification, extraction, semantic optimization, cleanup, and index
+     remapping preserve their documented structural contracts?
 
 No single test layer proves every property. In particular, static Circle verification,
 runtime parity, and target-NPU compilation are different checks.
@@ -60,7 +62,7 @@ runtime parity, and target-NPU compilation are different checks.
 | Conversion harness | `test/pt2_to_circle_test/` | Exercise direct and `.pt2` conversion, Circle validation, runtime execution, and PyTorch/Circle comparison. |
 | Opt-in model tests | `test/modules/model/` | Validate real model-family integration with per-model dependencies. |
 | Quantization tests | `test/quantization/` | Cover algorithms, WrapQ, qparam passes, configs, recipes, evaluation, analysis, and export behavior. |
-| Performance tests | `test/performance/` | Measure the current synthetic Llama decoder-layer conversion time and serialized-size thresholds. |
+| Performance tests | `test/performance/` | Measure synthetic Llama conversion/size thresholds and compare full Circle O1 scheduling strategies. |
 | Shared test support | `test/support/` | Provide test builders, runtime adapters, tags, and helpers. |
 | PyTorch compatibility checks | `.github/workflows/check-pr.yaml`, `.github/workflows/check-pytorch-compatibility.yaml` | Enforce style/DCO checks and validate the default, oldest supported, candidate, and `nightly-latest` tiers. |
 
@@ -328,8 +330,18 @@ The shell wildcard should be quoted.
 
 ### Run performance tests
 
+Run the configured conversion-time and serialized-size threshold benchmark:
+
 ```bash
 ./ccex test -p
+```
+
+Compare Circle O1 schedulers with a caller-provided full artifact:
+
+```bash
+python3 -m test.performance.benchmark_circle_optimizer \
+  model.circle \
+  --repeat 3
 ```
 
 ### Option-combination constraints
@@ -395,8 +407,10 @@ smoke test needed to prove integration.
 
 ## 9. Performance testing
 
-`test/performance/benchmark_perf.py` currently benchmarks synthetic Llama 3.2 decoder
-layers for 1B and 3B configurations.
+### Conversion speed and serialized size
+
+`test/performance/benchmark_perf.py` benchmarks synthetic Llama 3.2 decoder layers for
+1B and 3B configurations.
 
 The benchmark:
 
@@ -417,7 +431,25 @@ Interpret these results as regression indicators for this benchmark implementati
 as measured full-model end-to-end deployment latency. Results are host- and
 version-dependent.
 
-The performance benchmark is opt-in and is not in the current PR test matrix.
+### Full Circle O1 scheduling
+
+`test/performance/benchmark_circle_optimizer.py` accepts a caller-provided full Circle
+artifact and runs the same O1 pass sequence with two schedulers:
+
+- legacy `CirclePassStrategy.RESTART`
+- O1's round-based `CirclePassStrategy.UNTIL_NO_CHANGE`
+
+Each repetition starts from a fresh clone, verifies the result, and requires the two
+scheduler variants to produce byte-identical Circle binaries. The report includes
+elapsed time, pass-execution counts, invocation reduction, output size, and SHA-256.
+Heavy constant folding and optional O1 transforms can be enabled through explicit
+command-line flags.
+
+This comparison has no repository threshold and stores no model artifact. It is a
+diagnostic for real graph size and pass-interaction cost, not a claim that the two
+schedulers have identical intermediate states.
+
+Both performance workflows are opt-in and are not in the current PR test matrix.
 
 ## 10. Circle artifact testing
 
@@ -434,6 +466,10 @@ layer. Depending on the change, coverage should include:
 - dead-code elimination
 - tensor, buffer, operator, and opcode index remapping
 - verification before/after Circle passes
+- semantic pass taxonomy and canonical CLI-name coverage
+- atomic rewrite rollback and optimization-session cache invalidation
+- local worklist convergence and non-empty O1 idempotence
+- byte-equivalent `RESTART` and `UNTIL_NO_CHANGE` scheduler results
 
 Circle artifact tests should use in-memory synthetic Circle documents or the smallest
 possible fixture. Do not use OCR, graph screenshots, or external visualization as the
@@ -556,7 +592,11 @@ validation explicitly.
 
 - Test the pre-pass and post-pass document.
 - Run verifier assertions on expected errors/warnings.
+- Cover a close non-matching graph for pattern-based rewrites.
+- Validate rollback when a rewrite fails after beginning a mutation.
 - Validate global resource remapping when retaining multiple subgraphs.
+- Add pipeline-level idempotence or scheduler-equivalence coverage when pass order
+  or fixed-point behavior changes.
 
 ### For a bug fix
 
@@ -574,9 +614,10 @@ and make the assertion distinguish the bug from unrelated failures.
 | Static and dynamic input contracts | `ModelInputSpec` tests and dynamic module/onert tests |
 | Quantized graph legalization | `test/quantization/passes/`, quantization unit tests |
 | Quantization API and workflows | registry/config/WrapQ/algorithm/recipe tests |
-| Circle artifact structural contracts | `test/unit_test/circle/` |
+| Circle artifact structural contracts, pass scheduling, and rewrite transactions | `test/unit_test/circle/` |
 | Package/Torch compatibility | `tico/utils/compat/torch_version_policy.py`, `.github/workflows/check-pr.yaml`, `.github/workflows/check-pytorch-compatibility.yaml` |
 | Performance thresholds | `test/performance/benchmark_perf.py` through `./ccex test -p` |
+| Circle O1 scheduler comparison | `test/performance/benchmark_circle_optimizer.py` with a caller-provided artifact |
 | Formatting/type quality | `.lintrunner.toml` through `./ccex format --no-apply-patches` |
 
 See [Requirements](./requirements.md) for the supported contract and
