@@ -32,7 +32,9 @@ from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPa
 from tico.circle.passes.optimization.remove import (
     transpose_bounded_layout_region_rules as rules,
 )
-from tico.circle.passes.optimization.remove._layout_utils import _TRANSPOSE_BUILTIN_CODE
+from tico.circle.passes.optimization.simplify._layout_utils import (
+    _TRANSPOSE_BUILTIN_CODE,
+)
 
 from test.unit_test.circle.fixture import (
     FakeBuffer,

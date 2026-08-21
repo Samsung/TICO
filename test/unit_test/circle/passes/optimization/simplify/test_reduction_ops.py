@@ -21,11 +21,11 @@ import numpy as np
 from tico.circle.passes.base import CirclePassContext
 from tico.circle.passes.cleanup import DeadCodeEliminationPass
 from tico.circle.passes.optimization._utils import operator_builtin_code
-from tico.circle.passes.optimization.fusion.reduction_ops import (
+from tico.circle.passes.optimization.policy import FloatingPointRewritePolicy
+from tico.circle.passes.optimization.simplify.reductions import (
     ReductionSimplificationPolicy,
     SimplifyReductionOpsPass,
 )
-from tico.circle.passes.optimization.policy import FloatingPointRewritePolicy
 
 from test.unit_test.circle.infrastructure_fixture import (
     add_runtime_tensor,

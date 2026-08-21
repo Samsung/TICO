@@ -12,25 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.optimization.fusion.composite_ops import (
-    CompositeFusionPolicy,
-    FuseCompositeOpsPass,
-)
-from tico.circle.passes.optimization.fusion.legacy_fc_gelu_fc import (
+"""Backward-compatible imports for the former package layout."""
+
+from tico.circle.passes.optimization.compatibility import (
     FuseLegacyFCGeluFCPass,
     LegacyFCGeluFCFusionPolicy,
 )
-from tico.circle.passes.optimization.fusion.linear_ops import (
+from tico.circle.passes.optimization.fuse import (
+    CompositeFusionPolicy,
+    FuseCompositeOpsPass,
     FuseLinearOpsPass,
+    FuseTransposeConvSlicePass,
     LinearFusionPolicy,
+    TransposeConvSliceFusionPolicy,
 )
-from tico.circle.passes.optimization.fusion.reduction_ops import (
+from tico.circle.passes.optimization.simplify import (
     ReductionSimplificationPolicy,
     SimplifyReductionOpsPass,
-)
-from tico.circle.passes.optimization.fusion.transpose_conv_slice import (
-    FuseTransposeConvSlicePass,
-    TransposeConvSliceFusionPolicy,
 )
 
 __all__ = [

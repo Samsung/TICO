@@ -21,7 +21,7 @@ import numpy as np
 from tico.circle.passes.base import CirclePassContext
 from tico.circle.passes.cleanup import DeadCodeEliminationPass
 from tico.circle.passes.optimization._utils import operator_builtin_code
-from tico.circle.passes.optimization.fusion.composite_ops import (
+from tico.circle.passes.optimization.fuse.composite import (
     CompositeFusionPolicy,
     FuseCompositeOpsPass,
 )

@@ -21,9 +21,9 @@ CircleDocument
     ├── operations.extract      workflow-level graph extraction
     └── passes                  composable Circle-to-Circle rewrites
             ├── CanonicalizeEquivalentOpsPass
-            ├── FoldConstantSubgraphPass
+            ├── FoldConstantsPass
             ├── FuseLinearOpsPass
-            ├── RemoveNoOpOperatorsPass
+            ├── EliminateIdentityOpsPass
             ├── SimplifyViewOpsPass
             ├── DeadCodeEliminationPass
             └── CompactIndicesPass
@@ -136,9 +136,9 @@ from tico.circle.passes import (
     CanonicalizeEquivalentOpsPass,
     CirclePassManager,
     CommonSubexpressionEliminationPass,
-    FoldConstantSubgraphPass,
+    FoldConstantsPass,
     FuseLinearOpsPass,
-    RemoveNoOpOperatorsPass,
+    EliminateIdentityOpsPass,
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import (
@@ -149,9 +149,9 @@ from tico.circle.passes.cleanup import (
 pipeline = CirclePassManager(
     [
         CanonicalizeEquivalentOpsPass(),
-        FoldConstantSubgraphPass(),
+        FoldConstantsPass(),
         SimplifyViewOpsPass(),
-        RemoveNoOpOperatorsPass(),
+        EliminateIdentityOpsPass(),
         FuseLinearOpsPass(),
         CommonSubexpressionEliminationPass(),
         DeadCodeEliminationPass(),
@@ -163,7 +163,7 @@ print(result.changes)
 model.save("model.optimized.circle")
 ```
 
-`FoldConstantSubgraphPass` folds supported operators to a fixed point while preserving
+`FoldConstantsPass` folds supported operators to a fixed point while preserving
 existing output tensor indices and contracts. The first evaluator set covers `ADD`,
 `MUL`, `CAST`, `RESHAPE`, `SHAPE`, `SQUEEZE`, and `GATHER`. Arithmetic folding is
 limited to conservative dense cases, while exact quantized view operations may retain
@@ -181,7 +181,7 @@ keep-dims `MEAN` operations. It intentionally leaves operators made unreachable 
 rewiring in the graph. Schedule `DeadCodeEliminationPass` after it, followed by
 `CompactIndicesPass`, to remove and compact those dead objects.
 
-`RemoveNoOpOperatorsPass` removes contract-preserving `ADD` with an exact zero,
+`EliminateIdentityOpsPass` removes contract-preserving `ADD` with an exact zero,
 same-type `CAST`, full-range `SLICE`, identity `STRIDED_SLICE`, and one-output
 `SPLIT` or `SPLIT_V`. Quantized arithmetic is kept conservative because fixed-point
 requantization may remain observable even when real-number algebra suggests an
@@ -383,9 +383,9 @@ Available passes:
 | `canonicalize-equivalent-ops` | `CanonicalizeEquivalentOpsPass` | Replaces equivalent operator forms with canonical `RESHAPE`, `PAD`, or `SPLIT` forms |
 | `cse` | `CommonSubexpressionEliminationPass` | Reuses structurally identical pure expressions while preserving graph-output tensor identities |
 | `eliminate-transpose-bounded-layout-region` | `EliminateTransposeBoundedLayoutRegionPass` | Rewrites Transpose-bounded regions containing registered layout-invariant operators or constant PAD into the source layout |
-| `fold-constant-subgraph` | `FoldConstantSubgraphPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
+| `fold-constant-subgraph` | `FoldConstantsPass` | Folds supported constant operators to a fixed point under configurable storage and compute budgets |
 | `fuse-linear-ops` | `FuseLinearOpsPass` | Folds safe static FLOAT32 affine patterns into linear weights and biases; dead branches are left for DCE |
-| `remove-no-op-operators` | `RemoveNoOpOperatorsPass` | Removes operators that preserve the complete input tensor contract |
+| `remove-no-op-operators` | `EliminateIdentityOpsPass` | Removes operators that preserve the complete input tensor contract |
 | `simplify-view-ops` | `SimplifyViewOpsPass` | Rewires, composes, and safely moves compatible `RESHAPE` and `TRANSPOSE` views; dead operators are left for DCE |
 | `dce` | `DeadCodeEliminationPass` | Removes unreachable pure operators while preserving observable effects and public or caller-owned graph inputs |
 | `compact` | `CompactIndicesPass` | Removes unused tensors, buffers, and operator codes and remaps all supported references |
@@ -586,3 +586,28 @@ Additional limitations:
 - Control-flow references are discovered from scalar `*SubgraphIndex` fields, vector `*SubgraphIndices` fields,
  and `CallOptions.subgraph`. A new schema option with a different naming convention must be added to the reference walker.
 - Structural verification does not guarantee that a runtime accepts the model or that outputs are numerically equivalent.
+
+## Pass taxonomy
+
+Circle transformations are grouped by semantic responsibility under
+`tico.circle.passes.optimization`:
+
+- `canonicalize`: reduce equivalent operator spellings to a canonical form
+- `simplify`: remove identities and simplify views, arithmetic, reductions,
+  and layout regions
+- `fold`: evaluate constant subgraphs under an explicit evaluator profile
+- `fuse`: combine generic composite, linear, and spatial patterns
+- `legalize`: lower representations that are not directly executable
+- `compatibility`: recover legacy ONE or frontend-specific graph patterns
+
+The former `canon`, `fusion`, and `remove` module paths are forwarding
+compatibility shims. New code should import the semantic packages above.
+
+Constant folding uses one pass with an explicit profile instead of separate
+basic and heavy pass implementations:
+
+```python
+from tico.circle.passes import ConstantFoldingProfile, FoldConstantsPass
+
+folding = FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY)
+```
