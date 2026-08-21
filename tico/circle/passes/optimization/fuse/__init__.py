@@ -12,4 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__: list[str] = []
+
+from tico.circle.passes.optimization.fuse.composite import (
+    CompositeFusionPolicy,
+    FuseCompositeOpsPass,
+)
+from tico.circle.passes.optimization.fuse.linear import (
+    FuseLinearOpsPass,
+    LinearFusionPolicy,
+)
+from tico.circle.passes.optimization.fuse.spatial import (
+    FuseTransposeConvSlicePass,
+    TransposeConvSliceFusionPolicy,
+)
+
+__all__ = [
+    "CompositeFusionPolicy",
+    "FuseCompositeOpsPass",
+    "FuseLinearOpsPass",
+    "FuseTransposeConvSlicePass",
+    "LinearFusionPolicy",
+    "TransposeConvSliceFusionPolicy",
+]

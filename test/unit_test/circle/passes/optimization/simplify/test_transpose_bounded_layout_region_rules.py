@@ -17,9 +17,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from tico.circle.passes.optimization.remove import (
-    transpose_bounded_layout_region_rules as rules,
-)
+from tico.circle.passes.optimization.simplify import transpose_region_rules as rules
 
 
 class TransposeBoundedLayoutRegionRuleRegistryTest(unittest.TestCase):

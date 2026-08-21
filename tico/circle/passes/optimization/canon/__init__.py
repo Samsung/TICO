@@ -12,21 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.optimization.canon.arithmetic import (
-    ArithmeticCanonicalizationPolicy,
-    CanonicalizeArithmeticPass,
-)
-from tico.circle.passes.optimization.canon.dynamic_fully_connected import (
-    DynamicFullyConnectedLegalizationPolicy,
-    LegalizeDynamicFullyConnectedPass,
-)
-from tico.circle.passes.optimization.canon.equivalent_ops import (
-    CanonicalizeEquivalentOpsPass,
-)
-from tico.circle.passes.optimization.canon.legacy_custom_ops import (
+"""Backward-compatible imports for the former package layout."""
+
+from tico.circle.passes.optimization.canonicalize import CanonicalizeEquivalentOpsPass
+from tico.circle.passes.optimization.compatibility import (
     CustomOptionDecoder,
     LegacyCustomOpPolicy,
     ResolveLegacyCustomOpsPass,
+)
+from tico.circle.passes.optimization.legalize import (
+    DynamicFullyConnectedLegalizationPolicy,
+    LegalizeDynamicFullyConnectedPass,
+)
+from tico.circle.passes.optimization.simplify import (
+    ArithmeticCanonicalizationPolicy,
+    CanonicalizeArithmeticPass,
 )
 
 __all__ = [

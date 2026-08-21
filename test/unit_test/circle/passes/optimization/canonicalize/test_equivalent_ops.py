@@ -382,6 +382,65 @@ class CanonicalizeEquivalentOpsTest(unittest.TestCase):
             EXPAND_DIMS,
         )
 
+    def test_identity_patterns_are_left_to_identity_elimination(self) -> None:
+        """Do not canonicalize patterns owned by identity-removal passes."""
+
+        cases = (
+            (
+                TRANSPOSE,
+                (2, 3),
+                lambda builder: (add_i32(builder, "perm", [0, 1]),),
+                None,
+            ),
+            (
+                STRIDED_SLICE,
+                (2, 3),
+                lambda builder: (
+                    add_i32(builder, "begin", [0, 0]),
+                    add_i32(builder, "end", [2, 3]),
+                    add_i32(builder, "strides", [1, 1]),
+                ),
+                StridedSliceOptions(),
+            ),
+            (
+                SPLIT_V,
+                (4,),
+                lambda builder: (
+                    add_i32(builder, "size", [-1]),
+                    add_i32(builder, "axis", 0),
+                ),
+                SplitOptions(numSplits=1),
+            ),
+        )
+        for source_code, shape, extra_inputs, options in cases:
+            with self.subTest(source_code=source_code):
+                document = make_empty_document()
+                builder = make_builder(document, self.codec)
+                source = add_runtime_tensor(
+                    document,
+                    subgraph_index=0,
+                    name="source",
+                    shape=list(shape),
+                )
+                document.subgraph().inputs = [source]
+                inputs = (source, *extra_inputs(builder))
+                output = builder.add_operator(
+                    source_code,
+                    inputs=inputs,
+                    output_contracts=(static_contract(shape),),
+                    output_names=("output",),
+                    builtin_options=options,
+                )[0]
+                document.subgraph().outputs = [output]
+
+                result = self._pass().run(
+                    document,
+                    CirclePassContext(verify_after_each_pass=False),
+                )
+
+                self.assertFalse(result.modified)
+                self.assertEqual(len(document.subgraph().operators), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

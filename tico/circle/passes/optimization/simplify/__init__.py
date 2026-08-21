@@ -12,14 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backward-compatible forwarding module."""
 
+from tico.circle.passes.optimization.simplify.arithmetic import (
+    ArithmeticCanonicalizationPolicy,
+    CanonicalizeArithmeticPass,
+    SimplifyArithmeticPass,
+)
+from tico.circle.passes.optimization.simplify.identity_ops import (
+    EliminateIdentityOpsPass,
+    RemoveNoOpOperatorsPass,
+)
 from tico.circle.passes.optimization.simplify.reductions import (
     ReductionSimplificationPolicy,
     SimplifyReductionOpsPass,
 )
+from tico.circle.passes.optimization.simplify.transpose_region import (
+    EliminateTransposeBoundedLayoutRegionPass,
+)
+from tico.circle.passes.optimization.simplify.views import SimplifyViewOpsPass
 
 __all__ = [
+    "ArithmeticCanonicalizationPolicy",
+    "CanonicalizeArithmeticPass",
+    "EliminateIdentityOpsPass",
+    "EliminateTransposeBoundedLayoutRegionPass",
     "ReductionSimplificationPolicy",
+    "RemoveNoOpOperatorsPass",
+    "SimplifyArithmeticPass",
     "SimplifyReductionOpsPass",
+    "SimplifyViewOpsPass",
 ]

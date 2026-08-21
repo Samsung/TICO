@@ -12,14 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from tico.circle.passes.optimization.canon import (
-    ArithmeticCanonicalizationPolicy,
-    CanonicalizeArithmeticPass,
-    CanonicalizeEquivalentOpsPass,
+
+from tico.circle.passes.optimization.canonicalize import CanonicalizeEquivalentOpsPass
+from tico.circle.passes.optimization.compatibility import (
     CustomOptionDecoder,
-    DynamicFullyConnectedLegalizationPolicy,
+    FuseLegacyFCGeluFCPass,
     LegacyCustomOpPolicy,
-    LegalizeDynamicFullyConnectedPass,
+    LegacyFCGeluFCFusionPolicy,
     ResolveLegacyCustomOpsPass,
 )
 from tico.circle.passes.optimization.cse import (
@@ -27,28 +26,36 @@ from tico.circle.passes.optimization.cse import (
     CommonSubexpressionEliminationPolicy,
 )
 from tico.circle.passes.optimization.fold import (
+    ConstantFoldingProfile,
     ConstantFoldPolicy,
+    FoldConstantsPass,
     FoldConstantSubgraphPass,
     FoldHeavyConstantSubgraphPass,
     heavy_constant_evaluator_registry,
     HeavyConstantEvaluatorPolicy,
 )
-from tico.circle.passes.optimization.fusion import (
+from tico.circle.passes.optimization.fuse import (
     CompositeFusionPolicy,
     FuseCompositeOpsPass,
-    FuseLegacyFCGeluFCPass,
     FuseLinearOpsPass,
     FuseTransposeConvSlicePass,
-    LegacyFCGeluFCFusionPolicy,
     LinearFusionPolicy,
-    ReductionSimplificationPolicy,
-    SimplifyReductionOpsPass,
     TransposeConvSliceFusionPolicy,
 )
+from tico.circle.passes.optimization.legalize import (
+    DynamicFullyConnectedLegalizationPolicy,
+    LegalizeDynamicFullyConnectedPass,
+)
 from tico.circle.passes.optimization.policy import FloatingPointRewritePolicy
-from tico.circle.passes.optimization.remove import (
+from tico.circle.passes.optimization.simplify import (
+    ArithmeticCanonicalizationPolicy,
+    CanonicalizeArithmeticPass,
+    EliminateIdentityOpsPass,
     EliminateTransposeBoundedLayoutRegionPass,
+    ReductionSimplificationPolicy,
     RemoveNoOpOperatorsPass,
+    SimplifyArithmeticPass,
+    SimplifyReductionOpsPass,
     SimplifyViewOpsPass,
 )
 
@@ -60,10 +67,13 @@ __all__ = [
     "CommonSubexpressionEliminationPolicy",
     "CompositeFusionPolicy",
     "ConstantFoldPolicy",
+    "ConstantFoldingProfile",
     "CustomOptionDecoder",
     "DynamicFullyConnectedLegalizationPolicy",
+    "EliminateIdentityOpsPass",
     "EliminateTransposeBoundedLayoutRegionPass",
     "FloatingPointRewritePolicy",
+    "FoldConstantsPass",
     "FoldConstantSubgraphPass",
     "FoldHeavyConstantSubgraphPass",
     "FuseCompositeOpsPass",
@@ -78,6 +88,7 @@ __all__ = [
     "ReductionSimplificationPolicy",
     "RemoveNoOpOperatorsPass",
     "ResolveLegacyCustomOpsPass",
+    "SimplifyArithmeticPass",
     "SimplifyReductionOpsPass",
     "SimplifyViewOpsPass",
     "TransposeConvSliceFusionPolicy",

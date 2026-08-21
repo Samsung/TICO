@@ -12,4 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__: list[str] = []
+
+from tico.circle.passes.optimization.compatibility.custom_ops import (
+    CustomOptionDecoder,
+    LegacyCustomOpPolicy,
+    ResolveLegacyCustomOpsPass,
+)
+from tico.circle.passes.optimization.compatibility.fc_gelu_fc import (
+    FuseLegacyFCGeluFCPass,
+    LegacyFCGeluFCFusionPolicy,
+)
+
+__all__ = [
+    "CustomOptionDecoder",
+    "FuseLegacyFCGeluFCPass",
+    "LegacyCustomOpPolicy",
+    "LegacyFCGeluFCFusionPolicy",
+    "ResolveLegacyCustomOpsPass",
+]

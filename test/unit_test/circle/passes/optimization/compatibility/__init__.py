@@ -11,15 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-"""Backward-compatible forwarding module."""
-
-from tico.circle.passes.optimization.legalize.dynamic_fully_connected import (
-    DynamicFullyConnectedLegalizationPolicy,
-    LegalizeDynamicFullyConnectedPass,
-)
-
-__all__ = [
-    "DynamicFullyConnectedLegalizationPolicy",
-    "LegalizeDynamicFullyConnectedPass",
-]

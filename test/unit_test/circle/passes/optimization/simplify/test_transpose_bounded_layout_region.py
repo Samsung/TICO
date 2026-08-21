@@ -27,8 +27,10 @@ from tico.circle.passes import (
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
-from tico.circle.passes.optimization.remove._layout_utils import _TRANSPOSE_BUILTIN_CODE
-from tico.circle.passes.optimization.remove.transpose_bounded_layout_region import (
+from tico.circle.passes.optimization.simplify._layout_utils import (
+    _TRANSPOSE_BUILTIN_CODE,
+)
+from tico.circle.passes.optimization.simplify.transpose_region import (
     _ADD_BUILTIN_CODE,
     _PAD_BUILTIN_CODE,
 )
