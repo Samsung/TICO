@@ -566,12 +566,10 @@ def _run_constrained_greedy(
         baseline_reg = current_reg
 
         for step in range(1, step_limit + 1):
-            best: tuple[
-                WeightSensitivityGroup,
-                dict[str, dict[str, float | int | None]],
-                float,
-                float,
-            ] | None = None
+            best_group: WeightSensitivityGroup | None = None
+            best_outputs: dict[str, dict[str, float | int | None]] = {}
+            best_improvement = float("-inf")
+            best_cls = float("inf")
             for group in remaining:
                 candidate_paths = selected_paths.union(group.site_paths)
                 _apply_weight_baseline(state)
@@ -590,12 +588,18 @@ def _run_constrained_greedy(
                 improvement = current_reg - reg
                 if cls > current_cls + auxiliary_tolerance:
                     continue
-                if best is None or improvement > best[2]:
-                    best = (group, outputs, improvement, cls)
+                if best_group is None or improvement > best_improvement:
+                    best_group = group
+                    best_outputs = outputs
+                    best_improvement = improvement
+                    best_cls = cls
 
-            if best is None or best[2] <= minimum_improvement:
+            if best_group is None or best_improvement <= minimum_improvement:
                 break
-            group, outputs, improvement, cls = best
+            group = best_group
+            outputs = best_outputs
+            improvement = best_improvement
+            cls = best_cls
             selected.append(group.name)
             selected_paths.update(group.site_paths)
             reg = _mae(outputs, "regressors")
