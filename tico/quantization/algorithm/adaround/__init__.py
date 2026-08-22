@@ -12,8 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validation-aware AdaRound for fixed-qparam Conv2d weights."""
+"""Validation-aware AdaRound and joint learnable-scale Conv reconstruction."""
 
+from tico.quantization.algorithm.adaround.joint import (
+    JointAdaRoundWeightGroup,
+    JointAdaRoundWeightSet,
+    JointAdaRoundWeightStatistics,
+    LearnableScaleAdaRoundWeightQuantizer,
+)
+from tico.quantization.algorithm.adaround.joint_runner import (
+    JointAdaRoundCheckpoint,
+    JointAdaRoundConfig,
+    JointAdaRoundObjective,
+    JointAdaRoundResult,
+    JointAdaRoundRunner,
+)
 from tico.quantization.algorithm.adaround.rounding import (
     AdaRoundWeightGroup,
     AdaRoundWeightQuantizer,
@@ -36,4 +49,13 @@ __all__ = [
     "AdaRoundWeightQuantizer",
     "AdaRoundWeightSet",
     "AdaRoundWeightStatistics",
+    "JointAdaRoundCheckpoint",
+    "JointAdaRoundConfig",
+    "JointAdaRoundObjective",
+    "JointAdaRoundResult",
+    "JointAdaRoundRunner",
+    "JointAdaRoundWeightGroup",
+    "JointAdaRoundWeightSet",
+    "JointAdaRoundWeightStatistics",
+    "LearnableScaleAdaRoundWeightQuantizer",
 ]

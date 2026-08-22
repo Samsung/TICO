@@ -521,11 +521,34 @@ def _execute_operation(
         source = values[inputs[0]]
         if bool(config["nhwc_memory_order"]):
             source = source.permute(0, 2, 3, 1)
-        values[output] = source.reshape(tuple(config["shape"]))
+        shape = _runtime_reshape_shape(source, config["shape"])
+        values[output] = source.reshape(shape)
     elif name == "CONCATENATION":
         values[output] = layer(tuple(values[index] for index in inputs))
     else:
         raise RuntimeError(f"Unsupported converted operation: {name}")
+
+
+def _runtime_reshape_shape(
+    source: torch.Tensor,
+    configured_shape: Sequence[int],
+) -> tuple[int, ...]:
+    """Preserve a reconstruction minibatch through static B=1 reshapes.
+
+    Converted hand-detector RESHAPE operators retain the source TFLite
+    batch dimension of one, for example ``(1, -1, 18)``. Reconstruction
+    caches concatenate independent samples on dimension zero. Replacing
+    only a leading configured singleton with the runtime batch size keeps
+    those samples separate instead of folding them into the inferred axis.
+    The exported single-sample detector is unchanged.
+    """
+    shape = tuple(int(value) for value in configured_shape)
+    if not shape or source.ndim == 0:
+        return shape
+    runtime_batch = int(source.shape[0])
+    if runtime_batch != 1 and shape[0] == 1:
+        return (runtime_batch, *shape[1:])
+    return shape
 
 
 def _window_boundaries(

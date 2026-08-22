@@ -840,7 +840,12 @@ def _int16_activation_spec(
 
 def _calibrate(model: nn.Module, samples: Sequence[torch.Tensor]) -> None:
     model.eval()
-    with torch.inference_mode():
+    # Observer implementations may replace registered statistics buffers
+    # while collecting. Tensors created under inference_mode become
+    # inference tensors, which later reject load_state_dict's in-place
+    # copies outside inference mode. no_grad avoids autograd overhead
+    # without changing the mutability contract of observer buffers.
+    with torch.no_grad():
         for sample in samples:
             model(sample)
 
