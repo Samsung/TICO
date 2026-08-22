@@ -23,12 +23,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
-from examples.hand_detector._support.analysis import output_boundaries
-from examples.hand_detector._support.sensitivity import (
-    build_activation_sensitivity_groups,
-)
-from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 from tico.quantization.algorithm.block_reconstruction import (
     AffineObserverGroup,
     BlockInvocation,
@@ -50,6 +44,12 @@ from tico.quantization.wrapq.control import (
     SiteRole,
 )
 from torch import nn
+
+from examples.hand_detector._support.analysis import output_boundaries
+from examples.hand_detector._support.sensitivity import (
+    build_activation_sensitivity_groups,
+)
+from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
 
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")

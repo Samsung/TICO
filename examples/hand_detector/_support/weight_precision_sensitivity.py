@@ -26,21 +26,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
-from examples.hand_detector._support.precision_ablation import (
-    discover_output_observer_paths,
-    PHASE1_PROFILES,
-    summarize_precision_inventory,
-    validate_profile_inventory,
-)
-
-# Reuse the semantic partition used by activation sensitivity so names remain
-# stable across the two analyses.
-# pylint: disable=protected-access
-from examples.hand_detector._support.sensitivity import (
-    _find_detector,
-    _partition_operations,
-)
 from tico.quantization import convert as freeze_quantization, prepare
 from tico.quantization.analysis import (
     evaluate_models,
@@ -65,6 +50,21 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from torch import nn
+
+from examples.hand_detector._support.precision_ablation import (
+    discover_output_observer_paths,
+    PHASE1_PROFILES,
+    summarize_precision_inventory,
+    validate_profile_inventory,
+)
+
+# Reuse the semantic partition used by activation sensitivity so names remain
+# stable across the two analyses.
+# pylint: disable=protected-access
+from examples.hand_detector._support.sensitivity import (
+    _find_detector,
+    _partition_operations,
+)
 
 
 MetricSummary = Mapping[str, Mapping[str, float | int | None]]

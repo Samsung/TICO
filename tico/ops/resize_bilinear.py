@@ -85,12 +85,30 @@ class ResizeBilinear2d(nn.Module):
             )
 
         input_nhwc = torch.ops.aten.permute.default(input_, [0, 2, 3, 1])
-        output_nhwc = torch.ops.circle_custom.resize_bilinear.default(
-            input_nhwc,
-            [self.size[0], self.size[1]],
-            self.align_corners,
-            self.half_pixel_centers,
+        eager_autograd = (
+            torch.is_grad_enabled()
+            and input_.requires_grad
+            and not torch.compiler.is_compiling()
         )
+        if eager_autograd:
+            # Calling the differentiable reference directly avoids treating the
+            # custom operator as an opaque autograd boundary. Export and
+            # non-gradient eager execution keep the Circle custom operator.
+            from tico.utils.register_custom_op import _resize_bilinear_nhwc_reference
+
+            output_nhwc = _resize_bilinear_nhwc_reference(
+                input_nhwc,
+                [self.size[0], self.size[1]],
+                align_corners=self.align_corners,
+                half_pixel_centers=self.half_pixel_centers,
+            )
+        else:
+            output_nhwc = torch.ops.circle_custom.resize_bilinear.default(
+                input_nhwc,
+                [self.size[0], self.size[1]],
+                self.align_corners,
+                self.half_pixel_centers,
+            )
         return torch.ops.aten.permute.default(output_nhwc, [0, 3, 1, 2])
 
     def extra_repr(self) -> str:

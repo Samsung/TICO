@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run joint DW/PW learnable-scale AdaRound under the P2 W8/A16 profile."""
+"""Run gradient-ranked transactional refinement of fixed-scale W8 codes."""
 
 from __future__ import annotations
 
@@ -24,29 +24,27 @@ from pathlib import Path
 
 import torch
 from tico.quantization.algorithm.adaround import (
-    JointAdaRoundConfig,
+    DiscreteCodeRefinementConfig,
     JointAdaRoundObjective,
 )
-from tico.quantization.algorithm.block_reconstruction import ReconstructionLoss
 from tico.quantization.analysis import make_output_adapter
 
-from examples.hand_detector._support.analysis import output_boundaries, OUTPUT_NAMES
+from examples.hand_detector._support.analysis import OUTPUT_NAMES
 from examples.hand_detector._support.data import (
     list_npy_inputs,
     load_npy_inputs,
     make_synthetic_inputs,
 )
+from examples.hand_detector._support.discrete_code_refinement import (
+    run_hand_detector_discrete_code_refinement,
+)
 from examples.hand_detector._support.joint_adaround import (
-    ALL_CONV_JOINT_GROUPS,
     apply_joint_adaround_checkpoint,
-    PRIORITY_JOINT_GROUPS,
-    run_hand_detector_joint_adaround,
     save_joint_adaround_checkpoint,
 )
 from examples.hand_detector._support.multistart_reconstruction import (
     split_reconstruction_samples_three_way,
 )
-from examples.hand_detector._support.reconstruction import build_reconstruction_windows
 from examples.hand_detector._support.weight_precision_sensitivity import (
     build_w8a16_candidate,
 )
@@ -55,6 +53,7 @@ from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 
 DIRECTORY = Path(__file__).resolve().parent
 OUTPUT_ADAPTER = make_output_adapter(OUTPUT_NAMES)
+DEFAULT_PROPOSAL_SIZES = (2048, 1024, 512, 256, 128, 64)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,13 +65,13 @@ def build_parser() -> argparse.ArgumentParser:
 def add_subparser(
     subparsers: argparse._SubParsersAction,
     *,
-    command: str = "joint-dwpw-adaround",
+    command: str = "discrete-code-refinement",
 ) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(
         command,
         help=(
-            "Jointly optimize depthwise and regular Conv W8 scales and "
-            "AdaRound decisions under A16."
+            "Rank exact fixed-scale floor/ceil alternatives by final-output "
+            "gradient, validate nested top-K proposals, and commit accepted rounds."
         ),
     )
     _add_arguments(parser)
@@ -109,55 +108,27 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-samples", type=int, default=524_288)
     parser.add_argument("--samples-per-batch", type=int, default=4_096)
     parser.add_argument("--sampling-seed", type=int, default=20260803)
-
-    target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument(
-        "--groups",
-        nargs="+",
-        help="Optimize one semantic DW/PW block per listed group.",
-    )
-    target.add_argument(
-        "--windows",
-        nargs="+",
-        help="Optimize contiguous joint windows written as group_a+group_b.",
-    )
-    target.add_argument(
-        "--priority-preset",
-        action="store_true",
-        help="Use the conditional-sensitivity priority Conv group sequence.",
-    )
-    target.add_argument(
-        "--all-conv-preset",
-        action="store_true",
-        help=(
-            "Optimize stem, all 30 feature blocks, and both regressor heads "
-            "in execution order."
-        ),
-    )
     parser.add_argument(
         "--load-checkpoint",
         type=Path,
-        help="Restore a prior joint-AdaRound checkpoint before optimization.",
+        required=True,
+        help="Entry hard-code checkpoint with fixed W8 scales and activation qparams.",
     )
     parser.add_argument(
         "--save-checkpoint",
         type=Path,
-        help="Save finalized hard weights and exact affine parameter qparams.",
+        help="Save the accepted final codes and unchanged affine qparams.",
     )
     parser.add_argument(
-        "--allow-reoptimize",
-        action="store_true",
-        help="Allow selected windows already accepted in a loaded checkpoint.",
+        "--groups",
+        nargs="+",
+        help="Optional semantic group subset; all Conv sites are used by default.",
     )
+    parser.add_argument("--require-accept", action="store_true")
 
     parser.add_argument("--selection-count", type=int, default=40)
     parser.add_argument("--acceptance-count", type=int, default=40)
     parser.add_argument("--selection-seed", type=int, default=20260803)
-    parser.add_argument(
-        "--selection-score-output",
-        choices=OUTPUT_NAMES,
-        default="regressors",
-    )
     parser.add_argument(
         "--selection-score-metric",
         choices=("mae", "mse", "rmse", "relative_mae"),
@@ -167,37 +138,64 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--relative-classifier-tolerance",
         type=float,
-        help="Optional classifier regression limit relative to each entry state.",
+        help="Optional classifier tolerance relative to each round entry.",
     )
     parser.add_argument("--minimum-selection-improvement", type=float, default=0.0)
     parser.add_argument("--minimum-acceptance-improvement", type=float, default=1e-3)
 
+    parser.add_argument("--max-rounds", type=int, default=4)
     parser.add_argument(
-        "--reconstruction-loss",
-        choices=tuple(value.value for value in ReconstructionLoss),
-        default=ReconstructionLoss.NORMALIZED_L1.value,
+        "--proposal-sizes",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_PROPOSAL_SIZES),
+        help="Nested top-K hard proposals evaluated in descending order.",
     )
-    parser.add_argument("--steps", type=int, default=2_000)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--evaluation-batch-size", type=int, default=16)
-    parser.add_argument("--evaluation-interval", type=int, default=100)
-    parser.add_argument("--alpha-learning-rate", type=float, default=1e-3)
-    parser.add_argument("--scale-learning-rate", type=float, default=1e-4)
-    parser.add_argument("--rounding-loss-weight", type=float, default=1e-2)
-    parser.add_argument("--scale-loss-weight", type=float, default=1e-3)
-    parser.add_argument("--warmup-fraction", type=float, default=0.2)
-    parser.add_argument("--beta-start", type=float, default=20.0)
-    parser.add_argument("--beta-end", type=float, default=2.0)
-    parser.add_argument("--gamma", type=float, default=-0.1)
-    parser.add_argument("--zeta", type=float, default=1.1)
-    parser.add_argument("--max-scale-ratio", type=float, default=1.25)
-    parser.add_argument("--gradient-clip-norm", type=float, default=1.0)
-    parser.add_argument("--optimization-seed", type=int, default=20260830)
+    parser.add_argument(
+        "--gradient-sample-count",
+        type=int,
+        default=0,
+        help="Number of training samples used per round; zero uses all.",
+    )
+    parser.add_argument("--gradient-seed", type=int, default=20260901)
+    parser.add_argument(
+        "--gradient-auxiliary-weight",
+        type=float,
+        default=0.0,
+        help="Classifier raw-MAE weight used only in the proposal gradient.",
+    )
+    parser.add_argument(
+        "--training-loss",
+        choices=("raw-mae", "normalized-l1"),
+        default="raw-mae",
+    )
+    parser.add_argument(
+        "--minimum-predicted-improvement",
+        type=float,
+        default=0.0,
+        help="Discard individual alternatives below this first-order gain.",
+    )
+    parser.add_argument(
+        "--target-regressor-mae",
+        type=float,
+        default=0.1,
+        help="Stop after an accepted round reaches this acceptance-set REG MAE.",
+    )
+    parser.add_argument(
+        "--initialization-metric-tolerance",
+        type=float,
+        default=1e-4,
+    )
+    parser.add_argument(
+        "--initialization-metric-relative-tolerance",
+        type=float,
+        default=1e-3,
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument(
         "--report-json",
         type=Path,
-        default=DIRECTORY / "reports" / "joint_dwpw_adaround.json",
+        default=DIRECTORY / "reports" / "discrete_code_refinement.json",
     )
 
 
@@ -208,8 +206,20 @@ def main() -> None:
 def run(args: argparse.Namespace) -> None:
     _validate_args(args)
     _validate_disjoint(args)
+    if not args.load_checkpoint.is_file():
+        raise FileNotFoundError(
+            f"Discrete refinement checkpoint does not exist: {args.load_checkpoint}"
+        )
     device = torch.device(args.device)
-    float_model = load_nhwc_hand_detector(args.weights, args.spec).to(device).eval()
+    float_model = (
+        load_nhwc_hand_detector(
+            args.weights,
+            args.spec,
+            map_location=device,
+        )
+        .to(device)
+        .eval()
+    )
     calibration = _load_samples(
         args.calibration_dir,
         args.calibration_limit,
@@ -242,58 +252,25 @@ def run(args: argparse.Namespace) -> None:
         samples_per_batch=args.samples_per_batch,
         sampling_seed=args.sampling_seed,
     )
-    checkpoint_replay = None
-    if args.load_checkpoint is not None:
-        checkpoint_replay = apply_joint_adaround_checkpoint(
-            candidate,
-            args.load_checkpoint,
-        )
-    boundaries = output_boundaries(candidate)
-    if args.priority_preset:
-        groups = list(PRIORITY_JOINT_GROUPS)
-    elif args.all_conv_preset:
-        groups = list(ALL_CONV_JOINT_GROUPS)
-    else:
-        groups = args.groups
-    windows = build_reconstruction_windows(
+    checkpoint_replay = apply_joint_adaround_checkpoint(
         candidate,
-        boundaries,
-        groups=groups,
-        windows=args.windows,
+        args.load_checkpoint,
     )
-    if checkpoint_replay is not None and not args.allow_reoptimize:
-        previous = checkpoint_replay.get("metadata", {}).get(
-            "accepted_windows",
-            [],
-        )
-        previous_names = {str(name) for name in previous}
-        overlap = tuple(
-            window.name for window in windows if window.name in previous_names
-        )
-        if overlap:
-            raise ValueError(
-                "Selected windows were already accepted in the loaded "
-                f"checkpoint: {overlap}. Pass --allow-reoptimize only for an "
-                "intentional second optimization pass."
-            )
-    config = JointAdaRoundConfig(
-        steps=args.steps,
-        batch_size=args.batch_size,
-        evaluation_batch_size=args.evaluation_batch_size,
-        evaluation_interval=args.evaluation_interval,
-        alpha_learning_rate=args.alpha_learning_rate,
-        scale_learning_rate=args.scale_learning_rate,
-        reconstruction_loss=ReconstructionLoss(args.reconstruction_loss),
-        rounding_loss_weight=args.rounding_loss_weight,
-        scale_loss_weight=args.scale_loss_weight,
-        warmup_fraction=args.warmup_fraction,
-        beta_start=args.beta_start,
-        beta_end=args.beta_end,
-        gamma=args.gamma,
-        zeta=args.zeta,
-        max_scale_ratio=args.max_scale_ratio,
-        gradient_clip_norm=args.gradient_clip_norm,
-        seed=args.optimization_seed,
+    config = DiscreteCodeRefinementConfig(
+        max_rounds=args.max_rounds,
+        proposal_sizes=tuple(args.proposal_sizes),
+        gradient_sample_count=args.gradient_sample_count,
+        gradient_seed=args.gradient_seed,
+        primary_output="regressors",
+        auxiliary_output="classifiers",
+        auxiliary_gradient_weight=args.gradient_auxiliary_weight,
+        training_loss=args.training_loss.replace("-", "_"),
+        minimum_predicted_improvement=args.minimum_predicted_improvement,
+        target_primary_score=args.target_regressor_mae,
+        initialization_metric_tolerance=args.initialization_metric_tolerance,
+        initialization_metric_relative_tolerance=(
+            args.initialization_metric_relative_tolerance
+        ),
     )
     relative = (
         {"classifiers": args.relative_classifier_tolerance}
@@ -302,33 +279,73 @@ def run(args: argparse.Namespace) -> None:
     )
     absolute = {"classifiers": args.classifier_limit}
     selection_objective = JointAdaRoundObjective(
-        primary_output=args.selection_score_output,
+        primary_output="regressors",
         primary_metric=args.selection_score_metric,
         minimum_improvement=args.minimum_selection_improvement,
         absolute_output_limits=absolute,
         relative_output_tolerances=relative,
     )
     acceptance_objective = JointAdaRoundObjective(
-        primary_output=args.selection_score_output,
+        primary_output="regressors",
         primary_metric=args.selection_score_metric,
         minimum_improvement=args.minimum_acceptance_improvement,
         absolute_output_limits=absolute,
         relative_output_tolerances=relative,
     )
-    report = run_hand_detector_joint_adaround(
+
+    def progress(round_result) -> None:
+        gradient = round_result.gradient_statistics
+        print(
+            f"\nround={round_result.round_index} "
+            f"gradient_samples={len(gradient.sample_indices)} "
+            f"reachable={gradient.reachable_candidate_count} "
+            f"predicted_improving={gradient.predicted_improving_candidate_count}"
+        )
+        for proposal in round_result.proposal_evaluations:
+            outputs = proposal.selection_outputs
+            print(
+                f"  K={proposal.applied_size:5d} "
+                f"pred={proposal.predicted_improvement:+.6e} "
+                f"REG={_mae(outputs, 'regressors'):.6e} "
+                f"gain={proposal.selection_improvement:+.6e} "
+                f"CLS={_mae(outputs, 'classifiers'):.6e} "
+                f"selection={'yes' if proposal.selection_eligible else 'no'}"
+            )
+            if proposal.acceptance_attempted:
+                print(
+                    "      acceptance="
+                    f"{'yes' if proposal.acceptance_eligible else 'no'} "
+                    f"gain={proposal.acceptance_improvement:+.6e} "
+                    f"reason={proposal.acceptance_reason}"
+                )
+        transition = round_result.transition_summary
+        print(
+            f"  result={'ACCEPT' if round_result.accepted else 'STOP'} "
+            f"K={round_result.selected_size} "
+            f"new={transition.newly_changed_count} "
+            f"reverted={transition.reverted_count} "
+            f"retained={transition.retained_count} "
+            f"net={transition.net_changed_count}"
+        )
+        print("  reason=" + round_result.acceptance_reason)
+
+    report = run_hand_detector_discrete_code_refinement(
         float_model,
         candidate,
         data_split=data_split,
         evaluation_samples=evaluation,
-        windows=windows,
         config=config,
         selection_objective=selection_objective,
         acceptance_objective=acceptance_objective,
         output_adapter=OUTPUT_ADAPTER,
+        requested_groups=args.groups,
+        progress_callback=progress,
         device=device,
     )
+    refinement = report["discrete_code_refinement"]
+    accepted = bool(refinement["accepted"])
     payload = {
-        "analysis": "joint_dwpw_learnable_scale_adaround",
+        "analysis": "gradient_ranked_discrete_code_refinement",
         "metadata": {
             **p2_metadata,
             "calibration_samples": len(calibration),
@@ -336,48 +353,42 @@ def run(args: argparse.Namespace) -> None:
             "selection_count": args.selection_count,
             "acceptance_count": args.acceptance_count,
             "selection_seed": args.selection_seed,
-            "selection_score_output": args.selection_score_output,
             "selection_score_metric": args.selection_score_metric,
             "classifier_limit": args.classifier_limit,
-            "relative_classifier_tolerance": (args.relative_classifier_tolerance),
+            "relative_classifier_tolerance": args.relative_classifier_tolerance,
             "minimum_selection_improvement": (args.minimum_selection_improvement),
             "minimum_acceptance_improvement": (args.minimum_acceptance_improvement),
-            "reconstruction_loss": args.reconstruction_loss,
-            "steps": args.steps,
-            "alpha_learning_rate": args.alpha_learning_rate,
-            "scale_learning_rate": args.scale_learning_rate,
-            "rounding_loss_weight": args.rounding_loss_weight,
-            "scale_loss_weight": args.scale_loss_weight,
-            "warmup_fraction": args.warmup_fraction,
-            "beta_start": args.beta_start,
-            "beta_end": args.beta_end,
-            "gamma": args.gamma,
-            "zeta": args.zeta,
-            "max_scale_ratio": args.max_scale_ratio,
-            "optimization_seed": args.optimization_seed,
+            "max_rounds": args.max_rounds,
+            "proposal_sizes": args.proposal_sizes,
+            "gradient_sample_count": args.gradient_sample_count,
+            "gradient_seed": args.gradient_seed,
+            "gradient_auxiliary_weight": args.gradient_auxiliary_weight,
+            "training_loss": args.training_loss,
+            "minimum_predicted_improvement": (args.minimum_predicted_improvement),
+            "target_regressor_mae": args.target_regressor_mae,
+            "initialization_metric_tolerance": (args.initialization_metric_tolerance),
+            "initialization_metric_relative_tolerance": (
+                args.initialization_metric_relative_tolerance
+            ),
             "device": str(device),
-            "priority_preset": bool(args.priority_preset),
-            "all_conv_preset": bool(args.all_conv_preset),
+            "requested_groups": args.groups,
             "checkpoint_replay": checkpoint_replay,
-            "windows": [window.to_dict() for window in windows],
         },
         **report,
     }
     checkpoint = None
-    if args.save_checkpoint is not None:
+    if args.save_checkpoint is not None and (accepted or not args.require_accept):
         checkpoint_path = save_joint_adaround_checkpoint(
             candidate,
             args.save_checkpoint,
             metadata={
                 "source_report": str(args.report_json),
-                "profile": payload["profile"],
+                "source_checkpoint": str(args.load_checkpoint),
+                "analysis": payload["analysis"],
+                "accepted": accepted,
+                "accepted_rounds": refinement["accepted_rounds"],
                 "final_evaluation": payload["final_evaluation"],
-                "windows": payload["metadata"]["windows"],
-                "accepted_windows": [
-                    step["window"]["name"]
-                    for step in payload["steps"]
-                    if step["joint_adaround"]["accepted"]
-                ],
+                "final_code_change_count": refinement["final_code_change_count"],
             },
         )
         checkpoint = {"path": checkpoint_path}
@@ -391,43 +402,43 @@ def run(args: argparse.Namespace) -> None:
     print(f"\nWrote {args.report_json}")
     if checkpoint is not None:
         print(f"Wrote {checkpoint['path']}")
+    if args.require_accept and not accepted:
+        raise RuntimeError(
+            "Discrete code refinement accepted no round; the report was written, "
+            "but no deployment checkpoint was produced."
+        )
 
 
 def _print_report(report: dict[str, object]) -> None:
     baseline = report["baseline_evaluation"]
+    final = report["final_evaluation"]
+    refinement = report["discrete_code_refinement"]
     assert isinstance(baseline, dict)
-    print("\nJoint DW/PW learnable-scale AdaRound")
+    assert isinstance(final, dict)
+    assert isinstance(refinement, dict)
+    print("\nGradient-ranked fixed-scale hard-code refinement")
     print(
-        "External P2 baseline: "
-        f"REG_MAE={float(baseline['regressors']['mae']):.6e}, "
-        f"CLS_MAE={float(baseline['classifiers']['mae']):.6e}"
+        "Loaded entry:    "
+        f"REG_MAE={_mae(baseline, 'regressors'):.6e}, "
+        f"CLS_MAE={_mae(baseline, 'classifiers'):.6e}"
     )
     print(
-        f"{'step':>4s} {'window':34s} {'result':>8s} {'best':>6s} "
-        f"{'REG_MAE':>13s} {'GAIN_REG':>13s} {'CLS_MAE':>13s} "
-        f"{'GAIN_CLS':>13s} {'DW/PW':>7s}"
+        "Final committed: "
+        f"REG_MAE={_mae(final, 'regressors'):.6e}, "
+        f"CLS_MAE={_mae(final, 'classifiers'):.6e}"
     )
-    baseline_reg = float(baseline["regressors"]["mae"])
-    baseline_cls = float(baseline["classifiers"]["mae"])
-    for step in report["steps"]:
-        result = step["joint_adaround"]
-        outputs = step["evaluation_after"]
-        outcome = "ACCEPT" if result["accepted"] else "ROLLBACK"
-        families = result["weight_families"]
-        depthwise = sum(value == "depthwise_conv" for value in families)
-        regular = sum(value == "regular_conv" for value in families)
-        print(
-            f"{int(step['step']):4d} "
-            f"{str(step['window']['name'])[:34]:34s} "
-            f"{outcome:>8s} "
-            f"{int(result['best_step']):6d} "
-            f"{float(outputs['regressors']['mae']):13.6e} "
-            f"{baseline_reg - float(outputs['regressors']['mae']):13.6e} "
-            f"{float(outputs['classifiers']['mae']):13.6e} "
-            f"{baseline_cls - float(outputs['classifiers']['mae']):13.6e} "
-            f"{depthwise:1d}/{regular:1d}"
-        )
-        print(f"     acceptance: {result['acceptance_reason']}")
+    print(
+        f"result={'ACCEPT' if refinement['accepted'] else 'NO CHANGE'}, "
+        f"accepted_rounds={int(refinement['accepted_rounds'])}, "
+        f"final_code_changes={int(refinement['final_code_change_count'])}"
+    )
+    print("stop: " + str(refinement["stop_reason"]))
+
+
+def _mae(outputs: dict[str, object], name: str) -> float:
+    value = outputs[name]
+    assert isinstance(value, dict)
+    return float(value["mae"])
 
 
 def _load_samples(
@@ -445,22 +456,45 @@ def _load_samples(
 def _validate_args(args: argparse.Namespace) -> None:
     if args.selection_count <= 0 or args.acceptance_count <= 0:
         raise ValueError("selection-count and acceptance-count must be positive.")
-    for name, value in (
-        ("classifier_limit", args.classifier_limit),
-        ("minimum_selection_improvement", args.minimum_selection_improvement),
-        ("minimum_acceptance_improvement", args.minimum_acceptance_improvement),
+    sample_count = args.calibration_limit or args.synthetic_calibration_samples
+    if args.selection_count + args.acceptance_count >= sample_count:
+        raise ValueError(
+            "selection-count + acceptance-count must be smaller than the "
+            "calibration sample count."
+        )
+    if args.max_rounds < 0:
+        raise ValueError("--max-rounds must be nonnegative.")
+    if not args.proposal_sizes or any(value <= 0 for value in args.proposal_sizes):
+        raise ValueError("--proposal-sizes must contain positive integers.")
+    if len(set(args.proposal_sizes)) != len(args.proposal_sizes):
+        raise ValueError("--proposal-sizes must be unique.")
+    if args.gradient_sample_count < 0:
+        raise ValueError("--gradient-sample-count must be nonnegative.")
+    for name in (
+        "classifier_limit",
+        "target_regressor_mae",
     ):
+        value = float(getattr(args, name))
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(f"--{name.replace('_', '-')} must be positive.")
+    for name in (
+        "gradient_auxiliary_weight",
+        "minimum_predicted_improvement",
+        "minimum_selection_improvement",
+        "minimum_acceptance_improvement",
+        "initialization_metric_tolerance",
+        "initialization_metric_relative_tolerance",
+    ):
+        value = float(getattr(args, name))
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(f"--{name.replace('_', '-')} must be nonnegative.")
-    if args.classifier_limit <= 0.0:
-        raise ValueError("classifier-limit must be positive.")
     if args.relative_classifier_tolerance is not None and (
         not math.isfinite(args.relative_classifier_tolerance)
         or args.relative_classifier_tolerance < 0.0
     ):
-        raise ValueError(
-            "relative-classifier-tolerance must be finite and nonnegative."
-        )
+        raise ValueError("--relative-classifier-tolerance must be nonnegative.")
+    if args.save_checkpoint is not None and args.report_json == args.save_checkpoint:
+        raise ValueError("Report and checkpoint paths must differ.")
 
 
 def _validate_disjoint(args: argparse.Namespace) -> None:
