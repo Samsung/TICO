@@ -71,7 +71,13 @@ Useful source-install options include:
 ./ccex install --torch_ver nightly
 ./ccex install --torch_ver nightly-latest
 ./ccex install --cuda_ver 12.8
+./ccex install --index-url https://packages.example.com/simple
 ```
+
+`--index-url` is forwarded to every `pip install` run by `ccex`, including Torch,
+the auxiliary requirements, and TICO itself. It replaces the automatically selected
+PyTorch CPU, CUDA, or nightly index, so the supplied index must provide the requested
+Torch and TorchVision wheels.
 
 `one-compiler` is not required to create Circle files. It is required for the bundled
 Circle interpreter used by `CircleModel.__call__()` and by the default end-to-end test

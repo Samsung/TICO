@@ -43,25 +43,53 @@ Usage: ./ccex install [OPTIONS]
 --cuda_ver MAJ.MIN     Override detected host CUDA capability (e.g. 12.1)
 --cpu_only             Force CPU-only Torch installation
                        (disables CUDA detection / --cuda_ver)
+--index-url URL        Use URL as the package index for every pip install.
+                       Overrides the automatically selected PyTorch wheel index.
 -h | --help            Show this help
 EOF_HELP
 }
 
+pip_install() {
+  local -a index_args=()
+
+  if [[ -n "${_INDEX_URL}" ]]; then
+    index_args=(--index-url "${_INDEX_URL}")
+  fi
+
+  python3 -m pip install "${index_args[@]}" "$@"
+}
+
+set_torch_index_urls() {
+  if [[ -n "${_INDEX_URL}" ]]; then
+    PYTORCH_INDEX_URLS=("${_INDEX_URL}")
+    return 0
+  fi
+
+  pytorch_build_index_urls "$@"
+}
+
 install_torch() {
   local index_url
+  local index_label
   local -a pip_args=("$@")
 
   for index_url in "${PYTORCH_INDEX_URLS[@]}"; do
-    echo "[INFO] Installing ${pip_args[*]} from ${index_url}"
+    if [[ -n "${_INDEX_URL}" && "${index_url}" == "${_INDEX_URL}" ]]; then
+      index_label="the package index configured with --index-url"
+    else
+      index_label="${index_url}"
+    fi
+
+    echo "[INFO] Installing ${pip_args[*]} from ${index_label}"
     if python3 -m pip install "${pip_args[@]}" --index-url "${index_url}"; then
-      echo "[INFO] Successfully installed torch from ${index_url}"
+      echo "[INFO] Successfully installed torch from ${index_label}"
       return 0
     fi
 
-    echo "[WARN] Failed to install ${pip_args[*]} from ${index_url}; trying next candidate..." >&2
+    echo "[WARN] Failed to install ${pip_args[*]} from ${index_label}; trying next candidate..." >&2
   done
 
-  echo "[ERROR] Could not install torch from any candidate PyTorch index." >&2
+  echo "[ERROR] Could not install torch from any configured package index." >&2
   return 1
 }
 
@@ -95,8 +123,9 @@ _TORCH_VER="${PYTORCH_DEFAULT_FAMILY}"
 _TORCH_VER_WAS_SET=0
 _USER_CUDA=""
 _CPU_ONLY=0
+_INDEX_URL=""
 
-options=$(getopt -o h --long dist,torch_ver:,cuda_ver:,cpu_only,help -- "$@") || {
+options=$(getopt -o h --long dist,torch_ver:,cuda_ver:,cpu_only,index-url:,help -- "$@") || {
   echo "[ERROR] Invalid command-line options" >&2; exit 1; }
 eval set -- "${options}"
 
@@ -106,6 +135,14 @@ while true; do
       --torch_ver)   _TORCH_VER="$2"; _TORCH_VER_WAS_SET=1; shift ;;
       --cuda_ver)    _USER_CUDA="$2"; shift ;;
       --cpu_only)    _CPU_ONLY=1 ;;
+      --index-url)
+        if [[ -z "$2" ]]; then
+          echo "[ERROR] --index-url requires a non-empty URL." >&2
+          exit 1
+        fi
+        _INDEX_URL="$2"
+        shift
+        ;;
       -h|--help)     show_help; exit 0 ;;
       --)            shift; break ;;
       *)             echo "[ERROR] Unknown option $1"; exit 1 ;;
@@ -272,15 +309,15 @@ if [[ "${SKIP_TORCH_INSTALL}" == "0" ]]; then
   fi
 
   if [[ "${REQUEST_IS_LATEST_NIGHTLY}" == "1" ]]; then
-    pytorch_build_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
+    set_torch_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
     # Resolve Torch and TorchVision together so pip selects one compatible
     # nightly pair from the same moving index.
     install_torch --pre --upgrade torch torchvision || exit 1
   elif [[ "${REQUEST_IS_NIGHTLY}" == "1" ]]; then
-    pytorch_build_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
+    set_torch_index_urls "" "${HOST_CUDA}" 1 "${REQUESTED_BUILD_TAG}" || exit 1
     install_torch -r "${TORCH_DEV_FILE}" || exit 1
   else
-    pytorch_build_index_urls \
+    set_torch_index_urls \
       "${REQUESTED_FAMILY}" "${HOST_CUDA}" 0 "${REQUESTED_BUILD_TAG}" || exit 1
     echo "[INFO] Resolved torch ${_TORCH_VER} to ${RESOLVED_TORCH_VERSION}"
     install_torch "torch==${RESOLVED_TORCH_VERSION}" || exit 1
@@ -339,18 +376,18 @@ fi
 ###############################################################################
 REQ_FILE="${SCRIPTS_DIR}/install_requirements.txt"
 echo "[INFO] Installing auxiliary requirements from ${REQ_FILE##*/}"
-python3 -m pip install -r "${REQ_FILE}" || exit 1
+pip_install -r "${REQ_FILE}" || exit 1
 
 ###############################################################################
 # TICO itself
 ###############################################################################
 if [[ "${_DIST}" -eq 1 ]]; then
   echo "[INFO] Installing TICO wheel from ./dist"
-  python3 -m pip install --force-reinstall --no-deps \
+  pip_install --force-reinstall --no-deps \
     "${CCEX_PROJECT_PATH}"/dist/tico*.whl || exit 1
 else
   echo "[INFO] Installing TICO in editable mode"
-  python3 -m pip install --editable "${CCEX_PROJECT_PATH}" || exit 1
+  pip_install --editable "${CCEX_PROJECT_PATH}" || exit 1
 fi
 
 # TorchVision is installed by `./ccex configure test`, so a global `pip check`
