@@ -43,6 +43,7 @@ from examples.hand_detector import (
     discrete_code_refinement as discrete_code_refinement_cli,
     global_weight_refinement as global_weight_refinement_cli,
     joint_adaround as joint_adaround_cli,
+    legal_mixed_precision as legal_mixed_precision_cli,
     precision_ablation as precision_ablation_cli,
     reverse_weight_precision as reverse_weight_precision_cli,
     screened_code_refinement as screened_code_refinement_cli,
@@ -236,6 +237,7 @@ def parse_args() -> argparse.Namespace:
     global_weight_refinement_cli.add_subparser(subparsers)
     screened_code_refinement_cli.add_subparser(subparsers)
     joint_adaround_cli.add_subparser(subparsers)
+    legal_mixed_precision_cli.add_subparser(subparsers)
     adaround_cli.add_subparser(subparsers)
     precision_ablation_cli.add_subparser(subparsers)
     reverse_weight_precision_cli.add_subparser(subparsers)
@@ -370,6 +372,8 @@ def main() -> None:
         screened_code_refinement_cli.run(args)
     elif args.command == "joint-dwpw-adaround":
         joint_adaround_cli.run(args)
+    elif args.command == "legal-mixed-precision":
+        legal_mixed_precision_cli.run(args)
     elif args.command == "adaround":
         adaround_cli.run(args)
     elif args.command == "precision-ablation":
