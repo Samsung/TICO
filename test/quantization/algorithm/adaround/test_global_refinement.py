@@ -18,6 +18,7 @@ from tico.quantization.algorithm.adaround.global_refinement import (
     _validate_batch_one,
     CheckpointInitializedScaleAdaRoundQuantizer,
     GlobalAdaRoundWeightSet,
+    GlobalWeightRefinementCheckpoint,
     GlobalWeightRefinementConfig,
     GlobalWeightRefinementRunner,
 )
@@ -338,7 +339,7 @@ class GlobalWeightRefinementTest(unittest.TestCase):
                         count[name] += actual[name].numel()
             return {name: {"mae": absolute[name] / count[name]} for name in absolute}
 
-        checkpoints = []
+        checkpoints: list[GlobalWeightRefinementCheckpoint] = []
         config = GlobalWeightRefinementConfig(
             steps=2,
             gradient_accumulation_steps=2,
@@ -361,9 +362,9 @@ class GlobalWeightRefinementTest(unittest.TestCase):
                 source_weights={"block.weight": source_weight},
                 output_adapter=adapter,
                 selection_evaluator=evaluate,
-                selection_objective=_AlwaysAcceptObjective(),
+                selection_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 acceptance_evaluator=evaluate,
-                acceptance_objective=_AlwaysAcceptObjective(),
+                acceptance_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 evaluation_evaluator=evaluate,
                 progress_callback=checkpoints.append,
             )
@@ -430,9 +431,9 @@ class GlobalWeightRefinementTest(unittest.TestCase):
                 source_weights={"block.weight": source_weight},
                 output_adapter=lambda outputs: outputs,
                 selection_evaluator=evaluate,
-                selection_objective=_AlwaysAcceptObjective(),
+                selection_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 acceptance_evaluator=evaluate,
-                acceptance_objective=_AlwaysRejectObjective(),
+                acceptance_objective=_AlwaysRejectObjective(),  # type: ignore[arg-type]
                 evaluation_evaluator=evaluate,
             )
         self.assertFalse(result.accepted)

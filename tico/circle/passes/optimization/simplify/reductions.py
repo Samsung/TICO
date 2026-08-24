@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -241,7 +241,7 @@ class _ReductionRuleBase(CircleRewriteRule[ReductionRewritePlan]):
     ) -> ReductionRewritePlan:
         """Capture a reduction rewrite after all shape checks succeeded."""
 
-        return ReductionRewritePlan.capture(
+        plan = ReductionRewritePlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=anchor_operator_index,
@@ -266,6 +266,7 @@ class _ReductionRuleBase(CircleRewriteRule[ReductionRewritePlan]):
                 getattr(anchor_operator, "builtinOptions", None)
             ),
         )
+        return cast(ReductionRewritePlan, plan)
 
 
 class _MergeConsecutiveMeanRule(_ReductionRuleBase):
@@ -501,7 +502,7 @@ class SimplifyReductionOpsPass(CircleRulePass):
             tensor_types=tensor_types,
             object_factory=object_factory,
         )
-        shared = {
+        shared: dict[str, Any] = {
             "codes": {
                 "MEAN": resolver.builtin_code("MEAN"),
                 "TRANSPOSE": resolver.builtin_code("TRANSPOSE"),

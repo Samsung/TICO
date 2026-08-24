@@ -440,7 +440,9 @@ class _ConditionalWeightEvaluator(
             paths = frozenset(floating_paths)
             self._state.set_where(
                 SiteSelector(
-                    lambda site, selected=paths: site.path in selected,
+                    lambda site, selected=paths: (  # type: ignore[misc]
+                        site.path in selected
+                    ),
                     "conditional_weight_float_paths",
                 ),
                 False,
@@ -469,7 +471,7 @@ def _build_independent_report(
 ) -> list[dict[str, object]]:
     baseline_reg = _mae(baseline, "regressors")
     baseline_cls = _mae(baseline, "classifiers")
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
     for group in groups:
         outputs = evaluator.evaluate(frozenset({group.name}))
         reg_gain = baseline_reg - _mae(outputs, "regressors")
@@ -530,7 +532,7 @@ def _run_constrained_greedy(
     baseline_reg = _mae(baseline, "regressors")
     baseline_cls = _mae(baseline, "classifiers")
     step_limit = len(groups) if max_steps == 0 else min(max_steps, len(groups))
-    steps: list[dict[str, object]] = []
+    steps: list[dict[str, Any]] = []
     stop_reason = "all_groups_selected"
 
     if _target_reached(current, target_regressor_mae, target_classifier_mae):

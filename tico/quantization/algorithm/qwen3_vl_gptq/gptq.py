@@ -478,6 +478,7 @@ class GPTQ:
                     else:
                         idx: torch.Tensor | int = i1 + i
                         if actorder:
+                            assert perm is not None
                             idx = perm[idx]
                         self.quantizer = groups[idx // groupsize]
 

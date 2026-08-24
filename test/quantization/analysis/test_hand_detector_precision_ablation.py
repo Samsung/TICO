@@ -53,7 +53,7 @@ class HandDetectorPrecisionAblationTest(unittest.TestCase):
             observer_name="act_out",
         )
         self.assertEqual(
-            _policy_path(site),
+            _policy_path(site),  # type: ignore[arg-type]
             "detector.layers.7.conv.act_out",
         )
 
@@ -110,7 +110,7 @@ class HandDetectorPrecisionAblationTest(unittest.TestCase):
         ):
             paths = precision_module.discover_output_observer_paths(
                 object(),
-                object(),
+                object(),  # type: ignore[arg-type]
             )
         self.assertEqual(paths.regressors, "detector.layers.0.act_out")
         self.assertEqual(paths.classifiers, "detector.layers.2.conv.act_out")

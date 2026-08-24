@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import operator
 import unittest
 from dataclasses import dataclass
 
@@ -158,8 +159,8 @@ class ConstantSubgraphFoldTest(unittest.TestCase):
         self.codec = TensorValueCodec(make_registry())
         self.registry = ConstantEvaluatorRegistry(
             (
-                (ADD, BinaryElementwiseEvaluator("ADD", lambda lhs, rhs: lhs + rhs)),
-                (MUL, BinaryElementwiseEvaluator("MUL", lambda lhs, rhs: lhs * rhs)),
+                (ADD, BinaryElementwiseEvaluator("ADD", operator.add)),
+                (MUL, BinaryElementwiseEvaluator("MUL", operator.mul)),
                 (CAST, CastEvaluator()),
                 (RESHAPE, ReshapeEvaluator()),
                 (SHAPE, ShapeEvaluator()),

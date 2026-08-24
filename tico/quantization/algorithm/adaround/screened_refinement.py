@@ -224,7 +224,7 @@ class ScreenedCodeRefinementConfig:
             raise ValueError("Primary and auxiliary outputs must differ.")
         if self.training_loss not in {"raw_mae", "normalized_l1"}:
             raise ValueError("training_loss must be 'raw_mae' or 'normalized_l1'.")
-        for name, value in (
+        for name, float_value in (
             ("auxiliary_gradient_weight", self.auxiliary_gradient_weight),
             ("screening_auxiliary_weight", self.screening_auxiliary_weight),
             ("minimum_predicted_improvement", self.minimum_predicted_improvement),
@@ -235,7 +235,7 @@ class ScreenedCodeRefinementConfig:
                 self.initialization_metric_relative_tolerance,
             ),
         ):
-            if not math.isfinite(value) or value < 0.0:
+            if not math.isfinite(float_value) or float_value < 0.0:
                 raise ValueError(f"{name} must be finite and nonnegative.")
         if not math.isfinite(self.loss_epsilon) or self.loss_epsilon <= 0.0:
             raise ValueError("loss_epsilon must be finite and positive.")
@@ -338,7 +338,7 @@ class ScreenedCodeRefinementRunner:
         entry_selection = copy_outputs(selection_evaluator())
         entry_acceptance = copy_outputs(acceptance_evaluator())
         entry_evaluation = copy_outputs(evaluation_evaluator())
-        current_selection = entry_selection
+        current_selection: OutputMetrics = entry_selection
         current_acceptance = entry_acceptance
         current_evaluation = entry_evaluation
         round_results: list[ScreenedCodeRoundResult] = []
@@ -512,9 +512,14 @@ class ScreenedCodeRefinementRunner:
                             progress_callback(result)
                         break
 
+                    def _selection_score(index: int) -> float:
+                        score = evaluations[index].selection_score
+                        assert score is not None
+                        return score
+
                     winner_index = min(
                         selection_successes,
-                        key=lambda index: evaluations[index].selection_score,
+                        key=_selection_score,
                     )
                     winner = evaluations[winner_index]
                     assert winner.selection_outputs is not None
@@ -560,10 +565,10 @@ class ScreenedCodeRefinementRunner:
                             progress_callback(result)
                         break
 
-                    evaluation = copy_outputs(evaluation_evaluator())
+                    evaluation_outputs = copy_outputs(evaluation_evaluator())
                     current_selection = winner.selection_outputs
                     current_acceptance = acceptance
-                    current_evaluation = evaluation
+                    current_evaluation = evaluation_outputs
                     accepted_rounds += 1
                     transition = weights.transition_summary((winner.candidate,))
                     result = ScreenedCodeRoundResult(
@@ -702,13 +707,13 @@ class ScreenedCodeRefinementRunner:
                 ):
                     channel_winners.append((value, binding_index, flat_index))
         channel_winners.sort(key=lambda value: value[0])
-        for score, binding_index, flat_index in channel_winners[
+        for channel_score, binding_index, flat_index in channel_winners[
             : self.config.maximum_channel_candidates
         ]:
             binding = weights.bindings[binding_index]
             key = (binding.group.site_path, flat_index)
             sources[key].add("channel")
-            scores[key] = score
+            scores[key] = channel_score
 
         ordered = sorted(scores, key=lambda key: (scores[key], key[0], key[1]))
         ordered = ordered[: self.config.maximum_shortlist_count]

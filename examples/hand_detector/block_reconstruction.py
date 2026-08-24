@@ -20,8 +20,17 @@ import argparse
 import json
 
 from pathlib import Path
+from typing import Any, Sequence
 
 import torch
+from tico.quantization.algorithm.block_reconstruction import (
+    BlockReconstructionConfig,
+    build_qdrop_candidates,
+    ReconstructionLoss,
+    ValidationObjective,
+)
+from tico.quantization.analysis import make_output_adapter
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 from examples.hand_detector._support.analysis import output_boundaries, OUTPUT_NAMES
 from examples.hand_detector._support.data import (
@@ -44,14 +53,6 @@ from examples.hand_detector._support.reconstruction import (
     split_reconstruction_samples,
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
-from tico.quantization.algorithm.block_reconstruction import (
-    BlockReconstructionConfig,
-    build_qdrop_candidates,
-    ReconstructionLoss,
-    ValidationObjective,
-)
-from tico.quantization.analysis import make_output_adapter
-from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -247,6 +248,8 @@ def run(args: argparse.Namespace) -> None:
     _validate_disjoint(args)
     device = torch.device(args.device)
     float_model = load_nhwc_hand_detector(args.weights, args.spec).to(device).eval()
+    calibration: Sequence[torch.Tensor]
+    evaluation: Sequence[torch.Tensor]
     if args.calibration_dir is None:
         calibration = make_synthetic_inputs(
             args.synthetic_calibration_samples,
@@ -418,7 +421,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"Wrote {output}")
 
 
-def _print_report(report: dict[str, object]) -> None:
+def _print_report(report: dict[str, Any]) -> None:
     baseline = report["baseline_evaluation"]
     assert isinstance(baseline, dict)
     print("\nValidation-aware block reconstruction")

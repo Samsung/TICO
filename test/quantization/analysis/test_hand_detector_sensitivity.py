@@ -132,14 +132,14 @@ class HandDetectorSensitivityGroupsTest(unittest.TestCase):
 
         input_owner, input_tensors = _site_group(
             pool_input,
-            detector,
+            detector,  # type: ignore[arg-type]
             operation_to_group,
             producer_by_tensor,
             input_group,
         )
         output_owner, output_tensors = _site_group(
             pool_output,
-            detector,
+            detector,  # type: ignore[arg-type]
             operation_to_group,
             producer_by_tensor,
             input_group,

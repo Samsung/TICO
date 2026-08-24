@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 
 import torch
 
@@ -100,13 +101,15 @@ class CumulativeSensitivityTest(unittest.TestCase):
             score_output="output",
         )
 
-        self.assertGreater(float(baseline["output"]["mae"]), 0.0)
+        self.assertGreater(float(cast(float, baseline["output"]["mae"])), 0.0)
         self.assertEqual(tuple(step.group for step in steps), ("fine", "coarse"))
         self.assertEqual(steps[0].selected_groups, ("fine",))
         self.assertEqual(steps[1].selected_groups, ("fine", "coarse"))
         self.assertEqual(steps[1].selected_site_count, 2)
         self.assertGreater(steps[1].incremental_sensitivity, 0.0)
-        self.assertAlmostEqual(float(steps[1].outputs["output"]["mae"]), 0.0)
+        self.assertAlmostEqual(
+            float(cast(float, steps[1].outputs["output"]["mae"])), 0.0
+        )
 
     def test_greedy_recomputes_and_selects_the_best_next_group(self) -> None:
         candidate = _Candidate()
@@ -122,7 +125,9 @@ class CumulativeSensitivityTest(unittest.TestCase):
         self.assertEqual(steps[1].selected_groups, ("coarse", "fine"))
         self.assertGreater(steps[0].incremental_sensitivity, 0.0)
         self.assertGreater(steps[1].incremental_sensitivity, 0.0)
-        self.assertAlmostEqual(float(steps[1].outputs["output"]["mae"]), 0.0)
+        self.assertAlmostEqual(
+            float(cast(float, steps[1].outputs["output"]["mae"])), 0.0
+        )
         self.assertTrue(candidate.block.obs_act_in.fake_quant_enabled)
         self.assertTrue(candidate.block.obs_act_out.fake_quant_enabled)
 
@@ -138,7 +143,7 @@ class CumulativeSensitivityTest(unittest.TestCase):
             max_steps=0,
         )
 
-        self.assertGreater(float(baseline["output"]["mae"]), 0.0)
+        self.assertGreater(float(cast(float, baseline["output"]["mae"])), 0.0)
         self.assertEqual(steps, [])
 
     def test_greedy_stops_below_the_minimum_improvement(self) -> None:
@@ -153,7 +158,7 @@ class CumulativeSensitivityTest(unittest.TestCase):
             minimum_improvement=1.0,
         )
 
-        self.assertGreater(float(baseline["output"]["mae"]), 0.0)
+        self.assertGreater(float(cast(float, baseline["output"]["mae"])), 0.0)
         self.assertEqual(steps, [])
 
     def test_cumulative_rejects_a_group_that_adds_no_new_site(self) -> None:

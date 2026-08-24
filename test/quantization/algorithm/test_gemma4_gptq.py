@@ -15,7 +15,7 @@
 """Unit tests for tico.quantization.algorithm.gemma4_gptq.quantizer."""
 
 import unittest
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -175,7 +175,7 @@ class MockGemma4Model(nn.Module):
 
 def _make_quantizer(**overrides) -> Gemma4GPTQQuantizer:
     """Create a Gemma4GPTQQuantizer with sensible test defaults."""
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         weight_bits=4,
         show_progress=False,
         verbose=False,
@@ -399,7 +399,7 @@ class TestResolveWeightBits(unittest.TestCase):
             },
         )
         result = quantizer._resolve_weight_bits(
-            quantizer.config,
+            cast(Gemma4GPTQConfig, quantizer.config),
             full_module_name="model.layers.0.layer.proj",
             local_module_name="layer.proj",
         )
@@ -411,7 +411,7 @@ class TestResolveWeightBits(unittest.TestCase):
             weight_bits_overrides={"layer.proj": 6},
         )
         result = quantizer._resolve_weight_bits(
-            quantizer.config,
+            cast(Gemma4GPTQConfig, quantizer.config),
             full_module_name="model.layers.1.layer.proj",
             local_module_name="layer.proj",
         )
@@ -423,7 +423,7 @@ class TestResolveWeightBits(unittest.TestCase):
             weight_bits_overrides={"proj": 5},
         )
         result = quantizer._resolve_weight_bits(
-            quantizer.config,
+            cast(Gemma4GPTQConfig, quantizer.config),
             full_module_name="model.layers.2.other.proj",
             local_module_name="other.proj",
         )
@@ -435,7 +435,7 @@ class TestResolveWeightBits(unittest.TestCase):
             weight_bits_overrides={"proj": 5},
         )
         result = quantizer._resolve_weight_bits(
-            quantizer.config,
+            cast(Gemma4GPTQConfig, quantizer.config),
             full_module_name="model.layers.2.other.up_proj",
             local_module_name="other.up_proj",
         )
@@ -450,7 +450,7 @@ class TestResolveWeightBits(unittest.TestCase):
             },
         )
         result = quantizer._resolve_weight_bits(
-            quantizer.config,
+            cast(Gemma4GPTQConfig, quantizer.config),
             full_module_name="model.layers.2.other.proj",
             local_module_name="other.proj",
         )
@@ -655,7 +655,7 @@ class TestAddBatchHook(unittest.TestCase):
         quantizer = _make_quantizer(weight_bits=4)
 
         gptq_obj = MagicMock(spec=GPTQ)
-        gptq_objs = {"test": gptq_obj}
+        gptq_objs: dict[str, GPTQ] = {"test": gptq_obj}
         hook = quantizer._make_add_batch_hook(gptq_objs, "test")
 
         # Non-tensor input should be ignored
@@ -667,7 +667,7 @@ class TestAddBatchHook(unittest.TestCase):
         quantizer = _make_quantizer(weight_bits=4)
 
         gptq_obj = MagicMock(spec=GPTQ)
-        gptq_objs = {"test": gptq_obj}
+        gptq_objs: dict[str, GPTQ] = {"test": gptq_obj}
         hook = quantizer._make_add_batch_hook(gptq_objs, "test")
 
         hook(nn.Identity(), (), "output")

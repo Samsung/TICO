@@ -24,7 +24,7 @@ install_optional_dependency_stubs()
 import sys
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import tico.quantization.examples.evaluate as evaluate_cli
@@ -99,7 +99,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
 
             def validate_evaluation_config(self, cfg):
                 """Validate targets through the shared adapter implementation."""
-                ModelAdapter.validate_evaluation_config(self, cfg)
+                ModelAdapter.validate_evaluation_config(cast(ModelAdapter, self), cfg)
 
             def load_model(self, ctx):
                 """Attach a floating-point model to the context."""
@@ -177,7 +177,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
 
             def validate_evaluation_config(self, cfg):
                 """Validate targets through the shared adapter implementation."""
-                ModelAdapter.validate_evaluation_config(self, cfg)
+                ModelAdapter.validate_evaluation_config(cast(ModelAdapter, self), cfg)
 
             def load_model(self, ctx):
                 """Record an unexpected model load."""

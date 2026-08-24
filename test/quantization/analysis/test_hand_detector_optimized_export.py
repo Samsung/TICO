@@ -20,6 +20,7 @@ import tempfile
 import unittest
 
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 from examples.hand_detector._support.optimized_export import (
@@ -64,8 +65,10 @@ class OptimizedExportTest(unittest.TestCase):
             ),
         )
         self.assertEqual(manifest["circle_export_profile"], "D:full")
-        self.assertEqual(manifest["evaluation"]["final_full"], full)
-        accepted = manifest["recipe"]["accepted_adaround_windows"]
+        evaluation = cast(dict, manifest["evaluation"])
+        self.assertEqual(evaluation["final_full"], full)
+        recipe = cast(dict, manifest["recipe"])
+        accepted = recipe["accepted_adaround_windows"]
         self.assertEqual(accepted[0]["name"], "feature_block_28")
         self.assertEqual(accepted[0]["best_step"], 1800)
 

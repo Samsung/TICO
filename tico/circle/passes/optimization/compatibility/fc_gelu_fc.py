@@ -417,7 +417,7 @@ class FuseLegacyFCGeluFCPass(CirclePass):
                 is None
             ):
                 continue
-            return int(front_index), int(front_output), int(add_index)
+            return int(front_index or 0), int(front_output or 0), int(add_index or 0)
         return None
 
     def _match_erf_and_one(

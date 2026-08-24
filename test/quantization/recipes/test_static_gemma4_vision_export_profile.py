@@ -25,6 +25,7 @@ install_optional_dependency_stubs()
 
 import unittest
 from types import SimpleNamespace
+from typing import cast
 
 import torch
 import torch.nn as nn
@@ -139,11 +140,14 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
     def test_runtime_builds_once_and_reuses_identical_profile(self) -> None:
         """Repeated images with the same position layout should reuse one graph."""
         wrapped_model = _FakeWrappedModel()
-        runtime = SimpleNamespace(
-            _wrapped_model=wrapped_model,
-            device=torch.device("cpu"),
-            vision_prefill=None,
-            vision_profile=self.profile,
+        runtime = cast(
+            StaticGemma4Runtime,
+            SimpleNamespace(
+                _wrapped_model=wrapped_model,
+                device=torch.device("cpu"),
+                vision_prefill=None,
+                vision_profile=self.profile,
+            ),
         )
 
         first = StaticGemma4Runtime._get_or_create_vision_prefill(
@@ -161,11 +165,14 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
     def test_runtime_rejects_a_different_position_profile(self) -> None:
         """A new patch layout must use a new static runtime instance."""
         wrapped_model = _FakeWrappedModel()
-        runtime = SimpleNamespace(
-            _wrapped_model=wrapped_model,
-            device=torch.device("cpu"),
-            vision_prefill=None,
-            vision_profile=self.profile,
+        runtime = cast(
+            StaticGemma4Runtime,
+            SimpleNamespace(
+                _wrapped_model=wrapped_model,
+                device=torch.device("cpu"),
+                vision_prefill=None,
+                vision_profile=self.profile,
+            ),
         )
         StaticGemma4Runtime._get_or_create_vision_prefill(
             runtime,
@@ -179,11 +186,14 @@ class TestGemma4StaticVisionExportProfile(unittest.TestCase):
 
     def test_runtime_requires_processor_position_ids(self) -> None:
         """Static vision cannot be specialized without processor coordinates."""
-        runtime = SimpleNamespace(
-            _wrapped_model=_FakeWrappedModel(),
-            device=torch.device("cpu"),
-            vision_prefill=None,
-            vision_profile=self.profile,
+        runtime = cast(
+            StaticGemma4Runtime,
+            SimpleNamespace(
+                _wrapped_model=_FakeWrappedModel(),
+                device=torch.device("cpu"),
+                vision_prefill=None,
+                vision_profile=self.profile,
+            ),
         )
 
         with self.assertRaisesRegex(ValueError, "requires image_position_ids"):

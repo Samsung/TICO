@@ -61,7 +61,7 @@ class TestGemma4AttentionSmokeRegistry(unittest.TestCase):
         """Return the exact decode case requested by the CLI."""
         case = get_case("gemma4_text_attention_sliding_decode")
         self.assertEqual(case.name, "gemma4_text_attention_sliding_decode")
-        self.assertEqual(case.export_mode, "decode")
+        self.assertEqual(case.export_mode, "decode")  # type: ignore[attr-defined]
 
 
 _GEMMA4_AVAILABILITY = _has_gemma4()

@@ -451,7 +451,9 @@ class _WeightFamilyEvaluator(AbstractContextManager["_WeightFamilyEvaluator"]):
         if float_paths:
             self._state.set_where(
                 SiteSelector(
-                    lambda site, paths=float_paths: site.path in paths,
+                    lambda site, paths=float_paths: (  # type: ignore[misc]
+                        site.path in paths
+                    ),
                     "weight_family_float_paths",
                 ),
                 False,

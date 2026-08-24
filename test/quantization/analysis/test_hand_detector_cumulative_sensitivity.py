@@ -20,6 +20,7 @@ import io
 import unittest
 
 from contextlib import redirect_stdout
+from typing import cast
 
 from examples.hand_detector._support.cumulative_sensitivity import (
     build_activation_sensitivity_path_report,
@@ -98,13 +99,13 @@ class HandDetectorCumulativeSensitivityTest(unittest.TestCase):
 
         self.assertEqual(report[0]["kind"], "stem")
         self.assertEqual(report[1]["kind"], "feature")
-        self.assertAlmostEqual(report[1]["regressor_mae_improvement"], 0.8)
+        self.assertAlmostEqual(cast(float, report[1]["regressor_mae_improvement"]), 0.8)
         self.assertAlmostEqual(
-            report[1]["incremental_regressor_mae_improvement"],
+            cast(float, report[1]["incremental_regressor_mae_improvement"]),
             0.3,
         )
         self.assertAlmostEqual(
-            report[1]["incremental_classifier_mae_improvement"],
+            cast(float, report[1]["incremental_classifier_mae_improvement"]),
             0.05,
         )
 

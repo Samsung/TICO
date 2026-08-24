@@ -24,12 +24,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from tico.ops import Concat, ResizeBilinear2d, SamePaddingConv2d
 
 from examples.hand_detector.hand_detector import (
+    HandDetector,
     load_hand_detector,
     load_nhwc_hand_detector,
+    NHWCInputAdapter,
 )
-from tico.ops import Concat, ResizeBilinear2d, SamePaddingConv2d
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -110,6 +112,9 @@ class ResizeBilinearTest(unittest.TestCase):
 
 class HandDetectorTest(unittest.TestCase):
     """Validate model structure, outputs, and the NHWC adapter."""
+
+    model: HandDetector
+    nhwc_model: NHWCInputAdapter
 
     @classmethod
     def setUpClass(cls) -> None:

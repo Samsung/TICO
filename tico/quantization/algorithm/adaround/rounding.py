@@ -86,6 +86,11 @@ class AdaRoundWeightQuantizer(AffineObserverBase):
     to floor. Soft mode uses the rectified stretched sigmoid from AdaRound.
     """
 
+    _floor_codes: torch.Tensor
+    _scale_broadcast: torch.Tensor
+    _zero_point_broadcast: torch.Tensor
+    alpha: nn.Parameter
+
     def __init__(
         self,
         original: AffineObserverBase,
@@ -230,7 +235,7 @@ class AdaRoundWeightQuantizer(AffineObserverBase):
             site_path=site_path,
             element_count=round_up.numel(),
             round_up_count=int(round_up.sum().cpu().item()),
-            changed_from_nearest_count=int(changed.sum().cpu().item()),
+            changed_from_nearest_count=int(changed.sum().cpu().item()),  # type: ignore[attr-defined]
             clipped_code_count=int(clipped.sum().cpu().item()),
         )
 

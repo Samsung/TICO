@@ -18,11 +18,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 from tico.quantization.analysis import QuantizationBoundaries, SiteSelector
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 from torch import nn
+
+from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
 
 OUTPUT_NAMES = ("regressors", "classifiers")

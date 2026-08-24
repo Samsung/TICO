@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -170,7 +170,7 @@ class _CompositeRuleBase(CircleRewriteRule[CompositeFusionPlan]):
     ) -> CompositeFusionPlan:
         """Capture a complete immutable plan for one composite replacement."""
 
-        return CompositeFusionPlan.capture(
+        plan = CompositeFusionPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=anchor_operator_index,
@@ -191,6 +191,7 @@ class _CompositeRuleBase(CircleRewriteRule[CompositeFusionPlan]):
                 else int(template_operator_index)
             ),
         )
+        return cast(CompositeFusionPlan, plan)
 
     def _float_contract(self, graph: CircleGraph, tensor_index: int) -> bool:
         """Return whether one tensor is static dense unquantized FLOAT32."""
@@ -1345,7 +1346,7 @@ class FuseCompositeOpsPass(CircleRulePass):
             )
         }
         resolved_policy = policy or CompositeFusionPolicy()
-        shared = {
+        shared: dict[str, Any] = {
             "codes": codes,
             "options_types": options_types,
             "float32_type": resolver.tensor_type("FLOAT32"),

@@ -22,8 +22,6 @@ from typing import Mapping, Sequence
 
 import tico
 import torch
-
-from examples.hand_detector._support.circle import save_layout_optimized_circle
 from tico.ops import Concat, ResizeBilinear2d
 from tico.quantization import convert as freeze_quantization, prepare, QuantStub
 from tico.quantization.config.ptq import PTQConfig
@@ -41,6 +39,8 @@ from tico.quantization.wrapq.wrappers.ops.quant_resize_bilinear import (
 )
 from tico.quantization.wrapq.wrappers.quant_stub import QuantStubWrapper
 from torch import nn
+
+from examples.hand_detector._support.circle import save_layout_optimized_circle
 
 
 ObserverOverride = QuantSpec | Mapping[str, object]
@@ -112,7 +112,7 @@ def make_ptq_config(
         weight=affine(
             dtype,
             qscheme=weight_qscheme,
-            observer=MinMaxObserver,
+            observer=MinMaxObserver,  # type: ignore[type-abstract]
         ),
         overrides=dict(overrides or {}),
         strict_wrap=False,

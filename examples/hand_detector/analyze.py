@@ -86,6 +86,7 @@ from examples.hand_detector._support.quantization import (
     quantize_candidate,
 )
 from examples.hand_detector._support.sensitivity import (
+    ActivationSensitivityGroup,
     build_activation_sensitivity_groups,
     build_activation_sensitivity_report,
     print_activation_sensitivity,
@@ -477,7 +478,7 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
         float_model,
         args.bits,
         calibration,
-        activation_observer=MinMaxObserver,
+        activation_observer=MinMaxObserver,  # type: ignore[type-abstract]
     )
     minmax_profiles = evaluate_observer_profiles(
         float_model,
@@ -780,7 +781,7 @@ def _run_activation_sensitivity(args: argparse.Namespace) -> None:
                 **common,
             )
             initial_ranking = []
-            ranked_groups = ()
+            ranked_groups: tuple[ActivationSensitivityGroup, ...] = ()
         else:
             _, independent_results = runner.run(
                 evaluation,

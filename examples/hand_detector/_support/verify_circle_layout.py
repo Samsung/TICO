@@ -20,7 +20,7 @@ import argparse
 import struct
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import cast, Iterable
 
 from examples.hand_detector._support.tflite_flatbuffer import FlatBufferReader
 
@@ -241,7 +241,9 @@ def _count_transpose_add_round_trips(
         input_producers = [producers.get(index) for index in operator.inputs]
         if any(index is None for index in input_producers):
             continue
-        input_transposes = [operators[int(index)] for index in input_producers]
+        input_transposes = [
+            operators[int(cast(int, index))] for index in input_producers
+        ]
         first = _transpose_permutation(
             input_transposes[0],
             reader=reader,

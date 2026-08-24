@@ -12,6 +12,7 @@ import math
 from pathlib import Path
 
 import torch
+from tico.quantization.analysis import make_output_adapter
 
 from examples.hand_detector._support.analysis import OUTPUT_NAMES
 from examples.hand_detector._support.data import (
@@ -24,7 +25,6 @@ from examples.hand_detector._support.weight_precision_sensitivity import (
     run_weight_precision_sensitivity,
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
-from tico.quantization.analysis import make_output_adapter
 
 
 DIRECTORY = Path(__file__).resolve().parent

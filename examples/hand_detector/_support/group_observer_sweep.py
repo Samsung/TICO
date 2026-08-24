@@ -20,9 +20,8 @@ import math
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
-from examples.hand_detector._support.sensitivity import ActivationSensitivityGroup
 from tico.quantization.analysis import (
     evaluate_models,
     ModelInput,
@@ -43,6 +42,8 @@ from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 from torch import nn
+
+from examples.hand_detector._support.sensitivity import ActivationSensitivityGroup
 
 
 _ACTIVATION_ROLES = frozenset(
@@ -119,7 +120,7 @@ def build_group_observer_policies(
         policies.append(
             GroupObserverPolicy(
                 name="minmax",
-                observer=MinMaxObserver,
+                observer=MinMaxObserver,  # type: ignore[type-abstract]
             )
         )
 
@@ -363,7 +364,7 @@ def build_group_observer_sweep_result(
         )
         rows.append(row)
 
-    ranked = sorted(rows, key=lambda row: float(row["score"]))
+    ranked = sorted(rows, key=lambda row: float(cast(float, row["score"])))
     for rank, row in enumerate(ranked, start=1):
         row["rank"] = rank
         row["is_best"] = rank == 1

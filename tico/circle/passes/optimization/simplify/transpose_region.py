@@ -737,13 +737,13 @@ def _apply_region_plan(
             options = copy.deepcopy(getattr(operator, "builtinOptions", None))
             if options is None:
                 raise RuntimeError("Axis-remap rule expected Circle builtin options.")
-            for rewrite in operator_rewrite.builtin_option_rewrites:
-                if not hasattr(options, rewrite.field_name):
+            for option_rewrite in operator_rewrite.builtin_option_rewrites:
+                if not hasattr(options, option_rewrite.field_name):
                     raise RuntimeError(
                         "Axis-remap rule references missing builtin option "
-                        f"{rewrite.field_name}."
+                        f"{option_rewrite.field_name}."
                     )
-                setattr(options, rewrite.field_name, rewrite.value)
+                setattr(options, option_rewrite.field_name, option_rewrite.value)
             operator.builtinOptions = options
 
     for boundary in plan.input_boundaries:

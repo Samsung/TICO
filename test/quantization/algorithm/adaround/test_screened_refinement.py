@@ -310,14 +310,18 @@ class ScreenedCodeRunnerTest(unittest.TestCase):
             )
         self.assertEqual(result.accepted_rounds, 1)
         self.assertEqual(len(result.final_code_changes), 1)
-        self.assertEqual(result.rounds[0].selected_candidate.new_code, 130)
+        selected_candidate = result.rounds[0].selected_candidate
+        assert selected_candidate is not None
+        self.assertEqual(selected_candidate.new_code, 130)
         self.assertTrue(result.rounds[0].accepted)
         self.assertFalse(result.rounds[1].accepted)
-        self.assertIn("screening", result.rounds[1].stop_reason)
-        self.assertLess(
-            result.final_evaluation_outputs["regressors"]["mae"],
-            result.entry_evaluation_outputs["regressors"]["mae"],
-        )
+        stop_reason = result.rounds[1].stop_reason
+        assert stop_reason is not None
+        self.assertIn("screening", stop_reason)
+        final_mae = result.final_evaluation_outputs["regressors"]["mae"]
+        entry_mae = result.entry_evaluation_outputs["regressors"]["mae"]
+        assert final_mae is not None and entry_mae is not None
+        self.assertLess(final_mae, entry_mae)
 
 
 if __name__ == "__main__":

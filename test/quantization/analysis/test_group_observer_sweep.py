@@ -19,6 +19,7 @@ from __future__ import annotations
 import unittest
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 from examples.hand_detector._support.group_observer_sweep import (
@@ -250,8 +251,8 @@ class GroupObserverSweepTest(unittest.TestCase):
         )
 
         self.assertEqual(result["best_candidate"], "global_percentile_99_99")
-        self.assertEqual(float(result["best_score_improvement"]), 0.0)
-        candidates = result["candidates"]
+        self.assertEqual(float(cast(float, result["best_score_improvement"])), 0.0)
+        candidates = cast(list, result["candidates"])
         self.assertTrue(candidates[0]["is_global_baseline"])
         self.assertEqual(candidates[0]["rank"], 1)
         self.assertLess(float(candidates[1]["score_improvement"]), 0.0)
@@ -282,15 +283,15 @@ def _site(
     *,
     observer: object | None = None,
 ) -> QuantizationSite:
+    if observer is None:
+        observer = SimpleNamespace()
     return QuantizationSite(
         path=path,
         module_path=module_path,
         observer_name=observer_name,
         role=role,
         module=SimpleNamespace(fp_name=fp_name),  # type: ignore[arg-type]
-        observer=(
-            observer if observer is not None else SimpleNamespace()
-        ),  # type: ignore[arg-type]
+        observer=observer,  # type: ignore[arg-type]
     )
 
 

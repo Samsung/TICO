@@ -82,8 +82,11 @@ class QuantMaxPool2dTest(unittest.TestCase):
         torch.testing.assert_close(wrapper.obs_act_out.min_val, torch.tensor(4.0))
         torch.testing.assert_close(wrapper.obs_act_out.max_val, torch.tensor(4.0))
 
-        input_scale, input_zero_point = wrapper.obs_act_in.compute_qparams()
-        output_scale, output_zero_point = wrapper.obs_act_out.compute_qparams()
+        input_qparams = wrapper.obs_act_in.compute_qparams()
+        output_qparams = wrapper.obs_act_out.compute_qparams()
+        assert input_qparams is not None and output_qparams is not None
+        input_scale, input_zero_point = input_qparams
+        output_scale, output_zero_point = output_qparams
         self.assertFalse(
             torch.equal(input_scale, output_scale)
             and torch.equal(input_zero_point, output_zero_point)

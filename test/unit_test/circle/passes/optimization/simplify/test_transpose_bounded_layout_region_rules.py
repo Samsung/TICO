@@ -28,6 +28,7 @@ class TransposeBoundedLayoutRegionRuleRegistryTest(unittest.TestCase):
 
         rule = rules._rule_for_builtin_code(rules._ADD_BUILTIN_CODE)
         self.assertIsInstance(rule, rules._SameShapeBinaryElementwiseRule)
+        assert rule is not None
         self.assertEqual(rule.data_input_positions(None), (0, 1))
         self.assertEqual(rule.data_output_positions(None), (0,))
 
@@ -36,6 +37,7 @@ class TransposeBoundedLayoutRegionRuleRegistryTest(unittest.TestCase):
 
         rule = rules._rule_for_builtin_code(rules._PAD_BUILTIN_CODE)
         self.assertIsInstance(rule, rules._PadRule)
+        assert rule is not None
         self.assertEqual(rule.data_input_positions(None), (0,))
         self.assertEqual(rule.data_output_positions(None), (0,))
 

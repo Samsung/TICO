@@ -20,6 +20,7 @@ import io
 import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, patch
 
 from examples.hand_detector._support.observer_sweep import (
@@ -102,7 +103,7 @@ def _report() -> QuantizationReport:
                     f"{profile.value}.site.{index}"
                     for index in range(_SITE_COUNTS[profile])
                 ),
-                outputs=profiles[profile.value]["outputs"],
+                outputs=cast(dict, profiles[profile.value]["outputs"]),
             )
             for profile in OBSERVER_SWEEP_PROFILES
         },

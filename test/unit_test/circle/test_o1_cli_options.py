@@ -60,8 +60,10 @@ class CircleO1OptionsCLITest(unittest.TestCase):
         )
 
         self.assertEqual(len(passes), 1)
-        self.assertIsInstance(passes[0], FoldConstantsPass)
-        self.assertIs(passes[0].profile, ConstantFoldingProfile.HEAVY)
+        fold_pass = passes[0]
+        self.assertIsInstance(fold_pass, FoldConstantsPass)
+        assert isinstance(fold_pass, FoldConstantsPass)
+        self.assertIs(fold_pass.profile, ConstantFoldingProfile.HEAVY)
 
     def test_o1_only_flags_without_preset_fail_before_loading(self) -> None:
         """Require preset-owned ordering for optional O1 transforms."""

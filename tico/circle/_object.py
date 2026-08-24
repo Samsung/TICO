@@ -231,7 +231,7 @@ def _public_attributes(value: Any) -> tuple[tuple[str, Any], ...]:
             item = getattr(value, name)
         except Exception:
             continue
-        if isinstance(item, Callable) or callable(item):
+        if callable(item):
             continue
         attributes.append((name, item))
     return tuple(attributes)

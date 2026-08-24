@@ -219,7 +219,7 @@ class HandDetectorGlobalWeightRefinementTest(unittest.TestCase):
             report = run_hand_detector_global_weight_refinement(
                 mock.sentinel.reference_model,
                 mock.sentinel.candidate_model,
-                data_split=split,
+                data_split=split,  # type: ignore[arg-type]
                 evaluation_samples=(mock.sentinel.evaluation,),
                 config=mock.sentinel.config,
                 selection_objective=mock.sentinel.selection_objective,

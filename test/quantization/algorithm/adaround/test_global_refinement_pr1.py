@@ -305,9 +305,9 @@ class GlobalRefinementDiagnosticsTest(unittest.TestCase):
                 source_weights={"block.weight": source_weight},
                 output_adapter=lambda outputs: outputs,
                 selection_evaluator=evaluate,
-                selection_objective=_AlwaysAcceptObjective(),
+                selection_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 acceptance_evaluator=evaluate,
-                acceptance_objective=_AlwaysAcceptObjective(),
+                acceptance_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 evaluation_evaluator=evaluate,
             )
         self.assertTrue(result.accepted)
@@ -316,6 +316,7 @@ class GlobalRefinementDiagnosticsTest(unittest.TestCase):
         checkpoint = result.checkpoint_history[-1]
         self.assertIsNotNone(checkpoint.alpha_absolute_histogram)
         self.assertIsNotNone(checkpoint.alpha_gradient_absolute_histogram)
+        assert checkpoint.flip_budget_statistics is not None
         self.assertEqual(checkpoint.flip_budget_statistics.after_count, 0)
         for statistics in result.weight_statistics:
             self.assertAlmostEqual(statistics.base.scale_ratio_minimum, 1.0)
@@ -380,9 +381,9 @@ class GlobalRefinementDiagnosticsTest(unittest.TestCase):
                 source_weights={"block.weight": source_weight},
                 output_adapter=lambda outputs: outputs,
                 selection_evaluator=evaluate,
-                selection_objective=_AlwaysAcceptObjective(),
+                selection_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 acceptance_evaluator=evaluate,
-                acceptance_objective=_AlwaysAcceptObjective(),
+                acceptance_objective=_AlwaysAcceptObjective(),  # type: ignore[arg-type]
                 evaluation_evaluator=evaluate,
             )
         self.assertTrue(result.accepted)

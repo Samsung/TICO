@@ -268,8 +268,8 @@ def build_window_observer_groups(
         components[tuple(sorted(tensor_ids))].append(path)
 
     definitions: list[tuple[tuple[int, ...], tuple[str, ...]]] = []
-    for tensor_ids, paths in components.items():
-        definitions.append((tensor_ids, tuple(sorted(paths))))
+    for component_ids, paths in components.items():
+        definitions.append((component_ids, tuple(sorted(paths))))
     definitions.sort(key=lambda item: (item[0], item[1]))
     groups = tuple(
         AffineObserverGroup(

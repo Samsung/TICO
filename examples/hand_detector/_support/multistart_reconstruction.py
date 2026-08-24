@@ -20,6 +20,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
+from tico.quantization.algorithm.block_reconstruction import (
+    BlockReconstructionConfig,
+    QDropCandidate,
+    QDropMultiStartReconstructor,
+    ValidationObjective,
+)
+from tico.quantization.analysis import OutputAdapter, QuantizationProfile
+from tico.quantization.wrapq.control import iter_quantization_sites
+from torch import nn
 
 from examples.hand_detector._support.analysis import output_boundaries
 from examples.hand_detector._support.reconstruction import (
@@ -30,15 +39,6 @@ from examples.hand_detector._support.reconstruction import (
     evaluate_internal_full,
     ReconstructionWindow,
 )
-from tico.quantization.algorithm.block_reconstruction import (
-    BlockReconstructionConfig,
-    QDropCandidate,
-    QDropMultiStartReconstructor,
-    ValidationObjective,
-)
-from tico.quantization.analysis import OutputAdapter, QuantizationProfile
-from tico.quantization.wrapq.control import iter_quantization_sites
-from torch import nn
 
 
 @dataclass(frozen=True)

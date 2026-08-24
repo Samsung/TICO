@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -530,7 +530,7 @@ class _PostAffineIntoLinearRule(_LinearRuleBase):
         tensor_indices = _unique_indices(
             (*inputs, *outputs, *linear.inputs, linear.output_tensor)
         )
-        return LinearFusionPlan.capture(
+        plan = LinearFusionPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=operator_index,
@@ -546,6 +546,7 @@ class _PostAffineIntoLinearRule(_LinearRuleBase):
             replacement_inputs=tuple(replacement_inputs),
             constants=tuple(constants),
         )
+        return cast(LinearFusionPlan, plan)
 
     def _affine_input(
         self,
@@ -710,7 +711,7 @@ class _PreAffineIntoFullyConnectedRule(_LinearRuleBase):
         tensor_indices = _unique_indices(
             (*affine_inputs, *affine_outputs, *linear.inputs, *linear.operator.outputs)
         )
-        return LinearFusionPlan.capture(
+        plan = LinearFusionPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=operator_index,
@@ -726,6 +727,7 @@ class _PreAffineIntoFullyConnectedRule(_LinearRuleBase):
             replacement_inputs=tuple(replacement_inputs),
             constants=tuple(constants),
         )
+        return cast(LinearFusionPlan, plan)
 
     def _affine_input(
         self,
@@ -805,8 +807,8 @@ class _HorizontalFullyConnectedRule(_LinearRuleBase):
         producer_indices = tuple(graph.producer(index) for index in inputs)
         if any(index is None for index in producer_indices):
             return None
-        first_index = int(producer_indices[0])
-        second_index = int(producer_indices[1])
+        first_index = int(cast(int, producer_indices[0]))
+        second_index = int(cast(int, producer_indices[1]))
         first = self._linear_state(
             document,
             graph,
@@ -902,7 +904,7 @@ class _HorizontalFullyConnectedRule(_LinearRuleBase):
         tensor_indices = _unique_indices(
             (*inputs, *outputs, *first.inputs, *second.inputs)
         )
-        return LinearFusionPlan.capture(
+        plan = LinearFusionPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=operator_index,
@@ -912,6 +914,7 @@ class _HorizontalFullyConnectedRule(_LinearRuleBase):
             replacement_inputs=tuple(replacement_inputs),
             constants=tuple(constants),
         )
+        return cast(LinearFusionPlan, plan)
 
 
 class FuseLinearOpsPass(CircleRulePass):
@@ -950,7 +953,7 @@ class FuseLinearOpsPass(CircleRulePass):
         }
         fully_connected_code = resolver.builtin_code("FULLY_CONNECTED")
         add_code = resolver.builtin_code("ADD")
-        shared = {
+        shared: dict[str, Any] = {
             "descriptors": descriptors,
             "affine_codes": affine_codes,
             "affine_options_types": affine_options_types,

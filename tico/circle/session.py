@@ -384,7 +384,7 @@ def optimization_session_for(document_or_model: Any) -> CircleOptimizationSessio
             strong_model = model
         session_reference = weakref.ref(
             session,
-            lambda reference, key=model_id: _remove_session(key, reference),
+            lambda reference, key=model_id: _remove_session(key, reference),  # type: ignore[misc]
         )
         _SESSION_REGISTRY[model_id] = (
             model_reference,

@@ -536,7 +536,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         "print_candidate_count",
     )
     for name in integer_names:
-        value = int(getattr(args, name))
+        value: float = int(getattr(args, name))
         if value < 0:
             raise ValueError(f"--{name.replace('_', '-')} must be nonnegative.")
     if args.max_rounds == 0:

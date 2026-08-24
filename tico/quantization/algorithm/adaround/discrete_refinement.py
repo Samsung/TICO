@@ -445,6 +445,16 @@ class DiscreteCodeRefinementResult:
 class FixedScaleCodeObserver(ObserverBase):
     """Expose one exact fixed-scale code tensor as a differentiable weight."""
 
+    _fixed_scale: torch.Tensor
+    _fixed_zero_point: torch.Tensor
+    _reference_weight: torch.Tensor
+    _entry_codes: torch.Tensor
+    _current_codes: torch.Tensor
+    _entry_effective_weight: torch.Tensor
+    _floor_codes: torch.Tensor
+    _ceil_codes: torch.Tensor
+    effective_weight: nn.Parameter
+
     def __init__(
         self,
         original: AffineObserverBase,
@@ -1076,9 +1086,9 @@ class DiscreteCodeRefinementRunner:
             try:
                 initialized_selection = copy_outputs(selection_evaluator())
                 self._validate_initialization(entry_selection, initialized_selection)
-                current_selection = initialized_selection
-                current_acceptance = entry_acceptance
-                current_evaluation = entry_evaluation
+                current_selection: OutputMetrics = initialized_selection
+                current_acceptance: OutputMetrics = entry_acceptance
+                current_evaluation: OutputMetrics = entry_evaluation
 
                 for round_index in range(1, self.config.max_rounds + 1):
                     round_entry_selection = current_selection

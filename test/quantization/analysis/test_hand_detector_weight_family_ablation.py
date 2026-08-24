@@ -143,14 +143,14 @@ class HandDetectorWeightFamilyAblationTest(unittest.TestCase):
         evaluator.reference_model = object()
         evaluator.candidate_model = object()
         evaluator.samples = (object(),)
-        evaluator.output_adapter = object()
+        evaluator.output_adapter = object()  # type: ignore[assignment]
         evaluator._family_paths = {
             "regular_conv": frozenset({"a.weight"}),
             "depthwise_conv": frozenset({"b.weight"}),
             "prelu_slope": frozenset({"c.weight"}),
         }
         evaluator._cache = {}
-        evaluator._state = DummyState()
+        evaluator._state = DummyState()  # type: ignore[assignment]
         outputs = {
             "regressors": {"mae": 0.1},
             "classifiers": {"mae": 0.05},
@@ -158,9 +158,9 @@ class HandDetectorWeightFamilyAblationTest(unittest.TestCase):
         with mock.patch.object(module, "evaluate_models", return_value=outputs):
             result = evaluator.evaluate(frozenset({"regular_conv"}))
         self.assertEqual(result, outputs)
-        self.assertTrue(evaluator._state.enabled)
-        self.assertEqual(len(evaluator._state.disabled), 1)
-        self.assertFalse(evaluator._state.disabled[0][1])
+        self.assertTrue(evaluator._state.enabled)  # type: ignore[union-attr]
+        self.assertEqual(len(evaluator._state.disabled), 1)  # type: ignore[union-attr]
+        self.assertFalse(evaluator._state.disabled[0][1])  # type: ignore[union-attr]
 
 
 if __name__ == "__main__":

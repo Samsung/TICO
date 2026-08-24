@@ -8,6 +8,7 @@ from __future__ import annotations
 import unittest
 
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 from examples.hand_detector._support import weight_precision_sensitivity as module
@@ -153,11 +154,15 @@ class HandDetectorWeightPrecisionSensitivityTest(unittest.TestCase):
             target_regressor_mae=0.1,
             auxiliary_tolerance=0.0,
         )
-        self.assertAlmostEqual(report[0]["regressor_mae_improvement"], 0.2)
-        self.assertAlmostEqual(report[0]["classifier_mae_improvement"], 0.05)
+        self.assertAlmostEqual(cast(float, report[0]["regressor_mae_improvement"]), 0.2)
+        self.assertAlmostEqual(
+            cast(float, report[0]["classifier_mae_improvement"]), 0.05
+        )
         self.assertFalse(report[0]["regressor_target_reached"])
         self.assertTrue(report[0]["eligible"])
-        self.assertGreater(report[0]["regressor_gain_per_million_parameters"], 0)
+        self.assertGreater(
+            cast(float, report[0]["regressor_gain_per_million_parameters"]), 0
+        )
 
     def test_greedy_skips_classifier_regressing_candidate(self) -> None:
         class DummyState:
@@ -212,8 +217,8 @@ class HandDetectorWeightPrecisionSensitivityTest(unittest.TestCase):
                 object(),
                 object(),
                 (object(),),
-                (group_a, group_b),
-                output_adapter=object(),
+                (group_a, group_b),  # type: ignore[arg-type]
+                output_adapter=object(),  # type: ignore[arg-type]
                 max_steps=2,
                 minimum_improvement=0.0,
                 auxiliary_tolerance=0.0,
@@ -264,7 +269,7 @@ class HandDetectorWeightPrecisionSensitivityTest(unittest.TestCase):
                 object(),
                 (object(),),
                 groups,
-                output_adapter=object(),
+                output_adapter=object(),  # type: ignore[arg-type]
                 max_steps=0,
                 minimum_improvement=0.0,
                 auxiliary_tolerance=0.0,
@@ -312,7 +317,7 @@ class HandDetectorWeightPrecisionSensitivityTest(unittest.TestCase):
                     ],
                 )
 
-        captured = []
+        captured: list[str] = []
 
         def fake_greedy(*_args, **kwargs):
             captured.extend(group.name for group in _args[3])
@@ -351,7 +356,7 @@ class HandDetectorWeightPrecisionSensitivityTest(unittest.TestCase):
                 minimum_improvement=0.0,
                 auxiliary_tolerance=0.0,
                 target_regressor_mae=0.1,
-                output_adapter=object(),
+                output_adapter=object(),  # type: ignore[arg-type]
             )
         self.assertEqual(captured, ["stem", "feature_block_00"])
         self.assertTrue(report["metadata"]["greedy_include_all_groups"])

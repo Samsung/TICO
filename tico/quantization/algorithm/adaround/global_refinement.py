@@ -220,6 +220,9 @@ class CheckpointInitializedScaleAdaRoundQuantizer(
     information needed for a second optimization pass.
     """
 
+    _checkpoint_initial_codes: torch.Tensor
+    _checkpoint_effective_weight: torch.Tensor
+
     def __init__(
         self,
         original: AffineObserverBase,

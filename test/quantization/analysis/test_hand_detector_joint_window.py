@@ -124,7 +124,9 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             output_tensor_ids=(3,),
             site_paths=("site0", "site1"),
         )
-        output = DetectorWindow(detector, window)(torch.tensor([[2.0]]))
+        output = DetectorWindow(detector, window)(  # type: ignore[arg-type]
+            torch.tensor([[2.0]])
+        )
         torch.testing.assert_close(output, torch.tensor([[4.0]]))
 
     def test_boundary_analysis_keeps_multiple_live_ins_and_outs(self) -> None:
@@ -137,7 +139,9 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             ),
             output_tensors=(4,),
         )
-        inputs, outputs = _window_boundaries(detector, (0, 1, 2))
+        inputs, outputs = _window_boundaries(
+            detector, (0, 1, 2)  # type: ignore[arg-type]
+        )
         self.assertEqual(inputs, (0, 9))
         self.assertEqual(outputs, (3,))
 
@@ -166,7 +170,7 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             output_tensors=(143,),
         )
 
-        inputs, outputs = _window_boundaries(detector, (0, 1))
+        inputs, outputs = _window_boundaries(detector, (0, 1))  # type: ignore[arg-type]
 
         self.assertEqual(inputs, (0,))
         self.assertEqual(outputs, (142,))
@@ -189,7 +193,9 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             role=SiteRole.ACTIVATION_INPUT,
         )
 
-        self.assertEqual(_site_tensor_domain(site, detector), (0,))
+        self.assertEqual(
+            _site_tensor_domain(site, detector), (0,)  # type: ignore[arg-type]
+        )
 
     def test_max_pool_input_and_output_use_distinct_tensor_domains(self) -> None:
         detector = SimpleNamespace(

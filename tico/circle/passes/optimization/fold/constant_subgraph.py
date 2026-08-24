@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, cast, Iterable
 
 import numpy as np
 
@@ -337,7 +337,7 @@ class _FoldConstantOperatorRule(CircleRewriteRule[ConstantFoldPlan]):
                 if tensor_index != OPTIONAL_TENSOR_INDEX
             )
         )
-        return ConstantFoldPlan.capture(
+        plan = ConstantFoldPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=operator_index,
@@ -347,6 +347,7 @@ class _FoldConstantOperatorRule(CircleRewriteRule[ConstantFoldPlan]):
             compute_cost=compute_cost,
             evaluator_name=evaluator.name,
         )
+        return cast(ConstantFoldPlan, plan)
 
     def apply(
         self,
