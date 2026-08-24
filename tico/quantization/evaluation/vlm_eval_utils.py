@@ -242,6 +242,92 @@ def get_item_alpaca(ex: dict[str, Any]) -> dict[str, Any]:
     return {"text": text}
 
 
+def get_item_mmlu(ex: dict[str, Any]) -> dict[str, Any]:
+    """
+    Adapt an MMLU sample to a common format for text-only calibration.
+
+    MMLU is a multiple-choice dataset. Each sample has:
+    - ``question``: the question text
+    - ``choices``: list of answer options (typically 4)
+    - ``answer``: index (0-based) of the correct choice
+    - ``subject``: the knowledge category
+
+    The question and choices are combined into a single text block so that
+    the existing text-only calibration pipeline can sample fixed-length
+    sequences from it.
+
+    The returned schema is:
+
+    `{"text": text}`
+
+    Args:
+        ex: Raw dataset example.
+
+    Returns:
+        A normalized text item.
+    """
+    question = ex.get("question", "")
+    choices = ex.get("choices", [])
+    answer_idx = ex.get("answer", None)
+
+    # Build a readable multiple-choice prompt
+    lines = [question]
+    for i, choice in enumerate(choices):
+        label = chr(ord("A") + i)
+        lines.append(f"{label}. {choice}")
+
+    # Append the correct answer if available
+    if answer_idx is not None and 0 <= answer_idx < len(choices):
+        correct_label = chr(ord("A") + answer_idx)
+        lines.append(f"Answer: {correct_label}")
+
+    text = "\n".join(lines)
+    return {"text": text}
+
+
+def get_item_videomme_text(ex: dict[str, Any]) -> dict[str, Any]:
+    """
+    Adapt a Video-MME sample to a common format for text-only calibration.
+
+    Video-MME is a video understanding benchmark. Each sample has:
+    - ``videoID``: YouTube video identifier
+    - ``question``: the question about the video
+    - ``options``: list of answer choices (typically 4)
+    - ``answer``: the correct answer text (matching one of the options)
+    - ``domain``, ``duration``, ``task_type``: metadata
+
+    The question and answer choices are combined into a text block so that
+    the existing text-only calibration pipeline can sample fixed-length
+    sequences from it.
+
+    The returned schema is:
+
+    `{"text": text}`
+
+    Args:
+        ex: Raw dataset example.
+
+    Returns:
+        A normalized text item.
+    """
+    question = ex.get("question", "")
+    options = ex.get("options", [])
+    answer = ex.get("answer", "")
+
+    # Build a readable multiple-choice prompt
+    lines = [question]
+    for i, option in enumerate(options):
+        label = chr(ord("A") + i)
+        lines.append(f"{label}. {option}")
+
+    # Append the correct answer if available
+    if answer:
+        lines.append(f"Answer: {answer}")
+
+    text = "\n".join(lines)
+    return {"text": text}
+
+
 def get_item_mmmu_calib(ex: dict[str, Any]) -> dict[str, Any]:
     """
     Adapt an MMMU/MMMU_Pro sample for VLM calibration.
@@ -315,6 +401,19 @@ DATASETS: dict[str, dict[str, Any]] = {
         "default_split": "train",
         "adapter": get_item_alpaca,
         "candidates": ["tatsu-lab/alpaca"],
+        "is_text_only": True,
+    },
+    "mmlu": {
+        "default_split": "test",
+        "adapter": get_item_mmlu,
+        "candidates": ["cais/mmlu"],
+        "config": "all",
+        "is_text_only": True,
+    },
+    "videomme_text": {
+        "default_split": "test",
+        "adapter": get_item_videomme_text,
+        "candidates": ["lmms-lab/Video-MME"],
         "is_text_only": True,
     },
     "mmmu_pro_vision": {

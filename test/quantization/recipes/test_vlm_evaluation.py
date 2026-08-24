@@ -47,8 +47,10 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_item_alpaca,
     get_item_coco,
     get_item_llava_bench_in_the_wild,
+    get_item_mmlu,
     get_item_mmmu_calib,
     get_item_textvqa,
+    get_item_videomme_text,
     get_item_vqav2,
     get_item_wikitext2,
     move_inputs_to_device,
@@ -287,6 +289,144 @@ class TestDatasetAdapters(unittest.TestCase):
         item = get_item_alpaca(ex)
         self.assertEqual(item, {"text": "Do X"})
 
+    def test_get_item_mmlu_with_answer(self):
+        """Test get_item_mmlu with a standard 4-choice sample and correct answer."""
+        ex = {
+            "question": "What is the capital of France?",
+            "choices": ["London", "Berlin", "Paris", "Madrid"],
+            "answer": 2,
+            "subject": "geography",
+        }
+        result = get_item_mmlu(ex)
+
+        self.assertIn("text", result)
+        text = result["text"]
+
+        # Question is the first line
+        self.assertTrue(text.startswith("What is the capital of France?"))
+
+        # All four choices are labeled A-D
+        self.assertIn("A. London", text)
+        self.assertIn("B. Berlin", text)
+        self.assertIn("C. Paris", text)
+        self.assertIn("D. Madrid", text)
+
+        # Correct answer (index 2 -> C) is appended
+        self.assertIn("Answer: C", text)
+
+    def test_get_item_mmlu_no_answer(self):
+        """Test get_item_mmlu when answer is None (no answer line)."""
+        ex = {
+            "question": "What is 2+2?",
+            "choices": ["3", "4", "5"],
+            "answer": None,
+        }
+        result = get_item_mmlu(ex)
+        text = result["text"]
+
+        self.assertIn("A. 3", text)
+        self.assertIn("B. 4", text)
+        self.assertIn("C. 5", text)
+        self.assertNotIn("Answer:", text)
+
+    def test_get_item_mmlu_out_of_range_answer(self):
+        """Test get_item_mmlu when answer index is out of range."""
+        ex = {
+            "question": "Question?",
+            "choices": ["a", "b"],
+            "answer": 5,  # out of range
+        }
+        result = get_item_mmlu(ex)
+        text = result["text"]
+
+        self.assertIn("A. a", text)
+        self.assertIn("B. b", text)
+        # Answer line should not be appended for out-of-range index
+        self.assertNotIn("Answer:", text)
+
+    def test_get_item_mmlu_empty_choices(self):
+        """Test get_item_mmlu with empty choices list."""
+        ex = {
+            "question": "Question with no choices?",
+            "choices": [],
+            "answer": 0,
+        }
+        result = get_item_mmlu(ex)
+        text = result["text"]
+
+        # Only the question should be present
+        self.assertEqual(text, "Question with no choices?")
+
+    def test_get_item_mmlu_missing_fields(self):
+        """Test get_item_mmlu with an empty dict (all fields missing)."""
+        result = get_item_mmlu({})
+
+        self.assertIn("text", result)
+        self.assertEqual(result["text"], "")
+
+    def test_get_item_videomme_text_with_answer(self):
+        """Test get_item_videomme_text with a standard sample and answer text."""
+        ex = {
+            "videoID": "abc123",
+            "question": "What happens at 0:10?",
+            "options": ["A cat jumps", "A dog runs", "A bird flies", "Nothing"],
+            "answer": "A cat jumps",
+            "domain": "daily",
+            "duration": "short",
+            "task_type": "perception",
+        }
+        result = get_item_videomme_text(ex)
+
+        self.assertIn("text", result)
+        text = result["text"]
+
+        # Question is the first line
+        self.assertTrue(text.startswith("What happens at 0:10?"))
+
+        # All four options are labeled A-D
+        self.assertIn("A. A cat jumps", text)
+        self.assertIn("B. A dog runs", text)
+        self.assertIn("C. A bird flies", text)
+        self.assertIn("D. Nothing", text)
+
+        # Correct answer text is appended
+        self.assertIn("Answer: A cat jumps", text)
+
+    def test_get_item_videomme_text_no_answer(self):
+        """Test get_item_videomme_text when answer is empty string."""
+        ex = {
+            "question": "What is shown?",
+            "options": ["opt1", "opt2"],
+            "answer": "",
+        }
+        result = get_item_videomme_text(ex)
+        text = result["text"]
+
+        self.assertIn("A. opt1", text)
+        self.assertIn("B. opt2", text)
+        self.assertNotIn("Answer:", text)
+
+    def test_get_item_videomme_text_empty_options(self):
+        """Test get_item_videomme_text with empty options list."""
+        ex = {
+            "question": "Question with no options?",
+            "options": [],
+            "answer": "something",
+        }
+        result = get_item_videomme_text(ex)
+        text = result["text"]
+
+        # Only the question and answer should be present
+        self.assertTrue(text.startswith("Question with no options?"))
+        self.assertIn("Answer: something", text)
+
+    def test_get_item_videomme_text_missing_fields(self):
+        """Test get_item_videomme_text with an empty dict (all fields missing)."""
+        result = get_item_videomme_text({})
+
+        self.assertIn("text", result)
+        self.assertEqual(result["text"], "")
+
 
 class TestGetItemMmmuCalib(unittest.TestCase):
     """Tests for get_item_mmmu_calib."""
@@ -388,6 +528,27 @@ class TestDatasetsRegistry(unittest.TestCase):
                 DATASETS[name].get("is_text_only", False),
                 f"Dataset '{name}' should be text-only",
             )
+
+    def test_mmlu_registered(self):
+        """Test that 'mmlu' is registered with correct fields."""
+        self.assertIn("mmlu", DATASETS)
+        meta = DATASETS["mmlu"]
+
+        self.assertEqual(meta["default_split"], "test")
+        self.assertIs(meta["adapter"], get_item_mmlu)
+        self.assertEqual(meta["candidates"], ["cais/mmlu"])
+        self.assertEqual(meta["config"], "all")
+        self.assertTrue(meta["is_text_only"])
+
+    def test_videomme_text_registered(self):
+        """Test that 'videomme_text' is registered with correct fields."""
+        self.assertIn("videomme_text", DATASETS)
+        meta = DATASETS["videomme_text"]
+
+        self.assertEqual(meta["default_split"], "test")
+        self.assertIs(meta["adapter"], get_item_videomme_text)
+        self.assertEqual(meta["candidates"], ["lmms-lab/Video-MME"])
+        self.assertTrue(meta["is_text_only"])
 
 
 class TestBuildMessages(unittest.TestCase):
