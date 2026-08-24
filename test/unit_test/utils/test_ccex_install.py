@@ -30,6 +30,11 @@ from tico.utils.compat import torch_version_policy as policy
 class CcexInstallTest(unittest.TestCase):
     """Verify package-index handling without invoking a real pip installation."""
 
+    project_root: Path
+    install_script: Path
+    torch_family: str
+    torch_version: str
+
     @classmethod
     def setUpClass(cls) -> None:
         cls.project_root = Path(__file__).resolve().parents[3]
