@@ -21,7 +21,7 @@ remain separate follow-up stages.
 
 ## Generic local-only usage
 
-The original PR 1 interface remains supported. Without a held-out evaluator,
+The local-only interface remains supported. Without a held-out evaluator,
 the best full-cache local-loss state is committed as before.
 
 ```python

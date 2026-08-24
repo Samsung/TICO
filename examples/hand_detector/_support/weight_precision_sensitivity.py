@@ -53,7 +53,7 @@ from torch import nn
 
 from examples.hand_detector._support.precision_ablation import (
     discover_output_observer_paths,
-    PHASE1_PROFILES,
+    PRECISION_FLOOR_PROFILES,
     summarize_precision_inventory,
     validate_profile_inventory,
 )
@@ -313,7 +313,7 @@ def build_w8a16_candidate(
     candidate = freeze_quantization(candidate, inplace=True).eval()
 
     inventory = summarize_precision_inventory(candidate, output_paths)
-    p2 = next(profile for profile in PHASE1_PROFILES if profile.name == "P2")
+    p2 = next(profile for profile in PRECISION_FLOOR_PROFILES if profile.name == "P2")
     validate_profile_inventory(p2, inventory)
     return candidate, {
         "profile": p2.to_dict(),

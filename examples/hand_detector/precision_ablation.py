@@ -99,7 +99,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--report-json",
         type=Path,
-        default=DIRECTORY / "reports" / "precision_ablation_phase1.json",
+        default=DIRECTORY / "reports" / "precision_floor_ablation.json",
     )
 
 

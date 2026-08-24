@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Phase-1 W8/A8/A16 precision-floor analysis for the hand detector."""
+"""W8/A8/A16 precision-floor analysis for the hand detector."""
 
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ class PrecisionFloorProfile:
         }
 
 
-PHASE1_PROFILES = (
+PRECISION_FLOOR_PROFILES = (
     PrecisionFloorProfile(
         name="P0",
         weight="uint8",
@@ -137,7 +137,7 @@ class ObserverPolicy:
 
 @dataclass(frozen=True)
 class PrecisionProfileResult:
-    """Store one evaluated phase-1 profile."""
+    """Store one evaluated precision-floor profile."""
 
     profile: PrecisionFloorProfile
     outputs: MetricSummary
@@ -200,7 +200,7 @@ def run_precision_floor_ablation(
     output_paths = discover_output_observer_paths(float_model, uint8_policy.spec)
 
     profile_results: list[PrecisionProfileResult] = []
-    for profile in PHASE1_PROFILES:
+    for profile in PRECISION_FLOOR_PROFILES:
         candidate = _build_profile_candidate(
             float_model,
             calibration_samples,
@@ -230,7 +230,7 @@ def run_precision_floor_ablation(
     serialized = [result.to_dict(baseline) for result in profile_results]
     floors = _build_floor_summary(by_name, target_regressor_mae)
     return {
-        "analysis": "phase1_precision_floor_ablation",
+        "analysis": "precision_floor_ablation",
         "metadata": {
             "weight_policy": "uint8 per-channel asymmetric unless profile=P3",
             "classifier_output_policy": "uint8 per-tensor asymmetric",
@@ -245,7 +245,7 @@ def run_precision_floor_ablation(
             "sampling_seed": sampling_seed,
             "target_regressor_mae": target_regressor_mae,
             "output_override_paths": output_paths.to_dict(),
-            "profile_count": len(PHASE1_PROFILES),
+            "profile_count": len(PRECISION_FLOOR_PROFILES),
         },
         "profiles": serialized,
         "floors": floors,

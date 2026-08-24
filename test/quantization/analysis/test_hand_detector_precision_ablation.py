@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for the phase-1 hand-detector precision-floor matrix."""
+"""Tests for the hand-detector precision-floor matrix."""
 
 from __future__ import annotations
 
@@ -26,24 +26,27 @@ from examples.hand_detector._support.precision_ablation import (
     _build_floor_summary,
     _policy_path,
     _recommendation,
-    PHASE1_PROFILES,
+    PRECISION_FLOOR_PROFILES,
     PrecisionProfileResult,
 )
 from tico.quantization.wrapq.control import SiteRole
 
 
 class HandDetectorPrecisionAblationTest(unittest.TestCase):
-    def test_phase1_profile_contract(self) -> None:
+    def test_precision_floor_profile_contract(self) -> None:
         self.assertEqual(
-            [profile.name for profile in PHASE1_PROFILES],
+            [profile.name for profile in PRECISION_FLOOR_PROFILES],
             ["P0", "P1", "P2", "P3", "P4"],
         )
-        self.assertEqual(PHASE1_PROFILES[1].regressor_output, "int16")
-        self.assertEqual(PHASE1_PROFILES[2].internal_activation, "int16")
-        self.assertEqual(PHASE1_PROFILES[3].weight, "float")
-        self.assertEqual(PHASE1_PROFILES[4].internal_activation, "float")
+        self.assertEqual(PRECISION_FLOOR_PROFILES[1].regressor_output, "int16")
+        self.assertEqual(PRECISION_FLOOR_PROFILES[2].internal_activation, "int16")
+        self.assertEqual(PRECISION_FLOOR_PROFILES[3].weight, "float")
+        self.assertEqual(PRECISION_FLOOR_PROFILES[4].internal_activation, "float")
         self.assertTrue(
-            all(profile.classifier_output == "uint8" for profile in PHASE1_PROFILES)
+            all(
+                profile.classifier_output == "uint8"
+                for profile in PRECISION_FLOOR_PROFILES
+            )
         )
 
     def test_policy_path_uses_original_fp_name(self) -> None:
@@ -117,7 +120,9 @@ class HandDetectorPrecisionAblationTest(unittest.TestCase):
 
     def test_floor_summary_and_recommendation(self) -> None:
         def result(name: str, reg: float) -> PrecisionProfileResult:
-            profile = next(value for value in PHASE1_PROFILES if value.name == name)
+            profile = next(
+                value for value in PRECISION_FLOOR_PROFILES if value.name == name
+            )
             return PrecisionProfileResult(
                 profile=profile,
                 outputs={
