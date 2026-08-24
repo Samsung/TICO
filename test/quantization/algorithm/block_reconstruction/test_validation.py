@@ -98,7 +98,7 @@ class ValidationAwareReconstructionTest(unittest.TestCase):
                 **kwargs,
             )
 
-    def test_pr1_result_constructor_remains_compatible(self) -> None:
+    def test_result_constructor_defaults_preserve_local_only_behavior(self) -> None:
         from tico.quantization.algorithm.block_reconstruction import (
             BlockReconstructionResult,
         )

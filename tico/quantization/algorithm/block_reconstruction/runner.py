@@ -416,7 +416,7 @@ class BlockReconstructor:
                         entry_outputs,
                     )
                 else:
-                    # Preserve PR 1 behavior when no held-out evaluator is supplied:
+                    # Preserve local-only behavior when no held-out evaluator is supplied:
                     # commit the best local state, including unchanged step zero.
                     accepted = True
                     acceptance_reason = (
@@ -506,7 +506,7 @@ def normalized_mse_loss(
     *,
     epsilon: float = 1.0e-8,
 ) -> torch.Tensor:
-    """Preserve the PR 1 normalized-MSE public helper."""
+    """Return the normalized-MSE public compatibility helper."""
     return reconstruction_loss(
         candidate,
         target,
@@ -534,7 +534,7 @@ def normalized_mse_terms(
     candidate: TensorTree,
     target: TensorTree,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Preserve the PR 1 differentiable MSE-term helper."""
+    """Return differentiable normalized-MSE numerator and denominator terms."""
     return reconstruction_loss_terms(
         candidate,
         target,
