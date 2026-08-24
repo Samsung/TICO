@@ -20,8 +20,16 @@ import argparse
 import json
 
 from pathlib import Path
+from typing import Any, cast, Sequence
 
 import torch
+from tico.quantization.algorithm.adaround import AdaRoundConfig
+from tico.quantization.algorithm.block_reconstruction import (
+    ReconstructionLoss,
+    ValidationObjective,
+)
+from tico.quantization.analysis import make_output_adapter
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 from examples.hand_detector._support.adaround import (
     apply_activation_reconstruction_report,
@@ -49,13 +57,6 @@ from examples.hand_detector._support.quantization import (
 )
 from examples.hand_detector._support.reconstruction import build_reconstruction_windows
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
-from tico.quantization.algorithm.adaround import AdaRoundConfig
-from tico.quantization.algorithm.block_reconstruction import (
-    ReconstructionLoss,
-    ValidationObjective,
-)
-from tico.quantization.analysis import make_output_adapter
-from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -204,6 +205,8 @@ def run(args: argparse.Namespace) -> None:
     _validate_disjoint(args)
     device = torch.device(args.device)
     float_model = load_nhwc_hand_detector(args.weights, args.spec).to(device).eval()
+    calibration: Sequence[torch.Tensor]
+    evaluation: Sequence[torch.Tensor]
     if args.calibration_dir is None:
         calibration = make_synthetic_inputs(
             args.synthetic_calibration_samples,
@@ -303,7 +306,7 @@ def run(args: argparse.Namespace) -> None:
         output_adapter=OUTPUT_ADAPTER,
         device=args.device,
     )
-    payload = {
+    payload: dict[str, Any] = {
         "analysis": "validation_aware_adaround",
         "metadata": {
             "dtype": quantization_name(args.bits),
@@ -377,16 +380,18 @@ def run(args: argparse.Namespace) -> None:
             else default_manifest_path(args.export_circle)
         )
         written_manifest = write_export_manifest(manifest_path, manifest)
+        final_reg_mae = cast(float, final_full["regressors"]["mae"])
+        final_cls_mae = cast(float, final_full["classifiers"]["mae"])
         print(
             "Full deployment profile: "
-            f"REG_MAE={float(final_full['regressors']['mae']):.6e}, "
-            f"CLS_MAE={float(final_full['classifiers']['mae']):.6e}"
+            f"REG_MAE={float(final_reg_mae):.6e}, "
+            f"CLS_MAE={float(final_cls_mae):.6e}"
         )
         print(f"Wrote {export_summary['path']}")
         print(f"Wrote {written_manifest}")
 
 
-def _print_report(report: dict[str, object]) -> None:
+def _print_report(report: dict[str, Any]) -> None:
     baseline = report["baseline_evaluation"]
     assert isinstance(baseline, dict)
     print("\nValidation-aware AdaRound")

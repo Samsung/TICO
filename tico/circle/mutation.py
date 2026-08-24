@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 from contextvars import ContextVar, Token
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from tico.circle._object import clone_object
 from tico.circle.graph import as_list
@@ -92,7 +92,7 @@ class CircleMutationTransaction:
         self._entered = True
         return self
 
-    def __exit__(self, exc_type, exc, traceback) -> bool:
+    def __exit__(self, exc_type, exc, traceback) -> Literal[False]:
         """Rollback on exceptions or missing commit, then restore context state."""
 
         try:

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from tico.quantization.analysis import (
     ModelInput,
@@ -123,9 +123,12 @@ def rank_observer_sweep_results(
     return sorted(
         results.items(),
         key=lambda item: float(
-            _profile_outputs(item[1], OBSERVER_SWEEP_RANKING_PROFILE,)[
-                "regressors"
-            ]["mae"]
+            cast(
+                float,
+                _profile_outputs(item[1], OBSERVER_SWEEP_RANKING_PROFILE)["regressors"][
+                    "mae"
+                ],
+            )
         ),
     )
 

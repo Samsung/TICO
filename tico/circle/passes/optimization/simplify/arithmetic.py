@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -185,6 +185,7 @@ class _ArithmeticRuleBase(CircleRewriteRule[ArithmeticRewritePlan]):
             if plan.producer_operator_index is not None:
                 if plan.producer_builtin_code is None:
                     raise ValueError("Producer replacement requires a builtin code.")
+                assert original_producer is not None
                 producer_replacement = builder.make_operator(
                     plan.producer_builtin_code,
                     inputs=plan.producer_inputs,
@@ -261,7 +262,7 @@ class _ArithmeticRuleBase(CircleRewriteRule[ArithmeticRewritePlan]):
         """Capture a complete arithmetic rewrite plan."""
 
         anchor = as_list(graph.subgraph.operators)[anchor_operator_index]
-        return ArithmeticRewritePlan.capture(
+        plan = ArithmeticRewritePlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
             anchor_operator_index=anchor_operator_index,
@@ -288,6 +289,7 @@ class _ArithmeticRuleBase(CircleRewriteRule[ArithmeticRewritePlan]):
             producer_inputs=tuple(int(index) for index in producer_inputs),
             producer_version=int(producer_version),
         )
+        return cast(ArithmeticRewritePlan, plan)
 
 
 class _CombineMulDivRule(_ArithmeticRuleBase):
@@ -619,7 +621,7 @@ class SimplifyArithmeticPass(CircleRulePass):
             activation_none=activation_none,
             object_factory=object_factory,
         )
-        shared = {
+        shared: dict[str, Any] = {
             "codes": {
                 name: resolver.builtin_code(name)
                 for name in ("DIV", "MUL", "RSQRT", "SQRT")

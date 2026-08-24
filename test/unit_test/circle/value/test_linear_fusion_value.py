@@ -41,14 +41,14 @@ if _HAS_GENERATED_SCHEMA:
     from test.support.circle.evaluator import CircleReferenceEvaluator
     from test.support.circle.value_test import CircleValueTestCase
 else:
-    circle = None
-    CirclePassContext = None
-    CirclePassManager = None
-    FuseLinearOpsPass = None
-    DeadCodeEliminationPass = None
-    CircleModelBuilder = object
-    CircleReferenceEvaluator = object
-    CircleValueTestCase = unittest.TestCase
+    circle = None  # type: ignore[assignment]
+    CirclePassContext = None  # type: ignore[misc, assignment]
+    CirclePassManager = None  # type: ignore[misc, assignment]
+    FuseLinearOpsPass = None  # type: ignore[misc, assignment]
+    DeadCodeEliminationPass = None  # type: ignore[misc, assignment]
+    CircleModelBuilder = object  # type: ignore[misc, assignment]
+    CircleReferenceEvaluator = object  # type: ignore[misc, assignment]
+    CircleValueTestCase = unittest.TestCase  # type: ignore[misc, assignment]
 
 
 class _LinearCircleModelBuilder(CircleModelBuilder):

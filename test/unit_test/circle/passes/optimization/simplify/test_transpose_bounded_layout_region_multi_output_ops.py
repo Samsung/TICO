@@ -541,6 +541,7 @@ class MultiOutputRegionRuleRegistryTest(unittest.TestCase):
 
         operator = SimpleNamespace(inputs=[0, 1], outputs=[2, 3, 4])
         rule = rules._rule_for_builtin_code(rules._SPLIT_BUILTIN_CODE)
+        assert rule is not None
         self.assertEqual(rule.data_input_positions(operator), (1,))
         self.assertEqual(rule.data_output_positions(operator), (0, 1, 2))
 
@@ -549,6 +550,7 @@ class MultiOutputRegionRuleRegistryTest(unittest.TestCase):
 
         operator = SimpleNamespace(inputs=[0, 1, 2], outputs=[3, 4, 5])
         rule = rules._rule_for_builtin_code(rules._SPLIT_V_BUILTIN_CODE)
+        assert rule is not None
         self.assertEqual(rule.data_input_positions(operator), (0,))
         self.assertEqual(rule.data_output_positions(operator), (0, 1, 2))
 

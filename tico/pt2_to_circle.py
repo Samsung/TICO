@@ -17,7 +17,7 @@ import os
 from typing import Optional
 
 import torch
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from tico.config import CompileConfigBase, get_default_config
 

@@ -114,7 +114,9 @@ class HandDetectorAdaRoundTest(unittest.TestCase):
                 expected_percentile=99.99,
                 expected_max_samples=524288,
             )
-        scale, zero_point = activation_site.observer.compute_qparams()
+        qparams = activation_site.observer.compute_qparams()
+        assert qparams is not None
+        scale, zero_point = qparams
         self.assertAlmostEqual(float(scale), 0.25)
         self.assertEqual(int(zero_point), 7)
         self.assertEqual(summary["accepted_step_count"], 1)

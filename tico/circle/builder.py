@@ -320,11 +320,11 @@ class ConstantPool:
         for tensor_index in range(len(tensors)):
             if tensor_index in selected:
                 continue
-            key = self._constant_key_for_tensor(subgraph_index, tensor_index)
-            if key not in missing_keys:
+            candidate = self._constant_key_for_tensor(subgraph_index, tensor_index)
+            if candidate is None or candidate not in missing_keys:
                 continue
-            self._tensors.setdefault((subgraph_index, key), tensor_index)
-            missing_keys.discard(key)
+            self._tensors.setdefault((subgraph_index, candidate), tensor_index)
+            missing_keys.discard(candidate)
             if not missing_keys:
                 break
 

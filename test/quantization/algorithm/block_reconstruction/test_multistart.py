@@ -173,8 +173,9 @@ class QDropMultiStartTest(unittest.TestCase):
                 block_name="identity",
                 observer_model=model,
                 block=model.block,
-                cache=object(),  # The mocked runner does not inspect caches.
-                selection_cache=object(),
+                # The mocked runner does not inspect caches.
+                cache=object(),  # type: ignore[arg-type]
+                selection_cache=object(),  # type: ignore[arg-type]
                 observer_groups=(group,),
                 selection_evaluator=evaluator,
                 selection_objective=objective,
@@ -183,6 +184,7 @@ class QDropMultiStartTest(unittest.TestCase):
 
         self.assertEqual(observed_entry_scales, [0.25, 0.25, 0.25])
         self.assertIsNotNone(result.winner)
+        assert result.winner is not None
         self.assertEqual(result.winner.name, "qdrop_0_25_seed_17")
         scale, _ = model.block.obs_act_in.compute_qparams()
         self.assertAlmostEqual(float(scale), 0.10)
@@ -226,8 +228,8 @@ class QDropMultiStartTest(unittest.TestCase):
                 block_name="identity",
                 observer_model=model,
                 block=model.block,
-                cache=object(),
-                selection_cache=object(),
+                cache=object(),  # type: ignore[arg-type]
+                selection_cache=object(),  # type: ignore[arg-type]
                 observer_groups=(group,),
                 selection_evaluator=evaluator,
                 selection_objective=objective,

@@ -254,13 +254,13 @@ def replace_tensor_uses_many(
             continue
         for tensor_map in as_list(getattr(signature, "outputs", None)):
             old_index = int(getattr(tensor_map, "tensorIndex", -1))
-            new_index = mapping.get(old_index)
-            if new_index is None:
+            mapped_index: int | None = mapping.get(old_index)
+            if mapped_index is None:
                 continue
             if transaction is not None and not signature_field_watched:
                 transaction.watch_model_field("signatureDefs")
                 signature_field_watched = True
-            tensor_map.tensorIndex = new_index
+            tensor_map.tensorIndex = mapped_index
             replacements_count += 1
 
     if replacements_count and transaction is None:

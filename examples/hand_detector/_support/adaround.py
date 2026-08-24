@@ -23,6 +23,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import torch
+from tico.quantization.algorithm.adaround import (
+    AdaRoundConfig,
+    AdaRoundRunner,
+    AdaRoundWeightGroup,
+)
+from tico.quantization.algorithm.block_reconstruction import ValidationObjective
+from tico.quantization.analysis import OutputAdapter, QuantizationProfile
+from tico.quantization.wrapq.control import iter_quantization_sites, SiteRole
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from torch import nn
 
 from examples.hand_detector._support.analysis import output_boundaries
 from examples.hand_detector._support.multistart_reconstruction import (
@@ -35,16 +45,6 @@ from examples.hand_detector._support.reconstruction import (
     evaluate_internal_full,
     ReconstructionWindow,
 )
-from tico.quantization.algorithm.adaround import (
-    AdaRoundConfig,
-    AdaRoundRunner,
-    AdaRoundWeightGroup,
-)
-from tico.quantization.algorithm.block_reconstruction import ValidationObjective
-from tico.quantization.analysis import OutputAdapter, QuantizationProfile
-from tico.quantization.wrapq.control import iter_quantization_sites, SiteRole
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from torch import nn
 
 
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")

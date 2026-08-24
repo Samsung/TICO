@@ -333,6 +333,7 @@ class RemoveNoOpOperatorsTest(unittest.TestCase):
                 )
                 document.subgraph().inputs = [source]
                 axis = add_i32(builder, "axis", 0)
+                inputs: tuple[int, ...]
                 if code == SPLIT:
                     inputs = (axis, source)
                 else:

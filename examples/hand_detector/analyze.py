@@ -21,13 +21,31 @@ import json
 from pathlib import Path
 from typing import Any
 
+from tico.quantization.analysis import (
+    AffineQuantizationPolicy,
+    build_clipping_candidates,
+    collect_output_calibration_data,
+    evaluate_clipping_candidates,
+    make_output_adapter,
+    QuantizationAblation,
+    QuantizationProfile,
+    QuantizationSensitivity,
+    SensitivityMode,
+)
+from tico.quantization.wrapq.control import iter_quantization_sites
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
+
 from examples.hand_detector import (
     adaround as adaround_cli,
     block_reconstruction as block_reconstruction_cli,
     conditional_weight_sensitivity as conditional_weight_sensitivity_cli,
+    discrete_code_refinement as discrete_code_refinement_cli,
+    global_weight_refinement as global_weight_refinement_cli,
     joint_adaround as joint_adaround_cli,
     precision_ablation as precision_ablation_cli,
     reverse_weight_precision as reverse_weight_precision_cli,
+    screened_code_refinement as screened_code_refinement_cli,
     weight_family_ablation as weight_family_ablation_cli,
     weight_precision_sensitivity as weight_precision_sensitivity_cli,
 )
@@ -68,25 +86,12 @@ from examples.hand_detector._support.quantization import (
     quantize_candidate,
 )
 from examples.hand_detector._support.sensitivity import (
+    ActivationSensitivityGroup,
     build_activation_sensitivity_groups,
     build_activation_sensitivity_report,
     print_activation_sensitivity,
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
-from tico.quantization.analysis import (
-    AffineQuantizationPolicy,
-    build_clipping_candidates,
-    collect_output_calibration_data,
-    evaluate_clipping_candidates,
-    make_output_adapter,
-    QuantizationAblation,
-    QuantizationProfile,
-    QuantizationSensitivity,
-    SensitivityMode,
-)
-from tico.quantization.wrapq.control import iter_quantization_sites
-from tico.quantization.wrapq.observers.minmax import MinMaxObserver
-from tico.quantization.wrapq.observers.percentile import PercentileObserver
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -227,6 +232,9 @@ def parse_args() -> argparse.Namespace:
 
     block_reconstruction_cli.add_subparser(subparsers)
     conditional_weight_sensitivity_cli.add_subparser(subparsers)
+    discrete_code_refinement_cli.add_subparser(subparsers)
+    global_weight_refinement_cli.add_subparser(subparsers)
+    screened_code_refinement_cli.add_subparser(subparsers)
     joint_adaround_cli.add_subparser(subparsers)
     adaround_cli.add_subparser(subparsers)
     precision_ablation_cli.add_subparser(subparsers)
@@ -354,6 +362,12 @@ def main() -> None:
         block_reconstruction_cli.run(args)
     elif args.command == "conditional-weight-sensitivity":
         conditional_weight_sensitivity_cli.run(args)
+    elif args.command == "discrete-code-refinement":
+        discrete_code_refinement_cli.run(args)
+    elif args.command == "global-weight-refinement":
+        global_weight_refinement_cli.run(args)
+    elif args.command == "screened-code-refinement":
+        screened_code_refinement_cli.run(args)
     elif args.command == "joint-dwpw-adaround":
         joint_adaround_cli.run(args)
     elif args.command == "adaround":
@@ -464,7 +478,7 @@ def _run_observer_sweep(args: argparse.Namespace) -> None:
         float_model,
         args.bits,
         calibration,
-        activation_observer=MinMaxObserver,
+        activation_observer=MinMaxObserver,  # type: ignore[type-abstract]
     )
     minmax_profiles = evaluate_observer_profiles(
         float_model,
@@ -767,7 +781,7 @@ def _run_activation_sensitivity(args: argparse.Namespace) -> None:
                 **common,
             )
             initial_ranking = []
-            ranked_groups = ()
+            ranked_groups: tuple[ActivationSensitivityGroup, ...] = ()
         else:
             _, independent_results = runner.run(
                 evaluation,

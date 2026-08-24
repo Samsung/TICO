@@ -384,6 +384,7 @@ class LayoutInvariantRuleRegistryTest(unittest.TestCase):
 
         rule = rules._rule_for_builtin_code(rules._ADD_N_BUILTIN_CODE)
         self.assertIsInstance(rule, rules._SameShapeVariadicElementwiseRule)
+        assert rule is not None
         operator = SimpleNamespace(inputs=[0, 1, 2])
         self.assertEqual(rule.data_input_positions(operator), (0, 1, 2))
         self.assertEqual(rule.data_output_positions(operator), (0,))
@@ -401,6 +402,7 @@ class LayoutInvariantRuleRegistryTest(unittest.TestCase):
 
         builtin_code = rules._UNARY_LAYOUT_INVARIANT_BUILTIN_CODES["RELU"]
         rule = rules._rule_for_builtin_code(builtin_code)
+        assert rule is not None
         context = _rule_context([_REGION_SHAPE], [1, 3, 20])
         self.assertIsNone(rule.plan_rewrite(context))
 
@@ -409,6 +411,7 @@ class LayoutInvariantRuleRegistryTest(unittest.TestCase):
 
         builtin_code = rules._BINARY_LAYOUT_INVARIANT_BUILTIN_CODES["MUL"]
         rule = rules._rule_for_builtin_code(builtin_code)
+        assert rule is not None
         context = _rule_context(
             [_REGION_SHAPE, [1, 3, 1, 1]],
             _REGION_SHAPE,
@@ -419,6 +422,7 @@ class LayoutInvariantRuleRegistryTest(unittest.TestCase):
         """Reject ADD_N when one input shape differs from the output shape."""
 
         rule = rules._rule_for_builtin_code(rules._ADD_N_BUILTIN_CODE)
+        assert rule is not None
         context = _rule_context(
             [_REGION_SHAPE, _REGION_SHAPE, [1, 3, 1, 1]],
             _REGION_SHAPE,

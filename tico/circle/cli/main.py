@@ -36,6 +36,8 @@ from tico.circle.passes import (
     CirclePass,
     CirclePassContext,
     CirclePassManager,
+    CirclePassManagerResult,
+    CirclePassPipelineResult,
     CirclePassStrategy,
     CommonSubexpressionEliminationPass,
     ConstantFoldingProfile,
@@ -450,6 +452,7 @@ def _optimize_command(args: argparse.Namespace) -> int:
 
     document = CircleDocument.load(args.input)
     context = CirclePassContext(verify_after_each_pass=not args.no_verify)
+    result: CirclePassPipelineResult | CirclePassManagerResult
     if args.preset is not None:
         options = O1PipelineOptions(
             optimization=O1OptimizationOptions(

@@ -79,8 +79,10 @@ class QDropTest(unittest.TestCase):
             BlockInvocation(args=(quantized_value,)),
         )
         torch.testing.assert_close(first.args[0], second.args[0])
-        self.assertGreater(int((first.args[0] == 0).sum()), 0)
-        self.assertGreater(int((first.args[0] == 1).sum()), 0)
+        zero_count = (first.args[0] == 0).sum()  # type: ignore[union-attr]
+        one_count = (first.args[0] == 1).sum()  # type: ignore[union-attr]
+        self.assertGreater(int(zero_count), 0)
+        self.assertGreater(int(one_count), 0)
 
     def test_context_does_not_leak_into_selection_forward(self) -> None:
         controller = QDropController(1.0, seed=23)

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 
 try:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 except ImportError:  # pragma: no cover
     yaml = None  # type: ignore[assignment]
 

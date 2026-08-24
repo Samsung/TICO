@@ -15,6 +15,7 @@
 """Tests for group-wise quantization sensitivity analysis."""
 
 import unittest
+from typing import cast
 
 import torch
 
@@ -110,10 +111,12 @@ class QuantizationSensitivityTest(unittest.TestCase):
             baseline_selector=baseline_selector,
         )
 
-        self.assertGreater(float(baseline["output"]["mae"]), 0.0)
+        self.assertGreater(float(cast(float, baseline["output"]["mae"])), 0.0)
         self.assertEqual(results[0].matched_sites, ("block.act_in",))
         self.assertGreater(results[0].sensitivity, 0.0)
-        self.assertAlmostEqual(float(results[0].outputs["output"]["mae"]), 0.0)
+        self.assertAlmostEqual(
+            float(cast(float, results[0].outputs["output"]["mae"])), 0.0
+        )
 
     def test_custom_baseline_rejects_an_immutable_group(self) -> None:
         groups = (QuantizationGroup("fine", SiteSelector.paths("block.act_out")),)

@@ -21,8 +21,15 @@ import json
 import math
 
 from pathlib import Path
+from typing import Any
 
 import torch
+from tico.quantization.algorithm.adaround import (
+    JointAdaRoundConfig,
+    JointAdaRoundObjective,
+)
+from tico.quantization.algorithm.block_reconstruction import ReconstructionLoss
+from tico.quantization.analysis import make_output_adapter
 
 from examples.hand_detector._support.analysis import output_boundaries, OUTPUT_NAMES
 from examples.hand_detector._support.data import (
@@ -45,12 +52,6 @@ from examples.hand_detector._support.weight_precision_sensitivity import (
     build_w8a16_candidate,
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
-from tico.quantization.algorithm.adaround import (
-    JointAdaRoundConfig,
-    JointAdaRoundObjective,
-)
-from tico.quantization.algorithm.block_reconstruction import ReconstructionLoss
-from tico.quantization.analysis import make_output_adapter
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -242,7 +243,7 @@ def run(args: argparse.Namespace) -> None:
         samples_per_batch=args.samples_per_batch,
         sampling_seed=args.sampling_seed,
     )
-    checkpoint_replay = None
+    checkpoint_replay: dict[str, Any] | None = None
     if args.load_checkpoint is not None:
         checkpoint_replay = apply_joint_adaround_checkpoint(
             candidate,
@@ -327,7 +328,7 @@ def run(args: argparse.Namespace) -> None:
         output_adapter=OUTPUT_ADAPTER,
         device=device,
     )
-    payload = {
+    payload: dict[str, Any] = {
         "analysis": "joint_dwpw_learnable_scale_adaround",
         "metadata": {
             **p2_metadata,
@@ -393,7 +394,7 @@ def run(args: argparse.Namespace) -> None:
         print(f"Wrote {checkpoint['path']}")
 
 
-def _print_report(report: dict[str, object]) -> None:
+def _print_report(report: dict[str, Any]) -> None:
     baseline = report["baseline_evaluation"]
     assert isinstance(baseline, dict)
     print("\nJoint DW/PW learnable-scale AdaRound")

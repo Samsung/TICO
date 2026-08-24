@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import cast
+
+from tico.quantization.analysis import SensitivityPathResult
 
 from examples.hand_detector._support.sensitivity import ActivationSensitivityGroup
-from tico.quantization.analysis import SensitivityPathResult
 
 
 def select_activation_sensitivity_groups(
@@ -98,8 +100,8 @@ def print_activation_sensitivity_path(
     score_output: str,
 ) -> None:
     """Print cumulative, ranked, or greedy leave-float path steps."""
-    baseline_reg = float(baseline["regressors"]["mae"])
-    baseline_cls = float(baseline["classifiers"]["mae"])
+    baseline_reg = float(cast(float, baseline["regressors"]["mae"]))
+    baseline_cls = float(cast(float, baseline["classifiers"]["mae"]))
     print(
         f"\n{dtype_name.upper()} P{percentile:g} activation " f"{strategy} sensitivity"
     )
@@ -131,8 +133,8 @@ def print_activation_sensitivity_path(
     previous_reg = baseline_reg
     previous_cls = baseline_cls
     for result in results:
-        regressor_mae = float(result.outputs["regressors"]["mae"])
-        classifier_mae = float(result.outputs["classifiers"]["mae"])
+        regressor_mae = float(cast(float, result.outputs["regressors"]["mae"]))
+        classifier_mae = float(cast(float, result.outputs["classifiers"]["mae"]))
         print(
             f"{result.step:4d} "
             f"{result.group[:34]:34s} "
@@ -155,4 +157,6 @@ def _mae_improvement(
     outputs: Mapping[str, Mapping[str, float | int | None]],
     output_name: str,
 ) -> float:
-    return float(baseline[output_name]["mae"]) - float(outputs[output_name]["mae"])
+    baseline_mae = cast(float, baseline[output_name]["mae"])
+    output_mae = cast(float, outputs[output_name]["mae"])
+    return float(baseline_mae) - float(output_mae)

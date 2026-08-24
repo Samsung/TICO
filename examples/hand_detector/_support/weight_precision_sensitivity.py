@@ -26,21 +26,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
-from examples.hand_detector._support.precision_ablation import (
-    discover_output_observer_paths,
-    PHASE1_PROFILES,
-    summarize_precision_inventory,
-    validate_profile_inventory,
-)
-
-# Reuse the semantic partition used by activation sensitivity so names remain
-# stable across the two analyses.
-# pylint: disable=protected-access
-from examples.hand_detector._support.sensitivity import (
-    _find_detector,
-    _partition_operations,
-)
 from tico.quantization import convert as freeze_quantization, prepare
 from tico.quantization.analysis import (
     evaluate_models,
@@ -65,6 +50,21 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from torch import nn
+
+from examples.hand_detector._support.precision_ablation import (
+    discover_output_observer_paths,
+    PHASE1_PROFILES,
+    summarize_precision_inventory,
+    validate_profile_inventory,
+)
+
+# Reuse the semantic partition used by activation sensitivity so names remain
+# stable across the two analyses.
+# pylint: disable=protected-access
+from examples.hand_detector._support.sensitivity import (
+    _find_detector,
+    _partition_operations,
+)
 
 
 MetricSummary = Mapping[str, Mapping[str, float | int | None]]
@@ -401,11 +401,11 @@ def build_independent_report(
     groups: Sequence[WeightSensitivityGroup],
     target_regressor_mae: float,
     auxiliary_tolerance: float = 0.0,
-) -> list[dict[str, object]]:
+) -> list[dict[str, Any]]:
     """Attach weight metadata and balanced eligibility to independent results."""
     metadata = {group.name: group for group in groups}
     baseline_cls = _mae(baseline, "classifiers")
-    report: list[dict[str, object]] = []
+    report: list[dict[str, Any]] = []
     for rank, result in enumerate(results, start=1):
         group = metadata[result.group]
         reg_gain = _mae(baseline, "regressors") - _mae(
@@ -446,7 +446,7 @@ def build_path_report(
     baseline_cls = _mae(baseline, "classifiers")
     previous_reg = baseline_reg
     previous_cls = baseline_cls
-    report: list[dict[str, object]] = []
+    report: list[dict[str, Any]] = []
     for result in results:
         group = metadata[result.group]
         selected = tuple(metadata[name] for name in result.selected_groups)
@@ -482,7 +482,7 @@ def build_path_report(
     else:
         best_step = 0
         best_regressor_mae = baseline_reg
-    summary = {
+    summary: dict[str, object] = {
         "target_regressor_mae": target_regressor_mae,
         "target_reached": bool(target_steps),
         "first_target_step": target_steps[0] if target_steps else None,
@@ -634,7 +634,7 @@ def _apply_weight_baseline(state: FakeQuantState) -> None:
 def _path_selector(paths: Sequence[str] | set[str], name: str) -> SiteSelector:
     selected = frozenset(paths)
     return SiteSelector(
-        lambda site, values=selected: site.path in values,
+        lambda site, values=selected: site.path in values,  # type: ignore[misc]
         f"weight_paths[{name}]",
     )
 
@@ -789,7 +789,7 @@ def _uint8_weight_spec() -> QuantSpec:
     return affine(
         DType.uint(8),
         qscheme=QScheme.PER_CHANNEL_ASYMM,
-        observer=MinMaxObserver,
+        observer=MinMaxObserver,  # type: ignore[type-abstract]
     )
 
 
@@ -823,7 +823,7 @@ def _int16_activation_spec(
         return affine(
             DType.int(16),
             qscheme=QScheme.PER_TENSOR_SYMM,
-            observer=MinMaxObserver,
+            observer=MinMaxObserver,  # type: ignore[type-abstract]
         )
     if observer == "percentile":
         return affine(

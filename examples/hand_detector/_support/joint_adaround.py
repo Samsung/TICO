@@ -21,16 +21,6 @@ import re
 from collections.abc import Sequence
 
 import torch
-
-from examples.hand_detector._support.multistart_reconstruction import (
-    ReconstructionDataSplit,
-)
-from examples.hand_detector._support.reconstruction import (
-    _find_detector,
-    collect_reconstruction_cache,
-    DetectorWindow,
-    ReconstructionWindow,
-)
 from tico.quantization.algorithm.adaround import (
     JointAdaRoundConfig,
     JointAdaRoundObjective,
@@ -44,6 +34,16 @@ from tico.quantization.wrapq.control import (
     SiteRole,
 )
 from torch import nn
+
+from examples.hand_detector._support.multistart_reconstruction import (
+    ReconstructionDataSplit,
+)
+from examples.hand_detector._support.reconstruction import (
+    _find_detector,
+    collect_reconstruction_cache,
+    DetectorWindow,
+    ReconstructionWindow,
+)
 
 
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")

@@ -8,6 +8,7 @@ from __future__ import annotations
 import unittest
 
 from types import SimpleNamespace
+from typing import cast
 
 from examples.hand_detector._support.reverse_weight_precision import (
     _build_independent_report,
@@ -195,9 +196,9 @@ class HandDetectorReverseReportTest(unittest.TestCase):
                 return _outputs(0.02, 0.02)
 
         report = _build_independent_report(
-            self.groups,
+            self.groups,  # type: ignore[arg-type]
             _outputs(0.01, 0.01),
-            Evaluator(),
+            Evaluator(),  # type: ignore[arg-type]
             target_regressor_mae=0.1,
             target_classifier_mae=0.1,
             full_parameter_element_count=30,
@@ -206,7 +207,7 @@ class HandDetectorReverseReportTest(unittest.TestCase):
         self.assertTrue(all(row["target_feasible"] for row in report))
 
     def test_enrichment_reports_remaining_must_optimize_groups(self) -> None:
-        payload = {
+        payload: dict[str, object] = {
             "final": {
                 "selected_groups": ["a"],
                 "quantized_element_count": 10,
@@ -216,18 +217,23 @@ class HandDetectorReverseReportTest(unittest.TestCase):
         }
         result = _enrich_search_result(
             payload,
-            self.groups,
+            self.groups,  # type: ignore[arg-type]
             full_parameter_element_count=30,
         )
-        self.assertEqual(result["final"]["remaining_float_groups"], ["b"])
-        self.assertAlmostEqual(result["final"]["quantized_parameter_ratio"], 1 / 3)
+        final = cast(dict, result["final"])
+        self.assertEqual(final["remaining_float_groups"], ["b"])
+        self.assertAlmostEqual(final["quantized_parameter_ratio"], 1 / 3)
 
     def test_beam_candidate_count_uses_lowest_reverse_cost_rows(self) -> None:
         independent = (
             {"group": "b"},
             {"group": "a"},
         )
-        selected = _select_beam_groups(self.groups, independent, 1)
+        selected = _select_beam_groups(
+            self.groups,  # type: ignore[arg-type]
+            independent,
+            1,
+        )
         self.assertEqual([group.name for group in selected], ["b"])
 
 

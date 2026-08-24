@@ -15,11 +15,12 @@
 import operator
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TypeAlias
 
 import torch
 
 
-Qwen3VLVisionGridInput = torch.Tensor | Sequence[int]
+Qwen3VLVisionGridInput: TypeAlias = torch.Tensor | Sequence[int]
 
 
 @dataclass(frozen=True)

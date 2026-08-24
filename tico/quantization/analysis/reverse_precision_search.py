@@ -202,6 +202,7 @@ def run_reverse_greedy(
                     current.quantized_element_count + group.element_count
                 ),
             )
+            score: tuple[float, ...]
             if selection_objective == "primary-cost":
                 score = (
                     primary_cost,

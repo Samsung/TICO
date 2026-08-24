@@ -23,14 +23,6 @@ from contextlib import AbstractContextManager
 from typing import Any
 
 import torch
-
-from examples.hand_detector._support.weight_precision_sensitivity import (
-    build_w8a16_candidate,
-    build_weight_sensitivity_groups,
-    parameter_totals,
-    select_weight_sensitivity_groups,
-    WeightSensitivityGroup,
-)
 from tico.quantization.analysis import evaluate_models, OutputAdapter, SiteSelector
 from tico.quantization.analysis.reverse_precision_search import (
     ReversePrecisionGroup,
@@ -39,6 +31,14 @@ from tico.quantization.analysis.reverse_precision_search import (
 )
 from tico.quantization.wrapq.control import FakeQuantState, SiteRole
 from torch import nn
+
+from examples.hand_detector._support.weight_precision_sensitivity import (
+    build_w8a16_candidate,
+    build_weight_sensitivity_groups,
+    parameter_totals,
+    select_weight_sensitivity_groups,
+    WeightSensitivityGroup,
+)
 
 
 MetricSummary = Mapping[str, Mapping[str, float | int | None]]
@@ -295,7 +295,9 @@ class _WeightSubsetEvaluator(AbstractContextManager["_WeightSubsetEvaluator"]):
         if selected_paths:
             self._state.set_where(
                 SiteSelector(
-                    lambda site, paths=selected_paths: site.path in paths,
+                    lambda site, paths=selected_paths: (  # type: ignore[misc]
+                        site.path in paths
+                    ),
                     "reverse_weight_exact_paths",
                 ),
                 True,
@@ -323,7 +325,7 @@ def _build_independent_report(
 ) -> list[dict[str, object]]:
     baseline_reg = _mae(p3_outputs, "regressors")
     baseline_cls = _mae(p3_outputs, "classifiers")
-    rows: list[dict[str, object]] = []
+    rows: list[dict[str, Any]] = []
     for group in groups:
         outputs = evaluator.evaluate(frozenset({group.name}))
         reg = _mae(outputs, "regressors")
@@ -380,7 +382,7 @@ def _enrich_search_result(
 ) -> dict[str, object]:
     group_by_name = {group.name: group for group in groups}
 
-    def enrich_state(state: dict[str, object]) -> None:
+    def enrich_state(state: dict[str, Any]) -> None:
         selected = tuple(str(name) for name in state["selected_groups"])
         selected_set = frozenset(selected)
         remaining = tuple(
@@ -536,17 +538,19 @@ def _validate_arguments(
         raise ValueError("beam_exploration_slots must be zero when beam is disabled.")
     if beam_width > 0 and beam_exploration_slots >= beam_width:
         raise ValueError("beam_exploration_slots must be smaller than beam_width.")
-    for name, value in (
+    for name, target_value in (
         ("target_regressor_mae", target_regressor_mae),
         ("target_classifier_mae", target_classifier_mae),
     ):
-        if not math.isfinite(value) or value <= 0.0:
+        if not math.isfinite(target_value) or target_value <= 0.0:
             raise ValueError(f"{name} must be finite and positive.")
-    for name, value in (
+    for name, ceiling_value in (
         ("search_regressor_ceiling", search_regressor_ceiling),
         ("search_classifier_ceiling", search_classifier_ceiling),
     ):
-        if value is not None and (not math.isfinite(value) or value <= 0.0):
+        if ceiling_value is not None and (
+            not math.isfinite(ceiling_value) or ceiling_value <= 0.0
+        ):
             raise ValueError(f"{name} must be None or finite and positive.")
 
 

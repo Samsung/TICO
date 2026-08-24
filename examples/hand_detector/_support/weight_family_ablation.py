@@ -25,15 +25,15 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from tico.quantization.analysis import evaluate_models, OutputAdapter, SiteSelector
+from tico.quantization.wrapq.control import FakeQuantState
+from torch import nn
 
 from examples.hand_detector._support.weight_precision_sensitivity import (
     build_w8a16_candidate,
     build_weight_sensitivity_groups,
     WeightSensitivityGroup,
 )
-from tico.quantization.analysis import evaluate_models, OutputAdapter, SiteSelector
-from tico.quantization.wrapq.control import FakeQuantState
-from torch import nn
 
 
 MetricSummary = Mapping[str, Mapping[str, float | int | None]]
@@ -451,7 +451,9 @@ class _WeightFamilyEvaluator(AbstractContextManager["_WeightFamilyEvaluator"]):
         if float_paths:
             self._state.set_where(
                 SiteSelector(
-                    lambda site, paths=float_paths: site.path in paths,
+                    lambda site, paths=float_paths: (  # type: ignore[misc]
+                        site.path in paths
+                    ),
                     "weight_family_float_paths",
                 ),
                 False,

@@ -252,13 +252,13 @@ def _safe_binary_result(
             np.asarray(lhs, dtype=object),
             np.asarray(rhs, dtype=object),
         )
-    result_object = np.asarray(result_object, dtype=object)
+    result_array = np.asarray(result_object, dtype=object)
     limits = np.iinfo(normalized_dtype)
-    if result_object.size and (
-        np.any(result_object < limits.min) or np.any(result_object > limits.max)
+    if result_array.size and (
+        np.any(result_array < limits.min) or np.any(result_array > limits.max)
     ):
         return None
-    return result_object.astype(normalized_dtype, copy=False)
+    return result_array.astype(normalized_dtype, copy=False)
 
 
 def _safe_cast(

@@ -21,10 +21,8 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
-from examples.hand_detector._support.analysis import OUTPUT_NAMES
-from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 from tico.quantization.analysis import (
     QuantizationBoundaries,
     QuantizationGroup,
@@ -39,6 +37,9 @@ from tico.quantization.wrapq.control import (
 )
 
 from torch import nn
+
+from examples.hand_detector._support.analysis import OUTPUT_NAMES
+from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
 
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
@@ -134,7 +135,9 @@ def build_activation_sensitivity_groups(
         paths = tuple(sorted(site.path for site in grouped_sites))
         path_set = frozenset(paths)
         selector = SiteSelector(
-            lambda site, selected=path_set: site.path in selected,
+            lambda site, selected=path_set: (  # type: ignore[misc]
+                site.path in selected
+            ),
             f"exact_paths[{group.name}]",
         )
         operations = tuple(
@@ -208,8 +211,8 @@ def print_activation_sensitivity(
     if top_k < 0:
         raise ValueError("top_k must be nonnegative.")
     shown = results if top_k == 0 else results[:top_k]
-    baseline_reg = float(baseline["regressors"]["mae"])
-    baseline_cls = float(baseline["classifiers"]["mae"])
+    baseline_reg = float(cast(float, baseline["regressors"]["mae"]))
+    baseline_cls = float(cast(float, baseline["classifiers"]["mae"]))
     print(f"\n{dtype_name.upper()} P{percentile:g} activation block sensitivity")
     print(
         "Baseline E:internal-full: "
@@ -223,8 +226,8 @@ def print_activation_sensitivity(
         f"{'CLS_MAE':>13s} {'GAIN_CLS':>13s} {'SITES':>7s}"
     )
     for index, result in enumerate(shown, start=1):
-        regressor_mae = float(result.outputs["regressors"]["mae"])
-        classifier_mae = float(result.outputs["classifiers"]["mae"])
+        regressor_mae = float(cast(float, result.outputs["regressors"]["mae"]))
+        classifier_mae = float(cast(float, result.outputs["classifiers"]["mae"]))
         print(
             f"{index:4d} "
             f"{result.group[:34]:34s} "
@@ -412,7 +415,9 @@ def _mae_improvement(
     outputs: Mapping[str, Mapping[str, float | int | None]],
     output_name: str,
 ) -> float:
-    return float(baseline[output_name]["mae"]) - float(outputs[output_name]["mae"])
+    baseline_mae = cast(float, baseline[output_name]["mae"])
+    output_mae = cast(float, outputs[output_name]["mae"])
+    return float(baseline_mae) - float(output_mae)
 
 
 def _find_detector(model: nn.Module) -> HandDetector:

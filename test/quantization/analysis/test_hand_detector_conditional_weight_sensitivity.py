@@ -8,6 +8,7 @@ from __future__ import annotations
 import unittest
 
 from types import SimpleNamespace
+from typing import cast
 from unittest import mock
 
 from examples.hand_detector._support import conditional_weight_sensitivity as module
@@ -189,10 +190,10 @@ class ConditionalWeightSensitivityTest(unittest.TestCase):
         evaluator.samples = (object(),)
         evaluator.baseline_float_paths = frozenset({"regular.weight"})
         evaluator.groups = (group,)
-        evaluator.output_adapter = object()
+        evaluator.output_adapter = object()  # type: ignore[assignment]
         evaluator._group_paths = {"g": frozenset({"depthwise.weight"})}
         evaluator._cache = {}
-        evaluator._state = DummyState()
+        evaluator._state = DummyState()  # type: ignore[assignment]
         evaluator.evaluation_count = 0
         outputs = {
             "regressors": {"mae": 0.1},
@@ -201,9 +202,9 @@ class ConditionalWeightSensitivityTest(unittest.TestCase):
         with mock.patch.object(module, "evaluate_models", return_value=outputs):
             result = evaluator.evaluate(frozenset({"g"}))
         self.assertEqual(result, outputs)
-        self.assertTrue(evaluator._state.enabled)
-        self.assertEqual(len(evaluator._state.calls), 1)
-        selector, enabled = evaluator._state.calls[0]
+        self.assertTrue(evaluator._state.enabled)  # type: ignore[union-attr]
+        self.assertEqual(len(evaluator._state.calls), 1)  # type: ignore[union-attr]
+        selector, enabled = evaluator._state.calls[0]  # type: ignore[union-attr]
         self.assertFalse(enabled)
         self.assertTrue(selector(SimpleNamespace(path="regular.weight")))
         self.assertTrue(selector(SimpleNamespace(path="depthwise.weight")))
@@ -227,14 +228,14 @@ class ConditionalWeightSensitivityTest(unittest.TestCase):
                 "regressors": {"mae": 0.18},
                 "classifiers": {"mae": 0.06},
             },
-            evaluator,
+            evaluator,  # type: ignore[arg-type]
             auxiliary_tolerance=0.0,
             target_regressor_mae=0.1,
             target_classifier_mae=0.1,
             full_parameter_count=100,
         )
         self.assertEqual(evaluator.names, frozenset({"g"}))
-        self.assertAlmostEqual(rows[0]["regressor_mae_improvement"], 0.1)
+        self.assertAlmostEqual(cast(float, rows[0]["regressor_mae_improvement"]), 0.1)
         self.assertTrue(rows[0]["target_reached"])
         self.assertTrue(rows[0]["eligible"])
 
@@ -266,7 +267,7 @@ class ConditionalWeightSensitivityTest(unittest.TestCase):
                 "regressors": {"mae": 0.18},
                 "classifiers": {"mae": 0.06},
             },
-            Evaluator(),
+            Evaluator(),  # type: ignore[arg-type]
             max_steps=0,
             minimum_improvement=0.0,
             auxiliary_tolerance=0.0,

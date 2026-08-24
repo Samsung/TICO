@@ -23,12 +23,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
-from examples.hand_detector._support.analysis import output_boundaries
-from examples.hand_detector._support.sensitivity import (
-    build_activation_sensitivity_groups,
-)
-from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 from tico.quantization.algorithm.block_reconstruction import (
     AffineObserverGroup,
     BlockInvocation,
@@ -50,6 +44,12 @@ from tico.quantization.wrapq.control import (
     SiteRole,
 )
 from torch import nn
+
+from examples.hand_detector._support.analysis import output_boundaries
+from examples.hand_detector._support.sensitivity import (
+    build_activation_sensitivity_groups,
+)
+from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
 
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
@@ -268,8 +268,8 @@ def build_window_observer_groups(
         components[tuple(sorted(tensor_ids))].append(path)
 
     definitions: list[tuple[tuple[int, ...], tuple[str, ...]]] = []
-    for tensor_ids, paths in components.items():
-        definitions.append((tensor_ids, tuple(sorted(paths))))
+    for component_ids, paths in components.items():
+        definitions.append((component_ids, tuple(sorted(paths))))
     definitions.sort(key=lambda item: (item[0], item[1]))
     groups = tuple(
         AffineObserverGroup(

@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import torch
+
 from examples.hand_detector._support.tflite_flatbuffer import OperatorInfo, TFLiteModel
 
 from examples.hand_detector.hand_detector import HandDetector

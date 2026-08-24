@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any
 
 import numpy as np
 
@@ -52,7 +53,7 @@ class ResolveLegacyCustomOpsTest(unittest.TestCase):
         """Create fake schema services and deterministic custom-option mappings."""
 
         self.codec = make_codec()
-        self.option_maps = {
+        self.option_maps: dict[bytes, dict[str, Any]] = {
             b"bmm": {"adj_x": True, "adj_y": False},
             b"matmul": {"transpose_a": False, "transpose_b": True},
             b"pool": {

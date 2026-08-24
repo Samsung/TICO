@@ -790,7 +790,7 @@ class Gemma4TextMLPCase(Gemma4BaseCase):
 class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
     """Base class for mode-specific Gemma4 text attention smoke cases."""
 
-    tags = ("gemma4", "e2b", "text", "attention")
+    tags: tuple[str, ...] = ("gemma4", "e2b", "text", "attention")
     max_mean_abs_diff = 2.0
     seq_len = 8
     max_seq = 8

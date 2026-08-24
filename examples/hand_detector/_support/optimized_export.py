@@ -24,15 +24,15 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from tico.quantization.analysis import evaluate_models, OutputAdapter
+from tico.quantization.wrapq.control import FakeQuantState
+from torch import nn
 
 from examples.hand_detector._support.quantization import export_quantized_circle
 from examples.hand_detector._support.verify_circle_layout import verify_circle_layout
 from examples.hand_detector._support.verify_quantized_circle import (
     verify_quantized_circle,
 )
-from tico.quantization.analysis import evaluate_models, OutputAdapter
-from tico.quantization.wrapq.control import FakeQuantState
-from torch import nn
 
 
 OutputMetrics = Mapping[str, Mapping[str, float | int | None]]

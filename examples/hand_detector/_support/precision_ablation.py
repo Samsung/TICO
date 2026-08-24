@@ -24,9 +24,6 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-
-from examples.hand_detector._support.analysis import OUTPUT_NAMES
-from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 from tico.quantization import convert as freeze_quantization, prepare
 from tico.quantization.analysis import evaluate_models, OutputAdapter
 from tico.quantization.config.ptq import PTQConfig
@@ -42,6 +39,9 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from torch import nn
+
+from examples.hand_detector._support.analysis import OUTPUT_NAMES
+from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
 
 MetricSummary = Mapping[str, Mapping[str, float | int | None]]
@@ -530,7 +530,7 @@ def _uint8_weight_spec() -> QuantSpec:
     return affine(
         DType.uint(8),
         qscheme=QScheme.PER_CHANNEL_ASYMM,
-        observer=MinMaxObserver,
+        observer=MinMaxObserver,  # type: ignore[type-abstract]
     )
 
 
@@ -568,7 +568,7 @@ def _int16_activation_policy(
             spec=affine(
                 DType.int(16),
                 qscheme=QScheme.PER_TENSOR_SYMM,
-                observer=MinMaxObserver,
+                observer=MinMaxObserver,  # type: ignore[type-abstract]
             ),
             name="MinMaxObserver",
         )
