@@ -421,6 +421,7 @@ class AxisRemapRuleRegistryTest(unittest.TestCase):
             "MIRROR_PAD": rules._MirrorPadRule,
             "PADV2": rules._PadV2Rule,
             "SLICE": rules._SliceRule,
+            "STRIDED_SLICE": rules._StridedSliceRule,
             "TILE": rules._TileRule,
         }
         for name, rule_type in expected.items():
@@ -706,6 +707,120 @@ class AxisRemapRegionPassTest(unittest.TestCase):
             constants=(
                 _i32_constant("begin", (0, 1, 1, 2)),
                 _i32_constant("size", (1, 6, 2, -1)),
+            ),
+        )
+        result = EliminateTransposeBoundedLayoutRegionPass().run(
+            document,
+            CirclePassContext(),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(document.subgraph().operators[operator_index].inputs[0], 2)
+
+    def test_rewrites_strided_slice_vectors_and_masks(self) -> None:
+        """Remap STRIDED_SLICE begin/end/strides vectors and per-axis masks."""
+
+        (
+            document,
+            operator_index,
+            output_index,
+            constant_indices,
+        ) = _make_single_data_document(
+            rules._STRIDED_SLICE_BUILTIN_CODE,
+            source_shape=(1, 4, 5, 6),
+            region_output_shape=(1, 6, 2, 5),
+            source_output_shape=(1, 2, 5, 6),
+            constants=(
+                _i32_constant("begin", (0, 0, 1, 0)),
+                _i32_constant("end", (1, 6, 3, 5)),
+                _i32_constant("strides", (1, 1, 1, 1)),
+            ),
+            builtin_options=SimpleNamespace(
+                beginMask=0b1000,
+                endMask=0b0010,
+                ellipsisMask=0,
+                newAxisMask=0,
+                shrinkAxisMask=0,
+            ),
+        )
+        result = EliminateTransposeBoundedLayoutRegionPass().run(
+            document,
+            CirclePassContext(),
+        )
+
+        self.assertTrue(result.modified)
+        operator = document.subgraph().operators[operator_index]
+        self.assertNotEqual(operator.inputs[1], constant_indices[0])
+        self.assertNotEqual(operator.inputs[2], constant_indices[1])
+        self.assertNotEqual(operator.inputs[3], constant_indices[2])
+        begin = document.subgraph().tensors[operator.inputs[1]]
+        end = document.subgraph().tensors[operator.inputs[2]]
+        strides = document.subgraph().tensors[operator.inputs[3]]
+        self.assertEqual(
+            _decode_i32_buffer(document.model.buffers[begin.buffer]),
+            (0, 1, 0, 0),
+        )
+        self.assertEqual(
+            _decode_i32_buffer(document.model.buffers[end.buffer]),
+            (1, 3, 5, 6),
+        )
+        self.assertEqual(
+            _decode_i32_buffer(document.model.buffers[strides.buffer]),
+            (1, 1, 1, 1),
+        )
+        self.assertEqual(operator.builtinOptions.beginMask, 0b0100)
+        self.assertEqual(operator.builtinOptions.endMask, 0b1000)
+        self.assertEqual(document.subgraph().outputs, [output_index])
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+
+    def test_rejects_rank_changing_strided_slice(self) -> None:
+        """Reject STRIDED_SLICE whose shrink-axis mask changes tensor rank."""
+
+        document, operator_index, _, _ = _make_single_data_document(
+            rules._STRIDED_SLICE_BUILTIN_CODE,
+            source_shape=(1, 4, 5, 6),
+            region_output_shape=(1, 6, 2, 5),
+            source_output_shape=(1, 2, 5, 6),
+            constants=(
+                _i32_constant("begin", (0, 0, 1, 0)),
+                _i32_constant("end", (1, 6, 3, 5)),
+                _i32_constant("strides", (1, 1, 1, 1)),
+            ),
+            builtin_options=SimpleNamespace(
+                beginMask=0b1000,
+                endMask=0b0010,
+                ellipsisMask=0,
+                newAxisMask=0,
+                shrinkAxisMask=0b0001,
+            ),
+        )
+        result = EliminateTransposeBoundedLayoutRegionPass().run(
+            document,
+            CirclePassContext(),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(document.subgraph().operators[operator_index].inputs[0], 2)
+
+    def test_rejects_negative_strided_slice_stride(self) -> None:
+        """Reject STRIDED_SLICE when any static stride is not positive."""
+
+        document, operator_index, _, _ = _make_single_data_document(
+            rules._STRIDED_SLICE_BUILTIN_CODE,
+            source_shape=(1, 4, 5, 6),
+            region_output_shape=(1, 6, 2, 5),
+            source_output_shape=(1, 2, 5, 6),
+            constants=(
+                _i32_constant("begin", (0, 0, 1, 0)),
+                _i32_constant("end", (1, 6, 3, 5)),
+                _i32_constant("strides", (1, 1, 1, -1)),
+            ),
+            builtin_options=SimpleNamespace(
+                beginMask=0b1000,
+                endMask=0b0010,
+                ellipsisMask=0,
+                newAxisMask=0,
+                shrinkAxisMask=0,
             ),
         )
         result = EliminateTransposeBoundedLayoutRegionPass().run(

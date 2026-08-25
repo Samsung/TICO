@@ -39,16 +39,6 @@ from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from examples.hand_detector import (
     adaround as adaround_cli,
     block_reconstruction as block_reconstruction_cli,
-    conditional_weight_sensitivity as conditional_weight_sensitivity_cli,
-    discrete_code_refinement as discrete_code_refinement_cli,
-    global_weight_refinement as global_weight_refinement_cli,
-    joint_adaround as joint_adaround_cli,
-    legal_mixed_precision as legal_mixed_precision_cli,
-    precision_ablation as precision_ablation_cli,
-    reverse_weight_precision as reverse_weight_precision_cli,
-    screened_code_refinement as screened_code_refinement_cli,
-    weight_family_ablation as weight_family_ablation_cli,
-    weight_precision_sensitivity as weight_precision_sensitivity_cli,
 )
 from examples.hand_detector._support.analysis import (
     output_boundaries,
@@ -232,17 +222,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     block_reconstruction_cli.add_subparser(subparsers)
-    conditional_weight_sensitivity_cli.add_subparser(subparsers)
-    discrete_code_refinement_cli.add_subparser(subparsers)
-    global_weight_refinement_cli.add_subparser(subparsers)
-    screened_code_refinement_cli.add_subparser(subparsers)
-    joint_adaround_cli.add_subparser(subparsers)
-    legal_mixed_precision_cli.add_subparser(subparsers)
     adaround_cli.add_subparser(subparsers)
-    precision_ablation_cli.add_subparser(subparsers)
-    reverse_weight_precision_cli.add_subparser(subparsers)
-    weight_family_ablation_cli.add_subparser(subparsers)
-    weight_precision_sensitivity_cli.add_subparser(subparsers)
 
     sensitivity = subparsers.add_parser(
         "activation-sensitivity",
@@ -362,28 +342,8 @@ def main() -> None:
         _run_group_observer_sweep(args)
     elif args.command == "block-reconstruction":
         block_reconstruction_cli.run(args)
-    elif args.command == "conditional-weight-sensitivity":
-        conditional_weight_sensitivity_cli.run(args)
-    elif args.command == "discrete-code-refinement":
-        discrete_code_refinement_cli.run(args)
-    elif args.command == "global-weight-refinement":
-        global_weight_refinement_cli.run(args)
-    elif args.command == "screened-code-refinement":
-        screened_code_refinement_cli.run(args)
-    elif args.command == "joint-dwpw-adaround":
-        joint_adaround_cli.run(args)
-    elif args.command == "legal-mixed-precision":
-        legal_mixed_precision_cli.run(args)
     elif args.command == "adaround":
         adaround_cli.run(args)
-    elif args.command == "precision-ablation":
-        precision_ablation_cli.run(args)
-    elif args.command == "reverse-weight-precision":
-        reverse_weight_precision_cli.run(args)
-    elif args.command == "weight-family-ablation":
-        weight_family_ablation_cli.run(args)
-    elif args.command == "weight-precision-sensitivity":
-        weight_precision_sensitivity_cli.run(args)
     elif args.command == "activation-sensitivity":
         _run_activation_sensitivity(args)
     else:

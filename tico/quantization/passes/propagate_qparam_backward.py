@@ -21,6 +21,7 @@ import copy
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
@@ -72,6 +73,9 @@ class PropagateQParamBackward(PassBase):
             if node.target == torch.ops.aten.cat.default:
                 concat_args = CatArgs(*node.args, **node.kwargs)
                 concat_inputs = concat_args.tensors
+
+                if is_width_direction_concat(node, concat_args):
+                    continue
 
                 for concat_input in concat_inputs:
                     _propagate_qparam_if_possible(node, concat_input)

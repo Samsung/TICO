@@ -29,7 +29,7 @@ from tico.quantization.wrapq.wrappers.registry import register
 
 @register(Concat)
 class QuantConcat(QuantModuleBase):
-    """Force all concatenation inputs and the output into one quantization domain."""
+    """Quantize Concat output while honoring its input-qparam contract."""
 
     def __init__(
         self,
@@ -38,20 +38,23 @@ class QuantConcat(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ) -> None:
-        """Create one shared observer for every connected concatenation tensor."""
+        """Create the output observer for one concatenation."""
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
         self.obs_act_out = self._make_obs("act_out")
 
     def forward(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
-        """Concatenate inputs after applying one shared fake-quantization domain."""
+        """Concatenate branch domains and fake-quantize the output."""
         values = tuple(tensors)
         if not values:
             raise ValueError("QuantConcat requires at least one input tensor.")
-        inputs_q = tuple(self._fq(value, self.obs_act_out) for value in values)
+        if self.module.allow_distinct_input_qparams:
+            inputs_q = values
+        else:
+            inputs_q = tuple(self._fq(value, self.obs_act_out) for value in values)
         output = self.module(inputs_q)
         return self._fq(output, self.obs_act_out)
 
     def _all_observers(self):
-        """Return the single shared concatenation observer."""
+        """Return the concatenation output observer."""
         return (self.obs_act_out,)

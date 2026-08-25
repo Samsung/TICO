@@ -30,7 +30,9 @@ from examples.hand_detector.hand_detector import (
     HandDetector,
     load_hand_detector,
     load_nhwc_hand_detector,
+    lower_resize_bilinear_to_tconv,
     NHWCInputAdapter,
+    ResizeBilinearTConv,
 )
 
 
@@ -108,6 +110,68 @@ class ResizeBilinearTest(unittest.TestCase):
             if node.op == "call_function"
         ]
         self.assertEqual(targets.count("circle_custom.resize_bilinear.default"), 1)
+
+
+class ResizeBilinearTConvTest(unittest.TestCase):
+    """Validate the TransposeConv lowering of 2x half-pixel RESIZE_BILINEAR."""
+
+    def test_matches_half_pixel_resize_bilinear(self) -> None:
+        """Match ResizeBilinear2d output within float rounding error."""
+
+        torch.manual_seed(20260828)
+        for height, width, channels, groups in (
+            (6, 6, 8, 1),
+            (6, 6, 8, 4),
+            (12, 12, 4, 2),
+            (5, 7, 3, 1),
+        ):
+            with self.subTest(
+                height=height, width=width, channels=channels, groups=groups
+            ):
+                reference = ResizeBilinear2d(
+                    (2 * height, 2 * width),
+                    align_corners=False,
+                    half_pixel_centers=True,
+                ).eval()
+                lowered = ResizeBilinearTConv(channels, groups=groups).eval()
+                source = torch.randn(1, channels, height, width)
+                with torch.inference_mode():
+                    expected = reference(source)
+                    actual = lowered(source)
+                torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-5)
+
+    def test_rejects_indivisible_groups(self) -> None:
+        """Reject a group count that does not evenly divide the channels."""
+
+        with self.assertRaises(ValueError):
+            ResizeBilinearTConv(8, groups=3)
+
+    def test_lowering_replaces_every_resize_and_preserves_outputs(self) -> None:
+        """Replace both detector resizes without changing model outputs."""
+
+        detector = load_hand_detector(
+            DIRECTORY / "hand_detector_float.pt",
+            DIRECTORY / "hand_detector_spec.json",
+        ).eval()
+        reference = load_hand_detector(
+            DIRECTORY / "hand_detector_float.pt",
+            DIRECTORY / "hand_detector_spec.json",
+        ).eval()
+        replaced = lower_resize_bilinear_to_tconv(detector)
+        self.assertEqual(len(replaced), 2)
+        for position in replaced:
+            self.assertEqual(detector.operations[position]["name"], "RESIZE_BILINEAR")
+            self.assertIsInstance(detector.layers[position], ResizeBilinearTConv)
+
+        torch.manual_seed(20260828)
+        source = torch.rand(1, 3, 192, 192)
+        with torch.inference_mode():
+            expected = reference(source)
+            actual = detector(source)
+        for expected_output, actual_output in zip(expected, actual):
+            torch.testing.assert_close(
+                actual_output, expected_output, rtol=0.0, atol=1e-4
+            )
 
 
 class HandDetectorTest(unittest.TestCase):
