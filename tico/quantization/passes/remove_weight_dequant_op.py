@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, List, Optional, TYPE_CHECKING, Union
+from typing import Any, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -30,6 +30,7 @@ from tico.serialize.quant_param import QPARAM_KEY, QuantParam, to_qparam_dtype
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import get_quant_dtype
 from tico.utils.validate_args_kwargs import (
     DequantizePerChannelArgs,
     DequantizePerTensorArgs,
@@ -83,33 +84,31 @@ def get_constant(exported_program: ExportedProgram, node: torch.fx.Node):
         raise RuntimeError("NYI constant")
 
 
-class ValRange:
-    """Represent the minimum and maximum values of tensor or list data."""
+def infer_dtype(quant_min: int, quant_max: int, dtype: torch.dtype) -> str:
+    """Infer the logical dtype from the declared quantization range.
 
-    def __init__(self, val: Union[torch.Tensor, List[int]]):
-        if isinstance(val, torch.Tensor):
-            self.max = torch.max(val).item()
-            self.min = torch.min(val).item()
-        elif isinstance(val, list):
-            self.max = max(val)
-            self.min = min(val)
-        else:
-            raise RuntimeError("Wrong dtype (val)")
+    PyTorch stores sub-byte affine tensors in the nearest available integer
+    storage type. For example, UINT4 values are represented by ``torch.uint8``.
+    The logical dtype must therefore be derived from ``quant_min`` and
+    ``quant_max`` rather than from the values that happen to be present in the
+    tensor. Inspecting the observed values can incorrectly classify a UINT8
+    tensor as UINT4 when all of its codes happen to fall in ``[0, 15]``.
+    """
+    logical_dtype = get_quant_dtype(quant_min, quant_max)
+    storage_dtype = to_qparam_dtype(dtype)
+    expected_storage_dtype = {
+        "uint4": "uint8",
+        "int4": "int8",
+    }.get(logical_dtype, logical_dtype)
 
-    def within(self, min_val, max_val):
-        """Return whether the represented range is within the given bounds."""
-        return self.min >= min_val and self.max <= max_val
+    if storage_dtype != expected_storage_dtype:
+        raise RuntimeError(
+            "Quantization range and storage dtype are inconsistent: "
+            f"range=({quant_min}, {quant_max}), "
+            f"logical_dtype={logical_dtype}, storage_dtype={storage_dtype}."
+        )
 
-
-def infer_dtype(weight: torch.Tensor, zerop: List[int], dtype: torch.dtype) -> str:
-    """Infer quantization dtype using weight values, zero points, and dtype."""
-    weight_val = ValRange(weight)
-    zp_val = ValRange(zerop)
-
-    if weight_val.within(0, 15) and zp_val.within(0, 15) and dtype == torch.uint8:
-        return "uint4"
-    else:
-        return to_qparam_dtype(dtype)
+    return logical_dtype
 
 
 def _same_optional_float_list(
@@ -184,9 +183,6 @@ def _build_quant_param(
     # Weight should have quantized values.
     assert q_weight_meta.dtype != torch.float
 
-    q_weight_val = get_constant(exported_program, q_weight)
-    assert isinstance(q_weight_val, torch.Tensor)
-
     quant_param = QuantParam()
     if isinstance(dq_args, DequantizePerChannelArgs):
         scales = get_constant(exported_program, dq_args.scales)
@@ -196,17 +192,19 @@ def _build_quant_param(
         zero_ps = zero_ps.to(torch.int64)
         quant_param.scale = scales.tolist()
         quant_param.zero_point = zero_ps.tolist()
-        assert quant_param.zero_point is not None  # To avoid mypy error
         quant_param.quantized_dimension = dq_args.axis
         quant_param.dtype = infer_dtype(
-            q_weight_val, quant_param.zero_point, q_weight_meta.dtype
+            dq_args.quant_min,
+            dq_args.quant_max,
+            q_weight_meta.dtype,
         )
     elif isinstance(dq_args, DequantizePerTensorArgs):
         quant_param.scale = [dq_args.scale]
         quant_param.zero_point = [dq_args.zero_point]
-        assert quant_param.zero_point is not None  # To avoid mypy error
         quant_param.dtype = infer_dtype(
-            q_weight_val, quant_param.zero_point, q_weight_meta.dtype
+            dq_args.quant_min,
+            dq_args.quant_max,
+            q_weight_meta.dtype,
         )
     else:
         raise RuntimeError(f"Invalid DQ target: {dq.target}")

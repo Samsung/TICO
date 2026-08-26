@@ -34,6 +34,7 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
 
     This wrapper quantizes:
     - position_embedding_table (per-tensor symmetric)
+    - Pixel normalization constants
     - Scaled pixel values (input activation)
     - Projected hidden states (intermediate activation)
     - Position embeddings (intermediate activation)
@@ -67,6 +68,16 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
             fp.position_embedding_table.clone(),
             persistent=False,
         )
+        self.register_buffer(
+            "pixel_center",
+            self.position_embedding_table.new_tensor(0.5),
+            persistent=False,
+        )
+        self.register_buffer(
+            "pixel_rescale",
+            self.position_embedding_table.new_tensor(2.0),
+            persistent=False,
+        )
 
         self.obs_emb_table = self._make_obs(
             "position_embedding_table",
@@ -74,26 +85,31 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
             qscheme=QScheme.PER_TENSOR_SYMM,
         )
 
-        # Observers for activation tensors (dynamic)
+        # Observers for activation tensors and normalization constants
         self.obs_act_in = self._make_obs("act_in")
+        self.obs_pixel_center = self._make_obs("pixel_center")
         self.obs_pixel_values_m_0_5 = self._make_obs("pixel_values_m_0_5")
+        self.obs_pixel_rescale = self._make_obs("pixel_rescale")
         self.obs_pixel_values = self._make_obs("pixel_values")
         self.obs_hidden_states = self._make_obs("hidden_states")
         self.obs_position_embeddings = self._make_obs("position_embeddings")
         self.obs_output = self._make_obs("output")
 
     def enable_calibration(self) -> None:
-        """Enable calibration and collect static weight ranges."""
+        """Enable calibration and collect static tensor ranges."""
         super().enable_calibration()
-        # Collect position_embedding_table statistics
         self.obs_emb_table.collect(self.position_embedding_table)
+        self.obs_pixel_center.collect(self.pixel_center)
+        self.obs_pixel_rescale.collect(self.pixel_rescale)
 
     def _project_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Normalize and project flattened pixel patches into hidden space."""
         pixel_values = self._fq(pixel_values, self.obs_act_in)
-        pixel_values = pixel_values - 0.5
+        pixel_center = self._fq(self.pixel_center, self.obs_pixel_center)
+        pixel_values = pixel_values - pixel_center
         pixel_values = self._fq(pixel_values, self.obs_pixel_values_m_0_5)
-        pixel_values = 2.0 * pixel_values
+        pixel_rescale = self._fq(self.pixel_rescale, self.obs_pixel_rescale)
+        pixel_values = pixel_values * pixel_rescale
         pixel_values = self._fq(pixel_values, self.obs_pixel_values)
 
         hidden_states = self.input_proj(pixel_values)
@@ -186,7 +202,9 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         return (
             self.obs_emb_table,
             self.obs_act_in,
+            self.obs_pixel_center,
             self.obs_pixel_values_m_0_5,
+            self.obs_pixel_rescale,
             self.obs_pixel_values,
             self.obs_hidden_states,
             self.obs_position_embeddings,
