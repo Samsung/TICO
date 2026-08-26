@@ -19,6 +19,7 @@ import random
 import re
 import string
 import tempfile
+from dataclasses import dataclass, field
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 
@@ -30,6 +31,44 @@ from tico.quantization.recipes.data.dataset_usage import (
     resolve_dataset_usage,
     validate_single_dataset_usage,
 )
+
+
+@dataclass
+class CalibFilterConfig:
+    """Configuration for per-class calibration sample filtering.
+
+    When ``n_per_class > 0``, the dataset is loaded in non-streaming mode and
+    filtered to select up to ``n_per_class`` samples per class (as determined
+    by ``filter_field``, default ``image_classes``), instead of taking the
+    first ``n_samples``.
+
+    Attributes:
+        n_per_class: Maximum number of samples to keep per class.  When ``0``
+            or negative, filtering is disabled.
+        classes: Optional list of class names to include.  If ``None``, all
+            classes found in the data are used.
+        max_classes: Optional cap on the total number of classes when
+            ``classes`` is ``None``.  The most frequent classes are kept.
+        distinct_images: If ``True``, each unique image (by ``image_id``)
+            appears at most once in the calibration set.
+        filter_field: Name of the dataset field that holds the list of
+            classes for each example.  Defaults to ``"image_classes"``.
+        verbose: When ``True``, print progress information about discovered
+                    classes, selected samples, and per-class counts.  Defaults to
+                    ``False`` (silent).
+    """
+
+    n_per_class: int = 0
+    classes: Optional[List[str]] = None
+    max_classes: Optional[int] = None
+    distinct_images: bool = True
+    filter_field: str = "image_classes"
+    verbose: bool = True
+
+    @property
+    def is_active(self) -> bool:
+        """Return ``True`` when class filtering should be applied."""
+        return self.n_per_class > 0
 
 
 def normalize_answer(s: str) -> str:
@@ -153,6 +192,10 @@ def get_item_textvqa(ex: Dict[str, Any]) -> Dict[str, Any]:
     TextVQA is often more sensitive to OCR degradation than generic VQA tasks,
     but the unified output schema is the same as for other supported datasets.
 
+    The ``image_classes`` field (a list of detected object class names per
+    image) is also carried through so that downstream calibration code can
+    filter samples by class.
+
     Args:
         ex: Raw dataset example.
 
@@ -163,6 +206,7 @@ def get_item_textvqa(ex: Dict[str, Any]) -> Dict[str, Any]:
         "image": ex["image"],
         "question": ex.get("question", ""),
         "golds": _extract_golds(ex.get("answers")),
+        "image_classes": ex.get("image_classes", []),
     }
 
 
@@ -1449,6 +1493,7 @@ def get_calib_inputs(
     max_seq_len: Optional[int] = None,
     allow_benchmark_overlap: bool = False,
     allow_unregistered_dataset: bool = False,
+    filter_config: Optional[CalibFilterConfig] = None,
 ):
     """
     Build calibration inputs by preprocessing image-question pairs.
@@ -1456,19 +1501,66 @@ def get_calib_inputs(
     This helper uses the same prompt and processor-input construction logic as
     evaluation so that calibration and inference stay aligned.
 
+    When ``filter_config`` is provided and ``filter_config.is_active`` is ``True``,
+    the dataset is loaded in non-streaming mode and filtered to select up to
+    ``filter_config.n_per_class`` samples per class (as determined by
+    ``filter_config.filter_field``, default ``image_classes``), instead of
+    taking the first ``n_samples``.
+
     Args:
         dataset: Dataset key defined in ``DATASETS``.
         processor: Hugging Face multimodal processor.
-        n_samples: Number of calibration examples to prepare.
+        n_samples: Number of calibration examples to prepare.  Ignored when
+            ``filter_config`` is active.
         split: Optional dataset split. If omitted, the registry default is used.
         max_seq_len: Optional maximum text sequence length.
         allow_benchmark_overlap: Permit an explicitly transductive calibration use.
         allow_unregistered_dataset: Permit calibration with a source that has no
             registered safety policy.
+        filter_config: Optional :class:`CalibFilterConfig` for per-class
+            sample filtering.  When active, ``n_samples`` is ignored.
 
     Returns:
         A list of processor output objects, one per example.
     """
+    adapter = DATASETS[dataset]["adapter"]
+
+    # --- Class-filtering path ---
+    if filter_config is not None and filter_config.is_active:
+        ds, _ = get_dataset(
+            dataset=dataset,
+            role=CALIBRATION_ROLE,
+            n=-1,
+            split=split,
+            streaming=False,
+            allow_benchmark_overlap=allow_benchmark_overlap,
+            allow_unregistered_dataset=allow_unregistered_dataset,
+        )
+        examples = list(ds)
+
+        selected = dataset_filter(
+            examples=examples,
+            filter_config=filter_config,
+        )
+
+        calib_inputs = []
+        for ex in selected:
+            item = adapter(ex)
+            if item.get("image") is None:
+                continue
+            inputs = build_vlm_inputs(
+                processor=processor,
+                image=item["image"],
+                question=item["question"],
+                return_tensors="pt",
+                max_seq_len=max_seq_len,
+            )
+            calib_inputs.append(inputs)
+
+        print(f"[info] Built {len(calib_inputs)} calibration inputs from {dataset}")
+        return calib_inputs
+
+    # --- Default streaming path ---
     ds, adapter = get_dataset(
         dataset=dataset,
         role=CALIBRATION_ROLE,
@@ -1584,7 +1676,7 @@ def get_mixed_calib_inputs(
     allow_unregistered_dataset: bool = False,
 ) -> List[Dict[str, Any]]:
     """
-    Build calibration inputs from multiple datasets
+    Build calibration inputs from multiple datasets.
 
     This function loads samples from multiple datasets and combines them into
     a single calibration set. It handles both image-text datasets (e.g. VQAv2, COCO)
@@ -1595,16 +1687,36 @@ def get_mixed_calib_inputs(
 
     For image-text datasets, it takes the first n_samples directly.
 
+    Per-dataset filtering
+    ---------------------
+    When a dataset entry contains a ``filter`` block with ``n_per_class > 0``,
+    that dataset is loaded in non-streaming mode and filtered to select up to
+    ``n_per_class`` samples per class (as determined by ``filter.field``,
+    default ``image_classes``), instead of taking the first ``n_samples``.
+
+    Example ``filter`` block::
+
+        filter:
+          field: image_classes   # optional, defaults to "image_classes"
+          n_per_class: 5
+          classes: null           # optional list of class names
+          max_classes: null        # optional cap
+          distinct_images: true    # dedup by image_id
+          verbose: true
+
     Args:
         processor: Hugging Face processor.
         max_seq_len: maximum text sequence length.
-        dataset_config: Dictionary mapping dataset names (with optional split) to
+        dataset_config: Dictionary mapping dataset names (with optional split and filter block (see above)) to
             number of samples. Format: {"dataset": {"n_samples": n_samples}} or
                                        {"dataset": {"split":"split","n_samples": n_samples}}.
             Example: {
                       "wikitext2": {"n_samples": 128},
                       "alpaca": {"split": "train", "n_samples": 32}
                       }
+        dataset_config: Dictionary mapping dataset names to config dicts.
+            Each config dict may contain ``n_samples``, ``split``, and an
+            optional ``filter`` block (see above).
         seed: Random seed for reproducible sampling (used only for text-only
             datasets).
         allow_benchmark_overlap: Permit explicitly transductive calibration data.
@@ -1627,6 +1739,33 @@ def get_mixed_calib_inputs(
             continue
 
         is_text_only = DATASETS[dataset].get("is_text_only", False)
+
+        # --- Per-dataset filter block (e.g. TextVQA class filtering) ---
+        filter_dict: Optional[Dict[str, Any]] = config.get("filter")
+        if filter_dict and filter_dict.get("n_per_class", 0):
+            fc = CalibFilterConfig(
+                n_per_class=int(filter_dict["n_per_class"]),
+                classes=filter_dict.get("classes"),
+                max_classes=filter_dict.get("max_classes"),
+                distinct_images=filter_dict.get("distinct_images", True),
+                filter_field=filter_dict.get("field", "image_classes"),
+                verbose=filter_dict.get("verbose", True),
+            )
+
+            print(
+                f"[info] Filtering '{dataset}' by {fc.filter_field} "
+                f"(n_per_class={fc.n_per_class}) in mixed mode"
+            )
+            class_inputs = get_calib_inputs(
+                dataset=dataset,
+                processor=processor,
+                split=split,
+                max_seq_len=max_seq_len,
+                filter_config=fc,
+            )
+
+            calib_inputs.extend(class_inputs)
+            continue
 
         if is_text_only:
             # TODO: text only inputs should be changed with chat template
@@ -1708,3 +1847,161 @@ def get_mixed_calib_inputs(
 
     print(f"[info] Total calibration samples: {len(calib_inputs)}")
     return calib_inputs
+
+
+# ============================================================
+# Dataset filteration for calibration
+# ============================================================
+
+
+def dataset_filter(
+    examples: List[Dict[str, Any]],
+    filter_config: CalibFilterConfig,
+) -> List[Dict[str, Any]]:
+    """
+    Filter dataset examples by per-class quota.
+
+    All filtering parameters (``n_per_class``, ``classes``, ``max_classes``,
+    ``distinct_images``, ``filter_field``) are read from *filter_config*.
+
+    **Selection algorithm**
+
+    1.  **Discover classes** — scan every example and collect the set of
+        classes found in ``filter_config.filter_field`` (default
+        ``"image_classes"``) along with their frequencies.
+
+    2.  **Determine target classes** —
+        * If ``filter_config.classes`` is provided, only those classes are
+          used (a warning is printed for any requested class not present in
+          the data).
+        * Otherwise all discovered classes are used, optionally capped to
+          the top-``filter_config.max_classes`` most frequent ones.
+
+    3.  **Select samples** — iterate over *examples* in order.  A sample is
+        kept when at least one of its classes is still under the per-class
+        quota (``filter_config.n_per_class``).  The counter for every
+        under-quota class is then incremented.
+
+    4.  **Image deduplication** — when ``filter_config.distinct_images`` is
+        ``True`` (the default), each unique ``image_id`` appears at most once
+        in the output, ensuring maximum image diversity.
+
+    If no classes are found in any example, all *examples* are returned
+    unchanged with a warning.
+
+    Args:
+        examples: List of raw dataset examples.  Each example is expected to
+            contain a ``filter_config.filter_field`` entry (a list of class
+            names).  When ``filter_config.distinct_images`` is ``True``, the
+            ``image_id`` field is used for deduplication.
+        filter_config: A :class:`CalibFilterConfig` that controls the
+            filtering behaviour.  When ``None`` or inactive
+            (``n_per_class <= 0``), *examples* is returned unchanged.
+
+    Returns:
+        A list of selected raw examples.  When no classes are found in the
+        data, the original *examples* list is returned unchanged.
+    """
+
+    # --- Phase 1: discover classes and their frequencies ---
+    class_freq: Dict[str, int] = {}
+    for ex in examples:
+        filter_classes = ex.get(filter_config.filter_field, [])
+        if not filter_classes:
+            continue
+        for cls in filter_classes:
+            cls_str = str(cls)
+            class_freq[cls_str] = class_freq.get(cls_str, 0) + 1
+
+    if not class_freq:
+        if filter_config.verbose:
+            print(
+                f"[warn] No {filter_config.filter_field} found in any sample; returning all examples."
+            )
+        return list(examples)
+
+    # Determine target classes
+    if filter_config.classes is not None:
+        target_classes = [str(c) for c in filter_config.classes]
+        # Warn about requested classes not present in data
+        missing = [c for c in target_classes if c not in class_freq]
+        if missing and filter_config.verbose:
+            print(f"[warn] Requested classes not found in data: {missing}")
+    else:
+        # Sort by frequency (descending) and optionally cap
+        sorted_classes = sorted(class_freq.keys(), key=lambda c: -class_freq[c])
+        if filter_config.max_classes is not None and filter_config.max_classes > 0:
+            target_classes = sorted_classes[: filter_config.max_classes]
+        else:
+            target_classes = sorted_classes
+
+    if filter_config.verbose:
+        print(
+            f"[info] {len(class_freq)} unique filter classes discovered, "
+            f"using {len(target_classes)} classes"
+        )
+        print(
+            f"[info] Selecting up to {filter_config.n_per_class} samples per class "
+            f"→ up to {len(target_classes) * filter_config.n_per_class} total samples"
+        )
+
+    # --- Phase 2: select samples ---
+    # Each example in the list is a distinct dict from the HuggingFace dataset,
+    # so there is no need for explicit deduplication — a single pass over the
+    # list naturally visits each example at most once.
+    class_counts: Dict[str, int] = {c: 0 for c in target_classes}
+    target_set = set(target_classes)
+    selected: List[Dict[str, Any]] = []
+    seen_image_ids: set = set()
+    skipped_dup_images = 0
+
+    for ex in examples:
+        filter_classes = ex.get(filter_config.filter_field, [])
+        if not filter_classes:
+            continue
+
+        # Check if any of this sample's classes is still under quota
+        under_quota = [
+            str(c)
+            for c in filter_classes
+            if str(c) in target_set and class_counts[str(c)] < filter_config.n_per_class
+        ]
+        if not under_quota:
+            continue
+
+        # When distinct_images is enabled, skip samples whose image has
+        # already been selected. Deduplicating by image_id ensures each calibration
+        # sample comes from a distinct image.
+        if filter_config.distinct_images:
+            image_id = ex.get("image_id")
+            if image_id is not None:
+                if image_id in seen_image_ids:
+                    skipped_dup_images += 1
+                    continue
+                seen_image_ids.add(image_id)
+
+        selected.append(ex)
+        for cls in under_quota:
+            class_counts[cls] += 1
+
+        # Print selected sample info: question_id and truncated question
+        if filter_config.verbose:
+            qid = ex.get("question_id", "?")
+            question = ex.get("question", "")
+            question_preview = question[:80] + ("..." if len(question) > 80 else "")
+            print(
+                f"  [selected] question_id={qid}  classes={under_quota}  "
+                f"Q: {question_preview}"
+            )
+
+    # Print summary
+    total_selected = len(selected)
+    if filter_config.verbose:
+        print(f"[info] Selected {total_selected} unique samples")
+        if filter_config.distinct_images:
+            print(f"[info] Skipped {skipped_dup_images} samples with duplicate images")
+        print(f"[info] Per-class counts (first 20):")
+        for cls in target_classes[:20]:
+            print(f"  {cls}: {class_counts[cls]}")
+
+    return selected
