@@ -341,7 +341,10 @@ def _requires_calibration_inputs(
         if not stage_cfg.get("enabled", True):
             continue
         stage = get_stage(stage_cfg["name"])
-        if stage.requires_calibration_inputs:
+        # Legacy stages and test doubles may predate this metadata.
+        # Preserve the previous runner behavior by conservatively treating
+        # an unannotated enabled stage as a calibration consumer.
+        if getattr(stage, "requires_calibration_inputs", True):
             return True
     return False
 

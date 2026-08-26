@@ -47,7 +47,10 @@ class TestDatasetRoleLoading(unittest.TestCase):
 
     def test_role_is_required(self):
         with self.assertRaises(TypeError):
-            vlm_eval_utils.get_dataset("vqav2", n=1)
+            # Intentionally omit the mandatory `role` keyword argument.
+            vlm_eval_utils.get_dataset(  # type: ignore[call-arg] # pylint: disable=missing-kwoa
+                "vqav2", n=1
+            )
 
     def test_vqav2_calibration_defaults_to_train(self):
         dataset = self._dataset()
