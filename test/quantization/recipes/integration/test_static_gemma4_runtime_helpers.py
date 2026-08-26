@@ -251,7 +251,7 @@ class TestAllocateEmptyCache(unittest.TestCase):
             expected_shape = (
                 1,
                 expected_num_kv_heads,
-                layout.max_seq,
+                layout.max_seq - 1,
                 expected_head_dim,
             )
             self.assertEqual(
@@ -402,7 +402,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         self.assertEqual(masks["full_attention"].shape, (2, 1, 64))
 
     def test_full_attention_mask_values(self):
-        """Full attention mask should allow positions 0..past_len."""
+        """Full attention should allow valid past slots and the fixed current slot."""
         from types import SimpleNamespace
 
         from tico.quantization.recipes.debug.static_gemma4_runtime import (
@@ -440,13 +440,15 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         mask = masks["full_attention"][0, 0, :]  # (max_seq,)
         mask_value = torch.finfo(torch.float32).min
 
-        # Positions 0..past_len should be 0.0 (allowed)
-        self.assertTrue(torch.all(mask[: past_len + 1] == 0.0))
-        # Positions past_len+1..max_seq-1 should be mask_value (forbidden)
-        self.assertTrue(torch.all(mask[past_len + 1 :] == mask_value))
+        # Valid past-cache slots are allowed.
+        self.assertTrue(torch.all(mask[:past_len] == 0.0))
+        # Unused persistent-cache slots remain masked.
+        self.assertTrue(torch.all(mask[past_len : max_seq - 1] == mask_value))
+        # The current token is always appended at the final physical slot.
+        self.assertEqual(mask[max_seq - 1].item(), 0.0)
 
     def test_sliding_window_mask_boundary_early_decode(self):
-        """Sliding window should cover [0, past_len] when past_len < sliding_window."""
+        """Early sliding decode should allow all valid past slots plus current."""
         from types import SimpleNamespace
 
         from tico.quantization.recipes.debug.static_gemma4_runtime import (
@@ -485,13 +487,13 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
         mask_value = torch.finfo(torch.float32).min
 
-        # When past_len < sliding_window, window_start = 0
-        # Allowed: positions 0..past_len
-        self.assertTrue(torch.all(mask[: past_len + 1] == 0.0))
-        self.assertTrue(torch.all(mask[past_len + 1 :] == mask_value))
+        # When past_len < sliding_window, every valid past slot is allowed.
+        self.assertTrue(torch.all(mask[:past_len] == 0.0))
+        self.assertTrue(torch.all(mask[past_len : max_seq - 1] == mask_value))
+        self.assertEqual(mask[max_seq - 1].item(), 0.0)
 
     def test_sliding_window_mask_boundary_late_decode(self):
-        """Sliding window should cover [past_len-sw+1, past_len] when past_len >= sw."""
+        """Late sliding decode should keep W-1 past slots plus current."""
         from types import SimpleNamespace
 
         from tico.quantization.recipes.debug.static_gemma4_runtime import (
@@ -533,14 +535,14 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         # window_start = max(0, past_len - sliding_window + 1) = 100 - 32 + 1 = 69
         window_start = max(0, past_len - sliding_window + 1)
 
-        # Allowed: positions window_start..past_len
-        self.assertTrue(torch.all(mask[window_start : past_len + 1] == 0.0))
-        # Forbidden: positions 0..window_start-1 and past_len+1..max_seq-1
+        # Allow the most recent W-1 past slots and the fixed current slot.
+        self.assertTrue(torch.all(mask[window_start:past_len] == 0.0))
         self.assertTrue(torch.all(mask[:window_start] == mask_value))
-        self.assertTrue(torch.all(mask[past_len + 1 :] == mask_value))
+        self.assertTrue(torch.all(mask[past_len : max_seq - 1] == mask_value))
+        self.assertEqual(mask[max_seq - 1].item(), 0.0)
 
     def test_sliding_window_mask_first_step(self):
-        """Sliding window at past_len=0 should allow only position 0."""
+        """At past_len=0 only the fixed current-token slot should be allowed."""
         from types import SimpleNamespace
 
         from tico.quantization.recipes.debug.static_gemma4_runtime import (
@@ -579,9 +581,9 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
         mask_value = torch.finfo(torch.float32).min
 
-        # At past_len=0, only position 0 should be allowed
-        self.assertEqual(mask[0].item(), 0.0)
-        self.assertTrue(torch.all(mask[1:] == mask_value))
+        # At past_len=0, only the final current-token slot is allowed.
+        self.assertTrue(torch.all(mask[: max_seq - 1] == mask_value))
+        self.assertEqual(mask[max_seq - 1].item(), 0.0)
 
     def test_rope_computed_at_past_len(self):
         """RoPE should be computed at position past_len."""
@@ -627,6 +629,175 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         pos_ids = captured_pos_ids[0]
         self.assertEqual(pos_ids.shape, (1, 1))
         self.assertEqual(pos_ids[0, 0].item(), past_len)
+
+
+class TestDecodeOneFixedCacheContract(unittest.TestCase):
+    """Regression tests for the fixed-shape Gemma4 decode cache ABI."""
+
+    def test_decode_keeps_non_shared_and_shared_kv_shapes_fixed(self):
+        """Two decode steps should preserve all exported K/V input shapes."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            LayerCache,
+            StaticGemma4Runtime,
+        )
+
+        class FakeDecodeLayer:
+            """Record decode inputs and optionally produce one-token K/V deltas."""
+
+            def __init__(
+                self,
+                *,
+                is_shared: bool,
+                store_full_length_kv: bool,
+                delta_values: list[float] | None = None,
+            ) -> None:
+                self.is_shared = is_shared
+                self.delta_values = delta_values or []
+                self.call_index = 0
+                self.past_shapes: list[tuple[int, ...]] = []
+                self.shared_values: list[tuple[torch.Tensor, torch.Tensor]] = []
+                self.masks: list[torch.Tensor] = []
+                attention = SimpleNamespace(
+                    is_kv_shared_layer=is_shared,
+                    store_full_length_kv=store_full_length_kv,
+                )
+                self.wrapped = SimpleNamespace(
+                    self_attn=SimpleNamespace(wrapped=attention)
+                )
+
+            def __call__(
+                self,
+                *,
+                hidden_states: torch.Tensor,
+                attention_mask: torch.Tensor,
+                position_embeddings,
+                past_key_value=None,
+                per_layer_input=None,
+                shared_key_value=None,
+            ):
+                del position_embeddings, per_layer_input
+                self.masks.append(attention_mask.detach().clone())
+                if self.is_shared:
+                    if past_key_value is not None or shared_key_value is None:
+                        raise AssertionError(
+                            "Shared layers require only shared_key_value."
+                        )
+                    self.shared_values.append(
+                        tuple(tensor.detach().clone() for tensor in shared_key_value)
+                    )
+                    return hidden_states
+
+                if past_key_value is None:
+                    raise AssertionError("Non-shared layers require past_key_value.")
+                self.past_shapes.append(tuple(past_key_value[0].shape))
+                value = self.delta_values[self.call_index]
+                self.call_index += 1
+                new_k = torch.full(
+                    (hidden_states.size(0), 1, 1, 2),
+                    value,
+                    device=hidden_states.device,
+                    dtype=hidden_states.dtype,
+                )
+                new_v = torch.full_like(new_k, -value)
+                return hidden_states, new_k, new_v
+
+        max_seq = 8
+        owner = FakeDecodeLayer(
+            is_shared=False,
+            store_full_length_kv=True,
+            delta_values=[9.0, 10.0],
+        )
+        consumer = FakeDecodeLayer(
+            is_shared=True,
+            store_full_length_kv=False,
+        )
+
+        def rotary_emb(x, position_ids, layer_type):
+            del position_ids, layer_type
+            shape = (x.size(0), 1, 2)
+            return (
+                torch.ones(shape, device=x.device, dtype=x.dtype),
+                torch.zeros(shape, device=x.device, dtype=x.dtype),
+            )
+
+        runtime = object.__new__(StaticGemma4Runtime)
+        runtime.device = torch.device("cpu")
+        runtime.layout = SimpleNamespace(max_seq=max_seq)
+        runtime.text_config = SimpleNamespace(
+            layer_types=["full_attention", "full_attention"],
+            sliding_window=4,
+            final_logit_softcapping=None,
+        )
+        runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=0)
+        runtime.model = SimpleNamespace(
+            model=SimpleNamespace(language_model=SimpleNamespace(rotary_emb=rotary_emb))
+        )
+        runtime.token_embedding = lambda ids: torch.zeros(
+            ids.size(0), 1, 4, device=ids.device, dtype=torch.float32
+        )
+        runtime.lm_head = lambda hidden: torch.zeros(
+            hidden.size(0), hidden.size(1), 5, device=hidden.device
+        )
+        runtime.decode_layers = [owner, consumer]
+        runtime.past_len = 3
+
+        initial_k = torch.zeros(1, 1, max_seq - 1, 2)
+        initial_v = torch.zeros_like(initial_k)
+        for index, value in enumerate((1.0, 2.0, 3.0)):
+            initial_k[:, :, index, :] = value
+            initial_v[:, :, index, :] = -value
+        owner_cache = LayerCache(initial_k.clone(), initial_v.clone())
+        consumer_cache = LayerCache(
+            torch.zeros_like(initial_k), torch.zeros_like(initial_v)
+        )
+        runtime.layer_caches = [owner_cache, consumer_cache]
+
+        runtime.decode_one(torch.tensor([[1]], dtype=torch.long))
+        runtime.decode_one(torch.tensor([[2]], dtype=torch.long))
+
+        self.assertEqual(
+            owner.past_shapes,
+            [(1, 1, max_seq - 1, 2), (1, 1, max_seq - 1, 2)],
+        )
+        self.assertEqual(len(consumer.shared_values), 2)
+        self.assertEqual(tuple(consumer.shared_values[0][0].shape), (1, 1, max_seq, 2))
+        self.assertEqual(tuple(consumer.shared_values[1][0].shape), (1, 1, max_seq, 2))
+
+        expected_first = (
+            torch.tensor([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 9.0])
+            .view(1, 1, max_seq, 1)
+            .expand(-1, -1, -1, 2)
+        )
+        expected_second = (
+            torch.tensor([1.0, 2.0, 3.0, 9.0, 0.0, 0.0, 0.0, 10.0])
+            .view(1, 1, max_seq, 1)
+            .expand(-1, -1, -1, 2)
+        )
+        torch.testing.assert_close(consumer.shared_values[0][0], expected_first)
+        torch.testing.assert_close(consumer.shared_values[1][0], expected_second)
+        torch.testing.assert_close(consumer.shared_values[0][1], -expected_first)
+        torch.testing.assert_close(consumer.shared_values[1][1], -expected_second)
+
+        self.assertTrue(torch.all(owner_cache.past_k[:, :, 3, :] == 9.0))
+        self.assertTrue(torch.all(owner_cache.past_k[:, :, 4, :] == 10.0))
+        self.assertEqual(runtime.past_len, 5)
+
+        first_allowed = owner.masks[0][0, 0].eq(0.0)
+        second_allowed = owner.masks[1][0, 0].eq(0.0)
+        self.assertTrue(
+            torch.equal(
+                first_allowed,
+                torch.tensor([True, True, True, False, False, False, False, True]),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                second_allowed,
+                torch.tensor([True, True, True, True, False, False, False, True]),
+            )
+        )
 
 
 if __name__ == "__main__":

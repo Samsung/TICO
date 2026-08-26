@@ -337,11 +337,17 @@ def build_decode_attention_mask(
     dtype: torch.dtype,
     mask_value: float,
 ) -> torch.Tensor:
-    """Build a static decode attention mask for a single-token decode step."""
+    """Build a mask for fixed past-cache storage plus one current-token slot.
+
+    The first ``max_seq - 1`` positions correspond to persistent past-cache
+    storage. The decode graph appends the current token at position
+    ``max_seq - 1``, independent of the logical ``past_len``.
+    """
 
     if past_len < 0 or past_len >= max_seq:
         raise ValueError(
-            f"past_len must be in [0, max_seq), got past_len={past_len}, max_seq={max_seq}."
+            "past_len must be in [0, max_seq), got "
+            f"past_len={past_len}, max_seq={max_seq}."
         )
 
     mask = torch.full(
@@ -349,7 +355,7 @@ def build_decode_attention_mask(
     )
     if past_len > 0:
         mask[:, :, :past_len] = 0.0
-    mask[:, :, past_len] = 0.0
+    mask[:, :, max_seq - 1] = 0.0
     return mask
 
 
