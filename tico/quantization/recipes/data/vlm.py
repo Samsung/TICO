@@ -76,6 +76,52 @@ def _parse_dataset_spec(
     return dataset, config
 
 
+def _normalize_filter_config(filter_cfg: Any, *, context: str) -> dict[str, Any]:
+    """Normalize a per-dataset ``filter`` block.
+
+    Expected keys (all optional except ``n_per_class``):
+      - ``n_per_class`` (int, required for the filter to activate)
+      - ``field`` (str, default ``"image_classes"``)
+      - ``classes`` (list[str] | None)
+      - ``max_classes`` (int | None)
+      - ``distinct_images`` (bool, default True)
+      - ``verbose`` (bool, default True)
+    """
+    if not isinstance(filter_cfg, Mapping):
+        raise TypeError(
+            f"{context}.filter must be a mapping, got {type(filter_cfg).__name__}."
+        )
+
+    normalized: dict[str, Any] = {}
+    n_per_class = filter_cfg.get("n_per_class", 0)
+    if n_per_class is not None:
+        n_per_class = int(n_per_class)
+    normalized["n_per_class"] = n_per_class or 0
+
+    field = filter_cfg.get("field", "image_classes")
+    normalized["field"] = str(field)
+
+    classes = filter_cfg.get("classes")
+    if classes is not None:
+        if not isinstance(classes, (list, tuple)):
+            raise TypeError(
+                f"{context}.filter.classes must be a list or null, "
+                f"got {type(classes).__name__}."
+            )
+        normalized["classes"] = [str(c) for c in classes]
+    else:
+        normalized["classes"] = None
+
+    max_classes = filter_cfg.get("max_classes")
+    if max_classes is not None:
+        max_classes = int(max_classes)
+    normalized["max_classes"] = max_classes
+
+    normalized["distinct_images"] = bool(filter_cfg.get("distinct_images", True))
+
+    return normalized
+
+
 def _normalize_mapping_dataset_config(
     datasets: Mapping[str, Any],
     default_n_samples: int,
@@ -97,6 +143,13 @@ def _normalize_mapping_dataset_config(
             split = config.get("split")
             if split is not None:
                 entry["split"] = str(split)
+
+            # Pass through per-dataset filter block
+            filter_cfg = config.get("filter")
+            if filter_cfg is not None:
+                entry["filter"] = _normalize_filter_config(
+                    filter_cfg, context=f"{dataset}"
+                )
         else:
             entry = {
                 "n_samples": _coerce_positive_int(
@@ -134,6 +187,13 @@ def _normalize_sequence_dataset_config(
             split = item.get("split")
             if split is not None:
                 config["split"] = str(split)
+
+            # Pass through per-dataset filter block
+            filter_cfg = item.get("filter")
+            if filter_cfg is not None:
+                config["filter"] = _normalize_filter_config(
+                    filter_cfg, context=f"calibration.datasets[{index}]"
+                )
         else:
             raise TypeError(
                 "Each calibration dataset entry must be a string or mapping, "
@@ -177,6 +237,26 @@ def build_vlm_calibration_inputs(
 ) -> list[dict]:
     """
     Build VLM calibration inputs from either one dataset or a mixed dataset set.
+
+    Per-dataset filtering
+    ---------------------
+    When a dataset entry in ``datasets`` contains a ``filter`` block with
+    ``n_per_class > 0``, that dataset is loaded in non-streaming mode and
+    filtered to select up to ``n_per_class`` samples per class (as determined
+    by ``filter.field``, default ``image_classes``), instead of taking the
+    first ``n_samples``.
+
+    Example YAML::
+
+        calibration:
+          datasets:
+            textvqa:
+              n_samples: 50
+              filter:
+                field: image_classes
+                n_per_class: 5
+            wikitext2:
+              n_samples: 128
 
     Args:
         processor: Hugging Face processor used to build model inputs.

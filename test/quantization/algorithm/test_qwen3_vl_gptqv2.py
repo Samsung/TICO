@@ -21,12 +21,18 @@ These tests verify that:
   - Conv3d native inputs correctly populate dXXT.
 """
 
+import os
 import unittest
+from unittest.mock import MagicMock
 
 import torch
+import torch.nn as nn
 
 from tico.quantization.algorithm.qwen3_vl_gptq.gptq import GPTQ
-from tico.quantization.algorithm.qwen3_vl_gptq.quantizer import Qwen3VLGPTQQuantizer
+from tico.quantization.algorithm.qwen3_vl_gptq.quantizer import (
+    FPInputsCache,
+    Qwen3VLGPTQQuantizer,
+)
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 
 
@@ -54,9 +60,10 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
         gptq.add_batch(current, out)
 
         self.assertIsNotNone(gptq.dXXT)
-        assert gptq.dXXT is not None
-        self.assertEqual(gptq.dXXT.shape, gptq.H.shape)
-        self.assertGreater(gptq.dXXT.abs().sum().item(), 0.0)
+        dXXT = gptq.dXXT
+        assert dXXT is not None
+        self.assertEqual(dXXT.shape, gptq.H.shape)  # type: ignore[union-attr]
+        self.assertGreater(dXXT.abs().sum().item(), 0.0)
 
 
 class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
@@ -93,15 +100,17 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
 
         quantizer._assign_native_inputs(gptq_objs, native_inputs)
 
-        self.assertEqual(len(gptq_objs["linear"].native_inp), 2)
-        self.assertTrue(torch.allclose(gptq_objs["linear"].native_inp[0], fp_inputs[0]))
-        self.assertTrue(torch.allclose(gptq_objs["linear"].native_inp[1], fp_inputs[1]))
+        native_inp = gptq_objs["linear"].native_inp
+        assert native_inp is not None
+        self.assertEqual(len(native_inp), 2)
+        self.assertTrue(torch.allclose(native_inp[0], fp_inputs[0]))
+        self.assertTrue(torch.allclose(native_inp[1], fp_inputs[1]))
 
     def test_resolve_weight_bits_default(self):
         """_resolve_weight_bits should return the config default when no override."""
         quantizer = Qwen3VLGPTQQuantizer(Qwen3VLGPTQConfig(weight_bits=4))
         bits = quantizer._resolve_weight_bits(
-            quantizer.config,
+            quantizer.config,  # type: ignore[arg-type]
             full_module_name="model.layers.0.self_attn.q_proj",
             local_module_name="self_attn.q_proj",
         )
@@ -116,7 +125,7 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
             )
         )
         bits = quantizer._resolve_weight_bits(
-            quantizer.config,
+            quantizer.config,  # type: ignore[arg-type]
             full_module_name="model.layers.0.self_attn.q_proj",
             local_module_name="self_attn.q_proj",
         )
@@ -131,7 +140,7 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
             )
         )
         bits = quantizer._resolve_weight_bits(
-            quantizer.config,
+            quantizer.config,  # type: ignore[arg-type]
             full_module_name="model.layers.0.self_attn.q_proj",
             local_module_name="self_attn.q_proj",
         )
@@ -146,7 +155,7 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
             )
         )
         bits = quantizer._resolve_weight_bits(
-            quantizer.config,
+            quantizer.config,  # type: ignore[arg-type]
             full_module_name="model.layers.0.self_attn.q_proj",
             local_module_name="self_attn.q_proj",
         )
@@ -168,10 +177,137 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
         # Should be a different object
         self.assertIsNot(orig_model, model)
         # Weights should match
-        self.assertTrue(torch.allclose(orig_model[0].weight, model[0].weight))
+        self.assertTrue(torch.allclose(orig_model[0].weight, model[0].weight))  # type: ignore[index]
         # Modifying one should not affect the other
         model[0].weight.data.fill_(0.0)
-        self.assertFalse(torch.allclose(orig_model[0].weight, model[0].weight))
+        self.assertFalse(torch.allclose(orig_model[0].weight, model[0].weight))  # type: ignore[index]
+
+
+# ---------------------------------------------------------------------------
+# Helpers for FP inputs cache tests
+# ---------------------------------------------------------------------------
+
+
+def _make_quantizer(fp_inputs_cache_path=None, gptq_v2=True):
+    """Create a Qwen3VLGPTQQuantizer with minimal config for testing."""
+    config = Qwen3VLGPTQConfig(
+        weight_bits=8,
+        gptq_v2=gptq_v2,
+        fp_inputs_cache_path=fp_inputs_cache_path,
+        show_progress=False,
+        verbose=False,
+    )
+    return Qwen3VLGPTQQuantizer(config)
+
+
+# ---------------------------------------------------------------------------
+# Tests: FPInputsCache
+# ---------------------------------------------------------------------------
+
+
+class TestFPInputsCache(unittest.TestCase):
+    """Core tests for the FPInputsCache hook-based collector and disk cache."""
+
+    def test_caches_fp_input(self):
+        """A forward hook stores the first positional arg in fp_cache."""
+        cache = FPInputsCache(["linear"])
+        linear = nn.Linear(4, 4)
+        cache.add_hook({"linear": linear})
+
+        inp = torch.randn(2, 4)
+        linear(inp)
+        cache.clear_hook()
+
+        self.assertIn("linear", cache.fp_cache)
+        self.assertEqual(len(cache.fp_cache["linear"]), 1)
+        self.assertTrue(torch.equal(cache.fp_cache["linear"][0], inp))
+
+    def test_save_and_load_roundtrip(self):
+        """Save cache to disk, load it back, and verify tensor equality."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = os.path.join(tmpdir, "fp_cache.pt")
+            dummy_cache = {
+                "vision.patch_embed": {
+                    "proj": [torch.randn(2, 3), torch.randn(2, 3)],
+                },
+                "text.layers.0": {
+                    "self_attn.q_proj": [torch.randn(4, 5)],
+                },
+            }
+            torch.save(dummy_cache, cache_path)
+            self.assertTrue(os.path.exists(cache_path))
+
+            loaded = torch.load(cache_path, map_location="cpu", weights_only=False)
+            self.assertEqual(set(loaded.keys()), set(dummy_cache.keys()))
+            for stage in dummy_cache:
+                for name in dummy_cache[stage]:
+                    for i, t in enumerate(loaded[stage][name]):
+                        self.assertTrue(torch.equal(t, dummy_cache[stage][name][i]))
+
+    def test_raw_replay_returns_cached_on_hit(self):
+        """_collect_native_inputs_from_raw_replay returns cached data without
+        running any forward hooks when stage_desc is in the disk cache."""
+        quantizer = _make_quantizer(fp_inputs_cache_path="/tmp/dummy.pt")
+        cached_tensors = [torch.randn(2, 3)]
+        quantizer._fp_inputs_disk_cache = {
+            "vision.merger": {"merger.linear": cached_tensors},
+        }
+
+        dummy_model = MagicMock()
+        result = quantizer._collect_native_inputs_from_raw_replay(
+            model=dummy_model,
+            subset={"merger.linear": MagicMock()},
+            module_name={},
+            cache_args=[[]],
+            cache_kwargs={},
+            num_batches=1,
+            stage_desc="vision.merger",
+        )
+
+        self.assertIn("merger.linear", result)
+        self.assertTrue(torch.equal(result["merger.linear"][0], cached_tensors[0]))
+        dummy_model.assert_not_called()
+
+    @torch.no_grad()
+    def test_collect_then_cache_hit(self):
+        """First call collects via hooks; second call returns from cache
+        without re-running forward."""
+        quantizer = _make_quantizer(fp_inputs_cache_path="/tmp/dummy.pt")
+
+        linear = nn.Linear(4, 4)
+        stage_module = nn.Sequential(linear)
+        subset = {"0": linear}
+
+        inp = torch.randn(2, 4)
+        cached_args = [[inp]]
+        cached_kwargs: dict = {}
+
+        result1 = quantizer._collect_native_inputs_from_stage_cache(
+            stage_module=stage_module,
+            subset=subset,
+            cached_args=cached_args,
+            cached_kwargs=cached_kwargs,
+            stage_desc="test_stage",
+            num_batches=1,
+        )
+        self.assertIn("0", result1)
+        self.assertTrue(torch.equal(result1["0"][0], inp))
+
+        quantizer._fp_inputs_disk_cache["test_stage"] = result1
+
+        broken_module = MagicMock(side_effect=RuntimeError("should not be called"))
+        result2 = quantizer._collect_native_inputs_from_stage_cache(
+            stage_module=broken_module,
+            subset=subset,
+            cached_args=cached_args,
+            cached_kwargs=cached_kwargs,
+            stage_desc="test_stage",
+            num_batches=1,
+        )
+        self.assertTrue(torch.equal(result2["0"][0], result1["0"][0]))
+        broken_module.assert_not_called()
 
 
 if __name__ == "__main__":

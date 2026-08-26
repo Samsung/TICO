@@ -14,6 +14,7 @@
 
 import copy
 import functools
+import os
 import types
 from typing import Any, Callable, Optional
 
@@ -128,6 +129,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
         # GPTQv2: reference to original FP model for collecting FP inputs
         self.orig_model: Optional[nn.Module] = None
+
+        # GPTQv2: disk cache for FP inputs (stage_desc -> native_inputs dict)
+        self._fp_inputs_disk_cache: dict[str, dict[str, list[torch.Tensor]]] = {}
+        # GPTQv2: True if FP inputs cache was loaded from disk (skip orig model ops)
+        self._fp_inputs_disk_loaded: bool = False
 
     def _resolve_weight_bits(
         self,
@@ -258,10 +264,30 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         orig_model_use_cache: dict[str, Any] = {}
 
         if gptq_conf.gptq_v2:
-            orig_model = self._copy_original_model(model)
-            self.orig_model = orig_model
-            orig_model_use_cache = self._disable_model_cache(orig_model)
-            orig_components = resolve_qwen3_vl_components(orig_model, gptq_conf)
+            # Load FP inputs cache from disk if available
+            if gptq_conf.fp_inputs_cache_path and os.path.exists(
+                gptq_conf.fp_inputs_cache_path
+            ):
+                print(
+                    f"[GPTQv2] Loading FP inputs cache from {gptq_conf.fp_inputs_cache_path}"
+                )
+                self._fp_inputs_disk_cache = torch.load(
+                    gptq_conf.fp_inputs_cache_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+                print(
+                    f"[GPTQv2] Loaded FP inputs for {len(self._fp_inputs_disk_cache)} stages"
+                )
+                self._fp_inputs_disk_loaded = True
+
+            # Only deep-copy the model if FP inputs need to be collected on-the-fly.
+            # When the disk cache is loaded, orig_model is not needed.
+            if not self._fp_inputs_disk_loaded:
+                orig_model = self._copy_original_model(model)
+                self.orig_model = orig_model
+                orig_model_use_cache = self._disable_model_cache(orig_model)
+                orig_components = resolve_qwen3_vl_components(orig_model, gptq_conf)
 
         try:
             if should_quantize_vision_stage(gptq_conf, stage="patch_embed"):
@@ -340,7 +366,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     ),
                 )
 
-            model.quantizers = self._quantizers
+            model.quantizers = self._quantizers  # type: ignore[assignment]
             return model
         finally:
             self._restore_model_cache(model, orig_use_cache)
@@ -356,6 +382,21 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             self._vision_cache_args.clear()
             self._vision_cache_kwargs.clear()
             self._num_vision_batches = 0
+
+            # GPTQv2: Save FP inputs cache to disk if configured
+            if (
+                gptq_conf.fp_inputs_cache_path is not None
+                and self._fp_inputs_disk_cache
+                and not self._fp_inputs_disk_loaded
+            ):
+                cache_path = gptq_conf.fp_inputs_cache_path
+                os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+                print(
+                    f"[GPTQv2] Saving FP inputs cache to {cache_path} "
+                    f"({len(self._fp_inputs_disk_cache)} stages)"
+                )
+                torch.save(self._fp_inputs_disk_cache, cache_path)
+                print("[GPTQv2] FP inputs cache saved successfully")
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -398,7 +439,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         native_block_args: Optional[list[list[Any]]] = None
         native_block_kwargs: Optional[dict[str, list[Any]]] = None
 
-        if self.config.gptq_v2:
+        if self.config.gptq_v2 and not self._fp_inputs_disk_loaded:
             assert orig_model is not None and orig_components is not None
             self._move_module_to_device(orig_model, self._module_device(model))
             try:
@@ -535,7 +576,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         native_layer_args: Optional[list[list[Any]]] = None
         native_layer_kwargs: Optional[dict[str, list[Any]]] = None
 
-        if self.config.gptq_v2:
+        if self.config.gptq_v2 and not self._fp_inputs_disk_loaded:
             assert orig_model is not None and orig_components is not None
             self._move_module_to_device(orig_model, self._module_device(model))
             try:
@@ -680,7 +721,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         if not hasattr(language_model, "_deepstack_process"):
             return hidden_states
 
-        return language_model._deepstack_process(
+        return language_model._deepstack_process(  # type: ignore[operator]
             hidden_states=hidden_states,
             visual_pos_masks=visual_pos_masks,
             visual_embeds=cur_visual_embeds,
@@ -709,6 +750,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             Dictionary mapping local_name -> list of FP input tensors (one per batch).
         """
         assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # Check disk cache first
+        if stage_desc in self._fp_inputs_disk_cache:
+            print(f"[GPTQv2] Using cached FP inputs for stage '{stage_desc}'")
+            return self._fp_inputs_disk_cache[stage_desc]
 
         # Build full module name -> local name mapping
         full_to_local: dict[str, str] = {}
@@ -747,6 +793,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         for full_name, local_name in full_to_local.items():
             result[local_name] = fp_cache.fp_cache.get(full_name, [])
 
+        # Save to in-memory disk cache for later persistence
+        if self.config.fp_inputs_cache_path is not None:
+            self._fp_inputs_disk_cache[stage_desc] = {
+                k: list(v) for k, v in result.items()
+            }
         return result
 
     @torch.no_grad()
@@ -763,6 +814,13 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         GPTQv2: Collect full-precision inputs from the original (unquantized) stage
         module by replaying cached stage-entry inputs.
         """
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        # Check disk cache first
+        if stage_desc in self._fp_inputs_disk_cache:
+            print(f"[GPTQv2] Using cached FP inputs for stage '{stage_desc}'")
+            return self._fp_inputs_disk_cache[stage_desc]
+
         fp_cache = FPInputsCache(list(subset.keys()))
         full_modules: dict[str, nn.Module] = {}
         for local_name, submodule in subset.items():
@@ -841,7 +899,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             num_batches = self.num_batches
 
         # GPTQv2: Collect FP inputs from the ORIGINAL (unquantized) model
-        if self.config.gptq_v2:
+        if self.config.gptq_v2 and not self._fp_inputs_disk_loaded:
             assert orig_model is not None and orig_stage_module is not None
             orig_subset = get_quantizable_layers(orig_stage_module)
             self._move_module_to_device(orig_model, self._module_device(model))
@@ -857,6 +915,18 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 )
             finally:
                 orig_model.cpu()
+            self._assign_native_inputs(gptq_objs, native_inputs)
+        elif self.config.gptq_v2:
+            # Disk cache loaded — retrieve cached FP inputs without orig model
+            native_inputs = self._collect_native_inputs_from_raw_replay(
+                model=model,
+                subset=subset,
+                module_name=module_name,
+                cache_args=cache_args,
+                cache_kwargs=cache_kwargs,
+                num_batches=num_batches,
+                stage_desc=stage_desc,
+            )
             self._assign_native_inputs(gptq_objs, native_inputs)
 
         handles = []
@@ -936,7 +1006,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         # GPTQv2: Collect FP inputs from the ORIGINAL (unquantized) stage module.
         # The native cache contains entry inputs from the pristine model, so
         # forwarding them through orig_stage_module gives true FP submodule inputs.
-        if self.config.gptq_v2:
+        if self.config.gptq_v2 and not self._fp_inputs_disk_loaded:
             assert (
                 orig_stage_module is not None
                 and native_cached_args is not None
@@ -957,6 +1027,17 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 )
             finally:
                 orig_stage_module.cpu()
+            self._assign_native_inputs(gptq_objs, native_inputs)
+        elif self.config.gptq_v2:
+            # Disk cache loaded — retrieve cached FP inputs without orig model
+            native_inputs = self._collect_native_inputs_from_stage_cache(
+                stage_module=stage_module,
+                subset=subset,
+                cached_args=cached_args,
+                cached_kwargs=cached_kwargs,
+                stage_desc=stage_desc,
+                num_batches=num_batches,
+            )
             self._assign_native_inputs(gptq_objs, native_inputs)
 
         handles = []
@@ -1275,7 +1356,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
     def _disable_model_cache(self, model: nn.Module) -> dict[str, Any]:
         """
-        Disable cache-related flags commonly used by Qwen3-VL / HF models.
+        Disable cache-related flags
         """
         saved: dict[str, Any] = {}
 
@@ -1296,9 +1377,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         Restore cache-related flags saved by `_disable_model_cache`.
         """
         if "model.config.use_cache" in saved:
-            model.config.use_cache = saved["model.config.use_cache"]
+            model.config.use_cache = saved["model.config.use_cache"]  # type: ignore[union-attr]
 
         if "model.config.text_config.use_cache" in saved:
-            model.config.text_config.use_cache = saved[
+            model.config.text_config.use_cache = saved[  # type: ignore[union-attr]
                 "model.config.text_config.use_cache"
             ]

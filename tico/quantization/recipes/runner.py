@@ -295,6 +295,18 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
         "GPTQ lm_head enabled",
         bool(_stage_value(gptq_stage, "quantize_lm_head", False)),
     )
+    _print_config_row(
+        "GPTQv2 enabled",
+        bool(_stage_value(gptq_stage, "gptq_v2", False)),
+    )
+    _print_config_row(
+        "GPTQv2 alpha",
+        _stage_value(gptq_stage, "gptq_v2_alpha", "not set"),
+    )
+    _print_config_row(
+        "GPTQ percdamp",
+        _stage_value(gptq_stage, "percdamp", "not set"),
+    )
     _print_config_row("PTQ enabled", ptq_enabled)
     _print_config_row("SpinQuant enabled", spinquant_enabled)
     _print_config_row("CLE enabled", _is_stage_enabled(cle_stage))

@@ -72,6 +72,13 @@ class GPTQConfig(BaseConfig):
     # GPTQv2: uses FP inference for collecting inputs during quantization
     gptq_v2: bool = False
 
+    # GPTQv2: Path to save/load FP inputs cache.
+    # If set and file exists, FP inputs are loaded from disk instead of
+    # running the original model. If set and file doesn't exist, FP inputs
+    # are collected during quantization and saved to disk.
+    # If None, FP inputs are collected on-the-fly (default behavior).
+    fp_inputs_cache_path: str | None = None
+
     # GPTQv2: scaling factor for the asymmetric correction (P matrix)
     # `alpha` is the correction strength for GPTQv2's input-error compensation.
     # It scales the `P` matrix that adjusts weight updates to account for upstream quantization error in the activations.
