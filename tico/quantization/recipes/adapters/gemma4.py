@@ -274,6 +274,9 @@ class Gemma4Adapter(ModelAdapter):
                 split=calib.get("split"),
                 max_seq_len=calib.get("seq_len"),
                 seed=int(runtime.get("seed", 42)),
+                allow_benchmark_overlap=bool(
+                    calib.get("allow_benchmark_overlap", False)
+                ),
             )
 
     def forward_calibration(

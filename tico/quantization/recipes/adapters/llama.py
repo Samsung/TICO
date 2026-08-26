@@ -196,6 +196,14 @@ class LlamaAdapter(ModelAdapter):
             )
         return ctx
 
+    def requires_calibration_inputs(self, cfg: Mapping[str, Any]) -> bool:
+        """Preserve example inputs required by full-model Circle export."""
+        export_cfg = cfg.get("export", {})
+        if not isinstance(export_cfg, Mapping) or not export_cfg.get("enabled", False):
+            return False
+        artifacts = export_cfg.get("artifacts", [])
+        return "circle_full" in set(artifacts)
+
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[torch.Tensor]:
         cfg = ctx.cfg
         calib = cfg.get("calibration", {})
@@ -218,6 +226,7 @@ class LlamaAdapter(ModelAdapter):
             dataset_name=calib.get("dataset", "Salesforce/wikitext"),
             dataset_config=calib.get("dataset_config", "wikitext-2-raw-v1"),
             split=calib.get("split", "train"),
+            allow_benchmark_overlap=bool(calib.get("allow_benchmark_overlap", False)),
         )
 
     def forward_calibration(

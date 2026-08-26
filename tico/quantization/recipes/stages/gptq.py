@@ -29,6 +29,7 @@ from tico.quantization.recipes.utils import filter_dataclass_kwargs, stage_paylo
 
 class GPTQStage(Stage):
     name = "gptq"
+    requires_calibration_inputs = True
 
     _SENSITIVITY_MODES = {"compute", "load", "save", "cache"}
 

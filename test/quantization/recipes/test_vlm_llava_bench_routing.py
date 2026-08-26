@@ -25,6 +25,7 @@ import unittest
 from unittest.mock import patch
 
 import tico.quantization.recipes.evaluation.vlm as vlm
+from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
 
 
 class TestVlmLlavaBenchRouting(unittest.TestCase):
@@ -62,8 +63,8 @@ class TestVlmLlavaBenchRouting(unittest.TestCase):
         """evaluate_llava_bench should route through the shared COCO-score helper."""
         captured = {}
 
-        def fake_get_dataset(name, n):
-            captured["get_dataset"] = {"name": name, "n": n}
+        def fake_get_dataset(name, *, role, n):
+            captured["get_dataset"] = {"name": name, "role": role, "n": n}
             return ["sample"], object()
 
         def fake_get_coco_scores_on_dataset(**kwargs):
@@ -82,7 +83,10 @@ class TestVlmLlavaBenchRouting(unittest.TestCase):
             )
 
         self.assertEqual(result["CIDEr"], 2.0)
-        self.assertEqual(captured["get_dataset"], {"name": "llava_bench", "n": 1})
+        self.assertEqual(
+            captured["get_dataset"],
+            {"name": "llava_bench", "role": EVALUATION_ROLE, "n": 1},
+        )
         self.assertEqual(captured["scores"]["dataset_name"], "llava_bench")
         self.assertEqual(captured["scores"]["ds"], ["sample"])
         self.assertEqual(captured["scores"]["max_seq_len"], 128)

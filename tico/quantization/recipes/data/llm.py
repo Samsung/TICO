@@ -18,6 +18,12 @@ from typing import Any
 import torch
 from datasets import load_dataset
 
+from tico.quantization.recipes.data.dataset_usage import (
+    CALIBRATION_ROLE,
+    resolve_dataset_usage,
+    validate_single_dataset_usage,
+)
+
 
 def build_wikitext_calibration_inputs(
     *,
@@ -30,10 +36,35 @@ def build_wikitext_calibration_inputs(
     dataset_name: str = "Salesforce/wikitext",
     dataset_config: str = "wikitext-2-raw-v1",
     split: str = "train",
+    allow_benchmark_overlap: bool = False,
 ) -> list[torch.Tensor]:
-    dataset = load_dataset(
-        dataset_name, dataset_config, split=split, cache_dir=cache_dir
+    """Build deterministic causal-LM calibration windows from a text corpus."""
+    usage = resolve_dataset_usage(
+        dataset=dataset_name,
+        role=CALIBRATION_ROLE,
+        split=split,
+        config=dataset_config,
+        consumer="build_wikitext_calibration_inputs",
+        n_samples=n_samples,
     )
+    validate_single_dataset_usage(
+        usage,
+        allow_benchmark_overlap=allow_benchmark_overlap,
+    )
+
+    if usage.config is None:
+        dataset = load_dataset(
+            usage.canonical_id,
+            split=usage.split,
+            cache_dir=cache_dir,
+        )
+    else:
+        dataset = load_dataset(
+            usage.canonical_id,
+            usage.config,
+            split=usage.split,
+            cache_dir=cache_dir,
+        )
     text = " ".join(dataset["text"])
     token_ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
 

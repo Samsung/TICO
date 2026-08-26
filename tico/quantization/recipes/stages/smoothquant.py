@@ -20,6 +20,7 @@ from tico.quantization.recipes.stages.base import Stage
 
 class SmoothQuantStage(Stage):
     name = "smoothquant"
+    requires_calibration_inputs = True
 
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         if not hasattr(ctx.adapter, "apply_smoothquant"):

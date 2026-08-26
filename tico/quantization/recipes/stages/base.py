@@ -19,8 +19,12 @@ from tico.quantization.recipes.context import RecipeContext
 
 
 class Stage(ABC):
+    """Define one executable quantization pipeline stage."""
+
     name: str
+    requires_calibration_inputs: bool = False
 
     @abstractmethod
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
+        """Run the stage and return the updated recipe context."""
         raise NotImplementedError

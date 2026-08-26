@@ -84,6 +84,33 @@ def build_wikitext_calibration_inputs(
 This style makes call sites readable and makes it clear which config fields the
 builder actually uses.
 
+## Dataset roles and benchmark safety
+
+Every dataset use must declare a semantic role. Calibration and evaluation may
+use different defaults even when they share one physical repository. For
+example, VQAv2 uses `train` for calibration and `validation` for evaluation,
+while MMLU uses `auxiliary_train` for calibration and `test` for evaluation.
+
+Dataset safety is defined by the centralized policy in `dataset_usage.py`; it is
+not inferred from a split name. LLaVA-Bench is therefore evaluation-only even
+though its Hugging Face split is named `train`. The formatted COCO Caption2017
+source, Video-MME, and MMMU-Pro vision are also evaluation-only until separate
+calibration-safe corpora are registered.
+
+The recipe runner validates canonical dataset ID, config, split, and active
+evaluation consumers before loading a model or downloading data. It also saves
+resolved source provenance into `effective_config.yaml`. Deliberately
+transductive experiments must set:
+
+```yaml
+calibration:
+  allow_benchmark_overlap: true
+```
+
+This override emits a prominent warning, and benchmark results from the produced
+checkpoint must not be reported as strictly held out. Gold targets remain
+excluded from calibration rendering by default.
+
 ## Adding a new calibration dataset
 
 1. Decide whether the dataset belongs in an existing modality file or a new file.

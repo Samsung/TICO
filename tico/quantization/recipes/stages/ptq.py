@@ -182,6 +182,7 @@ def _print_effective_overrides(
 
 class PTQStage(Stage):
     name = "ptq"
+    requires_calibration_inputs = True
 
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         print("Wrapping model with PTQ wrappers …")
