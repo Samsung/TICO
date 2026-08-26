@@ -17,15 +17,15 @@
 import unittest
 from unittest import mock
 
+import tico
 import torch
-
+from circle_schema import circle
+from tico.circle.io import model_from_bytes
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.quant_vision_patch_embedder import (
     QuantGemma4VisionPatchEmbedder,
 )
-
-from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
 
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
@@ -57,6 +57,11 @@ def _make_patch_embedder(
         position_embedding_size=position_embedding_size,
     )
     return Gemma4VisionPatchEmbedder(config).eval()
+
+
+def _builtin_code(model, operator) -> int:
+    """Return the builtin code referenced by one Circle operator."""
+    return model.operatorCodes[operator.opcodeIndex].builtinCode
 
 
 @unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
@@ -152,7 +157,7 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         self.assertIs(q_module._mode, Mode.QUANT)
 
     def test_observers_are_collected(self):
-        """Check that _all_observers returns all 8 observers."""
+        """Check that _all_observers returns all nine observers."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -161,14 +166,16 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
 
         all_obs = list(q_module._all_observers())
-        self.assertEqual(len(all_obs), 7)
+        self.assertEqual(len(all_obs), 9)
         self.assertIs(all_obs[0], q_module.obs_emb_table)
         self.assertIs(all_obs[1], q_module.obs_act_in)
-        self.assertIs(all_obs[2], q_module.obs_pixel_values_m_0_5)
-        self.assertIs(all_obs[3], q_module.obs_pixel_values)
-        self.assertIs(all_obs[4], q_module.obs_hidden_states)
-        self.assertIs(all_obs[5], q_module.obs_position_embeddings)
-        self.assertIs(all_obs[6], q_module.obs_output)
+        self.assertIs(all_obs[2], q_module.obs_pixel_center)
+        self.assertIs(all_obs[3], q_module.obs_pixel_values_m_0_5)
+        self.assertIs(all_obs[4], q_module.obs_pixel_rescale)
+        self.assertIs(all_obs[5], q_module.obs_pixel_values)
+        self.assertIs(all_obs[6], q_module.obs_hidden_states)
+        self.assertIs(all_obs[7], q_module.obs_position_embeddings)
+        self.assertIs(all_obs[8], q_module.obs_output)
 
     # ------------------------------------------------------------------
     # Calibration and fake quantization
@@ -185,9 +192,25 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
 
         q_module.enable_calibration()
 
-        # Check that emb_table observer has collected statistics (min_val/max_val are set)
+        # Check that the embedding-table observer collected min/max statistics.
         self.assertIsNotNone(q_module.obs_emb_table.min_val)
         self.assertIsNotNone(q_module.obs_emb_table.max_val)
+
+    def test_normalization_constants_are_observed_in_calib_mode(self):
+        """Collect exact ranges for both static pixel normalization constants."""
+        fp_module = _make_patch_embedder(
+            hidden_size=self.hidden_size,
+            patch_size=self.patch_size,
+            position_embedding_size=self.position_embedding_size,
+        )
+        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
+
+        q_module.enable_calibration()
+
+        self.assertEqual(q_module.obs_pixel_center.min_val.item(), 0.5)
+        self.assertEqual(q_module.obs_pixel_center.max_val.item(), 0.5)
+        self.assertEqual(q_module.obs_pixel_rescale.min_val.item(), 2.0)
+        self.assertEqual(q_module.obs_pixel_rescale.max_val.item(), 2.0)
 
     def test_quant_mode_output_is_finite(self):
         """In QUANT mode the output should be finite and have the correct shape."""
@@ -227,7 +250,7 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         self.assertEqual(q_module.obs_emb_table.qscheme, QScheme.PER_TENSOR_SYMM)
 
     # ------------------------------------------------------------------
-    # position_embedding_table buffer
+    # Static buffers
     # ------------------------------------------------------------------
 
     def test_position_embedding_table_is_registered_as_buffer(self):
@@ -259,6 +282,29 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             torch.allclose(
                 q_module.position_embedding_table, fp_module.position_embedding_table
             )
+        )
+
+    def test_pixel_normalization_constants_are_registered_as_buffers(self):
+        """Keep the pixel center and rescale values as typed module buffers."""
+        fp_module = _make_patch_embedder(
+            hidden_size=self.hidden_size,
+            patch_size=self.patch_size,
+            position_embedding_size=self.position_embedding_size,
+        )
+        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
+
+        buffers = dict(q_module.named_buffers())
+        self.assertIn("pixel_center", buffers)
+        self.assertIn("pixel_rescale", buffers)
+        self.assertEqual(q_module.pixel_center.item(), 0.5)
+        self.assertEqual(q_module.pixel_rescale.item(), 2.0)
+        self.assertEqual(
+            q_module.pixel_center.dtype,
+            fp_module.position_embedding_table.dtype,
+        )
+        self.assertEqual(
+            q_module.pixel_rescale.dtype,
+            fp_module.position_embedding_table.dtype,
         )
 
     # ------------------------------------------------------------------
@@ -423,6 +469,59 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         with torch.no_grad():
             exported_output = exported.module()(pixel_values)
         torch.testing.assert_close(exported_output, actual)
+
+    def test_circle_export_uses_uint8_elementwise_constants(self):
+        """Serialize Sub, Mul, and Add constants in the UINT8 activation domain."""
+        fp_module = _make_patch_embedder(
+            hidden_size=self.hidden_size,
+            patch_size=self.patch_size,
+            position_embedding_size=self.position_embedding_size,
+        )
+        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
+        q_module.enable_calibration()
+
+        pixel_values, pixel_position_ids, padding_positions = self._sample_inputs()
+        with torch.no_grad():
+            _ = q_module(pixel_values, pixel_position_ids, padding_positions)
+        q_module.freeze_qparams()
+
+        export_module = q_module.as_export_module(
+            mode="prefill",
+            pixel_position_ids=pixel_position_ids,
+            padding_positions=padding_positions,
+        ).eval()
+        circle_model = tico.convert(export_module, (pixel_values,))
+        model = model_from_bytes(circle_model.circle_binary)
+        graph = model.subgraphs[0]
+
+        expected_type = circle.TensorType.TensorType.UINT8
+        target_codes = {
+            circle.BuiltinOperator.BuiltinOperator.SUB,
+            circle.BuiltinOperator.BuiltinOperator.MUL,
+            circle.BuiltinOperator.BuiltinOperator.ADD,
+        }
+        counts = {code: 0 for code in target_codes}
+
+        for operator in graph.operators:
+            builtin = _builtin_code(model, operator)
+            if builtin not in target_codes:
+                continue
+
+            counts[builtin] += 1
+            self.assertEqual(len(operator.inputs), 2)
+            self.assertEqual(len(operator.outputs), 1)
+
+            lhs = graph.tensors[operator.inputs[0]]
+            rhs = graph.tensors[operator.inputs[1]]
+            output = graph.tensors[operator.outputs[0]]
+            self.assertEqual(lhs.type, expected_type)
+            self.assertEqual(rhs.type, expected_type)
+            self.assertEqual(output.type, expected_type)
+            self.assertNotEqual(rhs.buffer, 0)
+            self.assertIsNotNone(rhs.quantization)
+
+        for code in target_codes:
+            self.assertEqual(counts[code], 1)
 
 
 if __name__ == "__main__":
