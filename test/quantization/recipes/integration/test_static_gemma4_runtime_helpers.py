@@ -42,7 +42,7 @@ class TestNormalizeValidTokenMask(unittest.TestCase):
         input_ids = torch.tensor([[1, 2, 3, 0, 0]])
         attention_mask = torch.tensor([[1, 1, 1, 0, 0]])
         result = _normalize_valid_token_mask(
-            input_ids,
+            input_ids,  # type: ignore[arg-type]
             attention_mask,
             pad_token_id=0,
             device=torch.device("cpu"),
@@ -59,7 +59,7 @@ class TestNormalizeValidTokenMask(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 3, 0, 0]])
         result = _normalize_valid_token_mask(
-            input_ids,
+            input_ids,  # type: ignore[arg-type]
             None,
             pad_token_id=0,
             device=torch.device("cpu"),
@@ -75,7 +75,7 @@ class TestNormalizeValidTokenMask(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 3, 0, 0]])
         result = _normalize_valid_token_mask(
-            input_ids,
+            input_ids,  # type: ignore[arg-type]
             None,
             pad_token_id=None,
             device=torch.device("cpu"),
@@ -93,7 +93,7 @@ class TestNormalizeValidTokenMask(unittest.TestCase):
         attention_mask = torch.tensor([[1, 0]])
         with self.assertRaisesRegex(ValueError, "attention_mask shape"):
             _normalize_valid_token_mask(
-                input_ids,
+                input_ids,  # type: ignore[arg-type]
                 attention_mask,
                 pad_token_id=0,
                 device=torch.device("cpu"),
@@ -108,7 +108,7 @@ class TestNormalizeValidTokenMask(unittest.TestCase):
         input_ids = torch.tensor([[1, 2, 0, 0], [3, 4, 5, 6]])
         attention_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 1]])
         result = _normalize_valid_token_mask(
-            input_ids,
+            input_ids,  # type: ignore[arg-type]
             attention_mask,
             pad_token_id=0,
             device=torch.device("cpu"),
@@ -132,7 +132,7 @@ class TestValidatePaddingLayout(unittest.TestCase):
         input_ids = torch.tensor([[1, 2, 3, 0, 0]])
         valid_token_mask = torch.tensor([[True, True, True, False, False]])
         # Should not raise
-        _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")
+        _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")  # type: ignore[arg-type]
 
     def test_right_padding_no_padding(self):
         """Fully valid sequence (no padding) should pass for right padding."""
@@ -142,7 +142,7 @@ class TestValidatePaddingLayout(unittest.TestCase):
 
         input_ids = torch.tensor([[1, 2, 3]])
         valid_token_mask = torch.tensor([[True, True, True]])
-        _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")
+        _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")  # type: ignore[arg-type]
 
     def test_right_padding_invalid(self):
         """Non-contiguous valid tokens should raise for right padding."""
@@ -153,7 +153,7 @@ class TestValidatePaddingLayout(unittest.TestCase):
         input_ids = torch.tensor([[1, 0, 3, 0, 0]])
         valid_token_mask = torch.tensor([[True, False, True, False, False]])
         with self.assertRaisesRegex(ValueError, "Right padding expected"):
-            _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")
+            _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")  # type: ignore[arg-type]
 
     def test_unsupported_padding_side_raises(self):
         """Unsupported padding_side should raise ValueError."""
@@ -164,7 +164,7 @@ class TestValidatePaddingLayout(unittest.TestCase):
         input_ids = torch.tensor([[1, 2, 3, 0, 0]])
         valid_token_mask = torch.tensor([[True, True, True, False, False]])
         with self.assertRaisesRegex(ValueError, "Unsupported padding_side"):
-            _validate_padding_layout(input_ids, valid_token_mask, padding_side="left")
+            _validate_padding_layout(input_ids, valid_token_mask, padding_side="left")  # type: ignore[arg-type]
 
     def test_batched_right_padding_valid(self):
         """Batched right-padded layout should pass."""
@@ -176,7 +176,7 @@ class TestValidatePaddingLayout(unittest.TestCase):
         valid_token_mask = torch.tensor(
             [[True, True, False, False], [True, True, True, False]]
         )
-        _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")
+        _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")  # type: ignore[arg-type]
 
     def test_batched_right_padding_invalid(self):
         """Batched layout with one bad row should raise."""
@@ -189,7 +189,7 @@ class TestValidatePaddingLayout(unittest.TestCase):
             [[True, True, False, False], [True, False, True, False]]
         )
         with self.assertRaisesRegex(ValueError, "Right padding expected"):
-            _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")
+            _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")  # type: ignore[arg-type]
 
 
 class TestAllocateEmptyCache(unittest.TestCase):
@@ -724,23 +724,23 @@ class TestDecodeOneFixedCacheContract(unittest.TestCase):
 
         runtime = object.__new__(StaticGemma4Runtime)
         runtime.device = torch.device("cpu")
-        runtime.layout = SimpleNamespace(max_seq=max_seq)
+        runtime.layout = SimpleNamespace(max_seq=max_seq)  # type: ignore[assignment]
         runtime.text_config = SimpleNamespace(
             layer_types=["full_attention", "full_attention"],
             sliding_window=4,
             final_logit_softcapping=None,
         )
         runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=0)
-        runtime.model = SimpleNamespace(
+        runtime.model = SimpleNamespace(  # type: ignore[assignment]
             model=SimpleNamespace(language_model=SimpleNamespace(rotary_emb=rotary_emb))
         )
-        runtime.token_embedding = lambda ids: torch.zeros(
+        runtime.token_embedding = lambda ids: torch.zeros(  # type: ignore[assignment]
             ids.size(0), 1, 4, device=ids.device, dtype=torch.float32
         )
-        runtime.lm_head = lambda hidden: torch.zeros(
+        runtime.lm_head = lambda hidden: torch.zeros(  # type: ignore[assignment]
             hidden.size(0), hidden.size(1), 5, device=hidden.device
         )
-        runtime.decode_layers = [owner, consumer]
+        runtime.decode_layers = [owner, consumer]  # type: ignore[assignment]
         runtime.past_len = 3
 
         initial_k = torch.zeros(1, 1, max_seq - 1, 2)
