@@ -14,6 +14,8 @@
 
 """Static per-stage Circle export for Gemma4 E2B."""
 
+import hashlib
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Mapping
@@ -35,10 +37,17 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     Gemma4StaticVisionProfile,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
+    build_gemma4_vision_split_export_bundle,
+    Gemma4VisionSplitExportBundle,
+)
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
 )
 from tico.utils.utils import SuppressWarning
+
+
+_VISION_EXPORT_GRANULARITIES = frozenset({"monolithic", "layer", "both"})
 
 
 def _convert_and_save(
@@ -226,6 +235,353 @@ def _make_vision_inputs(
     return pixel_values, pixel_position_ids
 
 
+def _normalize_vision_export_granularity(granularity: str) -> str:
+    """Validate and normalize the Gemma4 vision export granularity."""
+    normalized = str(granularity).strip().lower()
+    if normalized not in _VISION_EXPORT_GRANULARITIES:
+        choices = ", ".join(sorted(_VISION_EXPORT_GRANULARITIES))
+        raise ValueError(
+            "Unsupported Gemma4 vision export granularity "
+            f"{granularity!r}. Expected one of: {choices}."
+        )
+    return normalized
+
+
+def _vision_encoder_stage_stem(layer_index: int) -> str:
+    """Return the artifact stem for one vision encoder layer."""
+    if layer_index < 0:
+        raise ValueError(
+            f"Gemma4 vision layer index must be non-negative, got {layer_index}."
+        )
+    return f"vision_encoder_layer_{layer_index:02d}"
+
+
+def _tensor_manifest(name: str, tensor: torch.Tensor) -> dict[str, Any]:
+    """Return a JSON-safe tensor contract for a split vision manifest."""
+    return {
+        "name": name,
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype).removeprefix("torch."),
+    }
+
+
+def _small_tensor_values(tensor: torch.Tensor) -> dict[str, Any]:
+    """Return compact JSON metadata for an observer parameter tensor."""
+    tensor = tensor.detach().cpu()
+    metadata: dict[str, Any] = {
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype).removeprefix("torch."),
+        "sha256": hashlib.sha256(
+            tensor.reshape(-1).contiguous().view(torch.uint8).numpy().tobytes()
+        ).hexdigest(),
+    }
+    if tensor.numel() <= 16:
+        metadata["values"] = tensor.reshape(-1).tolist()
+    return metadata
+
+
+def _observer_manifest(observer: torch.nn.Module) -> dict[str, Any]:
+    """Return the quantization contract owned by one boundary observer."""
+    contract: dict[str, Any] = {
+        "name": str(getattr(observer, "name", type(observer).__name__)),
+        "type": type(observer).__name__,
+    }
+    dtype = getattr(observer, "dtype", None)
+    if dtype is not None:
+        contract["dtype"] = str(dtype)
+    qscheme = getattr(observer, "qscheme", None)
+    if qscheme is not None:
+        contract["qscheme"] = str(qscheme)
+    channel_axis = getattr(observer, "channel_axis", None)
+    if channel_axis is not None:
+        contract["channel_axis"] = int(channel_axis)
+
+    scale = getattr(observer, "_cached_scale", None)
+    zero_point = getattr(observer, "_cached_zp", None)
+    if (
+        isinstance(scale, torch.Tensor)
+        and scale.numel()
+        and isinstance(zero_point, torch.Tensor)
+        and zero_point.numel()
+    ):
+        contract["scale"] = _small_tensor_values(scale)
+        contract["zero_point"] = _small_tensor_values(zero_point)
+    return contract
+
+
+def _save_vision_context(
+    *,
+    path: Path,
+    bundle: Gemma4VisionSplitExportBundle,
+) -> None:
+    """Save the shared raw mask and RoPE tensors used by every encoder stage."""
+    torch.save(
+        {
+            "attention_mask": bundle.attention_mask,
+            "position_embeddings_cos": bundle.position_embeddings_cos,
+            "position_embeddings_sin": bundle.position_embeddings_sin,
+        },
+        path,
+    )
+
+
+def _save_vision_pipeline_manifest(
+    *,
+    path: Path,
+    profile: Gemma4StaticVisionProfile,
+    artifact_tag: str,
+    granularity: str,
+    bundle: Gemma4VisionSplitExportBundle,
+    stage_artifacts: list[dict[str, Any]],
+    monolithic_artifact: str | None,
+    context_artifact: str,
+) -> None:
+    """Write the execution and shared-input contract for split vision graphs."""
+    manifest = {
+        "schema_version": 1,
+        "profile": profile.name,
+        "artifact_tag": artifact_tag,
+        "granularity": granularity,
+        "context_externalized": True,
+        "direct_chainable_boundaries": True,
+        "monolithic_artifact": monolithic_artifact,
+        "shared_encoder_inputs_artifact": context_artifact,
+        "shared_encoder_inputs": [
+            _tensor_manifest("attention_mask", bundle.attention_mask),
+            _tensor_manifest(
+                "position_embeddings_cos",
+                bundle.position_embeddings_cos,
+            ),
+            _tensor_manifest(
+                "position_embeddings_sin",
+                bundle.position_embeddings_sin,
+            ),
+        ],
+        "boundaries": [
+            {
+                "name": boundary.name,
+                "producer": boundary.producer,
+                "consumer": boundary.consumer,
+                "observer": _observer_manifest(boundary.observer),
+            }
+            for boundary in bundle.boundary_contracts
+        ],
+        "stages": stage_artifacts,
+    }
+    path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _export_gemma4_vision_stages(
+    *,
+    gemma_model: torch.nn.Module,
+    qvision: torch.nn.Module,
+    profile: Gemma4StaticVisionProfile,
+    pixel_values: torch.Tensor,
+    pixel_position_ids: torch.Tensor,
+    text_hidden_size: int,
+    artifact_tag: str,
+    output_dir: Path,
+    granularity: str,
+    strict: bool,
+) -> None:
+    """Export monolithic, split, or both Gemma4 static vision pipelines."""
+    granularity = _normalize_vision_export_granularity(granularity)
+
+    if granularity == "monolithic":
+        vision_prefill = build_gemma4_vision_prefill_export_module(
+            gemma_model,
+            pixel_position_ids=pixel_position_ids,
+        )
+        _convert_and_save(
+            vision_prefill,
+            (pixel_values,),
+            output_dir / _circle_name("vision_prefill", artifact_tag),
+            strict=strict,
+        )
+        return
+
+    bundle = build_gemma4_vision_split_export_bundle(
+        gemma_model,
+        pixel_position_ids=pixel_position_ids,
+        output_dtype=pixel_values.dtype,
+    )
+    if bundle.post_projection.num_valid_pool_outputs != profile.num_visual_tokens:
+        raise RuntimeError(
+            "Gemma4 split vision valid-output count does not match the static "
+            "profile: "
+            f"module={bundle.post_projection.num_valid_pool_outputs}, "
+            f"profile={profile.num_visual_tokens}."
+        )
+
+    context_artifact = "vision_context.pt"
+    _save_vision_context(
+        path=output_dir / context_artifact,
+        bundle=bundle,
+    )
+
+    monolithic_artifact: str | None = None
+    if granularity == "both":
+        monolithic_artifact = _circle_name("vision_prefill", artifact_tag)
+        _convert_and_save(
+            bundle.monolithic,
+            (pixel_values,),
+            output_dir / monolithic_artifact,
+            strict=strict,
+        )
+
+    vision_hidden_size = int(qvision.config.hidden_size)
+    hidden_states = torch.randn(
+        1,
+        profile.num_patches,
+        vision_hidden_size,
+        device="cpu",
+    )
+    pooled_hidden_states = torch.randn(
+        1,
+        profile.max_soft_tokens,
+        vision_hidden_size,
+        device="cpu",
+    )
+
+    stage_artifacts: list[dict[str, Any]] = []
+
+    patch_artifact = _circle_name("vision_patch_embedder", artifact_tag)
+    _convert_and_save(
+        bundle.patch_embedder,
+        (pixel_values,),
+        output_dir / patch_artifact,
+        strict=strict,
+    )
+    stage_artifacts.append(
+        {
+            "id": "patch_embedder",
+            "kind": "patch_embedder",
+            "artifact": patch_artifact,
+            "inputs": [_tensor_manifest("pixel_values", pixel_values)],
+            "outputs": [
+                {
+                    "name": "hidden_states",
+                    "shape": [1, profile.num_patches, vision_hidden_size],
+                }
+            ],
+        }
+    )
+
+    shared_context = (
+        bundle.attention_mask,
+        bundle.position_embeddings_cos,
+        bundle.position_embeddings_sin,
+    )
+    for layer_index, layer in enumerate(bundle.encoder_layers):
+        stem = _vision_encoder_stage_stem(layer_index)
+        artifact = _circle_name(stem, artifact_tag)
+        _convert_and_save(
+            layer,
+            (hidden_states, *shared_context),
+            output_dir / artifact,
+            strict=strict,
+        )
+        stage_artifacts.append(
+            {
+                "id": f"encoder_layer_{layer_index}",
+                "kind": "encoder_layer",
+                "artifact": artifact,
+                "layer_index": layer_index,
+                "inputs": [
+                    {
+                        "name": "hidden_states",
+                        "shape": list(hidden_states.shape),
+                    },
+                    *[
+                        _tensor_manifest(name, tensor)
+                        for name, tensor in zip(
+                            (
+                                "attention_mask",
+                                "position_embeddings_cos",
+                                "position_embeddings_sin",
+                            ),
+                            shared_context,
+                        )
+                    ],
+                ],
+                "outputs": [
+                    {
+                        "name": "hidden_states",
+                        "shape": list(hidden_states.shape),
+                    }
+                ],
+            }
+        )
+
+    pooler_artifact = _circle_name("vision_pooler", artifact_tag)
+    _convert_and_save(
+        bundle.pooler,
+        (hidden_states,),
+        output_dir / pooler_artifact,
+        strict=strict,
+    )
+    stage_artifacts.append(
+        {
+            "id": "pooler",
+            "kind": "pooler",
+            "artifact": pooler_artifact,
+            "inputs": [
+                {
+                    "name": "hidden_states",
+                    "shape": list(hidden_states.shape),
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "pooled_hidden_states",
+                    "shape": list(pooled_hidden_states.shape),
+                }
+            ],
+        }
+    )
+
+    post_projection_artifact = _circle_name("vision_post_projection", artifact_tag)
+    _convert_and_save(
+        bundle.post_projection,
+        (pooled_hidden_states,),
+        output_dir / post_projection_artifact,
+        strict=strict,
+    )
+    stage_artifacts.append(
+        {
+            "id": "post_projection",
+            "kind": "post_projection",
+            "artifact": post_projection_artifact,
+            "inputs": [
+                {
+                    "name": "pooled_hidden_states",
+                    "shape": list(pooled_hidden_states.shape),
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "visual_embeds",
+                    "shape": [profile.num_visual_tokens, text_hidden_size],
+                }
+            ],
+        }
+    )
+
+    _save_vision_pipeline_manifest(
+        path=output_dir / "vision_pipeline.json",
+        profile=profile,
+        artifact_tag=artifact_tag,
+        granularity=granularity,
+        bundle=bundle,
+        stage_artifacts=stage_artifacts,
+        monolithic_artifact=monolithic_artifact,
+        context_artifact=context_artifact,
+    )
+
+
 def _make_prefill_attention_mask(
     *,
     max_seq_len: int,
@@ -308,21 +664,27 @@ def export_gemma4_per_layer(
     model_args: Mapping[str, Any],
     prefill_decode: bool = True,
     strict: bool = False,
+    vision_granularity: str = "monolithic",
 ) -> None:
     """Export a floating-point or PTQ-wrapped Gemma4 E2B by runtime stage.
 
-    The generated Circle set contains the image vision prefill stage, dynamic
-    token embedding, fixed-slot multimodal fusion, every text decoder layer,
-    and final norm/LM head. With ``prefill_decode=True``, each text layer is
-    emitted once for full prefill and once for single-token decode.
+    The generated Circle set contains the configured image vision pipeline,
+    dynamic token embedding, fixed-slot multimodal fusion, every text decoder
+    layer, and final norm/LM head. ``vision_granularity`` selects the existing
+    monolithic vision graph, a split patch/layer/pool/post-projection pipeline,
+    or both. Split encoder artifacts share external mask and RoPE inputs instead
+    of embedding duplicate profile tensors.
 
-    PLE token lookup and the packed context projection intentionally remain CPU
-    runtime responsibilities. Each decoder Circle receives only its sliced
-    ``per_layer_input`` tensor, matching ``StaticGemma4Runtime``.
+    With ``prefill_decode=True``, each text layer is emitted once for full
+    prefill and once for single-token decode. PLE token lookup and the packed
+    context projection intentionally remain CPU runtime responsibilities. Each
+    decoder Circle receives only its sliced ``per_layer_input`` tensor, matching
+    ``StaticGemma4Runtime``.
     """
     if max_seq_len < 1:
         raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
 
+    vision_granularity = _normalize_vision_export_granularity(vision_granularity)
     normalized_model_args = _normalize_model_args(
         model_args,
         max_seq_len=max_seq_len,
@@ -362,14 +724,16 @@ def export_gemma4_per_layer(
         profile=vision_profile,
     )
     vision_profile.save_manifest(output_dir / "vision_profile.json")
-    vision_prefill = build_gemma4_vision_prefill_export_module(
-        gemma_model,
+    _export_gemma4_vision_stages(
+        gemma_model=gemma_model,
+        qvision=qvision,
+        profile=vision_profile,
+        pixel_values=pixel_values,
         pixel_position_ids=pixel_position_ids,
-    )
-    _convert_and_save(
-        vision_prefill,
-        (pixel_values,),
-        output_dir / _circle_name("vision_prefill", artifact_tag),
+        text_hidden_size=hidden_size,
+        artifact_tag=artifact_tag,
+        output_dir=output_dir,
+        granularity=vision_granularity,
         strict=strict,
     )
 

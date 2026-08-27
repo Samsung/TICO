@@ -615,6 +615,13 @@ class Gemma4Adapter(ModelAdapter):
             model_args = ctx.cfg.get("model_args", {})
             if not isinstance(model_args, Mapping):
                 raise TypeError("model_args must be a mapping for Gemma4 export.")
+
+            vision_export_cfg = export_cfg.get("vision", {})
+            if vision_export_cfg is None:
+                vision_export_cfg = {}
+            if not isinstance(vision_export_cfg, Mapping):
+                raise TypeError("export.vision must be a mapping for Gemma4 export.")
+
             export_gemma4_per_layer(
                 q_model=ctx.require_model(),
                 max_seq_len=max_seq_len,
@@ -622,4 +629,7 @@ class Gemma4Adapter(ModelAdapter):
                 model_args=model_args,
                 prefill_decode=bool(export_cfg.get("prefill_decode", True)),
                 strict=bool(export_cfg.get("strict", False)),
+                vision_granularity=str(
+                    vision_export_cfg.get("granularity", "monolithic")
+                ),
             )
