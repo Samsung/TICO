@@ -320,7 +320,14 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
             for obs in self._all_observers():
                 assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
 
-        cos, sin = self._gather_position_embeddings(pixel_position_ids)
+        # Hugging Face casts vision RoPE to the hidden-state dtype. Match the
+        # encoder compute dtype when baking static templates so BF16 models do
+        # not promote only Q/K to FP32 while V remains BF16.
+        template_dtype = next(self.module.parameters()).dtype
+        cos, sin = self._gather_position_embeddings(
+            pixel_position_ids,
+            dtype=template_dtype,
+        )
         self.register_buffer("position_embeddings_cos_template", cos)
         self.register_buffer("position_embeddings_sin_template", sin)
 
