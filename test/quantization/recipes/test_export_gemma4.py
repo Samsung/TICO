@@ -102,10 +102,17 @@ class FakeDecoderLayer(torch.nn.Module):
                 is_shared=is_shared,
             )
         )
+        self.export_calls = []
 
-    def as_export_module(self, mode, *, return_kv=True):
+    def as_export_module(
+        self,
+        mode,
+        *,
+        return_kv=True,
+        per_layer_input_observer=None,
+    ):
         """Return a placeholder module for the requested export mode."""
-        del mode, return_kv
+        self.export_calls.append((mode, bool(return_kv), per_layer_input_observer))
         return torch.nn.Identity()
 
 
@@ -123,6 +130,7 @@ class FakeText(torch.nn.Module):
             enable_moe_block=False,
         )
         self.embed_tokens = torch.nn.Embedding(32, 8)
+        self.obs_per_layer_inputs = torch.nn.Identity()
         self.layers = torch.nn.ModuleList(
             [
                 FakePTQWrapper(
@@ -242,6 +250,19 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         self.assertEqual(token_embedding_shapes, [dynamic_shapes])
         self.assertEqual(len(vision_modules), 1)
         self.assertIsInstance(vision_modules[0], Gemma4VisionPrefillExportAdapter)
+
+        qtext = export_model.wrapped.model.wrapped.language_model.wrapped
+        for layer in qtext.layers:
+            self.assertEqual(
+                [call[0] for call in layer.wrapped.export_calls],
+                ["prefill", "decode"],
+            )
+            self.assertTrue(
+                all(
+                    call[2] is qtext.obs_per_layer_inputs
+                    for call in layer.wrapped.export_calls
+                )
+            )
 
     def test_prefill_only_export_uses_unsuffixed_stage_names(self):
         """Disabling decode export should omit all decode artifacts."""

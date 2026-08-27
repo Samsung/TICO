@@ -719,6 +719,14 @@ def export_gemma4_per_layer(
     hidden_size = int(config.hidden_size)
     vocab_size = int(config.vocab_size)
     ple_dim = int(getattr(config, "hidden_size_per_layer_input", 0) or 0)
+    per_layer_input_observer = (
+        getattr(qtext, "obs_per_layer_inputs", None) if ple_dim else None
+    )
+    if ple_dim and per_layer_input_observer is None:
+        raise RuntimeError(
+            "Gemma4 PLE split export requires the text-model "
+            "obs_per_layer_inputs observer."
+        )
 
     pixel_values, pixel_position_ids = _make_vision_inputs(
         profile=vision_profile,
@@ -812,10 +820,15 @@ def export_gemma4_per_layer(
             if prefill_decode
             else f"decoder_layer_{layer_idx}"
         )
+        prefill_export_kwargs: dict[str, Any] = {
+            "return_kv": prefill_decode,
+        }
+        if per_layer_input_observer is not None:
+            prefill_export_kwargs["per_layer_input_observer"] = per_layer_input_observer
         _convert_and_save(
             layer.wrapped.as_export_module(
                 "prefill",
-                return_kv=prefill_decode,
+                **prefill_export_kwargs,
             ),
             (prefill_hidden,),
             output_dir / _circle_name(prefill_stem, artifact_tag),
@@ -868,8 +881,11 @@ def export_gemma4_per_layer(
                 torch.randn_like(past_key),
             )
 
+        decode_export_kwargs: dict[str, Any] = {"return_kv": True}
+        if per_layer_input_observer is not None:
+            decode_export_kwargs["per_layer_input_observer"] = per_layer_input_observer
         _convert_and_save(
-            layer.wrapped.as_export_module("decode", return_kv=True),
+            layer.wrapped.as_export_module("decode", **decode_export_kwargs),
             (decode_hidden,),
             output_dir
             / _circle_name(f"decoder_layer_decode_{layer_idx}", artifact_tag),
