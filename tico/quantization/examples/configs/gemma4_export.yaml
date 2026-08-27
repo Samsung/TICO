@@ -33,5 +33,7 @@ export:
   max_seq_len: 2048
   prefill_decode: true
   strict: false
+  vision:
+    granularity: both  # monolithic | layer | both
   artifacts:
     - circle_per_layer

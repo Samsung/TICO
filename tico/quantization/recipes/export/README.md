@@ -33,6 +33,7 @@ recipes/export/
 ├── README.md
 ├── checkpoint.py     # torch checkpoint saving
 ├── circle.py         # full-model Circle export helpers
+├── gemma4.py         # static Gemma4 vision/text staged Circle export
 ├── llama.py          # staged LLaMA Circle export
 └── qwen3_vl.py       # fixed-grid Qwen3-VL staged Circle export
 ```
@@ -75,6 +76,45 @@ accepts only `pixel_values`; `image_grid_thw` remains a CPU-runtime value used
 to select the matching profile-specific artifacts.
 
 The output directory should come from `export.output_dir`.
+
+### Gemma4 split vision artifacts
+
+Gemma4 keeps the existing `vision_prefill.<tag>.circle` artifact by default.
+Configure `export.vision.granularity` to control the vision export layout:
+
+```yaml
+export:
+  artifacts:
+    - circle_per_layer
+  vision:
+    granularity: both       # monolithic | layer | both
+```
+
+`monolithic` writes only the existing whole-tower graph. `layer` writes the
+split pipeline, and `both` writes both forms so numerical or compiler results
+can be compared. Every vision encoder layer is emitted as one Circle artifact.
+
+The split pipeline is emitted in this order:
+
+```text
+vision_patch_embedder.<tag>.circle
+vision_encoder_layer_00.<tag>.circle
+...
+vision_pooler.<tag>.circle
+vision_post_projection.<tag>.circle
+```
+
+The exporter also writes:
+
+- `vision_context.pt`, containing the shared raw attention mask and RoPE tensors;
+- `vision_pipeline.json`, containing stage order, tensor shapes,
+  layer indices, and boundary observer/qparam contracts;
+- `vision_profile.json`, containing the existing static geometry contract.
+
+The attention mask and RoPE tensors are runtime inputs of every encoder Circle.
+They are saved once instead of being embedded repeatedly in every layer file.
+Producer and consumer stages use the same frozen observer at each split boundary
+so the generated quantized artifacts are directly chainable.
 
 ## Function shape
 

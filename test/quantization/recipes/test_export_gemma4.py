@@ -314,6 +314,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             model_args=_model_args(),
             prefill_decode=True,
             strict=True,
+            vision_granularity="monolithic",
         )
 
 
