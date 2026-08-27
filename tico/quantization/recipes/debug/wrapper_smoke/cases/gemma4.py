@@ -28,6 +28,9 @@ from tico.quantization.recipes.debug.wrapper_smoke.utils import (
     clone_module,
     smoke_section,
 )
+
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
     Gemma4StaticVisionProfile,
@@ -1142,6 +1145,54 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
 
         return PTQConfig(model_args={"profile": "npu_export"})
 
+    def after_prepare(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> None:
+        """Create the producer-side observer missing from a standalone layer case.
+
+        Production per-layer export receives a slice of the packed PLE tensor
+        produced and quantized by ``QuantGemma4TextModel.obs_per_layer_inputs``.
+        Wrapper-smoke constructs only one decoder layer, so it must model that
+        upstream boundary explicitly without adding a second observer to the
+        decoder wrapper itself.
+        """
+        del cfg
+        self._per_layer_input_observer: ObserverBase | None = None
+
+        wrapped = getattr(prepared, "wrapped", prepared)
+        ple_dim = int(getattr(wrapped, "hidden_size_per_layer_input", 0) or 0)
+        if ple_dim <= 0:
+            return
+
+        make_observer = getattr(wrapped, "_make_obs", None)
+        if not callable(make_observer):
+            raise TypeError(
+                "Gemma4 decoder wrapper-smoke PLE requires the quant wrapper "
+                "observer factory."
+            )
+        observer = make_observer("per_layer_inputs")
+        if not isinstance(observer, ObserverBase):
+            raise TypeError(
+                "Gemma4 decoder wrapper-smoke created an invalid PLE observer."
+            )
+        observer.reset()
+        observer.enabled = True
+        self._per_layer_input_observer = observer
+
+    def convert_model(
+        self,
+        prepared: torch.nn.Module,
+        cfg: Mapping[str, Any],
+    ) -> torch.nn.Module:
+        """Freeze the smoke-owned producer observer before quantized execution."""
+        observer = getattr(self, "_per_layer_input_observer", None)
+        if observer is not None:
+            observer.compute_qparams()
+            observer.enabled = False
+        return super().convert_model(prepared, cfg)
+
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a tiny dense Gemma4 text decoder layer and reference copy."""
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
@@ -1189,9 +1240,32 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         return ForwardInput((), kwargs)
 
     def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
-        """Run a Gemma4 decoder layer without sharing mutable sample state."""
+        """Run a decoder layer with the standalone PLE producer boundary."""
         cloned = _clone_forward_input(sample)
-        return module(*cloned.args, **dict(cloned.kwargs))
+        kwargs = dict(cloned.kwargs)
+        per_layer_input = kwargs.get("per_layer_input")
+        observer = getattr(self, "_per_layer_input_observer", None)
+
+        if per_layer_input is not None:
+            wrapped = getattr(module, "wrapped", module)
+            mode = getattr(wrapped, "_mode", Mode.NO_QUANT)
+            if observer is None:
+                ple_dim = int(getattr(wrapped, "hidden_size_per_layer_input", 0) or 0)
+                if ple_dim > 0 and mode in (Mode.CALIB, Mode.QUANT):
+                    raise RuntimeError(
+                        "Gemma4 decoder wrapper-smoke PLE boundary observer "
+                        "was not initialized."
+                    )
+            elif mode is Mode.CALIB:
+                observer.collect(per_layer_input.detach())
+            elif mode is Mode.QUANT:
+                kwargs["per_layer_input"] = observer.fake_quant(per_layer_input)
+            elif mode is not Mode.NO_QUANT:
+                raise RuntimeError(
+                    "Unsupported Gemma4 decoder wrapper-smoke mode: " f"{mode}."
+                )
+
+        return module(*cloned.args, **kwargs)
 
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
@@ -1221,15 +1295,28 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
     def export_module(
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
-        """Export the wrapped decoder layer in the configured static mode."""
+        """Export the decoder with the calibrated producer-side PLE observer."""
+        del cfg
         wrapped = getattr(quantized, "wrapped", quantized)
-        return (
-            wrapped.as_export_module(
-                self.export_mode, return_kv=self.return_kv_on_export
-            ).eval()
-            if hasattr(wrapped, "as_export_module")
-            else quantized
-        )
+        if not hasattr(wrapped, "as_export_module"):
+            return quantized
+
+        observer = getattr(self, "_per_layer_input_observer", None)
+        ple_dim = int(getattr(wrapped, "hidden_size_per_layer_input", 0) or 0)
+        if ple_dim > 0 and observer is None:
+            raise RuntimeError(
+                "Gemma4 decoder wrapper-smoke PLE boundary observer is missing."
+            )
+
+        export_kwargs: dict[str, Any] = {
+            "return_kv": self.return_kv_on_export,
+        }
+        if observer is not None:
+            export_kwargs["per_layer_input_observer"] = observer
+        return wrapped.as_export_module(
+            self.export_mode,
+            **export_kwargs,
+        ).eval()
 
     def export_input(
         self, eval_sample: ForwardInput, cfg: Mapping[str, Any]
