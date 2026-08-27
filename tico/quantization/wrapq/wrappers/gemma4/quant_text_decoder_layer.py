@@ -21,6 +21,7 @@ from tico.quantization.config.gemma4_attention import (
     is_npu_export_text_attention_options,
 )
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4TextDecoderLayerDecodeExportAdapter,
@@ -311,6 +312,7 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
         *,
         return_kv: bool = True,
         require_npu_profile: bool = True,
+        per_layer_input_observer: Optional[ObserverBase] = None,
     ) -> nn.Module:
         """Return a static export adapter for the requested execution mode.
 
@@ -324,6 +326,10 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
             Whether to reject a non-unrolled attention graph. Static NPU export
             should keep this enabled. Reference-only experiments may disable it
             explicitly.
+        per_layer_input_observer : ObserverBase, optional
+            Producer-side observer for the packed PLE tensor. Split Circle export
+            reapplies this frozen observer at the external ``per_layer_input``
+            boundary so the input placeholder inherits the original PLE qparam.
         """
         if require_npu_profile:
             attn_options = getattr(self.self_attn.wrapped, "attn_options", None)
@@ -340,9 +346,19 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
                 )
 
         if mode == "prefill":
-            return Gemma4TextDecoderLayerPrefillExportAdapter(self, return_kv=return_kv)
+            return Gemma4TextDecoderLayerPrefillExportAdapter(
+                self,
+                return_kv=return_kv,
+                mode=self._mode,
+                per_layer_input_observer=per_layer_input_observer,
+            )
         if mode == "decode":
-            return Gemma4TextDecoderLayerDecodeExportAdapter(self, return_kv=return_kv)
+            return Gemma4TextDecoderLayerDecodeExportAdapter(
+                self,
+                return_kv=return_kv,
+                mode=self._mode,
+                per_layer_input_observer=per_layer_input_observer,
+            )
         raise ValueError(f"Unsupported Gemma4 export mode: {mode!r}")
 
     def _all_observers(self) -> Iterable:

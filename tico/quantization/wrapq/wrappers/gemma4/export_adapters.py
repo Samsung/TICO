@@ -34,6 +34,29 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
 
+def _quantized_export(mode: Mode, *, stage_name: str) -> bool:
+    """Validate an export mode and return whether fake quantization is active."""
+    if mode is Mode.QUANT:
+        return True
+    if mode is Mode.NO_QUANT:
+        return False
+    raise RuntimeError(
+        f"{stage_name} export requires NO_QUANT or QUANT mode, got {mode}."
+    )
+
+
+def _apply_export_boundary_observer(
+    tensor: Optional[torch.Tensor],
+    observer: Optional[ObserverBase],
+    *,
+    quantized: bool,
+) -> Optional[torch.Tensor]:
+    """Apply a producer-owned frozen observer at an optional split boundary."""
+    if tensor is None or observer is None or not quantized:
+        return tensor
+    return observer.fake_quant(tensor)
+
+
 def _flatten_hidden_and_kv(output: Any, *, return_kv: bool) -> Any:
     """Return ``hidden`` or ``(hidden, key, value)`` from a layer-wrapper output."""
     if isinstance(output, tuple):
@@ -387,10 +410,22 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
         return only ``hidden_states`` because they do not produce new K/V states.
     """
 
-    def __init__(self, wrapped_layer: nn.Module, *, return_kv: bool = True):
+    def __init__(
+        self,
+        wrapped_layer: nn.Module,
+        *,
+        return_kv: bool = True,
+        mode: Mode = Mode.NO_QUANT,
+        per_layer_input_observer: Optional[ObserverBase] = None,
+    ):
         super().__init__()
         self.wrapped = wrapped_layer
         self.return_kv = bool(return_kv)
+        self.per_layer_input_observer = per_layer_input_observer
+        self.quantized = _quantized_export(
+            mode,
+            stage_name="Gemma4 text decoder-layer prefill",
+        )
 
     def forward(
         self,
@@ -401,6 +436,11 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
         shared_key_value: Optional[LayerKV] = None,
     ):
         """Run a static prefill layer graph."""
+        per_layer_input = _apply_export_boundary_observer(
+            per_layer_input,
+            self.per_layer_input_observer,
+            quantized=self.quantized,
+        )
         output = self.wrapped(
             hidden_states,
             per_layer_input=per_layer_input,
@@ -429,10 +469,22 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
         layers return only ``hidden_states``.
     """
 
-    def __init__(self, wrapped_layer: nn.Module, *, return_kv: bool = True):
+    def __init__(
+        self,
+        wrapped_layer: nn.Module,
+        *,
+        return_kv: bool = True,
+        mode: Mode = Mode.NO_QUANT,
+        per_layer_input_observer: Optional[ObserverBase] = None,
+    ):
         super().__init__()
         self.wrapped = wrapped_layer
         self.return_kv = bool(return_kv)
+        self.per_layer_input_observer = per_layer_input_observer
+        self.quantized = _quantized_export(
+            mode,
+            stage_name="Gemma4 text decoder-layer decode",
+        )
 
     def forward(
         self,
@@ -444,6 +496,11 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
         shared_key_value: Optional[LayerKV] = None,
     ):
         """Run a static decode layer graph and optionally return the K/V delta."""
+        per_layer_input = _apply_export_boundary_observer(
+            per_layer_input,
+            self.per_layer_input_observer,
+            quantized=self.quantized,
+        )
         output = self.wrapped(
             hidden_states,
             per_layer_input=per_layer_input,
