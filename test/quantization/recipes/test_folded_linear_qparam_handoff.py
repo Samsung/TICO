@@ -16,6 +16,7 @@
 
 import unittest
 from types import SimpleNamespace
+from typing import Any, Optional, Tuple
 from unittest.mock import patch
 
 import tico.quantization.recipes.qparams as qparams
@@ -29,7 +30,7 @@ class _FakeObserver:
     """Record qparams loaded by the handoff helper."""
 
     def __init__(self) -> None:
-        self.loaded = None
+        self.loaded: Optional[Tuple[Any, Any, Any]] = None
 
     def load_qparams(self, scale, zero, lock) -> None:
         """Store one qparam handoff for later assertions."""
