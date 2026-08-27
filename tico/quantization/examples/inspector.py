@@ -53,8 +53,16 @@ def parse_args() -> argparse.Namespace:
         ],
         default="trace",
     )
-    parser.add_argument("--model", default=None, help="Override model.name_or_path.")
-    parser.add_argument("--device", default=None, help="Override runtime.device.")
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the model path for the selected inspect mode.",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Override the runtime device for the selected inspect mode.",
+    )
     parser.add_argument("--enable-quantization", action="store_true")
     parser.add_argument("--interesting-modules", nargs="*", default=[])
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
@@ -107,18 +115,22 @@ def parse_args() -> argparse.Namespace:
 def _build_overrides(args: argparse.Namespace) -> list[str]:
     """Translate convenience CLI arguments into recipe config overrides."""
     overrides = list(args.set)
+    runtime_config_prefix = {
+        "static-llama-runtime": "debug.static_llama_runtime",
+        "static-gemma4-runtime": "debug.static_gemma4_runtime",
+    }.get(args.mode)
 
     if args.model:
         model_key = (
-            "debug.static_llama_runtime.model"
-            if args.mode == "static-llama-runtime"
+            f"{runtime_config_prefix}.model"
+            if runtime_config_prefix is not None
             else "model.name_or_path"
         )
         overrides.append(f"{model_key}={args.model}")
     if args.device:
         device_key = (
-            "debug.static_llama_runtime.device"
-            if args.mode == "static-llama-runtime"
+            f"{runtime_config_prefix}.device"
+            if runtime_config_prefix is not None
             else "runtime.device"
         )
         overrides.append(f"{device_key}={args.device}")

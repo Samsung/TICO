@@ -271,6 +271,60 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         self.assertEqual(calls["cfg"].model, "new-model")
         self.assertEqual(calls["cfg"].device, "cuda")
 
+    def test_inspect_cli_dispatches_static_gemma4_runtime(self):
+        """inspector.py should apply Gemma4 runtime-specific CLI overrides."""
+        calls: dict[str, Any] = {}
+
+        def fake_load_recipe_config(path, overrides):
+            calls["load"] = (path, overrides)
+            return {
+                "runtime": {},
+                "debug": {
+                    "static_gemma4_runtime": {
+                        "model": "new-model",
+                        "device": "cuda",
+                    }
+                },
+            }
+
+        argv = [
+            "inspector.py",
+            "--config",
+            "recipe.yaml",
+            "--mode",
+            "static-gemma4-runtime",
+            "--model",
+            "new-model",
+            "--device",
+            "cuda",
+        ]
+
+        with patch.object(
+            inspect_cli,
+            "load_recipe_config",
+            fake_load_recipe_config,
+        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
+            inspect_cli,
+            "run_static_gemma4_runtime",
+            lambda cfg: calls.setdefault("cfg", cfg),
+        ), patch.object(
+            sys, "argv", argv
+        ):
+            inspect_cli.main()
+
+        self.assertEqual(
+            calls["load"],
+            (
+                "recipe.yaml",
+                [
+                    "debug.static_gemma4_runtime.model=new-model",
+                    "debug.static_gemma4_runtime.device=cuda",
+                ],
+            ),
+        )
+        self.assertEqual(calls["cfg"].model, "new-model")
+        self.assertEqual(calls["cfg"].device, "cuda")
+
     def test_inspect_cli_dispatches_tied_embedding_smoke(self):
         """inspector.py should dispatch tied embedding smoke mode."""
         calls: dict[str, Any] = {}
