@@ -142,7 +142,8 @@ class Gemma4VisionPrefillExportAdapter(nn.Module):
         ``pixel_values`` has the fixed patch layout selected at construction.
 
     Output contract:
-        Returns visual soft tokens with shape ``(1, V, text_hidden_size)``.
+        Returns visual soft tokens with shape ``(V, text_hidden_size)``. The
+        fixed batch dimension is flattened by the static vision-model export.
     """
 
     def __init__(

@@ -192,6 +192,65 @@ class TestValidatePaddingLayout(unittest.TestCase):
             _validate_padding_layout(input_ids, valid_token_mask, padding_side="right")  # type: ignore[arg-type]
 
 
+@unittest.skipUnless(
+    HAS_TRANSFORMERS, "transformers is required for static runtime helpers"
+)
+class TestBuildStaticInputs(unittest.TestCase):
+    """Tests for the fixed sequence-length processor contract."""
+
+    def test_uses_layout_max_seq_and_rejects_override(self):
+        """The processor batch should always use ``layout.max_seq``."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        class FakeProcessor:
+            """Return one small image-text processor batch."""
+
+            def __call__(self, **kwargs):
+                del kwargs
+                return {
+                    "input_ids": torch.tensor([[7, 99, 99, 8]], dtype=torch.long),
+                    "attention_mask": torch.ones(1, 4, dtype=torch.long),
+                    "pixel_values": torch.zeros(1, 8, 12),
+                    "image_position_ids": torch.zeros(1, 8, 2, dtype=torch.long),
+                }
+
+        class FakeVisionProfile:
+            """Accept the synthetic processor output."""
+
+            def validate_processor_outputs(self, outputs, *, image_token_id):
+                self.outputs = outputs
+                self.image_token_id = image_token_id
+
+        runtime = object.__new__(StaticGemma4Runtime)
+        runtime.processor = FakeProcessor()
+        runtime.text_config = SimpleNamespace(pad_token_id=0)
+        runtime.device = torch.device("cpu")
+        runtime.layout = SimpleNamespace(max_seq=8)
+        runtime.config = SimpleNamespace(image_token_id=99)
+        runtime.vision_profile = FakeVisionProfile()
+
+        batch = runtime.build_static_inputs("prompt", image=None)
+
+        self.assertEqual(tuple(batch["llm_input_ids"].shape), (1, 8))
+        self.assertEqual(tuple(batch["attention_mask"].shape), (1, 8))
+        torch.testing.assert_close(
+            batch["llm_input_ids"][0, :4],
+            torch.tensor([7, 0, 0, 8], dtype=torch.long),
+        )
+        self.assertTrue(torch.all(batch["llm_input_ids"][0, 4:] == 0))
+
+        with self.assertRaises(TypeError):
+            runtime.build_static_inputs(  # type: ignore[call-arg]
+                "prompt",
+                image=None,
+                max_seq=4,
+            )
+
+
 class TestAllocateEmptyCache(unittest.TestCase):
     """Tests for StaticGemma4Runtime._allocate_empty_cache.
 
@@ -357,6 +416,83 @@ class TestAllocateEmptyCache(unittest.TestCase):
             self.assertEqual(cache.past_v.shape[-1], 256)
 
 
+@unittest.skipUnless(
+    HAS_TRANSFORMERS, "transformers is required for static runtime helpers"
+)
+class TestAttentionMaskFillValue(unittest.TestCase):
+    """Tests for the runtime/export additive-mask value contract."""
+
+    def test_prefill_and_decode_use_configured_fill_value(self):
+        """Both text paths should use the configured PTQ mask fill value."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        def mock_rotary_emb(x, position_ids, layer_type):
+            del position_ids, layer_type
+            return torch.ones_like(x), torch.zeros_like(x)
+
+        class FakeModel(torch.nn.Module):
+            """Expose a parameter dtype and the Gemma4 rotary hierarchy."""
+
+            def __init__(self):
+                super().__init__()
+                self.probe = torch.nn.Parameter(torch.zeros(1))
+                self.model = SimpleNamespace(
+                    language_model=SimpleNamespace(rotary_emb=mock_rotary_emb)
+                )
+
+        max_seq = 8
+        fill_value = -37.5
+        runtime = SimpleNamespace(
+            text_config=SimpleNamespace(
+                layer_types=["full_attention", "sliding_attention"],
+                sliding_window=2,
+            ),
+            layout=SimpleNamespace(max_seq=max_seq),
+            device=torch.device("cpu"),
+            past_len=3,
+            model=FakeModel(),
+            attention_mask_fill_value=fill_value,
+        )
+
+        input_ids = torch.ones(1, max_seq, dtype=torch.long)
+        valid = torch.tensor([[1, 1, 1, 0, 0, 0, 0, 0]], dtype=torch.long)
+        prefill_masks, _ = StaticGemma4Runtime.build_prefill_masks_and_rope(
+            runtime,  # type: ignore[arg-type]
+            input_ids,
+            valid,
+        )
+        self.assertEqual(
+            prefill_masks["full_attention"][0, 0, 0, 3].item(),
+            fill_value,
+        )
+        self.assertEqual(
+            prefill_masks["sliding_attention"][0, 0, 2, 0].item(),
+            fill_value,
+        )
+
+        decode_masks, _ = StaticGemma4Runtime.build_decode_masks_and_rope(
+            runtime,  # type: ignore[arg-type]
+            batch_size=1,
+            dtype=torch.float32,
+        )
+        self.assertEqual(
+            decode_masks["full_attention"][0, 0, 3].item(),
+            fill_value,
+        )
+        self.assertEqual(
+            decode_masks["sliding_attention"][0, 0, 0].item(),
+            fill_value,
+        )
+        self.assertEqual(
+            decode_masks["full_attention"][0, 0, max_seq - 1].item(),
+            0.0,
+        )
+
+
 class TestBuildDecodeMasksAndRope(unittest.TestCase):
     """Tests for StaticGemma4Runtime.build_decode_masks_and_rope.
 
@@ -438,7 +574,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         )
 
         mask = masks["full_attention"][0, 0, :]  # (max_seq,)
-        mask_value = torch.finfo(torch.float32).min
+        mask_value = -120.0
 
         # Valid past-cache slots are allowed.
         self.assertTrue(torch.all(mask[:past_len] == 0.0))
@@ -485,7 +621,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         )
 
         mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
-        mask_value = torch.finfo(torch.float32).min
+        mask_value = -120.0
 
         # When past_len < sliding_window, every valid past slot is allowed.
         self.assertTrue(torch.all(mask[:past_len] == 0.0))
@@ -530,7 +666,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         )
 
         mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
-        mask_value = torch.finfo(torch.float32).min
+        mask_value = -120.0
 
         # window_start = max(0, past_len - sliding_window + 1) = 100 - 32 + 1 = 69
         window_start = max(0, past_len - sliding_window + 1)
@@ -579,7 +715,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         )
 
         mask = masks["sliding_attention"][0, 0, :]  # (max_seq,)
-        mask_value = torch.finfo(torch.float32).min
+        mask_value = -120.0
 
         # At past_len=0, only the final current-token slot is allowed.
         self.assertTrue(torch.all(mask[: max_seq - 1] == mask_value))
@@ -629,6 +765,73 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
         pos_ids = captured_pos_ids[0]
         self.assertEqual(pos_ids.shape, (1, 1))
         self.assertEqual(pos_ids[0, 0].item(), past_len)
+
+
+@unittest.skipUnless(
+    HAS_TRANSFORMERS, "transformers is required for static runtime helpers"
+)
+class TestVerifyVisionPrefill(unittest.TestCase):
+    """Tests for the pixel-values-only vision-prefill verification ABI."""
+
+    def test_uses_pixel_values_only_for_eager_and_export_paths(self):
+        """The verification helper should never pass runtime position IDs."""
+        from types import SimpleNamespace
+
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            verify_step_vision_prefill,
+        )
+
+        class FakeVisionPrefill(torch.nn.Module):
+            """Flatten the fixed batch dimension from synthetic visual tokens."""
+
+            def forward(self, pixel_values):
+                return pixel_values.squeeze(0)
+
+        class FakeReferenceModel:
+            """Return the same output through the HF-style reference API."""
+
+            dtype = torch.float32
+
+            def get_image_features(
+                self,
+                *,
+                pixel_values,
+                image_position_ids,
+                return_dict,
+            ):
+                del image_position_ids, return_dict
+                return SimpleNamespace(pooler_output=pixel_values.squeeze(0))
+
+        class FakeWrappedModel:
+            """Return the same output through the wrapped eager reference API."""
+
+            def get_image_features(self, *, pixel_values, image_position_ids):
+                del image_position_ids
+                return pixel_values.squeeze(0)
+
+        vision_prefill = FakeVisionPrefill()
+        runtime = SimpleNamespace(
+            device=torch.device("cpu"),
+            model=FakeReferenceModel(),
+            qmodel=SimpleNamespace(
+                wrapped=SimpleNamespace(
+                    model=SimpleNamespace(wrapped=FakeWrappedModel())
+                )
+            ),
+            _get_or_create_vision_prefill=lambda image_position_ids: vision_prefill,
+        )
+        batch = {
+            "pixel_values": torch.arange(8, dtype=torch.float32).reshape(1, 4, 2),
+            "image_position_ids": torch.zeros(1, 4, 2, dtype=torch.long),
+        }
+
+        visual_embeds = verify_step_vision_prefill(runtime, batch)
+
+        self.assertEqual(tuple(visual_embeds.shape), (4, 2))
+        torch.testing.assert_close(
+            visual_embeds,
+            batch["pixel_values"].squeeze(0),
+        )
 
 
 class TestDecodeOneFixedCacheContract(unittest.TestCase):

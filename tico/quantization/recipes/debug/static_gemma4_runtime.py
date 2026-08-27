@@ -115,8 +115,7 @@ def _build_full_attention_mask(
             tokens, False for padding.
         device: Target device.
         dtype: Target dtype for the output mask.
-        mask_value: Value used to mask forbidden positions (typically
-            ``torch.finfo(dtype).min``).
+        mask_value: Configured additive value used to mask forbidden positions.
 
     Returns:
         Additive attention bias of shape ``(B, 1, S, S)``.  ``0.0`` allows
@@ -268,6 +267,8 @@ class StaticGemma4Runtime:
             num_vision_layers=int(model.config.vision_config.num_hidden_layers),
             model_args={"vision": vision_profile.to_vision_model_args()},
         )
+        # Keep runtime-created masks aligned with the PTQ/export ABI.
+        self.attention_mask_fill_value = float(qcfg.attention_mask_fill_value)
         # Runtime simulation must stay in NO_QUANT mode until a calibrated
         # checkpoint is supplied. This matches the floating-point Circle
         # export path and keeps as_export_module() available.
@@ -395,27 +396,22 @@ class StaticGemma4Runtime:
             caches.append(LayerCache(past_k=past_k, past_v=torch.zeros_like(past_k)))
         return caches
 
-    def build_static_inputs(
-        self, prompt: str, image, max_seq: Optional[int] = None
-    ) -> dict[str, Any]:
-        """
-        Build static padded processor inputs.
+    def build_static_inputs(self, prompt: str, image) -> dict[str, Any]:
+        """Build processor inputs padded to the fixed runtime sequence length.
 
-        Processes the prompt+image through the HF processor, pads to
-        ``max_seq``, and replaces image placeholder tokens with
-        ``pad_token_id`` to create ``llm_input_ids``.
+        Processes the prompt and image through the HF processor, pads token
+        inputs to ``self.layout.max_seq``, and replaces image placeholder tokens
+        with ``pad_token_id`` to create ``llm_input_ids``.
 
         Args:
             prompt: Text prompt string.
             image: PIL image or tensor to feed to the processor.
-            max_seq: Override for ``self.layout.max_seq``.
 
         Returns:
             Dict with keys: ``llm_input_ids``, ``pixel_values``,
             ``image_position_ids``, ``attention_mask``, ``valid_length``.
         """
-        if max_seq is None:
-            max_seq = self.layout.max_seq
+        max_seq = self.layout.max_seq
         pad_token_id = getattr(self.text_config, "pad_token_id", 0)
 
         inputs = self.processor(
@@ -534,7 +530,7 @@ class StaticGemma4Runtime:
         position_ids = torch.arange(seq_len, device=self.device).unsqueeze(0)  # (1, S)
 
         # --- Attention masks ---
-        mask_value = torch.finfo(runtime_dtype).min
+        mask_value = float(getattr(self, "attention_mask_fill_value", -120.0))
 
         # Full attention: standard causal + padding
         full_mask = _build_full_attention_mask(
@@ -696,7 +692,7 @@ class StaticGemma4Runtime:
           ``past_len``, per layer type.
         """
         max_seq = self.layout.max_seq
-        mask_value = torch.finfo(dtype).min
+        mask_value = float(getattr(self, "attention_mask_fill_value", -120.0))
 
         # Full attention decode mask: attend to all past + current token
         full_mask = build_decode_attention_mask(
@@ -1080,9 +1076,10 @@ def verify_step_vision_prefill(
     """Side-by-side validation of ``vision_prefill`` against references.
 
     The runtime's ``Gemma4VisionPrefillExportAdapter`` runs the vision tower
-    followed by the ``embed_vision`` projection.  This function feeds
-    ``pixel_values`` and ``image_position_ids`` through the runtime adapter
-    and two reference paths:
+    followed by the ``embed_vision`` projection. The runtime adapter accepts
+    only ``pixel_values``; ``image_position_ids`` are validated and baked into
+    the selected static profile before execution. This function compares that
+    pixel-values-only path against two reference paths:
 
     1. **HF (FP) reference** — ``runtime.model.get_image_features(...)``:
        Compared via PEIR (Peak-Error-to-Interval Ratio) as an informational
@@ -1104,7 +1101,7 @@ def verify_step_vision_prefill(
         runtime: The ``StaticGemma4Runtime`` instance.
         batch: The batch dict returned by ``build_static_inputs``.
 
-    Returns the visual embeddings tensor (shape ``(1, V, hidden_size)``).
+    Returns the visual embeddings tensor (shape ``(V, hidden_size)``).
     """
 
     import torch.testing
@@ -1119,7 +1116,7 @@ def verify_step_vision_prefill(
 
     # --- Runtime side ---
     vision_prefill = runtime._get_or_create_vision_prefill(image_position_ids)
-    rt_visual_embeds = vision_prefill(pixel_values, image_position_ids)
+    rt_visual_embeds = vision_prefill(pixel_values)
 
     # --- HF reference ---
     # model.get_image_features() returns BaseModelOutputWithPooling whose
@@ -1168,13 +1165,10 @@ def verify_step_vision_prefill(
     # ExportedProgram output here also guards the graph handed to tico.convert.
     exported_program = torch.export.export(
         vision_prefill,
-        (pixel_values, image_position_ids),
+        (pixel_values,),
         strict=False,
     )
-    exported_visual_embeds = exported_program.module()(
-        pixel_values,
-        image_position_ids,
-    )
+    exported_visual_embeds = exported_program.module()(pixel_values)
     torch.testing.assert_close(
         exported_visual_embeds,
         rt_visual_embeds,
@@ -1411,10 +1405,10 @@ def verify_step_masks_and_rope(
             )
             continue
 
-        # Convert to boolean: True = allowed (not mask_value), False = masked
-        mask_value = torch.finfo(runtime_dtype).min
-        rt_allowed = rt_mask.squeeze(1).squeeze(0) > (mask_value / 2)  # (S, S)
-        ref_allowed = ref_mask.squeeze(1).squeeze(0) > (mask_value / 2)  # (S, S)
+        # Additive masks use exactly 0.0 for allowed positions. The masked
+        # fill values may differ between the runtime and HF reference.
+        rt_allowed = rt_mask.squeeze(1).squeeze(0).eq(0.0)  # (S, S)
+        ref_allowed = ref_mask.squeeze(1).squeeze(0).eq(0.0)  # (S, S)
 
         torch.testing.assert_close(
             rt_allowed,
