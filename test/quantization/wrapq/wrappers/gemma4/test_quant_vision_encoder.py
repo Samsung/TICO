@@ -554,6 +554,42 @@ class TestQuantGemma4VisionEncoder(unittest.TestCase):
         self.assertEqual(output.shape, (1, self.seq_len, self.hidden_size))
         self.assertTrue(torch.isfinite(output).all())
 
+    def test_as_export_module_supports_bfloat16_compute_dtype(self):
+        """BF16 export should keep static RoPE and mask templates in BF16."""
+        fp_encoder = _make_encoder(self.cfg).to(dtype=torch.bfloat16)
+        q_encoder = QuantGemma4VisionEncoder(fp_encoder).eval()
+        pixel_position_ids = _vision_position_ids(1, self.seq_len)
+
+        adapter = q_encoder.as_export_module(
+            "prefill",
+            pixel_position_ids=pixel_position_ids,
+        )
+
+        self.assertEqual(
+            q_encoder.position_embeddings_cos_template.dtype,
+            torch.bfloat16,
+        )
+        self.assertEqual(
+            q_encoder.position_embeddings_sin_template.dtype,
+            torch.bfloat16,
+        )
+        self.assertEqual(
+            q_encoder.attention_mask_template.dtype,
+            torch.bfloat16,
+        )
+
+        inputs_embeds = torch.randn(
+            1,
+            self.seq_len,
+            self.hidden_size,
+            dtype=torch.bfloat16,
+        )
+        with torch.no_grad():
+            output = adapter(inputs_embeds)
+
+        self.assertEqual(output.dtype, torch.bfloat16)
+        self.assertTrue(torch.isfinite(output).all())
+
     def test_as_export_module_rejects_calibration_mode(self):
         """Export should reject CALIB mode because qparams are incomplete."""
         fp_encoder = _make_encoder(self.cfg)
