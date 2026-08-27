@@ -67,7 +67,8 @@ class TestDatasetRoleLoading(unittest.TestCase):
 
         self.assertIs(loaded, dataset)
         load_dataset_mock.assert_called_once_with(
-            path="HuggingFaceM4/VQAv2",
+            path="lmms-lab/VQAv2-FewShot",
+            name="full",
             split="train",
             streaming=True,
         )
@@ -87,7 +88,8 @@ class TestDatasetRoleLoading(unittest.TestCase):
             )
 
         load_dataset_mock.assert_called_once_with(
-            path="HuggingFaceM4/VQAv2",
+            path="lmms-lab/VQAv2-FewShot",
+            name="full",
             split="validation",
             streaming=True,
         )
@@ -200,6 +202,59 @@ class TestLlmCalibrationRoleLoading(unittest.TestCase):
                 )
 
         load_dataset_mock.assert_not_called()
+
+    def test_unregistered_corpus_fails_before_download(self):
+        with patch.object(llm_data, "load_dataset") as load_dataset_mock:
+            with self.assertRaisesRegex(
+                DatasetUsageError,
+                "no registered calibration policy",
+            ):
+                llm_data.build_wikitext_calibration_inputs(
+                    tokenizer=self._tokenizer(),
+                    cache_dir=None,
+                    n_samples=1,
+                    seq_len=4,
+                    seed=7,
+                    device="cpu",
+                    dataset_name="example/custom-corpus",
+                    dataset_config=None,
+                    split="train",
+                )
+
+        load_dataset_mock.assert_not_called()
+
+    def test_unregistered_corpus_loads_only_with_explicit_opt_in(self):
+        dataset = {"text": ["custom calibration corpus"]}
+        tokenizer = self._tokenizer()
+
+        with patch.object(
+            llm_data,
+            "load_dataset",
+            return_value=dataset,
+        ) as load_dataset_mock:
+            with self.assertWarnsRegex(
+                RuntimeWarning,
+                "UNREGISTERED CALIBRATION DATASET ENABLED",
+            ):
+                samples = llm_data.build_wikitext_calibration_inputs(
+                    tokenizer=tokenizer,
+                    cache_dir=None,
+                    n_samples=1,
+                    seq_len=4,
+                    seed=7,
+                    device="cpu",
+                    dataset_name="example/custom-corpus",
+                    dataset_config=None,
+                    split="train",
+                    allow_unregistered_dataset=True,
+                )
+
+        load_dataset_mock.assert_called_once_with(
+            "example/custom-corpus",
+            split="train",
+            cache_dir=None,
+        )
+        self.assertEqual(len(samples), 1)
 
 
 if __name__ == "__main__":

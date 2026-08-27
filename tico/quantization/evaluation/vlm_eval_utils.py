@@ -299,7 +299,8 @@ DATASETS: dict[str, dict[str, Any]] = {
     "vqav2": {
         "default_split": "validation",
         "adapter": get_item_vqav2,
-        "candidates": ["HuggingFaceM4/VQAv2", "vqav2", "lmms-lab/VQAv2"],
+        "candidates": ["lmms-lab/VQAv2-FewShot"],
+        "config": "full",
         "is_text_only": False,
     },
     "textvqa": {
@@ -1260,6 +1261,7 @@ def get_dataset(
     split: Optional[str] = None,
     streaming: bool = True,
     allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ):
     """Load a supported dataset using an explicit semantic data-use role.
 
@@ -1270,6 +1272,8 @@ def get_dataset(
         split: Optional explicit split. Role-specific policy supplies the default.
         streaming: Whether to request streaming mode from ``load_dataset``.
         allow_benchmark_overlap: Permit an explicitly transductive calibration use.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
         A tuple containing the dataset iterable and its adapter.
@@ -1297,6 +1301,7 @@ def get_dataset(
     validate_single_dataset_usage(
         usage,
         allow_benchmark_overlap=allow_benchmark_overlap,
+        allow_unregistered_dataset=allow_unregistered_dataset,
     )
 
     resolved_split = usage.split
@@ -1443,6 +1448,7 @@ def get_calib_inputs(
     split: Optional[str] = None,
     max_seq_len: Optional[int] = None,
     allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ):
     """
     Build calibration inputs by preprocessing image-question pairs.
@@ -1457,6 +1463,8 @@ def get_calib_inputs(
         split: Optional dataset split. If omitted, the registry default is used.
         max_seq_len: Optional maximum text sequence length.
         allow_benchmark_overlap: Permit an explicitly transductive calibration use.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
         A list of processor output objects, one per example.
@@ -1467,6 +1475,7 @@ def get_calib_inputs(
         n=n_samples,
         split=split,
         allow_benchmark_overlap=allow_benchmark_overlap,
+        allow_unregistered_dataset=allow_unregistered_dataset,
     )
 
     calib_inputs = []
@@ -1572,6 +1581,7 @@ def get_mixed_calib_inputs(
     max_seq_len: int,
     seed: int = 42,
     allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Build calibration inputs from multiple datasets
@@ -1598,6 +1608,8 @@ def get_mixed_calib_inputs(
         seed: Random seed for reproducible sampling (used only for text-only
             datasets).
         allow_benchmark_overlap: Permit explicitly transductive calibration data.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
         A list of processor output objects from all datasets.
@@ -1626,6 +1638,7 @@ def get_mixed_calib_inputs(
                 n=-1,
                 split=split,
                 allow_benchmark_overlap=allow_benchmark_overlap,
+                allow_unregistered_dataset=allow_unregistered_dataset,
             )
 
             # For text-only datasets: use adapter to extract text, then sample random sequences
@@ -1665,6 +1678,7 @@ def get_mixed_calib_inputs(
                 n=n_samples,
                 split=split,
                 allow_benchmark_overlap=allow_benchmark_overlap,
+                allow_unregistered_dataset=allow_unregistered_dataset,
             )
 
             # For image-text datasets: take first n_samples directly

@@ -111,6 +111,21 @@ This override emits a prominent warning, and benchmark results from the produced
 checkpoint must not be reported as strictly held out. Gold targets remain
 excluded from calibration rendering by default.
 
+Unregistered calibration corpora cannot be checked against TICO's dataset-role
+policy and therefore fail by default. Custom text corpora may be enabled only
+with an explicit opt-in:
+
+```yaml
+calibration:
+  dataset: example/custom-corpus
+  split: train
+  dataset_config: null
+  allow_unregistered_dataset: true
+```
+
+This option records the source as unverified and emits a warning. It does not add
+an adapter or loader for an otherwise unsupported VLM dataset key.
+
 ## Adding a new calibration dataset
 
 1. Decide whether the dataset belongs in an existing modality file or a new file.

@@ -34,9 +34,10 @@ def build_wikitext_calibration_inputs(
     seed: int,
     device: torch.device | str,
     dataset_name: str = "Salesforce/wikitext",
-    dataset_config: str = "wikitext-2-raw-v1",
+    dataset_config: str | None = "wikitext-2-raw-v1",
     split: str = "train",
     allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ) -> list[torch.Tensor]:
     """Build deterministic causal-LM calibration windows from a text corpus."""
     usage = resolve_dataset_usage(
@@ -50,6 +51,7 @@ def build_wikitext_calibration_inputs(
     validate_single_dataset_usage(
         usage,
         allow_benchmark_overlap=allow_benchmark_overlap,
+        allow_unregistered_dataset=allow_unregistered_dataset,
     )
 
     if usage.config is None:

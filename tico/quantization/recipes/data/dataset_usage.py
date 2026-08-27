@@ -134,11 +134,18 @@ def _policy(
 DATASET_POLICIES: dict[str, DatasetPolicy] = {
     "vqav2": _policy(
         key="vqav2",
-        canonical_id="HuggingFaceM4/VQAv2",
-        aliases=("vqav2", "HuggingFaceM4/VQAv2", "lmms-lab/VQAv2"),
+        canonical_id="lmms-lab/VQAv2-FewShot",
+        aliases=(
+            "vqav2",
+            "HuggingFaceM4/VQAv2",
+            "lmms-lab/VQAv2",
+            "lmms-lab-encoder/VQAv2",
+            "lmms-lab/VQAv2-FewShot",
+        ),
         allowed_roles=(CALIBRATION_ROLE, EVALUATION_ROLE),
         default_splits={CALIBRATION_ROLE: "train", EVALUATION_ROLE: "validation"},
         calibration_safe_splits=("train",),
+        default_config="full",
     ),
     "textvqa": _policy(
         key="textvqa",
@@ -321,15 +328,11 @@ def resolve_dataset_usage(
             )
         resolved_split = policy.default_splits.get(normalized_role)
         if resolved_split is None:
-            # Resolve the dataset's benchmark split so the central validator can
-            # report the semantic role violation and honor an explicit
-            # transductive override.
-            resolved_split = next(iter(policy.default_splits.values()), None)
-        if resolved_split is None:
             allowed = ", ".join(sorted(policy.allowed_roles))
             raise DatasetUsageError(
-                f"Dataset {dataset!r} does not define a split for role "
-                f"{normalized_role!r}. Allowed roles: {allowed}."
+                f"Dataset {dataset!r} has no default split for role "
+                f"{normalized_role!r}. Specify the split explicitly. "
+                f"Allowed roles: {allowed}."
             )
     else:
         resolved_split = str(split).strip()
@@ -360,6 +363,16 @@ def _usage_policy(usage: DatasetUsage) -> DatasetPolicy | None:
     if usage.policy_key is not None:
         return DATASET_POLICIES[usage.policy_key]
     return get_dataset_policy(usage.canonical_id)
+
+
+def _unregistered_calibration_risks(usage: DatasetUsage) -> list[str]:
+    """Return risks for calibration sources whose safety policy is unknown."""
+    if usage.role != CALIBRATION_ROLE or _usage_policy(usage) is not None:
+        return []
+    return [
+        f"{usage.canonical_id} has no registered calibration policy; "
+        "role and split safety cannot be verified"
+    ]
 
 
 def dataset_usage_risks(usage: DatasetUsage) -> list[str]:
@@ -436,7 +449,9 @@ def _format_usage_error(
         [
             "",
             (
-                "Choose a source allowed for the requested role. Unsafe "
+                "Choose a source allowed for the requested role. "
+                "Unregistered calibration sources require "
+                "calibration.allow_unregistered_dataset=true. Unsafe "
                 "calibration splits and calibration/evaluation overlap may be "
                 "opted into with calibration.allow_benchmark_overlap=true for an "
                 "explicitly transductive experiment. The override never permits "
@@ -451,6 +466,7 @@ def validate_single_dataset_usage(
     usage: DatasetUsage,
     *,
     allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ) -> None:
     """Validate one loader request independently of a complete recipe."""
     target_risks = _target_inclusion_risks(usage)
@@ -461,6 +477,24 @@ def validate_single_dataset_usage(
                 [],
                 [f"{usage.consumer}: {risk}" for risk in target_risks],
             )
+        )
+
+    unregistered_risks = _unregistered_calibration_risks(usage)
+    if unregistered_risks and not allow_unregistered_dataset:
+        raise DatasetUsageError(
+            _format_usage_error(
+                [usage],
+                [],
+                [f"{usage.consumer}: {risk}" for risk in unregistered_risks],
+            )
+        )
+    if unregistered_risks:
+        warnings.warn(
+            "UNREGISTERED CALIBRATION DATASET ENABLED: safety checks are "
+            "limited to the explicitly configured identity and split. "
+            + " ".join(unregistered_risks),
+            RuntimeWarning,
+            stacklevel=2,
         )
 
     risks = dataset_usage_risks(usage)
@@ -966,6 +1000,7 @@ def _store_provenance(
     evaluation_usages: Sequence[DatasetUsage],
     *,
     transductive: bool,
+    unverified: bool,
     violations: Sequence[str],
 ) -> None:
     """Store resolved data sources in the configuration saved by the runner."""
@@ -976,6 +1011,7 @@ def _store_provenance(
         usage.to_config() for usage in calibration_usages
     ]
     calibration["transductive"] = transductive
+    calibration["unverified"] = unverified
     if violations:
         calibration["dataset_usage_warnings"] = list(violations)
     else:
@@ -1017,10 +1053,13 @@ def validate_recipe_dataset_usage(
 
     target_violations: list[str] = []
     evaluation_violations: list[str] = []
+    unregistered_violations: list[str] = []
     transductive_violations: list[str] = []
     for usage in calibration_usages:
         for risk in _target_inclusion_risks(usage):
             target_violations.append(f"{usage.consumer}: {risk}")
+        for risk in _unregistered_calibration_risks(usage):
+            unregistered_violations.append(f"{usage.consumer}: {risk}")
         for risk in dataset_usage_risks(usage):
             transductive_violations.append(f"{usage.consumer}: {risk}")
 
@@ -1038,6 +1077,20 @@ def validate_recipe_dataset_usage(
             )
         )
 
+    calibration_cfg = cfg.get("calibration", {})
+    allow_unregistered = bool(
+        isinstance(calibration_cfg, Mapping)
+        and calibration_cfg.get("allow_unregistered_dataset", False)
+    )
+    if unregistered_violations and not allow_unregistered:
+        raise DatasetUsageError(
+            _format_usage_error(
+                calibration_usages,
+                evaluation_usages,
+                unregistered_violations,
+            )
+        )
+
     for calibration in calibration_usages:
         for evaluation in evaluation_usages:
             if dataset_usages_overlap(calibration, evaluation):
@@ -1047,12 +1100,12 @@ def validate_recipe_dataset_usage(
                     f"evaluation=({evaluation.describe()})"
                 )
 
-    calibration_cfg = cfg.get("calibration", {})
     allow_overlap = bool(
         isinstance(calibration_cfg, Mapping)
         and calibration_cfg.get("allow_benchmark_overlap", False)
     )
     transductive = bool(transductive_violations)
+    unverified = bool(unregistered_violations)
 
     if transductive_violations and not allow_overlap:
         raise DatasetUsageError(
@@ -1068,8 +1121,20 @@ def validate_recipe_dataset_usage(
         calibration_usages,
         evaluation_usages,
         transductive=transductive,
-        violations=transductive_violations,
+        unverified=unverified,
+        violations=unregistered_violations + transductive_violations,
     )
+
+    if unregistered_violations:
+        message = (
+            "UNREGISTERED CALIBRATION DATASET ENABLED: TICO cannot verify "
+            "whether the configured source is independent from evaluation data. "
+            + " | ".join(unregistered_violations)
+        )
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        if emit_summary:
+            border = "!" * 80
+            print(f"\n{border}\nWARNING: {message}\n{border}\n")
 
     if transductive_violations:
         message = (

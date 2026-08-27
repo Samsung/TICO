@@ -277,6 +277,9 @@ class Gemma4Adapter(ModelAdapter):
                 allow_benchmark_overlap=bool(
                     calib.get("allow_benchmark_overlap", False)
                 ),
+                allow_unregistered_dataset=bool(
+                    calib.get("allow_unregistered_dataset", False)
+                ),
             )
 
     def forward_calibration(

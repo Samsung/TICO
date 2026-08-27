@@ -227,6 +227,9 @@ class LlamaAdapter(ModelAdapter):
             dataset_config=calib.get("dataset_config", "wikitext-2-raw-v1"),
             split=calib.get("split", "train"),
             allow_benchmark_overlap=bool(calib.get("allow_benchmark_overlap", False)),
+            allow_unregistered_dataset=bool(
+                calib.get("allow_unregistered_dataset", False)
+            ),
         )
 
     def forward_calibration(

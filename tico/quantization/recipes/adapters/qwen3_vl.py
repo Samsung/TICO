@@ -151,6 +151,9 @@ class Qwen3VLAdapter(ModelAdapter):
             max_seq_len=calib.get("seq_len"),
             seed=int(runtime.get("seed", 42)),
             allow_benchmark_overlap=bool(calib.get("allow_benchmark_overlap", False)),
+            allow_unregistered_dataset=bool(
+                calib.get("allow_unregistered_dataset", False)
+            ),
         )
 
     def forward_calibration(

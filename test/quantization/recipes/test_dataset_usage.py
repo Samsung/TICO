@@ -54,6 +54,8 @@ class TestRoleAwareDatasetResolution(unittest.TestCase):
         self.assertEqual(calibration.split, "train")
         self.assertEqual(evaluation.split, "validation")
         self.assertEqual(calibration.canonical_id, evaluation.canonical_id)
+        self.assertEqual(calibration.canonical_id, "lmms-lab/VQAv2-FewShot")
+        self.assertEqual(calibration.config, "full")
 
     def test_mmlu_calibration_defaults_to_auxiliary_train(self):
         usage = resolve_dataset_usage(
@@ -88,6 +90,48 @@ class TestRoleAwareDatasetResolution(unittest.TestCase):
                 dataset="example/custom-corpus",
                 role=CALIBRATION_ROLE,
                 consumer="test",
+            )
+
+    def test_missing_role_default_requires_explicit_split(self):
+        with self.assertRaisesRegex(
+            DatasetUsageError,
+            "no default split.*Specify the split explicitly",
+        ):
+            resolve_dataset_usage(
+                dataset="videomme",
+                role=CALIBRATION_ROLE,
+                consumer="test",
+            )
+
+    def test_unregistered_calibration_dataset_fails_by_default(self):
+        usage = resolve_dataset_usage(
+            dataset="example/custom-corpus",
+            role=CALIBRATION_ROLE,
+            split="train",
+            consumer="test",
+        )
+
+        with self.assertRaisesRegex(
+            DatasetUsageError,
+            "no registered calibration policy",
+        ):
+            validate_single_dataset_usage(usage)
+
+    def test_unregistered_calibration_dataset_requires_explicit_opt_in(self):
+        usage = resolve_dataset_usage(
+            dataset="example/custom-corpus",
+            role=CALIBRATION_ROLE,
+            split="train",
+            consumer="test",
+        )
+
+        with self.assertWarnsRegex(
+            RuntimeWarning,
+            "UNREGISTERED CALIBRATION DATASET ENABLED",
+        ):
+            validate_single_dataset_usage(
+                usage,
+                allow_unregistered_dataset=True,
             )
 
     def test_videomme_is_evaluation_only(self):
@@ -430,6 +474,55 @@ class TestRecipeDatasetValidation(unittest.TestCase):
         self.assertTrue(captured)
         self.assertIn("TRANSDUCTIVE DATASET USAGE ENABLED", str(captured[0].message))
         self.assertTrue(cfg["calibration"]["transductive"])
+        self.assertTrue(cfg["calibration"]["dataset_usage_warnings"])
+
+    def test_unregistered_recipe_dataset_fails_by_default(self):
+        cfg = self._qwen_config()
+        cfg["calibration"]["datasets"] = [
+            {
+                "dataset": "example/custom-corpus",
+                "split": "train",
+                "n_samples": 8,
+            }
+        ]
+        cfg["evaluation"]["enabled"] = False
+
+        with self.assertRaisesRegex(
+            DatasetUsageError,
+            "no registered calibration policy",
+        ):
+            validate_recipe_dataset_usage(
+                cfg,
+                include_calibration=True,
+                emit_summary=False,
+            )
+
+    def test_unregistered_recipe_dataset_opt_in_records_unverified_provenance(self):
+        cfg = self._qwen_config()
+        cfg["calibration"] = {
+            "datasets": [
+                {
+                    "dataset": "example/custom-corpus",
+                    "split": "train",
+                    "n_samples": 8,
+                }
+            ],
+            "allow_unregistered_dataset": True,
+        }
+        cfg["evaluation"]["enabled"] = False
+
+        with self.assertWarnsRegex(
+            RuntimeWarning,
+            "UNREGISTERED CALIBRATION DATASET ENABLED",
+        ):
+            validate_recipe_dataset_usage(
+                cfg,
+                include_calibration=True,
+                emit_summary=False,
+            )
+
+        self.assertTrue(cfg["calibration"]["unverified"])
+        self.assertFalse(cfg["calibration"]["transductive"])
         self.assertTrue(cfg["calibration"]["dataset_usage_warnings"])
 
     def test_target_inclusion_is_rejected_by_default(self):
