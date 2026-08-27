@@ -226,12 +226,12 @@ class TestBuildStaticInputs(unittest.TestCase):
                 self.image_token_id = image_token_id
 
         runtime = object.__new__(StaticGemma4Runtime)
-        runtime.processor = FakeProcessor()
+        runtime.processor = FakeProcessor()  # type: ignore[assignment]
         runtime.text_config = SimpleNamespace(pad_token_id=0)
         runtime.device = torch.device("cpu")
-        runtime.layout = SimpleNamespace(max_seq=8)
-        runtime.config = SimpleNamespace(image_token_id=99)
-        runtime.vision_profile = FakeVisionProfile()
+        runtime.layout = SimpleNamespace(max_seq=8)  # type: ignore[assignment]
+        runtime.config = SimpleNamespace(image_token_id=99)  # type: ignore[assignment]
+        runtime.vision_profile = FakeVisionProfile()  # type: ignore[assignment]
 
         batch = runtime.build_static_inputs("prompt", image=None)
 
@@ -244,7 +244,7 @@ class TestBuildStaticInputs(unittest.TestCase):
         self.assertTrue(torch.all(batch["llm_input_ids"][0, 4:] == 0))
 
         with self.assertRaises(TypeError):
-            runtime.build_static_inputs(  # type: ignore[call-arg]
+            runtime.build_static_inputs(  # type: ignore[call-arg] # pylint: disable=unexpected-keyword-arg
                 "prompt",
                 image=None,
                 max_seq=4,
@@ -825,7 +825,7 @@ class TestVerifyVisionPrefill(unittest.TestCase):
             "image_position_ids": torch.zeros(1, 4, 2, dtype=torch.long),
         }
 
-        visual_embeds = verify_step_vision_prefill(runtime, batch)
+        visual_embeds = verify_step_vision_prefill(runtime, batch)  # type: ignore[arg-type]
 
         self.assertEqual(tuple(visual_embeds.shape), (4, 2))
         torch.testing.assert_close(
