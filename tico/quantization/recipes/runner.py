@@ -19,6 +19,7 @@ from typing import Any, Mapping
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.config import save_effective_config
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.data.dataset_usage import validate_recipe_dataset_usage
 from tico.quantization.recipes.evaluation.selection import (
     validate_adapter_evaluation_config,
 )
@@ -325,6 +326,29 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     print()
 
 
+def _requires_calibration_inputs(
+    cfg: Mapping[str, Any],
+    adapter: Any,
+) -> bool:
+    """Return whether any enabled operation consumes calibration inputs."""
+    adapter_requirement = getattr(adapter, "requires_calibration_inputs", None)
+    if callable(adapter_requirement) and bool(adapter_requirement(cfg)):
+        return True
+
+    for stage_cfg in cfg.get("pipeline", []):
+        if not isinstance(stage_cfg, Mapping):
+            raise TypeError("Each pipeline stage must be a mapping.")
+        if not stage_cfg.get("enabled", True):
+            continue
+        stage = get_stage(stage_cfg["name"])
+        # Legacy stages and test doubles may predate this metadata.
+        # Preserve the previous runner behavior by conservatively treating
+        # an unannotated enabled stage as a calibration consumer.
+        if getattr(stage, "requires_calibration_inputs", True):
+            return True
+    return False
+
+
 class QuantizationRunner:
     """Pipeline runner for model-family adapters and algorithm stages."""
 
@@ -340,13 +364,25 @@ class QuantizationRunner:
 
         adapter = get_adapter(model_cfg["family"])
         validate_adapter_evaluation_config(adapter, cfg)
+        needs_calibration = _requires_calibration_inputs(cfg, adapter)
+        validate_recipe_dataset_usage(
+            cfg,
+            include_calibration=needs_calibration,
+        )
         ctx = RecipeContext(cfg=cfg, adapter=adapter)
 
         print("=== Loading model ===")
         ctx = adapter.load_model(ctx)
 
-        print("=== Building calibration inputs ===")
-        ctx.calibration_inputs = adapter.build_calibration_inputs(ctx)
+        if needs_calibration:
+            print("=== Building calibration inputs ===")
+            ctx.calibration_inputs = adapter.build_calibration_inputs(ctx)
+        else:
+            print(
+                "=== Skipping calibration inputs: "
+                "no enabled operation requires them ==="
+            )
+            ctx.calibration_inputs = []
 
         print("=== Running quantization pipeline ===")
         for stage_cfg in cfg.get("pipeline", []):

@@ -14,7 +14,7 @@ runtime:
 
 calibration:
   dataset: vqav2
-  split: testdev
+  split: train
   n_samples: 1
   seq_len: 2048
 

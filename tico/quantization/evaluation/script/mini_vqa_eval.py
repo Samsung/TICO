@@ -23,6 +23,7 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_accuracy_on_dataset,
     get_dataset,
 )
+from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
 
 
 def load_model_and_processor(model_id: str, torch_dtype: torch.dtype):
@@ -154,6 +155,7 @@ def main():
 
     ds, adapter = get_dataset(
         dataset=args.dataset,
+        role=EVALUATION_ROLE,
         n=args.n,
         split=args.split,
     )

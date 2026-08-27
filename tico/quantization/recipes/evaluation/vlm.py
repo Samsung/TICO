@@ -25,6 +25,7 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_coco_scores_on_dataset,
     get_dataset,
 )
+from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
 
 
 def evaluate_vqa_tasks(
@@ -53,7 +54,7 @@ def evaluate_vqa_tasks(
                     stderr_buffer = stack.enter_context(io.StringIO())
                     stack.enter_context(contextlib.redirect_stderr(stderr_buffer))
 
-            dataset, adapter = get_dataset(task, n=n_samples)
+            dataset, adapter = get_dataset(task, role=EVALUATION_ROLE, n=n_samples)
             total_for_progress = n_samples if n_samples >= 0 else None
             dataset_iter = tqdm.tqdm(
                 dataset,
@@ -103,7 +104,7 @@ def evaluate_coco_score_dataset(
     Returns:
         COCO-style metric values returned by the shared evaluation helper.
     """
-    dataset, _ = get_dataset(dataset_name, n=n_samples)
+    dataset, _ = get_dataset(dataset_name, role=EVALUATION_ROLE, n=n_samples)
     return get_coco_scores_on_dataset(
         model=model,
         processor=processor,
@@ -209,7 +210,7 @@ def evaluate_vlm_text_ppl(
     max_seq_len: int,
     show_progress: bool,
 ) -> float:
-    dataset, _ = get_dataset(dataset_name, split=split, n=-1)
+    dataset, _ = get_dataset(dataset_name, role=EVALUATION_ROLE, split=split, n=-1)
     return float(
         evaluate_ppl(
             model=model,
@@ -257,7 +258,7 @@ def evaluate_vlm_text_ppl_chat_prefix(
     Returns:
         Conditional perplexity score.
     """
-    dataset, _ = get_dataset(dataset_name, split=split, n=-1)
+    dataset, _ = get_dataset(dataset_name, role=EVALUATION_ROLE, split=split, n=-1)
     return float(
         evaluate_ppl_chat_prefix(
             model=model,

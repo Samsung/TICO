@@ -172,6 +172,8 @@ def build_vlm_calibration_inputs(
     split: str | None = None,
     max_seq_len: int | None = None,
     seed: int = 42,
+    allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ) -> list[dict]:
     """
     Build VLM calibration inputs from either one dataset or a mixed dataset set.
@@ -187,6 +189,9 @@ def build_vlm_calibration_inputs(
             dataset registry default is used.
         max_seq_len: Optional maximum text sequence length.
         seed: Random seed for text-only mixed calibration sampling.
+        allow_benchmark_overlap: Permit explicitly transductive calibration data.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
         A list of processor output dictionaries for calibration.
@@ -198,6 +203,8 @@ def build_vlm_calibration_inputs(
             dataset_config=dataset_config,
             max_seq_len=max_seq_len or 2048,
             seed=seed,
+            allow_benchmark_overlap=allow_benchmark_overlap,
+            allow_unregistered_dataset=allow_unregistered_dataset,
         )
 
     if dataset is not None and "," in dataset:
@@ -207,6 +214,8 @@ def build_vlm_calibration_inputs(
             dataset_config=dataset_config,
             max_seq_len=max_seq_len or 2048,
             seed=seed,
+            allow_benchmark_overlap=allow_benchmark_overlap,
+            allow_unregistered_dataset=allow_unregistered_dataset,
         )
 
     return get_calib_inputs(
@@ -215,4 +224,6 @@ def build_vlm_calibration_inputs(
         n_samples=n_samples,
         split=split,
         max_seq_len=max_seq_len,
+        allow_benchmark_overlap=allow_benchmark_overlap,
+        allow_unregistered_dataset=allow_unregistered_dataset,
     )

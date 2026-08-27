@@ -25,6 +25,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
 
+from tico.quantization.recipes.data.dataset_usage import (
+    CALIBRATION_ROLE,
+    resolve_dataset_usage,
+    validate_single_dataset_usage,
+)
+
 
 def normalize_answer(s: str) -> str:
     """
@@ -242,6 +248,19 @@ def get_item_alpaca(ex: dict[str, Any]) -> dict[str, Any]:
     return {"text": text}
 
 
+def get_item_mmlu_calib(ex: dict[str, Any]) -> dict[str, Any]:
+    """Render an MMLU calibration sample without the benchmark target."""
+    question = str(ex.get("question", ""))
+    choices = ex.get("choices") or []
+
+    lines = [question]
+    for index, choice in enumerate(choices):
+        label = chr(ord("A") + index)
+        lines.append(f"{label}. {choice}")
+
+    return {"text": "\n".join(lines)}
+
+
 def get_item_mmmu_calib(ex: dict[str, Any]) -> dict[str, Any]:
     """
     Adapt an MMMU/MMMU_Pro sample for VLM calibration.
@@ -280,7 +299,8 @@ DATASETS: dict[str, dict[str, Any]] = {
     "vqav2": {
         "default_split": "validation",
         "adapter": get_item_vqav2,
-        "candidates": ["HuggingFaceM4/VQAv2", "vqav2", "lmms-lab/VQAv2"],
+        "candidates": ["lmms-lab/VQAv2-FewShot"],
+        "config": "full",
         "is_text_only": False,
     },
     "textvqa": {
@@ -315,6 +335,13 @@ DATASETS: dict[str, dict[str, Any]] = {
         "default_split": "train",
         "adapter": get_item_alpaca,
         "candidates": ["tatsu-lab/alpaca"],
+        "is_text_only": True,
+    },
+    "mmlu": {
+        "default_split": "auxiliary_train",
+        "adapter": get_item_mmlu_calib,
+        "candidates": ["cais/mmlu"],
+        "config": "all",
         "is_text_only": True,
     },
     "mmmu_pro_vision": {
@@ -1228,31 +1255,32 @@ def get_accuracy_on_dataset(
 
 def get_dataset(
     dataset: str,
+    *,
+    role: str,
     n: int = 50,
     split: Optional[str] = None,
     streaming: bool = True,
+    allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ):
-    """
-    Load a supported evaluation dataset with simple name fallback logic.
-
-    The function tries multiple known dataset identifiers because mirrors or
-    dataset aliases may differ across environments.
+    """Load a supported dataset using an explicit semantic data-use role.
 
     Args:
         dataset: Dataset key defined in ``DATASETS``.
-        n: Number of examples to take. Use a negative value to keep the full
-            iterable without truncation.
-        split: Optional dataset split. If omitted, the dataset default split is
-            used.
+        role: Semantic use such as ``calibration`` or ``evaluation``.
+        n: Number of examples to take. A negative value keeps the full source.
+        split: Optional explicit split. Role-specific policy supplies the default.
         streaming: Whether to request streaming mode from ``load_dataset``.
+        allow_benchmark_overlap: Permit an explicitly transductive calibration use.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
-        A tuple of:
-        - dataset iterable
-        - adapter function for the selected dataset
+        A tuple containing the dataset iterable and its adapter.
 
     Raises:
         KeyError: If the dataset key is unsupported.
+        DatasetUsageError: If the requested role or split is unsafe.
         RuntimeError: If none of the candidate dataset names can be loaded.
     """
     if dataset not in DATASETS:
@@ -1262,9 +1290,23 @@ def get_dataset(
 
     meta: dict[str, Any] = DATASETS[dataset]
     adapter = meta["adapter"]
-    split = split or meta["default_split"]  # type: ignore[assignment]
+    usage = resolve_dataset_usage(
+        dataset=meta.get("policy", dataset),
+        role=role,
+        split=split,
+        config=meta.get("config"),
+        consumer=f"get_dataset:{dataset}",
+        n_samples=n,
+    )
+    validate_single_dataset_usage(
+        usage,
+        allow_benchmark_overlap=allow_benchmark_overlap,
+        allow_unregistered_dataset=allow_unregistered_dataset,
+    )
+
+    resolved_split = usage.split
+    config = usage.config
     candidates = meta["candidates"]
-    config = meta.get("config")  # Optional config for datasets like wikitext
     assert isinstance(candidates, list)
 
     ds = None
@@ -1274,10 +1316,10 @@ def get_dataset(
         try:
             if config:
                 ds = load_dataset(
-                    path=name, name=config, split=split, streaming=streaming
+                    path=name, name=config, split=resolved_split, streaming=streaming
                 )
             else:
-                ds = load_dataset(path=name, split=split, streaming=streaming)
+                ds = load_dataset(path=name, split=resolved_split, streaming=streaming)
             if n >= 0:
                 ds = ds.take(n)
 
@@ -1285,7 +1327,9 @@ def get_dataset(
             stream_str = "streaming" if streaming else "non-streaming"
             config_str = f"config={config}, " if config else ""
             print(
-                f"[info] Loaded dataset: {name} ({config_str}{split}, {stream_str}), size={size_str}"
+                f"[info] Loaded dataset: {name} "
+                f"({config_str}{resolved_split}, role={role}, {stream_str}), "
+                f"size={size_str}"
             )
             break
         except Exception as exc:
@@ -1293,8 +1337,9 @@ def get_dataset(
 
     if ds is None:
         raise RuntimeError(
-            f"Failed to load dataset='{dataset}', split='{split}', "
-            f"candidates={candidates}. Last error: {last_err}"
+            f"Failed to load dataset='{dataset}', role='{role}', "
+            f"split='{resolved_split}', candidates={candidates}. "
+            f"Last error: {last_err}"
         )
 
     return ds, adapter
@@ -1402,6 +1447,8 @@ def get_calib_inputs(
     n_samples: int = 28,
     split: Optional[str] = None,
     max_seq_len: Optional[int] = None,
+    allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ):
     """
     Build calibration inputs by preprocessing image-question pairs.
@@ -1415,11 +1462,21 @@ def get_calib_inputs(
         n_samples: Number of calibration examples to prepare.
         split: Optional dataset split. If omitted, the registry default is used.
         max_seq_len: Optional maximum text sequence length.
+        allow_benchmark_overlap: Permit an explicitly transductive calibration use.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
         A list of processor output objects, one per example.
     """
-    ds, adapter = get_dataset(dataset=dataset, n=n_samples, split=split)
+    ds, adapter = get_dataset(
+        dataset=dataset,
+        role=CALIBRATION_ROLE,
+        n=n_samples,
+        split=split,
+        allow_benchmark_overlap=allow_benchmark_overlap,
+        allow_unregistered_dataset=allow_unregistered_dataset,
+    )
 
     calib_inputs = []
     for ex in ds:
@@ -1523,6 +1580,8 @@ def get_mixed_calib_inputs(
     dataset_config: Dict[str, Dict[str, Any]],
     max_seq_len: int,
     seed: int = 42,
+    allow_benchmark_overlap: bool = False,
+    allow_unregistered_dataset: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Build calibration inputs from multiple datasets
@@ -1548,6 +1607,9 @@ def get_mixed_calib_inputs(
                       }
         seed: Random seed for reproducible sampling (used only for text-only
             datasets).
+        allow_benchmark_overlap: Permit explicitly transductive calibration data.
+        allow_unregistered_dataset: Permit calibration with a source that has no
+            registered safety policy.
 
     Returns:
         A list of processor output objects from all datasets.
@@ -1570,7 +1632,14 @@ def get_mixed_calib_inputs(
             # TODO: text only inputs should be changed with chat template
 
             # Loading whole dataset
-            ds, adapter = get_dataset(dataset=dataset, n=-1, split=split)
+            ds, adapter = get_dataset(
+                dataset=dataset,
+                role=CALIBRATION_ROLE,
+                n=-1,
+                split=split,
+                allow_benchmark_overlap=allow_benchmark_overlap,
+                allow_unregistered_dataset=allow_unregistered_dataset,
+            )
 
             # For text-only datasets: use adapter to extract text, then sample random sequences
             if adapter is None:
@@ -1603,7 +1672,14 @@ def get_mixed_calib_inputs(
             calib_inputs.extend(text_inputs)
         else:
             # Loading whole dataset
-            ds, adapter = get_dataset(dataset=dataset, n=n_samples, split=split)
+            ds, adapter = get_dataset(
+                dataset=dataset,
+                role=CALIBRATION_ROLE,
+                n=n_samples,
+                split=split,
+                allow_benchmark_overlap=allow_benchmark_overlap,
+                allow_unregistered_dataset=allow_unregistered_dataset,
+            )
 
             # For image-text datasets: take first n_samples directly
             if adapter is None:

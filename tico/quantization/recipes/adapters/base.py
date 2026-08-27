@@ -66,6 +66,10 @@ class ModelAdapter(ABC):
                 f"evaluation.{config_key}."
             )
 
+    def requires_calibration_inputs(self, cfg: Mapping[str, Any]) -> bool:
+        """Return whether adapter operations outside pipeline stages need inputs."""
+        return False
+
     @abstractmethod
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         raise NotImplementedError

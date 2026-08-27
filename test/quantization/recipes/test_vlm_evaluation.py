@@ -47,6 +47,7 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_item_alpaca,
     get_item_coco,
     get_item_llava_bench_in_the_wild,
+    get_item_mmlu_calib,
     get_item_mmmu_calib,
     get_item_textvqa,
     get_item_vqav2,
@@ -54,6 +55,7 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     move_inputs_to_device,
     normalize_answer,
 )
+from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
 
 
 class TestVlmEvaluation(unittest.TestCase):
@@ -61,8 +63,8 @@ class TestVlmEvaluation(unittest.TestCase):
         """LLaVA-Bench evaluation should use the shared COCO-score helper."""
         captured = {}
 
-        def fake_get_dataset(name, n):
-            captured["get_dataset"] = {"name": name, "n": n}
+        def fake_get_dataset(name, *, role, n):
+            captured["get_dataset"] = {"name": name, "role": role, "n": n}
             return ["sample"], object()
 
         def fake_get_coco_scores_on_dataset(**kwargs):
@@ -81,7 +83,10 @@ class TestVlmEvaluation(unittest.TestCase):
             )
 
         self.assertEqual(result["CIDEr"], 1.5)
-        self.assertEqual(captured["get_dataset"], {"name": "llava_bench", "n": 3})
+        self.assertEqual(
+            captured["get_dataset"],
+            {"name": "llava_bench", "role": EVALUATION_ROLE, "n": 3},
+        )
         self.assertEqual(captured["scores"]["dataset_name"], "llava_bench")
         self.assertEqual(captured["scores"]["ds"], ["sample"])
         self.assertEqual(captured["scores"]["max_seq_len"], 128)
@@ -288,6 +293,25 @@ class TestDatasetAdapters(unittest.TestCase):
         self.assertEqual(item, {"text": "Do X"})
 
 
+class TestGetItemMmluCalib(unittest.TestCase):
+    """Tests for target-free MMLU calibration rendering."""
+
+    def test_gold_answer_is_not_rendered(self):
+        item = get_item_mmlu_calib(
+            {
+                "question": "What is 2 + 2?",
+                "choices": ["3", "4", "5", "6"],
+                "answer": 1,
+            }
+        )
+
+        self.assertEqual(
+            item["text"],
+            "What is 2 + 2?\nA. 3\nB. 4\nC. 5\nD. 6",
+        )
+        self.assertNotIn("Answer:", item["text"])
+
+
 class TestGetItemMmmuCalib(unittest.TestCase):
     """Tests for get_item_mmmu_calib."""
 
@@ -364,6 +388,7 @@ class TestDatasetsRegistry(unittest.TestCase):
         ) as load_dataset_mock:
             loaded, adapter = vlm_eval_utils.get_dataset(
                 "mmmu_pro_vision",
+                role=EVALUATION_ROLE,
                 n=1,
             )
 
@@ -383,7 +408,7 @@ class TestDatasetsRegistry(unittest.TestCase):
                 self.assertIn(key, meta, f"Dataset '{name}' missing key '{key}'")
 
     def test_text_only_datasets_marked(self):
-        for name in ("wikitext2", "alpaca"):
+        for name in ("wikitext2", "alpaca", "mmlu"):
             self.assertTrue(
                 DATASETS[name].get("is_text_only", False),
                 f"Dataset '{name}' should be text-only",

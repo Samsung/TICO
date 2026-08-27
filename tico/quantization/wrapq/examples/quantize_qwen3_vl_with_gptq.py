@@ -53,6 +53,7 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_dataset,
     get_mixed_calib_inputs,
 )
+from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -161,13 +162,13 @@ def parse_args():
     parser.add_argument(
         "--nsamples_for_qcalibration",
         type=str,
-        default="vqav2:testdev:128,wikitext2:train:128",
+        default="vqav2:train:128,wikitext2:train:128",
         help=(
-            "Just a number -> uses default dataset `vqav2` with `testdev` split and N samples. "
+            "Just a number -> uses default dataset `vqav2` with `train` split and N samples. "
             "Comma-separated list: "
             "a) dataset:n_samples -> uses default split. "
             "b) dataset:split:n_samples -> uses specified split. "
-            "c) Multiple datasets example: vqav2:testdev:128,wikitext2:train:128,coco:32"
+            "c) Multiple datasets example: vqav2:train:128,wikitext2:train:128,coco:32"
         ),
     )
     parser.add_argument(
@@ -600,7 +601,7 @@ def evaluate_model(
             contextlib.redirect_stdout(buffer),
             contextlib.redirect_stderr(buffer),
         ):
-            ds, adapter = get_dataset(task, n=nsamples)
+            ds, adapter = get_dataset(task, role=EVALUATION_ROLE, n=nsamples)
             em_cnt, total = get_accuracy_on_dataset(
                 model,
                 processor,
@@ -637,7 +638,7 @@ def evaluate_model_with_coco_score(
         COCO metric dictionary.
     """
 
-    ds, _ = get_dataset(dataset_name, n=nsamples)
+    ds, _ = get_dataset(dataset_name, role=EVALUATION_ROLE, n=nsamples)
     result = get_coco_scores_on_dataset(
         model=model,
         processor=processor,
@@ -1289,7 +1290,12 @@ def evaluate_original_model(model, processor, args):
 
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Original Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
+        ds_ppl, _ = get_dataset(
+            args.ppl_dataset,
+            role=EVALUATION_ROLE,
+            split=args.ppl_split,
+            n=-1,
+        )
         original_ppl = evaluate_ppl(
             model=model,
             tokenizer=processor.tokenizer,
@@ -1413,7 +1419,12 @@ def evaluate_quantized_model(model, processor, args, original_results=None) -> N
 
     if args.ppl_dataset:
         print("\n=== PPL Evaluation (Quantized Model) ===")
-        ds_ppl, _ = get_dataset(args.ppl_dataset, split=args.ppl_split, n=-1)
+        ds_ppl, _ = get_dataset(
+            args.ppl_dataset,
+            role=EVALUATION_ROLE,
+            split=args.ppl_split,
+            n=-1,
+        )
         quantized_ppl = evaluate_ppl(
             model=model,
             tokenizer=processor.tokenizer,
@@ -1444,7 +1455,7 @@ def load_calib_inputs(processor, args) -> List[Dict[str, Any]]:
     # In this case, use the default dataset "vqav2"
     if raw_input.isdigit():
         n_samples = int(raw_input)
-        dataset_config["vqav2"] = {"n_samples": n_samples, "split": "testdev"}
+        dataset_config["vqav2"] = {"n_samples": n_samples, "split": "train"}
         print(f"[info] Using default dataset 'vqav2' with {n_samples} samples")
     else:
         # Parse the full format
