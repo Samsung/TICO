@@ -22,6 +22,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.utils.linear_folding import fold_input_affine_into_linear
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -30,12 +31,16 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionPatchEmbedder")
 class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
-    """PTQ wrapper for Gemma4 vision patch embedding with decomposed forward.
+    """PTQ wrapper for Gemma4 vision patch embedding with folded normalization.
+
+    The wrapper folds ``(pixel_values - 0.5) * 2.0`` into ``input_proj``
+    before any observers are created. Calibration and weight quantization
+    therefore operate on the final linear parameters, and Circle export does
+    not need separate Sub or Mul operators for pixel normalization.
 
     This wrapper quantizes:
     - position_embedding_table (per-tensor symmetric)
-    - Pixel normalization constants
-    - Scaled pixel values (input activation)
+    - Raw pixel values (input activation)
     - Projected hidden states (intermediate activation)
     - Position embeddings (intermediate activation)
     - Final output (output activation)
@@ -56,8 +61,13 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         self.patch_size = fp.patch_size
         self.position_embedding_size = fp.position_embedding_size
 
-        self.input_proj = PTQWrapper(
+        folded_input_proj = fold_input_affine_into_linear(
             fp.input_proj,
+            scale=2.0,
+            shift=-1.0,
+        )
+        self.input_proj = PTQWrapper(
+            folded_input_proj,
             qcfg=qcfg.child("input_proj") if qcfg else None,
             fp_name=join_name(fp_name, "input_proj"),
         )
@@ -68,50 +78,26 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
             fp.position_embedding_table.clone(),
             persistent=False,
         )
-        self.register_buffer(
-            "pixel_center",
-            self.position_embedding_table.new_tensor(0.5),
-            persistent=False,
-        )
-        self.register_buffer(
-            "pixel_rescale",
-            self.position_embedding_table.new_tensor(2.0),
-            persistent=False,
-        )
-
         self.obs_emb_table = self._make_obs(
             "position_embedding_table",
             dtype=DType.int(16),
             qscheme=QScheme.PER_TENSOR_SYMM,
         )
 
-        # Observers for activation tensors and normalization constants
+        # Observers for activation tensors around the folded projection.
         self.obs_act_in = self._make_obs("act_in")
-        self.obs_pixel_center = self._make_obs("pixel_center")
-        self.obs_pixel_values_m_0_5 = self._make_obs("pixel_values_m_0_5")
-        self.obs_pixel_rescale = self._make_obs("pixel_rescale")
-        self.obs_pixel_values = self._make_obs("pixel_values")
         self.obs_hidden_states = self._make_obs("hidden_states")
         self.obs_position_embeddings = self._make_obs("position_embeddings")
         self.obs_output = self._make_obs("output")
 
     def enable_calibration(self) -> None:
-        """Enable calibration and collect static tensor ranges."""
+        """Enable calibration and collect the static embedding-table range."""
         super().enable_calibration()
         self.obs_emb_table.collect(self.position_embedding_table)
-        self.obs_pixel_center.collect(self.pixel_center)
-        self.obs_pixel_rescale.collect(self.pixel_rescale)
 
     def _project_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Normalize and project flattened pixel patches into hidden space."""
+        """Project raw flattened pixel patches with the folded linear layer."""
         pixel_values = self._fq(pixel_values, self.obs_act_in)
-        pixel_center = self._fq(self.pixel_center, self.obs_pixel_center)
-        pixel_values = pixel_values - pixel_center
-        pixel_values = self._fq(pixel_values, self.obs_pixel_values_m_0_5)
-        pixel_rescale = self._fq(self.pixel_rescale, self.obs_pixel_rescale)
-        pixel_values = pixel_values * pixel_rescale
-        pixel_values = self._fq(pixel_values, self.obs_pixel_values)
-
         hidden_states = self.input_proj(pixel_values)
         return self._fq(hidden_states, self.obs_hidden_states)
 
@@ -202,10 +188,6 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         return (
             self.obs_emb_table,
             self.obs_act_in,
-            self.obs_pixel_center,
-            self.obs_pixel_values_m_0_5,
-            self.obs_pixel_rescale,
-            self.obs_pixel_values,
             self.obs_hidden_states,
             self.obs_position_embeddings,
             self.obs_output,

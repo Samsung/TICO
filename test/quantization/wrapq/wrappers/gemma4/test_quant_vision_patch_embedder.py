@@ -112,8 +112,37 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         # Shapes must match
         self.assertEqual(q_out.shape, fp_out.shape)
 
-        # Values must be close (the wrapper delegates to original operations)
+        # The folded projection must remain numerically equivalent.
         self.assertTrue(torch.allclose(q_out, fp_out, atol=1e-5, rtol=1e-5))
+
+    def test_pixel_normalization_is_folded_into_input_projection(self):
+        """Fold pixel normalization into a cloned projection before PTQ."""
+        fp_module = _make_patch_embedder(
+            hidden_size=self.hidden_size,
+            patch_size=self.patch_size,
+            position_embedding_size=self.position_embedding_size,
+        )
+        original_weight = fp_module.input_proj.weight.detach().clone()
+        self.assertIsNone(fp_module.input_proj.bias)
+
+        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
+        folded_linear = q_module.input_proj.wrapped.module
+        pixel_values, _, _ = self._sample_inputs()
+
+        self.assertIsNot(folded_linear, fp_module.input_proj)
+        torch.testing.assert_close(folded_linear.weight, original_weight * 2.0)
+        self.assertIsNotNone(folded_linear.bias)
+        torch.testing.assert_close(
+            folded_linear.bias,
+            -original_weight.sum(dim=1),
+        )
+        with torch.no_grad():
+            expected = fp_module.input_proj((pixel_values - 0.5) * 2.0)
+            actual = folded_linear(pixel_values)
+        torch.testing.assert_close(actual, expected)
+
+        torch.testing.assert_close(fp_module.input_proj.weight, original_weight)
+        self.assertIsNone(fp_module.input_proj.bias)
 
     def test_no_quant_output_shape(self):
         """Check that the output has the expected static shape."""
@@ -157,7 +186,7 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         self.assertIs(q_module._mode, Mode.QUANT)
 
     def test_observers_are_collected(self):
-        """Check that _all_observers returns all nine observers."""
+        """Check that _all_observers returns the five remaining observers."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -166,16 +195,12 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
 
         all_obs = list(q_module._all_observers())
-        self.assertEqual(len(all_obs), 9)
+        self.assertEqual(len(all_obs), 5)
         self.assertIs(all_obs[0], q_module.obs_emb_table)
         self.assertIs(all_obs[1], q_module.obs_act_in)
-        self.assertIs(all_obs[2], q_module.obs_pixel_center)
-        self.assertIs(all_obs[3], q_module.obs_pixel_values_m_0_5)
-        self.assertIs(all_obs[4], q_module.obs_pixel_rescale)
-        self.assertIs(all_obs[5], q_module.obs_pixel_values)
-        self.assertIs(all_obs[6], q_module.obs_hidden_states)
-        self.assertIs(all_obs[7], q_module.obs_position_embeddings)
-        self.assertIs(all_obs[8], q_module.obs_output)
+        self.assertIs(all_obs[2], q_module.obs_hidden_states)
+        self.assertIs(all_obs[3], q_module.obs_position_embeddings)
+        self.assertIs(all_obs[4], q_module.obs_output)
 
     # ------------------------------------------------------------------
     # Calibration and fake quantization
@@ -195,22 +220,6 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         # Check that the embedding-table observer collected min/max statistics.
         self.assertIsNotNone(q_module.obs_emb_table.min_val)
         self.assertIsNotNone(q_module.obs_emb_table.max_val)
-
-    def test_normalization_constants_are_observed_in_calib_mode(self):
-        """Collect exact ranges for both static pixel normalization constants."""
-        fp_module = _make_patch_embedder(
-            hidden_size=self.hidden_size,
-            patch_size=self.patch_size,
-            position_embedding_size=self.position_embedding_size,
-        )
-        q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
-
-        q_module.enable_calibration()
-
-        self.assertEqual(q_module.obs_pixel_center.min_val.item(), 0.5)
-        self.assertEqual(q_module.obs_pixel_center.max_val.item(), 0.5)
-        self.assertEqual(q_module.obs_pixel_rescale.min_val.item(), 2.0)
-        self.assertEqual(q_module.obs_pixel_rescale.max_val.item(), 2.0)
 
     def test_quant_mode_output_is_finite(self):
         """In QUANT mode the output should be finite and have the correct shape."""
@@ -284,8 +293,8 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             )
         )
 
-    def test_pixel_normalization_constants_are_registered_as_buffers(self):
-        """Keep the pixel center and rescale values as typed module buffers."""
+    def test_pixel_normalization_constants_are_not_registered_as_buffers(self):
+        """Avoid retaining normalization constants after parameter folding."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -294,18 +303,8 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
 
         buffers = dict(q_module.named_buffers())
-        self.assertIn("pixel_center", buffers)
-        self.assertIn("pixel_rescale", buffers)
-        self.assertEqual(q_module.pixel_center.item(), 0.5)
-        self.assertEqual(q_module.pixel_rescale.item(), 2.0)
-        self.assertEqual(
-            q_module.pixel_center.dtype,
-            fp_module.position_embedding_table.dtype,
-        )
-        self.assertEqual(
-            q_module.pixel_rescale.dtype,
-            fp_module.position_embedding_table.dtype,
-        )
+        self.assertNotIn("pixel_center", buffers)
+        self.assertNotIn("pixel_rescale", buffers)
 
     # ------------------------------------------------------------------
     # Config attributes
@@ -470,8 +469,8 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
             exported_output = exported.module()(pixel_values)
         torch.testing.assert_close(exported_output, actual)
 
-    def test_circle_export_uses_uint8_elementwise_constants(self):
-        """Serialize Sub, Mul, and Add constants in the UINT8 activation domain."""
+    def test_circle_export_folds_pixel_normalization_into_fully_connected(self):
+        """Export one biased FC without pixel-normalization Sub or Mul ops."""
         fp_module = _make_patch_embedder(
             hidden_size=self.hidden_size,
             patch_size=self.patch_size,
@@ -494,34 +493,37 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
         model = model_from_bytes(circle_model.circle_binary)
         graph = model.subgraphs[0]
 
-        expected_type = circle.TensorType.TensorType.UINT8
-        target_codes = {
-            circle.BuiltinOperator.BuiltinOperator.SUB,
-            circle.BuiltinOperator.BuiltinOperator.MUL,
-            circle.BuiltinOperator.BuiltinOperator.ADD,
+        sub_code = circle.BuiltinOperator.BuiltinOperator.SUB
+        mul_code = circle.BuiltinOperator.BuiltinOperator.MUL
+        add_code = circle.BuiltinOperator.BuiltinOperator.ADD
+        fc_code = circle.BuiltinOperator.BuiltinOperator.FULLY_CONNECTED
+        operators_by_code = {
+            code: [
+                operator
+                for operator in graph.operators
+                if _builtin_code(model, operator) == code
+            ]
+            for code in (sub_code, mul_code, add_code, fc_code)
         }
-        counts = {code: 0 for code in target_codes}
 
-        for operator in graph.operators:
-            builtin = _builtin_code(model, operator)
-            if builtin not in target_codes:
-                continue
+        self.assertEqual(operators_by_code[sub_code], [])
+        self.assertEqual(operators_by_code[mul_code], [])
+        self.assertEqual(len(operators_by_code[add_code]), 1)
+        self.assertEqual(len(operators_by_code[fc_code]), 1)
 
-            counts[builtin] += 1
-            self.assertEqual(len(operator.inputs), 2)
-            self.assertEqual(len(operator.outputs), 1)
+        expected_type = circle.TensorType.TensorType.UINT8
+        add = operators_by_code[add_code][0]
+        self.assertEqual(len(add.inputs), 2)
+        self.assertEqual(len(add.outputs), 1)
+        for tensor_index in (*add.inputs, *add.outputs):
+            self.assertEqual(graph.tensors[tensor_index].type, expected_type)
 
-            lhs = graph.tensors[operator.inputs[0]]
-            rhs = graph.tensors[operator.inputs[1]]
-            output = graph.tensors[operator.outputs[0]]
-            self.assertEqual(lhs.type, expected_type)
-            self.assertEqual(rhs.type, expected_type)
-            self.assertEqual(output.type, expected_type)
-            self.assertNotEqual(rhs.buffer, 0)
-            self.assertIsNotNone(rhs.quantization)
-
-        for code in target_codes:
-            self.assertEqual(counts[code], 1)
+        fc = operators_by_code[fc_code][0]
+        self.assertEqual(len(fc.inputs), 3)
+        self.assertEqual(len(fc.outputs), 1)
+        bias = graph.tensors[fc.inputs[2]]
+        self.assertNotEqual(bias.buffer, 0)
+        self.assertIsNotNone(bias.quantization)
 
 
 if __name__ == "__main__":

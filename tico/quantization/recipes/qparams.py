@@ -17,6 +17,9 @@ from typing import Any
 import torch
 
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.utils.linear_folding import (
+    reused_weight_qparam_scale_multiplier,
+)
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
@@ -46,7 +49,7 @@ def inject_gptq_qparams(
     *,
     verbose: bool = False,
 ) -> dict[str, int]:
-    """Inject GPTQ scale / zero-point into PTQ weight observers."""
+    """Inject compatible GPTQ scale and zero-point values into PTQ observers."""
     seen: set[str] = set()
     missed: list[str] = []
 
@@ -65,8 +68,13 @@ def inject_gptq_qparams(
             missed.append(module.fp_name)
             continue
 
+        scale_multiplier = reused_weight_qparam_scale_multiplier(module)
+        scale = quantizer.scale
+        if scale_multiplier != 1.0:
+            scale = scale * scale_multiplier
+
         assert isinstance(obs, AffineObserverBase)
-        obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
+        obs.load_qparams(scale, quantizer.zero, lock=True)
         seen.add(module.fp_name)
 
     unused = set(gptq_quantizers.keys()) - seen
