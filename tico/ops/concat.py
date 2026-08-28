@@ -25,10 +25,16 @@ from torch import nn
 class Concat(nn.Module):
     """Concatenate tensors along a fixed dimension."""
 
-    def __init__(self, dim: int = 0) -> None:
-        """Store the concatenation dimension."""
+    def __init__(
+        self,
+        dim: int = 0,
+        *,
+        allow_distinct_input_qparams: bool = False,
+    ) -> None:
+        """Store the axis and target-backend input-qparam contract."""
         super().__init__()
         self.dim = int(dim)
+        self.allow_distinct_input_qparams = bool(allow_distinct_input_qparams)
 
     def forward(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
         """Concatenate a non-empty tensor sequence."""
@@ -38,5 +44,8 @@ class Concat(nn.Module):
         return torch.cat(values, dim=self.dim)
 
     def extra_repr(self) -> str:
-        """Return the fixed concatenation dimension."""
-        return f"dim={self.dim}"
+        """Return the fixed dimension and nondefault qparam contract."""
+        fields = [f"dim={self.dim}"]
+        if self.allow_distinct_input_qparams:
+            fields.append("allow_distinct_input_qparams=True")
+        return ", ".join(fields)

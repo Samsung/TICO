@@ -40,7 +40,10 @@ from examples.hand_detector._support.verify_circle_resize import (
 from examples.hand_detector._support.verify_quantized_circle import (
     verify_quantized_circle,
 )
-from examples.hand_detector.hand_detector import load_nhwc_hand_detector
+from examples.hand_detector.hand_detector import (
+    load_nhwc_hand_detector,
+    lower_resize_bilinear_to_tconv,
+)
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -84,6 +87,26 @@ def parse_args() -> argparse.Namespace:
         default=DIRECTORY / "exported" / "manifest.json",
     )
     quantized.add_argument("--skip-verification", action="store_true")
+    quantized.add_argument(
+        "--resize-tconv",
+        action="store_true",
+        help=(
+            "Lower every 2x half-pixel RESIZE_BILINEAR to an equivalent "
+            "fixed-weight TRANSPOSE_CONV."
+        ),
+    )
+    quantized.add_argument(
+        "--resize-tconv-groups",
+        type=int,
+        default=4,
+        help=(
+            "Split each lowered TRANSPOSE_CONV into this many channel groups "
+            "joined by one CONCATENATION. The interpolation weight is "
+            "diagonal, so the result is bit-identical while the dense "
+            "constant weight shrinks by the group factor."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -134,6 +157,17 @@ def _export_float(args: argparse.Namespace) -> None:
 
 def _export_quantized(args: argparse.Namespace) -> None:
     model = load_nhwc_hand_detector(args.weights, args.spec).eval()
+    lowered_resize_positions: tuple[int, ...] = ()
+    if args.resize_tconv:
+        lowered_resize_positions = lower_resize_bilinear_to_tconv(
+            model.detector,
+            groups=args.resize_tconv_groups,
+        )
+        print(
+            "Lowered RESIZE_BILINEAR operations "
+            f"{lowered_resize_positions} to TRANSPOSE_CONV "
+            f"(groups={args.resize_tconv_groups})."
+        )
     if args.calibration_dir is None:
         calibration = make_synthetic_inputs(
             args.synthetic_calibration_samples,
@@ -162,7 +196,21 @@ def _export_quantized(args: argparse.Namespace) -> None:
                 "verification_skipped": True,
             }
         else:
-            summary = verify_quantized_circle(output, bit_width)
+            if args.resize_tconv:
+                # Each lowered resize removes one RESIZE_BILINEAR and adds two
+                # replicate-padding CONCATENATION operators, plus one channel
+                # CONCATENATION when the TRANSPOSE_CONV is split into groups.
+                concats_per_resize = 2 + (1 if args.resize_tconv_groups > 1 else 0)
+                summary = verify_quantized_circle(
+                    output,
+                    bit_width,
+                    expected_resize_count=0,
+                    expected_concat_count=(
+                        2 + concats_per_resize * len(lowered_resize_positions)
+                    ),
+                )
+            else:
+                summary = verify_quantized_circle(output, bit_width)
             summary["layout"] = verify_circle_layout(output)
         summary["sha256"] = _sha256(output)
         models[dtype_name] = summary
@@ -173,6 +221,10 @@ def _export_quantized(args: argparse.Namespace) -> None:
         "input_shape": [1, 192, 192, 3],
         "calibration_samples": len(calibration),
         "synthetic_calibration": args.calibration_dir is None,
+        "resize_tconv": bool(args.resize_tconv),
+        "resize_tconv_groups": (
+            int(args.resize_tconv_groups) if args.resize_tconv else None
+        ),
         "models": models,
     }
     args.manifest_json.parent.mkdir(parents=True, exist_ok=True)

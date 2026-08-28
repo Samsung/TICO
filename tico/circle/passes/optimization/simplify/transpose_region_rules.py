@@ -33,6 +33,7 @@ _MIRROR_PAD_BUILTIN_CODE = _builtin_operator_value("MIRROR_PAD")
 _PAD_BUILTIN_CODE = _builtin_operator_value("PAD")
 _PADV2_BUILTIN_CODE = _builtin_operator_value("PADV2")
 _SLICE_BUILTIN_CODE = _builtin_operator_value("SLICE")
+_STRIDED_SLICE_BUILTIN_CODE = _builtin_operator_value("STRIDED_SLICE")
 _SPLIT_BUILTIN_CODE = _builtin_operator_value("SPLIT")
 _SPLIT_V_BUILTIN_CODE = _builtin_operator_value("SPLIT_V")
 _TILE_BUILTIN_CODE = _builtin_operator_value("TILE")
@@ -43,6 +44,7 @@ _AXIS_REMAP_BUILTIN_CODES: Mapping[str, int] = MappingProxyType(
         "MIRROR_PAD": _MIRROR_PAD_BUILTIN_CODE,
         "PADV2": _PADV2_BUILTIN_CODE,
         "SLICE": _SLICE_BUILTIN_CODE,
+        "STRIDED_SLICE": _STRIDED_SLICE_BUILTIN_CODE,
         "SPLIT": _SPLIT_BUILTIN_CODE,
         "SPLIT_V": _SPLIT_V_BUILTIN_CODE,
         "TILE": _TILE_BUILTIN_CODE,
@@ -1042,6 +1044,185 @@ class _SliceRule(_RegionOpRule):
         )
 
 
+def _strided_slice_matches_shape(
+    input_shape: tuple[int, ...],
+    output_shape: tuple[int, ...],
+    begin: tuple[int, ...],
+    end: tuple[int, ...],
+    strides: tuple[int, ...],
+    begin_mask: int,
+    end_mask: int,
+) -> bool:
+    """Return whether one static STRIDED_SLICE yields the output shape."""
+
+    rank = len(input_shape)
+    if any(len(values) != rank for values in (output_shape, begin, end, strides)):
+        return False
+    if any(dimension < 0 for dimension in (*input_shape, *output_shape)):
+        return False
+    for axis in range(rank):
+        stride = strides[axis]
+        if stride <= 0:
+            return False
+        size = input_shape[axis]
+        begin_value = 0 if begin_mask & (1 << axis) else begin[axis]
+        end_value = size if end_mask & (1 << axis) else end[axis]
+        if begin_value < 0:
+            begin_value += size
+        if end_value < 0:
+            end_value += size
+        begin_value = min(max(begin_value, 0), size)
+        end_value = min(max(end_value, 0), size)
+        sliced = max(0, -(-(end_value - begin_value) // stride))
+        if sliced != output_shape[axis]:
+            return False
+    return True
+
+
+def _remap_axis_mask(
+    mask: int,
+    rank: int,
+    source_to_region: tuple[int, ...],
+) -> int | None:
+    """Reorder one per-axis bitmask into source-layout axis order."""
+
+    if len(source_to_region) != rank or mask < 0 or mask >= (1 << rank):
+        return None
+    remapped = 0
+    for region_axis, source_axis in enumerate(source_to_region):
+        if mask & (1 << region_axis):
+            remapped |= 1 << source_axis
+    return remapped
+
+
+class _StridedSliceRule(_RegionOpRule):
+    """Support rank-preserving STRIDED_SLICE by remapping vectors and masks."""
+
+    def data_input_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the STRIDED_SLICE data input position."""
+
+        del operator
+        return (0,)
+
+    def data_output_positions(self, operator: Any) -> tuple[int, ...]:
+        """Return the STRIDED_SLICE data output position."""
+
+        del operator
+        return (0,)
+
+    def plan_rewrite(
+        self,
+        context: _RegionOpContext,
+    ) -> _OperatorRewritePlan | None:
+        """Validate STRIDED_SLICE and plan source-layout vectors and masks."""
+
+        if len(context.inputs) != 4 or len(context.outputs) != 1:
+            return None
+        options = getattr(context.operator, "builtinOptions", None)
+        if options is None:
+            return None
+        for field_name in ("beginMask", "endMask"):
+            if not hasattr(options, field_name):
+                return None
+        # Ellipsis, new-axis, and shrink-axis slices change tensor rank, so
+        # their axes cannot be remapped by one rank-preserving permutation.
+        if any(
+            int(getattr(options, field_name, 0) or 0)
+            for field_name in ("ellipsisMask", "newAxisMask", "shrinkAxisMask")
+        ):
+            return None
+        if bool(getattr(options, "offset", False)):
+            return None
+        begin_mask = int(options.beginMask or 0)
+        end_mask = int(options.endMask or 0)
+
+        begin_vector = _rank_vector_constant(context, 1)
+        end_vector = _rank_vector_constant(context, 2)
+        strides_vector = _rank_vector_constant(context, 3)
+        shapes = _tensor_shapes(
+            context,
+            (context.inputs[0], context.outputs[0]),
+        )
+        if (
+            begin_vector is None
+            or end_vector is None
+            or strides_vector is None
+            or shapes is None
+        ):
+            return None
+        begin_index, begin = begin_vector
+        end_index, end = end_vector
+        strides_index, strides = strides_vector
+        if not _strided_slice_matches_shape(
+            shapes[0],
+            shapes[1],
+            begin,
+            end,
+            strides,
+            begin_mask,
+            end_mask,
+        ):
+            return None
+
+        remapped_begin = _remap_axis_vector(
+            begin,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        remapped_end = _remap_axis_vector(
+            end,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        remapped_strides = _remap_axis_vector(
+            strides,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        remapped_begin_mask = _remap_axis_mask(
+            begin_mask,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        remapped_end_mask = _remap_axis_mask(
+            end_mask,
+            context.rank,
+            context.source_to_region_permutation,
+        )
+        source_shapes = _source_layout_shapes(context, shapes[0], shapes[1])
+        if (
+            remapped_begin is None
+            or remapped_end is None
+            or remapped_strides is None
+            or remapped_begin_mask is None
+            or remapped_end_mask is None
+            or source_shapes is None
+        ):
+            return None
+        if not _strided_slice_matches_shape(
+            source_shapes[0],
+            source_shapes[1],
+            remapped_begin,
+            remapped_end,
+            remapped_strides,
+            remapped_begin_mask,
+            remapped_end_mask,
+        ):
+            return None
+        return _OperatorRewritePlan(
+            operator_index=context.operator_index,
+            constant_input_rewrites=(
+                _ConstantInputRewrite(1, begin_index, remapped_begin),
+                _ConstantInputRewrite(2, end_index, remapped_end),
+                _ConstantInputRewrite(3, strides_index, remapped_strides),
+            ),
+            builtin_option_rewrites=(
+                _BuiltinOptionRewrite("beginMask", remapped_begin_mask),
+                _BuiltinOptionRewrite("endMask", remapped_end_mask),
+            ),
+        )
+
+
 class _SplitRule(_RegionOpRule):
     """Support equal-size SPLIT by remapping its constant axis input."""
 
@@ -1205,6 +1386,9 @@ def _build_region_op_rules() -> Mapping[int, _RegionOpRule]:
     registry[_PAD_BUILTIN_CODE] = _PadRule(_PAD_BUILTIN_CODE)
     registry[_PADV2_BUILTIN_CODE] = _PadV2Rule(_PADV2_BUILTIN_CODE)
     registry[_SLICE_BUILTIN_CODE] = _SliceRule(_SLICE_BUILTIN_CODE)
+    registry[_STRIDED_SLICE_BUILTIN_CODE] = _StridedSliceRule(
+        _STRIDED_SLICE_BUILTIN_CODE
+    )
     registry[_SPLIT_BUILTIN_CODE] = _SplitRule(_SPLIT_BUILTIN_CODE)
     registry[_SPLIT_V_BUILTIN_CODE] = _SplitVRule(_SPLIT_V_BUILTIN_CODE)
     registry[_TILE_BUILTIN_CODE] = _TileRule(_TILE_BUILTIN_CODE)

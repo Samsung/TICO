@@ -56,6 +56,7 @@ _EXPECTED_PASS_API = {
     "FuseCompositeOpsPass",
     "FuseLegacyFCGeluFCPass",
     "FuseLinearOpsPass",
+    "FuseOutputRequantizePass",
     "FuseTransposeConvSlicePass",
     "LegalizeDynamicFullyConnectedPass",
     "O1LegacyCompatibilityOptions",

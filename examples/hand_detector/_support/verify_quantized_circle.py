@@ -284,6 +284,71 @@ def _require_data_operator_qparams(
         _require_same_qparams(tensors, context=context)
 
 
+def _normalize_axis(axis: int, rank: int, *, context: str) -> int:
+    """Normalize one possibly negative axis."""
+    normalized = axis + rank if axis < 0 else axis
+    if normalized < 0 or normalized >= rank:
+        raise RuntimeError(f"{context} axis {axis} is invalid for rank {rank}.")
+    return normalized
+
+
+def _is_width_concatenation(
+    reader: FlatBufferReader,
+    tensors: list[CircleTensorInfo],
+    operator: CircleOperatorInfo,
+    *,
+    context: str,
+) -> bool:
+    """Return whether one channels-last Concat joins width."""
+    if operator.options_table is None:
+        raise RuntimeError(f"{context} has no builtin options.")
+    if not operator.outputs:
+        raise RuntimeError(f"{context} has no output tensor.")
+    output = tensors[operator.outputs[0]]
+    rank = len(output.shape)
+    if rank < 2:
+        raise RuntimeError(f"{context} output rank {rank} has no width axis.")
+    axis = reader.scalar_i32(operator.options_table, 0, 0)
+    return _normalize_axis(axis, rank, context=context) == rank - 2
+
+
+def _require_supported_quantize_transition(
+    input_tensor: CircleTensorInfo,
+    output_tensor: CircleTensorInfo,
+    *,
+    context: str,
+) -> tuple[int, int]:
+    """Require a backend-supported Q8/Q16 dtype transition."""
+    allowed_types = (TENSOR_UINT8, TENSOR_INT16)
+    for tensor in (input_tensor, output_tensor):
+        if tensor.tensor_type not in allowed_types:
+            raise RuntimeError(
+                f"{context} supports only UINT8 and INT16, but "
+                f"{tensor.name!r} is {_type_name(tensor.tensor_type)}."
+            )
+        _require_quantized_tensor(
+            tensor,
+            tensor.tensor_type,
+            context=context,
+            expected_qparam_count=1,
+        )
+    transition = (
+        input_tensor.tensor_type,
+        output_tensor.tensor_type,
+    )
+    allowed = {
+        (TENSOR_UINT8, TENSOR_INT16),
+        (TENSOR_INT16, TENSOR_UINT8),
+    }
+    if transition not in allowed:
+        raise RuntimeError(
+            f"{context} supports only Q8->Q16 and Q16->Q8, "
+            f"found {_type_name(transition[0])}->"
+            f"{_type_name(transition[1])}."
+        )
+    return transition
+
+
 def _tensor_indices(indices: Iterable[int]) -> list[int]:
     """Drop optional negative tensor indices from an operator input list."""
     return [index for index in indices if index >= 0]
@@ -471,7 +536,16 @@ def verify_quantized_circle(
                 expected_type,
                 context="CONCATENATION tensor",
             )
-            _require_same_qparams(connected, context="CONCATENATION")
+            if not _is_width_concatenation(
+                reader,
+                tensors,
+                operator,
+                context=f"CONCATENATION@{operator_index}",
+            ):
+                _require_same_qparams(
+                    connected,
+                    context="CONCATENATION",
+                )
             continue
 
         if operator.builtin_code in _DATA_OPERATOR_REQUIRES_SHARED_QPARAMS:
@@ -514,13 +588,12 @@ def verify_quantized_circle(
             continue
 
         if operator.builtin_code == QUANTIZE:
-            if not operator.outputs:
-                raise RuntimeError("QUANTIZE has no output tensor.")
-            _require_per_tensor_data(
-                tensors,
-                operator.outputs,
-                expected_type,
-                context="QUANTIZE output",
+            if not operator.inputs or not operator.outputs:
+                raise RuntimeError("QUANTIZE has incomplete tensor connections.")
+            _require_supported_quantize_transition(
+                tensors[operator.inputs[0]],
+                tensors[operator.outputs[0]],
+                context=f"QUANTIZE@{operator_index}",
             )
 
     if counts["CONV_2D"] == 0:

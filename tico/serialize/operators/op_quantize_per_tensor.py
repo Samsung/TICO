@@ -30,6 +30,33 @@ from tico.utils.mx.dtypes import is_mx_dtype, mx_dtype_from_elem_format
 from tico.utils.validate_args_kwargs import QuantizePerTensorArgs
 
 
+def _require_matching_qparam(
+    node: torch.fx.Node,
+    output_tensor: circle.Tensor.TensorT,
+    scale: float,
+    zero_point: int,
+) -> None:
+    """Require Quantize arguments and output tensor metadata to agree."""
+    quantization = output_tensor.quantization
+    if quantization is None:
+        raise RuntimeError(
+            f"Quantize node {node.name!r} has no output qparam metadata."
+        )
+    tensor_scale = quantization.scale[0]
+    tensor_zero_point = quantization.zeroPoint[0]
+    if tensor_scale == scale and tensor_zero_point == zero_point:
+        return
+    raise RuntimeError(
+        "Quantize qparam mismatch after propagation: "
+        f"node={node.name!r}, op_scale={scale!r}, "
+        f"tensor_scale={tensor_scale!r}, "
+        f"op_zero_point={zero_point}, "
+        f"tensor_zero_point={tensor_zero_point}. "
+        "A qparam propagation pass must not overwrite a Quantize output "
+        "domain, including inputs of width-direction Concat."
+    )
+
+
 @register_node_visitor
 class QuantizePerTensorDefaultVisitor(NodeVisitor):
     target: List[torch._ops.OpOverload] = [
@@ -51,12 +78,7 @@ class QuantizePerTensorDefaultVisitor(NodeVisitor):
         quant_max = args.quant_max
 
         output_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)
-        assert output_tensor.quantization is not None
-
-        # Tensor should have qparam when it's exported
-        # The qparam must match with the arguments of this Op
-        assert output_tensor.quantization.scale[0] == scale
-        assert output_tensor.quantization.zeroPoint[0] == zero_p
+        _require_matching_qparam(node, output_tensor, scale, zero_p)
 
         if output_tensor.type == circle.TensorType.TensorType.UINT8:
             assert quant_min == 0 and quant_max == 255

@@ -25,6 +25,7 @@ from tico.circle.passes.optimization.fold import (
 from tico.circle.passes.optimization.fuse import (
     FuseCompositeOpsPass,
     FuseLinearOpsPass,
+    FuseOutputRequantizePass,
     FuseTransposeConvSlicePass,
 )
 from tico.circle.passes.optimization.legalize import LegalizeDynamicFullyConnectedPass
@@ -46,6 +47,7 @@ __all__ = [
     "FuseCompositeOpsPass",
     "FuseLegacyFCGeluFCPass",
     "FuseLinearOpsPass",
+    "FuseOutputRequantizePass",
     "FuseTransposeConvSlicePass",
     "LegalizeDynamicFullyConnectedPass",
     "ResolveLegacyCustomOpsPass",

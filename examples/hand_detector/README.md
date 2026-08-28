@@ -106,6 +106,24 @@ The quantization policies are:
 | PReLU slope | per-channel asymmetric | per-channel symmetric |
 | Convolution bias | INT32 | INT64 |
 
+### NPU-friendly resize lowering
+
+`--resize-tconv` replaces both 2x half-pixel `RESIZE_BILINEAR` operators with
+numerically equivalent fixed-weight `TRANSPOSE_CONV` operators (replicate
+padding is expressed with slice/concat):
+
+```bash
+python -m examples.hand_detector.export quantized \
+  --calibration-dir /path/to/calibration_npy \
+  --bits 16 \
+  --resize-tconv
+```
+
+The interpolation weight is diagonal across channels, so
+`--resize-tconv-groups` (default 4) splits each `TRANSPOSE_CONV` into
+independent channel groups joined by one `CONCATENATION`. The result is
+bit-identical while the dense constant weight shrinks by the group factor.
+
 Synthetic inputs are available only for smoke tests:
 
 ```bash
@@ -380,11 +398,18 @@ Implementation helpers are under `_support/` and are not separate user-facing
 commands:
 
 ```text
+_support/adaround.py
+_support/analysis.py
 _support/circle.py
 _support/conversion.py
+_support/cumulative_sensitivity.py
 _support/data.py
 _support/group_observer_sweep.py
+_support/multistart_reconstruction.py
+_support/observer_sweep.py
+_support/optimized_export.py
 _support/quantization.py
+_support/reconstruction.py
 _support/sensitivity.py
 _support/tflite_flatbuffer.py
 _support/verify_circle_layout.py
@@ -409,8 +434,10 @@ Run the model example tests:
 python -m examples.hand_detector.test_hand_detector
 ```
 
-See `docs/layout_optimization.md` for the Circle layout-region optimization design
-and `THIRD_PARTY_NOTICES.md` for source-model attribution.
+See `docs/layout_optimization.md` for the Circle layout-region optimization
+design, `docs/npu_latency_optimization.md` for the measured NPU latency
+optimization that led to the `--resize-tconv` export option, and
+`THIRD_PARTY_NOTICES.md` for source-model attribution.
 
 ## Activation block reconstruction
 
@@ -527,8 +554,7 @@ python -m examples.hand_detector.analyze adaround \
   --bits 8 \
   --percentile 99.99 \
   --max-samples 524288 \
-  --activation-report \
-    examples/hand_detector/reports/qdrop_simplified_recipe/simplified_split_20260803.json \
+  --activation-report /path/to/block_reconstruction_report.json \
   --groups stem feature_block_00 feature_block_28 \
   --selection-count 40 \
   --acceptance-count 40 \

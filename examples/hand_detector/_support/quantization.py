@@ -31,6 +31,9 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.nn.quant_conv2d import QuantConv2d
+from tico.quantization.wrapq.wrappers.nn.quant_conv_transpose2d import (
+    QuantConvTranspose2d,
+)
 from tico.quantization.wrapq.wrappers.nn.quant_maxpool2d import QuantMaxPool2d
 from tico.quantization.wrapq.wrappers.nn.quant_prelu import QuantPReLU
 from tico.quantization.wrapq.wrappers.ops.quant_concat import QuantConcat
@@ -49,6 +52,7 @@ ObserverOverride = QuantSpec | Mapping[str, object]
 _FLOAT_MODULE_TYPES = (
     QuantStub,
     nn.Conv2d,
+    nn.ConvTranspose2d,
     nn.MaxPool2d,
     nn.PReLU,
     Concat,
@@ -57,6 +61,7 @@ _FLOAT_MODULE_TYPES = (
 _QUANT_MODULE_TYPES = (
     QuantStubWrapper,
     QuantConv2d,
+    QuantConvTranspose2d,
     QuantMaxPool2d,
     QuantPReLU,
     QuantConcat,

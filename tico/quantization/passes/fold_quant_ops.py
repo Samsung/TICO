@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch.fx
 
+import copy
+
 import torch
 from torch.export import ExportedProgram
 
@@ -35,6 +37,54 @@ from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
 )
+
+
+_QPARAM_PRESERVING_VIEW_TARGETS = frozenset(
+    {
+        torch.ops.aten.permute.default,
+        torch.ops.aten.reshape.default,
+    }
+)
+
+
+def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
+    """Seed an unfused per-tensor view chain with its source qparams.
+
+    ``FoldQuantOps`` runs before ``PropagateQParamForward``.  A
+    requantization after ``PERMUTE -> RESHAPE`` must therefore discover
+    the already-folded producer qparams by walking through the view
+    chain.  Otherwise the target Q-DQ pair is folded into RESHAPE and
+    the required Quantize operation disappears.
+
+    Only per-tensor qparams are propagated.  Per-channel propagation
+    would require axis remapping through PERMUTE and RESHAPE.
+    """
+    if QPARAM_KEY in node.meta:
+        return False
+
+    chain: list[torch.fx.Node] = []
+    current = node
+    while QPARAM_KEY not in current.meta:
+        if current.op != "call_function":
+            return False
+        if current.target not in _QPARAM_PRESERVING_VIEW_TARGETS:
+            return False
+        if not current.args:
+            return False
+
+        source = current.args[0]
+        if not isinstance(source, torch.fx.Node):
+            return False
+        chain.append(current)
+        current = source
+
+    source_qparam: QuantParam = current.meta[QPARAM_KEY]
+    if source_qparam.quantized_dimension is not None:
+        return False
+
+    for view in reversed(chain):
+        view.meta[QPARAM_KEY] = copy.deepcopy(source_qparam)
+    return bool(chain)
 
 
 def _mx_op_params(node) -> tuple[str, int, str, str]:
@@ -147,6 +197,8 @@ class FoldQuantOps(PassBase):
                 continue
             if q_args.dtype != dq_args.dtype:
                 continue
+
+            _inherit_qparam_from_view_chain(op)
 
             # ───────────────────────────────────────────
             # Case 1: op not yet quantized

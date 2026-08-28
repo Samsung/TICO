@@ -21,6 +21,7 @@ from tico.circle.passes.optimization.fuse.linear import (
     FuseLinearOpsPass,
     LinearFusionPolicy,
 )
+from tico.circle.passes.optimization.fuse.requantize import FuseOutputRequantizePass
 from tico.circle.passes.optimization.fuse.spatial import (
     FuseTransposeConvSlicePass,
     TransposeConvSliceFusionPolicy,
@@ -30,6 +31,7 @@ __all__ = [
     "CompositeFusionPolicy",
     "FuseCompositeOpsPass",
     "FuseLinearOpsPass",
+    "FuseOutputRequantizePass",
     "FuseTransposeConvSlicePass",
     "LinearFusionPolicy",
     "TransposeConvSliceFusionPolicy",

@@ -71,6 +71,149 @@ class ChannelPadNode(nn.Module):
         return F.pad(input_, self.pad)
 
 
+class ResizeBilinearTConv(nn.Module):
+    """Exact 2x half-pixel RESIZE_BILINEAR as replicate padding plus TransposeConv.
+
+    Circle RESIZE_BILINEAR with ``align_corners=False`` and
+    ``half_pixel_centers=True`` at an exact 2x scale equals a fixed-weight
+    ``ConvTranspose2d(kernel_size=4, stride=2, padding=3)`` over the input
+    replicate-padded by one pixel. The padding is expressed with slice/concat
+    so every operation lowers to quantizable Circle operators. A separable
+    4x1 + 1x4 decomposition would halve the constant weight payload, but the
+    NPU compiler may reject non-square TRANSPOSE_CONV kernels (HLAT failure),
+    so the dense 4x4 kernel is kept.
+
+    Because the interpolation weight is diagonal across channels, ``groups``
+    splits the channel dimension into independent TRANSPOSE_CONV operators
+    joined by one channel CONCATENATION. The result is bit-identical while
+    the dense constant weight shrinks by the group factor.
+    """
+
+    def __init__(self, channels: int, *, groups: int = 1) -> None:
+        """Create the fixed bilinear-interpolation transposed convolutions."""
+        super().__init__()
+        if channels <= 0:
+            raise ValueError(f"channels must be positive, got {channels}.")
+        if groups <= 0 or channels % groups != 0:
+            raise ValueError(
+                f"groups must evenly divide channels, got {channels}/{groups}."
+            )
+        self.group_channels = channels // groups
+        kernel = torch.outer(
+            torch.tensor([0.25, 0.75, 0.75, 0.25]),
+            torch.tensor([0.25, 0.75, 0.75, 0.25]),
+        )
+        # The zero biases stay real parameters so bias quantization produces
+        # fully quantized Circle operators.
+        tconvs = []
+        for _ in range(groups):
+            tconv = nn.ConvTranspose2d(
+                self.group_channels,
+                self.group_channels,
+                kernel_size=4,
+                stride=2,
+                padding=3,
+                bias=True,
+            )
+            weight = torch.zeros(self.group_channels, self.group_channels, 4, 4)
+            weight[range(self.group_channels), range(self.group_channels)] = kernel
+            with torch.no_grad():
+                tconv.weight.copy_(weight)
+                tconv.bias.zero_()
+            tconvs.append(tconv)
+        self.tconvs = nn.ModuleList(tconvs)
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        """Upsample one NCHW tensor by exactly 2x in both spatial dimensions."""
+        padded = torch.cat([input_[:, :, :1, :], input_, input_[:, :, -1:, :]], dim=2)
+        padded = torch.cat([padded[:, :, :, :1], padded, padded[:, :, :, -1:]], dim=3)
+        if len(self.tconvs) == 1:
+            return self.tconvs[0](padded)
+        size = self.group_channels
+        outputs = [
+            tconv(padded[:, index * size : (index + 1) * size])
+            for index, tconv in enumerate(self.tconvs)
+        ]
+        return torch.cat(outputs, dim=1)
+
+
+def lower_resize_bilinear_to_tconv(
+    detector: "HandDetector",
+    *,
+    groups: int = 1,
+) -> tuple[int, ...]:
+    """Replace every 2x half-pixel RESIZE_BILINEAR layer with ResizeBilinearTConv.
+
+    Call after loading weights; the replacement layers carry their own fixed
+    interpolation weights. Returns the replaced operation positions.
+    """
+    device = next(detector.parameters()).device
+    with torch.inference_mode():
+        values = detector.forward_values(detector.get_example_inputs()[0].to(device))
+    replaced: list[int] = []
+    for position, operation in enumerate(detector.operations):
+        if operation["name"] != "RESIZE_BILINEAR":
+            continue
+        config = operation["config"]
+        if bool(config["align_corners"]) or not bool(config["half_pixel_centers"]):
+            raise ValueError(
+                "TransposeConv lowering requires align_corners=False and "
+                "half_pixel_centers=True."
+            )
+        source = values[int(operation["inputs"][0])]
+        out_h, out_w = (int(value) for value in config["size"])
+        if (out_h, out_w) != (2 * source.shape[2], 2 * source.shape[3]):
+            raise ValueError(
+                "TransposeConv lowering requires an exact 2x resize, got "
+                f"{tuple(source.shape[2:])} -> {(out_h, out_w)}."
+            )
+        detector.layers[position] = ResizeBilinearTConv(
+            int(source.shape[1]), groups=groups
+        ).to(device)
+        replaced.append(position)
+    if not replaced:
+        raise RuntimeError("No RESIZE_BILINEAR operation was lowered.")
+    return tuple(replaced)
+
+
+def _is_width_concat_operation(
+    operations: Sequence[Mapping[str, Any]],
+    position: int,
+) -> bool:
+    """Return whether one channels-last Concat joins the width axis."""
+    operation = operations[position]
+    if operation["name"] != "CONCATENATION":
+        raise ValueError(f"Operation {position} is not CONCATENATION.")
+    ranks: set[int] = set()
+    for raw_tensor_id in operation["inputs"]:
+        tensor_id = int(raw_tensor_id)
+        producer = next(
+            (
+                candidate
+                for candidate in operations[:position]
+                if tensor_id in tuple(int(value) for value in candidate["outputs"])
+            ),
+            None,
+        )
+        if producer is None or producer["name"] != "RESHAPE":
+            return False
+        shape = tuple(int(value) for value in producer["config"]["shape"])
+        ranks.add(len(shape))
+    if len(ranks) != 1:
+        return False
+    rank = ranks.pop()
+    if rank < 2:
+        return False
+    axis = int(operation["config"]["axis"])
+    if axis < 0:
+        axis += rank
+    if axis < 0 or axis >= rank:
+        raise ValueError(f"Concat axis {axis} is invalid for rank {rank}.")
+    return axis == rank - 2
+
+
 class HandDetector(nn.Module):
     """Execute the converted static graph with NCHW input tensors."""
 
@@ -83,7 +226,7 @@ class HandDetector(nn.Module):
         self.operations = tuple(specification["operations"])
         self.input_quantizer = QuantStub()
         layers: list[nn.Module] = []
-        for operation in self.operations:
+        for position, operation in enumerate(self.operations):
             name = operation["name"]
             config = operation["config"]
             if name in {"CONV_2D", "DEPTHWISE_CONV_2D"}:
@@ -108,7 +251,17 @@ class HandDetector(nn.Module):
                     )
                 )
             elif name == "CONCATENATION":
-                layers.append(Concat(dim=int(config["axis"])))
+                layers.append(
+                    Concat(
+                        dim=int(config["axis"]),
+                        allow_distinct_input_qparams=(
+                            _is_width_concat_operation(
+                                self.operations,
+                                position,
+                            )
+                        ),
+                    )
+                )
             else:
                 layers.append(nn.Identity())
         self.layers = nn.ModuleList(layers)

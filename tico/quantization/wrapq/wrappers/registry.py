@@ -34,6 +34,7 @@ _CORE_MODULES = (
     "tico.quantization.wrapq.wrappers.nn.quant_linear",
     "tico.quantization.wrapq.wrappers.nn.quant_maxpool2d",
     "tico.quantization.wrapq.wrappers.nn.quant_conv2d",
+    "tico.quantization.wrapq.wrappers.nn.quant_conv_transpose2d",
     "tico.quantization.wrapq.wrappers.nn.quant_prelu",
     "tico.quantization.wrapq.wrappers.nn.quant_conv3d_decomposed",
     # This includes not only `nn.SiLU` but also `SiLUActivation` from transformers
