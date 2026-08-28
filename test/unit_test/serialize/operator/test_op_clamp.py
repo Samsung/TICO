@@ -16,10 +16,12 @@
 
 import copy
 import unittest
+from typing import Dict
 
 import torch
 
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
+from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.op_clamp import ClampVisitor
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 
@@ -68,7 +70,7 @@ class TestClampVisitor(unittest.TestCase):
             if node.op in {"placeholder", "call_function"}:
                 graph.add_tensor_from_node(node)
 
-        op_codes = {}
+        op_codes: Dict[OpCode, int] = {}
         visitor = ClampVisitor(op_codes=op_codes, graph=graph)
         maximum = visitor.define_node(clamp)
 
@@ -80,6 +82,7 @@ class TestClampVisitor(unittest.TestCase):
         intermediate = graph.tensors[minimum.outputs[0]]
         self.assertEqual(intermediate.type, graph.get_tensor(clamp).type)
         self.assertIsNotNone(intermediate.quantization)
+        assert intermediate.quantization is not None
         self.assertEqual(intermediate.quantization.scale, [0.25])
         self.assertEqual(intermediate.quantization.zeroPoint, [0])
 

@@ -33,6 +33,9 @@ from torch._export.utils import get_lifted_tensor_constant
 class _TensorBoundClamp(torch.nn.Module):
     """Clamp between different INT16 fake-quantization domains."""
 
+    lower: torch.Tensor
+    upper: torch.Tensor
+
     def __init__(self) -> None:
         super().__init__()
         self.register_buffer("lower", torch.tensor(-1.25))
@@ -58,6 +61,9 @@ class _TensorBoundClamp(torch.nn.Module):
 
 class _IdentityTensorBoundClamp(torch.nn.Module):
     """Clamp UINT8 activations by the complete real range."""
+
+    lower: torch.Tensor
+    upper: torch.Tensor
 
     def __init__(self) -> None:
         super().__init__()
@@ -148,6 +154,8 @@ class TestLegalizeQuantizedClamp(unittest.TestCase):
 
         self.assertIsInstance(clamp_args.min, torch.fx.Node)
         self.assertIsInstance(clamp_args.max, torch.fx.Node)
+        assert isinstance(clamp_args.min, torch.fx.Node)
+        assert isinstance(clamp_args.max, torch.fx.Node)
         lower = get_lifted_tensor_constant(exported_program, clamp_args.min)
         upper = get_lifted_tensor_constant(exported_program, clamp_args.max)
         self.assertIsNotNone(lower)
