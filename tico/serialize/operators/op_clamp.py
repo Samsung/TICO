@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 from typing import Dict, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ from tico.serialize.circle_mapping import extract_circle_dtype, extract_circle_s
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils.validate_args_kwargs import ClampArgs
 
 
@@ -103,11 +105,17 @@ class ClampVisitor(NodeVisitor):
         elif min_val is not None and max_val is not None:
             input_shape, input_shape_signature = extract_circle_shape(input)
             input_dtype = extract_circle_dtype(input)
+            qparam = (
+                copy.deepcopy(node.meta[QPARAM_KEY])
+                if QPARAM_KEY in node.meta
+                else None
+            )
             minimum_tensor = self.graph.add_tensor_from_scratch(
                 prefix=f"{input.name}_min",
                 dtype=input_dtype,
                 shape=input_shape,
                 shape_signature=input_shape_signature,
+                qparam=qparam,
                 source_node=node,
             )
             minimum_opertor = self.define_minimum_node(

@@ -267,11 +267,17 @@ FoldQuantOps
 RemoveWeightDequantOp
 PropagateQParamForward
 PropagateQParamBackward
+LegalizeQuantizedClamp
 QParamSafeConstPropPass
 QuantizeBias
 RemoveUnusedPlaceholder
 InsertQuantizeOnDtypeMismatch
 ```
+
+`LegalizeQuantizedClamp` converts constant Clamp bounds to the activation's
+per-tensor integer domain, aligns the Clamp input to that same scale and zero point,
+and removes bounds that cover the complete quantized dtype range. Backend-specific
+Clamp lowering and Linear fusion remain outside the core converter.
 
 It then reports missing qparams non-strictly, with a specific exception for
 `split_with_sizes` because qparams are attached to its `getitem` result nodes.
