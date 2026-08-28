@@ -70,6 +70,7 @@ from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
     InsertQuantizeOnDtypeMismatch,
 )
+from tico.quantization.passes.legalize_quantized_clamp import LegalizeQuantizedClamp
 from tico.quantization.passes.propagate_qparam_backward import PropagateQParamBackward
 from tico.quantization.passes.propagate_qparam_forward import PropagateQParamForward
 from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropPass
@@ -319,6 +320,7 @@ def convert_exported_module_to_circle(
                 RemoveWeightDequantOp(),
                 PropagateQParamForward(),
                 PropagateQParamBackward(),
+                LegalizeQuantizedClamp(),
                 QParamSafeConstPropPass(),
                 QuantizeBias(),
                 RemoveUnusedPlaceholder(),
