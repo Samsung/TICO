@@ -647,5 +647,164 @@ class SimplifyViewOpsTest(unittest.TestCase):
         )
 
 
+class MemoryOrderTransposeTest(unittest.TestCase):
+    """Check bypassing TRANSPOSE operators that only move size-one axes."""
+
+    setUp = SimplifyViewOpsTest.setUp
+    _pass = SimplifyViewOpsTest._pass
+    _reshape = SimplifyViewOpsTest._reshape
+    _transpose = SimplifyViewOpsTest._transpose
+
+    def test_unit_axis_transpose_into_reshape_is_rewired(self) -> None:
+        """Redirect a RESHAPE past a size-one-axis-moving TRANSPOSE."""
+
+        document = make_empty_document()
+        builder = make_builder(document, self.codec)
+        source = add_runtime_tensor(
+            document,
+            subgraph_index=0,
+            name="source",
+            shape=[1, 1, 1, 63],
+        )
+        document.subgraph().inputs = [source]
+        transposed = self._transpose(
+            builder,
+            source,
+            (1, 1, 1, 63),
+            [0, 3, 1, 2],
+            "transposed",
+        )
+        output = self._reshape(builder, transposed, [1, 63], "output")
+        document.subgraph().outputs = [output]
+
+        result = self._pass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertTrue(result.modified)
+        reshape = document.subgraph().operators[1]
+        self.assertEqual(
+            operator_builtin_code(document.model, reshape),
+            RESHAPE,
+        )
+        self.assertEqual(int(reshape.inputs[0]), source)
+
+        cleanup = DeadCodeEliminationPass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+        self.assertTrue(cleanup.modified)
+        self.assertEqual(
+            [
+                operator_builtin_code(document.model, operator)
+                for operator in document.subgraph().operators
+            ],
+            [RESHAPE],
+        )
+
+    def test_shape_preserving_unit_axis_transpose_is_rewired(self) -> None:
+        """Bypass an all-unit-shape TRANSPOSE regardless of its consumer."""
+
+        document = make_empty_document()
+        builder = make_builder(document, self.codec)
+        source = add_runtime_tensor(
+            document,
+            subgraph_index=0,
+            name="source",
+            shape=[1, 1, 1, 1],
+        )
+        document.subgraph().inputs = [source]
+        transposed = self._transpose(
+            builder,
+            source,
+            (1, 1, 1, 1),
+            [0, 3, 1, 2],
+            "transposed",
+        )
+        output = builder.add_operator(
+            ABS,
+            inputs=(transposed,),
+            output_contracts=(static_contract((1, 1, 1, 1)),),
+            output_names=("output",),
+        )[0]
+        document.subgraph().outputs = [output]
+
+        result = self._pass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertTrue(result.modified)
+        consumer = document.subgraph().operators[1]
+        self.assertEqual(operator_builtin_code(document.model, consumer), ABS)
+        self.assertEqual(int(consumer.inputs[0]), source)
+
+    def test_data_moving_transpose_is_preserved(self) -> None:
+        """Keep TRANSPOSE that reorders axes with more than one element."""
+
+        document = make_empty_document()
+        builder = make_builder(document, self.codec)
+        source = add_runtime_tensor(
+            document,
+            subgraph_index=0,
+            name="source",
+            shape=[1, 2, 3, 4],
+        )
+        document.subgraph().inputs = [source]
+        transposed = self._transpose(
+            builder,
+            source,
+            (1, 2, 3, 4),
+            [0, 3, 1, 2],
+            "transposed",
+        )
+        output = self._reshape(builder, transposed, [1, 24], "output")
+        document.subgraph().outputs = [output]
+
+        result = self._pass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(len(document.subgraph().operators), 2)
+
+    def test_shape_changing_bypass_requires_reshape_consumer(self) -> None:
+        """Keep the TRANSPOSE when a non-RESHAPE consumer sees the new shape."""
+
+        document = make_empty_document()
+        builder = make_builder(document, self.codec)
+        source = add_runtime_tensor(
+            document,
+            subgraph_index=0,
+            name="source",
+            shape=[1, 1, 1, 63],
+        )
+        document.subgraph().inputs = [source]
+        transposed = self._transpose(
+            builder,
+            source,
+            (1, 1, 1, 63),
+            [0, 3, 1, 2],
+            "transposed",
+        )
+        output = builder.add_operator(
+            ABS,
+            inputs=(transposed,),
+            output_contracts=(static_contract((1, 63, 1, 1)),),
+            output_names=("output",),
+        )[0]
+        document.subgraph().outputs = [output]
+
+        result = self._pass().run(
+            document,
+            CirclePassContext(verify_after_each_pass=False),
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(len(document.subgraph().operators), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

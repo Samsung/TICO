@@ -96,6 +96,12 @@ landmark values. Quantized export reuses the same command with
 `--calibration-pattern "landmark*.npy"`, and `--skip-verification` (the
 structural verifier encodes palm-detector operator counts).
 
+`--hoist-head-means` swaps each head's `1x1 Conv -> spatial MEAN` chain into
+an exactly equivalent shared `MEAN -> 1x1 Conv` (both operations are linear).
+This removes the quantized per-position head maps, shares one reduced feature
+vector across all four heads, shrinks the head convolutions by the spatial
+factor, and measured about 6% fewer NPU cycles at unchanged output error.
+
 ## Export Circle models
 
 ### Floating point

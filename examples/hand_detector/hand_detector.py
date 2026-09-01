@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -178,6 +179,110 @@ def lower_resize_bilinear_to_tconv(
     return tuple(replaced)
 
 
+def hoist_head_spatial_means(detector: "HandDetector") -> "HandDetector":
+    """Swap head ``1x1 Conv -> spatial MEAN`` chains into ``MEAN -> 1x1 Conv``.
+
+    A spatial mean and a 1x1 convolution are both linear, so
+    ``mean(conv(x)) == conv(mean(x))`` exactly. Hoisting the mean removes the
+    coarsely quantized per-position head map and lets every head share one
+    reduced feature vector. The original MEAN position becomes a RESHAPE that
+    keeps the original output tensor and shape. Returns a new detector with
+    the rewritten graph and the original weights.
+    """
+    operations = [copy.deepcopy(dict(op)) for op in detector.operations]
+    device = next(detector.parameters()).device
+    with torch.inference_mode():
+        values = detector.forward_values(detector.get_example_inputs()[0].to(device))
+
+    producers: dict[int, int] = {}
+    consumers: dict[int, list[int]] = {}
+    used_tensors: set[int] = {detector.input_tensor}
+    for position, operation in enumerate(operations):
+        for tensor_id in operation["outputs"]:
+            producers[int(tensor_id)] = position
+            used_tensors.add(int(tensor_id))
+        for tensor_id in operation["inputs"]:
+            consumers.setdefault(int(tensor_id), []).append(position)
+            used_tensors.add(int(tensor_id))
+
+    rewrites: dict[int, int] = {}
+    for mean_pos, operation in enumerate(operations):
+        if operation["name"] != "MEAN" or operation["config"].get("keep_dims"):
+            continue
+        conv_pos = producers.get(int(operation["inputs"][0]))
+        if conv_pos is None:
+            continue
+        conv = operations[conv_pos]
+        if conv["name"] != "CONV_2D":
+            continue
+        config = conv["config"]
+        if list(config["kernel_size"]) != [1, 1] or int(config["groups"]) != 1:
+            continue
+        if consumers[int(conv["outputs"][0])] != [mean_pos]:
+            continue
+        feature = values[int(conv["inputs"][0])]
+        if feature.dim() != 4 or (feature.shape[2] == 1 and feature.shape[3] == 1):
+            continue
+        rewrites[conv_pos] = mean_pos
+    if not rewrites:
+        raise RuntimeError("No 1x1 Conv -> spatial MEAN head chain was found.")
+    mean_to_conv = {mean_pos: conv_pos for conv_pos, mean_pos in rewrites.items()}
+
+    next_tensor = max(used_tensors) + 1
+    shared_means: dict[int, int] = {}
+    new_operations: list[dict[str, Any]] = []
+    position_map: dict[int, int] = {}
+    for position, operation in enumerate(operations):
+        if position in rewrites:
+            feature_tensor = int(operation["inputs"][0])
+            if feature_tensor not in shared_means:
+                shared_means[feature_tensor] = next_tensor
+                new_operations.append(
+                    {
+                        "index": operation["index"],
+                        "name": "MEAN",
+                        "inputs": [feature_tensor],
+                        "outputs": [next_tensor],
+                        "config": {"keep_dims": True},
+                    }
+                )
+                next_tensor += 1
+            operation["inputs"] = [
+                shared_means[feature_tensor],
+                *operation["inputs"][1:],
+            ]
+            position_map[position] = len(new_operations)
+            new_operations.append(operation)
+        elif position in mean_to_conv:
+            conv = operations[mean_to_conv[position]]
+            new_operations.append(
+                {
+                    "index": operation["index"],
+                    "name": "RESHAPE",
+                    "inputs": [int(conv["outputs"][0])],
+                    "outputs": list(operation["outputs"]),
+                    "config": {
+                        "shape": [1, int(conv["config"]["out_channels"])],
+                        "nhwc_memory_order": False,
+                    },
+                }
+            )
+        else:
+            position_map[position] = len(new_operations)
+            new_operations.append(operation)
+
+    specification = copy.deepcopy(detector.specification)
+    specification["operations"] = new_operations
+    rewritten = HandDetector(specification).to(device)
+    with torch.no_grad():
+        for old_position, new_position in position_map.items():
+            layer = rewritten.layers[new_position]
+            state = detector.layers[old_position].state_dict()
+            if state:
+                layer.load_state_dict(state)
+    return rewritten.eval()
+
+
 def _is_width_concat_operation(
     operations: Sequence[Mapping[str, Any]],
     position: int,
@@ -215,17 +320,26 @@ def _is_width_concat_operation(
 
 
 class SpatialMeanNode(nn.Module):
-    """Reduce one NCHW tensor over its spatial axes without keeping dims.
+    """Reduce one NCHW tensor over its spatial axes.
 
     The reduction runs in NHWC so the exported Circle MEAN keeps the TFLite
     axes ``[1, 2]``; layout optimization then cancels the internal permute
     against the producer's layout transition instead of wrapping the MEAN in
-    NPU-unsupported NCHW transposes.
+    NPU-unsupported NCHW transposes. With ``keep_dims`` the result stays
+    rank-4 NCHW so a following convolution can consume it.
     """
+
+    def __init__(self, *, keep_dims: bool = False) -> None:
+        """Store whether the reduced spatial axes stay as size-one dims."""
+        super().__init__()
+        self.keep_dims = bool(keep_dims)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """Average one rank-4 NCHW tensor over height and width."""
-        return input_.permute(0, 2, 3, 1).mean(dim=(1, 2))
+        reduced = input_.permute(0, 2, 3, 1).mean(dim=(1, 2), keepdim=self.keep_dims)
+        if self.keep_dims:
+            return reduced.permute(0, 3, 1, 2)
+        return reduced
 
 
 class HandDetector(nn.Module):
@@ -264,7 +378,9 @@ class HandDetector(nn.Module):
             elif name == "LOGISTIC":
                 layers.append(nn.Sigmoid())
             elif name == "MEAN":
-                layers.append(SpatialMeanNode())
+                layers.append(
+                    SpatialMeanNode(keep_dims=bool(config.get("keep_dims", False)))
+                )
             elif name == "RESIZE_BILINEAR":
                 layers.append(
                     ResizeBilinear2d(

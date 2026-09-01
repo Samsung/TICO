@@ -28,6 +28,7 @@ from tico.ops import Concat, ResizeBilinear2d, SamePaddingConv2d
 
 from examples.hand_detector.hand_detector import (
     HandDetector,
+    hoist_head_spatial_means,
     load_hand_detector,
     load_nhwc_hand_detector,
     lower_resize_bilinear_to_tconv,
@@ -359,6 +360,36 @@ class HandLandmarkSpecTest(unittest.TestCase):
         )
         example = model.get_example_inputs()[0]
         self.assertEqual(tuple(example.shape), (1, 3, 224, 224))
+
+    def test_hoisted_head_means_match_original_outputs(self) -> None:
+        """Swap Conv->MEAN heads into MEAN->Conv without changing outputs."""
+
+        torch.manual_seed(20260901)
+        model = HandDetector(self.spec).eval()
+        rewritten = hoist_head_spatial_means(model)
+        names = [operation["name"] for operation in rewritten.operations]
+        self.assertEqual(names.count("MEAN"), 1)
+        self.assertEqual(names.count("RESHAPE"), 4)
+        self.assertEqual(len(names), len(model.operations) + 1)
+
+        source = torch.rand(1, 3, 224, 224)
+        with torch.inference_mode():
+            expected = model(source)
+            actual = rewritten(source)
+        for expected_output, actual_output in zip(expected, actual):
+            torch.testing.assert_close(
+                actual_output, expected_output, rtol=0.0, atol=1e-4
+            )
+
+    def test_hoisting_rejects_graph_without_head_chain(self) -> None:
+        """Reject a graph that has no 1x1 Conv -> spatial MEAN head."""
+
+        detector = load_hand_detector(
+            DIRECTORY / "hand_detector_float.pt",
+            DIRECTORY / "hand_detector_spec.json",
+        ).eval()
+        with self.assertRaises(RuntimeError):
+            hoist_head_spatial_means(detector)
 
 
 if __name__ == "__main__":

@@ -125,9 +125,7 @@ class FuseActivationFunctionTest(unittest.TestCase):
         target = builder.add_operator(
             activation_code,
             inputs=(mid,),
-            output_contracts=(
-                quantized_contract((1, 4, 4, 2), scale=target_scale),
-            ),
+            output_contracts=(quantized_contract((1, 4, 4, 2), scale=target_scale),),
             output_names=("target",),
         )[0]
         document.subgraph().outputs = [target]
