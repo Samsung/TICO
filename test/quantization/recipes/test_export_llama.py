@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import io
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -263,7 +265,8 @@ class TestExportMain(unittest.TestCase):
         ), patch.object(
             export_example.torch, "load"
         ) as torch_load:
-            export_example.main()
+            with contextlib.redirect_stdout(io.StringIO()):
+                export_example.main()
 
         adapter.load_model.assert_called_once()
         adapter.export.assert_called_once_with(loaded_ctx)
@@ -294,7 +297,8 @@ class TestExportMain(unittest.TestCase):
         ), patch.object(
             export_example.torch, "load", return_value=checkpoint
         ) as torch_load:
-            export_example.main()
+            with contextlib.redirect_stdout(io.StringIO()):
+                export_example.main()
 
         adapter.load_model.assert_not_called()
         adapter.export.assert_called_once()

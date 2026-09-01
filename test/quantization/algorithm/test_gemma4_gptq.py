@@ -14,6 +14,8 @@
 
 """Unit tests for tico.quantization.algorithm.gemma4_gptq.quantizer."""
 
+import contextlib
+import io
 import unittest
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
@@ -813,13 +815,14 @@ class TestQuantizeStageFromRawReplay(unittest.TestCase):
 
         orig_w = model.model.vision_tower.patch_embedder.input_proj.weight.data.clone()
 
-        quantizer._quantize_stage_from_raw_replay(
-            model=model,
-            stage_module=model.model.vision_tower.patch_embedder,
-            module_name=module_name,
-            stage_desc="vision.patch_embed",
-            vision_only=True,
-        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            quantizer._quantize_stage_from_raw_replay(
+                model=model,
+                stage_module=model.model.vision_tower.patch_embedder,
+                module_name=module_name,
+                stage_desc="vision.patch_embed",
+                vision_only=True,
+            )
 
         # Weights should be unchanged
         new_w = model.model.vision_tower.patch_embedder.input_proj.weight.data

@@ -19,7 +19,9 @@ These tests exercise the pure-Python helper functions
 requiring a real Gemma4 model or processor.
 """
 
+import contextlib
 import importlib.util
+import io
 import unittest
 
 import torch
@@ -825,7 +827,8 @@ class TestVerifyVisionPrefill(unittest.TestCase):
             "image_position_ids": torch.zeros(1, 4, 2, dtype=torch.long),
         }
 
-        visual_embeds = verify_step_vision_prefill(runtime, batch)  # type: ignore[arg-type]
+        with contextlib.redirect_stdout(io.StringIO()):
+            visual_embeds = verify_step_vision_prefill(runtime, batch)  # type: ignore[arg-type]
 
         self.assertEqual(tuple(visual_embeds.shape), (4, 2))
         torch.testing.assert_close(

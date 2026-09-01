@@ -21,6 +21,8 @@ except ModuleNotFoundError:
 
 install_optional_dependency_stubs()
 
+import contextlib
+import io
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -59,11 +61,12 @@ class TestDatasetRoleLoading(unittest.TestCase):
             "load_dataset",
             return_value=dataset,
         ) as load_dataset_mock:
-            loaded, _ = vlm_eval_utils.get_dataset(
-                "vqav2",
-                role=CALIBRATION_ROLE,
-                n=2,
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                loaded, _ = vlm_eval_utils.get_dataset(
+                    "vqav2",
+                    role=CALIBRATION_ROLE,
+                    n=2,
+                )
 
         self.assertIs(loaded, dataset)
         load_dataset_mock.assert_called_once_with(
@@ -81,11 +84,12 @@ class TestDatasetRoleLoading(unittest.TestCase):
             "load_dataset",
             return_value=dataset,
         ) as load_dataset_mock:
-            vlm_eval_utils.get_dataset(
-                "vqav2",
-                role=EVALUATION_ROLE,
-                n=1,
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                vlm_eval_utils.get_dataset(
+                    "vqav2",
+                    role=EVALUATION_ROLE,
+                    n=1,
+                )
 
         load_dataset_mock.assert_called_once_with(
             path="lmms-lab/VQAv2-FewShot",
@@ -101,11 +105,12 @@ class TestDatasetRoleLoading(unittest.TestCase):
             "load_dataset",
             return_value=dataset,
         ) as load_dataset_mock:
-            _, adapter = vlm_eval_utils.get_dataset(
-                "mmlu",
-                role=CALIBRATION_ROLE,
-                n=1,
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                _, adapter = vlm_eval_utils.get_dataset(
+                    "mmlu",
+                    role=CALIBRATION_ROLE,
+                    n=1,
+                )
 
         self.assertIs(adapter, vlm_eval_utils.get_item_mmlu_calib)
         load_dataset_mock.assert_called_once_with(
