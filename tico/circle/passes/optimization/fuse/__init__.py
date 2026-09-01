@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+from tico.circle.passes.optimization.fuse.activation import FuseActivationFunctionPass
 from tico.circle.passes.optimization.fuse.composite import (
     CompositeFusionPolicy,
     FuseCompositeOpsPass,
@@ -29,6 +30,7 @@ from tico.circle.passes.optimization.fuse.spatial import (
 
 __all__ = [
     "CompositeFusionPolicy",
+    "FuseActivationFunctionPass",
     "FuseCompositeOpsPass",
     "FuseLinearOpsPass",
     "FuseOutputRequantizePass",

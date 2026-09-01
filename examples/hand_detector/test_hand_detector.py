@@ -324,5 +324,42 @@ class HandDetectorTest(unittest.TestCase):
         self.assertEqual(counts["aten.mul.Tensor"], 0)
 
 
+class HandLandmarkSpecTest(unittest.TestCase):
+    """Validate hand-landmark executor construction from its specification."""
+
+    SPEC_PATH = DIRECTORY / "hand_landmark_spec.json"
+
+    def setUp(self) -> None:
+        """Skip when the converted landmark specification is unavailable."""
+
+        if not self.SPEC_PATH.exists():
+            self.skipTest("hand_landmark_spec.json has not been converted.")
+        self.spec = json.loads(self.SPEC_PATH.read_text(encoding="utf-8"))
+
+    def test_specification_declares_224_input_and_four_outputs(self) -> None:
+        """Check the converted landmark graph interface."""
+
+        self.assertEqual(self.spec["input_shape"], [1, 224, 224, 3])
+        self.assertEqual(len(self.spec["outputs"]), 4)
+        names = {operation["name"] for operation in self.spec["operations"]}
+        self.assertIn("RELU6", names)
+        self.assertIn("MEAN", names)
+        self.assertIn("LOGISTIC", names)
+        self.assertNotIn("FULLY_CONNECTED", names)
+
+    def test_randomly_initialized_executor_produces_output_shapes(self) -> None:
+        """Run the executor graph without converted weights."""
+
+        model = HandDetector(self.spec).eval()
+        with torch.inference_mode():
+            outputs = model(torch.rand(1, 3, 224, 224))
+        self.assertEqual(
+            [tuple(value.shape) for value in outputs],
+            [(1, 63), (1, 1), (1, 1), (1, 63)],
+        )
+        example = model.get_example_inputs()[0]
+        self.assertEqual(tuple(example.shape), (1, 3, 224, 224))
+
+
 if __name__ == "__main__":
     unittest.main()

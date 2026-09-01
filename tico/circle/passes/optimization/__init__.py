@@ -23,6 +23,7 @@ from tico.circle.passes.optimization.fold import (
     FoldConstantsPass,
 )
 from tico.circle.passes.optimization.fuse import (
+    FuseActivationFunctionPass,
     FuseCompositeOpsPass,
     FuseLinearOpsPass,
     FuseOutputRequantizePass,
@@ -44,6 +45,7 @@ __all__ = [
     "EliminateIdentityOpsPass",
     "EliminateTransposeBoundedLayoutRegionPass",
     "FoldConstantsPass",
+    "FuseActivationFunctionPass",
     "FuseCompositeOpsPass",
     "FuseLegacyFCGeluFCPass",
     "FuseLinearOpsPass",

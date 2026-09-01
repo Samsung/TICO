@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
     quantized.add_argument("--calibration-dir", type=Path)
     quantized.add_argument("--calibration-offset", type=int, default=0)
     quantized.add_argument("--calibration-limit", type=int)
+    quantized.add_argument(
+        "--calibration-pattern",
+        default="palm*.npy",
+        help="Glob pattern selecting calibration arrays inside --calibration-dir.",
+    )
     quantized.add_argument("--synthetic-calibration-samples", type=int, default=32)
     quantized.add_argument(
         "--bits",
@@ -179,6 +184,7 @@ def _export_quantized(args: argparse.Namespace) -> None:
             args.calibration_dir,
             args.calibration_limit,
             offset=args.calibration_offset,
+            pattern=args.calibration_pattern,
         )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

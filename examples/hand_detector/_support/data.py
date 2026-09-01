@@ -31,12 +31,15 @@ def normalize_input_array(array: np.ndarray) -> torch.Tensor:
     value = np.asarray(array)
     if value.ndim == 3:
         value = value[None, ...]
-    if value.shape == (1, 3, 192, 192):
-        value = np.transpose(value, (0, 2, 3, 1))
-    elif value.shape != (1, 192, 192, 3):
+    if value.ndim != 4 or value.shape[0] != 1:
         raise ValueError(
-            "Expected [192,192,3], [1,192,192,3], [3,192,192], or "
-            f"[1,3,192,192], got {value.shape}."
+            f"Expected a rank-3 image or single-batch rank-4 array, got {value.shape}."
+        )
+    if value.shape[1] == 3 and value.shape[3] != 3:
+        value = np.transpose(value, (0, 2, 3, 1))
+    if value.shape[3] != 3:
+        raise ValueError(
+            f"Expected an NHWC or NCHW image with 3 channels, got {value.shape}."
         )
     if np.issubdtype(value.dtype, np.integer):
         value = value.astype(np.float32) / 255.0

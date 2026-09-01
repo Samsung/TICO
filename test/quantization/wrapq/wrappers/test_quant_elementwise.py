@@ -40,6 +40,7 @@ from tico.quantization.wrapq.wrappers.quant_elementwise import (
     QuantGELU,
     QuantGELUTanh,
     QuantReLU,
+    QuantReLU6,
     QuantSigmoid,
     QuantTanh,
 )
@@ -57,6 +58,7 @@ ACTIVATIONS: List[
     (torch.nn.Sigmoid(), torch.sigmoid, QuantSigmoid),
     (torch.nn.Tanh(), torch.tanh, QuantTanh),
     (torch.nn.ReLU(), torch.relu, QuantReLU),
+    (torch.nn.ReLU6(), torch.nn.functional.relu6, QuantReLU6),
     (torch.nn.GELU(), torch.nn.functional.gelu, QuantGELU),
     (
         torch.nn.GELU(approximate="tanh"),

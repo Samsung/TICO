@@ -214,6 +214,20 @@ def _is_width_concat_operation(
     return axis == rank - 2
 
 
+class SpatialMeanNode(nn.Module):
+    """Reduce one NCHW tensor over its spatial axes without keeping dims.
+
+    The reduction runs in NHWC so the exported Circle MEAN keeps the TFLite
+    axes ``[1, 2]``; layout optimization then cancels the internal permute
+    against the producer's layout transition instead of wrapping the MEAN in
+    NPU-unsupported NCHW transposes.
+    """
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        """Average one rank-4 NCHW tensor over height and width."""
+        return input_.permute(0, 2, 3, 1).mean(dim=(1, 2))
+
+
 class HandDetector(nn.Module):
     """Execute the converted static graph with NCHW input tensors."""
 
@@ -224,6 +238,9 @@ class HandDetector(nn.Module):
         self.input_tensor = int(specification["inputs"][0])
         self.output_tensors = tuple(int(value) for value in specification["outputs"])
         self.operations = tuple(specification["operations"])
+        self.input_shape_nhwc = tuple(
+            int(value) for value in specification.get("input_shape", (1, 192, 192, 3))
+        )
         self.input_quantizer = QuantStub()
         layers: list[nn.Module] = []
         for position, operation in enumerate(self.operations):
@@ -242,6 +259,12 @@ class HandDetector(nn.Module):
                 )
             elif name == "PAD":
                 layers.append(ChannelPadNode(config["pad"]))
+            elif name == "RELU6":
+                layers.append(nn.ReLU6())
+            elif name == "LOGISTIC":
+                layers.append(nn.Sigmoid())
+            elif name == "MEAN":
+                layers.append(SpatialMeanNode())
             elif name == "RESIZE_BILINEAR":
                 layers.append(
                     ResizeBilinear2d(
@@ -304,6 +327,9 @@ class HandDetector(nn.Module):
                 "PRELU",
                 "MAX_POOL_2D",
                 "PAD",
+                "RELU6",
+                "LOGISTIC",
+                "MEAN",
                 "RESIZE_BILINEAR",
             }:
                 values[output] = layer(values[int(inputs[0])])
@@ -339,26 +365,27 @@ class HandDetector(nn.Module):
     def _forward_core(
         self,
         input_: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """Run the static detector graph from an already quantized NCHW tensor."""
         values = self.execute_segment(
             {self.input_tensor: input_},
             tuple(range(len(self.operations))),
         )
-        return values[self.output_tensors[0]], values[self.output_tensors[1]]
+        return tuple(values[tensor_id] for tensor_id in self.output_tensors)
 
-    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Run the detector from an NCHW input tensor."""
         return self._forward_core(self.input_quantizer(input_))
 
-    def forward_nhwc(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_nhwc(self, input_: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Quantize an NHWC input before converting it to the internal NCHW layout."""
         quantized = self.input_quantizer(input_)
         return self._forward_core(quantized.permute(0, 3, 1, 2))
 
     def get_example_inputs(self) -> tuple[torch.Tensor]:
         """Return the static NCHW example input used by direct model export."""
-        return (torch.zeros(1, 3, 192, 192, dtype=torch.float32),)
+        batch, height, width, channels = self.input_shape_nhwc
+        return (torch.zeros(batch, channels, height, width, dtype=torch.float32),)
 
 
 class NHWCInputAdapter(nn.Module):
@@ -369,13 +396,13 @@ class NHWCInputAdapter(nn.Module):
         super().__init__()
         self.detector = detector
 
-    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Run the wrapped detector from one NHWC input tensor."""
         return self.detector.forward_nhwc(input_)
 
     def get_example_inputs(self) -> tuple[torch.Tensor]:
         """Return the static NHWC example input used by Circle export."""
-        return (torch.zeros(1, 192, 192, 3, dtype=torch.float32),)
+        return (torch.zeros(*self.detector.input_shape_nhwc, dtype=torch.float32),)
 
 
 def load_hand_detector(
