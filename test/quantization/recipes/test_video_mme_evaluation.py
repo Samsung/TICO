@@ -21,6 +21,8 @@ except ModuleNotFoundError:
 
 install_optional_dependency_stubs()
 
+import contextlib
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -49,13 +51,14 @@ class TestVideoMmeEvaluation(unittest.TestCase):
                 video_mme, "print_lmms_eval_results", fake_print_lmms_eval_results
             ),
         ):
-            result = video_mme.evaluate_and_print_video_mme(
-                model=MagicMock(),
-                processor=MagicMock(),
-                device="cuda",
-                batch_size=1,
-                max_new_tokens=16,
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = video_mme.evaluate_and_print_video_mme(
+                    model=MagicMock(),
+                    processor=MagicMock(),
+                    device="cuda",
+                    batch_size=1,
+                    max_new_tokens=16,
+                )
 
         # Verify the task is "videomme" (lmms-eval task name)
         self.assertEqual(captured["tasks"], ["videomme"])
@@ -85,12 +88,13 @@ class TestVideoMmeEvaluation(unittest.TestCase):
                 video_mme, "print_lmms_eval_results", fake_print_lmms_eval_results
             ),
         ):
-            video_mme.evaluate_and_print_video_mme(
-                model=MagicMock(),
-                processor=MagicMock(),
-                device="cpu",
-                use_cache="/tmp/cache",
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                video_mme.evaluate_and_print_video_mme(
+                    model=MagicMock(),
+                    processor=MagicMock(),
+                    device="cpu",
+                    use_cache="/tmp/cache",
+                )
 
         self.assertEqual(captured["use_cache"], "/tmp/cache")
 
@@ -493,13 +497,14 @@ class TestLmmsEvalUtils(unittest.TestCase):
         image_processor = SimpleNamespace(patch_size=16, merge_size=2)
         proc = SimpleNamespace(image_processor=image_processor)
 
-        _, args = _build_model_args(
-            model,
-            max_num_frames=10,
-            max_position_embeddings=2048,
-            max_new_tokens=30,
-            processor=proc,
-        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, args = _build_model_args(
+                model,
+                max_num_frames=10,
+                max_position_embeddings=2048,
+                max_new_tokens=30,
+                processor=proc,
+            )
         self.assertIn("max_pixels", args)
         self.assertIn("min_pixels", args)
         self.assertIn("max_num_frames", args)
@@ -533,13 +538,14 @@ class TestLmmsEvalUtils(unittest.TestCase):
         image_processor = SimpleNamespace(patch_size=16, merge_size=2)
         proc = SimpleNamespace(image_processor=image_processor)
 
-        _, args = _build_model_args(
-            model,
-            max_num_frames=32,
-            max_position_embeddings=300,
-            max_new_tokens=30,
-            processor=proc,
-        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            _, args = _build_model_args(
+                model,
+                max_num_frames=32,
+                max_position_embeddings=300,
+                max_new_tokens=30,
+                processor=proc,
+            )
         self.assertLessEqual(args["max_num_frames"], 32)
 
     def test_check_lmms_eval_available_raises_when_missing(self):
@@ -754,7 +760,8 @@ class TestEnsureVideommeChunksDownloaded(unittest.TestCase):
                 os.environ["HF_HOME"] = tmpdir
 
                 with patch("huggingface_hub.snapshot_download") as mock_dl:
-                    _ensure_videomme_chunks_downloaded(limit=1)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        _ensure_videomme_chunks_downloaded(limit=1)
                     # Should NOT call snapshot_download since chunk 01 is cached
                     mock_dl.assert_not_called()
             finally:
@@ -787,7 +794,8 @@ class TestEnsureVideommeChunksDownloaded(unittest.TestCase):
 
                 with patch("huggingface_hub.snapshot_download") as mock_dl:
                     # limit=31 needs 2 chunks (01 and 02), but 01 is cached
-                    _ensure_videomme_chunks_downloaded(limit=31)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        _ensure_videomme_chunks_downloaded(limit=31)
                     mock_dl.assert_called_once()
                     call_kwargs = mock_dl.call_args
                     allow_patterns = call_kwargs.kwargs.get(

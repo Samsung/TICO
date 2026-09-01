@@ -21,6 +21,8 @@ except ModuleNotFoundError:
 
 install_optional_dependency_stubs()
 
+import contextlib
+import io
 import unittest
 from types import SimpleNamespace
 from unittest.mock import DEFAULT, patch
@@ -76,7 +78,8 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
             llama_mod,
             "evaluate_lm_tasks",
         ) as evaluate_lm_tasks:
-            ctx.adapter.evaluate(ctx)
+            with contextlib.redirect_stdout(io.StringIO()):
+                ctx.adapter.evaluate(ctx)
 
         evaluate_perplexity.assert_not_called()
         evaluate_lm_tasks.assert_called_once()
@@ -105,7 +108,8 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
             llama_mod,
             "evaluate_lm_tasks",
         ) as evaluate_lm_tasks:
-            ctx.adapter.evaluate(ctx)
+            with contextlib.redirect_stdout(io.StringIO()):
+                ctx.adapter.evaluate(ctx)
 
         evaluate_lm_tasks.assert_not_called()
         evaluate_perplexity.assert_called_once()
@@ -179,7 +183,8 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
             "evaluate_vlm_text_ppl_chat_prefix",
             return_value=2.5,
         ) as evaluate_chat_prefix_ppl:
-            adapter.evaluate(ctx)
+            with contextlib.redirect_stdout(io.StringIO()):
+                adapter.evaluate(ctx)
 
         evaluate_raw_ppl.assert_not_called()
         evaluate_chat_prefix_ppl.assert_called_once()
@@ -215,7 +220,8 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
                     evaluate_vlm_text_ppl=DEFAULT,
                 ) as mocks:
                     mocks["evaluate_vlm_text_ppl"].return_value = 2.0
-                    adapter.evaluate(ctx)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        adapter.evaluate(ctx)
 
                 mocks["evaluate_and_print_mmmu"].assert_called_once()
                 mocks["evaluate_vlm_text_ppl"].assert_called_once()

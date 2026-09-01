@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import io
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -191,7 +193,8 @@ class TestDecoderExportSingleStep(unittest.TestCase):
             cmock = MagicMock()
             mock_convert.return_value = cmock
 
-            export_decoder_single_step(fake_translator, save_path="dummy.circle")
+            with contextlib.redirect_stdout(io.StringIO()):
+                export_decoder_single_step(fake_translator, save_path="dummy.circle")
 
             # Ensure convert was called once with a DecoderExportSingleStep and example tensors
             self.assertTrue(mock_convert.called)

@@ -386,11 +386,12 @@ class TestDatasetsRegistry(unittest.TestCase):
             "load_dataset",
             return_value=dataset,
         ) as load_dataset_mock:
-            loaded, adapter = vlm_eval_utils.get_dataset(
-                "mmmu_pro_vision",
-                role=EVALUATION_ROLE,
-                n=1,
-            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                loaded, adapter = vlm_eval_utils.get_dataset(
+                    "mmmu_pro_vision",
+                    role=EVALUATION_ROLE,
+                    n=1,
+                )
 
         self.assertIs(loaded, dataset)
         self.assertIs(adapter, get_item_mmmu_calib)
