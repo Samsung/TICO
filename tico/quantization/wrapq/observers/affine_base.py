@@ -125,11 +125,17 @@ class AffineObserverBase(ObserverBase):
         assert isinstance(self.max_val, torch.Tensor)
         qmin, qmax = self.dtype.qmin, self.dtype.qmax
         rng = self.max_val - self.min_val
-        eps = 1e-12
+        # The floor bounds the final scale, not the observed range, so a
+        # degenerate (all-zero) channel quantizes with the floor scale instead
+        # of floor / qmax. The value matches the ONE quantizer: a dead weight
+        # channel can still carry a real bias, whose integer value scales with
+        # 1 / (input_scale * weight_scale); floors far below 1e-8 push such
+        # biases past integer-backend accumulator rescale limits.
+        eps = 1e-8
 
         if self.qscheme.is_symmetric():
             max_abs = torch.maximum(self.max_val.abs(), self.min_val.abs())
-            scale = torch.clamp(max_abs, min=eps) / qmax
+            scale = torch.clamp(max_abs / qmax, min=eps)
             zp = torch.zeros_like(scale, dtype=torch.int)
             self._cached_scale, self._cached_zp = scale, zp
             return scale, zp
@@ -150,7 +156,7 @@ class AffineObserverBase(ObserverBase):
             rng = torch.where(0 < self.min_val, self.max_val, rng)
             rng = torch.where(0 > self.max_val, -self.min_val, rng)
 
-            scale = torch.clamp(rng, min=eps) / (qmax - qmin)
+            scale = torch.clamp(rng / (qmax - qmin), min=eps)
             zp = (
                 torch.round(qmin - self.min_val / scale).clamp(qmin, qmax).to(torch.int)
             )

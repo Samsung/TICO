@@ -651,8 +651,10 @@ def _build_region_plan(
             output_boundary.transpose_output_index,
         ):
             return None
+        # The tensor name is excluded so one region output may fan out through
+        # several duplicate inverse Transposes; the rewrite keeps the first
+        # boundary's contract and bypasses every duplicate.
         contract = (
-            getattr(final_tensor, "name", ""),
             _shape(final_tensor),
             _shape_signature(final_tensor),
             _per_tensor_encoding(final_tensor),
@@ -663,6 +665,25 @@ def _build_region_plan(
             contract,
         )
         if previous != contract:
+            return None
+
+    fanout_counts: dict[int, int] = {}
+    for output_boundary in output_boundaries:
+        fanout_counts[output_boundary.region_tensor_index] = (
+            fanout_counts.get(output_boundary.region_tensor_index, 0) + 1
+        )
+    for output_boundary in output_boundaries:
+        if fanout_counts[output_boundary.region_tensor_index] < 2:
+            continue
+        # A fanned-out duplicate loses its own tensor identity, so none of the
+        # duplicates may carry an externally visible graph-output name.
+        if output_boundary.transpose_output_index in graph.outputs:
+            return None
+        if _is_signature_output(
+            document,
+            graph.subgraph_index,
+            output_boundary.transpose_output_index,
+        ):
             return None
 
     data_tensor_indices = _region_data_tensor_indices(

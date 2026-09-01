@@ -1,8 +1,8 @@
-# MediaPipe Palm Detector
+# MediaPipe Hand Models
 
-This example reconstructs the MediaPipe palm detector as a PyTorch module,
-quantizes it with TICO WrapQ, and exports static Circle models with an NHWC
-input boundary.
+This example reconstructs the MediaPipe palm detector and hand landmark
+models as static PyTorch modules, quantizes them with TICO WrapQ, and exports
+static Circle models with an NHWC input boundary.
 
 The example is organized around four entry points:
 
@@ -72,7 +72,35 @@ examples/hand_detector/hand_detector_float.pt
 ```
 
 The converter currently supports the operator subset used by the supplied palm
-detector. It is not a general TFLite-to-PyTorch frontend.
+detector and hand landmark models. It is not a general TFLite-to-PyTorch
+frontend. Fused RELU6 activations are split into explicit RELU6 operations so
+activation quantization observes the post-activation tensor; after export the
+Circle-side `FuseActivationFunctionPass` folds each standalone RELU/RELU6 back
+into its producer's fused activation slot, which removes the intermediate
+pre-activation quantization. A FULLY_CONNECTED over a spatial map is stored as
+an equivalent 1x1 CONV_2D.
+
+The hand landmark model converts the same way:
+
+```bash
+python -m examples.hand_detector.convert \
+  /path/to/hand_landmark_full.tflite \
+  --spec examples/hand_detector/hand_landmark_spec.json \
+  --weights examples/hand_detector/hand_landmark_float.pt
+```
+
+It exposes a `[1, 224, 224, 3]` NHWC input and four outputs: 63 image-space
+landmark values, a hand-presence score, a handedness score, and 63 world
+landmark values. Quantized export reuses the same command with
+`--weights`/`--spec` pointing at the landmark artifacts,
+`--calibration-pattern "landmark*.npy"`, and `--skip-verification` (the
+structural verifier encodes palm-detector operator counts).
+
+`--hoist-head-means` swaps each head's `1x1 Conv -> spatial MEAN` chain into
+an exactly equivalent shared `MEAN -> 1x1 Conv` (both operations are linear).
+This removes the quantized per-position head maps, shares one reduced feature
+vector across all four heads, shrinks the head convolutions by the spatial
+factor, and measured about 6% fewer NPU cycles at unchanged output error.
 
 ## Export Circle models
 

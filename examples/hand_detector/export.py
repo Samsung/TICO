@@ -41,8 +41,10 @@ from examples.hand_detector._support.verify_quantized_circle import (
     verify_quantized_circle,
 )
 from examples.hand_detector.hand_detector import (
+    hoist_head_spatial_means,
     load_nhwc_hand_detector,
     lower_resize_bilinear_to_tconv,
+    NHWCInputAdapter,
 )
 
 
@@ -71,6 +73,11 @@ def parse_args() -> argparse.Namespace:
     quantized.add_argument("--calibration-dir", type=Path)
     quantized.add_argument("--calibration-offset", type=int, default=0)
     quantized.add_argument("--calibration-limit", type=int)
+    quantized.add_argument(
+        "--calibration-pattern",
+        default="palm*.npy",
+        help="Glob pattern selecting calibration arrays inside --calibration-dir.",
+    )
     quantized.add_argument("--synthetic-calibration-samples", type=int, default=32)
     quantized.add_argument(
         "--bits",
@@ -93,6 +100,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Lower every 2x half-pixel RESIZE_BILINEAR to an equivalent "
             "fixed-weight TRANSPOSE_CONV."
+        ),
+    )
+    quantized.add_argument(
+        "--hoist-head-means",
+        action="store_true",
+        help=(
+            "Swap head '1x1 Conv -> spatial MEAN' chains into an equivalent "
+            "shared 'MEAN -> 1x1 Conv', removing the quantized per-position "
+            "head maps and shrinking the head convolutions."
         ),
     )
     quantized.add_argument(
@@ -157,6 +173,9 @@ def _export_float(args: argparse.Namespace) -> None:
 
 def _export_quantized(args: argparse.Namespace) -> None:
     model = load_nhwc_hand_detector(args.weights, args.spec).eval()
+    if args.hoist_head_means:
+        model = NHWCInputAdapter(hoist_head_spatial_means(model.detector)).eval()
+        print("Hoisted head spatial means before the head convolutions.")
     lowered_resize_positions: tuple[int, ...] = ()
     if args.resize_tconv:
         lowered_resize_positions = lower_resize_bilinear_to_tconv(
@@ -179,6 +198,7 @@ def _export_quantized(args: argparse.Namespace) -> None:
             args.calibration_dir,
             args.calibration_limit,
             offset=args.calibration_offset,
+            pattern=args.calibration_pattern,
         )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -221,6 +241,7 @@ def _export_quantized(args: argparse.Namespace) -> None:
         "input_shape": [1, 192, 192, 3],
         "calibration_samples": len(calibration),
         "synthetic_calibration": args.calibration_dir is None,
+        "hoist_head_means": bool(args.hoist_head_means),
         "resize_tconv": bool(args.resize_tconv),
         "resize_tconv_groups": (
             int(args.resize_tconv_groups) if args.resize_tconv else None

@@ -25,6 +25,7 @@ from tico.circle.passes import (
     CirclePassManagerResult,
     CirclePassStrategy,
     EliminateTransposeBoundedLayoutRegionPass,
+    FuseActivationFunctionPass,
     SimplifyViewOpsPass,
 )
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
@@ -38,6 +39,7 @@ def optimize_layout_transitions(
     document = CircleDocument.from_bytes(circle_model.circle_binary)
     pipeline = CirclePassManager(
         [
+            FuseActivationFunctionPass(),
             EliminateTransposeBoundedLayoutRegionPass(),
             SimplifyViewOpsPass(),
             DeadCodeEliminationPass(),

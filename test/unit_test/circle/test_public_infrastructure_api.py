@@ -53,6 +53,7 @@ _EXPECTED_PASS_API = {
     "EliminateIdentityOpsPass",
     "EliminateTransposeBoundedLayoutRegionPass",
     "FoldConstantsPass",
+    "FuseActivationFunctionPass",
     "FuseCompositeOpsPass",
     "FuseLegacyFCGeluFCPass",
     "FuseLinearOpsPass",

@@ -45,10 +45,13 @@ BUILTIN_OPERATOR_NAMES = {
     3: "CONV_2D",
     4: "DEPTHWISE_CONV_2D",
     6: "DEQUANTIZE",
+    9: "FULLY_CONNECTED",
+    14: "LOGISTIC",
     17: "MAX_POOL_2D",
     22: "RESHAPE",
     23: "RESIZE_BILINEAR",
     34: "PAD",
+    40: "MEAN",
     54: "PRELU",
 }
 
@@ -303,6 +306,14 @@ class TFLiteModel:
             }
         if name == "ADD":
             return {"fused_activation": reader.scalar_i8(table, 0, 0)}
+        if name == "FULLY_CONNECTED":
+            return {
+                "fused_activation": reader.scalar_i8(table, 0, 0),
+                "weights_format": reader.scalar_i8(table, 1, 0),
+                "keep_num_dims": reader.scalar_bool(table, 2, False),
+            }
+        if name == "MEAN":
+            return {"keep_dims": reader.scalar_bool(table, 0, False)}
         if name == "CONCATENATION":
             return {
                 "axis": reader.scalar_i32(table, 0, 0),

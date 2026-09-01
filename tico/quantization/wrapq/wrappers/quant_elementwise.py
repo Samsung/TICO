@@ -119,6 +119,10 @@ def _sigmoid(x: torch.Tensor) -> torch.Tensor:
     return torch.sigmoid(x)
 
 
+def _relu6(x: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.relu6(x)
+
+
 def _gelu(x: torch.Tensor, approximate="none") -> torch.Tensor:
     return torch.nn.functional.gelu(x, approximate=approximate)
 
@@ -146,6 +150,13 @@ class QuantReLU(QuantElementwise):
     @staticmethod
     def FUNC(x: torch.Tensor) -> torch.Tensor:
         return _relu(x)
+
+
+@register(nn.ReLU6)
+class QuantReLU6(QuantElementwise):
+    @staticmethod
+    def FUNC(x: torch.Tensor) -> torch.Tensor:
+        return _relu6(x)
 
 
 @register(nn.GELU)

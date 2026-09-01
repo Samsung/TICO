@@ -340,6 +340,94 @@ class _RemoveIdentityTransposeRule(_ViewRule):
         return self._apply_bypass(document, plan)
 
 
+class _BypassMemoryOrderTransposeRule(_ViewRule):
+    """Bypass TRANSPOSE whose permutation only moves size-one axes.
+
+    Such a permutation preserves the flattened memory order, so the operator
+    copies data unchanged. When the output shape still differs from the input
+    shape, the bypass is restricted to consumers that only read the memory
+    order: static RESHAPE data inputs.
+    """
+
+    def match(self, document, graph, operator_index, context):
+        """Match a memory-order-preserving TRANSPOSE with safe consumers."""
+
+        del context
+        operator = as_list(graph.subgraph.operators)[operator_index]
+        if operator_builtin_code(document.model, operator) != self.transpose_code:
+            return None
+        inputs = as_indices(operator.inputs)
+        outputs = as_indices(operator.outputs)
+        if len(inputs) != 2 or len(outputs) != 1 or not operator_is_plain(operator):
+            return None
+        if not _tensor_has_uses(document, graph, outputs[0]):
+            return None
+        input_contract = tensor_contract(graph, inputs[0])
+        output_contract = tensor_contract(graph, outputs[0])
+        if input_contract.tensor_type != output_contract.tensor_type:
+            return None
+        if input_contract.quantization != output_contract.quantization:
+            return None
+        permutation = decode_integer_vector(
+            self.codec,
+            document.model,
+            subgraph_index=graph.subgraph_index,
+            tensor_index=inputs[1],
+            expected_count=input_contract.rank,
+        )
+        if permutation is None or sorted(permutation) != list(
+            range(input_contract.rank)
+        ):
+            return None
+        if permutation == tuple(range(input_contract.rank)):
+            # The plain identity permutation belongs to the dedicated rule.
+            return None
+        shape = input_contract.shape
+        if shape is None or any(int(dim) < 0 for dim in shape):
+            return None
+        if tuple(int(shape[axis]) for axis in permutation) != output_contract.shape:
+            return None
+        moved_non_unit = [axis for axis in permutation if int(shape[axis]) > 1]
+        if moved_non_unit != sorted(moved_non_unit):
+            return None
+
+        if _tensor_is_boundary(document, graph, outputs[0]):
+            return None
+        if input_contract.shape != output_contract.shape or (
+            input_contract.shape_signature != output_contract.shape_signature
+        ):
+            # The tensor identity changes shape, so only memory-order readers
+            # may be redirected.
+            operators = as_list(graph.subgraph.operators)
+            for consumer_index in graph.consumers(outputs[0]):
+                consumer = operators[consumer_index]
+                if operator_builtin_code(document.model, consumer) != self.reshape_code:
+                    return None
+                consumer_inputs = as_indices(consumer.inputs)
+                if len(consumer_inputs) < 1 or consumer_inputs[0] != outputs[0]:
+                    return None
+                if outputs[0] in consumer_inputs[1:]:
+                    return None
+
+        return _BypassViewPlan.capture(
+            document,
+            subgraph_index=graph.subgraph_index,
+            anchor_operator_index=operator_index,
+            tensor_indices=(*inputs, *outputs),
+            replacement_input=inputs[0],
+            diagnostic_code="BYPASS_MEMORY_ORDER_TRANSPOSE",
+            diagnostic_message=(
+                "Bypassed TRANSPOSE that only rearranges size-one axes."
+            ),
+        )
+
+    def apply(self, document, plan, context):
+        """Bypass one matched memory-order-preserving TRANSPOSE."""
+
+        del context
+        return self._apply_bypass(document, plan)
+
+
 class _RemoveInverseTransposePairRule(_ViewRule):
     """Bypass an inverse TRANSPOSE pair without deleting its operators."""
 
@@ -880,6 +968,7 @@ class SimplifyViewOpsPass(CirclePass):
             _RemoveIdentityReshapeRule(self.schema, self.codec),
             _ComposeReshapeChainRule(self.schema, self.codec),
             _RemoveIdentityTransposeRule(self.schema, self.codec),
+            _BypassMemoryOrderTransposeRule(self.schema, self.codec),
             _RemoveInverseTransposePairRule(self.schema, self.codec),
             _ComposeTransposeChainRule(self.schema, self.codec),
             _CommuteReshapeThroughElementwiseRule(self.schema, self.codec),

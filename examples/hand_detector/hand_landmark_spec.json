@@ -1,0 +1,2439 @@
+{
+  "format_version": 1,
+  "source": "hand_landmark_full.tflite",
+  "input_layout": "NCHW",
+  "input_shape": [
+    1,
+    224,
+    224,
+    3
+  ],
+  "inputs": [
+    0
+  ],
+  "outputs": [
+    165,
+    164,
+    162,
+    166
+  ],
+  "operations": [
+    {
+      "index": 2,
+      "name": "CONV_2D",
+      "inputs": [
+        0,
+        202,
+        201
+      ],
+      "outputs": [
+        273
+      ],
+      "config": {
+        "in_channels": 3,
+        "out_channels": 24,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          1,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "index": 2,
+      "name": "RELU6",
+      "inputs": [
+        273
+      ],
+      "outputs": [
+        104
+      ],
+      "config": {}
+    },
+    {
+      "index": 5,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        104,
+        192,
+        263
+      ],
+      "outputs": [
+        274
+      ],
+      "config": {
+        "in_channels": 24,
+        "out_channels": 24,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 24,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "index": 5,
+      "name": "RELU6",
+      "inputs": [
+        274
+      ],
+      "outputs": [
+        105
+      ],
+      "config": {}
+    },
+    {
+      "index": 8,
+      "name": "CONV_2D",
+      "inputs": [
+        105,
+        265,
+        198
+      ],
+      "outputs": [
+        106
+      ],
+      "config": {
+        "in_channels": 24,
+        "out_channels": 16,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 11,
+      "name": "CONV_2D",
+      "inputs": [
+        106,
+        183,
+        221
+      ],
+      "outputs": [
+        275
+      ],
+      "config": {
+        "in_channels": 16,
+        "out_channels": 64,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 11,
+      "name": "RELU6",
+      "inputs": [
+        275
+      ],
+      "outputs": [
+        107
+      ],
+      "config": {}
+    },
+    {
+      "index": 14,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        107,
+        223,
+        249
+      ],
+      "outputs": [
+        276
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 64,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          1,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "index": 14,
+      "name": "RELU6",
+      "inputs": [
+        276
+      ],
+      "outputs": [
+        108
+      ],
+      "config": {}
+    },
+    {
+      "index": 17,
+      "name": "CONV_2D",
+      "inputs": [
+        108,
+        219,
+        258
+      ],
+      "outputs": [
+        109
+      ],
+      "config": {
+        "in_channels": 64,
+        "out_channels": 24,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 20,
+      "name": "CONV_2D",
+      "inputs": [
+        109,
+        241,
+        234
+      ],
+      "outputs": [
+        277
+      ],
+      "config": {
+        "in_channels": 24,
+        "out_channels": 144,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 20,
+      "name": "RELU6",
+      "inputs": [
+        277
+      ],
+      "outputs": [
+        110
+      ],
+      "config": {}
+    },
+    {
+      "index": 23,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        110,
+        176,
+        268
+      ],
+      "outputs": [
+        278
+      ],
+      "config": {
+        "in_channels": 144,
+        "out_channels": 144,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 144,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "index": 23,
+      "name": "RELU6",
+      "inputs": [
+        278
+      ],
+      "outputs": [
+        111
+      ],
+      "config": {}
+    },
+    {
+      "index": 26,
+      "name": "CONV_2D",
+      "inputs": [
+        111,
+        250,
+        237
+      ],
+      "outputs": [
+        112
+      ],
+      "config": {
+        "in_channels": 144,
+        "out_channels": 24,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 27,
+      "name": "ADD",
+      "inputs": [
+        112,
+        109
+      ],
+      "outputs": [
+        113
+      ],
+      "config": {}
+    },
+    {
+      "index": 30,
+      "name": "CONV_2D",
+      "inputs": [
+        113,
+        168,
+        190
+      ],
+      "outputs": [
+        279
+      ],
+      "config": {
+        "in_channels": 24,
+        "out_channels": 144,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 30,
+      "name": "RELU6",
+      "inputs": [
+        279
+      ],
+      "outputs": [
+        114
+      ],
+      "config": {}
+    },
+    {
+      "index": 33,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        114,
+        260,
+        182
+      ],
+      "outputs": [
+        280
+      ],
+      "config": {
+        "in_channels": 144,
+        "out_channels": 144,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 144,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 33,
+      "name": "RELU6",
+      "inputs": [
+        280
+      ],
+      "outputs": [
+        115
+      ],
+      "config": {}
+    },
+    {
+      "index": 36,
+      "name": "CONV_2D",
+      "inputs": [
+        115,
+        203,
+        193
+      ],
+      "outputs": [
+        116
+      ],
+      "config": {
+        "in_channels": 144,
+        "out_channels": 40,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 39,
+      "name": "CONV_2D",
+      "inputs": [
+        116,
+        228,
+        217
+      ],
+      "outputs": [
+        281
+      ],
+      "config": {
+        "in_channels": 40,
+        "out_channels": 240,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 39,
+      "name": "RELU6",
+      "inputs": [
+        281
+      ],
+      "outputs": [
+        117
+      ],
+      "config": {}
+    },
+    {
+      "index": 42,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        117,
+        213,
+        239
+      ],
+      "outputs": [
+        282
+      ],
+      "config": {
+        "in_channels": 240,
+        "out_channels": 240,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 240,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 42,
+      "name": "RELU6",
+      "inputs": [
+        282
+      ],
+      "outputs": [
+        118
+      ],
+      "config": {}
+    },
+    {
+      "index": 45,
+      "name": "CONV_2D",
+      "inputs": [
+        118,
+        185,
+        242
+      ],
+      "outputs": [
+        119
+      ],
+      "config": {
+        "in_channels": 240,
+        "out_channels": 40,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 46,
+      "name": "ADD",
+      "inputs": [
+        119,
+        116
+      ],
+      "outputs": [
+        120
+      ],
+      "config": {}
+    },
+    {
+      "index": 49,
+      "name": "CONV_2D",
+      "inputs": [
+        120,
+        212,
+        251
+      ],
+      "outputs": [
+        283
+      ],
+      "config": {
+        "in_channels": 40,
+        "out_channels": 240,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 49,
+      "name": "RELU6",
+      "inputs": [
+        283
+      ],
+      "outputs": [
+        121
+      ],
+      "config": {}
+    },
+    {
+      "index": 52,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        121,
+        252,
+        174
+      ],
+      "outputs": [
+        284
+      ],
+      "config": {
+        "in_channels": 240,
+        "out_channels": 240,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 240,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          1,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "index": 52,
+      "name": "RELU6",
+      "inputs": [
+        284
+      ],
+      "outputs": [
+        122
+      ],
+      "config": {}
+    },
+    {
+      "index": 55,
+      "name": "CONV_2D",
+      "inputs": [
+        122,
+        235,
+        169
+      ],
+      "outputs": [
+        123
+      ],
+      "config": {
+        "in_channels": 240,
+        "out_channels": 80,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 58,
+      "name": "CONV_2D",
+      "inputs": [
+        123,
+        167,
+        195
+      ],
+      "outputs": [
+        285
+      ],
+      "config": {
+        "in_channels": 80,
+        "out_channels": 480,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 58,
+      "name": "RELU6",
+      "inputs": [
+        285
+      ],
+      "outputs": [
+        124
+      ],
+      "config": {}
+    },
+    {
+      "index": 61,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        124,
+        205,
+        231
+      ],
+      "outputs": [
+        286
+      ],
+      "config": {
+        "in_channels": 480,
+        "out_channels": 480,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 480,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "index": 61,
+      "name": "RELU6",
+      "inputs": [
+        286
+      ],
+      "outputs": [
+        125
+      ],
+      "config": {}
+    },
+    {
+      "index": 64,
+      "name": "CONV_2D",
+      "inputs": [
+        125,
+        191,
+        230
+      ],
+      "outputs": [
+        126
+      ],
+      "config": {
+        "in_channels": 480,
+        "out_channels": 80,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 65,
+      "name": "ADD",
+      "inputs": [
+        126,
+        123
+      ],
+      "outputs": [
+        127
+      ],
+      "config": {}
+    },
+    {
+      "index": 68,
+      "name": "CONV_2D",
+      "inputs": [
+        127,
+        199,
+        254
+      ],
+      "outputs": [
+        287
+      ],
+      "config": {
+        "in_channels": 80,
+        "out_channels": 480,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 68,
+      "name": "RELU6",
+      "inputs": [
+        287
+      ],
+      "outputs": [
+        128
+      ],
+      "config": {}
+    },
+    {
+      "index": 71,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        128,
+        186,
+        211
+      ],
+      "outputs": [
+        288
+      ],
+      "config": {
+        "in_channels": 480,
+        "out_channels": 480,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 480,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "index": 71,
+      "name": "RELU6",
+      "inputs": [
+        288
+      ],
+      "outputs": [
+        129
+      ],
+      "config": {}
+    },
+    {
+      "index": 74,
+      "name": "CONV_2D",
+      "inputs": [
+        129,
+        222,
+        208
+      ],
+      "outputs": [
+        130
+      ],
+      "config": {
+        "in_channels": 480,
+        "out_channels": 80,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 75,
+      "name": "ADD",
+      "inputs": [
+        130,
+        127
+      ],
+      "outputs": [
+        131
+      ],
+      "config": {}
+    },
+    {
+      "index": 78,
+      "name": "CONV_2D",
+      "inputs": [
+        131,
+        257,
+        233
+      ],
+      "outputs": [
+        289
+      ],
+      "config": {
+        "in_channels": 80,
+        "out_channels": 480,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 78,
+      "name": "RELU6",
+      "inputs": [
+        289
+      ],
+      "outputs": [
+        132
+      ],
+      "config": {}
+    },
+    {
+      "index": 81,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        132,
+        243,
+        267
+      ],
+      "outputs": [
+        290
+      ],
+      "config": {
+        "in_channels": 480,
+        "out_channels": 480,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 480,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 81,
+      "name": "RELU6",
+      "inputs": [
+        290
+      ],
+      "outputs": [
+        133
+      ],
+      "config": {}
+    },
+    {
+      "index": 84,
+      "name": "CONV_2D",
+      "inputs": [
+        133,
+        175,
+        266
+      ],
+      "outputs": [
+        134
+      ],
+      "config": {
+        "in_channels": 480,
+        "out_channels": 112,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 87,
+      "name": "CONV_2D",
+      "inputs": [
+        134,
+        236,
+        189
+      ],
+      "outputs": [
+        291
+      ],
+      "config": {
+        "in_channels": 112,
+        "out_channels": 672,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 87,
+      "name": "RELU6",
+      "inputs": [
+        291
+      ],
+      "outputs": [
+        135
+      ],
+      "config": {}
+    },
+    {
+      "index": 90,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        135,
+        171,
+        196
+      ],
+      "outputs": [
+        292
+      ],
+      "config": {
+        "in_channels": 672,
+        "out_channels": 672,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 672,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 90,
+      "name": "RELU6",
+      "inputs": [
+        292
+      ],
+      "outputs": [
+        136
+      ],
+      "config": {}
+    },
+    {
+      "index": 93,
+      "name": "CONV_2D",
+      "inputs": [
+        136,
+        261,
+        200
+      ],
+      "outputs": [
+        137
+      ],
+      "config": {
+        "in_channels": 672,
+        "out_channels": 112,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 94,
+      "name": "ADD",
+      "inputs": [
+        137,
+        134
+      ],
+      "outputs": [
+        138
+      ],
+      "config": {}
+    },
+    {
+      "index": 97,
+      "name": "CONV_2D",
+      "inputs": [
+        138,
+        184,
+        248
+      ],
+      "outputs": [
+        293
+      ],
+      "config": {
+        "in_channels": 112,
+        "out_channels": 672,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 97,
+      "name": "RELU6",
+      "inputs": [
+        293
+      ],
+      "outputs": [
+        139
+      ],
+      "config": {}
+    },
+    {
+      "index": 100,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        139,
+        224,
+        181
+      ],
+      "outputs": [
+        294
+      ],
+      "config": {
+        "in_channels": 672,
+        "out_channels": 672,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 672,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 100,
+      "name": "RELU6",
+      "inputs": [
+        294
+      ],
+      "outputs": [
+        140
+      ],
+      "config": {}
+    },
+    {
+      "index": 103,
+      "name": "CONV_2D",
+      "inputs": [
+        140,
+        220,
+        259
+      ],
+      "outputs": [
+        141
+      ],
+      "config": {
+        "in_channels": 672,
+        "out_channels": 112,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 104,
+      "name": "ADD",
+      "inputs": [
+        141,
+        138
+      ],
+      "outputs": [
+        142
+      ],
+      "config": {}
+    },
+    {
+      "index": 107,
+      "name": "CONV_2D",
+      "inputs": [
+        142,
+        244,
+        204
+      ],
+      "outputs": [
+        295
+      ],
+      "config": {
+        "in_channels": 112,
+        "out_channels": 672,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 107,
+      "name": "RELU6",
+      "inputs": [
+        295
+      ],
+      "outputs": [
+        143
+      ],
+      "config": {}
+    },
+    {
+      "index": 110,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        143,
+        177,
+        264
+      ],
+      "outputs": [
+        296
+      ],
+      "config": {
+        "in_channels": 672,
+        "out_channels": 672,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          2,
+          2
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 672,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          2,
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "index": 110,
+      "name": "RELU6",
+      "inputs": [
+        296
+      ],
+      "outputs": [
+        144
+      ],
+      "config": {}
+    },
+    {
+      "index": 113,
+      "name": "CONV_2D",
+      "inputs": [
+        144,
+        253,
+        238
+      ],
+      "outputs": [
+        145
+      ],
+      "config": {
+        "in_channels": 672,
+        "out_channels": 192,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 116,
+      "name": "CONV_2D",
+      "inputs": [
+        145,
+        170,
+        187
+      ],
+      "outputs": [
+        297
+      ],
+      "config": {
+        "in_channels": 192,
+        "out_channels": 1152,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 116,
+      "name": "RELU6",
+      "inputs": [
+        297
+      ],
+      "outputs": [
+        146
+      ],
+      "config": {}
+    },
+    {
+      "index": 119,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        146,
+        262,
+        218
+      ],
+      "outputs": [
+        298
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 1152,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1152,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 119,
+      "name": "RELU6",
+      "inputs": [
+        298
+      ],
+      "outputs": [
+        147
+      ],
+      "config": {}
+    },
+    {
+      "index": 122,
+      "name": "CONV_2D",
+      "inputs": [
+        147,
+        206,
+        194
+      ],
+      "outputs": [
+        148
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 192,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 123,
+      "name": "ADD",
+      "inputs": [
+        148,
+        145
+      ],
+      "outputs": [
+        149
+      ],
+      "config": {}
+    },
+    {
+      "index": 126,
+      "name": "CONV_2D",
+      "inputs": [
+        149,
+        229,
+        240
+      ],
+      "outputs": [
+        299
+      ],
+      "config": {
+        "in_channels": 192,
+        "out_channels": 1152,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 126,
+      "name": "RELU6",
+      "inputs": [
+        299
+      ],
+      "outputs": [
+        150
+      ],
+      "config": {}
+    },
+    {
+      "index": 129,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        150,
+        214,
+        172
+      ],
+      "outputs": [
+        300
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 1152,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1152,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 129,
+      "name": "RELU6",
+      "inputs": [
+        300
+      ],
+      "outputs": [
+        151
+      ],
+      "config": {}
+    },
+    {
+      "index": 132,
+      "name": "CONV_2D",
+      "inputs": [
+        151,
+        188,
+        225
+      ],
+      "outputs": [
+        152
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 192,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 133,
+      "name": "ADD",
+      "inputs": [
+        152,
+        149
+      ],
+      "outputs": [
+        153
+      ],
+      "config": {}
+    },
+    {
+      "index": 136,
+      "name": "CONV_2D",
+      "inputs": [
+        153,
+        207,
+        209
+      ],
+      "outputs": [
+        301
+      ],
+      "config": {
+        "in_channels": 192,
+        "out_channels": 1152,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 136,
+      "name": "RELU6",
+      "inputs": [
+        301
+      ],
+      "outputs": [
+        154
+      ],
+      "config": {}
+    },
+    {
+      "index": 139,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        154,
+        246,
+        232
+      ],
+      "outputs": [
+        302
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 1152,
+        "kernel_size": [
+          5,
+          5
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1152,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          2,
+          2,
+          2,
+          2
+        ]
+      }
+    },
+    {
+      "index": 139,
+      "name": "RELU6",
+      "inputs": [
+        302
+      ],
+      "outputs": [
+        155
+      ],
+      "config": {}
+    },
+    {
+      "index": 142,
+      "name": "CONV_2D",
+      "inputs": [
+        155,
+        245,
+        173
+      ],
+      "outputs": [
+        156
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 192,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 143,
+      "name": "ADD",
+      "inputs": [
+        156,
+        153
+      ],
+      "outputs": [
+        157
+      ],
+      "config": {}
+    },
+    {
+      "index": 146,
+      "name": "CONV_2D",
+      "inputs": [
+        157,
+        178,
+        255
+      ],
+      "outputs": [
+        303
+      ],
+      "config": {
+        "in_channels": 192,
+        "out_channels": 1152,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 146,
+      "name": "RELU6",
+      "inputs": [
+        303
+      ],
+      "outputs": [
+        158
+      ],
+      "config": {}
+    },
+    {
+      "index": 149,
+      "name": "DEPTHWISE_CONV_2D",
+      "inputs": [
+        158,
+        210,
+        215
+      ],
+      "outputs": [
+        304
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 1152,
+        "kernel_size": [
+          3,
+          3
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1152,
+        "has_bias": true,
+        "padding": "same",
+        "pad": [
+          1,
+          1,
+          1,
+          1
+        ]
+      }
+    },
+    {
+      "index": 149,
+      "name": "RELU6",
+      "inputs": [
+        304
+      ],
+      "outputs": [
+        159
+      ],
+      "config": {}
+    },
+    {
+      "index": 152,
+      "name": "CONV_2D",
+      "inputs": [
+        159,
+        197,
+        180
+      ],
+      "outputs": [
+        269
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 1,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 153,
+      "name": "MEAN",
+      "inputs": [
+        269,
+        1
+      ],
+      "outputs": [
+        161
+      ],
+      "config": {}
+    },
+    {
+      "index": 154,
+      "name": "LOGISTIC",
+      "inputs": [
+        161
+      ],
+      "outputs": [
+        162
+      ],
+      "config": {}
+    },
+    {
+      "index": 157,
+      "name": "CONV_2D",
+      "inputs": [
+        159,
+        226,
+        247
+      ],
+      "outputs": [
+        270
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 1,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 158,
+      "name": "MEAN",
+      "inputs": [
+        270,
+        1
+      ],
+      "outputs": [
+        163
+      ],
+      "config": {}
+    },
+    {
+      "index": 159,
+      "name": "LOGISTIC",
+      "inputs": [
+        163
+      ],
+      "outputs": [
+        164
+      ],
+      "config": {}
+    },
+    {
+      "index": 162,
+      "name": "CONV_2D",
+      "inputs": [
+        159,
+        256,
+        227
+      ],
+      "outputs": [
+        271
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 63,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 163,
+      "name": "MEAN",
+      "inputs": [
+        271,
+        1
+      ],
+      "outputs": [
+        165
+      ],
+      "config": {}
+    },
+    {
+      "index": 166,
+      "name": "CONV_2D",
+      "inputs": [
+        159,
+        179,
+        216
+      ],
+      "outputs": [
+        272
+      ],
+      "config": {
+        "in_channels": 1152,
+        "out_channels": 63,
+        "kernel_size": [
+          1,
+          1
+        ],
+        "stride": [
+          1,
+          1
+        ],
+        "dilation": [
+          1,
+          1
+        ],
+        "groups": 1,
+        "has_bias": true,
+        "padding": "valid",
+        "pad": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "index": 167,
+      "name": "MEAN",
+      "inputs": [
+        272,
+        1
+      ],
+      "outputs": [
+        166
+      ],
+      "config": {}
+    }
+  ]
+}

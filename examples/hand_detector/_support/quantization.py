@@ -40,13 +40,45 @@ from tico.quantization.wrapq.wrappers.ops.quant_concat import QuantConcat
 from tico.quantization.wrapq.wrappers.ops.quant_resize_bilinear import (
     QuantResizeBilinear2d,
 )
+from tico.quantization.wrapq.wrappers.quant_elementwise import QuantReLU6, QuantSigmoid
+from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.quant_stub import QuantStubWrapper
+from tico.quantization.wrapq.wrappers.registry import register
 from torch import nn
 
 from examples.hand_detector._support.circle import save_layout_optimized_circle
+from examples.hand_detector.hand_detector import SpatialMeanNode
 
 
 ObserverOverride = QuantSpec | Mapping[str, object]
+
+
+@register(SpatialMeanNode)
+class QuantSpatialMean(QuantModuleBase):
+    """Fake-quantize both sides of one spatial-mean reduction."""
+
+    def __init__(
+        self,
+        fp: SpatialMeanNode,
+        *,
+        qcfg: PTQConfig | None = None,
+        fp_name: str | None = None,
+    ) -> None:
+        """Create activation observers around one SpatialMeanNode module."""
+        super().__init__(qcfg, fp_name=fp_name)
+        self.module = fp
+        self.obs_act_in = self._make_obs("act_in")
+        self.obs_act_out = self._make_obs("act_out")
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        """Execute the spatial mean under the current WrapQ mode."""
+        input_q = self._fq(input_, self.obs_act_in)
+        output = self.module(input_q)
+        return self._fq(output, self.obs_act_out)
+
+    def _all_observers(self):
+        """Return observers owned directly by this wrapper."""
+        return self.obs_act_in, self.obs_act_out
 
 
 _FLOAT_MODULE_TYPES = (
@@ -55,8 +87,11 @@ _FLOAT_MODULE_TYPES = (
     nn.ConvTranspose2d,
     nn.MaxPool2d,
     nn.PReLU,
+    nn.ReLU6,
+    nn.Sigmoid,
     Concat,
     ResizeBilinear2d,
+    SpatialMeanNode,
 )
 _QUANT_MODULE_TYPES = (
     QuantStubWrapper,
@@ -64,8 +99,11 @@ _QUANT_MODULE_TYPES = (
     QuantConvTranspose2d,
     QuantMaxPool2d,
     QuantPReLU,
+    QuantReLU6,
+    QuantSigmoid,
     QuantConcat,
     QuantResizeBilinear2d,
+    QuantSpatialMean,
 )
 _SUPPORTED_BIT_WIDTHS = (8, 16)
 

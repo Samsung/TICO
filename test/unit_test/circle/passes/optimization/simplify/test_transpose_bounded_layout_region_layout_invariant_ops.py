@@ -252,6 +252,101 @@ def _make_elementwise_document(
     )
 
 
+def _make_fanout_unary_document(
+    *,
+    duplicate_output_is_graph_output: bool,
+) -> tuple[CircleDocument, int, int]:
+    """Create one RELU region whose output fans out through two inverse Transposes."""
+
+    relu_code = rules._UNARY_LAYOUT_INVARIANT_BUILTIN_CODES["RELU"]
+    unsupported_code = 3  # CONV_2D has no registered region rule.
+    tensor_type, qparam = _encoding(quantized=False)
+    tensors = [
+        _tensor(
+            "source_nhwc", _SOURCE_SHAPE, tensor_type=tensor_type, quantization=qparam
+        ),
+        FakeTensor("to_nchw", buffer=1, shape=[4], type=_INT32_TENSOR_TYPE),
+        _tensor(
+            "region_input_nchw",
+            _REGION_SHAPE,
+            tensor_type=tensor_type,
+            quantization=qparam,
+        ),
+        _tensor(
+            "region_output_nchw",
+            _REGION_SHAPE,
+            tensor_type=tensor_type,
+            quantization=qparam,
+        ),
+        FakeTensor("to_nhwc_a", buffer=2, shape=[4], type=_INT32_TENSOR_TYPE),
+        _tensor(
+            "dup_output_a_nhwc",
+            _SOURCE_SHAPE,
+            tensor_type=tensor_type,
+            quantization=qparam,
+        ),
+        FakeTensor("to_nhwc_b", buffer=2, shape=[4], type=_INT32_TENSOR_TYPE),
+        _tensor(
+            "dup_output_b_nhwc",
+            _SOURCE_SHAPE,
+            tensor_type=tensor_type,
+            quantization=qparam,
+        ),
+        _tensor(
+            "consumer_a_nhwc",
+            _SOURCE_SHAPE,
+            tensor_type=tensor_type,
+            quantization=qparam,
+        ),
+        _tensor(
+            "consumer_b_nhwc",
+            _SOURCE_SHAPE,
+            tensor_type=tensor_type,
+            quantization=qparam,
+        ),
+    ]
+    operators = [
+        FakeOperator(opcodeIndex=0, inputs=[0, 1], outputs=[2]),
+        FakeOperator(opcodeIndex=1, inputs=[2], outputs=[3]),
+        FakeOperator(opcodeIndex=0, inputs=[3, 4], outputs=[5]),
+        FakeOperator(opcodeIndex=0, inputs=[3, 6], outputs=[7]),
+        FakeOperator(opcodeIndex=2, inputs=[5], outputs=[8]),
+        FakeOperator(opcodeIndex=2, inputs=[7], outputs=[9]),
+    ]
+    outputs = [8, 9, 7] if duplicate_output_is_graph_output else [8, 9]
+    subgraph = FakeSubGraph(
+        name="main",
+        tensors=tensors,
+        inputs=[0],
+        outputs=outputs,
+        operators=operators,
+    )
+    model = FakeModel(
+        subgraphs=[subgraph],
+        buffers=[
+            FakeBuffer(),
+            _permutation_buffer(_SOURCE_TO_REGION),
+            _permutation_buffer(_REGION_TO_SOURCE),
+        ],
+        operatorCodes=[
+            FakeOperatorCode(builtinCode=code)
+            for code in (_TRANSPOSE_BUILTIN_CODE, relu_code, unsupported_code)
+        ],
+        signatureDefs=[
+            FakeSignatureDef(
+                signatureKey="main",
+                subgraphIndex=0,
+                inputs=[FakeTensorMap("input_0", 0)],
+                outputs=[
+                    FakeTensorMap(f"output_{position}", tensor_index)
+                    for position, tensor_index in enumerate(outputs)
+                ],
+            )
+        ],
+    )
+    return CircleDocument(model), 1, 3
+
+
 def _make_mixed_binary_unary_document(
     *,
     quantized: bool,
@@ -566,6 +661,43 @@ class LayoutInvariantRegionPassTest(unittest.TestCase):
             _SOURCE_SHAPE,
         )
         self.assertTrue(document.verify(raise_on_error=False).ok)
+
+    def test_rewrites_region_with_fanout_inverse_transposes(self) -> None:
+        """Bypass duplicate inverse Transposes fanning out of one region output."""
+
+        document, operator_index, region_output = _make_fanout_unary_document(
+            duplicate_output_is_graph_output=False,
+        )
+        result = EliminateTransposeBoundedLayoutRegionPass().run(
+            document,
+            CirclePassContext(),
+        )
+
+        self.assertTrue(result.modified)
+        self.assertEqual(result.changes, 3)
+        operators = document.subgraph().operators
+        self.assertEqual(operators[operator_index].inputs, [0])
+        # Both downstream consumers now read the region tensor directly.
+        self.assertEqual(operators[4].inputs, [region_output])
+        self.assertEqual(operators[5].inputs, [region_output])
+        self.assertEqual(
+            document.subgraph().tensors[region_output].shape,
+            _SOURCE_SHAPE,
+        )
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+
+    def test_rejects_fanout_when_duplicate_is_graph_output(self) -> None:
+        """Keep the region when one fanned-out Transpose output is a graph output."""
+
+        document, _operator_index, _region_output = _make_fanout_unary_document(
+            duplicate_output_is_graph_output=True,
+        )
+        result = EliminateTransposeBoundedLayoutRegionPass().run(
+            document,
+            CirclePassContext(),
+        )
+
+        self.assertFalse(result.modified)
 
     def test_restart_pipeline_removes_mixed_region_transposes(self) -> None:
         """Remove all boundary Transposes around a MUL-to-RELU component."""

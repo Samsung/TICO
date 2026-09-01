@@ -214,6 +214,35 @@ class TestAffineObserverBase(unittest.TestCase):
         _check_scalar(-0.3, DType.uint(8))
         _check_scalar(0.0, DType.uint(8))
 
+    def test_scale_floor_bounds_final_scale(self):
+        # A degenerate (all-zero) channel must clamp the final scale to the
+        # documented 1e-8 floor instead of floor / qmax. A dead weight channel
+        # can still carry a real bias whose integer value scales with
+        # 1 / (input_scale * weight_scale), so smaller floors push it past
+        # integer-backend accumulator rescale limits.
+        obs = _MinMaxLikeObserver(
+            name="dead_channel",
+            dtype=DType.int(16),
+            qscheme=QScheme.PER_CHANNEL_SYMM,
+            channel_axis=0,
+        )
+        obs.collect(torch.stack([torch.zeros(8), torch.linspace(-1.0, 1.0, 8)]))
+        scale, zp = obs.compute_qparams()
+        # Allow float32 rounding of the 1e-8 floor constant.
+        self.assertAlmostEqual(scale[0].item(), 1e-8, delta=1e-14)
+        self.assertAlmostEqual(scale[1].item(), 1.0 / obs.dtype.qmax, places=9)
+        self.assertEqual(zp[0].item(), 0)
+
+        asymm = _MinMaxLikeObserver(
+            name="dead_tensor",
+            dtype=DType.uint(8),
+            qscheme=QScheme.PER_CHANNEL_ASYMM,
+            channel_axis=0,
+        )
+        asymm.collect(torch.stack([torch.zeros(8), torch.linspace(-1.0, 1.0, 8)]))
+        asymm_scale, _ = asymm.compute_qparams()
+        self.assertAlmostEqual(asymm_scale[0].item(), 1e-8, delta=1e-14)
+
     def test_per_tensor_asymm_qparams_positive_range(self):
         # Test per-tensor asymmetric quantization with positive-only range
         obs = _MinMaxLikeObserver(name="pt_asymm_pos", dtype=DType.uint(4))

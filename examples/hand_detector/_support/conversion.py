@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Convert the supplied TFLite hand detector into a static PyTorch model."""
+"""Convert a supported MediaPipe hand TFLite model into a static PyTorch model."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from examples.hand_detector.hand_detector import HandDetector
 
 PADDING_SAME = 0
 FUSED_ACTIVATION_NONE = 0
+FUSED_ACTIVATION_RELU6 = 3
 
 
 def _same_padding(
@@ -124,29 +125,86 @@ def _convert_channel_pad(paddings_nhwc: np.ndarray[Any, Any]) -> list[int]:
     return [w[0], w[1], h[0], h[1], c[0], c[1]]
 
 
+def _fully_connected_conv_config(
+    model: TFLiteModel,
+    operation: OperatorInfo,
+) -> dict[str, Any]:
+    """Express one spatial-map FULLY_CONNECTED as an equivalent 1x1 Conv2d."""
+    input_tensor = model.tensors[operation.inputs[0]]
+    weight_tensor = model.tensors[operation.inputs[1]]
+    if len(input_tensor.shape) != 4:
+        raise NotImplementedError(
+            f"FULLY_CONNECTED at index {operation.index} expects a rank-4 "
+            f"NHWC input, got {input_tensor.shape}."
+        )
+    if int(weight_tensor.shape[1]) != int(input_tensor.shape[3]):
+        raise NotImplementedError(
+            f"FULLY_CONNECTED at index {operation.index} mixes spatial and "
+            "channel dimensions, which a 1x1 convolution cannot express."
+        )
+    return {
+        "in_channels": int(input_tensor.shape[3]),
+        "out_channels": int(weight_tensor.shape[0]),
+        "kernel_size": [1, 1],
+        "stride": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1,
+        "has_bias": len(operation.inputs) >= 3 and operation.inputs[2] >= 0,
+        "padding": "valid",
+        "pad": [0, 0, 0, 0],
+    }
+
+
 def build_specification(
     model: TFLiteModel,
 ) -> tuple[dict[str, Any], dict[int, np.ndarray[Any, Any]]]:
     """Build the JSON graph specification and decoded constant mapping."""
     constants = _decode_constant_map(model)
     operations: list[dict[str, Any]] = []
+    synthetic_tensor = len(model.tensors)
     for operation in model.operators:
         if operation.name == "DEQUANTIZE":
             continue
-        if any(
-            int(value) != FUSED_ACTIVATION_NONE
-            for key, value in operation.options.items()
-            if key == "fused_activation"
-        ):
+        fused_activation = int(
+            operation.options.get("fused_activation", FUSED_ACTIVATION_NONE) or 0
+        )
+        if fused_activation not in (FUSED_ACTIVATION_NONE, FUSED_ACTIVATION_RELU6):
             raise NotImplementedError(
-                f"Operator {operation.index} uses a fused activation that is "
-                "not represented separately"
+                f"Operator {operation.index} uses unsupported fused "
+                f"activation {fused_activation}."
+            )
+        if fused_activation == FUSED_ACTIVATION_RELU6 and operation.name not in {
+            "CONV_2D",
+            "DEPTHWISE_CONV_2D",
+        }:
+            raise NotImplementedError(
+                f"Fused RELU6 on {operation.name} at index {operation.index} "
+                "is not supported."
             )
         config: dict[str, Any] = {}
         if operation.name == "CONV_2D":
             config = _conv_config(model, operation, depthwise=False)
         elif operation.name == "DEPTHWISE_CONV_2D":
             config = _conv_config(model, operation, depthwise=True)
+        elif operation.name == "FULLY_CONNECTED":
+            config = _fully_connected_conv_config(model, operation)
+            weight_index = int(operation.inputs[1])
+            weight = constants[weight_index]
+            # Store the weight in the OHWI Conv2d layout expected by the
+            # shared CONV_2D parameter loader.
+            constants[weight_index] = weight.reshape(
+                weight.shape[0], 1, 1, weight.shape[1]
+            )
+        elif operation.name == "MEAN":
+            axes = constants[operation.inputs[1]].astype(np.int64).reshape(-1).tolist()
+            if sorted(axes) != [1, 2] or bool(operation.options.get("keep_dims")):
+                raise NotImplementedError(
+                    f"MEAN at index {operation.index} must reduce NHWC axes "
+                    "[1, 2] without keep_dims."
+                )
+            config = {}
+        elif operation.name == "LOGISTIC":
+            config = {}
         elif operation.name == "PRELU":
             config = {"channels": int(model.tensors[operation.inputs[0]].shape[3])}
         elif operation.name == "MAX_POOL_2D":
@@ -205,19 +263,41 @@ def build_specification(
             raise NotImplementedError(
                 f"Unsupported operator {operation.name} at index {operation.index}"
             )
+        # FULLY_CONNECTED over a spatial map is stored as an equivalent 1x1
+        # CONV_2D so the executor, quantizer, and exporter share one path.
+        name = "CONV_2D" if operation.name == "FULLY_CONNECTED" else operation.name
+        outputs = [int(value) for value in operation.outputs]
+        if fused_activation == FUSED_ACTIVATION_RELU6:
+            # Split the fused activation into an explicit RELU6 operation so
+            # activation quantization observes the post-activation tensor.
+            fused_output = outputs[0]
+            outputs = [synthetic_tensor]
+            synthetic_tensor += 1
         operations.append(
             {
                 "index": operation.index,
-                "name": operation.name,
+                "name": name,
                 "inputs": [int(value) for value in operation.inputs if value >= 0],
-                "outputs": [int(value) for value in operation.outputs],
+                "outputs": outputs,
                 "config": config,
             }
         )
+        if fused_activation == FUSED_ACTIVATION_RELU6:
+            operations.append(
+                {
+                    "index": operation.index,
+                    "name": "RELU6",
+                    "inputs": [outputs[0]],
+                    "outputs": [fused_output],
+                    "config": {},
+                }
+            )
+    input_tensor = model.tensors[int(model.inputs[0])]
     specification = {
         "format_version": 1,
         "source": model.path.name,
         "input_layout": "NCHW",
+        "input_shape": [int(value) for value in input_tensor.shape],
         "inputs": [int(value) for value in model.inputs],
         "outputs": [int(value) for value in model.outputs],
         "operations": operations,
