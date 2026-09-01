@@ -90,3 +90,91 @@ def iterate_GPTQ(
     cur_Q = quantize_fn(cur_weights, scale, zero, maxq)
 
     return cur_Q, cur_weights
+
+
+def iterate_GPTQ_batched(
+    scale_all,
+    zero_all,
+    maxq,
+    W,
+    Hinv,
+    max_num_of_iters=50,
+    P=None,
+    chunk_size=8,
+    quantize_fn=None,
+):
+    """Batched version of :func:`iterate_GPTQ` for grid-search parallelisation.
+
+    Runs ``iterate_GPTQ`` for *many* (scale, zero) pairs simultaneously,
+    exploiting the fact that ``W``, ``Hinv`` and ``P`` are shared across all
+    grid points — only ``scale`` and ``zero`` differ.
+
+    The grid dimension is processed in chunks of ``chunk_size`` to bound
+    memory.  Within each chunk the iteration loop uses batched matmuls
+    (``[chunk, rows, cols] @ [cols, cols]``) which PyTorch broadcasts over
+    the batch dimension, keeping the GPU saturated.
+
+    Args:
+        scale_all:   ``[n_grid, channels, 1]`` per-grid-point scales.
+        zero_all:    ``[n_grid, channels, 1]`` per-grid-point zeros.
+        maxq:        Maximum quantized value (scalar).
+        W:           ``[channels, columns]`` shared weight matrix.
+        Hinv:        ``[columns, columns]`` shared inverse Hessian.
+        max_num_of_iters: Number of GPTQ correction iterations.
+        P:           Optional GPTQv2 correction matrix ``[columns, columns]``.
+        chunk_size:  Number of grid points to process simultaneously.
+        quantize_fn: Optional quantize function (defaults to :func:`quantize`).
+
+    Returns:
+        ``(cur_Q, cur_weights)`` where both have shape
+        ``[n_grid, channels, columns]``.
+    """
+    if quantize_fn is None:
+        quantize_fn = quantize
+
+    n_grid = scale_all.shape[0]
+    dev = W.device
+
+    # Precompute shared quantities once (identical for every grid point)
+    mults = torch.pow(torch.diag(Hinv), -1)  # [columns]
+    Hinv_U = torch.triu(Hinv, diagonal=1)  # [columns, columns]
+    P_U = torch.triu(P, diagonal=1) if P is not None else None  # [columns, columns]
+
+    results_Q = []
+    results_W = []
+
+    for s in range(0, n_grid, chunk_size):
+        e = min(s + chunk_size, n_grid)
+        sc = scale_all[s:e]  # [chunk, channels, 1]
+        zo = zero_all[s:e]  # [chunk, channels, 1]
+        k = e - s
+
+        # Expand W to [chunk, channels, columns] — shared across grid points
+        cur_weights = W.unsqueeze(0).expand(k, -1, -1).clone().to(Hinv.dtype)
+        init_weights = W.unsqueeze(0).expand(k, -1, -1).clone()
+
+        for _ in range(max_num_of_iters):
+            # quantize broadcasts scale/zero over [chunk, channels, columns]
+            cur_Q = quantize_fn(cur_weights, sc, zo, maxq)
+
+            # d_W: [chunk, channels, columns]  (mults broadcasts on last dim)
+            d_W = (cur_weights - cur_Q) * mults
+
+            # Batched matmul: [chunk, ch, cols] @ [cols, cols] → [chunk, ch, cols]
+            cur_weights = init_weights - torch.matmul(d_W, Hinv_U)
+            if P_U is not None:
+                cur_weights += torch.matmul(cur_Q, P_U)
+
+            del d_W, cur_Q
+
+        # Final quantization with the (optionally) custom quantize_fn
+        cur_Q = quantize_fn(cur_weights, sc, zo, maxq)
+
+        results_Q.append(cur_Q)
+        results_W.append(cur_weights)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return torch.cat(results_Q, dim=0), torch.cat(results_W, dim=0)
+

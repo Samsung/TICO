@@ -21,7 +21,12 @@
 import torch
 import torch.nn as nn
 
-from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ, soft_quantize
+from tico.quantization.algorithm.fpi_gptq.util import (
+    iterate_GPTQ,
+    iterate_GPTQ_batched,
+    soft_quantize,
+)
+
 
 
 def quantize(x, scale, zero, maxq):
@@ -50,6 +55,8 @@ class Quantizer(nn.Module):
         trits=False,
         sensitivity=None,
         mse_tolerance=1e-5,
+        chunk_size=8,
+        use_batched_gptq=True,
     ):
         self.maxq = torch.tensor(2**bits - 1)
         self.perchannel = perchannel
@@ -60,6 +67,15 @@ class Quantizer(nn.Module):
         self.maxshrink = maxshrink
         self.sensitivity = sensitivity
         self.mse_tolerance = mse_tolerance
+        # Number of grid points processed simultaneously in the batched
+        # iterate_GPTQ path (mse_for_gptq / smse_for_gptq).  Larger values
+        # improve GPU utilisation at the cost of memory.
+        self.chunk_size = chunk_size
+        # When True, use the batched (parallelised) iterate_GPTQ path for
+        # mse_for_gptq / smse_for_gptq.  Set to False to fall back to the
+        # original sequential grid search (useful for debugging / numerical
+        # comparison).
+        self.use_batched_gptq = use_batched_gptq
         if trits:
             self.maxq = torch.tensor(-1)
 
@@ -241,11 +257,23 @@ class Quantizer(nn.Module):
     def _optimize_mse(self, x, xmin, xmax):
         """Optimize scale and zero using MSE-based grid search.
 
+        When ``self.use_batched_gptq`` is True (default), all grid points
+        are evaluated in parallel by vectorising the ``quantize`` call across
+        the grid dimension.  When False, the original sequential grid search
+        is used.
+
         Args:
             x: Prepared tensor
             xmin: Minimum values per channel
             xmax: Maximum values per channel
         """
+        if self.use_batched_gptq:
+            self._optimize_mse_batched(x, xmin, xmax)
+        else:
+            self._optimize_mse_sequential(x, xmin, xmax)
+
+    def _optimize_mse_sequential(self, x, xmin, xmax):
+        """Original sequential grid search (one quantize per grid point)."""
 
         def compute_error(x, scale1, zero1):
             q = quantize(x, scale1.unsqueeze(1), zero1.unsqueeze(1), self.maxq)
@@ -263,6 +291,68 @@ class Quantizer(nn.Module):
             return torch.sum(q, 1)
 
         self._grid_search(x, xmin, xmax, compute_error)
+
+    def _optimize_mse_batched(self, x, xmin, xmax):
+        """Parallelised grid search for MSE/SMSE.
+
+        All grid points are evaluated simultaneously by vectorising the
+        ``quantize`` call across the grid dimension, replacing ~80
+        sequential calls with a single batched call.
+        """
+        dev = x.device
+        dtype = x.dtype
+        n_grid = int(self.maxshrink * self.grid)
+
+        # Precompute shrink factors for all grid points: [n_grid]
+        p_all = 1 - torch.arange(n_grid, device=dev, dtype=dtype) / self.grid
+
+        # Compute scale/zero for all grid points at once: [n_grid, channels]
+        xmin1 = p_all.unsqueeze(1) * xmin.unsqueeze(0)
+        xmax1 = p_all.unsqueeze(1) * xmax.unsqueeze(0)
+        scale_all = (xmax1 - xmin1) / self.maxq
+        if self.sym:
+            zero_all = self.zero.unsqueeze(0).expand(n_grid, -1).clone()
+        else:
+            zero_all = torch.round(-xmin1 / scale_all)
+
+        # Vectorised quantize across all grid points:
+        # x: [channels, columns], scale_all/zero_all: [n_grid, channels]
+        # Broadcast to: [n_grid, channels, columns]
+        # quantize: q = clamp(round(x / scale) + zero, 0, maxq); return scale * (q - zero)
+        x_exp = x.unsqueeze(0)  # [1, channels, columns]
+        scale_3d = scale_all.unsqueeze(2)  # [n_grid, channels, 1]
+        zero_3d = zero_all.unsqueeze(2)  # [n_grid, channels, 1]
+
+        q = torch.clamp(torch.round(x_exp / scale_3d) + zero_3d, 0, self.maxq)
+        q = scale_3d * (q - zero_3d)  # [n_grid, channels, columns]
+
+        # Compute error: q - x, then abs, then power or sensitivity-weighted
+        err = q - x_exp  # [n_grid, channels, columns]
+        err.abs_()
+
+        if self.mse == "smse":
+            sens = self.sensitivity.to(q.device, q.dtype)
+            err = (err**2) * sens.unsqueeze(0)
+        else:
+            assert self.mse == "mse"
+            err.pow_(self.norm)
+
+        # Sum over columns: [n_grid, channels]
+        err_all = err.sum(dim=2)
+
+        # Tolerance-aware reduction: process grid points in order to preserve
+        # the exact mse_tolerance semantics from _update_best_params.
+        best = torch.full([x.shape[0]], float("inf"), device=dev, dtype=dtype)
+        for i in range(n_grid):
+            best = self._update_best_params(
+                best, err_all[i], scale_all[i], zero_all[i]
+            )
+
+        # Free batched tensors
+        del q, err, err_all, scale_3d, zero_3d, x_exp
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 
     def update(self, x, Hinv, perm, P=None):
         if self.mse is None or (
@@ -291,14 +381,34 @@ class Quantizer(nn.Module):
     def _optimize_gptq_adjusted(self, x, Hinv, sensitivity, xmin, xmax, P=None):
         """Optimize scale and zero using GPTQ-aware MSE/SMSE grid search.
 
+        When ``self.use_batched_gptq`` is True (default), all grid points are
+        evaluated in parallel via :func:`iterate_GPTQ_batched`, which batches
+        the GPTQ iteration loop across the grid dimension.  When False, the
+        original sequential grid search is used — each grid point calls
+        :func:`iterate_GPTQ` independently.  The fallback is kept for
+        debugging and numerical comparison.
+
         Args:
-            x: Prepared tensor
-            Hinv: Inverse Hessian matrix
+            x: Prepared tensor ``[channels, columns]``
+            Hinv: Inverse Hessian matrix ``[columns, columns]``
             sensitivity: Sensitivity tensor for weighted MSE
             xmin: Minimum values per channel
             xmax: Maximum values per channel
             P: GPTQv2 P correction matrix (optional)
         """
+        if self.use_batched_gptq:
+            self._optimize_gptq_adjusted_batched(
+                x, Hinv, sensitivity, xmin, xmax, P=P
+            )
+        else:
+            self._optimize_gptq_adjusted_sequential(
+                x, Hinv, sensitivity, xmin, xmax, P=P
+            )
+
+    def _optimize_gptq_adjusted_sequential(
+        self, x, Hinv, sensitivity, xmin, xmax, P=None
+    ):
+        """Original sequential grid search (one iterate_GPTQ per grid point)."""
         num_of_iters = 15
         quantize_fn = None#soft_quantize
         def compute_error(x, scale1, zero1):
@@ -310,7 +420,7 @@ class Quantizer(nn.Module):
                 Hinv,
                 max_num_of_iters=num_of_iters,
                 P=P,
-                quantize_fn = quantize_fn
+                quantize_fn=quantize_fn,
             )
             if sensitivity is not None:
                 assert self.mse == "smse_for_gptq"
@@ -324,6 +434,82 @@ class Quantizer(nn.Module):
             return err
 
         self._grid_search(x, xmin, xmax, compute_error)
+
+    def _optimize_gptq_adjusted_batched(
+        self, x, Hinv, sensitivity, xmin, xmax, P=None
+    ):
+        """Parallelised grid search using batched iterate_GPTQ.
+
+        All grid points share the same ``W``, ``Hinv`` and ``P`` — only
+        ``scale`` and ``zero`` differ.  This method evaluates all grid points
+        simultaneously (in chunks of ``self.chunk_size``) via
+        :func:`iterate_GPTQ_batched`, replacing ~80 sequential
+        :func:`iterate_GPTQ` calls with ~10 batched calls.
+        """
+        num_of_iters = 15
+        quantize_fn = None  # soft_quantize
+
+        n_grid = int(self.maxshrink * self.grid)
+        dev = x.device
+        dtype = x.dtype
+
+        # Precompute shrink factors for all grid points: [n_grid]
+        p_all = 1 - torch.arange(n_grid, device=dev, dtype=dtype) / self.grid
+
+        # Compute scale/zero for all grid points at once: [n_grid, channels]
+        xmin1 = p_all.unsqueeze(1) * xmin.unsqueeze(0)
+        xmax1 = p_all.unsqueeze(1) * xmax.unsqueeze(0)
+        scale_all = (xmax1 - xmin1) / self.maxq
+        if self.sym:
+            zero_all = self.zero.unsqueeze(0).expand(n_grid, -1).clone()
+        else:
+            zero_all = torch.round(-xmin1 / scale_all)
+
+        # Reshape for broadcasting against [channels, columns]:
+        # [n_grid, channels, 1]
+        scale_all_3d = scale_all.unsqueeze(2)
+        zero_all_3d = zero_all.unsqueeze(2)
+
+        # Run batched iterate_GPTQ for all grid points
+        # Returns: q_all [n_grid, channels, columns],
+        #          pre_q_all [n_grid, channels, columns]
+        q_all, pre_q_all = iterate_GPTQ_batched(
+            scale_all_3d,
+            zero_all_3d,
+            self.maxq,
+            x,
+            Hinv,
+            max_num_of_iters=num_of_iters,
+            P=P,
+            chunk_size=self.chunk_size,
+            quantize_fn=quantize_fn,
+        )
+
+        # Compute per-grid-point, per-channel error: [n_grid, channels]
+        if sensitivity is not None:
+            assert self.mse == "smse_for_gptq"
+            sens = sensitivity.to(q_all.device, q_all.dtype)
+            err_all = ((q_all - x.unsqueeze(0)) ** 2) * sens.unsqueeze(0)
+            err_all = err_all.sum(dim=2)  # [n_grid, channels]
+        else:
+            assert self.mse == "mse_for_gptq"
+            diag_Hinv = torch.diag(Hinv)
+            err_all = ((q_all - pre_q_all) / diag_Hinv) ** 2
+            err_all = err_all.sum(dim=2)  # [n_grid, channels]
+
+        # Tolerance-aware reduction: process grid points in order to preserve
+        # the exact mse_tolerance semantics from _update_best_params.
+        best = torch.full([x.shape[0]], float("inf"), device=dev, dtype=dtype)
+        for i in range(n_grid):
+            best = self._update_best_params(
+                best, err_all[i], scale_all[i], zero_all[i]
+            )
+
+        # Free batched tensors to release memory before returning
+        del q_all, pre_q_all, err_all, scale_all_3d, zero_all_3d
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 
     def quantize(self, x):
         if self.ready():

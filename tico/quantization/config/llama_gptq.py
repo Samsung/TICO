@@ -129,6 +129,17 @@ class LlamaGPTQConfig(BaseConfig):
     # (float32, backward compatible). Enable for reproducible results.
     double_precision: bool = False
 
+    # Number of grid points processed simultaneously in the batched
+    # iterate_GPTQ path (mse_for_gptq / smse_for_gptq).  Larger values
+    # improve GPU utilisation at the cost of memory.
+    chunk_size: int = 8
+
+    # When True, use the batched (parallelised) iterate_GPTQ path for
+    # mse_for_gptq / smse_for_gptq.  Set to False to fall back to the
+    # original sequential grid search (useful for debugging / numerical
+    # comparison).
+    use_batched_gptq: bool = True
+
     @property
     def name(self) -> str:
         return "llama_gptq"

@@ -1655,6 +1655,8 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         mse=gptq_conf.mse,
                         sensitivity=cur_sensitivity,
                         mse_tolerance=gptq_conf.mse_tolerance,
+                        chunk_size=gptq_conf.chunk_size,
+                        use_batched_gptq=gptq_conf.use_batched_gptq,
                     )
 
                     # GPTQv2: Assign native_inp from FPInputsCache
@@ -2000,6 +2002,8 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
             mse_tolerance=gptq_conf.mse_tolerance,
+            chunk_size=gptq_conf.chunk_size,
+            use_batched_gptq=gptq_conf.use_batched_gptq,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -2126,6 +2130,8 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             mse=gptq_conf.mse,
             sensitivity=cur_sensitivity,
             mse_tolerance=gptq_conf.mse_tolerance,
+            chunk_size=gptq_conf.chunk_size,
+            use_batched_gptq=gptq_conf.use_batched_gptq,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
