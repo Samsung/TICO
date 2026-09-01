@@ -46,8 +46,8 @@ from test.unit_test.circle.passes.optimization._fixture import (
 )
 
 
-class SimplifyViewOpsTest(unittest.TestCase):
-    """Check identity removal, view composition, and safe RESHAPE motion."""
+class ViewOpsTestBase(unittest.TestCase):
+    """Shared codec, pass, and operator-building helpers for view-op tests."""
 
     def setUp(self) -> None:
         """Create a schema-independent constant codec for each test."""
@@ -88,6 +88,10 @@ class SimplifyViewOpsTest(unittest.TestCase):
             output_contracts=(static_contract(output_shape),),
             output_names=(name,),
         )[0]
+
+
+class SimplifyViewOpsTest(ViewOpsTestBase):
+    """Check identity removal, view composition, and safe RESHAPE motion."""
 
     def test_identity_reshape_and_transpose_are_rewired_before_dce(self) -> None:
         """Bypass identity views while leaving operator deletion to external DCE."""
@@ -647,13 +651,8 @@ class SimplifyViewOpsTest(unittest.TestCase):
         )
 
 
-class MemoryOrderTransposeTest(unittest.TestCase):
+class MemoryOrderTransposeTest(ViewOpsTestBase):
     """Check bypassing TRANSPOSE operators that only move size-one axes."""
-
-    setUp = SimplifyViewOpsTest.setUp
-    _pass = SimplifyViewOpsTest._pass
-    _reshape = SimplifyViewOpsTest._reshape
-    _transpose = SimplifyViewOpsTest._transpose
 
     def test_unit_axis_transpose_into_reshape_is_rewired(self) -> None:
         """Redirect a RESHAPE past a size-one-axis-moving TRANSPOSE."""
