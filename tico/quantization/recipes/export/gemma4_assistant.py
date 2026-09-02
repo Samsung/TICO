@@ -158,7 +158,7 @@ def _quantized_lm_head_payload(
         zp_view = zero_point.reshape(view_shape)
 
     int_weight = torch.clamp(torch.round(weight / scale_view) + zp_view, qmin, qmax).to(
-        torch.int32
+        torch.uint8
     )
 
     return {
@@ -221,6 +221,40 @@ def _token_ordering_sha256(token_ordering: torch.Tensor) -> str:
     return hashlib.sha256(data.numpy().tobytes()).hexdigest()
 
 
+def _extract_circle_io_contracts(circle_path: Path) -> tuple[list[dict], list[dict]]:
+    """Extract input/output tensor contracts from a Circle graph.
+
+    Returns: (input_contracts, output_contracts) where each is a list of
+    {"name": str, "shape": list, "dtype": str, "quantization": {...} or None}
+    """
+    import tico
+
+    circle_model = tico.load_circle(str(circle_path))
+    subgraph = circle_model.subgraphs[0]
+
+    input_contracts = []
+    for input_idx in subgraph.inputs:
+        tensor = subgraph.tensors[input_idx]
+        dtype_str = str(tensor.type).removeprefix("torch.")
+        input_contracts.append({
+            "name": tensor.name,
+            "shape": list(tensor.shape),
+            "dtype": dtype_str,
+        })
+
+    output_contracts = []
+    for output_idx in subgraph.outputs:
+        tensor = subgraph.tensors[output_idx]
+        dtype_str = str(tensor.type).removeprefix("torch.")
+        output_contracts.append({
+            "name": tensor.name,
+            "shape": list(tensor.shape),
+            "dtype": dtype_str,
+        })
+
+    return input_contracts, output_contracts
+
+
 def write_gemma4_assistant_manifest(
     assistant: QuantGemma4AssistantForCausalLM,
     shape: Gemma4AssistantStaticShapeConfig,
@@ -228,24 +262,29 @@ def write_gemma4_assistant_manifest(
     *,
     source_model: str,
     quantization_profile: Mapping[str, Any],
+    circle_path: Path,
 ) -> Path:
-    """Write the JSON execution contract for the exported assistant."""
+    """Write the JSON execution contract for the exported assistant.
+
+    Args:
+        circle_path: Path to the exported Circle core graph (for I/O type extraction).
+    """
     import transformers
 
     text_config = extract_assistant_text_config(assistant.config)
-    example_inputs = build_assistant_core_example_inputs(assistant, shape)
     kv_heads = assistant_shared_kv_num_heads(text_config)
     masked_embedding = assistant.masked_embedding
 
-    output_shapes = {
-        "projected_state": [1, 1, assistant.backbone_hidden_size],
-        "assistant_hidden": [1, 1, assistant.hidden_size],
-        "centroid_logits": [
-            1,
-            1,
-            masked_embedding.num_centroids if masked_embedding else 0,
-        ],
-    }
+    # Validate that required artifacts exist.
+    sparse_head_path = output_dir / SPARSE_HEAD_ARTIFACT
+    if not sparse_head_path.exists():
+        raise RuntimeError(
+            f"Manifest requires sparse-head artifact at {sparse_head_path}; "
+            "export assistant_sparse_head first."
+        )
+
+    # Extract actual Circle I/O types instead of using hardcoded example tensor types.
+    input_contracts, output_contracts = _extract_circle_io_contracts(circle_path)
 
     manifest: dict[str, Any] = {
         "schema_version": GEMMA4_ASSISTANT_MANIFEST_SCHEMA_VERSION,
@@ -282,14 +321,8 @@ def write_gemma4_assistant_manifest(
             "sliding_kv_length": shape.sliding_kv_length,
         },
         "attention_mask_fill_value": float(assistant.qcfg.attention_mask_fill_value),
-        "inputs": [
-            _tensor_contract(name, tensor)
-            for name, tensor in zip(GEMMA4_ASSISTANT_CORE_INPUT_NAMES, example_inputs)
-        ],
-        "outputs": [
-            {"name": name, "shape": output_shapes[name], "dtype": "float32"}
-            for name in GEMMA4_ASSISTANT_CORE_OUTPUT_NAMES
-        ],
+        "inputs": input_contracts,
+        "outputs": output_contracts,
         "quantization_profile": dict(quantization_profile),
         "sparse_head": {
             "execution_location": "host",

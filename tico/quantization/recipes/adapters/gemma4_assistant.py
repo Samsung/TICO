@@ -191,6 +191,23 @@ class Gemma4AssistantAdapter(ModelAdapter):
             cache_dir=target_cfg.get("cache_dir", model_cfg.get("cache_dir")),
         ).to(ctx.device)
         target.eval()
+
+        # Validate target/assistant compatibility.
+        assistant = ctx.require_model()
+        assistant_cfg = extract_assistant_text_config(assistant.config)
+        target_cfg = extract_assistant_text_config(target.config)
+
+        if assistant_cfg.hidden_size != target_cfg.hidden_size:
+            raise ValueError(
+                f"Assistant backbone_hidden_size {assistant.backbone_hidden_size} does not match "
+                f"target hidden_size {target_cfg.hidden_size}."
+            )
+        if assistant_cfg.vocab_size != target_cfg.vocab_size:
+            raise ValueError(
+                f"Assistant vocab_size {assistant_cfg.vocab_size} does not match "
+                f"target vocab_size {target_cfg.vocab_size}."
+            )
+
         ctx.artifacts["gemma4_assistant_target_model"] = target
         return target
 
@@ -204,11 +221,18 @@ class Gemma4AssistantAdapter(ModelAdapter):
 
     # --- Calibration ---------------------------------------------------------
 
-    def build_calibration_inputs(self, ctx: RecipeContext) -> list[torch.Tensor]:
-        """Build deterministic prompt token windows for assisted decoding."""
+    def build_calibration_inputs(
+        self, ctx: RecipeContext
+    ) -> list[dict[str, torch.Tensor]]:
+        """Build prompts with varied padding lengths for assisted decoding.
+
+        Returns prompt buckets with different lengths to cover:
+        - short (32-128), medium (256-512), long (1024-1536), near-capacity (1800-2048)
+        - left-padded variants to test attention mask handling
+        """
         calib = ctx.cfg.get("calibration", {})
         runtime = ctx.cfg.get("runtime", {})
-        return build_wikitext_calibration_inputs(
+        base_prompts = build_wikitext_calibration_inputs(
             tokenizer=ctx.tokenizer,
             cache_dir=ctx.cfg.get("model", {}).get("cache_dir"),
             n_samples=int(calib.get("n_prompts", calib.get("n_samples", 64))),
@@ -224,13 +248,56 @@ class Gemma4AssistantAdapter(ModelAdapter):
             ),
         )
 
+        # Distribute prompts across length buckets for padding diversity.
+        prompt_buckets = {
+            "short": [p for p in base_prompts[: len(base_prompts) // 4]],
+            "medium": [p for p in base_prompts[len(base_prompts) // 4 : len(base_prompts) // 2]],
+            "long": [p for p in base_prompts[len(base_prompts) // 2 : 3 * len(base_prompts) // 4]],
+            "near_capacity": [p for p in base_prompts[3 * len(base_prompts) // 4 :]],
+        }
+
+        result = []
+        for bucket_name, prompts in prompt_buckets.items():
+            for prompt in prompts:
+                valid_len = int(prompt.shape[1])
+                result.append(
+                    {
+                        "input_ids": prompt,
+                        "attention_mask": torch.ones_like(prompt),
+                    }
+                )
+                # Add left-padded variant for short/medium buckets.
+                if bucket_name in ("short", "medium") and valid_len < 256:
+                    pad_len = min(256, valid_len + 64)
+                    padded_input = torch.cat(
+                        [
+                            torch.full(
+                                (1, pad_len - valid_len),
+                                ctx.tokenizer.pad_token_id or 0,
+                                dtype=torch.long,
+                            ),
+                            prompt,
+                        ],
+                        dim=1,
+                    )
+                    mask = torch.cat(
+                        [
+                            torch.zeros(1, pad_len - valid_len, dtype=torch.long),
+                            torch.ones(1, valid_len, dtype=torch.long),
+                        ],
+                        dim=1,
+                    )
+                    result.append({"input_ids": padded_input, "attention_mask": mask})
+
+        return result
+
     def _run_assisted_generation(
         self,
         ctx: RecipeContext,
         *,
         target: torch.nn.Module,
         assistant: torch.nn.Module,
-        prompts: Sequence[torch.Tensor],
+        prompts: Sequence[dict[str, torch.Tensor]],
         max_new_tokens: int,
         num_assistant_tokens: int,
         max_assistant_calls: int | None,
@@ -251,11 +318,12 @@ class Gemma4AssistantAdapter(ModelAdapter):
         try:
             iterator = tqdm.tqdm(prompts, desc=desc, disable=not show_progress)
             with torch.no_grad():
-                for prompt in iterator:
-                    input_ids = prompt.to(ctx.device)
+                for prompt_dict in iterator:
+                    input_ids = prompt_dict["input_ids"].to(ctx.device)
+                    attention_mask = prompt_dict["attention_mask"].to(ctx.device)
                     target.generate(
                         input_ids=input_ids,
-                        attention_mask=torch.ones_like(input_ids),
+                        attention_mask=attention_mask,
                         assistant_model=generation_adapter,
                         max_new_tokens=int(max_new_tokens),
                         do_sample=False,
@@ -372,7 +440,9 @@ class Gemma4AssistantAdapter(ModelAdapter):
         )
 
         target = self._load_target_model(ctx)
-        pad_token_id = ctx.tokenizer.pad_token_id or ctx.tokenizer.eos_token_id
+        pad_token_id = ctx.tokenizer.pad_token_id
+        if pad_token_id is None:
+            pad_token_id = ctx.tokenizer.eos_token_id
         generation_adapter = Gemma4AssistantGenerationAdapter(ctx.require_model())
         generation_config = generation_adapter.generation_config
         generation_config.num_assistant_tokens = num_assistant_tokens
@@ -422,7 +492,7 @@ class Gemma4AssistantAdapter(ModelAdapter):
         print(f"assistant draft forwards       : {total_assistant_calls}")
         if total_target_forwards:
             print(
-                "avg accepted tokens / verify   : "
+                "generated tokens / target forward : "
                 f"{total_new_tokens / total_target_forwards:.3f}"
             )
         self._release_target_model(ctx)
@@ -448,7 +518,17 @@ class Gemma4AssistantAdapter(ModelAdapter):
                     for key in keys
                     if stage_cfg.get(key) is not None
                 }
-        return {}
+        # Export-only: infer profile from effective config or defaults.
+        # For now, return the documented safe_w8a16 default.
+        return {
+            "activation": "int16",
+            "weight": "uint8",
+            "linear_weight": "uint8",
+            "projection_weight": "uint8",
+            "centroid_weight": "uint8",
+            "lm_head_weight": "uint8",
+            "norm_weight": "int16",
+        }
 
     def export(self, ctx: RecipeContext) -> None:
         """Export the configured Gemma4 assistant artifacts."""
@@ -478,8 +558,9 @@ class Gemma4AssistantAdapter(ModelAdapter):
         )
         shape.validate(assistant.text_config)
 
+        circle_path = None
         if "assistant_core_circle" in artifacts:
-            export_gemma4_assistant_core_circle(
+            circle_path = export_gemma4_assistant_core_circle(
                 assistant,
                 shape,
                 output_dir,
@@ -488,10 +569,16 @@ class Gemma4AssistantAdapter(ModelAdapter):
         if "assistant_sparse_head" in artifacts:
             export_gemma4_assistant_sparse_head(assistant, output_dir)
         if "assistant_manifest" in artifacts:
+            if circle_path is None:
+                raise RuntimeError(
+                    "assistant_manifest requires assistant_core_circle to be exported first "
+                    "(for actual I/O type extraction from the Circle graph)."
+                )
             write_gemma4_assistant_manifest(
                 assistant,
                 shape,
                 output_dir,
-                source_model=str(ctx.cfg.get("model", {}).get("name_or_path", "")),
+                source_model=self._resolve_assistant_path(ctx.cfg),
                 quantization_profile=self._quantization_profile(ctx.cfg),
+                circle_path=circle_path,
             )

@@ -76,6 +76,7 @@ def build_gemma4_assistant_ptq_config(
     projection_weight = projection_weight or linear_weight
     centroid_weight = centroid_weight or linear_weight
     lm_head_weight = lm_head_weight or linear_weight
+    norm_weight = norm_weight or affine(DType.int(16))
 
     projection_override = _weight_override(projection_weight)
     overrides: Dict[str, Any] = {

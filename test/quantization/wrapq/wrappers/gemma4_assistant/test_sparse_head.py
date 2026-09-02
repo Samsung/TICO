@@ -137,12 +137,13 @@ class TestGemma4AssistantSparseHead(unittest.TestCase):
         scale = self.lm_head_weight.abs().amax(dim=1) / 127.0
         int_weight = torch.clamp(
             torch.round(self.lm_head_weight / scale[:, None]), -128, 127
-        ).to(torch.int32)
+        ).to(torch.uint8)
+        zp = torch.zeros_like(scale, dtype=torch.uint8)
         artifact = {
             "schema_version": SPARSE_HEAD_ARTIFACT_SCHEMA_VERSION,
             "lm_head_weight_int": int_weight,
             "lm_head_weight_scale": scale,
-            "lm_head_weight_zero_point": torch.zeros_like(scale, dtype=torch.int32),
+            "lm_head_weight_zero_point": zp,
             "lm_head_weight_channel_axis": 0,
             "token_ordering": self.embedder.token_ordering,
             "num_centroids": int(self.embedder.num_centroids),
@@ -157,7 +158,9 @@ class TestGemma4AssistantSparseHead(unittest.TestCase):
             num_centroids=int(self.embedder.num_centroids),
             centroid_top_k=int(self.embedder.centroid_intermediate_top_k),
         )
-        torch.testing.assert_close(head.lm_head_weight, reference.lm_head_weight)
+        torch.testing.assert_close(
+            head._get_dequantized_weight(), reference.lm_head_weight
+        )
 
         centroid_logits = self.embedder.centroids(self.hidden)
         self.assertEqual(
