@@ -28,6 +28,9 @@ from typing import Any, Mapping
 
 import torch
 
+from tico.circle._schema import enum_name
+from tico.circle.document import CircleDocument
+from tico.circle.graph import as_indices, as_list
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.gemma4_assistant.export_adapters import (
     Gemma4AssistantCoreExportAdapter,
@@ -227,31 +230,22 @@ def _extract_circle_io_contracts(circle_path: Path) -> tuple[list[dict], list[di
     Returns: (input_contracts, output_contracts) where each is a list of
     {"name": str, "shape": list, "dtype": str, "quantization": {...} or None}
     """
-    import tico
+    graph = CircleDocument.load(circle_path).graph(0)
+    tensors = as_list(graph.subgraph.tensors)
 
-    circle_model = tico.load_circle(str(circle_path))
-    subgraph = circle_model.subgraphs[0]
-
-    input_contracts = []
-    for input_idx in subgraph.inputs:
-        tensor = subgraph.tensors[input_idx]
-        dtype_str = str(tensor.type).removeprefix("torch.")
-        input_contracts.append({
-            "name": tensor.name,
-            "shape": list(tensor.shape),
+    def _contract(tensor_index: int) -> dict:
+        tensor = tensors[int(tensor_index)]
+        # Lower-cased TensorType names ("float32", "int16") match the
+        # torch-style dtype strings used elsewhere in the manifest.
+        dtype_str = enum_name("TensorType", int(tensor.type)).lower()
+        return {
+            "name": graph.tensor_name(int(tensor_index)),
+            "shape": [int(dim) for dim in as_list(tensor.shape)],
             "dtype": dtype_str,
-        })
+        }
 
-    output_contracts = []
-    for output_idx in subgraph.outputs:
-        tensor = subgraph.tensors[output_idx]
-        dtype_str = str(tensor.type).removeprefix("torch.")
-        output_contracts.append({
-            "name": tensor.name,
-            "shape": list(tensor.shape),
-            "dtype": dtype_str,
-        })
-
+    input_contracts = [_contract(idx) for idx in as_indices(graph.subgraph.inputs)]
+    output_contracts = [_contract(idx) for idx in as_indices(graph.subgraph.outputs)]
     return input_contracts, output_contracts
 
 

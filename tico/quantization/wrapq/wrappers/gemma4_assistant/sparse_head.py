@@ -195,10 +195,16 @@ class Gemma4AssistantSparseHead(nn.Module):
                 "lm_head_weight_int (quantized); exactly one is required."
             )
 
-        if is_quantized:
-            vocab_size = lm_head_weight_int.shape[0]
+        if lm_head_weight_int is not None:
+            if lm_head_weight_scale is None or lm_head_weight_zero_point is None:
+                raise ValueError(
+                    "lm_head_weight_int requires both lm_head_weight_scale and "
+                    "lm_head_weight_zero_point."
+                )
+            vocab_size = int(lm_head_weight_int.shape[0])
             hidden_size = None
         else:
+            assert lm_head_weight is not None
             if lm_head_weight.dim() != 2:
                 raise ValueError(
                     "Sparse-head lm_head_weight must be rank 2 (vocab, hidden), "
@@ -221,10 +227,18 @@ class Gemma4AssistantSparseHead(nn.Module):
         self.vocab_size = vocab_size
         self.vocab_per_centroid = self.vocab_size // self.num_centroids
 
-        if is_quantized:
-            self.register_buffer("_lm_head_weight_int", lm_head_weight_int.detach().clone())
-            self.register_buffer("_lm_head_weight_scale", lm_head_weight_scale.detach().clone())
-            self.register_buffer("_lm_head_weight_zero_point", lm_head_weight_zero_point.detach().clone())
+        if lm_head_weight_int is not None:
+            assert lm_head_weight_scale is not None
+            assert lm_head_weight_zero_point is not None
+            self.register_buffer(
+                "_lm_head_weight_int", lm_head_weight_int.detach().clone()
+            )
+            self.register_buffer(
+                "_lm_head_weight_scale", lm_head_weight_scale.detach().clone()
+            )
+            self.register_buffer(
+                "_lm_head_weight_zero_point", lm_head_weight_zero_point.detach().clone()
+            )
             self._lm_head_weight_channel_axis = lm_head_weight_channel_axis
             self.hidden_size = None
         else:

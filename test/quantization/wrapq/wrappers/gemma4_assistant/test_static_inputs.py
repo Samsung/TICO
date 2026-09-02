@@ -137,7 +137,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
 
     def test_parity_without_padding(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=8)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         static = self._assert_dynamic_static_parity(inputs, shape)
         self.assertEqual(static.full_key.shape[2], 16)
         self.assertEqual(static.sliding_key.shape[2], 16)
@@ -146,7 +148,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
         mask = torch.ones(1, 8, dtype=torch.long)
         mask[:, :3] = 0
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=8, attention_mask=mask)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         self._assert_dynamic_static_parity(inputs, shape)
 
     def test_sliding_overcapacity_raises_error(self):
@@ -168,7 +172,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
         so the padded region cannot contribute to attention.
         """
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         static = self._canonicalize(inputs, shape)
         self.assertEqual(static.full_key[:, :, 10:, :].abs().max().item(), 0.0)
         prepared = prepare(
@@ -201,7 +207,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
 
     def test_as_tuple_matches_abi_order(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         static = self._canonicalize(inputs, shape)
         flattened = static.as_tuple()
         self.assertEqual(len(flattened), len(GEMMA4_ASSISTANT_CORE_INPUT_NAMES))
@@ -211,20 +219,26 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
     def test_invalid_batch_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
         inputs["inputs_embeds"] = inputs["inputs_embeds"].repeat(2, 1, 1)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "batch"):
             self._canonicalize(inputs, shape)
 
     def test_invalid_query_length_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
         inputs["inputs_embeds"] = inputs["inputs_embeds"].repeat(1, 2, 1)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "query length"):
             self._canonicalize(inputs, shape)
 
     def test_over_capacity_full_kv_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=20)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "static capacity"):
             self._canonicalize(inputs, shape)
 
@@ -239,7 +253,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
     def test_missing_shared_kv_entry_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
         del inputs["shared_kv_states"]["sliding_attention"]
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=16)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "sliding_attention"):
             self._canonicalize(inputs, shape)
 

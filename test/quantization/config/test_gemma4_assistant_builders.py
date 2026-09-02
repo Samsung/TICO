@@ -54,9 +54,7 @@ class TestBuildGemma4AssistantPtqConfig(unittest.TestCase):
         )
         for idx in range(4):
             layer = cfg.overrides["model"]["layers"][str(idx)]  # type: ignore[index]
-            self.assertEqual(
-                layer["input_layernorm"]["weight"]["dtype"], DType.int(16)
-            )
+            self.assertEqual(layer["input_layernorm"]["weight"]["dtype"], DType.int(16))
 
     def test_layer_paths_cover_every_layer(self):
         """model.layers.{i} overrides must exist for every hidden layer."""

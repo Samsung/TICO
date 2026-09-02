@@ -43,6 +43,7 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.static_inputs import (
     Gemma4AssistantStaticShapeConfig,
 )
 from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
+    extract_assistant_text_config,
     Gemma4AssistantGenerationAdapter,
     validate_gemma4_assistant_architecture,
 )
@@ -251,8 +252,15 @@ class Gemma4AssistantAdapter(ModelAdapter):
         # Distribute prompts across length buckets for padding diversity.
         prompt_buckets = {
             "short": [p for p in base_prompts[: len(base_prompts) // 4]],
-            "medium": [p for p in base_prompts[len(base_prompts) // 4 : len(base_prompts) // 2]],
-            "long": [p for p in base_prompts[len(base_prompts) // 2 : 3 * len(base_prompts) // 4]],
+            "medium": [
+                p for p in base_prompts[len(base_prompts) // 4 : len(base_prompts) // 2]
+            ],
+            "long": [
+                p
+                for p in base_prompts[
+                    len(base_prompts) // 2 : 3 * len(base_prompts) // 4
+                ]
+            ],
             "near_capacity": [p for p in base_prompts[3 * len(base_prompts) // 4 :]],
         }
 
