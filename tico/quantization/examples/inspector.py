@@ -18,6 +18,10 @@ from pathlib import Path
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.debug.static_gemma4_assistant_runtime import (
+    run_static_gemma4_assistant_runtime,
+    StaticGemma4AssistantRuntimeConfig,
+)
 from tico.quantization.recipes.debug.static_gemma4_runtime import (
     run_static_gemma4_runtime,
     StaticGemma4RuntimeConfig,
@@ -48,6 +52,7 @@ def parse_args() -> argparse.Namespace:
             "trace",
             "static-llama-runtime",
             "static-gemma4-runtime",
+            "static-gemma4-assistant-runtime",
             "tied-embedding-smoke",
             "wrapper-smoke",
         ],
@@ -118,6 +123,7 @@ def _build_overrides(args: argparse.Namespace) -> list[str]:
     runtime_config_prefix = {
         "static-llama-runtime": "debug.static_llama_runtime",
         "static-gemma4-runtime": "debug.static_gemma4_runtime",
+        "static-gemma4-assistant-runtime": "debug.static_gemma4_assistant_runtime",
     }.get(args.mode)
 
     if args.model:
@@ -156,6 +162,8 @@ def _wrapper_smoke_case_group(case_name: str) -> str:
         return "llama"
     if case_name.startswith("qwen3_vl_"):
         return "qwen3_vl"
+    if case_name.startswith("gemma4_assistant_"):
+        return "gemma4_assistant"
     if case_name.startswith("gemma4_"):
         return "gemma4"
     return "other"
@@ -168,13 +176,21 @@ def _print_wrapper_smoke_cases() -> None:
         "llama": [],
         "qwen3_vl": [],
         "gemma4": [],
+        "gemma4_assistant": [],
         "other": [],
     }
     for case in list_cases():
         groups[_wrapper_smoke_case_group(case.name)].append(case.name)
 
     print("Available wrapper smoke cases:")
-    for group_name in ("nn", "llama", "qwen3_vl", "gemma4", "other"):
+    for group_name in (
+        "nn",
+        "llama",
+        "qwen3_vl",
+        "gemma4",
+        "gemma4_assistant",
+        "other",
+    ):
         case_names = groups[group_name]
         if not case_names:
             continue
@@ -248,6 +264,13 @@ def main() -> None:
             **cfg.get("debug", {}).get("static_gemma4_runtime", {})
         )
         run_static_gemma4_runtime(gemma4_runtime_cfg)
+        return
+
+    if args.mode == "static-gemma4-assistant-runtime":
+        assistant_runtime_cfg = StaticGemma4AssistantRuntimeConfig(
+            **cfg.get("debug", {}).get("static_gemma4_assistant_runtime", {})
+        )
+        run_static_gemma4_assistant_runtime(assistant_runtime_cfg)
         return
 
     adapter = get_adapter(cfg["model"]["family"])
