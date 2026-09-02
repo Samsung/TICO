@@ -102,12 +102,17 @@ def select_sparse_candidates(
 def sparse_top1_token(result: SparseCandidateResult) -> torch.Tensor:
     """Return the canonical top-1 token id per position, shape ``(B, L)``.
 
-    The full-vocabulary scatter fills unselected positions strictly below the
-    selected minimum, so the argmax over selected logits equals the argmax
-    over the reconstructed full logits.
+    Matches HF behavior: when logits tie, the selected token with the smallest
+    canonical id is chosen (not the first occurrence in the selected array).
     """
-    best = result.selected_logits.argmax(dim=-1, keepdim=True)
-    return result.selected_token_ids.gather(-1, best).squeeze(-1)
+    max_logits = result.selected_logits.amax(dim=-1, keepdim=True)
+    sentinel = torch.iinfo(result.selected_token_ids.dtype).max
+    tied_token_ids = torch.where(
+        result.selected_logits == max_logits,
+        result.selected_token_ids,
+        torch.full_like(result.selected_token_ids, sentinel),
+    )
+    return tied_token_ids.amin(dim=-1)
 
 
 def scatter_full_vocab_logits(
@@ -168,30 +173,76 @@ class Gemma4AssistantSparseHead(nn.Module):
     def __init__(
         self,
         *,
-        lm_head_weight: torch.Tensor,
+        lm_head_weight: torch.Tensor | None = None,
         token_ordering: torch.Tensor,
         num_centroids: int,
         centroid_top_k: int,
+        lm_head_weight_int: torch.Tensor | None = None,
+        lm_head_weight_scale: torch.Tensor | None = None,
+        lm_head_weight_zero_point: torch.Tensor | None = None,
+        lm_head_weight_channel_axis: int | None = None,
     ):
         super().__init__()
-        if lm_head_weight.dim() != 2:
+        is_quantized = lm_head_weight_int is not None
+        if is_quantized and lm_head_weight is not None:
             raise ValueError(
-                "Sparse-head lm_head_weight must be rank 2 (vocab, hidden), "
-                f"got {tuple(lm_head_weight.shape)}."
+                "Cannot specify both lm_head_weight (dequantized) and "
+                "lm_head_weight_int; choose one path."
             )
-        if token_ordering.numel() != lm_head_weight.shape[0]:
+        if not is_quantized and lm_head_weight is None:
+            raise ValueError(
+                "Must specify either lm_head_weight (dequantized) or "
+                "lm_head_weight_int (quantized); exactly one is required."
+            )
+
+        if lm_head_weight_int is not None:
+            if lm_head_weight_scale is None or lm_head_weight_zero_point is None:
+                raise ValueError(
+                    "lm_head_weight_int requires both lm_head_weight_scale and "
+                    "lm_head_weight_zero_point."
+                )
+            vocab_size = int(lm_head_weight_int.shape[0])
+            hidden_size = None
+        else:
+            assert lm_head_weight is not None
+            if lm_head_weight.dim() != 2:
+                raise ValueError(
+                    "Sparse-head lm_head_weight must be rank 2 (vocab, hidden), "
+                    f"got {tuple(lm_head_weight.shape)}."
+                )
+            vocab_size = int(lm_head_weight.shape[0])
+            hidden_size = int(lm_head_weight.shape[1])
+            self.register_buffer("lm_head_weight", lm_head_weight.detach().clone())
+
+        if token_ordering.numel() != vocab_size:
             raise ValueError(
                 "token_ordering length must match the LM-head vocabulary: "
                 f"ordering={token_ordering.numel()}, "
-                f"vocab={lm_head_weight.shape[0]}."
+                f"vocab={vocab_size}."
             )
-        self.register_buffer("lm_head_weight", lm_head_weight.detach().clone())
+
         self.register_buffer("token_ordering", token_ordering.detach().clone().long())
         self.num_centroids = int(num_centroids)
         self.centroid_top_k = int(centroid_top_k)
-        self.vocab_size = int(lm_head_weight.shape[0])
-        self.hidden_size = int(lm_head_weight.shape[1])
+        self.vocab_size = vocab_size
         self.vocab_per_centroid = self.vocab_size // self.num_centroids
+
+        if lm_head_weight_int is not None:
+            assert lm_head_weight_scale is not None
+            assert lm_head_weight_zero_point is not None
+            self.register_buffer(
+                "_lm_head_weight_int", lm_head_weight_int.detach().clone()
+            )
+            self.register_buffer(
+                "_lm_head_weight_scale", lm_head_weight_scale.detach().clone()
+            )
+            self.register_buffer(
+                "_lm_head_weight_zero_point", lm_head_weight_zero_point.detach().clone()
+            )
+            self._lm_head_weight_channel_axis = lm_head_weight_channel_axis
+            self.hidden_size = None
+        else:
+            self.hidden_size = hidden_size
 
     @classmethod
     def from_artifact(cls, artifact: Mapping[str, Any]) -> "Gemma4AssistantSparseHead":
@@ -202,18 +253,14 @@ class Gemma4AssistantSparseHead(nn.Module):
                 "Unsupported Gemma4 assistant sparse-head artifact schema: "
                 f"got {schema}, expected {SPARSE_HEAD_ARTIFACT_SCHEMA_VERSION}."
             )
-        weight = artifact["lm_head_weight_int"]
-        lm_head_weight = _dequantize_affine(
-            weight,
-            artifact["lm_head_weight_scale"],
-            artifact["lm_head_weight_zero_point"],
-            channel_axis=artifact.get("lm_head_weight_channel_axis"),
-        )
         return cls(
-            lm_head_weight=lm_head_weight,
             token_ordering=artifact["token_ordering"],
             num_centroids=int(artifact["num_centroids"]),
             centroid_top_k=int(artifact["centroid_top_k"]),
+            lm_head_weight_int=artifact["lm_head_weight_int"],
+            lm_head_weight_scale=artifact["lm_head_weight_scale"],
+            lm_head_weight_zero_point=artifact["lm_head_weight_zero_point"],
+            lm_head_weight_channel_axis=artifact.get("lm_head_weight_channel_axis"),
         )
 
     def select_candidates(
@@ -222,13 +269,25 @@ class Gemma4AssistantSparseHead(nn.Module):
         centroid_logits: torch.Tensor,
     ) -> SparseCandidateResult:
         """Select sparse candidates from the NPU core outputs."""
+        lm_head_weight = self._get_dequantized_weight()
         return select_sparse_candidates(
             assistant_hidden,
-            self.lm_head_weight,
+            lm_head_weight,
             centroid_logits=centroid_logits,
             token_ordering=self.token_ordering,
             num_centroids=self.num_centroids,
             centroid_top_k=self.centroid_top_k,
+        )
+
+    def _get_dequantized_weight(self) -> torch.Tensor:
+        """Get the dequantized weight, materializing only selected rows if quantized."""
+        if hasattr(self, "lm_head_weight"):
+            return self.lm_head_weight
+        return _dequantize_affine(
+            self._lm_head_weight_int,
+            self._lm_head_weight_scale,
+            self._lm_head_weight_zero_point,
+            channel_axis=self._lm_head_weight_channel_axis,
         )
 
     def forward(

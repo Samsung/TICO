@@ -297,6 +297,9 @@ def canonicalize_gemma4_assistant_static_inputs(
             sliding crop that would drop positions still visible through the
             sliding window.
     """
+    # Normalize device early to ensure all tensor operations use consistent device.
+    device = torch.device(device)
+
     text_config = extract_assistant_text_config(model_or_config)
     shape.validate(text_config)
 
@@ -377,22 +380,13 @@ def canonicalize_gemma4_assistant_static_inputs(
     first_visible = max(0, sliding_valid - (window + 1))
 
     if sliding_valid > shape.sliding_kv_length:
-        crop_start = sliding_valid - shape.sliding_kv_length
-        if crop_start > first_visible:
-            raise ValueError(
-                "Cropping the sliding shared KV to the static capacity would "
-                "drop positions that are still visible through the sliding "
-                f"window: crop_start={crop_start}, "
-                f"first_visible={first_visible}, "
-                f"sliding_kv_length={shape.sliding_kv_length}."
-            )
-        sliding_key = sliding_key[:, :, crop_start:, :]
-        sliding_value = sliding_value[:, :, crop_start:, :]
-        sliding_base_valid = sliding_base_valid[:, crop_start:]
-        first_visible -= crop_start
-        sliding_valid = shape.sliding_kv_length
+        raise ValueError(
+            "Sliding shared KV exceeds the configured static capacity: "
+            f"valid={sliding_valid}, sliding_kv_length={shape.sliding_kv_length}. "
+            "Inputs that exceed capacity must not be silently cropped; "
+            "increase sliding_kv_length or reduce the input sequence length."
+        )
 
-    device = torch.device(device)
     fill = float(mask_fill_value)
 
     full_mask = torch.full(

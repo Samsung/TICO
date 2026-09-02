@@ -136,29 +136,33 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
         return static
 
     def test_parity_without_padding(self):
-        inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        inputs = _make_dynamic_inputs(self.fp_model, kv_len=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         static = self._assert_dynamic_static_parity(inputs, shape)
         self.assertEqual(static.full_key.shape[2], 16)
-        self.assertEqual(static.sliding_key.shape[2], 8)
+        self.assertEqual(static.sliding_key.shape[2], 16)
 
     def test_parity_with_left_padding(self):
-        mask = torch.ones(1, 10, dtype=torch.long)
+        mask = torch.ones(1, 8, dtype=torch.long)
         mask[:, :3] = 0
-        inputs = _make_dynamic_inputs(self.fp_model, kv_len=10, attention_mask=mask)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        inputs = _make_dynamic_inputs(self.fp_model, kv_len=8, attention_mask=mask)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         self._assert_dynamic_static_parity(inputs, shape)
 
-    def test_parity_with_sliding_crop_at_capacity(self):
-        """Cropping invisible sliding positions must preserve the output."""
+    def test_sliding_overcapacity_raises_error(self):
+        """Inputs that exceed sliding capacity must fail, not silently crop."""
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=12)
         # window=4 → visible sliding span is the last 5 positions; capacity 5
-        # crops 7 invisible positions without information loss.
+        # Input has 12 positions > capacity, must raise.
         shape = Gemma4AssistantStaticShapeConfig(
             full_kv_length=16, sliding_kv_length=self.window + 1
         )
-        static = self._assert_dynamic_static_parity(inputs, shape)
-        self.assertEqual(static.sliding_key.shape[2], self.window + 1)
+        with self.assertRaisesRegex(ValueError, "Sliding shared KV exceeds"):
+            self._canonicalize(inputs, shape)
 
     def test_padded_kv_does_not_change_output(self):
         """Values in padded KV slots must be fully masked out.
@@ -168,7 +172,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
         so the padded region cannot contribute to attention.
         """
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         static = self._canonicalize(inputs, shape)
         self.assertEqual(static.full_key[:, :, 10:, :].abs().max().item(), 0.0)
         prepared = prepare(
@@ -201,7 +207,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
 
     def test_as_tuple_matches_abi_order(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         static = self._canonicalize(inputs, shape)
         flattened = static.as_tuple()
         self.assertEqual(len(flattened), len(GEMMA4_ASSISTANT_CORE_INPUT_NAMES))
@@ -211,20 +219,26 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
     def test_invalid_batch_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
         inputs["inputs_embeds"] = inputs["inputs_embeds"].repeat(2, 1, 1)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "batch"):
             self._canonicalize(inputs, shape)
 
     def test_invalid_query_length_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
         inputs["inputs_embeds"] = inputs["inputs_embeds"].repeat(1, 2, 1)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "query length"):
             self._canonicalize(inputs, shape)
 
     def test_over_capacity_full_kv_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=20)
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "static capacity"):
             self._canonicalize(inputs, shape)
 
@@ -239,7 +253,9 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
     def test_missing_shared_kv_entry_is_rejected(self):
         inputs = _make_dynamic_inputs(self.fp_model, kv_len=10)
         del inputs["shared_kv_states"]["sliding_attention"]
-        shape = Gemma4AssistantStaticShapeConfig(full_kv_length=16, sliding_kv_length=8)
+        shape = Gemma4AssistantStaticShapeConfig(
+            full_kv_length=16, sliding_kv_length=16
+        )
         with self.assertRaisesRegex(ValueError, "sliding_attention"):
             self._canonicalize(inputs, shape)
 

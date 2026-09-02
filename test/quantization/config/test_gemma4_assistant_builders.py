@@ -25,7 +25,7 @@ from tico.quantization.wrapq.dtypes import DType
 
 class TestBuildGemma4AssistantPtqConfig(unittest.TestCase):
     def test_default_profile_is_w8a16(self):
-        """The default profile must be int16 activations and uint8 weights."""
+        """The default profile must be int16 activations, uint8 weights, int16 norm."""
         cfg = build_gemma4_assistant_ptq_config(num_hidden_layers=4)
 
         self.assertEqual(cfg.activation.dtype, DType.int(16))
@@ -47,6 +47,14 @@ class TestBuildGemma4AssistantPtqConfig(unittest.TestCase):
             cfg.overrides["masked_embedding"]["centroids"]["weight"]["dtype"],  # type: ignore[index]
             DType.uint(8),
         )
+        # Norm weights must default to int16, not inherit root uint8.
+        self.assertEqual(
+            cfg.overrides["model"]["norm"]["weight"]["dtype"],  # type: ignore[index]
+            DType.int(16),
+        )
+        for idx in range(4):
+            layer = cfg.overrides["model"]["layers"][str(idx)]  # type: ignore[index]
+            self.assertEqual(layer["input_layernorm"]["weight"]["dtype"], DType.int(16))
 
     def test_layer_paths_cover_every_layer(self):
         """model.layers.{i} overrides must exist for every hidden layer."""

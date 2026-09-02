@@ -87,9 +87,9 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
         torch.manual_seed(2031)
         self.fp_model = make_tiny_gemma4_assistant_model()
         self.shape = Gemma4AssistantStaticShapeConfig(
-            full_kv_length=16, sliding_kv_length=8
+            full_kv_length=16, sliding_kv_length=16
         )
-        self.inputs = _make_dynamic_inputs(self.fp_model)
+        self.inputs = _make_dynamic_inputs(self.fp_model, kv_len=8)
 
     def _static_inputs(self):
         return canonicalize_gemma4_assistant_static_inputs(
