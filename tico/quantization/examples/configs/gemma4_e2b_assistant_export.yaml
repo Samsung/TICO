@@ -1,0 +1,43 @@
+# Export Gemma4 E2B assistant artifacts from a saved quantized checkpoint
+# without re-running calibration:
+#
+#   python -m tico.quantization.examples.export \
+#     --config tico/quantization/examples/configs/gemma4_e2b_assistant_export.yaml \
+#     --checkpoint ./out/gemma4_e2b_assistant_quantized/quantized_model.pt
+model:
+  family: gemma4_assistant
+  name_or_path: google/gemma-4-E2B-it-assistant
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+target_model:
+  name_or_path: google/gemma-4-E2B-it
+
+runtime:
+  device: cpu
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+model_args:
+  assistant:
+    batch_size: 1
+    query_length: 1
+    full_kv_length: 2048
+    sliding_kv_length: 640
+  profile: npu_export
+
+pipeline: []
+
+evaluation:
+  enabled: false
+
+export:
+  enabled: true
+  output_dir: ./out/gemma4_e2b_assistant_quantized
+  strict: false
+  artifacts:
+    - assistant_core_circle
+    - assistant_sparse_head
+    - assistant_manifest

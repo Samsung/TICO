@@ -62,11 +62,18 @@ def _register_builtin_cases() -> None:
     if _REGISTRY:
         return
     from .cases.gemma4 import GEMMA4_CASES
+    from .cases.gemma4_assistant import GEMMA4_ASSISTANT_CASES
     from .cases.llama import LLAMA_CASES
     from .cases.nn import NN_CASES
     from .cases.qwen3_vl import QWEN3_VL_CASES
 
-    for case in (*NN_CASES, *LLAMA_CASES, *QWEN3_VL_CASES, *GEMMA4_CASES):
+    for case in (
+        *NN_CASES,
+        *LLAMA_CASES,
+        *QWEN3_VL_CASES,
+        *GEMMA4_CASES,
+        *GEMMA4_ASSISTANT_CASES,
+    ):
         register_case(case)
 
 

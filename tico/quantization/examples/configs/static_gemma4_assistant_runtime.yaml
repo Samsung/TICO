@@ -1,0 +1,16 @@
+debug:
+  static_gemma4_assistant_runtime:
+    model: google/gemma-4-E2B-it-assistant
+    # Set target_model (or GEMMA4_TARGET_PATH) to build the fixture from a
+    # real target prefill. Without it a synthetic target-side fixture with
+    # the correct shared-KV geometry is used.
+    target_model: null
+    device: cpu
+    dtype: float32
+    prompt: "The capital of France is"
+    full_kv_length: 64
+    sliding_kv_length: 64
+    calibration_samples: 4
+    seed: 42
+    # synthetic: true swaps the checkpoint for a tiny download-free model.
+    synthetic: false

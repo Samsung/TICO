@@ -28,6 +28,8 @@ qwen3_vl_export.yaml
 gemma4_quantize.yaml
 gemma4_eval_suite.yaml
 gemma4_export.yaml
+gemma4_e2b_assistant_quantize.yaml
+gemma4_e2b_assistant_export.yaml
 ```
 
 Use lower snake case. Keep names descriptive but short.

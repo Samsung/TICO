@@ -1,0 +1,72 @@
+# Quantize the Gemma4 E2B assistant (MTP draft model) with W8A16 PTQ using
+# real assisted-generation calibration, then export the static NPU artifacts.
+#
+# Profile: safe_w8a16 (int16 activations, uint8 weights). For a compact
+# w4a16 experiment set linear_weight: uint4 and keep the sensitive
+# boundaries at W8 via projection_weight/centroid_weight/lm_head_weight.
+model:
+  family: gemma4_assistant
+  name_or_path: google/gemma-4-E2B-it-assistant
+  trust_remote_code: true
+  hf_token: null
+  cache_dir: null
+
+# The FP target model that produces the shared KV states and hidden states
+# consumed by the assistant. Overridable with the GEMMA4_TARGET_PATH
+# environment variable.
+target_model:
+  name_or_path: google/gemma-4-E2B-it
+  dtype: bfloat16
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+calibration:
+  dataset: wikitext2
+  split: train
+  n_prompts: 64
+  max_prompt_length: 512
+  max_new_tokens: 16
+  num_assistant_tokens: 6
+  max_assistant_calls: 384
+
+model_args:
+  assistant:
+    batch_size: 1
+    query_length: 1
+    full_kv_length: 2048
+    # The bidirectional sliding overlay is distance-inclusive, so the draft
+    # position can see sliding_window + 1 = 513 valid positions. Keep the
+    # static capacity above that bound.
+    sliding_kv_length: 640
+  profile: npu_export
+
+pipeline:
+  - name: ptq
+    enabled: true
+    activation: int16
+    linear_weight: uint8
+    projection_weight: uint8
+    centroid_weight: uint8
+    lm_head_weight: uint8
+    norm_weight: int16
+    strict_wrap: true
+
+evaluation:
+  enabled: false
+  n_prompts: 4
+  max_prompt_length: 256
+  max_new_tokens: 32
+  num_assistant_tokens: 6
+
+export:
+  enabled: true
+  output_dir: ./out/gemma4_e2b_assistant_quantized
+  artifacts:
+    - ptq_checkpoint
+    - assistant_core_circle
+    - assistant_sparse_head
+    - assistant_manifest
