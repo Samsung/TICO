@@ -50,6 +50,12 @@ if _has_gemma4_assistant():
         GEMMA4_ASSISTANT_CORE_INPUT_NAMES,
         Gemma4AssistantStaticShapeConfig,
     )
+else:
+    make_tiny_gemma4_assistant_model = None  # type: ignore[assignment]
+    Gemma4AssistantCoreExportAdapter = None  # type: ignore[assignment, misc]
+    canonicalize_gemma4_assistant_static_inputs = None  # type: ignore[assignment]
+    GEMMA4_ASSISTANT_CORE_INPUT_NAMES = None  # type: ignore[assignment]
+    Gemma4AssistantStaticShapeConfig = None  # type: ignore[assignment, misc]
 
 
 def _make_dynamic_inputs(model: torch.nn.Module, kv_len: int = 10) -> dict:

@@ -51,6 +51,10 @@ if _has_gemma4_assistant():
     from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
         Gemma4AssistantGenerationAdapter,
     )
+else:
+    make_tiny_gemma4_assistant_model = None  # type: ignore[assignment]
+    QuantGemma4AssistantForCausalLM = None  # type: ignore[assignment, misc]
+    Gemma4AssistantGenerationAdapter = None  # type: ignore[assignment, misc]
 
 
 def _make_sample(model: torch.nn.Module, kv_len: int = 10) -> dict:

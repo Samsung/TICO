@@ -245,7 +245,7 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_export_dispatches_sparse_head_and_manifest(self):
-        cfg = {
+        cfg: dict = {
             "model": {
                 "family": "gemma4_assistant",
                 "name_or_path": "tiny-synthetic-assistant",
