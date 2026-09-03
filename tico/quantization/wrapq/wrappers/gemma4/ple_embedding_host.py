@@ -323,11 +323,12 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
         map_location: Any = "cpu",
     ) -> "Gemma4PLEEmbeddingHostTable":
         """Load a saved ``ple_embedding`` artifact or wrap an in-memory payload."""
+        payload: Mapping[str, Any]
         if isinstance(artifact, (str, Path)):
-            artifact = torch.load(
-                artifact, map_location=map_location, weights_only=True
-            )
-        return cls(artifact)
+            payload = torch.load(artifact, map_location=map_location, weights_only=True)
+        else:
+            payload = artifact
+        return cls(payload)
 
     def _dequantized_weight(self) -> torch.Tensor:
         """Return the table exactly as ``fake_quant(weight)`` produced it."""
