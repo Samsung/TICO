@@ -23,6 +23,8 @@ import contextlib
 import importlib.util
 import io
 import unittest
+from types import SimpleNamespace
+from typing import Any
 
 import torch
 
@@ -835,6 +837,301 @@ class TestVerifyVisionPrefill(unittest.TestCase):
             visual_embeds,
             batch["pixel_values"].squeeze(0),
         )
+
+
+class _CountingPLEStage:
+    """Record inputs and outputs of a PLE stage with deterministic values."""
+
+    def __init__(self, output_fn):
+        self.output_fn = output_fn
+        self.calls: list[tuple] = []
+        self.outputs: list[torch.Tensor] = []
+
+    def __call__(self, *args):
+        self.calls.append(tuple(arg.detach().clone() for arg in args))
+        output = self.output_fn(*args)
+        self.outputs.append(output)
+        return output
+
+
+class _FakeRuntimeModel(torch.nn.Module):
+    """Expose a parameter dtype and the Gemma4 rotary hierarchy."""
+
+    def __init__(self, rotary_emb):
+        super().__init__()
+        self.probe = torch.nn.Parameter(torch.zeros(1))
+        self.model = SimpleNamespace(
+            language_model=SimpleNamespace(rotary_emb=rotary_emb)
+        )
+
+    @property
+    def dtype(self):
+        return self.probe.dtype
+
+
+class _SliceRecordingLayer:
+    """Record the ``per_layer_input`` slice received by one decoder layer."""
+
+    def __init__(self):
+        self.per_layer_inputs: list[torch.Tensor] = []
+        self.hidden_inputs: list[torch.Tensor] = []
+        attention = SimpleNamespace(
+            is_kv_shared_layer=False, store_full_length_kv=False
+        )
+        self.wrapped = SimpleNamespace(self_attn=SimpleNamespace(wrapped=attention))
+
+    def __call__(self, *, hidden_states, per_layer_input=None, **kwargs):
+        del kwargs
+        self.hidden_inputs.append(hidden_states)
+        self.per_layer_inputs.append(per_layer_input)
+        return hidden_states
+
+
+def _make_packed_ple(inputs_embeds, per_layer_token_inputs):
+    """Return a packed PLE tensor whose layer slices are distinguishable."""
+    del inputs_embeds
+    layer_ids = torch.arange(
+        per_layer_token_inputs.size(2), dtype=per_layer_token_inputs.dtype
+    )
+    return per_layer_token_inputs + 100.0 * layer_ids.view(1, 1, -1, 1)
+
+
+def _make_ple_runtime(*, max_seq: int, num_layers: int, ple_dim: int):
+    """Build a runtime skeleton with counting PLE stages and recording layers."""
+    from tico.quantization.recipes.debug.static_gemma4_runtime import (
+        StaticGemma4Runtime,
+    )
+
+    hidden_size = 4
+
+    def rotary_emb(x, position_ids, layer_type):
+        del position_ids, layer_type
+        shape = (x.size(0), x.size(1), 2)
+        return (
+            torch.ones(shape, device=x.device, dtype=x.dtype),
+            torch.zeros(shape, device=x.device, dtype=x.dtype),
+        )
+
+    def ple_lookup(input_ids):
+        seq_len = input_ids.size(1)
+        return (
+            torch.arange(seq_len * num_layers * ple_dim, dtype=torch.float32)
+            .view(1, seq_len, num_layers, ple_dim)
+            .clone()
+        )
+
+    runtime = object.__new__(StaticGemma4Runtime)
+    runtime.device = torch.device("cpu")
+    runtime.layout = SimpleNamespace(max_seq=max_seq)  # type: ignore[assignment]
+    runtime.text_config = SimpleNamespace(
+        layer_types=["full_attention"] * num_layers,
+        sliding_window=4,
+        final_logit_softcapping=None,
+        num_hidden_layers=num_layers,
+    )
+    runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=ple_dim)
+    runtime.model = _FakeRuntimeModel(rotary_emb)  # type: ignore[assignment]
+    runtime.attention_mask_fill_value = -120.0
+    runtime.token_embedding = lambda ids: torch.full(  # type: ignore[assignment]
+        (ids.size(0), ids.size(1), hidden_size), 0.5, dtype=torch.float32
+    )
+    runtime.lm_head = lambda hidden: torch.zeros(  # type: ignore[assignment]
+        hidden.size(0), hidden.size(1), 5
+    )
+    runtime.ple_embedding = _CountingPLEStage(ple_lookup)  # type: ignore[assignment]
+    runtime.ple_projection = _CountingPLEStage(_make_packed_ple)  # type: ignore[assignment]
+    runtime.prefill_layers = [_SliceRecordingLayer() for _ in range(num_layers)]  # type: ignore[assignment]
+    runtime.decode_layers = [_SliceRecordingLayer() for _ in range(num_layers)]  # type: ignore[assignment]
+    runtime.layer_caches = []
+    runtime.past_len = 0
+    return runtime
+
+
+def _assert_layer_slices(testcase, layers, packed):
+    """Assert each layer got a non-copied view of its own packed slice."""
+    for layer_idx, layer in enumerate(layers):
+        testcase.assertEqual(len(layer.per_layer_inputs), 1)
+        received = layer.per_layer_inputs[0]
+        testcase.assertIsNotNone(received)
+        testcase.assertTrue(torch.equal(received, packed[:, :, layer_idx, :]))
+        # Slicing must not materialize a copy of the packed projection output.
+        testcase.assertEqual(
+            received.untyped_storage().data_ptr(),
+            packed.untyped_storage().data_ptr(),
+        )
+
+
+class TestStaticRuntimePLEStages(unittest.TestCase):
+    """The runtime must route PLE through explicit lookup/projection stages."""
+
+    def test_build_per_layer_inputs_matches_text_model_reference(self):
+        """Runtime helper output equals the authoritative text-model methods."""
+        try:
+            from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
+            from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+        except Exception:  # pragma: no cover - environment dependent
+            self.skipTest("transformers Gemma4 modules are not installed")
+
+        from tico.quantization.config.ptq import PTQConfig
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4PLEEmbeddingExportAdapter,
+            Gemma4PLEProjectionExportAdapter,
+        )
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        torch.manual_seed(7)
+        config_kwargs: dict[str, Any] = dict(
+            vocab_size=64,
+            vocab_size_per_layer_input=48,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=2,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=4,
+            global_head_dim=4,
+            max_position_embeddings=32,
+            sliding_window=8,
+            layer_types=["full_attention", "full_attention"],
+            rope_parameters={
+                "full_attention": {
+                    "rope_type": "proportional",
+                    "partial_rotary_factor": 0.25,
+                    "rope_theta": 1_000_000.0,
+                }
+            },
+            hidden_size_per_layer_input=8,
+            attention_k_eq_v=False,
+            num_kv_shared_layers=0,
+            enable_moe_block=False,
+            use_cache=False,
+        )
+        cfg = Gemma4TextConfig(
+            **config_kwargs
+        )  # pylint: disable=unexpected-keyword-arg
+        cfg._attn_implementation = "eager"
+        fp_model = Gemma4TextModel(cfg).eval()
+        qtext = QuantGemma4TextModel(fp_model, qcfg=PTQConfig()).eval()
+
+        runtime = object.__new__(StaticGemma4Runtime)
+        runtime.text_model = qtext
+        runtime.ple_embedding = Gemma4PLEEmbeddingExportAdapter(qtext)
+        runtime.ple_projection = Gemma4PLEProjectionExportAdapter(qtext)
+
+        for seq_len in (6, 1):
+            ids = torch.randint(0, cfg.vocab_size_per_layer_input, (1, seq_len))
+            inputs_embeds = fp_model.embed_tokens(ids)
+            with torch.no_grad():
+                actual = runtime._build_per_layer_inputs(ids, inputs_embeds)
+                expected = qtext.project_per_layer_inputs(
+                    inputs_embeds, qtext.get_per_layer_inputs(ids, None)
+                )
+            self.assertIsNotNone(actual)
+            assert actual is not None
+            self.assertTrue(torch.equal(actual, expected))
+
+    def test_build_per_layer_inputs_returns_none_when_ple_disabled(self):
+        """PLE-disabled models skip both stages without touching them."""
+        from tico.quantization.recipes.debug.static_gemma4_runtime import (
+            StaticGemma4Runtime,
+        )
+
+        runtime = object.__new__(StaticGemma4Runtime)
+        runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=0)
+        runtime.ple_embedding = None
+        runtime.ple_projection = None
+
+        result = runtime._build_per_layer_inputs(
+            torch.tensor([[1, 2]]), torch.zeros(1, 2, 4)
+        )
+
+        self.assertIsNone(result)
+
+    def test_prefill_runs_each_stage_once_after_fusion_and_slices_per_layer(self):
+        """Prefill: one lookup, one projection on fused embeds, correct slices."""
+        max_seq, num_layers, ple_dim = 6, 3, 2
+        runtime = _make_ple_runtime(
+            max_seq=max_seq, num_layers=num_layers, ple_dim=ple_dim
+        )
+        fused = torch.full((1, max_seq, 4), 7.0)
+        runtime._get_or_create_vision_prefill = lambda ids: (  # type: ignore[assignment]
+            lambda pixel_values: torch.zeros(2, 4)
+        )
+        runtime.mm_fusion = lambda text, image: fused  # type: ignore[assignment]
+        runtime._allocate_empty_cache = lambda batch, dtype: []  # type: ignore[assignment]
+
+        batch = {
+            "llm_input_ids": torch.arange(max_seq).view(1, max_seq),
+            "pixel_values": torch.zeros(1, 2, 3),
+            "image_position_ids": torch.zeros(1, 2, 2, dtype=torch.long),
+            "attention_mask": torch.tensor([[1, 1, 1, 1, 0, 0]], dtype=torch.bool),
+            "valid_length": torch.tensor([4]),
+        }
+        runtime.prefill(batch)
+
+        lookup = runtime.ple_embedding
+        projection = runtime.ple_projection
+        self.assertEqual(len(lookup.calls), 1)
+        self.assertEqual(len(projection.calls), 1)
+        self.assertTrue(torch.equal(lookup.calls[0][0], batch["llm_input_ids"]))
+        # The projection consumes the multimodal-fused decoder input, not the
+        # raw token embeddings, plus the shared lookup output.
+        self.assertTrue(torch.equal(projection.calls[0][0], fused))
+        expected_lookup = lookup.output_fn(batch["llm_input_ids"])
+        self.assertTrue(torch.equal(projection.calls[0][1], expected_lookup))
+
+        packed = projection.outputs[0]
+        self.assertTrue(torch.equal(packed, _make_packed_ple(fused, expected_lookup)))
+        self.assertEqual(tuple(packed.shape), (1, max_seq, num_layers, ple_dim))
+        _assert_layer_slices(self, runtime.prefill_layers, packed)
+        self.assertTrue(torch.equal(runtime.prefill_layers[0].hidden_inputs[0], fused))
+
+    def test_decode_runs_each_stage_once_after_embedding_and_slices_per_layer(self):
+        """Decode: one lookup, one projection on the token embedding, slices."""
+        from tico.quantization.recipes.debug.static_gemma4_runtime import LayerCache
+
+        max_seq, num_layers, ple_dim = 6, 3, 2
+        runtime = _make_ple_runtime(
+            max_seq=max_seq, num_layers=num_layers, ple_dim=ple_dim
+        )
+        runtime.layer_caches = [
+            LayerCache(
+                torch.zeros(1, 1, max_seq - 1, 2), torch.zeros(1, 1, max_seq - 1, 2)
+            )
+            for _ in range(num_layers)
+        ]
+        runtime.past_len = 2
+        next_token = torch.tensor([[5]], dtype=torch.long)
+
+        runtime.decode_one(next_token)
+
+        lookup = runtime.ple_embedding
+        projection = runtime.ple_projection
+        self.assertEqual(len(lookup.calls), 1)
+        self.assertEqual(len(projection.calls), 1)
+        self.assertTrue(torch.equal(lookup.calls[0][0], next_token))
+        token_embeds = runtime.token_embedding(next_token)
+        self.assertTrue(torch.equal(projection.calls[0][0], token_embeds))
+        expected_lookup = lookup.output_fn(next_token)
+        self.assertTrue(torch.equal(projection.calls[0][1], expected_lookup))
+
+        packed = projection.outputs[0]
+        self.assertTrue(
+            torch.equal(packed, _make_packed_ple(token_embeds, expected_lookup))
+        )
+        self.assertEqual(tuple(packed.shape), (1, 1, num_layers, ple_dim))
+        _assert_layer_slices(self, runtime.decode_layers, packed)
+
+        # A second decode step runs each stage exactly once more.
+        runtime.decode_one(torch.tensor([[6]], dtype=torch.long))
+        self.assertEqual(len(lookup.calls), 2)
+        self.assertEqual(len(projection.calls), 2)
 
 
 class TestDecodeOneFixedCacheContract(unittest.TestCase):

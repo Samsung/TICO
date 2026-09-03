@@ -355,8 +355,10 @@ class RemoveRedundantReshapePattern4(PassBase):
             reshape1_input, size = reshape1_args.input, reshape1_args.shape
             assert isinstance(reshape1_input, torch.fx.Node), type(reshape1_input)
             assert isinstance(size, list), type(size)
-            for s in size:
-                assert isinstance(s, int), type(s)
+            # Dynamic-shape graphs carry symbolic sizes (SymInt or sym_size
+            # nodes). This static fusion pattern only handles concrete sizes.
+            if not all(isinstance(s, int) for s in size):
+                continue
 
             if not len(reshape1.users) == 1:
                 continue
@@ -370,8 +372,8 @@ class RemoveRedundantReshapePattern4(PassBase):
             reshape2_input, reshape2_size = reshape2_args.input, reshape2_args.shape
             assert isinstance(reshape2_input, torch.fx.Node), type(reshape2_input)
             assert isinstance(reshape2_size, list), type(reshape2_size)
-            for s in reshape2_size:
-                assert isinstance(s, int), type(s)
+            if not all(isinstance(s, int) for s in reshape2_size):
+                continue
 
             with graph.inserting_before(reshape1):
                 fused_reshape = create_node(

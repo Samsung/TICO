@@ -45,8 +45,31 @@ class ConvertLayoutOpToReshape(PassBase):
         graph = graph_module.graph
         modified = False
 
-        def convert(node, input):
+        def resolve_static_size(node, explicit_size):
+            """Return an all-int reshape size for ``node``.
+
+            Dynamic-shape graphs expose symbolic output dims. Circle RESHAPE
+            needs a constant shape tensor, so prefer the explicit ``view`` size
+            (which keeps the user's ``-1``) and otherwise infer a single
+            symbolic dim as ``-1``. Shapes with several symbolic dims are left
+            unchanged and rejected downstream as before.
+            """
             out_shape = list(extract_shape(node))
+            if all(isinstance(dim, int) for dim in out_shape):
+                return out_shape
+            if explicit_size is not None and all(
+                isinstance(dim, int) for dim in explicit_size
+            ):
+                return list(explicit_size)
+            symbolic = [
+                i for i, dim in enumerate(out_shape) if not isinstance(dim, int)
+            ]
+            if len(symbolic) == 1:
+                out_shape[symbolic[0]] = -1
+            return out_shape
+
+        def convert(node, input, explicit_size=None):
+            out_shape = resolve_static_size(node, explicit_size)
 
             with graph.inserting_after(node):
                 reshape_node = create_node(
@@ -64,7 +87,7 @@ class ConvertLayoutOpToReshape(PassBase):
 
             if node.target in ops.aten.view:
                 view_args = ViewArgs(*node.args, **node.kwargs)
-                convert(node, view_args.input)
+                convert(node, view_args.input, explicit_size=view_args.size)
                 modified = True
                 continue
             elif node.target in ops.aten.unsqueeze:
