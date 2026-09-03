@@ -193,14 +193,18 @@ class Gemma4AssistantAdapter(ModelAdapter):
         ).to(ctx.device)
         target.eval()
 
-        # Validate target/assistant compatibility.
+        # Validate target/assistant compatibility. The assistant consumes the
+        # target hidden states through ``backbone_hidden_size`` (top-level
+        # assistant config); its own text-config ``hidden_size`` is the much
+        # smaller draft width and must not be compared against the target.
         assistant = ctx.require_model()
         assistant_cfg = extract_assistant_text_config(assistant.config)
         target_cfg = extract_assistant_text_config(target.config)
+        backbone_hidden_size = int(assistant.config.backbone_hidden_size)
 
-        if assistant_cfg.hidden_size != target_cfg.hidden_size:
+        if backbone_hidden_size != int(target_cfg.hidden_size):
             raise ValueError(
-                f"Assistant backbone_hidden_size {assistant.backbone_hidden_size} does not match "
+                f"Assistant backbone_hidden_size {backbone_hidden_size} does not match "
                 f"target hidden_size {target_cfg.hidden_size}."
             )
         if assistant_cfg.vocab_size != target_cfg.vocab_size:

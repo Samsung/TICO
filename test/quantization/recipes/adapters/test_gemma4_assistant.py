@@ -24,6 +24,7 @@ install_optional_dependency_stubs()
 import json
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -192,6 +193,42 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
             sorted(qcfg.overrides["model"]["layers"]),  # type: ignore[arg-type]
             ["0", "1"],
         )
+
+    def test_load_target_model_compares_backbone_hidden_size(self):
+        """The target compatibility check must use the assistant's
+        ``backbone_hidden_size`` (the target width it consumes), not the
+        assistant's own, much smaller, text-config ``hidden_size``."""
+        text_cfg = self.fp_model.config.get_text_config()
+        backbone_hidden_size = int(self.fp_model.config.backbone_hidden_size)
+        draft_hidden_size = int(text_cfg.hidden_size)
+        # The tiny fixture keeps the two widths distinct so the wrong
+        # comparison is observable.
+        self.assertNotEqual(backbone_hidden_size, draft_hidden_size)
+
+        class _FakeTarget(torch.nn.Module):
+            def __init__(self, hidden_size: int):
+                super().__init__()
+                self.config = types.SimpleNamespace(
+                    hidden_size=hidden_size, vocab_size=int(text_cfg.vocab_size)
+                )
+
+        def _ctx() -> RecipeContext:
+            return RecipeContext(
+                cfg={"target_model": {"name_or_path": "fake-target"}},
+                adapter=self.adapter,
+                model=self.fp_model,
+            )
+
+        module = "tico.quantization.recipes.adapters.gemma4_assistant._load_causal_lm"
+        matching = _FakeTarget(backbone_hidden_size)
+        with patch(module, return_value=matching):
+            ctx = _ctx()
+            self.assertIs(self.adapter._load_target_model(ctx), matching)
+            self.assertIs(ctx.artifacts["gemma4_assistant_target_model"], matching)
+
+        with patch(module, return_value=_FakeTarget(draft_hidden_size)):
+            with self.assertRaisesRegex(ValueError, "backbone_hidden_size"):
+                self.adapter._load_target_model(_ctx())
 
     def test_forward_calibration_streams_real_assisted_generation(self):
         """Calibration must route prompts through target.generate with the
