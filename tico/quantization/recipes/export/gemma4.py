@@ -29,7 +29,14 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
     Gemma4LMHeadExportAdapter,
     Gemma4MMFusionExportAdapter,
+    Gemma4PLEEmbeddingExportAdapter,
+    Gemma4PLEProjectionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
+)
+from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
+    CIRCLE_FLATBUFFER_LIMIT_BYTES,
+    estimate_gemma4_ple_embedding_circle_bytes,
+    save_gemma4_ple_embedding_artifact,
 )
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     build_gemma4_static_vision_profile,
@@ -43,11 +50,13 @@ from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
 )
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
+    register_fake_quant_meta_kernels_for_dynamic_export,
 )
 from tico.utils.utils import SuppressWarning
 
 
 _VISION_EXPORT_GRANULARITIES = frozenset({"monolithic", "layer", "both"})
+_PLE_EMBEDDING_FORMATS = frozenset({"auto", "circle", "pt"})
 
 
 def _convert_and_save(
@@ -82,6 +91,10 @@ def _is_wrapped_export_model(model: torch.nn.Module) -> bool:
     )
 
 
+_FLOAT_ARTIFACT_TAG = "f32"
+_QUANTIZED_ARTIFACT_TAG = "q"
+
+
 def _float_artifact_tag(model: torch.nn.Module) -> str:
     """Validate a floating-point export model and return its precision tag."""
     try:
@@ -94,7 +107,7 @@ def _float_artifact_tag(model: torch.nn.Module) -> str:
             "Floating-point Gemma4 export currently supports float32 only. "
             f"Got parameter dtype {dtype}."
         )
-    return "f32"
+    return _FLOAT_ARTIFACT_TAG
 
 
 def _normalize_model_args(
@@ -164,7 +177,7 @@ def _prepare_gemma4_export_model(
     """
     model = model.eval().cpu()
     if _is_wrapped_export_model(model):
-        return model, "q"
+        return model, _QUANTIZED_ARTIFACT_TAG
 
     artifact_tag = _float_artifact_tag(model)
     wrapper_config = PTQConfig(
@@ -656,6 +669,254 @@ def _attention_contract(
     return attention, num_kv_heads, head_dim, sliding_window, is_shared
 
 
+def _make_ple_projection_inputs(
+    *,
+    seq_len: int,
+    hidden_size: int,
+    num_hidden_layers: int,
+    ple_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create ``(inputs_embeds, per_layer_token_inputs)`` for one PLE graph."""
+    inputs_embeds = torch.randn(1, seq_len, hidden_size, device="cpu")
+    per_layer_token_inputs = torch.randn(
+        1,
+        seq_len,
+        num_hidden_layers,
+        ple_dim,
+        device="cpu",
+    )
+    return inputs_embeds, per_layer_token_inputs
+
+
+def _normalize_ple_embedding_format(embedding_format: str) -> str:
+    """Validate and normalize the ``ple_embedding`` artifact format."""
+    normalized = str(embedding_format).strip().lower()
+    if normalized not in _PLE_EMBEDDING_FORMATS:
+        choices = ", ".join(sorted(_PLE_EMBEDDING_FORMATS))
+        raise ValueError(
+            "Unsupported Gemma4 ple_embedding format "
+            f"{embedding_format!r}. Expected one of: {choices}."
+        )
+    return normalized
+
+
+def _resolve_ple_embedding_format(
+    embedding_format: str,
+    *,
+    estimated_circle_bytes: int,
+) -> str:
+    """Return ``circle`` or ``pt`` for the shared PLE lookup artifact.
+
+    ``auto`` writes a Circle graph when the packed table fits the flatbuffer
+    limit and falls back to the host ``.pt`` artifact otherwise. Both float and
+    quantized exports follow the same rule.
+    """
+    normalized = _normalize_ple_embedding_format(embedding_format)
+    if normalized != "auto":
+        return normalized
+    if estimated_circle_bytes >= CIRCLE_FLATBUFFER_LIMIT_BYTES:
+        return "pt"
+    return "circle"
+
+
+def _export_gemma4_ple_embedding_stage(
+    *,
+    qtext: torch.nn.Module,
+    max_seq_len: int,
+    vocab_size_per_layer_input: int,
+    artifact_tag: str,
+    output_dir: Path,
+    embedding_format: str,
+    strict: bool,
+) -> dict[str, Any]:
+    """Export the shared PLE lookup as a dynamic Circle graph or ``.pt`` table.
+
+    Returns the manifest entry describing the chosen format and the
+    ``(1, S)`` input contract shared with ``token_embedding``.
+    """
+    ple_embedding = Gemma4PLEEmbeddingExportAdapter(qtext)
+    estimated_bytes = estimate_gemma4_ple_embedding_circle_bytes(ple_embedding)
+    resolved = _resolve_ple_embedding_format(
+        embedding_format,
+        estimated_circle_bytes=estimated_bytes,
+    )
+
+    manifest: dict[str, Any] = {
+        "id": "ple_embedding",
+        "kind": "ple_embedding",
+        "format": resolved,
+        "requested_format": _normalize_ple_embedding_format(embedding_format),
+        "estimated_circle_bytes": int(estimated_bytes),
+        "circle_flatbuffer_limit_bytes": int(CIRCLE_FLATBUFFER_LIMIT_BYTES),
+        "inputs": [
+            {
+                "name": "input_ids",
+                "shape": [1, "S"],
+                "dtype": "int64",
+                "sequence_range": [1, int(max_seq_len)],
+            }
+        ],
+        "outputs": [
+            {
+                "name": "per_layer_token_inputs",
+                "shape": [
+                    1,
+                    "S",
+                    int(ple_embedding.num_hidden_layers),
+                    int(ple_embedding.hidden_size_per_layer_input),
+                ],
+            }
+        ],
+    }
+
+    if resolved == "pt":
+        if manifest["requested_format"] == "auto":
+            print(
+                "ple_embedding table is estimated at "
+                f"{estimated_bytes / 2**30:.2f} GiB, above the Circle flatbuffer "
+                "limit; saving the host .pt artifact instead."
+            )
+        artifact = f"ple_embedding.{artifact_tag}.pt"
+        save_gemma4_ple_embedding_artifact(ple_embedding, output_dir / artifact)
+        manifest["artifact"] = artifact
+        return manifest
+
+    artifact = _circle_name("ple_embedding", artifact_tag)
+    ple_input_ids = torch.randint(
+        low=0,
+        high=vocab_size_per_layer_input,
+        size=(1, max_seq_len),
+        dtype=torch.long,
+        device="cpu",
+    )
+    _convert_and_save(
+        ple_embedding,
+        (ple_input_ids,),
+        output_dir / artifact,
+        dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
+        strict=strict,
+    )
+    manifest["artifact"] = artifact
+    return manifest
+
+
+def _export_gemma4_ple_projection_stages(
+    *,
+    qtext: torch.nn.Module,
+    max_seq_len: int,
+    hidden_size: int,
+    ple_dim: int,
+    artifact_tag: str,
+    output_dir: Path,
+    prefill_decode: bool,
+    strict: bool,
+) -> list[dict[str, Any]]:
+    """Export the fixed-shape PLE projection graphs for prefill and decode.
+
+    A single adapter instance is traced once per static sequence length. The
+    projection graphs never contain ``embed_tokens_per_layer``; the token
+    lookup is the separate shared ``ple_embedding`` artifact. Returns one
+    manifest entry per exported graph.
+    """
+    num_hidden_layers = int(getattr(qtext, "config").num_hidden_layers)
+    ple_projection = Gemma4PLEProjectionExportAdapter(qtext)
+    stages: list[dict[str, Any]] = []
+
+    def _export(stem: str, seq_len: int, stage_id: str) -> None:
+        inputs = _make_ple_projection_inputs(
+            seq_len=seq_len,
+            hidden_size=hidden_size,
+            num_hidden_layers=num_hidden_layers,
+            ple_dim=ple_dim,
+        )
+        artifact = _circle_name(stem, artifact_tag)
+        _convert_and_save(
+            ple_projection,
+            inputs,
+            output_dir / artifact,
+            strict=strict,
+        )
+        stages.append(
+            {
+                "id": stage_id,
+                "kind": "ple_projection",
+                "format": "circle",
+                "artifact": artifact,
+                "inputs": [
+                    _tensor_manifest("inputs_embeds", inputs[0]),
+                    _tensor_manifest("per_layer_token_inputs", inputs[1]),
+                ],
+                "outputs": [
+                    {
+                        "name": "per_layer_inputs",
+                        "shape": list(inputs[1].shape),
+                    }
+                ],
+            }
+        )
+
+    prefill_stem = "ple_projection_prefill" if prefill_decode else "ple_projection"
+    _export(prefill_stem, max_seq_len, prefill_stem)
+    if prefill_decode:
+        _export("ple_projection_decode", 1, "ple_projection_decode")
+    return stages
+
+
+def _save_ple_pipeline_manifest(
+    *,
+    path: Path,
+    qtext: torch.nn.Module,
+    artifact_tag: str,
+    embedding: dict[str, Any],
+    projections: list[dict[str, Any]],
+) -> None:
+    """Write the PLE stage contract, including format and observer boundaries."""
+    boundaries = []
+    for name, attr, producer, consumer in (
+        (
+            "per_layer_token_inputs",
+            "obs_per_layer_token_inputs",
+            "ple_embedding",
+            "ple_projection",
+        ),
+        (
+            "per_layer_projection",
+            "obs_per_layer_projection",
+            "ple_projection",
+            "ple_projection",
+        ),
+        (
+            "per_layer_inputs",
+            "obs_per_layer_inputs",
+            "ple_projection",
+            "decoder_layer",
+        ),
+    ):
+        observer = getattr(qtext, attr, None)
+        if observer is None:
+            continue
+        boundaries.append(
+            {
+                "name": name,
+                "producer": producer,
+                "consumer": consumer,
+                "observer": _observer_manifest(observer),
+            }
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "artifact_tag": artifact_tag,
+        "embedding": embedding,
+        "projections": projections,
+        "boundaries": boundaries,
+    }
+    path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def export_gemma4_per_layer(
     *,
     q_model: torch.nn.Module,
@@ -665,6 +926,7 @@ def export_gemma4_per_layer(
     prefill_decode: bool = True,
     strict: bool = False,
     vision_granularity: str = "monolithic",
+    ple_embedding_format: str = "auto",
 ) -> None:
     """Export a floating-point or PTQ-wrapped Gemma4 E2B by runtime stage.
 
@@ -675,16 +937,31 @@ def export_gemma4_per_layer(
     or both. Split encoder artifacts share external mask and RoPE inputs instead
     of embedding duplicate profile tensors.
 
+    When Per-Layer Embeddings are enabled (``hidden_size_per_layer_input > 0``)
+    the exporter additionally emits:
+
+    - ``ple_embedding``: one shared CPU lookup owning ``embed_tokens_per_layer``
+      with the same ``(1, S)`` dynamic contract as ``token_embedding``.
+      ``ple_embedding_format`` selects ``circle`` (dynamic Circle graph),
+      ``pt`` (host ``.pt`` table loaded by
+      ``Gemma4PLEEmbeddingHostTable``), or ``auto`` (Circle when the packed
+      table fits the 2 GiB flatbuffer limit, otherwise ``.pt``);
+    - ``ple_projection_prefill`` (``S = max_seq_len``) and
+      ``ple_projection_decode`` (``S = 1``): fixed-shape NPU graphs running the
+      complete projection/norm/combine stage. With ``prefill_decode=False`` only
+      the unsuffixed ``ple_projection`` prefill graph is written.
+
     With ``prefill_decode=True``, each text layer is emitted once for full
-    prefill and once for single-token decode. PLE token lookup and the packed
-    context projection intentionally remain CPU runtime responsibilities. Each
-    decoder Circle receives only its sliced ``per_layer_input`` tensor, matching
+    prefill and once for single-token decode. The CPU runtime orchestrates the
+    PLE lookup and slices the packed projection output; each decoder Circle
+    receives only its ``per_layer_input`` slice, matching
     ``StaticGemma4Runtime``.
     """
     if max_seq_len < 1:
         raise ValueError(f"max_seq_len must be positive, got {max_seq_len}.")
 
     vision_granularity = _normalize_vision_export_granularity(vision_granularity)
+    ple_embedding_format = _normalize_ple_embedding_format(ple_embedding_format)
     normalized_model_args = _normalize_model_args(
         model_args,
         max_seq_len=max_seq_len,
@@ -745,6 +1022,9 @@ def export_gemma4_per_layer(
         strict=strict,
     )
 
+    # Dynamic-sequence QUANT export traces frozen fake-quant ops with
+    # FakeTensors; reuse the shared meta-kernel registration.
+    register_fake_quant_meta_kernels_for_dynamic_export()
     token_input_ids = torch.randint(
         low=0,
         high=vocab_size,
@@ -759,6 +1039,21 @@ def export_gemma4_per_layer(
         dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
         strict=strict,
     )
+    ple_embedding_manifest: dict[str, Any] | None = None
+    if ple_dim:
+        # One shared lookup for both phases; the large
+        # ``embed_tokens_per_layer`` table must exist only here.
+        ple_embedding_manifest = _export_gemma4_ple_embedding_stage(
+            qtext=qtext,
+            max_seq_len=max_seq_len,
+            vocab_size_per_layer_input=int(
+                getattr(config, "vocab_size_per_layer_input", vocab_size)
+            ),
+            artifact_tag=artifact_tag,
+            output_dir=output_dir,
+            embedding_format=ple_embedding_format,
+            strict=strict,
+        )
 
     text_embeds = torch.randn(1, max_seq_len, hidden_size, device="cpu")
     visual_embeds = torch.randn(num_visual_tokens, hidden_size, device="cpu")
@@ -775,6 +1070,26 @@ def export_gemma4_per_layer(
 
     prefill_hidden = torch.randn(1, max_seq_len, hidden_size, device="cpu")
     decode_hidden = torch.randn(1, 1, hidden_size, device="cpu")
+
+    if ple_dim:
+        projection_manifest = _export_gemma4_ple_projection_stages(
+            qtext=qtext,
+            max_seq_len=max_seq_len,
+            hidden_size=hidden_size,
+            ple_dim=ple_dim,
+            artifact_tag=artifact_tag,
+            output_dir=output_dir,
+            prefill_decode=prefill_decode,
+            strict=strict,
+        )
+        assert ple_embedding_manifest is not None
+        _save_ple_pipeline_manifest(
+            path=output_dir / "ple_pipeline.json",
+            qtext=qtext,
+            artifact_tag=artifact_tag,
+            embedding=ple_embedding_manifest,
+            projections=projection_manifest,
+        )
 
     for layer_idx, layer in enumerate(qtext.layers):
         (

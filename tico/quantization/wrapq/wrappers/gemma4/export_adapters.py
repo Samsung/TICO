@@ -27,7 +27,11 @@ import torch.nn as nn
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
-from tico.quantization.wrapq.wrappers.gemma4.utils import fixed_slot_fuse
+from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    fixed_slot_fuse,
+    lookup_gemma4_per_layer_token_inputs,
+    project_gemma4_per_layer_inputs,
+)
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
@@ -121,6 +125,202 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return token embeddings for static runtime execution."""
         return self.embed_tokens(input_ids)
+
+
+def _resolve_ple_export_mode(
+    wrapped_text_model: nn.Module, mode: Optional[Mode]
+) -> Mode:
+    """Return the explicit export mode or the text-model wrapper's current mode."""
+    if mode is not None:
+        return mode
+    resolved = getattr(wrapped_text_model, "_mode", None)
+    if not isinstance(resolved, Mode):
+        raise TypeError(
+            "Gemma4 PLE export adapters require an explicit ``mode`` when the "
+            "text model does not expose a wrapper ``_mode``."
+        )
+    return resolved
+
+
+def _require_ple_attribute(wrapped_text_model: nn.Module, name: str) -> Any:
+    """Return a PLE module or observer that must exist on the text wrapper."""
+    value = getattr(wrapped_text_model, name, None)
+    if value is None:
+        raise RuntimeError(
+            "Gemma4 PLE export requires the text-model attribute "
+            f"{name!r}; Per-Layer Embeddings appear to be disabled."
+        )
+    return value
+
+
+class Gemma4PLEEmbeddingExportAdapter(nn.Module):
+    """Export adapter for the shared, CPU-executed PLE token-identity lookup.
+
+    This stage owns ``embed_tokens_per_layer``, the very large per-layer
+    embedding table, and nothing else from the text model. It is exported once
+    as a dynamic-sequence Circle graph (``ple_embedding``) and reused by both
+    prefill (``S = max_seq_len``) and decode (``S = 1``).
+
+    Input contract:
+        ``input_ids`` has shape ``(1, S)`` with ``1 <= S <= max_seq_len``
+        following ``make_token_embedding_dynamic_shapes``.
+
+    Output contract:
+        ``per_layer_token_inputs`` has shape
+        ``(1, S, num_hidden_layers, hidden_size_per_layer_input)`` and is
+        observed by the text-model ``per_layer_token_inputs`` observer in
+        ``QUANT`` mode.
+    """
+
+    def __init__(
+        self,
+        wrapped_text_model: nn.Module,
+        *,
+        mode: Optional[Mode] = None,
+    ):
+        super().__init__()
+        hidden_size_per_layer_input = int(
+            getattr(wrapped_text_model, "hidden_size_per_layer_input", 0) or 0
+        )
+        if hidden_size_per_layer_input <= 0:
+            raise RuntimeError(
+                "Gemma4 PLE embedding export requires hidden_size_per_layer_input > 0."
+            )
+        self.embed_tokens_per_layer = _require_ple_attribute(
+            wrapped_text_model, "embed_tokens_per_layer"
+        )
+        self.num_hidden_layers = int(
+            _require_ple_attribute(wrapped_text_model, "config").num_hidden_layers
+        )
+        self.hidden_size_per_layer_input = hidden_size_per_layer_input
+        self.per_layer_token_inputs_observer: ObserverBase = _require_ple_attribute(
+            wrapped_text_model, "obs_per_layer_token_inputs"
+        )
+        self.quantized = _quantized_export(
+            _resolve_ple_export_mode(wrapped_text_model, mode),
+            stage_name="Gemma4 PLE embedding",
+        )
+
+    def _fq(self, tensor: torch.Tensor, observer: ObserverBase) -> torch.Tensor:
+        """Apply the frozen producer observer in QUANT mode only."""
+        return observer.fake_quant(tensor) if self.quantized else tensor
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Return observed token-identity PLE with shape ``(1, S, L, P)``."""
+        return lookup_gemma4_per_layer_token_inputs(
+            input_ids,
+            embed_tokens_per_layer=self.embed_tokens_per_layer,
+            num_hidden_layers=self.num_hidden_layers,
+            hidden_size_per_layer_input=self.hidden_size_per_layer_input,
+            fq=self._fq,
+            token_inputs_observer=self.per_layer_token_inputs_observer,
+        )
+
+
+class Gemma4PLEProjectionExportAdapter(nn.Module):
+    """Export adapter for the complete NPU PLE projection/combine stage.
+
+    The adapter reproduces ``QuantGemma4TextModel.project_per_layer_inputs``
+    through the shared ``project_gemma4_per_layer_inputs`` helper while owning
+    only the projection modules, their scales, and the existing text-model PLE
+    observers. It never registers ``embed_tokens``, ``embed_tokens_per_layer``,
+    decoder layers, or the LM head, so the packed lookup table is not
+    duplicated into the prefill and decode projection artifacts.
+
+    The same adapter instance serves both static shapes; the exporter traces it
+    once with ``S = max_seq_len`` (``ple_projection_prefill``) and once with
+    ``S = 1`` (``ple_projection_decode``).
+
+    Input contract:
+        ``inputs_embeds`` has shape ``(1, S, hidden_size)`` and is the initial
+        decoder input (``mm_fusion`` output for multimodal prefill, token
+        embedding for decode).
+        ``per_layer_token_inputs`` has shape
+        ``(1, S, num_hidden_layers, hidden_size_per_layer_input)`` and is the
+        ``ple_embedding`` output. In ``QUANT`` mode it is re-observed with the
+        producer's ``per_layer_token_inputs`` observer so the Circle input keeps
+        the producer qparams; the frozen affine fake-quant is idempotent.
+
+    Output contract:
+        ``per_layer_inputs`` has shape
+        ``(1, S, num_hidden_layers, hidden_size_per_layer_input)`` observed by
+        the text-model ``per_layer_inputs`` observer. Decoder layer ``i``
+        consumes ``per_layer_inputs[:, :, i, :]``.
+    """
+
+    def __init__(
+        self,
+        wrapped_text_model: nn.Module,
+        *,
+        mode: Optional[Mode] = None,
+    ):
+        super().__init__()
+        hidden_size_per_layer_input = int(
+            getattr(wrapped_text_model, "hidden_size_per_layer_input", 0) or 0
+        )
+        if hidden_size_per_layer_input <= 0:
+            raise RuntimeError(
+                "Gemma4 PLE projection export requires "
+                "hidden_size_per_layer_input > 0."
+            )
+        self.per_layer_model_projection = _require_ple_attribute(
+            wrapped_text_model, "per_layer_model_projection"
+        )
+        self.per_layer_projection_norm = _require_ple_attribute(
+            wrapped_text_model, "per_layer_projection_norm"
+        )
+        self.per_layer_model_projection_scale = float(
+            _require_ple_attribute(
+                wrapped_text_model, "per_layer_model_projection_scale"
+            )
+        )
+        self.per_layer_input_scale = float(
+            _require_ple_attribute(wrapped_text_model, "per_layer_input_scale")
+        )
+        self.num_hidden_layers = int(
+            _require_ple_attribute(wrapped_text_model, "config").num_hidden_layers
+        )
+        self.hidden_size_per_layer_input = hidden_size_per_layer_input
+        self.per_layer_token_inputs_observer: ObserverBase = _require_ple_attribute(
+            wrapped_text_model, "obs_per_layer_token_inputs"
+        )
+        self.per_layer_projection_observer: ObserverBase = _require_ple_attribute(
+            wrapped_text_model, "obs_per_layer_projection"
+        )
+        self.per_layer_inputs_observer: ObserverBase = _require_ple_attribute(
+            wrapped_text_model, "obs_per_layer_inputs"
+        )
+        self.quantized = _quantized_export(
+            _resolve_ple_export_mode(wrapped_text_model, mode),
+            stage_name="Gemma4 PLE projection",
+        )
+
+    def _fq(self, tensor: torch.Tensor, observer: ObserverBase) -> torch.Tensor:
+        """Apply a frozen text-model observer in QUANT mode only."""
+        return observer.fake_quant(tensor) if self.quantized else tensor
+
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        per_layer_token_inputs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return packed per-layer inputs with shape ``(1, S, L, P)``."""
+        per_layer_token_inputs = self._fq(
+            per_layer_token_inputs, self.per_layer_token_inputs_observer
+        )
+        return project_gemma4_per_layer_inputs(
+            inputs_embeds,
+            per_layer_token_inputs,
+            projection=self.per_layer_model_projection,
+            projection_norm=self.per_layer_projection_norm,
+            projection_scale=self.per_layer_model_projection_scale,
+            input_scale=self.per_layer_input_scale,
+            num_hidden_layers=self.num_hidden_layers,
+            hidden_size_per_layer_input=self.hidden_size_per_layer_input,
+            fq=self._fq,
+            projection_observer=self.per_layer_projection_observer,
+            inputs_observer=self.per_layer_inputs_observer,
+        )
 
 
 class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
@@ -574,7 +774,8 @@ class Gemma4ModelPrefillExportAdapter(nn.Module):
     - Token embedding (with placeholder replacement)
     - Vision tower + projection
     - Multimodal fusion (fixed-slot)
-    - PLE computation (if enabled)
+    - PLE orchestration (shared ``ple_embedding`` lookup feeding the exported
+      ``ple_projection`` stage) when enabled
     - Mask and RoPE generation per layer type
     - KV cache management
 

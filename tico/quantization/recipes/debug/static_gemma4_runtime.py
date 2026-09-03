@@ -16,8 +16,10 @@
 
 This module mirrors the Llama static runtime design while adding a fixed image
 prefill stage. CPU code owns processor/tokenizer logic, static layout checks,
-RoPE and mask generation, KV cache writes, shared-KV bookkeeping, and sampling.
-NPU-exportable subgraphs own quantized tensor compute.
+RoPE and mask generation, the shared Per-Layer Embedding (PLE) token lookup,
+KV cache writes, shared-KV bookkeeping, and sampling. NPU-exportable subgraphs
+own quantized tensor compute, including the complete PLE projection/combine
+stage that produces the packed ``per_layer_inputs`` tensor.
 """
 
 from dataclasses import dataclass
@@ -33,6 +35,8 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
     Gemma4LMHeadExportAdapter,
     Gemma4MMFusionExportAdapter,
+    Gemma4PLEEmbeddingExportAdapter,
+    Gemma4PLEProjectionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
 )
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
@@ -290,6 +294,19 @@ class StaticGemma4Runtime:
             self.device
         )
 
+        # PLE stage boundaries mirror the exported artifact set: one shared
+        # CPU ``ple_embedding`` lookup and one NPU ``ple_projection`` adapter
+        # that the exporter traces separately for prefill and decode shapes.
+        self.ple_embedding: Optional[nn.Module] = None
+        self.ple_projection: Optional[nn.Module] = None
+        if self.text_model.hidden_size_per_layer_input:
+            self.ple_embedding = Gemma4PLEEmbeddingExportAdapter(self.text_model).to(
+                self.device
+            )
+            self.ple_projection = Gemma4PLEProjectionExportAdapter(self.text_model).to(
+                self.device
+            )
+
         self.vision_prefill: Optional[nn.Module] = None
         self.mm_fusion = Gemma4MMFusionExportAdapter(
             visual_start_idx=vision_profile.visual_start_idx,
@@ -343,6 +360,26 @@ class StaticGemma4Runtime:
                 .eval()
             )
         return self.vision_prefill
+
+    def _build_per_layer_inputs(
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Run the two PLE stages and return packed ``(B, S, L, P)`` inputs.
+
+        The host runs the shared ``ple_embedding`` lookup on ``input_ids`` and
+        feeds its output, together with the initial decoder input
+        (``mm_fusion`` output for prefill, token embedding for decode), into the
+        NPU-exportable ``ple_projection`` stage. Returns ``None`` when PLE is
+        disabled for the model.
+        """
+        if not self.text_model.hidden_size_per_layer_input:
+            return None
+        if self.ple_embedding is None or self.ple_projection is None:
+            raise RuntimeError("Gemma4 PLE stages are not initialized.")
+        per_layer_token_inputs = self.ple_embedding(input_ids)
+        return self.ple_projection(inputs_embeds, per_layer_token_inputs)
 
     def _allocate_empty_cache(
         self, batch_size: int, dtype: torch.dtype
@@ -598,18 +635,12 @@ class StaticGemma4Runtime:
             batch["attention_mask"].to(self.device),
         )
 
-        # Compute Per-Layer Embeddings (PLE) if enabled.
-        # PLE has two components:
-        #   1. Token-identity: embed_tokens_per_layer(llm_input_ids) → (B, S, L, P)
-        #   2. Context projection: per_layer_model_projection(hidden_states) → (B, S, L, P)
-        # Combined: (projection + token_identity) * per_layer_input_scale
-        # Each layer receives its slice: per_layer_inputs[:, :, i, :]
-        per_layer_inputs = None
-        if self.text_model.hidden_size_per_layer_input:
-            ple_token = self.text_model.get_per_layer_inputs(llm_input_ids, None)
-            per_layer_inputs = self.text_model.project_per_layer_inputs(
-                hidden_states, ple_token
-            )
+        # Per-Layer Embeddings (PLE) after multimodal fusion, if enabled:
+        #   1. ple_embedding (shared CPU graph): llm_input_ids → (B, S, L, P)
+        #   2. ple_projection_prefill (NPU graph): fused hidden_states plus the
+        #      token-identity tensor → packed (B, S, L, P)
+        # Each layer receives its view: per_layer_inputs[:, :, i, :]
+        per_layer_inputs = self._build_per_layer_inputs(llm_input_ids, hidden_states)
 
         # Shared-KV bookkeeping: some layers share K/V states with earlier
         # layers of the same layer_type.  Store layers write their full-length
@@ -765,13 +796,9 @@ class StaticGemma4Runtime:
             dtype=hidden_states.dtype,
         )
 
-        # Compute PLE for the single decode token if enabled
-        per_layer_inputs = None
-        if self.text_model.hidden_size_per_layer_input:
-            ple_token = self.text_model.get_per_layer_inputs(llm_input_ids, None)
-            per_layer_inputs = self.text_model.project_per_layer_inputs(
-                hidden_states, ple_token
-            )
+        # PLE for the single decode token after token embedding, if enabled:
+        # shared ``ple_embedding`` lookup then the ``ple_projection_decode`` stage.
+        per_layer_inputs = self._build_per_layer_inputs(llm_input_ids, hidden_states)
 
         # Store layers build fixed ``max_seq`` shared K/V tensors before later
         # shared consumers of the same layer type execute.

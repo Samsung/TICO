@@ -13,9 +13,15 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 import torch
+import torch.nn as nn
+
+# ``(tensor, observer) -> tensor`` hook applied at every PLE observer boundary.
+# ``QuantModuleBase._fq`` provides calibration/quant/no-quant semantics for the
+# text model; export adapters pass a frozen fake-quant or identity function.
+PLEObserverFn = Callable[[torch.Tensor, Any], torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -357,6 +363,75 @@ def build_decode_attention_mask(
         mask[:, :, :past_len] = 0.0
     mask[:, :, max_seq - 1] = 0.0
     return mask
+
+
+def lookup_gemma4_per_layer_token_inputs(
+    input_ids: torch.Tensor,
+    *,
+    embed_tokens_per_layer: nn.Module,
+    num_hidden_layers: int,
+    hidden_size_per_layer_input: int,
+    fq: PLEObserverFn,
+    token_inputs_observer: Any,
+) -> torch.Tensor:
+    """Return the token-identity Per-Layer Embedding (PLE) component.
+
+    This is the shared implementation behind
+    ``QuantGemma4TextModel.get_per_layer_inputs`` and the CPU
+    ``ple_embedding`` export adapter. The packed lookup
+    ``[B, S, L * P]`` is reshaped to ``[B, S, L, P]`` and observed with the
+    text-model ``per_layer_token_inputs`` observer.
+    """
+    result = embed_tokens_per_layer(input_ids).reshape(
+        *input_ids.shape,
+        int(num_hidden_layers),
+        int(hidden_size_per_layer_input),
+    )
+    return fq(result, token_inputs_observer)
+
+
+def project_gemma4_per_layer_inputs(
+    inputs_embeds: torch.Tensor,
+    per_layer_token_inputs: Optional[torch.Tensor],
+    *,
+    projection: nn.Module,
+    projection_norm: nn.Module,
+    projection_scale: float,
+    input_scale: float,
+    num_hidden_layers: int,
+    hidden_size_per_layer_input: int,
+    fq: PLEObserverFn,
+    projection_observer: Any,
+    inputs_observer: Any,
+) -> torch.Tensor:
+    """Project decoder inputs and combine them with token-identity PLE.
+
+    This is the shared implementation behind
+    ``QuantGemma4TextModel.project_per_layer_inputs`` and the NPU
+    ``ple_projection`` export adapter. The numerical contract is:
+
+    ``projected = norm(reshape(projection(inputs_embeds) * projection_scale))``
+    ``projected = fq(projected, projection_observer)``
+    ``combined = fq((projected + per_layer_token_inputs) * input_scale,
+    inputs_observer)``
+
+    Only ``inputs_embeds`` passes through the projection; the token-identity
+    tensor bypasses it and is added after normalization and observation. When
+    ``per_layer_token_inputs`` is ``None`` (Hugging Face ``inputs_embeds``-only
+    entry), the observed projection is returned without the final scale.
+    """
+    projected = projection(inputs_embeds) * projection_scale
+    projected = projected.reshape(
+        *inputs_embeds.shape[:-1],
+        int(num_hidden_layers),
+        int(hidden_size_per_layer_input),
+    )
+    projected = projection_norm(projected)
+    projected = fq(projected, projection_observer)
+    if per_layer_token_inputs is None:
+        return fq(projected, inputs_observer)
+    combined = (projected + per_layer_token_inputs) * input_scale
+    return fq(combined, inputs_observer)
 
 
 def extract_text_config(config: Any) -> Any:

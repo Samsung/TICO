@@ -77,6 +77,54 @@ to select the matching profile-specific artifacts.
 
 The output directory should come from `export.output_dir`.
 
+A file-by-file description of a complete Gemma4 E2B quantized export is kept in
+[`gemma4_artifacts.md`](gemma4_artifacts.md).
+
+### Gemma4 Per-Layer Embedding (PLE) artifacts
+
+When the text config sets `hidden_size_per_layer_input > 0`, the Gemma4
+`circle_per_layer` export adds three PLE stages alongside the existing
+`token_embedding`, `multimodal_fusion_*`, decoder-layer, and `lm_head` graphs:
+
+```text
+ple_embedding.<tag>.circle            # shared CPU lookup, dynamic 1 <= S <= max_seq_len
+ple_embedding.<tag>.pt                # ...or the host .pt table when the Circle would exceed 2 GiB
+ple_projection_prefill.<tag>.circle   # NPU projection/combine, S = max_seq_len
+ple_projection_decode.<tag>.circle    # NPU projection/combine, S = 1
+ple_pipeline.json                     # chosen format, shapes, and observer boundaries
+```
+
+- `ple_embedding` takes `input_ids` `[1, S]` (int64) and returns
+  `per_layer_token_inputs` `[1, S, num_hidden_layers, hidden_size_per_layer_input]`.
+  It follows the same dynamic-sequence contract as `token_embedding`
+  (`make_token_embedding_dynamic_shapes`) and is the only artifact that
+  contains the large `embed_tokens_per_layer` table. Prefill runs it with
+  `S = max_seq_len`, decode with `S = 1`.
+- `export.ple_embedding_format` selects the lookup artifact: `auto` (default)
+  writes the Circle graph when the packed table fits the 2 GiB flatbuffer
+  limit and otherwise writes `ple_embedding.<tag>.pt`; `circle` and `pt`
+  force one format. The E2B table (262144 x 35 x 256 elements) is 9.4 GB in
+  float32 and 2.35 GB at 8-bit weights, so E2B exports use `.pt` for both
+  `f32` and `q` tags.
+- The `.pt` artifact stores the complete stage contract: the float table (or
+  the integer table with its per-row weight qparams), `embed_scale`, the packed
+  geometry, and the frozen `embedding`, `embed_scale`, `act_out`, and
+  `per_layer_token_inputs` observers. `Gemma4PLEEmbeddingHostTable.from_artifact`
+  replays the stage on the host bit-exactly against the export adapter.
+- `ple_projection_*` take `inputs_embeds` `[1, S, hidden_size]` (the
+  `mm_fusion` output for prefill, the token embedding for decode) and
+  `per_layer_token_inputs`, and return packed `per_layer_inputs`
+  `[1, S, num_hidden_layers, hidden_size_per_layer_input]`. The runtime feeds
+  decoder layer `i` the slice `per_layer_inputs[:, :, i, :]`.
+- Observer ownership: `ple_embedding` output and `ple_projection_*` input use
+  the text-model `per_layer_token_inputs` observer, the normalized projection
+  uses `per_layer_projection`, and the packed output plus every decoder-layer
+  `per_layer_input` boundary use `per_layer_inputs`.
+
+With `export.prefill_decode: false` the exporter writes only the unsuffixed
+prefill-shaped `ple_projection.<tag>.circle`. Models without PLE emit no PLE
+artifacts.
+
 ### Gemma4 split vision artifacts
 
 Gemma4 keeps the existing `vision_prefill.<tag>.circle` artifact by default.

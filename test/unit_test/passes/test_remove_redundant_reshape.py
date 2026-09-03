@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
+
 import torch
 
 from tico.passes import ops
@@ -271,3 +273,42 @@ class RemoveRedundantReshapePattern5Test(SinglePassValueTest):
 
         self.run_value_test(RemoveRedundantReshapePattern5())
         self.assertEqual(num_of_ops(self.exported_program(), ops.aten.reshape), 0)
+
+
+class RedundantReshapePattern4DynamicSeq(torch.nn.Module):
+    """Consecutive reshapes whose sizes depend on a dynamic sequence dimension."""
+
+    def forward(self, x):
+        batch, seq = x.shape[0], x.shape[1]
+        # (B, S, 8) -> (B*S, 8) -> (B, S, 2, 4): both sizes carry SymInt.
+        reshape_1 = torch.reshape(x, [batch * seq, 8])
+        reshape_2 = torch.reshape(reshape_1, [batch, seq, 2, 4])
+        return reshape_2
+
+    def get_example_inputs(self):
+        return (torch.randn(1, 6, 8),), {}
+
+
+class RemoveRedundantReshapePattern4DynamicSeqTest(unittest.TestCase):
+    def test_pass_skips_symbolic_sizes(self):
+        """The static fusion must skip, not crash on, symbolic reshape sizes."""
+        mod = RedundantReshapePattern4DynamicSeq()
+        args, kwargs = mod.get_example_inputs()
+        seq_dim = torch.export.Dim("seq", min=1, max=16)
+        with torch.no_grad():
+            ep = torch.export.export(
+                mod.eval(),
+                args,
+                kwargs,
+                dynamic_shapes={"x": {1: seq_dim}},
+            )
+        ConvertLayoutOpToReshape().call(ep)
+        self.assertEqual(num_of_ops(ep, ops.aten.reshape), 2)
+
+        result = RemoveRedundantReshapePattern4().call(ep)
+
+        self.assertFalse(result.modified)
+        self.assertEqual(num_of_ops(ep, ops.aten.reshape), 2)
+        for seq_len in (1, 3, 16):
+            x = torch.randn(1, seq_len, 8)
+            self.assertTrue(torch.equal(ep.module()(x), mod(x)))

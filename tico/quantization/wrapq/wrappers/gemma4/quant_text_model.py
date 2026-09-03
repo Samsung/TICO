@@ -24,7 +24,11 @@ import torch.nn as nn
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    assert_gemma4_e2b_no_moe,
+    lookup_gemma4_per_layer_token_inputs,
+    project_gemma4_per_layer_inputs,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -643,21 +647,27 @@ class QuantGemma4TextModel(QuantModuleBase):
                 raise ValueError("inputs_embeds is required when input_ids is None.")
             input_ids = self._reverse_input_ids_from_embeddings(inputs_embeds)
 
-        result = self.embed_tokens_per_layer(input_ids).reshape(
-            *input_ids.shape,
-            self.config.num_hidden_layers,
-            self.hidden_size_per_layer_input,
-        )
         if self.obs_per_layer_token_inputs is None:
             raise RuntimeError("Gemma4 PLE token observer is not initialized.")
-        return self._fq(result, self.obs_per_layer_token_inputs)
+        return lookup_gemma4_per_layer_token_inputs(
+            input_ids,
+            embed_tokens_per_layer=self.embed_tokens_per_layer,
+            num_hidden_layers=self.config.num_hidden_layers,
+            hidden_size_per_layer_input=self.hidden_size_per_layer_input,
+            fq=self._fq,
+            token_inputs_observer=self.obs_per_layer_token_inputs,
+        )
 
     def project_per_layer_inputs(
         self,
         inputs_embeds: torch.Tensor,
         per_layer_inputs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Project and combine Gemma4 context-aware per-layer inputs."""
+        """Project and combine Gemma4 context-aware per-layer inputs.
+
+        The shared math lives in ``project_gemma4_per_layer_inputs`` so the
+        ``ple_projection`` export adapter and this eager path cannot drift.
+        """
         if not self.hidden_size_per_layer_input:
             raise RuntimeError("Per-layer projection is disabled for this config.")
         projection = self.per_layer_model_projection
@@ -667,18 +677,19 @@ class QuantGemma4TextModel(QuantModuleBase):
         if self.obs_per_layer_projection is None or self.obs_per_layer_inputs is None:
             raise RuntimeError("Gemma4 PLE observers are not initialized.")
 
-        projected = projection(inputs_embeds) * self.per_layer_model_projection_scale
-        projected = projected.reshape(
-            *inputs_embeds.shape[:-1],
-            self.config.num_hidden_layers,
-            self.hidden_size_per_layer_input,
+        return project_gemma4_per_layer_inputs(
+            inputs_embeds,
+            per_layer_inputs,
+            projection=projection,
+            projection_norm=projection_norm,
+            projection_scale=self.per_layer_model_projection_scale,
+            input_scale=self.per_layer_input_scale,
+            num_hidden_layers=self.config.num_hidden_layers,
+            hidden_size_per_layer_input=self.hidden_size_per_layer_input,
+            fq=self._fq,
+            projection_observer=self.obs_per_layer_projection,
+            inputs_observer=self.obs_per_layer_inputs,
         )
-        projected = projection_norm(projected)
-        projected = self._fq(projected, self.obs_per_layer_projection)
-        if per_layer_inputs is None:
-            return self._fq(projected, self.obs_per_layer_inputs)
-        combined = (projected + per_layer_inputs) * self.per_layer_input_scale
-        return self._fq(combined, self.obs_per_layer_inputs)
 
     @staticmethod
     def _unwrap_layer_output(output: Any) -> tuple[torch.Tensor, Optional[Any]]:

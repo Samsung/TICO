@@ -651,6 +651,7 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             prefill_decode=True,
             strict=False,
             vision_granularity="both",
+            ple_embedding_format="auto",
         )
 
     def test_adapter_rejects_non_mapping_vision_options(self) -> None:

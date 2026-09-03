@@ -21,6 +21,7 @@ except ModuleNotFoundError:
 
 install_optional_dependency_stubs()
 
+import json
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -32,7 +33,10 @@ import tico.quantization.recipes.export.gemma4 as gemma_export
 import torch
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+    Gemma4PLEEmbeddingExportAdapter,
+    Gemma4PLEProjectionExportAdapter,
     Gemma4VisionPrefillExportAdapter,
 )
 
@@ -119,18 +123,38 @@ class FakeDecoderLayer(torch.nn.Module):
 class FakeText(torch.nn.Module):
     """Minimal Gemma4 text wrapper hierarchy."""
 
-    def __init__(self):
+    def __init__(self, *, ple_dim: int = 2):
         super().__init__()
         self.config = SimpleNamespace(
             hidden_size=8,
-            hidden_size_per_layer_input=2,
+            hidden_size_per_layer_input=ple_dim,
             max_position_embeddings=4,
             num_hidden_layers=2,
             vocab_size=32,
+            vocab_size_per_layer_input=16,
             enable_moe_block=False,
         )
+        self._mode = Mode.NO_QUANT
         self.embed_tokens = torch.nn.Embedding(32, 8)
-        self.obs_per_layer_inputs = torch.nn.Identity()
+        self.hidden_size_per_layer_input = ple_dim
+        self.embed_tokens_per_layer = None
+        self.per_layer_model_projection = None
+        self.per_layer_projection_norm = None
+        self.per_layer_input_scale = 1.0
+        self.per_layer_model_projection_scale = 1.0
+        self.obs_per_layer_token_inputs = None
+        self.obs_per_layer_projection = None
+        self.obs_per_layer_inputs = None
+        if ple_dim:
+            packed = self.config.num_hidden_layers * ple_dim
+            self.embed_tokens_per_layer = torch.nn.Embedding(16, packed)
+            self.per_layer_model_projection = torch.nn.Linear(8, packed, bias=False)
+            self.per_layer_projection_norm = torch.nn.Identity()
+            self.per_layer_input_scale = 0.5
+            self.per_layer_model_projection_scale = 0.25
+            self.obs_per_layer_token_inputs = torch.nn.Identity()
+            self.obs_per_layer_projection = torch.nn.Identity()
+            self.obs_per_layer_inputs = torch.nn.Identity()
         self.layers = torch.nn.ModuleList(
             [
                 FakePTQWrapper(
@@ -155,10 +179,10 @@ class FakeText(torch.nn.Module):
 class FakeGemmaModel(torch.nn.Module):
     """Minimal multimodal Gemma4 wrapper hierarchy."""
 
-    def __init__(self):
+    def __init__(self, *, ple_dim: int = 2):
         super().__init__()
         self.vision_tower = FakePTQWrapper(FakeVision())
-        self.language_model = FakePTQWrapper(FakeText())
+        self.language_model = FakePTQWrapper(FakeText(ple_dim=ple_dim))
         self.embed_vision = torch.nn.Identity()
         self.visual_start_idx = 0
         self.num_visual_tokens = 4
@@ -167,18 +191,27 @@ class FakeGemmaModel(torch.nn.Module):
 class FakeTopLevelGemma(torch.nn.Module):
     """Minimal conditional-generation wrapper hierarchy."""
 
-    def __init__(self):
+    def __init__(self, *, ple_dim: int = 2):
         super().__init__()
-        self.model = FakePTQWrapper(FakeGemmaModel())
+        self.model = FakePTQWrapper(FakeGemmaModel(ple_dim=ple_dim))
         self.lm_head = torch.nn.Linear(8, 32, bias=False)
 
 
 class FakeExportModel(torch.nn.Module):
     """Outer PTQWrapper-like model returned by prepare/convert."""
 
-    def __init__(self):
+    def __init__(self, *, ple_dim: int = 2):
         super().__init__()
-        self.wrapped = FakeTopLevelGemma()
+        self.wrapped = FakeTopLevelGemma(ple_dim=ple_dim)
+
+
+def _patch_small_ple_table(estimated_bytes: int = 1024):
+    """Bypass the wrapper-based size estimate for the plain fake PLE table."""
+    return patch.object(
+        gemma_export,
+        "estimate_gemma4_ple_embedding_circle_bytes",
+        return_value=estimated_bytes,
+    )
 
 
 def _model_args():
@@ -198,16 +231,20 @@ def _model_args():
 
 class TestGemma4PerLayerExport(unittest.TestCase):
     def test_exports_all_static_runtime_stages(self):
-        """Gemma4 staged export should emit vision, prefill, and decode graphs."""
+        """Gemma4 staged export should emit vision, PLE, prefill, and decode graphs."""
         calls = []
-        vision_modules = []
+        modules = {}
+        example_shapes = {}
         export_model = FakeExportModel()
         dynamic_shapes = {"input_ids": {1: "S"}}
 
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
             if save_path.name == "vision_prefill.q.circle":
-                vision_modules.append(module)
                 self.assertEqual(len(example_inputs), 1)
+            modules[save_path.name] = module
+            example_shapes[save_path.name] = [
+                (tuple(tensor.shape), tensor.dtype) for tensor in example_inputs
+            ]
             calls.append((save_path.name, kwargs.get("dynamic_shapes")))
 
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
@@ -219,6 +256,9 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             "make_token_embedding_dynamic_shapes",
             return_value=dynamic_shapes,
         ), patch.object(
+            gemma_export,
+            "register_fake_quant_meta_kernels_for_dynamic_export",
+        ) as register_fake_kernels, _patch_small_ple_table(), patch.object(
             gemma_export,
             "_convert_and_save",
             fake_convert_and_save,
@@ -236,7 +276,10 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             [
                 "vision_prefill.q.circle",
                 "token_embedding.q.circle",
+                "ple_embedding.q.circle",
                 "multimodal_fusion_prefill.q.circle",
+                "ple_projection_prefill.q.circle",
+                "ple_projection_decode.q.circle",
                 "decoder_layer_prefill_0.q.circle",
                 "decoder_layer_decode_0.q.circle",
                 "decoder_layer_prefill_1.q.circle",
@@ -244,14 +287,71 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                 "lm_head.q.circle",
             ],
         )
+        register_fake_kernels.assert_called_once_with()
+
+        # Dynamic ``(1, S)`` contract is shared by token and PLE embeddings.
         token_embedding_shapes = [
             shapes for name, shapes in calls if name == "token_embedding.q.circle"
         ]
         self.assertEqual(token_embedding_shapes, [dynamic_shapes])
-        self.assertEqual(len(vision_modules), 1)
-        self.assertIsInstance(vision_modules[0], Gemma4VisionPrefillExportAdapter)
+        ple_embedding_shapes = [
+            shapes for name, shapes in calls if name == "ple_embedding.q.circle"
+        ]
+        self.assertEqual(ple_embedding_shapes, [dynamic_shapes])
+        self.assertEqual(
+            example_shapes["ple_embedding.q.circle"],
+            [((1, 4), torch.long)],
+        )
+
+        # Static projection ABI: prefill uses max_seq_len, decode uses one token.
+        self.assertEqual(
+            example_shapes["ple_projection_prefill.q.circle"],
+            [((1, 4, 8), torch.float32), ((1, 4, 2, 2), torch.float32)],
+        )
+        self.assertEqual(
+            example_shapes["ple_projection_decode.q.circle"],
+            [((1, 1, 8), torch.float32), ((1, 1, 2, 2), torch.float32)],
+        )
+        # Static projection artifacts must not carry dynamic shapes.
+        for name, shapes in calls:
+            if name.startswith("ple_projection"):
+                self.assertIsNone(shapes)
+
+        self.assertIsInstance(
+            modules["vision_prefill.q.circle"], Gemma4VisionPrefillExportAdapter
+        )
+        self.assertIsInstance(
+            modules["ple_embedding.q.circle"], Gemma4PLEEmbeddingExportAdapter
+        )
+        self.assertIsInstance(
+            modules["ple_projection_prefill.q.circle"],
+            Gemma4PLEProjectionExportAdapter,
+        )
+        self.assertIs(
+            modules["ple_projection_prefill.q.circle"],
+            modules["ple_projection_decode.q.circle"],
+        )
 
         qtext = export_model.wrapped.model.wrapped.language_model.wrapped
+        # The lookup table exists only in the shared embedding stage.
+        ple_embedding_params = dict(
+            modules["ple_embedding.q.circle"].named_parameters()
+        )
+        self.assertEqual(
+            list(ple_embedding_params),
+            ["embed_tokens_per_layer.weight"],
+        )
+        self.assertIs(
+            ple_embedding_params["embed_tokens_per_layer.weight"],
+            qtext.embed_tokens_per_layer.weight,
+        )
+        projection_state = list(
+            modules["ple_projection_prefill.q.circle"].state_dict().keys()
+        )
+        self.assertEqual(projection_state, ["per_layer_model_projection.weight"])
+        for name in projection_state:
+            self.assertNotIn("embed_tokens", name)
+
         for layer in qtext.layers:
             self.assertEqual(
                 [call[0] for call in layer.wrapped.export_calls],
@@ -263,6 +363,49 @@ class TestGemma4PerLayerExport(unittest.TestCase):
                     for call in layer.wrapped.export_calls
                 )
             )
+
+    def test_ple_disabled_model_skips_ple_artifacts(self):
+        """A model without PLE must produce exactly the previous artifact set."""
+        names = []
+        export_model = FakeExportModel(ple_dim=0)
+
+        def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
+            del module, example_inputs, kwargs
+            names.append(save_path.name)
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            gemma_export,
+            "_prepare_gemma4_export_model",
+            return_value=(export_model, "q"),
+        ), patch.object(
+            gemma_export,
+            "_convert_and_save",
+            fake_convert_and_save,
+        ):
+            gemma_export.export_gemma4_per_layer(
+                q_model=torch.nn.Identity(),
+                max_seq_len=4,
+                output_dir=tmpdir,
+                model_args=_model_args(),
+                prefill_decode=True,
+            )
+
+        self.assertEqual(
+            names,
+            [
+                "vision_prefill.q.circle",
+                "token_embedding.q.circle",
+                "multimodal_fusion_prefill.q.circle",
+                "decoder_layer_prefill_0.q.circle",
+                "decoder_layer_decode_0.q.circle",
+                "decoder_layer_prefill_1.q.circle",
+                "decoder_layer_decode_1.q.circle",
+                "lm_head.q.circle",
+            ],
+        )
+        qtext = export_model.wrapped.model.wrapped.language_model.wrapped
+        for layer in qtext.layers:
+            self.assertTrue(all(call[2] is None for call in layer.wrapped.export_calls))
 
     def test_prefill_only_export_uses_unsuffixed_stage_names(self):
         """Disabling decode export should omit all decode artifacts."""
@@ -277,7 +420,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             gemma_export,
             "_prepare_gemma4_export_model",
             return_value=(export_model, "f32"),
-        ), patch.object(
+        ), _patch_small_ple_table(), patch.object(
             gemma_export,
             "_convert_and_save",
             fake_convert_and_save,
@@ -295,12 +438,137 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             [
                 "vision_prefill.f32.circle",
                 "token_embedding.f32.circle",
+                "ple_embedding.f32.circle",
                 "multimodal_fusion.f32.circle",
+                "ple_projection.f32.circle",
                 "decoder_layer_0.f32.circle",
                 "decoder_layer_1.f32.circle",
                 "lm_head.f32.circle",
             ],
         )
+
+    def _run_export_with_ple_format(
+        self, *, artifact_tag, ple_embedding_format, estimated_bytes=None
+    ):
+        """Run the exporter and return (circle names, saved .pt paths, manifest)."""
+        circle_names = []
+        pt_saves = []
+        export_model = FakeExportModel()
+
+        def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
+            del module, example_inputs, kwargs
+            circle_names.append(save_path.name)
+
+        def fake_save_pt(module, path):
+            pt_saves.append((module, gemma_export.Path(path).name))
+            return path
+
+        if estimated_bytes is None:
+            estimated_bytes = 1024
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            gemma_export,
+            "_prepare_gemma4_export_model",
+            return_value=(export_model, artifact_tag),
+        ), patch.object(
+            gemma_export, "_convert_and_save", fake_convert_and_save
+        ), patch.object(
+            gemma_export, "save_gemma4_ple_embedding_artifact", fake_save_pt
+        ), _patch_small_ple_table(
+            estimated_bytes
+        ):
+            gemma_export.export_gemma4_per_layer(
+                q_model=torch.nn.Identity(),
+                max_seq_len=4,
+                output_dir=tmpdir,
+                model_args=_model_args(),
+                prefill_decode=True,
+                ple_embedding_format=ple_embedding_format,
+            )
+            manifest = json.loads(
+                (gemma_export.Path(tmpdir) / "ple_pipeline.json").read_text()
+            )
+        return circle_names, pt_saves, manifest
+
+    def test_auto_format_keeps_circle_when_table_fits(self):
+        """A small table stays a dynamic Circle graph under ``auto``."""
+        circle_names, pt_saves, manifest = self._run_export_with_ple_format(
+            artifact_tag="q", ple_embedding_format="auto"
+        )
+
+        self.assertIn("ple_embedding.q.circle", circle_names)
+        self.assertEqual(pt_saves, [])
+        self.assertEqual(manifest["embedding"]["format"], "circle")
+        self.assertEqual(manifest["embedding"]["artifact"], "ple_embedding.q.circle")
+        self.assertEqual(manifest["embedding"]["inputs"][0]["sequence_range"], [1, 4])
+        self.assertEqual(
+            [stage["id"] for stage in manifest["projections"]],
+            ["ple_projection_prefill", "ple_projection_decode"],
+        )
+        self.assertEqual(manifest["projections"][0]["inputs"][1]["shape"], [1, 4, 2, 2])
+        self.assertEqual(
+            [boundary["name"] for boundary in manifest["boundaries"]],
+            ["per_layer_token_inputs", "per_layer_projection", "per_layer_inputs"],
+        )
+
+    def test_auto_format_falls_back_to_pt_above_circle_limit(self):
+        """Tables at or above the flatbuffer limit are saved as host ``.pt``."""
+        for artifact_tag in ("f32", "q"):
+            with self.subTest(artifact_tag=artifact_tag):
+                circle_names, pt_saves, manifest = self._run_export_with_ple_format(
+                    artifact_tag=artifact_tag,
+                    ple_embedding_format="auto",
+                    estimated_bytes=gemma_export.CIRCLE_FLATBUFFER_LIMIT_BYTES,
+                )
+
+                self.assertNotIn(f"ple_embedding.{artifact_tag}.circle", circle_names)
+                self.assertEqual(len(pt_saves), 1)
+                module, name = pt_saves[0]
+                self.assertIsInstance(module, Gemma4PLEEmbeddingExportAdapter)
+                self.assertEqual(name, f"ple_embedding.{artifact_tag}.pt")
+                self.assertEqual(manifest["embedding"]["format"], "pt")
+                self.assertEqual(manifest["embedding"]["requested_format"], "auto")
+                self.assertEqual(
+                    manifest["embedding"]["estimated_circle_bytes"],
+                    gemma_export.CIRCLE_FLATBUFFER_LIMIT_BYTES,
+                )
+                # Projection graphs are unaffected by the lookup format.
+                self.assertIn(
+                    f"ple_projection_prefill.{artifact_tag}.circle", circle_names
+                )
+                self.assertIn(
+                    f"ple_projection_decode.{artifact_tag}.circle", circle_names
+                )
+
+    def test_explicit_pt_and_circle_formats_are_honored(self):
+        """Explicit formats override the size heuristic in both directions."""
+        circle_names, pt_saves, manifest = self._run_export_with_ple_format(
+            artifact_tag="q", ple_embedding_format="pt"
+        )
+        self.assertNotIn("ple_embedding.q.circle", circle_names)
+        self.assertEqual([name for _, name in pt_saves], ["ple_embedding.q.pt"])
+        self.assertEqual(manifest["embedding"]["requested_format"], "pt")
+
+        circle_names, pt_saves, manifest = self._run_export_with_ple_format(
+            artifact_tag="q",
+            ple_embedding_format="circle",
+            estimated_bytes=gemma_export.CIRCLE_FLATBUFFER_LIMIT_BYTES * 4,
+        )
+        self.assertIn("ple_embedding.q.circle", circle_names)
+        self.assertEqual(pt_saves, [])
+        self.assertEqual(manifest["embedding"]["format"], "circle")
+
+    def test_invalid_ple_embedding_format_is_rejected(self):
+        """Unknown formats fail before any artifact is written."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, "ple_embedding format"):
+                gemma_export.export_gemma4_per_layer(
+                    q_model=torch.nn.Identity(),
+                    max_seq_len=4,
+                    output_dir=tmpdir,
+                    model_args=_model_args(),
+                    ple_embedding_format="safetensors",
+                )
 
     def test_adapter_routes_circle_per_layer_artifact(self):
         """The Gemma4 adapter should dispatch the generic Circle artifact key."""
@@ -336,6 +604,7 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             prefill_decode=True,
             strict=True,
             vision_granularity="monolithic",
+            ple_embedding_format="auto",
         )
 
 

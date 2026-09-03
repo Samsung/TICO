@@ -638,4 +638,7 @@ class Gemma4Adapter(ModelAdapter):
                 vision_granularity=str(
                     vision_export_cfg.get("granularity", "monolithic")
                 ),
+                ple_embedding_format=str(
+                    export_cfg.get("ple_embedding_format", "auto")
+                ),
             )
