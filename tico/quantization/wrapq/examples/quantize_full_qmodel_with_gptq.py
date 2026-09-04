@@ -504,6 +504,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--gptq_parallel_workers",
+        type=int,
+        default=0,
+        help=(
+            "Number of parallel worker processes for GPTQ layer quantization. "
+            "0 = sequential (default). Requires --gptq_use_orig_model_inference. "
+            "Each worker process runs on GPU using multiprocessing spawn."
+        ),
+    )
+
+    parser.add_argument(
         "--compression_feature_mode",
         type=str,
         default="mean_pool",
@@ -984,6 +995,7 @@ def build_gptq_config(
             sample_weights=sample_weights,
             saturation_threshold=args.gptq_saturation_threshold,
             double_precision=args.gptq_double_precision,
+            parallel_workers=args.gptq_parallel_workers,
         )
         return config
     else:
@@ -1004,6 +1016,7 @@ def build_gptq_config(
             sample_weights=sample_weights,
             saturation_threshold=args.gptq_saturation_threshold,
             double_precision=args.gptq_double_precision,
+            parallel_workers=args.gptq_parallel_workers,
         )
         return config
 
@@ -3385,8 +3398,8 @@ def load_model_and_tokenizer(args, dtype: torch.dtype):
         trust_remote_code=args.trust_remote_code,
         token=args.hf_token,
         cache_dir=args.cache_dir,
-        device_map=dev_map,
-    ).eval()
+        #device_map=dev_map,
+    ).eval().to(args.device)
 
     return model, tokenizer
 

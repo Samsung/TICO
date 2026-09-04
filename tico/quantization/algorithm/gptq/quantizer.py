@@ -15,6 +15,7 @@
 
 import copy
 import functools
+import multiprocessing
 import types
 from typing import Any, Callable, Dict, List, Optional
 
@@ -72,10 +73,270 @@ def move_to_cpu(obj):
     return move_to_device(obj, "cpu")
 
 
+def _format_elapsed_dhms(seconds: float) -> str:
+    """Format elapsed seconds as DD:HH:MM:SS, dropping leading zero components.
+
+    Always shows at least MM:SS.
+
+    Examples:
+        59    -> "00:59"
+        297   -> "04:57"
+        3601  -> "01:00:01"
+        90061 -> "01:01:01:01"
+    """
+    seconds = int(seconds)
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = [days, hours, minutes, seconds]
+    formatted = [f"{p:02d}" for p in parts]
+    # Find first non-zero component (default to 2 so we always show MM:SS)
+    first_nonzero = 2
+    for i, p in enumerate(parts):
+        if p > 0:
+            first_nonzero = i
+            break
+    # Always keep at least MM:SS (indices 2 and 3)
+    start = min(first_nonzero, 2)
+    return ":".join(formatted[start:])
+
+
+
 class StopForward(Exception):
     """Custom exception used to stop the forward pass after the first layer."""
 
     pass
+
+
+def _gptq_layer_worker_gpu(worker_args: dict) -> dict:
+    """Module-level worker function for parallel GPTQ layer quantization on GPU.
+
+    This function runs in a separate process (spawned by multiprocessing.Pool).
+    It reconstructs a decoder layer from its state_dict, collects Hessian
+    statistics using pre-computed layer inputs, and applies GPTQ quantization.
+
+    Args:
+        worker_args: Dictionary containing:
+            - l_idx: Layer index
+            - layer_state_dict: Layer state_dict (CPU tensors)
+            - layer_class_name: Full class path for layer reconstruction
+            - layer_inputs: List of pre-computed layer input args per batch (CPU)
+            - layer_kwargs: List of pre-computed layer kwargs per batch (CPU)
+            - gptq_conf_dict: GPTQ config as plain dict
+            - module_names: List of submodule full names
+            - sample_weights: Optional sample weights for Hessian
+            - sensitivity_data: Optional sensitivity dict (CPU tensors)
+            - fp_inputs: Optional FP inputs per submodule (GPTQv2, CPU tensors)
+
+    Returns:
+        Dictionary with:
+            - l_idx: Layer index
+            - quantized_weights: {submodule_name: CPU tensor}
+            - quantizer_params: {submodule_name: (scale_cpu, zero_cpu)}
+    """
+    import torch
+    from tico.quantization.algorithm.gptq.gptq import GPTQ
+    from tico.quantization.algorithm.gptq.quant import Quantizer
+
+    l_idx = worker_args["l_idx"]
+    layer = worker_args["target_layer"]
+    layer_inputs = worker_args["layer_inputs"]
+    layer_kwargs = worker_args["layer_kwargs"]
+    gptq_conf_dict = worker_args["gptq_conf_dict"]
+    module_names = worker_args["module_names"]
+    sample_weights = worker_args.get("sample_weights", None)
+    sensitivity_data = worker_args.get("sensitivity_data", None)
+    fp_inputs = worker_args.get("fp_inputs", None)
+    device = worker_args.get("device", "cuda")
+    # Set the CUDA device for this worker process so that .to(device)
+    # uses the correct GPU when multiple GPUs are available.
+    if torch.cuda.is_available() and "cuda" in str(device):
+        gpu_id = int(str(device).split(":")[1]) if ":" in str(device) else 0
+        torch.cuda.set_device(gpu_id)
+
+    # Move the received layer to the target device
+    layer = layer.to(device)
+    layer.eval()
+
+    # Find quantizable submodules
+    full = find_layers(
+        layer,
+        layers=[
+            torch.nn.Linear,
+            torch.nn.Conv2d,
+            torch.nn.Conv1d,
+            torch.nn.Conv3d,
+            torch.nn.ConvTranspose2d,
+        ],
+    )
+
+
+
+    # Use sequential_groups if provided, otherwise process all at once
+    sequential_groups = worker_args.get("sequential_groups", None)
+    if sequential_groups is not None:
+        # Filter groups to only include names that exist in the reconstructed layer
+        existing_names = set(full.keys())
+        sequential = []
+        for names in sequential_groups:
+            cur_seq = [name for name in names if name in existing_names]
+            if cur_seq:
+                sequential.append(cur_seq)
+    else:
+        sequential = [list(full.keys())]
+
+    # Set up GPTQ objects and gather stats
+    quantized_weights = {}
+    quantizer_params = {}
+
+    for names in sequential:
+        subset = {n: full[n] for n in names}
+
+        gptq: Dict[str, GPTQ] = {}
+        for name in subset:
+            full_module_name = module_names.get(name, name)
+            gptq[name] = GPTQ(
+                subset[name],
+                double_precision=gptq_conf_dict.get("double_precision", False),
+                layer_name=full_module_name,
+            )
+            gptq[name].saturation_threshold = gptq_conf_dict.get("saturation_threshold", None)
+            gptq[name].saturation_min_batches = gptq_conf_dict.get("saturation_min_batches", 4)
+            # Resolve weight bits
+            weight_bits = gptq_conf_dict.get("weight_bits", 8)
+            weight_bits_overrides = gptq_conf_dict.get("weight_bits_overrides", {})
+            if full_module_name in weight_bits_overrides:
+                weight_bits = weight_bits_overrides[full_module_name]
+            elif name in weight_bits_overrides:
+                weight_bits = weight_bits_overrides[name]
+            else:
+                suffix_matches = [
+                    bits
+                    for pattern, bits in weight_bits_overrides.items()
+                    if full_module_name.endswith(f".{pattern}")
+                ]
+                if suffix_matches:
+                    weight_bits = suffix_matches[-1]
+
+            # Resolve sensitivity
+            cur_sensitivity = None
+            if sensitivity_data is not None and full_module_name in sensitivity_data:
+                cur_sensitivity = sensitivity_data[full_module_name]
+
+            gptq[name].quantizer.configure(
+                bits=weight_bits,
+                perchannel=gptq_conf_dict.get("perchannel", True),
+                sym=gptq_conf_dict.get("symmetric", False),
+                mse=gptq_conf_dict.get("mse", None),
+                sensitivity=cur_sensitivity,
+                mse_tolerance=gptq_conf_dict.get("mse_tolerance", 1e-2),
+                chunk_size=gptq_conf_dict.get("chunk_size", 64),
+                use_batched_gptq=gptq_conf_dict.get("use_batched_gptq", True),
+            )
+
+            # GPTQv2: Assign native_inp
+            if fp_inputs is not None and name in fp_inputs:
+                gptq[name].native_inp = fp_inputs[name]
+
+        # Set weights and reset batch_id
+        for name in subset:
+            gptq[name].weights = sample_weights
+            gptq[name].batch_id = 0
+
+        # Register hooks
+        def add_batch(name):
+            def _hook(_, inp, out):
+                gptq[name].add_batch(inp[0].data, out.data)
+            return _hook
+
+        handles = []
+        for name in subset:
+            handles.append(subset[name].register_forward_hook(add_batch(name)))
+
+        # Run layer forward over all batches to collect Hessian
+        batch_num = len(layer_inputs)
+        for batch_idx in range(batch_num):
+            cache_args_batch = layer_inputs[batch_idx]
+            cache_args_batch = move_to_device(cache_args_batch, device)
+            cache_kwargs_batch = layer_kwargs[batch_idx]
+            cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+
+            if gptq_conf_dict.get("double_precision", False):
+                # Cast to double for batch-size-independence
+                for pname, param in layer.named_parameters():
+                    param.data = param.data.double()
+                args_d = GPTQQuantizer._cast_to_double(cache_args_batch)
+                kwargs_d = GPTQQuantizer._cast_to_double(cache_kwargs_batch)
+                layer(*args_d, **kwargs_d)
+                for pname, param in layer.named_parameters():
+                    param.data = param.data.float()
+            else:
+                layer(*cache_args_batch, **cache_kwargs_batch)
+
+        # Remove hooks
+        for h in handles:
+            h.remove()
+
+        # Quantize each submodule
+        for name in subset:
+            full_module_name = module_names.get(name, name)
+
+            if gptq_conf_dict.get("verbose", False):
+                print(f"[Layer {l_idx}] {name} -> Quantizing (parallel) ...")
+
+            gptq[name].fasterquant(
+                percdamp=gptq_conf_dict.get("percdamp", 0.01),
+                groupsize=gptq_conf_dict.get("groupsize", -1),
+                actorder=gptq_conf_dict.get("actorder", True),
+                static_groups=gptq_conf_dict.get("static_groups", False),
+                verbose=gptq_conf_dict.get("verbose", False),
+                adaptive_percdamp=gptq_conf_dict.get("adaptive_percdamp", False),
+                cond_threshold_good=gptq_conf_dict.get("cond_threshold_good", 100000.0),
+                use_iterate=gptq_conf_dict.get("use_iterate", False),
+                actorder_precision=gptq_conf_dict.get("actorder_precision", 1e-2),
+            )
+
+            # Collect quantized weights and quantizer params
+            quantized_weights[name] = subset[name].weight.data.cpu().clone()
+            quantizer_params[name] = (
+                gptq[name].quantizer.scale.cpu().clone(),
+                gptq[name].quantizer.zero.cpu().clone(),
+            )
+            gptq[name].free()
+
+        # If processing subgroups sequentially, re-run the layer forward
+        # (without hooks) so that the next subgroup's Hessian sees the
+        # effect of this subgroup's quantized weights.
+        if len(sequential) > 1:
+            for batch_idx in range(batch_num):
+                cache_args_batch = layer_inputs[batch_idx]
+                cache_args_batch = move_to_device(cache_args_batch, device)
+                cache_kwargs_batch = layer_kwargs[batch_idx]
+                cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+
+                if gptq_conf_dict.get("double_precision", False):
+                    for pname, param in layer.named_parameters():
+                        param.data = param.data.double()
+                    args_d = GPTQQuantizer._cast_to_double(cache_args_batch)
+                    kwargs_d = GPTQQuantizer._cast_to_double(cache_kwargs_batch)
+                    layer(*args_d, **kwargs_d)
+                    for pname, param in layer.named_parameters():
+                        param.data = param.data.float()
+                else:
+                    layer(*cache_args_batch, **cache_kwargs_batch)
+
+
+    # Clean up GPU memory
+    layer.cpu()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    return {
+        "l_idx": l_idx,
+        "quantized_weights": quantized_weights,
+        "quantizer_params": quantizer_params,
+    }
+
 
 
 @register_quantizer(GPTQConfig)
@@ -344,7 +605,22 @@ class GPTQQuantizer(BaseQuantizer):
         fp_inps = None
         if need_float_inference and orig_layers is not None:
             fp_inps = copy.deepcopy(self.cache_args)
+
+        # ---- Parallel path: when parallel_workers > 1 ----
+        if gptq_conf.parallel_workers > 1:
+            assert orig_layers is not None, (
+                "parallel_workers > 0 requires use_orig_model_inference=True "
+                "which creates orig_model"
+            )
+            model = self._convert_parallel(
+                model, target_layers, orig_layers, module_name, quantizers,
+                gptq_conf, fp_inps
+            )
+            return self.finalize(model, quantizers)
+
+        need_next_orig_layer_inference = gptq_conf.use_orig_model_inference
         
+        # ---- Sequential path (original, runs when parallel_workers <= 1) ----
         for l_idx, layer in enumerate(
             tqdm(
                 target_layers,
@@ -554,20 +830,22 @@ class GPTQQuantizer(BaseQuantizer):
                             fp_inps[0][batch_idx] = fp_outs
                 
                 if gptq_conf.double_precision:
-                    if orig_layers is None or gptq_conf.gptq_v2 is True:
+                    if not need_next_orig_layer_inference :#orig_layers is None or gptq_conf.gptq_v2 is True:
                         outs = self._run_layer_forward_double_precision(
                             layer, cache_args_batch, cache_kwargs_batch, True
                         )
                     else:
+                        assert orig_layers is not None
                         orig_layer = orig_layers[l_idx].to(device)
                         outs = self._run_layer_forward_double_precision(
                             orig_layer, cache_args_batch, cache_kwargs_batch, True
                         )
                         orig_layer.cpu()
                 else:
-                    if orig_layers is None or gptq_conf.gptq_v2 is True:
+                    if not need_next_orig_layer_inference:#orig_layers is None or gptq_conf.gptq_v2 is True:
                         outs = layer(*cache_args_batch, **cache_kwargs_batch)
                     else:
+                        assert orig_layers is not None
                         orig_layer = orig_layers[l_idx].to(device)
                         outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
                         orig_layer.cpu()
@@ -589,6 +867,13 @@ class GPTQQuantizer(BaseQuantizer):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
+        return self.finalize(model, quantizers)
+
+    def finalize(self, model, quantizers):
+        
+        gptq_conf = self.config
+        assert isinstance(gptq_conf, GPTQConfig)
+                
         if (
             gptq_conf.quantize_lm_head
             and hasattr(model, "model")
@@ -617,6 +902,291 @@ class GPTQQuantizer(BaseQuantizer):
             model.float()
 
         return model
+            
+    def _convert_parallel(
+        self,
+        model: torch.nn.Module,
+        target_layers,
+        orig_layers,
+        module_name: dict,
+        quantizers: Dict[str, Any],
+        gptq_conf: GPTQConfig,
+        fp_inps,
+    ) -> torch.nn.Module:
+        """Parallel GPTQ quantization using multiprocessing.
+
+        When ``use_orig_model_inference=True``, each layer's Hessian is
+        computed from the original (unquantized) model, so layers are
+        independent and can be quantized in parallel.
+
+        This method:
+          1. Pre-computes layer inputs for all layers using the original model.
+          2. Dispatches each layer to a worker process via multiprocessing.Pool.
+          3. Collects quantized weights and quantizer params from workers.
+          4. Applies quantized weights back to the model.
+
+        Args:
+            model: The model to quantize (already prepared).
+            target_layers: ModuleList of decoder layers.
+            orig_layers: ModuleList of original (unquantized) decoder layers.
+            module_name: Dict mapping module -> full module name.
+            quantizers: Dict to populate with quantizer objects.
+            gptq_conf: GPTQ configuration.
+            fp_inps: Optional FP inputs for GPTQv2.
+
+        Returns:
+            The model with quantized weights applied.
+        """
+        import dataclasses
+        import time
+
+        device = next(model.parameters()).device
+        num_layers = len(target_layers)
+        num_batches = self.num_batches
+        num_workers = gptq_conf.parallel_workers
+
+        parallel_start = time.time()
+
+
+        # Process layers in groups to reduce peak RAM usage.
+        # Each group: compute inputs → dispatch workers → collect results.
+        group_size = num_workers  # one layer per worker per group
+
+        # Prepare static config data (shared across all groups)
+        gptq_conf_dict = {}
+        for f in dataclasses.fields(gptq_conf):
+            val = getattr(gptq_conf, f.name)
+            if f.name == "sensitivity":
+                gptq_conf_dict[f.name] = None
+            else:
+                gptq_conf_dict[f.name] = val
+
+        sensitivity_data = None
+        if gptq_conf.sensitivity is not None and isinstance(gptq_conf.sensitivity, dict):
+            sensitivity_data = {}
+            for k, v in gptq_conf.sensitivity.items():
+                if isinstance(v, torch.Tensor):
+                    sensitivity_data[k] = v.cpu()
+                else:
+                    sensitivity_data[k] = v
+
+        # Get model config for layer reconstruction
+        layer_config = getattr(model, "config", None)
+
+        # Detect available GPUs for multi-GPU distribution
+        num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if num_gpus > 1:
+            gpu_devices = [f"cuda:{i}" for i in range(num_gpus)]
+            print(f"[Parallel] Detected {num_gpus} GPUs, distributing workers across: {gpu_devices}")
+        else:
+            gpu_devices = [str(device)]
+
+        # Use spawn context for CUDA compatibility
+        ctx = multiprocessing.get_context("spawn")
+
+        # Track current layer inputs (start from cached first-layer inputs)
+        cur_args_per_batch: List[List[Any]] = self.cache_args
+        cur_kwargs_per_batch: Dict[str, List[Any]] = self.cache_kwargs
+
+        # Create pool once and reuse across groups
+        with ctx.Pool(processes=num_workers) as pool:
+            pbar = tqdm(
+                range(num_layers),
+                desc="[Parallel] Quantizing layers",
+                unit="layer",
+                disable=not gptq_conf.show_progress,
+            )
+            for group_start in range(0, num_layers, group_size):
+                group_end = min(group_start + group_size, num_layers)
+                group_indices = list(range(group_start, group_end))
+
+                # ---- Step 1: Compute inputs for this group only ----
+                # Note: we move individual orig_layers[l_idx] to GPU one at a time,
+                # so there's no need to move the entire orig_model to GPU.
+
+                group_inputs: List[List[Any]] = []
+                group_kwargs: List[List[Dict[str, Any]]] = []
+                group_fp_inputs: List[Optional[Dict[str, List[Any]]]] = []
+
+                for l_idx in group_indices:
+                    pbar.update(1)
+
+                    layer_args: List[Any] = []
+                    layer_kwargs: List[Dict[str, Any]] = []
+                    next_args: List[Any] = []
+
+                    # GPTQv2: Collect FP inputs from original model
+                    fp_inputs_cache = None
+                    if fp_inps is not None:
+                        orig_full = find_layers(
+                            orig_layers[l_idx],
+                            layers=[
+                                torch.nn.Linear,
+                                torch.nn.Conv2d,
+                                torch.nn.Conv1d,
+                                torch.nn.Conv3d,
+                                torch.nn.ConvTranspose2d,
+                            ],
+                        )
+                        sequential = [list(orig_full.keys())]
+                        fp_inputs_cache = FPInputsCache(sequential)
+                        fp_inputs_cache.add_hook(orig_full)
+
+                    for batch_idx in range(num_batches):
+                        cache_args_batch = gather_single_batch_from_list(
+                            cur_args_per_batch, batch_idx
+                        )
+                        cache_args_batch = move_to_device(cache_args_batch, device)
+                        cache_kwargs_batch = gather_single_batch_from_dict(
+                            cur_kwargs_per_batch, batch_idx
+                        )
+                        cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+
+                        layer_args.append(move_to_cpu(cache_args_batch))
+                        layer_kwargs.append(move_to_cpu(cache_kwargs_batch))
+
+                        orig_layer = orig_layers[l_idx].to(device)
+                        if gptq_conf.double_precision:
+                            outs = self._run_layer_forward_double_precision(
+                                orig_layer, cache_args_batch, cache_kwargs_batch, True
+                            )
+                        else:
+                            outs = orig_layer(*cache_args_batch, **cache_kwargs_batch)
+                            outs = outs[0] if isinstance(outs, tuple) else outs
+                        orig_layer.cpu()
+
+                        next_args.append(move_to_cpu(outs))
+
+                    # GPTQv2: Collect FP inputs and clean up hooks
+                    if fp_inputs_cache is not None:
+                        fp_inputs_cache.clear_hook()
+                        group_fp_inputs.append(fp_inputs_cache.fp_cache)
+                    else:
+                        group_fp_inputs.append(None)
+
+                    group_inputs.append(layer_args)
+                    group_kwargs.append(layer_kwargs)
+                    cur_args_per_batch = [next_args]
+
+
+                if self.orig_model is not None:
+                    self.orig_model.cpu()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                # ---- Step 2: Build worker args for this group ----
+                worker_args_list = []
+                for i, l_idx in enumerate(group_indices):
+                    layer = target_layers[l_idx]
+
+                    local_module_names = {}
+                    for name, module in layer.named_modules():
+                        full_name = module_name.get(module, name)
+                        local_module_names[name] = full_name
+
+                    # Move layer to CPU for pickling to worker process
+                    layer_cpu = move_to_cpu(layer)
+
+                    worker_args = {
+                        "l_idx": l_idx,
+                        "target_layer": layer_cpu,
+                        "layer_inputs": group_inputs[i],
+                        "layer_kwargs": group_kwargs[i],
+                        "gptq_conf_dict": gptq_conf_dict,
+                        "module_names": local_module_names,
+                        "sample_weights": self.sample_weights,
+                        "sensitivity_data": sensitivity_data,
+                        "fp_inputs": group_fp_inputs[i],
+                        "ptq_wrapped": False,
+                        "device": gpu_devices[i % len(gpu_devices)],
+                    }
+                    worker_args_list.append(worker_args)
+
+                # ---- Step 3: Move model to CPU to free GPU for workers ----
+                model = model.cpu()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                # ---- Step 4: Dispatch workers for this group ----
+                group_results = {}
+                for result in pool.imap_unordered(_gptq_layer_worker_gpu, worker_args_list):
+                    l_idx = result["l_idx"]
+                    group_results[l_idx] = result
+
+                # ---- Step 5: Move model back to GPU and apply quantized weights ----
+                model = model.to(device)
+
+                for l_idx in group_indices:
+                    layer = target_layers[l_idx]
+                    result = group_results[l_idx]
+                    quantized_weights = result["quantized_weights"]
+                    quantizer_params = result["quantizer_params"]
+
+                    full = find_layers(
+                        layer,
+                        layers=[
+                            torch.nn.Linear,
+                            torch.nn.Conv2d,
+                            torch.nn.Conv1d,
+                            torch.nn.Conv3d,
+                            torch.nn.ConvTranspose2d,
+                        ],
+                    )
+
+                    for name, module in full.items():
+                        if name in quantized_weights:
+                            module.weight.data = quantized_weights[name].to(device)
+                            full_module_name = module_name.get(module, name)
+                            if name in quantizer_params:
+                                scale_cpu, zero_cpu = quantizer_params[name]
+                                from tico.quantization.algorithm.gptq.quant import Quantizer
+                                q = Quantizer()
+                                q.configure(
+                                    bits=gptq_conf.weight_bits,
+                                    perchannel=gptq_conf.perchannel,
+                                    sym=gptq_conf.symmetric,
+                                    mse=gptq_conf.mse,
+                                    sensitivity=(
+                                        gptq_conf.sensitivity.get(full_module_name)
+                                        if gptq_conf.sensitivity and isinstance(gptq_conf.sensitivity, dict)
+                                        else None
+                                    ),
+                                    mse_tolerance=gptq_conf.mse_tolerance,
+                                    chunk_size=gptq_conf.chunk_size,
+                                    use_batched_gptq=gptq_conf.use_batched_gptq,
+                                )
+                                q.scale = scale_cpu.to(device)
+                                q.zero = zero_cpu.to(device)
+                                q.maxq = torch.tensor((1 << gptq_conf.weight_bits) - 1)
+                                quantizers[full_module_name] = q
+
+                # Free this group's inputs
+                group_inputs.clear()
+                group_kwargs.clear()
+                group_results.clear()
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            pbar.close()
+
+        # Update cache_args with last layer outputs for lm_head quantization
+        self.cache_args = cur_args_per_batch
+
+        # Move model back to GPU for post-quantization steps
+        model = model.to(device)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        parallel_elapsed = time.time() - parallel_start
+        elapsed_dhms = _format_elapsed_dhms(parallel_elapsed)
+        print(f"[Parallel] Total quantization time: {parallel_elapsed:.1f}s "
+              f"[{elapsed_dhms}] "
+              f"({num_layers} layers, {num_workers} workers)")
+
+        return model
+
 
     def _quantize_lm_head(self, model, quantizers):
         """

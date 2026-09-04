@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+import warnings
 
 import torch
 
@@ -124,6 +125,12 @@ class GPTQConfig(BaseConfig):
     # comparison).
     use_batched_gptq: bool = True
 
+    # Number of parallel worker processes for layer quantization. 0 = sequential
+    # (default). When > 0, requires use_orig_model_inference=True because layers
+    # must be independent (each layer's Hessian is computed from the original
+    # unquantized model). Each worker process runs on GPU.
+    parallel_workers: int = 0
+
 
     @property
     def name(self) -> str:
@@ -149,3 +156,24 @@ class GPTQConfig(BaseConfig):
             raise ValueError(f"groupsize must be -1 or positive. got {self.groupsize}")
         if not (0.0 < self.percdamp <= 1.0):
             raise ValueError(f"percdamp must be in (0, 1]. got {self.percdamp}")
+        if self.parallel_workers > 0 and not self.use_orig_model_inference:
+            raise ValueError(
+                "parallel_workers > 0 requires use_orig_model_inference=True "
+                "because layers must be independent for parallel quantization."
+            )
+        if self.parallel_workers < 0:
+            raise ValueError(
+                f"parallel_workers must be >= 0. got {self.parallel_workers}"
+            )
+        if self.gptq_v2 and self.use_orig_model_inference:
+            warnings.warn(
+                "gptq_v2=True with use_orig_model_inference=True in the ordinary "
+                "GPTQ path (GPTQConfig, not LlamaGPTQConfig) is unusual: GPTQv2 "
+                "collects FP inputs from the original model, but the ordinary GPTQ "
+                "sequential path ignores use_orig_model_inference for Hessian "
+                "collection when gptq_v2 is on. This combination may produce "
+                "unexpected results. Consider using LlamaGPTQConfig with "
+                "llama_gptq_sequential instead, or disable one of these flags.",
+                stacklevel=2,
+            )
+
