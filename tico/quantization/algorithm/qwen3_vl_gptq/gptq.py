@@ -579,10 +579,15 @@ class GPTQ:
             err1 = torch.zeros_like(w1)
             losses1 = torch.zeros_like(w1)
             hinv1 = hinv[i1:i2, i1:i2]
-            P1 = P[i1:i2, i1:i2] if P is not None else None
+            if P is not None:
+                P1 = P[i1:i2, i1:i2]
+                P_update = w1.matmul(P[i1:i2, i2:])
+            else:
+                P1 = None
+                P_update = None
 
             for i in range(count):
-                w_col = w1[:, i]
+                w_col = w1[:, i].clone()
                 d = hinv1[i, i]
 
                 if groupsize != -1:
@@ -620,8 +625,8 @@ class GPTQ:
             losses[:, i1:i2] = losses1 / 2
             w[:, i2:] -= err1.matmul(hinv[i1:i2, i2:])
             # GPTQv2: Apply P correction to remaining weights
-            if P is not None:
-                w[:, i2:] += w1.matmul(P[i1:i2, i2:])
+            if P_update is not None:
+                w[:, i2:] += P_update
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()

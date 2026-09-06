@@ -821,6 +821,14 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             print(f"[GPTQv2] Using cached FP inputs for stage '{stage_desc}'")
             return self._fp_inputs_disk_cache[stage_desc]
 
+        if self._fp_inputs_disk_loaded:
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache miss for stage '{stage_desc}'. "
+                f"Cache was loaded from disk but this stage is not present. "
+                f"Delete the cache file "
+                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
+            )
+
         fp_cache = FPInputsCache(list(subset.keys()))
         full_modules: dict[str, nn.Module] = {}
         for local_name, submodule in subset.items():
@@ -842,6 +850,12 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 stage_module(*args_batch, **kwargs_batch)
         finally:
             fp_cache.clear_hook()
+
+        # Save to in-memory disk cache for later persistence
+        if self.config.fp_inputs_cache_path is not None:
+            self._fp_inputs_disk_cache[stage_desc] = {
+                k: list(v) for k, v in fp_cache.fp_cache.items()
+            }
 
         return fp_cache.fp_cache
 

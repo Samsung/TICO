@@ -307,6 +307,10 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
         "GPTQ percdamp",
         _stage_value(gptq_stage, "percdamp", "not set"),
     )
+    _print_config_row(
+        "GPTQ normalize_H",
+        bool(_stage_value(gptq_stage, "normalize_H", False)),
+    )
     _print_config_row("PTQ enabled", ptq_enabled)
     _print_config_row("SpinQuant enabled", spinquant_enabled)
     _print_config_row("CLE enabled", _is_stage_enabled(cle_stage))

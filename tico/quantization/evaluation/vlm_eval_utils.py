@@ -1541,6 +1541,7 @@ def get_calib_inputs(
         selected = dataset_filter(
             examples=examples,
             filter_config=filter_config,
+            dataset_name=dataset,
         )
 
         calib_inputs = []
@@ -1857,6 +1858,7 @@ def get_mixed_calib_inputs(
 def dataset_filter(
     examples: List[Dict[str, Any]],
     filter_config: CalibFilterConfig,
+    dataset_name: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Filter dataset examples by per-class quota.
@@ -1886,8 +1888,9 @@ def dataset_filter(
         ``True`` (the default), each unique ``image_id`` appears at most once
         in the output, ensuring maximum image diversity.
 
-    If no classes are found in any example, all *examples* are returned
-    unchanged with a warning.
+    If no classes are found in any example, a :class:`ValueError` is raised so
+    that configuration errors (e.g. a misspelled field name) are detected early
+    instead of silently returning the entire dataset.
 
     Args:
         examples: List of raw dataset examples.  Each example is expected to
@@ -1897,10 +1900,16 @@ def dataset_filter(
         filter_config: A :class:`CalibFilterConfig` that controls the
             filtering behaviour.  When ``None`` or inactive
             (``n_per_class <= 0``), *examples* is returned unchanged.
+        dataset_name: Name of the dataset being filtered, used in error
+            messages for easier debugging.  Defaults to an empty string.
 
     Returns:
-        A list of selected raw examples.  When no classes are found in the
-        data, the original *examples* list is returned unchanged.
+        A list of selected raw examples.
+
+    Raises:
+        ValueError: If the configured ``filter_field`` is not found in any
+            example.  This prevents a silent fallback that would return the
+            entire dataset, which can be very expensive in time and memory.
     """
 
     # --- Phase 1: discover classes and their frequencies ---
@@ -1914,11 +1923,12 @@ def dataset_filter(
             class_freq[cls_str] = class_freq.get(cls_str, 0) + 1
 
     if not class_freq:
-        if filter_config.verbose:
-            print(
-                f"[warn] No {filter_config.filter_field} found in any sample; returning all examples."
-            )
-        return list(examples)
+        raise ValueError(
+            f"Filter field '{filter_config.filter_field}' was not found in any "
+            f"sample of dataset '{dataset_name}'. This usually means the field "
+            f"name is misspelled or the dataset does not contain it. "
+            f"Please check the 'filter.field' configuration."
+        )
 
     # Determine target classes
     if filter_config.classes is not None:
