@@ -1,0 +1,56 @@
+model:
+  family: llama
+  name_or_path: Maykeye/TinyLLama-v0
+  trust_remote_code: false
+  hf_token: null
+  cache_dir: null
+
+runtime:
+  device: cuda
+  dtype: float32
+  seed: 42
+  show_progress: true
+
+model_args:
+  profile: npu_export
+
+calibration:
+  dataset: Salesforce/wikitext
+  dataset_config: wikitext-2-raw-v1
+  split: train
+  n_samples: 128
+  seq_len: 2048
+  decode_steps: 8
+
+pipeline:
+  - name: gptq
+    enabled: true
+    variant: universal
+    weight_bits: 4
+    weight_bits_overrides: {}
+    perchannel: true
+    symmetric: false
+    mse: mse
+    sensitivity:
+      mode: compute
+      path: null
+    percdamp: 0.01
+    groupsize: -1
+    actorder: true
+    static_groups: false
+    use_orig_model_inference: false
+    verbose: true
+    show_progress: true
+
+  - name: ptq
+    enabled: true
+    profile: npu_export
+    activation: int16
+    linear_weight: uint4
+    embedding_weight: uint8
+    lm_head_weight: uint8
+    spin_rotation_weight: int16
+    norm_weight: int16
+    strict_wrap: true
+    decode_calibration_steps: 8
+

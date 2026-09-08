@@ -16,6 +16,7 @@ import inspect
 import subprocess
 import typing
 import warnings
+from collections import OrderedDict
 from functools import wraps
 from typing import List
 
@@ -402,14 +403,17 @@ def move_to_device(obj, device):
     if isinstance(obj, torch.Tensor):
         return obj.to(device)
 
-    elif isinstance(obj, tuple):
+    if isinstance(obj, tuple):
         return tuple(move_to_device(x, device) for x in obj)
 
-    elif isinstance(obj, list):
+    if isinstance(obj, list):
         return [move_to_device(x, device) for x in obj]
 
-    elif isinstance(obj, dict):
+    if type(obj) is dict:
         return {k: move_to_device(v, device) for k, v in obj.items()}
+
+    if isinstance(obj, dict):
+        return obj.__class__({k: move_to_device(v, device) for k, v in obj.items()})
 
     # preserve everything else (bool, int, None, custom objects, etc.)
     return obj

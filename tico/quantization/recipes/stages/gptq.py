@@ -19,8 +19,9 @@ import torch
 
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
+from tico.quantization.config.base import BaseConfig
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
-from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.gptq import GPTQConfig, UniversalGPTQConfig
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.stages.base import Stage
@@ -152,15 +153,28 @@ class GPTQStage(Stage):
         if self._is_smse_mode(payload):
             payload["sensitivity"] = self._resolve_sensitivity(ctx, payload)
 
+        # Select the GPTQ variant. `variant: universal` selects the
+        # model-agnostic frontier-based quantizer; the default variant uses
+        # the model-family-specific quantizer.
+        variant = str(payload.pop("variant", "default")).strip().lower()
+        if variant not in {"default", "universal"}:
+            raise ValueError(
+                f"Unsupported GPTQ variant {variant!r}. "
+                "Supported variants: default, universal."
+            )
+
         # Map model family to the appropriate GPTQ config class.
         # Families with a dedicated multimodal GPTQ config (vision + text
         # stagewise quantization) get their own class; everything else falls
         # back to the generic GPTQConfig (single decoder stack).
-        _FAMILY_CONFIG_MAP = {
+        _FAMILY_CONFIG_MAP: dict[str, type[BaseConfig]] = {
             "qwen3_vl": Qwen3VLGPTQConfig,
             "gemma4": Gemma4GPTQConfig,
         }
-        config_cls = _FAMILY_CONFIG_MAP.get(ctx.adapter.family, GPTQConfig)
+        if variant == "universal":
+            config_cls: type[BaseConfig] = UniversalGPTQConfig
+        else:
+            config_cls = _FAMILY_CONFIG_MAP.get(ctx.adapter.family, GPTQConfig)
         gptq_config = config_cls(**filter_dataclass_kwargs(config_cls, payload))
 
         print(f"Applying {gptq_config.name} …")

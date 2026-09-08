@@ -13,11 +13,22 @@
 # limitations under the License.
 
 import json
+import math
 from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from numbers import Number
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    SupportsFloat,
+    SupportsIndex,
+    Tuple,
+)
 
 import torch
 from transformers.modeling_outputs import ModelOutput
@@ -513,6 +524,86 @@ class DataMismatchError(Exception):
     ...
 
 
+def outputs_close(
+    lhs: ModuleOutput,
+    rhs: ModuleOutput,
+) -> bool:
+    """
+    Check if two module outputs are close.
+
+    Recursively compares outputs of various types (tensors, numbers, dicts,
+    lists, named tuples, ModelOutput objects) and returns True if they are numerically close.
+
+    Args:
+        lhs: Left-hand side output.
+        rhs: Right-hand side output.
+
+    Returns:
+        True is the argments are close, False otherwise.
+
+    Raises:
+        ValueError: If the types or structure of lhs and rhs doesn't allow for comparison.
+    """
+    if type(lhs) != type(rhs):
+        return False
+
+    # None
+    if lhs is None:
+        return True
+
+    # Tensor
+    if isinstance(lhs, torch.Tensor):
+        return torch.allclose(lhs, rhs)
+
+    # Number (float, int)
+    if isinstance(lhs, SupportsFloat | SupportsIndex):
+        return math.isclose(lhs, rhs)
+
+    # List, Tuple: compare element-wise
+    if isinstance(lhs, Sequence):
+        if len(lhs) != len(rhs):
+            return False
+        for lhs_val, rhs_val in zip(lhs, rhs):
+            if not outputs_close(lhs_val, rhs_val):
+                return False
+        return True
+
+    # Mapping (dict, OrderedDict)
+    if isinstance(lhs, Mapping):
+        lhs_keys = set(lhs.keys())
+        rhs_keys = set(rhs.keys())
+
+        if lhs_keys != rhs_keys:
+            return False
+
+        for key in lhs_keys:
+            if not outputs_close(lhs[key], rhs[key]):
+                return False
+
+        return True
+
+    # Iterable
+    if isinstance(lhs, Iterable):
+        try:
+            for lhs_val, rhs_val in zip(lhs, rhs, strict=True):
+                if not outputs_close(lhs_val, rhs_val):
+                    return False
+        except ValueError:
+            # Length mismatch
+            return False
+        return True
+
+    # Arbitrary type: compare by fields
+    attr_names = lhs.__dict__.keys()
+    for attr_name in attr_names:
+        if not outputs_close(lhs.__dict__[attr_name], rhs.__dict__[attr_name]):
+            return False
+        return True
+
+    # We should never get here
+    raise ValueError(f"Unsupported type: {type(lhs)}")
+
+
 def compare_outputs(
     lhs: ModuleOutput,
     rhs: ModuleOutput,
@@ -551,10 +642,10 @@ def compare_outputs(
             abs_delta: torch.Tensor = (lhs - rhs).abs().to(torch.float)
             delta_stats: TensorStatistics = get_tensor_statistics(abs_delta)
             interval = (lhs.max() - lhs.min()).item()
-            if interval != 0.0:
-                peir = delta_stats.max / interval
-                return DifferenceStatistics(**delta_stats._asdict(), peir=peir)
-            return delta_stats
+            return DifferenceStatistics(
+                **delta_stats._asdict(),
+                peir=delta_stats.max / interval if interval != 0.0 else float("nan"),
+            )
 
     # Number
     if isinstance(lhs, Number):
@@ -566,7 +657,7 @@ def compare_outputs(
     if isinstance(lhs, Sequence):
         if len(lhs) != len(rhs):
             raise DataMismatchError(f"Length mismatch: {len(lhs)} != {len(rhs)}")
-        for i, (lhs_val, rhs_val) in enumerate(zip(lhs, rhs)):
+        for i, (lhs_val, rhs_val) in enumerate(zip(lhs, rhs, strict=True)):
             try:
                 diff[str(i)] = compare_outputs(lhs_val, rhs_val)
             except Exception as ex:
@@ -641,7 +732,9 @@ def compare_side_by_side(
             continue
         output_a = model_outputs_a[module_name]
         output_b = model_outputs_b[module_name]
-        diff: Number | torch.Tensor | dict[str, Any] | Exception | None
+        diff: Number | torch.Tensor | DifferenceStatistics | dict[
+            str, Any
+        ] | Exception | None
         this_module_is_interesting = module_name in interesting_modules
         try:
             diff = compare_outputs(

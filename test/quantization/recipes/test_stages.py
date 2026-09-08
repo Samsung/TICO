@@ -26,6 +26,7 @@ import tico.quantization.recipes.stages.ptq as ptq_mod
 
 import torch
 
+from tico.quantization.config.gptq import GPTQConfig, UniversalGPTQConfig
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine
 from tico.quantization.recipes.context import RecipeContext
@@ -293,6 +294,81 @@ class TestRecipeStages(unittest.TestCase):
             (ctx, prepared_model, ctx.calibration_inputs, "GPTQ calibration"),
         )
         self.assertEqual(calls["convert"], (prepared_model, True))
+
+    def test_gptq_stage_universal_variant_builds_universal_config(self):
+        """GPTQStage should build UniversalGPTQConfig when variant=universal."""
+        adapter = DummyAdapter()
+        model = torch.nn.Linear(2, 2)
+        ctx = RecipeContext(
+            cfg={},
+            adapter=adapter,
+            model=model,
+            calibration_inputs=[torch.randn(1, 2)],
+        )
+        calls: dict[str, Any] = {}
+
+        def fake_prepare(model_arg, config, inplace=False):
+            calls["prepare"] = (model_arg, config, inplace)
+            return model_arg
+
+        stage_cfg = {
+            "name": "gptq",
+            "variant": "universal",
+            "weight_bits": 4,
+        }
+
+        with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
+            gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                GPTQStage().run(ctx, stage_cfg)
+
+        config = calls["prepare"][1]
+        self.assertIsInstance(config, UniversalGPTQConfig)
+        self.assertEqual(config.weight_bits, 4)
+        self.assertEqual(config.name, "universal_gptq")
+
+    def test_gptq_stage_default_variant_builds_generic_config(self):
+        """GPTQStage should build the generic GPTQConfig when variant is absent."""
+        adapter = DummyAdapter()
+        model = torch.nn.Linear(2, 2)
+        ctx = RecipeContext(
+            cfg={},
+            adapter=adapter,
+            model=model,
+            calibration_inputs=[torch.randn(1, 2)],
+        )
+        calls: dict[str, Any] = {}
+
+        def fake_prepare(model_arg, config, inplace=False):
+            calls["prepare"] = (model_arg, config, inplace)
+            return model_arg
+
+        with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
+            gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                GPTQStage().run(ctx, {"name": "gptq", "weight_bits": 4})
+
+        config = calls["prepare"][1]
+        self.assertIsInstance(config, GPTQConfig)
+        self.assertNotIsInstance(config, UniversalGPTQConfig)
+        self.assertEqual(config.name, "gptq")
+
+    def test_gptq_stage_rejects_unknown_variant(self):
+        """GPTQStage should raise ValueError for an unsupported variant."""
+        adapter = DummyAdapter()
+        ctx = RecipeContext(
+            cfg={},
+            adapter=adapter,
+            model=torch.nn.Linear(2, 2),
+            calibration_inputs=[torch.randn(1, 2)],
+        )
+
+        with self.assertRaises(ValueError) as cm:
+            GPTQStage().run(ctx, {"name": "gptq", "variant": "unknown"})
+
+        self.assertIn("Unsupported GPTQ variant", str(cm.exception))
 
     def test_gptq_stage_loads_sensitivity_from_nested_path(self):
         """GPTQStage should load sensitivity tensors with mode=load."""
