@@ -239,6 +239,8 @@ def _build_llama_layer_overrides(
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
     softmax: Optional[QuantSpec],
+    kv_cache_key: Optional[QuantSpec] = None,
+    kv_cache_value: Optional[QuantSpec] = None,
 ) -> Dict[str, Any]:
     """Build per-layer overrides for a Llama decoder block."""
     layer_overrides: Dict[str, Any] = {}
@@ -279,6 +281,14 @@ def _build_llama_layer_overrides(
             layer_overrides, ("self_attn",), softmax_override
         )
 
+    # KV cache key/value quantization overrides
+    if kv_cache_key:
+        kv_key_override = _build_activation_overrides(kv_cache_key, ("key",))
+        _update_nested_path(layer_overrides, ("self_attn",), kv_key_override)
+    if kv_cache_value:
+        kv_value_override = _build_activation_overrides(kv_cache_value, ("value",))
+        _update_nested_path(layer_overrides, ("self_attn",), kv_value_override)
+
     return layer_overrides
 
 
@@ -295,6 +305,8 @@ def _build_llama_overrides(
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
     softmax: Optional[QuantSpec],
+    kv_cache_key: Optional[QuantSpec] = None,
+    kv_cache_value: Optional[QuantSpec] = None,
 ) -> Dict[str, Any]:
     """Build PTQ overrides for a Llama-style causal LM."""
     overrides: Dict[str, Any] = {"model": {"layers": {}}}
@@ -330,7 +342,9 @@ def _build_llama_overrides(
             linear_weight=linear_weight,
             norm=norm,
             norm_weight=norm_weight,
-            softmax=softmax
+            softmax=softmax,
+            kv_cache_key=kv_cache_key,
+            kv_cache_value=kv_cache_value,
         )
 
     return overrides
@@ -352,6 +366,8 @@ def build_llm_ptq_config(
     norm: Optional[QuantSpec] = None,
     norm_weight: Optional[QuantSpec] = None,
     softmax: Optional[QuantSpec] = None,
+    kv_cache_key: Optional[QuantSpec] = None,
+    kv_cache_value: Optional[QuantSpec] = None,
     strict_wrap: bool = True,
     profile: ExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> PTQConfig:
@@ -369,6 +385,8 @@ def build_llm_ptq_config(
         spin_rotation_weight: Weight spec for SpinLlama rotation matrices.
         norm: Activation spec for norm module internals.
         norm_weight: Weight spec for norm affine parameters.
+        kv_cache_key: Activation spec for KV cache key quantization.
+        kv_cache_value: Activation spec for KV cache value quantization.
         strict_wrap: If True, unsupported modules raise during wrapping.
         profile: Llama execution profile stored in model_args.
 
@@ -396,6 +414,8 @@ def build_llm_ptq_config(
             norm=norm,
             norm_weight=norm_weight,
             softmax=softmax,
+            kv_cache_key=kv_cache_key,
+            kv_cache_value=kv_cache_value,
         )
     else:
         raise NotImplementedError(

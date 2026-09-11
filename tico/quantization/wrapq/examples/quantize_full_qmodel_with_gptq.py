@@ -290,6 +290,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="which activation types are supposed for output norm + lm_head I/O (input/output of final norm and lm_head). Defaults to linear_io_qdtype if not specified.",
     )
     parser.add_argument(
+        "--kv_cache_key_qdtype",
+        type=str,
+        default=None,
+        help="which activation types are supposed for KV cache key quantization. Defaults to linear_io_qdtype if not specified.",
+    )
+    parser.add_argument(
+        "--kv_cache_value_qdtype",
+        type=str,
+        default=None,
+        help="which activation types are supposed for KV cache value quantization. Defaults to linear_io_qdtype if not specified.",
+    )
+    parser.add_argument(
         "--gptq_mse",
         type=str,
         default=None,
@@ -2870,6 +2882,16 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         if args.lm_head_io_qdtype is not None
         else linear_spec
     )
+    kv_cache_key_spec = (
+        quant_spec_from_dtype_string(args.kv_cache_key_qdtype)
+        if args.kv_cache_key_qdtype is not None
+        else linear_spec
+    )
+    kv_cache_value_spec = (
+        quant_spec_from_dtype_string(args.kv_cache_value_qdtype)
+        if args.kv_cache_value_qdtype is not None
+        else linear_spec
+    )
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -2889,6 +2911,8 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         norm=norm_spec,
         norm_weight=affine(DType.int(16)),
         softmax=softmax_spec,
+        kv_cache_key=kv_cache_key_spec,
+        kv_cache_value=kv_cache_value_spec,
         strict_wrap=True,
         profile=args.profile,
     )
@@ -2967,6 +2991,16 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
         if args.lm_head_io_qdtype is not None
         else linear_spec
     )
+    kv_cache_key_spec = (
+        quant_spec_from_dtype_string(args.kv_cache_key_qdtype)
+        if args.kv_cache_key_qdtype is not None
+        else linear_spec
+    )
+    kv_cache_value_spec = (
+        quant_spec_from_dtype_string(args.kv_cache_value_qdtype)
+        if args.kv_cache_value_qdtype is not None
+        else linear_spec
+    )
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -2986,6 +3020,8 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
         norm=norm_spec,
         norm_weight=affine(DType.int(16)),
         softmax=softmax_spec,
+        kv_cache_key=kv_cache_key_spec,
+        kv_cache_value=kv_cache_value_spec,
         strict_wrap=True,
         profile=args.profile,
     )
@@ -3324,6 +3360,8 @@ def print_config(args, device: torch.device) -> None:
     print()
     print("--- Activation quantization ---")
     print(f"Linear IO qdtype       : {args.linear_io_qdtype}")
+    print(f"KV cache key qdtype    : {args.kv_cache_key_qdtype}")
+    print(f"KV cache value qdtype  : {args.kv_cache_value_qdtype}")
     print()
     print("--- Calibration ---")
     print(f"Batch size             : {args.batch}")
