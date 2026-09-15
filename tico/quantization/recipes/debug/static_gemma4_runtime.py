@@ -29,6 +29,10 @@ import torch
 import torch.nn as nn
 from transformers import AutoProcessor
 
+from tico.quantization.config.gemma4_attention import (
+    get_gemma4_text_attention_options,
+    RopeConvention,
+)
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
@@ -39,6 +43,7 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4PLEProjectionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
     Gemma4StaticVisionProfile,
@@ -218,6 +223,7 @@ class StaticGemma4RuntimeConfig:
     prompt: str = "<|image|>Describe the image."
     verify_steps: int = 4
     gen_steps: int = 16
+    rope: RopeConvention = "pre_negated_sin"
 
 
 class StaticGemma4Runtime:
@@ -231,8 +237,9 @@ class StaticGemma4Runtime:
         layout: StaticGemma4Layout,
         vision_profile: Optional[Gemma4StaticVisionProfile] = None,
         device: str = "cpu",
+        rope: RopeConvention = "pre_negated_sin",
     ):
-        """Create a runtime around a Gemma4 E2B model."""
+        """Create an NPU-profile runtime; ``rope="hf"`` is an explicit override."""
         layout.validate()
         assert_gemma4_e2b_no_moe(model)
 
@@ -269,8 +276,12 @@ class StaticGemma4Runtime:
         qcfg = build_gemma4_e2b_ptq_config(
             num_text_layers=int(self.text_config.num_hidden_layers),
             num_vision_layers=int(model.config.vision_config.num_hidden_layers),
-            model_args={"vision": vision_profile.to_vision_model_args()},
+            model_args={
+                "vision": vision_profile.to_vision_model_args(),
+                "attention": {"rope": rope},
+            },
         )
+        self.rope_convention = get_gemma4_text_attention_options(qcfg).rope
         # Keep runtime-created masks aligned with the PTQ/export ABI.
         self.attention_mask_fill_value = float(qcfg.attention_mask_fill_value)
         # Runtime simulation must stay in NO_QUANT mode until a calibrated
@@ -553,7 +564,8 @@ class StaticGemma4Runtime:
           ``(batch, seq_len, head_dim)`` per layer type, computed via the HF
           model's ``Gemma4TextRotaryEmbedding`` module.  Full-attention layers
           use proportional RoPE (partial_rotary_factor=0.25, global_head_dim);
-          sliding-attention layers use default RoPE (head_dim).
+          sliding-attention layers use default RoPE (head_dim). Sine is
+          prepared according to ``rope_convention`` before being returned.
         """
         batch_size, seq_len = input_ids.shape
 
@@ -607,6 +619,7 @@ class StaticGemma4Runtime:
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_type in layer_types:
             cos, sin = rotary_emb(dummy_hidden, position_ids, layer_type)
+            sin = prepare_gemma4_rope_sin(sin, getattr(self, "rope_convention", "hf"))
             position_embeddings[layer_type] = (cos, sin)
 
         return attention_masks, position_embeddings
@@ -720,7 +733,7 @@ class StaticGemma4Runtime:
 
         - **RoPE**: ``(cos, sin)`` computed via the HF model's
           ``Gemma4TextRotaryEmbedding`` at the current decode position
-          ``past_len``, per layer type.
+          ``past_len``, per layer type. Sine follows ``rope_convention``.
         """
         max_seq = self.layout.max_seq
         mask_value = float(getattr(self, "attention_mask_fill_value", -120.0))
@@ -761,6 +774,7 @@ class StaticGemma4Runtime:
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_type in layer_types:
             cos, sin = rotary_emb(dummy_hidden, position_ids, layer_type)
+            sin = prepare_gemma4_rope_sin(sin, getattr(self, "rope_convention", "hf"))
             position_embeddings[layer_type] = (cos, sin)
 
         return attention_masks, position_embeddings
@@ -1327,7 +1341,8 @@ def verify_step_masks_and_rope(
 
     2. **RoPE (cos, sin)**: The runtime's per-layer-type RoPE is compared
        against HF's ``Gemma4TextRotaryEmbedding.forward`` — the same module the
-       runtime uses internally.  This is an exact-match check.
+       runtime uses internally. The reference sine is first adapted to
+       the selected convention, then compared without changing tolerance.
 
     HF reference (modeling_gemma4.py L1688–1707):
         ``causal_mask_mapping = {``
@@ -1368,6 +1383,9 @@ def verify_step_masks_and_rope(
     layer_types = set(runtime.text_config.layer_types)
     for layer_type in layer_types:
         ref_cos, ref_sin = rotary_emb(dummy_hidden, position_ids, layer_type)
+        ref_sin = prepare_gemma4_rope_sin(
+            ref_sin, getattr(runtime, "rope_convention", "hf")
+        )
         rt_cos, rt_sin = rt_rope[layer_type]
 
         torch.testing.assert_close(
@@ -1883,6 +1901,7 @@ def run_static_gemma4_runtime(cfg: StaticGemma4RuntimeConfig) -> None:
         model=model,
         processor=processor,
         layout=layout,
+        rope=cfg.rope,
         vision_profile=vision_profile,
         device=cfg.device,
     )

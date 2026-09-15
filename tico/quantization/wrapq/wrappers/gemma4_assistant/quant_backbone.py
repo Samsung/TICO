@@ -19,8 +19,10 @@ from typing import Iterable, Mapping, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     SUPPORTED_ASSISTANT_LAYER_TYPES,
 )
@@ -52,6 +54,7 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
+        self.rope_convention = get_gemma4_text_attention_options(self.qcfg).rope
         self.config = fp_text_model.config
         self.unique_layer_types = tuple(sorted(set(self.config.layer_types)))
 
@@ -101,11 +104,13 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
         position_ids = position_ids.to(device=hidden_states.device)
         if position_ids.dim() == 1:
             position_ids = position_ids.unsqueeze(0)
+        rope = getattr(self, "rope_convention", "hf")
+        outputs = {}
         with torch.no_grad():
-            return {
-                layer_type: self.rotary_emb(hidden_states, position_ids, layer_type)
-                for layer_type in self.unique_layer_types
-            }
+            for layer_type in self.unique_layer_types:
+                cos, sin = self.rotary_emb(hidden_states, position_ids, layer_type)
+                outputs[layer_type] = (cos, prepare_gemma4_rope_sin(sin, rope))
+        return outputs
 
     def _require_layer_type_entries(
         self,
@@ -145,7 +150,9 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
             shared_kv_states: Target shared ``(key, value)`` tuples keyed by
                 layer type. The assistant never projects or caches K/V.
             position_embeddings: Optional explicit ``(cos, sin)`` per layer
-                type. Required by the static export path.
+                type. Required by the static export path. Sine must already
+                follow the configured RoPE convention; explicit tables are
+                forwarded unchanged.
             position_ids: Positions used to build RoPE tables when
                 ``position_embeddings`` is omitted (eager path).
 

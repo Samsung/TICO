@@ -38,6 +38,10 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_assistant_builders import (
     build_gemma4_assistant_ptq_config,
 )
+from tico.quantization.config.gemma4_attention import (
+    get_gemma4_text_attention_options,
+    RopeConvention,
+)
 from tico.quantization.recipes.utils import set_seed, torch_dtype_from_name
 from tico.quantization.wrapq.wrappers.gemma4_assistant.export_adapters import (
     Gemma4AssistantCoreExportAdapter,
@@ -72,6 +76,7 @@ class StaticGemma4AssistantRuntimeConfig:
     calibration_samples: int = 4
     seed: int = 42
     synthetic: bool = False
+    rope: RopeConvention = "pre_negated_sin"
 
 
 def _make_tiny_synthetic_assistant() -> torch.nn.Module:
@@ -215,7 +220,8 @@ def run_static_gemma4_assistant_runtime(
             "assistant": {
                 "full_kv_length": cfg.full_kv_length,
                 "sliding_kv_length": cfg.sliding_kv_length,
-            }
+            },
+            "attention": {"rope": cfg.rope},
         },
     )
     prepared = prepare(quant_source, qcfg)
@@ -244,6 +250,7 @@ def run_static_gemma4_assistant_runtime(
         model_or_config=assistant.config,
         rotary_emb=assistant.model.rotary_emb,
         mask_fill_value=float(qcfg.attention_mask_fill_value),
+        rope=get_gemma4_text_attention_options(qcfg).rope,
     )
     adapter = Gemma4AssistantCoreExportAdapter(quantized)
     with torch.no_grad():

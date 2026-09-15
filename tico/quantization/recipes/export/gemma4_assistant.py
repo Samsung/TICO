@@ -55,6 +55,9 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
 
 
 GEMMA4_ASSISTANT_MANIFEST_SCHEMA_VERSION = 1
+# Version 1 consumers assume HF sine tables. Opt-in graphs must fail closed
+# in hosts that do not understand the changed sine-input semantics.
+GEMMA4_ASSISTANT_PRE_NEGATED_SIN_MANIFEST_SCHEMA_VERSION = 2
 
 CORE_CIRCLE_ARTIFACT = "gemma4_assistant_core.q.circle"
 SPARSE_HEAD_ARTIFACT = "gemma4_assistant_sparse_head.pt"
@@ -108,6 +111,7 @@ def build_assistant_core_example_inputs(
         model_or_config=assistant.config,
         rotary_emb=assistant.model.rotary_emb,
         mask_fill_value=float(assistant.qcfg.attention_mask_fill_value),
+        rope=getattr(assistant.model, "rope_convention", "hf"),
     )
     return static.as_tuple()
 
@@ -280,8 +284,13 @@ def write_gemma4_assistant_manifest(
     # Extract actual Circle I/O types instead of using hardcoded example tensor types.
     input_contracts, output_contracts = _extract_circle_io_contracts(circle_path)
 
+    rope = getattr(assistant.model, "rope_convention", "hf")
     manifest: dict[str, Any] = {
-        "schema_version": GEMMA4_ASSISTANT_MANIFEST_SCHEMA_VERSION,
+        "schema_version": (
+            GEMMA4_ASSISTANT_PRE_NEGATED_SIN_MANIFEST_SCHEMA_VERSION
+            if rope == "pre_negated_sin"
+            else GEMMA4_ASSISTANT_MANIFEST_SCHEMA_VERSION
+        ),
         "source_model": source_model,
         "transformers_version": transformers.__version__,
         "assistant_config": {
@@ -333,6 +342,8 @@ def write_gemma4_assistant_manifest(
         },
         "core_artifact": CORE_CIRCLE_ARTIFACT,
     }
+    if rope == "pre_negated_sin":
+        manifest["rope_convention"] = rope
 
     path = output_dir / MANIFEST_ARTIFACT
     path.write_text(

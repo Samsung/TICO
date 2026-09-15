@@ -21,9 +21,11 @@ from typing import Any, Iterable, Optional
 import torch
 import torch.nn as nn
 
+from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
     lookup_gemma4_per_layer_token_inputs,
@@ -66,6 +68,7 @@ class QuantGemma4TextModel(QuantModuleBase):
     ):
         assert_gemma4_e2b_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
+        self.rope_convention = get_gemma4_text_attention_options(self.qcfg).rope
 
         self.module = fp_model
         self.config = fp_model.config
@@ -273,6 +276,10 @@ class QuantGemma4TextModel(QuantModuleBase):
                     )
                 self.register_buffer(
                     self._cos_template_name(layer_type), cos, persistent=False
+                )
+                # Store prepared templates; slicing must not flip them again.
+                sin = prepare_gemma4_rope_sin(
+                    sin, getattr(self, "rope_convention", "hf")
                 )
                 self.register_buffer(
                     self._sin_template_name(layer_type), sin, persistent=False
@@ -594,6 +601,9 @@ class QuantGemma4TextModel(QuantModuleBase):
                 ).expand(batch_size, -1, -1)
             else:
                 cos, sin = self.rotary_emb(hidden_states, position_ids, layer_type)
+                sin = prepare_gemma4_rope_sin(
+                    sin, getattr(self, "rope_convention", "hf")
+                )
             outputs[layer_type] = (
                 self._fq(cos, self.obs_position_cos[layer_type]),
                 self._fq(sin, self.obs_position_sin[layer_type]),

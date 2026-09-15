@@ -19,6 +19,7 @@ from typing import Any, Mapping
 
 import torch
 
+from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
     ForwardInput,
@@ -31,6 +32,7 @@ from tico.quantization.recipes.debug.wrapper_smoke.utils import (
 
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
     Gemma4StaticVisionProfile,
@@ -419,6 +421,25 @@ def _text_rope(
     return emb.cos(), emb.sin()
 
 
+def _text_rope_for_module(
+    position_embeddings: tuple[torch.Tensor, torch.Tensor],
+    module: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Adapt raw smoke sine for the actual consumer, leaving HF references raw.
+
+    Samples always contain fresh HF-convention tables. A prepared reference
+    uses the wrapper convention just like calibration and quantized execution;
+    an original HF module has no attention options and keeps ordinary sine.
+    Cached/shared K/V and the sample itself must not be transformed.
+    """
+    wrapped = getattr(module, "wrapped", module)
+    attention = getattr(wrapped, "self_attn", wrapped)
+    attention = getattr(attention, "wrapped", attention)
+    options = getattr(attention, "attn_options", None)
+    cos, sin = position_embeddings
+    return cos, prepare_gemma4_rope_sin(sin, getattr(options, "rope", "hf"))
+
+
 def _attention_mask(seq_len: int, kv_len: int | None = None) -> torch.Tensor:
     """Create an additive attention mask for synthetic Gemma4 attention tests."""
     kv_len = seq_len if kv_len is None else kv_len
@@ -598,6 +619,16 @@ class Gemma4BaseCase(WrapperSmokeCase):
     def _static_runtime_shape(self) -> Gemma4StaticRuntimeShape | None:
         """Return the active static-runtime shape after profile validation."""
         return getattr(self, "_active_static_runtime_shape", None)
+
+    def _export_text_rope(
+        self,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        cfg: Mapping[str, Any],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prepare raw smoke sine for the same PTQ profile used by export."""
+        options = get_gemma4_text_attention_options(self.ptq_config(cfg))
+        cos, sin = position_embeddings
+        return cos, prepare_gemma4_rope_sin(sin, options.rope)
 
     def _text_prefill_seq_len(self, default: int) -> int:
         """Return the text prefill length for the active profile."""
@@ -848,16 +879,19 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
         raise NotImplementedError
 
     def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
-        """Run a Gemma4 attention wrapper without sharing mutable sample state."""
+        """Run attention with sine prepared for the actual wrapper convention."""
         cloned = _clone_forward_input(sample)
-        return module(*cloned.args, **dict(cloned.kwargs))
+        kwargs = dict(cloned.kwargs)
+        kwargs["position_embeddings"] = _text_rope_for_module(
+            kwargs["position_embeddings"], module
+        )
+        return module(*cloned.args, **kwargs)
 
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
-        """Run the selected reference module without sharing mutable sample state."""
-        cloned = _clone_forward_input(sample)
-        return reference(*cloned.args, **dict(cloned.kwargs))
+        """Keep HF reference sine raw; adapt it for a prepared reference."""
+        return self.forward(reference, sample)
 
     def calibration_inputs(
         self, prepared: torch.nn.Module, cfg: Mapping[str, Any]
@@ -935,7 +969,7 @@ class Gemma4TextAttentionPrefillBaseCase(Gemma4TextAttentionBaseCase):
             (
                 kwargs["hidden_states"],
                 kwargs["attention_mask"],
-                kwargs["position_embeddings"],
+                self._export_text_rope(kwargs["position_embeddings"], cfg),
             ),
             export_kwargs,
         )
@@ -1002,7 +1036,7 @@ class Gemma4TextAttentionDecodeBaseCase(Gemma4TextAttentionBaseCase):
             (
                 kwargs["hidden_states"],
                 kwargs["attention_mask"],
-                kwargs["position_embeddings"],
+                self._export_text_rope(kwargs["position_embeddings"], cfg),
             ),
             export_kwargs,
         )
@@ -1240,9 +1274,12 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         return ForwardInput((), kwargs)
 
     def forward(self, module: torch.nn.Module, sample: ForwardInput) -> Any:
-        """Run a decoder layer with the standalone PLE producer boundary."""
+        """Run a decoder layer with standalone RoPE and PLE producer boundaries."""
         cloned = _clone_forward_input(sample)
         kwargs = dict(cloned.kwargs)
+        kwargs["position_embeddings"] = _text_rope_for_module(
+            kwargs["position_embeddings"], module
+        )
         per_layer_input = kwargs.get("per_layer_input")
         observer = getattr(self, "_per_layer_input_observer", None)
 
@@ -1270,9 +1307,12 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
     def reference_forward(
         self, reference: torch.nn.Module, sample: ForwardInput
     ) -> Any:
-        """Run the original Gemma4 decoder layer without wrapper-only kwargs."""
+        """Run the selected decoder reference with its own sine convention."""
         cloned = _clone_forward_input(sample)
         kwargs = dict(cloned.kwargs)
+        kwargs["position_embeddings"] = _text_rope_for_module(
+            kwargs["position_embeddings"], reference
+        )
         kwargs.pop("shared_key_value", None)
         output = reference(*cloned.args, **kwargs)
         return output[0] if isinstance(output, tuple) else output
@@ -1326,7 +1366,7 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         kwargs = dict(cloned.kwargs)
         hidden = kwargs["hidden_states"]
         mask = kwargs["attention_mask"]
-        rope = kwargs["position_embeddings"]
+        rope = self._export_text_rope(kwargs["position_embeddings"], cfg)
         shared_key_value = kwargs.get("shared_key_value")
         per_layer_input = kwargs.get("per_layer_input")
         export_kwargs = {}
@@ -1519,7 +1559,7 @@ class Gemma4TextDecoderLayerDecodeCase(Gemma4TextDecoderLayerBaseCase):
             (
                 kwargs["hidden_states"],
                 kwargs["attention_mask"],
-                kwargs["position_embeddings"],
+                self._export_text_rope(kwargs["position_embeddings"], cfg),
             ),
             {
                 "past_key_value": kwargs["past_key_value"],
@@ -2499,7 +2539,7 @@ class Gemma4ModelCase(Gemma4BaseCase):
             attention_masks[layer_type] = torch.zeros(1, 1, self.seq_len, self.seq_len)
             cos = torch.ones(1, self.seq_len, head_dim)
             sin = torch.zeros(1, self.seq_len, head_dim)
-            position_embeddings[layer_type] = (cos, sin)
+            position_embeddings[layer_type] = self._export_text_rope((cos, sin), cfg)
 
         return ForwardInput(
             (inputs_embeds, per_layer_inputs, attention_masks, position_embeddings),
@@ -2646,7 +2686,7 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
             attention_masks[layer_type] = torch.zeros(1, 1, self.seq_len, self.seq_len)
             cos = torch.ones(1, self.seq_len, head_dim)
             sin = torch.zeros(1, self.seq_len, head_dim)
-            position_embeddings[layer_type] = (cos, sin)
+            position_embeddings[layer_type] = self._export_text_rope((cos, sin), cfg)
 
         return ForwardInput(
             (inputs_embeds, per_layer_inputs, attention_masks, position_embeddings),
@@ -2769,7 +2809,7 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
             attention_masks[layer_type] = torch.zeros(1, 1, self.seq_len, self.seq_len)
             cos = torch.ones(1, self.seq_len, head_dim)
             sin = torch.zeros(1, self.seq_len, head_dim)
-            position_embeddings[layer_type] = (cos, sin)
+            position_embeddings[layer_type] = self._export_text_rope((cos, sin), cfg)
 
         return ForwardInput(
             (inputs_embeds, per_layer_inputs, attention_masks, position_embeddings),

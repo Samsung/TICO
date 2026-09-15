@@ -20,6 +20,7 @@ from tico.quantization.config.ptq import PTQConfig
 
 ExecutionProfile = Literal["reference_eval", "npu_export"]
 AttentionLayout = Literal["batched", "unrolled"]
+RopeConvention = Literal["hf", "pre_negated_sin"]
 
 DEFAULT_EXECUTION_PROFILE: ExecutionProfile = "npu_export"
 SUPPORTED_EXECUTION_PROFILES: tuple[ExecutionProfile, ...] = (
@@ -43,14 +44,35 @@ class Gemma4TextAttentionOptions:
         ``"batched"`` uses a Hugging Face-like batched GQA graph and is useful
         for reference evaluation. ``"unrolled"`` emits one rank-3 attention
         matmul per query head and avoids KV-head broadcasting for NPU export.
+    rope : RopeConvention
+        ``"hf"`` consumes ordinary sine tables and uses ``[-x2, x1]``.
+        ``"pre_negated_sin"`` consumes sine tables with their first half
+        negated and uses ``[x2, x1]``. The producer must prepare the tables
+        before calibration or export; changing this option requires fresh
+        calibration. ``"npu_export"`` defaults to ``"pre_negated_sin"``;
+        ``"reference_eval"`` defaults to ``"hf"``. An explicit ``rope``
+        override takes precedence over either profile.
     """
 
     layout: AttentionLayout = "unrolled"
+    rope: RopeConvention = "pre_negated_sin"
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Keep pre-option pickles on the HF convention they were built for.
+
+        Older attention options stored only ``layout``. Falling through to
+        the new class default would reinterpret their already-built graph
+        without converting its producer or recalibrating its observers.
+        Explicit conventions saved by newer checkpoints are preserved.
+        """
+        object.__setattr__(self, "layout", state["layout"])
+        object.__setattr__(self, "rope", state.get("rope", "hf"))
+        _validate_gemma4_text_attention_options(self)
 
 
 _PRESETS: dict[ExecutionProfile, Gemma4TextAttentionOptions] = {
-    "reference_eval": Gemma4TextAttentionOptions(layout="batched"),
-    "npu_export": Gemma4TextAttentionOptions(layout="unrolled"),
+    "reference_eval": Gemma4TextAttentionOptions(layout="batched", rope="hf"),
+    "npu_export": Gemma4TextAttentionOptions(layout="unrolled", rope="pre_negated_sin"),
 }
 
 
@@ -98,7 +120,9 @@ def get_gemma4_text_attention_options(
     The root-level ``model_args["profile"]`` selects the default execution
     profile. ``model_args["attention"]`` may override that profile or individual
     attention fields. The attention override accepts either a profile string or
-    a mapping.
+    a mapping. When omitted, ``"npu_export"`` selects unrolled attention
+    with pre-negated sine. An explicit ``attention.rope`` overrides the
+    selected profile without changing the layout.
 
     Examples
     --------
@@ -162,8 +186,15 @@ def get_gemma4_text_attention_options(
 def is_npu_export_text_attention_options(
     options: Gemma4TextAttentionOptions,
 ) -> bool:
-    """Return whether the options match the NPU-export attention graph."""
-    return options.layout == "unrolled"
+    """Return whether the options are supported by the NPU-export graph.
+
+    Both RoPE conventions are supported. The host-provided sine tables must
+    match the selected convention; this predicate does not validate tensors.
+    """
+    return options.layout == "unrolled" and options.rope in (
+        "hf",
+        "pre_negated_sin",
+    )
 
 
 def _validate_gemma4_text_attention_options(
@@ -172,3 +203,5 @@ def _validate_gemma4_text_attention_options(
     """Validate a fully resolved Gemma4 text-attention option set."""
     if options.layout not in ("batched", "unrolled"):
         raise ValueError(f"Unsupported attention layout: {options.layout!r}.")
+    if options.rope not in ("hf", "pre_negated_sin"):
+        raise ValueError(f"Unsupported RoPE convention: {options.rope!r}.")

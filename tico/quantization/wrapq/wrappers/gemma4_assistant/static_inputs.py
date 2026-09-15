@@ -32,6 +32,8 @@ from typing import Any, Mapping, Optional, Tuple
 
 import torch
 
+from tico.quantization.config.gemma4_attention import RopeConvention
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     assistant_layer_type_head_dim,
     assistant_shared_kv_num_heads,
@@ -273,6 +275,7 @@ def canonicalize_gemma4_assistant_static_inputs(
     mask_fill_value: float = -120.0,
     dtype: torch.dtype = torch.float32,
     device: torch.device | str = "cpu",
+    rope: RopeConvention = "pre_negated_sin",
 ) -> Gemma4AssistantStaticInputs:
     """Canonicalize dynamic assistant inputs to the fixed NPU core ABI.
 
@@ -291,6 +294,11 @@ def canonicalize_gemma4_assistant_static_inputs(
             ``PTQConfig.attention_mask_fill_value``).
         dtype: Floating dtype of the canonicalized tensors.
         device: Device of the canonicalized tensors.
+        rope: Sine-table convention required by the consuming attention graph.
+            Defaults to the NPU profile (``"pre_negated_sin"``). Pass ``"hf"``
+            for a reference/HF consumer, or pass the constructed consumer
+            convention explicitly. Only fresh RoPE tables are transformed,
+            never target shared K/V.
 
     Raises:
         ValueError: On batch/query violations, over-capacity full KV, or a
@@ -436,7 +444,7 @@ def canonicalize_gemma4_assistant_static_inputs(
         full_attention_mask=_finalize(full_mask),
         sliding_attention_mask=_finalize(sliding_mask),
         full_cos=_finalize(full_cos),
-        full_sin=_finalize(full_sin),
+        full_sin=_finalize(prepare_gemma4_rope_sin(full_sin, rope)),
         sliding_cos=_finalize(sliding_cos),
-        sliding_sin=_finalize(sliding_sin),
+        sliding_sin=_finalize(prepare_gemma4_rope_sin(sliding_sin, rope)),
     )

@@ -230,12 +230,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
         obs_neg,
         obs_cat,
     ) -> torch.Tensor:
-        """Apply Gemma4/HF ``rotate_half`` as ``[-x2, x1]``."""
+        """Rotate halves using the convention of the supplied sine table."""
         x1, x2 = torch.chunk(tensor, 2, dim=-1)
         x1 = self._fq(x1, obs_x1)
         x2 = self._fq(x2, obs_x2)
-        neg_x2 = self._fq(-x2, obs_neg)
-        return self._fq(torch.cat((neg_x2, x1), dim=-1), obs_cat)
+        if self.attn_options.rope == "hf":
+            x2 = self._fq(-x2, obs_neg)
+        return self._fq(torch.cat((x2, x1), dim=-1), obs_cat)
 
     def _apply_rope(
         self,
@@ -564,6 +565,10 @@ class QuantGemma4TextAttention(QuantModuleBase):
     def _apply_attention_scale(self, logits: torch.Tensor) -> torch.Tensor:
         """Observe logits, apply the Gemma4 attention scale, and observe output."""
         logits = self._fq(logits, self.obs_logits_raw)
+        # Keep both logits fake-quant boundaries. Only the identity scale
+        # tensor and its multiplication disappear; no Q/K weights are fused.
+        if self.scaling == 1.0:
+            return self._fq(logits, self.obs_logits)
         scale = self._fq(
             torch.tensor(
                 self.scaling,
@@ -699,6 +704,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
         Args:
             hidden_states: Input tensor shaped ``(B, S, hidden_size)``.
             position_embeddings: Tuple ``(cos, sin)`` shaped ``(B, S, head_dim)``.
+                Sine must already follow ``attn_options.rope``. This wrapper
+                does not transform tables or re-rotate shared/cached keys.
             attention_mask: Optional additive or keep mask broadcastable to
                 attention logits.
             shared_key_value: Optional full K/V tensors for shared-KV layers.
@@ -832,14 +839,13 @@ class QuantGemma4TextAttention(QuantModuleBase):
         raise ValueError(f"Unsupported Gemma4 export mode: {mode!r}")
 
     def _all_observers(self) -> Iterable:
-        """Return observers owned directly by this wrapper."""
+        """Return only active observers, retaining dormant module attributes."""
         common = [
             self.obs_hidden,
             self.obs_cos,
             self.obs_sin,
             self.obs_q_x1,
             self.obs_q_x2,
-            self.obs_q_neg,
             self.obs_q_cat,
             self.obs_q_cos,
             self.obs_q_sin,
@@ -848,7 +854,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self.obs_present_value,
             self.obs_attn_mask,
             self.obs_logits_raw,
-            self.obs_scale,
             self.obs_logits,
             self.obs_mask_add,
             self.obs_softmax,
@@ -856,12 +861,15 @@ class QuantGemma4TextAttention(QuantModuleBase):
             self.obs_attn_weights,
             self.obs_attn_out_h,
         ]
+        if self.attn_options.rope == "hf":
+            common.append(self.obs_q_neg)
+        if self.scaling != 1.0:
+            common.append(self.obs_scale)
         if not self.is_kv_shared_layer:
             common.extend(
                 [
                     self.obs_k_x1,
                     self.obs_k_x2,
-                    self.obs_k_neg,
                     self.obs_k_cat,
                     self.obs_k_cos,
                     self.obs_k_sin,
@@ -870,4 +878,6 @@ class QuantGemma4TextAttention(QuantModuleBase):
                     self.obs_new_v,
                 ]
             )
+            if self.attn_options.rope == "hf":
+                common.append(self.obs_k_neg)
         return tuple(common)
