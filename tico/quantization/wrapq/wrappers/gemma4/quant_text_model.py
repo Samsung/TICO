@@ -278,9 +278,7 @@ class QuantGemma4TextModel(QuantModuleBase):
                     self._cos_template_name(layer_type), cos, persistent=False
                 )
                 # Store prepared templates; slicing must not flip them again.
-                sin = prepare_gemma4_rope_sin(
-                    sin, getattr(self, "rope_convention", "hf")
-                )
+                sin = prepare_gemma4_rope_sin(sin, self.rope_convention)
                 self.register_buffer(
                     self._sin_template_name(layer_type), sin, persistent=False
                 )
@@ -601,9 +599,7 @@ class QuantGemma4TextModel(QuantModuleBase):
                 ).expand(batch_size, -1, -1)
             else:
                 cos, sin = self.rotary_emb(hidden_states, position_ids, layer_type)
-                sin = prepare_gemma4_rope_sin(
-                    sin, getattr(self, "rope_convention", "hf")
-                )
+                sin = prepare_gemma4_rope_sin(sin, self.rope_convention)
             outputs[layer_type] = (
                 self._fq(cos, self.obs_position_cos[layer_type]),
                 self._fq(sin, self.obs_position_sin[layer_type]),

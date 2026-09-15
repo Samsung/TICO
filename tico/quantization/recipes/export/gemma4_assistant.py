@@ -111,7 +111,7 @@ def build_assistant_core_example_inputs(
         model_or_config=assistant.config,
         rotary_emb=assistant.model.rotary_emb,
         mask_fill_value=float(assistant.qcfg.attention_mask_fill_value),
-        rope=getattr(assistant.model, "rope_convention", "hf"),
+        rope=assistant.model.rope_convention,
     )
     return static.as_tuple()
 
@@ -284,7 +284,7 @@ def write_gemma4_assistant_manifest(
     # Extract actual Circle I/O types instead of using hardcoded example tensor types.
     input_contracts, output_contracts = _extract_circle_io_contracts(circle_path)
 
-    rope = getattr(assistant.model, "rope_convention", "hf")
+    rope = assistant.model.rope_convention
     manifest: dict[str, Any] = {
         "schema_version": (
             GEMMA4_ASSISTANT_PRE_NEGATED_SIN_MANIFEST_SCHEMA_VERSION

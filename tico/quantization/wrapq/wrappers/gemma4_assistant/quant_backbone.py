@@ -104,7 +104,7 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
         position_ids = position_ids.to(device=hidden_states.device)
         if position_ids.dim() == 1:
             position_ids = position_ids.unsqueeze(0)
-        rope = getattr(self, "rope_convention", "hf")
+        rope = self.rope_convention
         outputs = {}
         with torch.no_grad():
             for layer_type in self.unique_layer_types:

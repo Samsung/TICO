@@ -619,7 +619,7 @@ class StaticGemma4Runtime:
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_type in layer_types:
             cos, sin = rotary_emb(dummy_hidden, position_ids, layer_type)
-            sin = prepare_gemma4_rope_sin(sin, getattr(self, "rope_convention", "hf"))
+            sin = prepare_gemma4_rope_sin(sin, self.rope_convention)
             position_embeddings[layer_type] = (cos, sin)
 
         return attention_masks, position_embeddings
@@ -774,7 +774,7 @@ class StaticGemma4Runtime:
         position_embeddings: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for layer_type in layer_types:
             cos, sin = rotary_emb(dummy_hidden, position_ids, layer_type)
-            sin = prepare_gemma4_rope_sin(sin, getattr(self, "rope_convention", "hf"))
+            sin = prepare_gemma4_rope_sin(sin, self.rope_convention)
             position_embeddings[layer_type] = (cos, sin)
 
         return attention_masks, position_embeddings
@@ -1383,9 +1383,7 @@ def verify_step_masks_and_rope(
     layer_types = set(runtime.text_config.layer_types)
     for layer_type in layer_types:
         ref_cos, ref_sin = rotary_emb(dummy_hidden, position_ids, layer_type)
-        ref_sin = prepare_gemma4_rope_sin(
-            ref_sin, getattr(runtime, "rope_convention", "hf")
-        )
+        ref_sin = prepare_gemma4_rope_sin(ref_sin, runtime.rope_convention)
         rt_cos, rt_sin = rt_rope[layer_type]
 
         torch.testing.assert_close(

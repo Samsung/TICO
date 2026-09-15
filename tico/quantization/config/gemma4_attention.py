@@ -51,23 +51,14 @@ class Gemma4TextAttentionOptions:
         before calibration or export; changing this option requires fresh
         calibration. ``"npu_export"`` defaults to ``"pre_negated_sin"``;
         ``"reference_eval"`` defaults to ``"hf"``. An explicit ``rope``
-        override takes precedence over either profile.
+        override takes precedence over either profile. Direct dataclass
+        construction defaults to ``"hf"``; execution-profile policy
+        belongs to the presets resolved by
+        ``get_gemma4_text_attention_options``.
     """
 
     layout: AttentionLayout = "unrolled"
-    rope: RopeConvention = "pre_negated_sin"
-
-    def __setstate__(self, state: dict[str, Any]) -> None:
-        """Keep pre-option pickles on the HF convention they were built for.
-
-        Older attention options stored only ``layout``. Falling through to
-        the new class default would reinterpret their already-built graph
-        without converting its producer or recalibrating its observers.
-        Explicit conventions saved by newer checkpoints are preserved.
-        """
-        object.__setattr__(self, "layout", state["layout"])
-        object.__setattr__(self, "rope", state.get("rope", "hf"))
-        _validate_gemma4_text_attention_options(self)
+    rope: RopeConvention = "hf"
 
 
 _PRESETS: dict[ExecutionProfile, Gemma4TextAttentionOptions] = {
@@ -186,15 +177,13 @@ def get_gemma4_text_attention_options(
 def is_npu_export_text_attention_options(
     options: Gemma4TextAttentionOptions,
 ) -> bool:
-    """Return whether the options are supported by the NPU-export graph.
+    """Return whether the options match the canonical NPU-export graph.
 
-    Both RoPE conventions are supported. The host-provided sine tables must
-    match the selected convention; this predicate does not validate tensors.
+    An explicit ``rope="hf"`` override remains valid for eager execution,
+    but does not satisfy the NPU export contract. This predicate checks
+    execution options, not the convention of host-provided sine tensors.
     """
-    return options.layout == "unrolled" and options.rope in (
-        "hf",
-        "pre_negated_sin",
-    )
+    return options.layout == "unrolled" and options.rope == "pre_negated_sin"
 
 
 def _validate_gemma4_text_attention_options(

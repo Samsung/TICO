@@ -323,9 +323,9 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
         return_kv : bool
             Whether the adapter should return the newly produced K/V tensors.
         require_npu_profile : bool
-            Whether to reject a non-unrolled attention graph. Static NPU export
-            should keep this enabled. Reference-only experiments may disable it
-            explicitly.
+            Whether to require unrolled attention with pre-negated sine.
+            Static NPU export should keep this enabled. Reference-only
+            experiments may disable it explicitly.
         per_layer_input_observer : ObserverBase, optional
             Producer-side observer for the packed PLE tensor. Split Circle export
             reapplies this frozen observer at the external ``per_layer_input``
@@ -339,10 +339,14 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
                 )
             if not is_npu_export_text_attention_options(attn_options):
                 raise ValueError(
-                    "Gemma4 text decoder export requires execution profile "
-                    "'npu_export'. Set PTQConfig.model_args['profile'] to "
-                    "'npu_export', or pass require_npu_profile=False for a "
-                    "reference-only export experiment."
+                    "Gemma4 text decoder export requires the canonical "
+                    "'npu_export' graph: layout='unrolled' and "
+                    "rope='pre_negated_sin'. "
+                    f"Got layout={attn_options.layout!r}, rope={attn_options.rope!r}. "
+                    "Set PTQConfig.model_args['profile'] to 'npu_export' and "
+                    "remove conflicting attention overrides, or pass "
+                    "require_npu_profile=False for a reference-only export "
+                    "experiment."
                 )
 
         if mode == "prefill":

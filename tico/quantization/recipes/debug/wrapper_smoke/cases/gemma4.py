@@ -437,7 +437,9 @@ def _text_rope_for_module(
     attention = getattr(attention, "wrapped", attention)
     options = getattr(attention, "attn_options", None)
     cos, sin = position_embeddings
-    return cos, prepare_gemma4_rope_sin(sin, getattr(options, "rope", "hf"))
+    if options is None:
+        return cos, sin  # An original HF reference has no wrapper options.
+    return cos, prepare_gemma4_rope_sin(sin, options.rope)
 
 
 def _attention_mask(seq_len: int, kv_len: int | None = None) -> torch.Tensor:

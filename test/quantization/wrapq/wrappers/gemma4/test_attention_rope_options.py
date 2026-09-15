@@ -15,9 +15,9 @@
 """Synthetic regression tests for Gemma4 RoPE and identity-scale handling."""
 
 import copy
-import pickle
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -29,6 +29,9 @@ from tico.quantization.config.gemma4_attention import (
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     QuantGemma4TextAttention,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+    QuantGemma4TextDecoderLayer,
 )
 from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 
@@ -44,7 +47,10 @@ class TestGemma4RoPEOptions(unittest.TestCase):
         expected_default = Gemma4TextAttentionOptions(
             layout="unrolled", rope="pre_negated_sin"
         )
-        self.assertEqual(Gemma4TextAttentionOptions(), expected_default)
+        self.assertEqual(
+            Gemma4TextAttentionOptions(),
+            Gemma4TextAttentionOptions(layout="unrolled", rope="hf"),
+        )
         self.assertEqual(get_gemma4_text_attention_options(None), expected_default)
         self.assertEqual(
             get_gemma4_text_attention_options(PTQConfig()), expected_default
@@ -65,7 +71,7 @@ class TestGemma4RoPEOptions(unittest.TestCase):
                     self.assertEqual(options, Gemma4TextAttentionOptions(layout, rope))
                     self.assertEqual(
                         is_npu_export_text_attention_options(options),
-                        layout == "unrolled",
+                        layout == "unrolled" and rope == "pre_negated_sin",
                     )
 
     def test_profile_aliases_and_explicit_override_precedence(self):
@@ -103,16 +109,63 @@ class TestGemma4RoPEOptions(unittest.TestCase):
                 )
                 self.assertEqual((options.layout, options.rope), (layout, rope))
 
-    def test_legacy_pickle_without_rope_retains_hf(self):
-        # Simulate the state of main's layout-only options, not a new default.
-        legacy = Gemma4TextAttentionOptions(layout="unrolled")
-        object.__delattr__(legacy, "rope")
-        restored = pickle.loads(pickle.dumps(legacy))
-        self.assertEqual(restored, Gemma4TextAttentionOptions("unrolled", "hf"))
-        for rope in ("hf", "pre_negated_sin"):
-            options = Gemma4TextAttentionOptions("unrolled", rope)
-            self.assertEqual(pickle.loads(pickle.dumps(options)), options)
-            self.assertEqual(copy.deepcopy(options), options)
+    def test_dataclass_defaults_do_not_select_an_execution_profile(self):
+        options = Gemma4TextAttentionOptions()
+        self.assertEqual((options.layout, options.rope), ("unrolled", "hf"))
+        self.assertFalse(is_npu_export_text_attention_options(options))
+        self.assertNotIn("__setstate__", Gemma4TextAttentionOptions.__dict__)
+        resolved = get_gemma4_text_attention_options(PTQConfig())
+        self.assertTrue(is_npu_export_text_attention_options(resolved))
+
+    @staticmethod
+    def _decoder_shell(options):
+        return SimpleNamespace(
+            self_attn=SimpleNamespace(wrapped=SimpleNamespace(attn_options=options)),
+            _mode=None,
+        )
+
+    def test_decoder_export_rejects_noncanonical_options(self):
+        for layout, rope in (
+            ("batched", "hf"),
+            ("batched", "pre_negated_sin"),
+            ("unrolled", "hf"),
+        ):
+            for mode in ("prefill", "decode"):
+                with self.subTest(layout=layout, rope=rope, mode=mode):
+                    shell = self._decoder_shell(
+                        Gemma4TextAttentionOptions(layout, rope)
+                    )
+                    with self.assertRaisesRegex(ValueError, "rope='pre_negated_sin'"):
+                        QuantGemma4TextDecoderLayer.as_export_module(shell, mode)
+
+    def test_decoder_export_accepts_npu_and_explicit_reference_bypass(self):
+        module = "tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer"
+        for mode, adapter in (
+            ("prefill", "Gemma4TextDecoderLayerPrefillExportAdapter"),
+            ("decode", "Gemma4TextDecoderLayerDecodeExportAdapter"),
+        ):
+            for options, require_npu in (
+                (get_gemma4_text_attention_options(PTQConfig()), True),
+                (Gemma4TextAttentionOptions("unrolled", "hf"), False),
+            ):
+                with self.subTest(mode=mode, require_npu=require_npu):
+                    shell = self._decoder_shell(options)
+                    observer = object()
+                    with patch(f"{module}.{adapter}") as factory:
+                        result = QuantGemma4TextDecoderLayer.as_export_module(
+                            shell,
+                            mode,
+                            return_kv=False,
+                            require_npu_profile=require_npu,
+                            per_layer_input_observer=observer,
+                        )
+                    self.assertIs(result, factory.return_value)
+                    factory.assert_called_once_with(
+                        shell,
+                        return_kv=False,
+                        mode=None,
+                        per_layer_input_observer=observer,
+                    )
 
     def test_invalid_options_are_rejected(self):
         for invalid in ("unknown", None, 1):
