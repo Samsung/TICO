@@ -32,7 +32,7 @@ from tico.serialize.circle_mapping import (
 )
 from tico.serialize.pack import pack_buffer
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
-from tico.utils.utils import to_circle_qparam
+from tico.utils.utils import quant_min_max, to_circle_qparam
 
 """
 Type alias for const
@@ -164,8 +164,20 @@ class CircleSubgraph(circle.SubGraph.SubGraphT):
             data = to_flat_contiguous_numpy(data)
 
             if QPARAM_KEY in node.meta:
-                if node.meta[QPARAM_KEY].dtype == "uint4":
-                    data = pack_buffer(data, "uint4")
+                qparam = node.meta[QPARAM_KEY]
+                if qparam.dtype in ("uint4", "uint8"):
+                    # Quantize data to uint8 before packing
+                    if not np.issubdtype(data.dtype, np.integer):
+                        assert qparam.scale is not None and len(qparam.scale) == 1
+                        assert qparam.zero_point is not None and len(qparam.zero_point) == 1
+                        scale = qparam.scale[0]
+                        zerop = qparam.zero_point[0]
+                        qmin, qmax = quant_min_max(qparam.dtype)
+                        data = np.clip(
+                            np.round(data / scale + zerop), qmin, qmax
+                        ).astype(np.uint8)
+                    if qparam.dtype == "uint4":
+                        data = pack_buffer(data, "uint4")
 
             # Packing np.ndarray is faster than packing bytes
             buffer.data = data.view(np.uint8)  # type: ignore[assignment]

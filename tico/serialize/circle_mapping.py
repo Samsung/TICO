@@ -30,6 +30,7 @@ def to_circle_dtype(
         torch.float32: circle.TensorType.TensorType.FLOAT32,
         torch.float: circle.TensorType.TensorType.FLOAT32,
         torch.uint8: circle.TensorType.TensorType.UINT8,
+        torch.uint4: circle.TensorType.TensorType.UINT4,
         torch.int8: circle.TensorType.TensorType.INT8,
         torch.int16: circle.TensorType.TensorType.INT16,
         torch.short: circle.TensorType.TensorType.INT16,
