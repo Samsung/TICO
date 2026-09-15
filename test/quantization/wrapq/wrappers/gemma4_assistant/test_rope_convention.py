@@ -15,7 +15,9 @@
 """Assistant eager/static sine conventions and shared-KV invariants."""
 
 import copy
+import dataclasses
 import unittest
+from typing import Any, cast
 
 import torch
 
@@ -53,7 +55,11 @@ class TestGemma4AssistantRoPEConvention(unittest.TestCase):
             full_kv_length=8, sliding_kv_length=5
         )
         self.positions = torch.tensor([[4]])
-        self.inputs = torch.randn(1, 1, 2 * self.fp.config.backbone_hidden_size)
+        # ``nn.Module.__getattr__`` types submodules as ``Tensor | Module``.
+        self.config = cast(Any, self.fp.config)
+        self.backbone = cast(torch.nn.Module, self.fp.model)
+        self.rotary_emb = cast(Any, self.backbone).rotary_emb
+        self.inputs = torch.randn(1, 1, 2 * self.config.backbone_hidden_size)
         self.shared = {
             layer_type: (
                 torch.randn(1, 1, 5, width),
@@ -68,20 +74,21 @@ class TestGemma4AssistantRoPEConvention(unittest.TestCase):
             position_ids=self.positions,
             shared_kv_states=self.shared,
             shape=self.shape,
-            model_or_config=self.fp.config,
-            rotary_emb=self.fp.model.rotary_emb,
+            model_or_config=self.config,
+            rotary_emb=self.rotary_emb,
             **({} if rope is None else {"rope": rope}),
         )
 
     def test_npu_profile_and_static_default_match_without_rope_override(self):
         qcfg = PTQConfig(model_args={"profile": "npu_export"})
         backbone = QuantGemma4AssistantBackbone(
-            copy.deepcopy(self.fp.model), qcfg=qcfg
+            copy.deepcopy(self.backbone), qcfg=qcfg
         ).eval()
         self.assertEqual(backbone.rope_convention, "pre_negated_sin")
         for layer in backbone.layers:
+            decoder = cast(Any, layer.wrapped)
             self.assertEqual(
-                layer.wrapped.self_attn.wrapped.attn_options.rope, "pre_negated_sin"
+                decoder.self_attn.wrapped.attn_options.rope, "pre_negated_sin"
             )
         default_static = self._canonical()
         explicit_static = self._canonical("pre_negated_sin")
@@ -89,7 +96,7 @@ class TestGemma4AssistantRoPEConvention(unittest.TestCase):
             default_static.as_tuple(), explicit_static.as_tuple()
         ):
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-        hidden = torch.randn(1, 1, self.fp.config.get_text_config().hidden_size)
+        hidden = torch.randn(1, 1, self.config.get_text_config().hidden_size)
         eager_tables = backbone.build_position_embeddings(hidden, self.positions)
         for layer_type, pair in eager_tables.items():
             for actual, expected in zip(
@@ -102,7 +109,8 @@ class TestGemma4AssistantRoPEConvention(unittest.TestCase):
         hf = self._canonical("hf")
         pre = self._canonical("pre_negated_sin")
         changed = {"full_sin", "sliding_sin"}
-        for name in hf.__dataclass_fields__:
+        for field in dataclasses.fields(hf):
+            name = field.name
             expected = getattr(hf, name)
             if name in changed:
                 expected = prepare_gemma4_rope_sin(expected, "pre_negated_sin")
@@ -114,12 +122,12 @@ class TestGemma4AssistantRoPEConvention(unittest.TestCase):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_backbone_eager_and_explicit_static_tables_match(self):
-        hidden = torch.randn(1, 1, self.fp.config.get_text_config().hidden_size)
+        hidden = torch.randn(1, 1, self.config.get_text_config().hidden_size)
         for rope in ("hf", "pre_negated_sin"):
             with self.subTest(rope=rope), torch.no_grad():
                 qcfg = PTQConfig(model_args={"attention": {"rope": rope}})
                 backbone = QuantGemma4AssistantBackbone(
-                    copy.deepcopy(self.fp.model), qcfg=qcfg
+                    copy.deepcopy(self.backbone), qcfg=qcfg
                 ).eval()
                 static = self._canonical(rope)
                 tables = backbone.build_position_embeddings(hidden, self.positions)

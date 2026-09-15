@@ -17,16 +17,19 @@
 import copy
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast, Dict, Tuple
 from unittest.mock import patch
 
 import torch
 
 from tico.quantization.config.gemma4_attention import (
+    AttentionLayout,
     Gemma4TextAttentionOptions,
     get_gemma4_text_attention_options,
     is_npu_export_text_attention_options,
+    RopeConvention,
 )
-from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     QuantGemma4TextAttention,
 )
@@ -61,8 +64,10 @@ class TestGemma4RoPEOptions(unittest.TestCase):
         ):
             cfg = PTQConfig(model_args={"profile": profile})
             self.assertEqual(get_gemma4_text_attention_options(cfg).rope, rope)
-        for layout in ("batched", "unrolled"):
-            for rope in ("hf", "pre_negated_sin"):
+        layouts: Tuple[AttentionLayout, ...] = ("batched", "unrolled")
+        ropes: Tuple[RopeConvention, ...] = ("hf", "pre_negated_sin")
+        for layout in layouts:
+            for rope in ropes:
                 with self.subTest(layout=layout, rope=rope):
                     cfg = PTQConfig(
                         model_args={"attention": {"layout": layout, "rope": rope}}
@@ -75,7 +80,7 @@ class TestGemma4RoPEOptions(unittest.TestCase):
                     )
 
     def test_profile_aliases_and_explicit_override_precedence(self):
-        cases = (
+        cases: Tuple[Tuple[Dict[str, Any], str, str], ...] = (
             ({"attention": "npu_export"}, "unrolled", "pre_negated_sin"),
             ({"attention": {"profile": "npu_export"}}, "unrolled", "pre_negated_sin"),
             (
@@ -118,19 +123,23 @@ class TestGemma4RoPEOptions(unittest.TestCase):
         self.assertTrue(is_npu_export_text_attention_options(resolved))
 
     @staticmethod
-    def _decoder_shell(options):
-        return SimpleNamespace(
+    def _decoder_shell(options) -> QuantGemma4TextDecoderLayer:
+        shell = SimpleNamespace(
             self_attn=SimpleNamespace(wrapped=SimpleNamespace(attn_options=options)),
             _mode=None,
         )
+        # Only the attributes read by ``as_export_module`` are needed here.
+        return cast(QuantGemma4TextDecoderLayer, shell)
 
     def test_decoder_export_rejects_noncanonical_options(self):
-        for layout, rope in (
+        noncanonical: Tuple[Tuple[AttentionLayout, RopeConvention], ...] = (
             ("batched", "hf"),
             ("batched", "pre_negated_sin"),
             ("unrolled", "hf"),
-        ):
-            for mode in ("prefill", "decode"):
+        )
+        modes: Tuple[ExportMode, ...] = ("prefill", "decode")
+        for layout, rope in noncanonical:
+            for mode in modes:
                 with self.subTest(layout=layout, rope=rope, mode=mode):
                     shell = self._decoder_shell(
                         Gemma4TextAttentionOptions(layout, rope)
@@ -140,17 +149,19 @@ class TestGemma4RoPEOptions(unittest.TestCase):
 
     def test_decoder_export_accepts_npu_and_explicit_reference_bypass(self):
         module = "tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer"
-        for mode, adapter in (
+        adapters: Tuple[Tuple[ExportMode, str], ...] = (
             ("prefill", "Gemma4TextDecoderLayerPrefillExportAdapter"),
             ("decode", "Gemma4TextDecoderLayerDecodeExportAdapter"),
-        ):
+        )
+        for mode, adapter in adapters:
             for options, require_npu in (
                 (get_gemma4_text_attention_options(PTQConfig()), True),
                 (Gemma4TextAttentionOptions("unrolled", "hf"), False),
             ):
                 with self.subTest(mode=mode, require_npu=require_npu):
                     shell = self._decoder_shell(options)
-                    observer = object()
+                    # The observer is forwarded verbatim, so a sentinel suffices.
+                    observer = cast(Any, object())
                     with patch(f"{module}.{adapter}") as factory:
                         result = QuantGemma4TextDecoderLayer.as_export_module(
                             shell,
@@ -211,7 +222,19 @@ class TestGemma4RoPEOptions(unittest.TestCase):
         with self.assertRaises(TypeError):
             prepare_gemma4_rope_sin(torch.zeros(2, 4, dtype=torch.int64))
         with self.assertRaises(ValueError):
-            prepare_gemma4_rope_sin(torch.zeros(2, 4), "other")
+            prepare_gemma4_rope_sin(torch.zeros(2, 4), cast(RopeConvention, "other"))
+
+    @staticmethod
+    def _scale_shell(scaling, fq) -> QuantGemma4TextAttention:
+        shell = SimpleNamespace(
+            scaling=scaling,
+            _fq=fq,
+            obs_logits_raw="raw",
+            obs_logits="output",
+            obs_scale="scale",
+        )
+        # Only the attributes read by ``_apply_attention_scale`` are needed here.
+        return cast(QuantGemma4TextAttention, shell)
 
     def test_identity_scale_retains_both_logits_observers(self):
         calls = []
@@ -222,13 +245,7 @@ class TestGemma4RoPEOptions(unittest.TestCase):
                 self.fail("The identity scale observer must never be visited")
             return value + 1
 
-        shell = SimpleNamespace(
-            scaling=1.0,
-            _fq=fq,
-            obs_logits_raw="raw",
-            obs_logits="output",
-            obs_scale="scale",
-        )
+        shell = self._scale_shell(1.0, fq)
         logits = torch.randn(1, 3, 4)
         actual = QuantGemma4TextAttention._apply_attention_scale(shell, logits)
         torch.testing.assert_close(actual, logits + 2)
@@ -242,13 +259,7 @@ class TestGemma4RoPEOptions(unittest.TestCase):
                 calls.append(observer)
                 return value
 
-            shell = SimpleNamespace(
-                scaling=scale,
-                _fq=fq,
-                obs_logits_raw="raw",
-                obs_logits="output",
-                obs_scale="scale",
-            )
+            shell = self._scale_shell(scale, fq)
             logits = torch.randn(1, 3, 4)
             actual = QuantGemma4TextAttention._apply_attention_scale(shell, logits)
             torch.testing.assert_close(actual, logits * scale, rtol=0, atol=0)
@@ -378,7 +389,8 @@ class TestGemma4RoPEIntegration(unittest.TestCase):
             Gemma4TextRotaryEmbedding,
         )
 
-        for rope in ("hf", "pre_negated_sin"):
+        ropes: Tuple[RopeConvention, ...] = ("hf", "pre_negated_sin")
+        for rope in ropes:
             cfg = self._config()
             fp = Gemma4TextAttention(cfg, layer_idx=1).eval()
             wrapped = QuantGemma4TextAttention(
@@ -451,10 +463,11 @@ class TestGemma4RoPEIntegration(unittest.TestCase):
         )
         from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
-        for profile, rope in (
+        profiles: Tuple[Tuple[str, RopeConvention], ...] = (
             ("reference_eval", "hf"),
             ("npu_export", "pre_negated_sin"),
-        ):
+        )
+        for profile, rope in profiles:
             cfg = self._config()
             fp = Gemma4TextModel(cfg).eval()
             model = QuantGemma4TextModel(
@@ -465,18 +478,23 @@ class TestGemma4RoPEIntegration(unittest.TestCase):
             ).eval()
             self.assertEqual(model.rope_convention, rope)
             for layer in model.layers:
-                self.assertEqual(
-                    layer.wrapped.self_attn.wrapped.attn_options.rope, rope
-                )
+                # ``nn.Module.__getattr__`` types submodules as ``Tensor | Module``.
+                decoder = cast(Any, layer.wrapped)
+                self.assertEqual(decoder.self_attn.wrapped.attn_options.rope, rope)
             hidden = torch.randn(1, 5, cfg.hidden_size)
             positions = torch.arange(5).unsqueeze(0)
-            args = dict(
-                hidden_states=hidden, position_ids=positions, past_key_values=None
-            )
             dynamic = model._make_position_embeddings(
-                **args, use_static_templates=False
+                hidden_states=hidden,
+                position_ids=positions,
+                past_key_values=None,
+                use_static_templates=False,
             )
-            static = model._make_position_embeddings(**args, use_static_templates=True)
+            static = model._make_position_embeddings(
+                hidden_states=hidden,
+                position_ids=positions,
+                past_key_values=None,
+                use_static_templates=True,
+            )
             for layer_type in model.unique_layer_types:
                 self._assert_nested(static[layer_type], dynamic[layer_type])
                 cos, sin = fp.rotary_emb(hidden, positions, layer_type)

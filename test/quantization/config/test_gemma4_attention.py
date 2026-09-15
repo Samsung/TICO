@@ -13,13 +13,16 @@
 # limitations under the License.
 
 import unittest
+from typing import Tuple
 
 from tico.quantization.config.gemma4_attention import (
+    AttentionLayout,
     DEFAULT_EXECUTION_PROFILE,
     Gemma4TextAttentionOptions,
     get_gemma4_text_attention_options,
     is_npu_export_text_attention_options,
     normalize_execution_profile,
+    RopeConvention,
 )
 from tico.quantization.config.ptq import PTQConfig
 
@@ -157,8 +160,10 @@ class TestGemma4TextAttentionOptionsResolver(unittest.TestCase):
 
     def test_npu_contract_requires_canonical_layout_and_rope(self):
         """Only unrolled attention with pre-negated sine satisfies export."""
-        for layout in ("batched", "unrolled"):
-            for rope in ("hf", "pre_negated_sin"):
+        layouts: Tuple[AttentionLayout, ...] = ("batched", "unrolled")
+        ropes: Tuple[RopeConvention, ...] = ("hf", "pre_negated_sin")
+        for layout in layouts:
+            for rope in ropes:
                 with self.subTest(layout=layout, rope=rope):
                     options = Gemma4TextAttentionOptions(layout=layout, rope=rope)
                     self.assertEqual(
