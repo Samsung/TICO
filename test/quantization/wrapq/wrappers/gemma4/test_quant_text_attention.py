@@ -26,7 +26,14 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     LayerKV,
     QuantGemma4TextAttention,
 )
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
+
+
+def _rope_for_attention(attention, raw_rope):
+    """Prepare fresh HF sine for this wrapper without modifying the reference."""
+    cos, sin = raw_rope
+    return cos, prepare_gemma4_rope_sin(sin, attention.attn_options.rope)
 
 
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
@@ -165,6 +172,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         qattn = QuantGemma4TextAttention(self._make_attention()).eval()
 
         self.assertEqual(qattn.attn_options.layout, "unrolled")
+        self.assertEqual(qattn.attn_options.rope, "pre_negated_sin")
 
     def test_reference_profile_uses_batched_layout(self):
         """The reference profile should select the batched GQA implementation."""
@@ -174,6 +182,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         ).eval()
 
         self.assertEqual(qattn.attn_options.layout, "batched")
+        self.assertEqual(qattn.attn_options.rope, "hf")
 
     def test_copies_sliding_window_contract(self):
         """The wrapper should retain the static sliding-attention contract."""
@@ -204,7 +213,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         with torch.no_grad():
             quant_out, quant_weights = qattn(
                 hidden,
-                rope,
+                _rope_for_attention(qattn, rope),
                 attention_mask=mask,
                 shared_kv_states={},
             )
@@ -234,14 +243,14 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
             with self.subTest(cache_mode=cache_mode), torch.no_grad():
                 batched_output = batched(
                     hidden,
-                    rope,
+                    _rope_for_attention(batched, rope),
                     attention_mask=mask,
                     use_cache=True,
                     cache_output_mode=cache_mode,
                 )
                 unrolled_output = unrolled(
                     hidden,
-                    rope,
+                    _rope_for_attention(unrolled, rope),
                     attention_mask=mask,
                     use_cache=True,
                     cache_output_mode=cache_mode,
@@ -266,7 +275,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
             with self.subTest(cache_mode=cache_mode), torch.no_grad():
                 batched_output = batched(
                     hidden,
-                    rope,
+                    _rope_for_attention(batched, rope),
                     attention_mask=mask,
                     past_key_value=past_key_value,
                     use_cache=True,
@@ -274,7 +283,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
                 )
                 unrolled_output = unrolled(
                     hidden,
-                    rope,
+                    _rope_for_attention(unrolled, rope),
                     attention_mask=mask,
                     past_key_value=past_key_value,
                     use_cache=True,
@@ -293,8 +302,12 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         mask = self._zero_mask(batch_size, seq_len, seq_len)
 
         with torch.no_grad():
-            batched_output = batched(hidden, rope, attention_mask=mask)
-            unrolled_output = unrolled(hidden, rope, attention_mask=mask)
+            batched_output = batched(
+                hidden, _rope_for_attention(batched, rope), attention_mask=mask
+            )
+            unrolled_output = unrolled(
+                hidden, _rope_for_attention(unrolled, rope), attention_mask=mask
+            )
 
         self._assert_output_tuple_close(batched_output, unrolled_output)
 
@@ -320,14 +333,14 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         with torch.no_grad():
             batched_output = batched(
                 hidden,
-                rope,
+                _rope_for_attention(batched, rope),
                 attention_mask=mask,
                 shared_key_value=shared_key_value,
                 use_cache=True,
             )
             unrolled_output = unrolled(
                 hidden,
-                rope,
+                _rope_for_attention(unrolled, rope),
                 attention_mask=mask,
                 shared_key_value=shared_key_value,
                 use_cache=True,
@@ -347,6 +360,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         batch_size, seq_len = 1, 4
         hidden = torch.randn(batch_size, seq_len, cfg.hidden_size)
         cos, sin = self._rope(batch_size, seq_len, cfg.head_dim)
+        cos, sin = _rope_for_attention(qattn, (cos, sin))
         mask = self._zero_mask(batch_size, seq_len, seq_len)
 
         exported = torch.export.export(adapter, (hidden, cos, sin, mask))
@@ -390,7 +404,11 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
 
         hidden = torch.randn(1, 4, qattn.config.hidden_size)
         rope = self._rope(1, 4, qattn.head_dim)
-        qattn(hidden, rope, attention_mask=self._zero_mask(1, 4, 4))
+        qattn(
+            hidden,
+            _rope_for_attention(qattn, rope),
+            attention_mask=self._zero_mask(1, 4, 4),
+        )
         qattn.freeze_qparams()
 
         self.assertIs(qattn._mode, Mode.QUANT)
@@ -411,7 +429,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         with torch.no_grad():
             out0, weights0, kv0 = qattn(
                 hidden,
-                rope,
+                _rope_for_attention(qattn, rope),
                 attention_mask=mask,
                 use_cache=True,
                 cache_output_mode="delta",
@@ -437,7 +455,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         with torch.no_grad():
             out1, weights1, kv1 = qattn(
                 hidden1,
-                rope1,
+                _rope_for_attention(qattn, rope1),
                 attention_mask=mask1,
                 past_key_value=kv0,
                 use_cache=True,
@@ -478,7 +496,7 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         with torch.no_grad():
             quant_out, _ = qattn(
                 hidden,
-                rope,
+                _rope_for_attention(qattn, rope),
                 attention_mask=mask,
                 shared_kv_states={},
             )
@@ -529,18 +547,22 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
 
             qattn0(
                 hidden,
-                rope,
+                _rope_for_attention(qattn0, rope),
                 attention_mask=mask,
                 shared_kv_states=q_shared,
             )
             quant_out, quant_weights = qattn1(
                 hidden,
-                rope,
+                _rope_for_attention(qattn1, rope),
                 attention_mask=mask,
                 shared_kv_states=q_shared,
             )
 
         self.assertIn("full_attention", q_shared)
+        for actual, expected in zip(
+            q_shared["full_attention"], fp_shared["full_attention"]
+        ):
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
         self.assertEqual(quant_out.shape, fp_out.shape)
         self.assertEqual(quant_weights.shape, fp_weights.shape)
         torch.testing.assert_close(quant_out, fp_out, atol=1e-5, rtol=1e-5)

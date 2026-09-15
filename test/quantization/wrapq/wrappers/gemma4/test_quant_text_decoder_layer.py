@@ -20,6 +20,14 @@ import torch
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
+
+
+def _rope_for_decoder(layer, raw_rope):
+    """Use the decoder attention convention for eager and exported inputs."""
+    cos, sin = raw_rope
+    convention = layer.self_attn.wrapped.attn_options.rope
+    return cos, prepare_gemma4_rope_sin(sin, convention)
 
 
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
@@ -154,7 +162,7 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
         with torch.no_grad():
             quant_out = qlayer(
                 hidden,
-                position_embeddings=position_embeddings,
+                position_embeddings=_rope_for_decoder(qlayer, position_embeddings),
                 attention_mask=mask,
                 shared_kv_states={},
             )
@@ -195,7 +203,9 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
         hidden = torch.randn(1, 4, qlayer.config.hidden_size)
         qlayer(
             hidden,
-            position_embeddings=_rope(1, 4, qlayer.config.head_dim),
+            position_embeddings=_rope_for_decoder(
+                qlayer, _rope(1, 4, qlayer.config.head_dim)
+            ),
             attention_mask=_zero_mask(1, 4, 4),
             shared_kv_states={},
         )
@@ -226,7 +236,9 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
         position_embeddings = _rope(batch_size, seq_len, cfg.head_dim)
 
         with torch.no_grad():
-            output = adapter(hidden, mask, position_embeddings)
+            output = adapter(
+                hidden, mask, _rope_for_decoder(qlayer, position_embeddings)
+            )
 
         self.assertIsInstance(output, tuple)
         self.assertEqual(len(output), 3)
@@ -261,7 +273,7 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
             output = adapter(
                 hidden,
                 mask,
-                position_embeddings,
+                _rope_for_decoder(qlayer, position_embeddings),
                 past_key_value=past,
             )
 
@@ -300,7 +312,7 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
             output = adapter(
                 hidden,
                 _zero_mask(batch_size, seq_len, seq_len),
-                _rope(batch_size, seq_len, cfg.head_dim),
+                _rope_for_decoder(qlayer, _rope(batch_size, seq_len, cfg.head_dim)),
                 shared_key_value=key_value,
             )
 
@@ -322,14 +334,18 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
         mask = _zero_mask(1, 3, 3)
 
         with self.assertRaisesRegex(ValueError, "per_layer_input"):
-            qlayer(hidden, position_embeddings=position_embeddings, attention_mask=mask)
+            qlayer(
+                hidden,
+                position_embeddings=_rope_for_decoder(qlayer, position_embeddings),
+                attention_mask=mask,
+            )
 
         per_layer_input = torch.randn(1, 3, cfg.hidden_size_per_layer_input)
         with torch.no_grad():
             quant_out = qlayer(
                 hidden,
                 per_layer_input=per_layer_input,
-                position_embeddings=position_embeddings,
+                position_embeddings=_rope_for_decoder(qlayer, position_embeddings),
                 attention_mask=mask,
                 shared_kv_states={},
             )

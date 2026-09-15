@@ -109,6 +109,11 @@ class TestGemma4WrapperSmokePLEBoundary(unittest.TestCase):
             (),
             {
                 "hidden_states": hidden,
+                # Satisfy the smoke input ABI; this fake only observes PLE.
+                "position_embeddings": (
+                    torch.ones_like(hidden),
+                    torch.zeros_like(hidden),
+                ),
                 "per_layer_input": per_layer_input,
             },
         )

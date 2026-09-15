@@ -230,6 +230,7 @@ class TestBuildStaticInputs(unittest.TestCase):
                 self.image_token_id = image_token_id
 
         runtime = object.__new__(StaticGemma4Runtime)
+        runtime.rope_convention = "pre_negated_sin"
         runtime.processor = FakeProcessor()  # type: ignore[assignment]
         runtime.text_config = SimpleNamespace(pad_token_id=0)
         runtime.device = torch.device("cpu")
@@ -288,6 +289,7 @@ class TestAllocateEmptyCache(unittest.TestCase):
         )
         layout = SimpleNamespace(max_seq=64)
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -344,6 +346,7 @@ class TestAllocateEmptyCache(unittest.TestCase):
         )
         layout = SimpleNamespace(max_seq=32)
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -375,6 +378,7 @@ class TestAllocateEmptyCache(unittest.TestCase):
         )
         layout = SimpleNamespace(max_seq=32)
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -406,6 +410,7 @@ class TestAllocateEmptyCache(unittest.TestCase):
         )
         layout = SimpleNamespace(max_seq=32)
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -436,7 +441,11 @@ class TestAttentionMaskFillValue(unittest.TestCase):
 
         def mock_rotary_emb(x, position_ids, layer_type):
             del position_ids, layer_type
-            return torch.ones_like(x), torch.zeros_like(x)
+            shape = (x.size(0), x.size(1), 2)
+            return (
+                torch.ones(shape, device=x.device, dtype=x.dtype),
+                torch.zeros(shape, device=x.device, dtype=x.dtype),
+            )
 
         class FakeModel(torch.nn.Module):
             """Expose a parameter dtype and the Gemma4 rotary hierarchy."""
@@ -451,6 +460,7 @@ class TestAttentionMaskFillValue(unittest.TestCase):
         max_seq = 8
         fill_value = -37.5
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=SimpleNamespace(
                 layer_types=["full_attention", "sliding_attention"],
                 sliding_window=2,
@@ -527,6 +537,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
             ),
         )
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -566,6 +577,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
             ),
         )
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -613,6 +625,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
             ),
         )
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -658,6 +671,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
             ),
         )
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -707,6 +721,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
             ),
         )
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -754,6 +769,7 @@ class TestBuildDecodeMasksAndRope(unittest.TestCase):
             ),
         )
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             text_config=text_config,
             layout=layout,
             device=torch.device("cpu"),
@@ -815,6 +831,7 @@ class TestVerifyVisionPrefill(unittest.TestCase):
 
         vision_prefill = FakeVisionPrefill()
         runtime = SimpleNamespace(
+            rope_convention="pre_negated_sin",
             device=torch.device("cpu"),
             model=FakeReferenceModel(),
             qmodel=SimpleNamespace(
@@ -921,6 +938,7 @@ def _make_ple_runtime(*, max_seq: int, num_layers: int, ple_dim: int):
         )
 
     runtime = object.__new__(StaticGemma4Runtime)
+    runtime.rope_convention = "pre_negated_sin"
     runtime.device = torch.device("cpu")
     runtime.layout = SimpleNamespace(max_seq=max_seq)  # type: ignore[assignment]
     runtime.text_config = SimpleNamespace(
@@ -1020,6 +1038,7 @@ class TestStaticRuntimePLEStages(unittest.TestCase):
         qtext = QuantGemma4TextModel(fp_model, qcfg=PTQConfig()).eval()
 
         runtime = object.__new__(StaticGemma4Runtime)
+        runtime.rope_convention = "pre_negated_sin"
         runtime.text_model = qtext
         runtime.ple_embedding = Gemma4PLEEmbeddingExportAdapter(qtext)
         runtime.ple_projection = Gemma4PLEProjectionExportAdapter(qtext)
@@ -1043,6 +1062,7 @@ class TestStaticRuntimePLEStages(unittest.TestCase):
         )
 
         runtime = object.__new__(StaticGemma4Runtime)
+        runtime.rope_convention = "pre_negated_sin"
         runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=0)
         runtime.ple_embedding = None
         runtime.ple_projection = None
@@ -1226,6 +1246,7 @@ class TestDecodeOneFixedCacheContract(unittest.TestCase):
             )
 
         runtime = object.__new__(StaticGemma4Runtime)
+        runtime.rope_convention = "pre_negated_sin"
         runtime.device = torch.device("cpu")
         runtime.layout = SimpleNamespace(max_seq=max_seq)  # type: ignore[assignment]
         runtime.text_config = SimpleNamespace(
