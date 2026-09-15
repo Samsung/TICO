@@ -173,8 +173,10 @@ class AffineObserverBase(ObserverBase):
             else:
                 # Per-channel affine fake quant in float64
                 # Reshape scale for broadcasting along channel_axis
+                # (channel_axis may be negative, e.g. -1 for the last dim)
+                ca = self.channel_axis % x.dim()
                 shape = [1] * x.dim()
-                shape[self.channel_axis] = -1
+                shape[ca] = -1
                 scale_b = scale_f64.reshape(shape)
                 zp_b = zp.reshape(shape)
                 x_q = torch.round(x / scale_b + zp_b).clamp(qmin, qmax)
@@ -189,11 +191,14 @@ class AffineObserverBase(ObserverBase):
                 quant_max=self.dtype.qmax,
             )
         else:
+            # channel_axis may be negative (e.g. -1 for the last dim);
+            # torch requires a non-negative axis.
+            axis = self.channel_axis % x.dim()
             return torch.fake_quantize_per_channel_affine(
                 x.float(),
                 scale=scale,
                 zero_point=zp,
-                axis=self.channel_axis,
+                axis=axis,
                 quant_min=self.dtype.qmin,
                 quant_max=self.dtype.qmax,
             )

@@ -302,6 +302,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="which activation types are supposed for KV cache value quantization. Defaults to linear_io_qdtype if not specified.",
     )
     parser.add_argument(
+        "--kv_cache_key_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse"],
+        help="Observer type for KV cache key quantization (minmax/mse). Default: minmax.",
+    )
+    parser.add_argument(
+        "--kv_cache_value_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse"],
+        help="Observer type for KV cache value quantization (minmax/mse). Default: minmax.",
+    )
+    parser.add_argument(
         "--gptq_mse",
         type=str,
         default=None,
@@ -2858,6 +2872,44 @@ def quant_spec_from_dtype_string(dtype_str: str):
     )
 
 
+def quant_spec_from_dtype_and_observer(
+    dtype_str: str,
+    observer_str: str = "minmax",
+):
+    """
+    Convert a dtype string and observer string to a QuantSpec.
+
+    Like :func:`quant_spec_from_dtype_string`, but allows selecting the
+    observer class (``minmax`` or ``mse``) in addition to the dtype.
+
+    Args:
+        dtype_str: A dtype string such as "int16", "uint8", "mxint8", "mxfp4".
+        observer_str: Observer type — ``"minmax"`` (default) or ``"mse"``.
+            Ignored for MX dtypes (MXObserver is always used).
+
+    Returns:
+        A QuantSpec instance with the requested observer class.
+    """
+    if dtype_str in MX_DTYPE_TO_ELEM_FORMAT:
+        # MX dtypes always use MXObserver; observer_str is ignored.
+        return quant_spec_from_dtype_string(dtype_str)
+
+    if dtype_str in AFFINE_DTYPE_TO_CONFIG:
+        bits, signed = AFFINE_DTYPE_TO_CONFIG[dtype_str]
+        if observer_str == "mse":
+            from tico.quantization.wrapq.observers.mse import MSEObserver
+
+            return affine(DType(bits=bits, signed=signed), observer=MSEObserver)
+        else:
+            return affine(DType(bits=bits, signed=signed))
+
+    raise ValueError(
+        f"Unknown dtype string {dtype_str!r}. "
+        f"Expected one of affine: {list(AFFINE_DTYPE_TO_CONFIG.keys())} "
+        f"or MX: {list(MX_DTYPE_TO_ELEM_FORMAT.keys())}."
+    )
+
+
 def quantize_using_PTQ(q_m, calib_inputs, args):
     """
     Wrap the model with PTQ wrappers, calibrate observers, and convert it.
@@ -2883,14 +2935,22 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         else linear_spec
     )
     kv_cache_key_spec = (
-        quant_spec_from_dtype_string(args.kv_cache_key_qdtype)
+        quant_spec_from_dtype_and_observer(
+            args.kv_cache_key_qdtype, args.kv_cache_key_observer
+        )
         if args.kv_cache_key_qdtype is not None
-        else linear_spec
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype, args.kv_cache_key_observer
+        )
     )
     kv_cache_value_spec = (
-        quant_spec_from_dtype_string(args.kv_cache_value_qdtype)
+        quant_spec_from_dtype_and_observer(
+            args.kv_cache_value_qdtype, args.kv_cache_value_observer
+        )
         if args.kv_cache_value_qdtype is not None
-        else linear_spec
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype, args.kv_cache_value_observer
+        )
     )
 
     qcfg = build_llm_ptq_config(
@@ -2992,14 +3052,22 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
         else linear_spec
     )
     kv_cache_key_spec = (
-        quant_spec_from_dtype_string(args.kv_cache_key_qdtype)
+        quant_spec_from_dtype_and_observer(
+            args.kv_cache_key_qdtype, args.kv_cache_key_observer
+        )
         if args.kv_cache_key_qdtype is not None
-        else linear_spec
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype, args.kv_cache_key_observer
+        )
     )
     kv_cache_value_spec = (
-        quant_spec_from_dtype_string(args.kv_cache_value_qdtype)
+        quant_spec_from_dtype_and_observer(
+            args.kv_cache_value_qdtype, args.kv_cache_value_observer
+        )
         if args.kv_cache_value_qdtype is not None
-        else linear_spec
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype, args.kv_cache_value_observer
+        )
     )
 
     qcfg = build_llm_ptq_config(
@@ -3362,6 +3430,8 @@ def print_config(args, device: torch.device) -> None:
     print(f"Linear IO qdtype       : {args.linear_io_qdtype}")
     print(f"KV cache key qdtype    : {args.kv_cache_key_qdtype}")
     print(f"KV cache value qdtype  : {args.kv_cache_value_qdtype}")
+    print(f"KV cache key observer  : {args.kv_cache_key_observer}")
+    print(f"KV cache value observer: {args.kv_cache_value_observer}")
     print()
     print("--- Calibration ---")
     print(f"Batch size             : {args.batch}")
