@@ -53,50 +53,44 @@ def qparam_dtype(node: torch.fx.Node) -> str:
     return node.meta[QPARAM_KEY].dtype
 
 
-# Convert i16 qparam to u8 qparam
-# scale and zero_point are inferred from i16 qparam
-def _i16_to_u8(qparam: QuantParam) -> QuantParam:
-    # Assume per-tensor quantization
-    assert qparam.scale is not None and len(qparam.scale) == 1
-    assert qparam.dtype == "int16"
+def convert_qparam(qparam: QuantParam, target_dtype: str) -> QuantParam:
+    """Convert a QuantParam from one dtype to another.
 
-    s16_scale = qparam.scale[0]
-    max_ = s16_scale * 32767  # numeric_limits<int16>
-    min_ = -max_
+    Supports conversions between int16 and unsigned types (uint8, uint4).
+    The conversion preserves the representable value range.
+    """
+    if qparam.dtype == target_dtype:
+        return copy.deepcopy(qparam)
 
-    u8_scale = (max_ - min_) / 255
-    u8_zerop = round(-min_ / u8_scale)
-
-    new_qparam = QuantParam()
-    new_qparam.scale = [u8_scale]
-    new_qparam.zero_point = [u8_zerop]
-    new_qparam.dtype = "uint8"
-
-    return new_qparam
-
-
-# Convert u8 qparam to i16 qparam
-# scale is inferred from u8 qparam
-def _u8_to_i16(qparam: QuantParam) -> QuantParam:
-    # Assume per-tensor quantization
     assert qparam.scale is not None and len(qparam.scale) == 1
     assert qparam.zero_point is not None and len(qparam.zero_point) == 1
-    assert qparam.dtype == "uint8"
 
-    u8_scale = qparam.scale[0]
-    u8_zerop = qparam.zero_point[0]
-    max_ = u8_scale * (255 - u8_zerop)
-    min_ = u8_scale * (-u8_zerop)
+    src_dtype = qparam.dtype
+    src_scale = qparam.scale[0]
+    src_zerop = qparam.zero_point[0]
+    src_min, src_max = quant_min_max(src_dtype)
 
-    abs_max = max(abs(max_), abs(min_))
-    s16_scale = abs_max / 32767
-    s16_zerop = 0
+    # Compute the real value range from the source qparam
+    real_max = src_scale * (src_max - src_zerop)
+    real_min = src_scale * (src_min - src_zerop)
+
+    dst_min, dst_max = quant_min_max(target_dtype)
+    n_levels = dst_max - dst_min + 1  # 256 for uint8, 16 for uint4, 65536 for int16
+
+    if target_dtype == "int16":
+        # Converting to int16: symmetric, zero_point = 0
+        abs_max = max(abs(real_max), abs(real_min))
+        dst_scale = abs_max / 32767
+        dst_zerop = 0
+    else:
+        # Converting to unsigned: use full range [0, n_levels-1]
+        dst_scale = (real_max - real_min) / (n_levels - 1)
+        dst_zerop = round(-real_min / dst_scale)
 
     new_qparam = QuantParam()
-    new_qparam.scale = [s16_scale]
-    new_qparam.zero_point = [s16_zerop]
-    new_qparam.dtype = "int16"
-
+    new_qparam.scale = [dst_scale]
+    new_qparam.zero_point = [dst_zerop]
+    new_qparam.dtype = target_dtype
     return new_qparam
 
 
@@ -196,14 +190,14 @@ def _linear_handler(node, logger):
         # Update node's qparam from i16 to u8
         # NOTE This would severely degrade accuracy. It is
         # important to mitigate this accuracy drop in backend.
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], "uint8")
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif is_mx_dtype(qparam_dtype(inp)) and qparam_dtype(node) == "int16":
         quantize = _insert_quantize_op_after(node)
 
         node.meta[QPARAM_KEY] = copy.deepcopy(
             inp.meta[QPARAM_KEY]
-        )  # _i16_to_u8(node.meta[QPARAM_KEY])
+        )  # convert_qparam(node.meta[QPARAM_KEY], "uint8")
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
         raise NotYetSupportedError(
@@ -238,7 +232,7 @@ def _add_handler(node, logger):
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and qparam_dtype(
         node
@@ -302,7 +296,7 @@ def _mul_handler(node, logger):
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and qparam_dtype(
         node
@@ -365,7 +359,7 @@ def _cat_handler(node, logger):
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], in_dtype)
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif is_mx_dtype(in_dtype) and qparam_dtype(node) == "int16":
         for inp in tensors:
@@ -392,17 +386,35 @@ def _bmm_handler(node, logger):
     if qparam_dtype(x) == qparam_dtype(node) and qparam_dtype(y) == qparam_dtype(node):
         return
 
+    # If x and node agree but y differs with a non-MX dtype, there is
+    # nothing to fix (e.g. Q@K^T where Q and output are int16, K is uint8).
+    # MX dtypes on y still need to be handled below.
+    if qparam_dtype(x) == qparam_dtype(node) and is_mx_dtype(qparam_dtype(y)) == is_mx_dtype(qparam_dtype(node)):
+        return
+
     if qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint8":
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif qparam_dtype(x) == "uint8" and qparam_dtype(node) == "int16":
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(x) == "int16" and qparam_dtype(node) == "uint4":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(x) == "uint4" and qparam_dtype(node) == "int16":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(x))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif (is_mx_dtype(qparam_dtype(x)) or is_mx_dtype(qparam_dtype(y))) and qparam_dtype(
         node
@@ -466,7 +478,20 @@ def _permute_handler(node, logger):
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "int16" and qparam_dtype(node) == "uint4":
+        # A new Quantize Op (s16 to u4) is inserted before (not after)
+        # permute Op to reduce tensor size ealier
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
+    elif qparam_dtype(inp) == "uint4" and qparam_dtype(node) == "int16":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
         raise NotYetSupportedError("Unsupported dtype")
@@ -496,7 +521,20 @@ def _reshape_handler(node, logger):
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "int16" and qparam_dtype(node) == "uint4":
+        # A new Quantize Op (s16 to u4) is inserted before (not after)
+        # reshape Op to reduce tensor size ealier
+        quantize = _insert_quantize_op_before(node, inp)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        logger.debug(f"quantize_per_tensor.default is inserted before {node.name}.")
+    elif qparam_dtype(inp) == "uint4" and qparam_dtype(node) == "int16":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif qparam_dtype(inp) == "int16" and is_mx_dtype(qparam_dtype(node)):
         quantize = _insert_mx_quantize_op_after(inp, node.meta[QPARAM_KEY])
@@ -678,13 +716,25 @@ def _relu_handler(node, logger):
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _u8_to_i16(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     elif qparam_dtype(inp) == "uint8" and qparam_dtype(node) == "int16":
         quantize = _insert_quantize_op_after(node)
 
         quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
-        node.meta[QPARAM_KEY] = _i16_to_u8(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "int16" and qparam_dtype(node) == "uint4":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
+        logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
+    elif qparam_dtype(inp) == "uint4" and qparam_dtype(node) == "int16":
+        quantize = _insert_quantize_op_after(node)
+
+        quantize.meta[QPARAM_KEY] = copy.deepcopy(node.meta[QPARAM_KEY])
+        node.meta[QPARAM_KEY] = convert_qparam(node.meta[QPARAM_KEY], qparam_dtype(inp))
         logger.debug(f"quantize_per_tensor.default is inserted after {node.name}.")
     else:
         raise NotYetSupportedError("Unsupported dtype")
