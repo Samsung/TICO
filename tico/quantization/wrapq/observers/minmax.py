@@ -22,7 +22,7 @@ class MinMaxObserver(AffineObserverBase):
     """Plain min/max range tracker."""
 
     @torch.no_grad()
-    def _update_stats(self, x: torch.Tensor) -> None:
+    def _update_stats(self, x: torch.Tensor, **kwargs) -> None:
         """
         Update running min/max with the incoming batch.
 

@@ -120,10 +120,14 @@ class QuantModuleBase(nn.Module, ABC):
         for child in self._child_quant_modules():
             child.freeze_qparams()
 
-    def _fq(self, x, obs: ObserverBase):
-        """Fake-quant or collect."""
+    def _fq(self, x, obs: ObserverBase, **kwargs):
+        """Fake-quant or collect.
+
+        Extra kwargs are forwarded to ``obs.collect`` during calibration so
+        matmul-aware observers can receive consumer context (e.g. weight, kv_rep).
+        """
         if self._mode is Mode.CALIB:
-            obs.collect(x.detach())
+            obs.collect(x.detach(), **kwargs)
             return x
         if self._mode is Mode.QUANT:
             return obs.fake_quant(x)

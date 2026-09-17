@@ -54,23 +54,32 @@ class ObserverBase(nn.Module, ABC):
         """Clear any running statistics or cached params."""
         raise NotImplementedError
 
-    def collect(self, x: torch.Tensor) -> None:
+    def collect(self, x: torch.Tensor, **kwargs) -> None:
         """
         Update running statistics with a new batch of data.
 
-        This base implementation guards on `enabled` and then calls `_update_stats(x)`.
-        Subclasses should implement `_update_stats(x)` instead of overriding `collect`.
+        This base implementation guards on `enabled` and then calls
+        `_update_stats(x, **kwargs)`. Subclasses should implement
+        `_update_stats(x, **kwargs)` instead of overriding `collect`.
+
+        Extra kwargs may carry context about the consumer of the observed
+        tensor (e.g. the weight of the Linear layer that consumes an
+        activation). Observers that don't need the context simply ignore it.
         """
         if not self.enabled:
             return
-        self._update_stats(x)
+        self._update_stats(x, **kwargs)
 
     @abstractmethod
-    def _update_stats(self, x: torch.Tensor) -> None:
+    def _update_stats(self, x: torch.Tensor, **kwargs) -> None:
         """
         Update running statistics (min/max, hist, mse buffers, ...).
 
         Must be implemented by subclasses (e.g., MinMax, EMA, Histogram, MSE).
+
+        Extra kwargs may carry context about the consumer of the observed
+        tensor (e.g. the weight of the Linear layer that consumes an
+        activation). Observers that don't need the context simply ignore it.
         """
         raise NotImplementedError
 

@@ -305,15 +305,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--kv_cache_key_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse"],
-        help="Observer type for KV cache key quantization (minmax/mse). Default: minmax.",
+        choices=["minmax", "mse", "mse_batched_matmul"],
+        help="Observer type for KV cache key quantization (minmax/mse/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_value_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse"],
-        help="Observer type for KV cache value quantization (minmax/mse). Default: minmax.",
+        choices=["minmax", "mse", "mse_matmul"],
+        help="Observer type for KV cache value quantization (minmax/mse/mse_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--gptq_mse",
@@ -2900,6 +2900,16 @@ def quant_spec_from_dtype_and_observer(
             from tico.quantization.wrapq.observers.mse import MSEObserver
 
             return affine(DType(bits=bits, signed=signed), observer=MSEObserver)
+        elif observer_str == "mse_matmul":
+            from tico.quantization.wrapq.observers.mse_matmul import MSEMatMulObserver
+
+            return affine(DType(bits=bits, signed=signed), observer=MSEMatMulObserver)
+        elif observer_str == "mse_batched_matmul":
+            from tico.quantization.wrapq.observers.mse_matmul import (
+                MSEBatchedMatMulObserver,
+            )
+
+            return affine(DType(bits=bits, signed=signed), observer=MSEBatchedMatMulObserver)
         else:
             return affine(DType(bits=bits, signed=signed))
 

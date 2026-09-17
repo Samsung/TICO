@@ -25,6 +25,10 @@ from tico.quantization.config.llama_attention import (
     is_npu_export_attention_options,
 )
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.observers.mse_matmul import (
+    MSEBatchedMatMulObserver,
+    MSEMatMulObserver,
+)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaAttentionDecodeExportAdapter,
@@ -780,6 +784,24 @@ class QuantLlamaAttention(QuantModuleBase):
         present_k_parts: list[torch.Tensor] = []
         present_v_parts: list[torch.Tensor] = []
 
+        # Pre-rotate all Q heads so post-RoPE Q activations are available as
+        # matmul context for the K observer (MSEBatchedMatMulObserver).
+        q_rotated: list[torch.Tensor] = []
+        for q_idx in range(self.num_heads):
+            q_i = q[:, :, q_idx, :]
+            q_i = self._apply_rope(
+                q_i,
+                cos,
+                sin,
+                self.obs_q_x1,
+                self.obs_q_x2,
+                self.obs_q_cat,
+                self.obs_q_cos,
+                self.obs_q_sin,
+                self.obs_q_rot,
+            )
+            q_rotated.append(q_i)
+
         for kv_i in range(self.num_kv_heads):
             new_k_i = k[:, :, kv_i, :]
             new_v_i = v[:, :, kv_i, :]
@@ -808,6 +830,25 @@ class QuantLlamaAttention(QuantModuleBase):
                 new_v_i=new_v_i,
             )
 
+            # Provide post-RoPE Q activations as matmul context for the K
+            # observer.  MSE matmul observers skip stats when weight is None
+            # (the call inside _build_present_kv_head), so this is the call
+            # that actually calibrates.  Plain observers already quantized the
+            # key in _build_present_kv_head, so skip to avoid double-quant.
+            if isinstance(
+                self.obs_key, (MSEMatMulObserver, MSEBatchedMatMulObserver)
+            ):
+                q_for_kv = torch.stack(
+                    q_rotated[kv_i * self.kv_rep : (kv_i + 1) * self.kv_rep],
+                    dim=1,
+                )  # [B, kv_rep, S, D]
+                present_k_i = self._fq(
+                    present_k_i.unsqueeze(1),  # [B, 1, K, D]
+                    self.obs_key,
+                    weight=q_for_kv,
+                    kv_rep=self.kv_rep,
+                ).squeeze(1)
+
             new_k_parts.append(new_k_i)
             new_v_parts.append(new_v_i)
 
@@ -819,19 +860,7 @@ class QuantLlamaAttention(QuantModuleBase):
 
             for rep_i in range(self.kv_rep):
                 q_idx = kv_i * self.kv_rep + rep_i
-                q_i = q[:, :, q_idx, :]
-
-                q_i = self._apply_rope(
-                    q_i,
-                    cos,
-                    sin,
-                    self.obs_q_x1,
-                    self.obs_q_x2,
-                    self.obs_q_cat,
-                    self.obs_q_cos,
-                    self.obs_q_sin,
-                    self.obs_q_rot,
-                )
+                q_i = q_rotated[q_idx]  # already rotated above
 
                 logits_i = q_i @ present_k_i.transpose(-2, -1)
                 logits_i = self._apply_attention_scale_if_needed(logits_i)
@@ -848,6 +877,8 @@ class QuantLlamaAttention(QuantModuleBase):
                     q_i.dtype
                 )
                 attn_i = self._fq(attn_i, self.obs_softmax)
+
+                present_v_i = self._fq(present_v_i, self.obs_value, weight=attn_i)
 
                 out_i = self._fq(attn_i @ present_v_i, self.obs_attn_out)
 
@@ -933,18 +964,26 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_k_rot,
         )
 
-        new_k = self._fq(k, self.obs_key)
+        # Pass the post-RoPE Q activations and kv_rep to the K observer so
+        # matmul-aware observers (e.g. MSEBatchedMatMulObserver) can minimize
+        # the exact attention-logits error; plain observers ignore the kwargs.
+        new_k = self._fq(k, self.obs_key, weight=q, kv_rep=self.kv_rep)
+        #new_v = v
         new_v = self._fq(v, self.obs_value)
 
         if past_key_value is None:
-            present_k = self._fq(new_k, self.obs_key)
-            present_v = self._fq(new_v, self.obs_value)
+            present_k = self._fq(new_k, self.obs_key, weight=q, kv_rep=self.kv_rep)
+            #present_v = self._fq(new_v, self.obs_value)
+            present_v = new_v
         else:
             past_k, past_v = past_key_value
             present_k = self._fq(
                 torch.cat([past_k, new_k], dim=2),
                 self.obs_key,
+                weight=q,
+                kv_rep=self.kv_rep,
             )
+            #present_v = torch.cat([past_v, new_v], dim=2)
             present_v = self._fq(
                 torch.cat([past_v, new_v], dim=2),
                 self.obs_value,
@@ -972,7 +1011,8 @@ class QuantLlamaAttention(QuantModuleBase):
         attn_weights = torch.softmax(logits, dim=-1, dtype=torch.float32).to(q.dtype)
         attn_weights = self._fq(attn_weights, self.obs_softmax)
         attn_weights = self._fq(attn_weights, self.obs_attn_weights)
-
+        
+        present_v_for_attn = self._fq(present_v_for_attn, self.obs_value, weight=attn_weights)
         attn_out_h = self._fq(attn_weights @ present_v_for_attn, self.obs_attn_out)
         attn_out_h = self._fq(attn_out_h, self.obs_attn_out_h)
 

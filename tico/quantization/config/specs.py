@@ -20,6 +20,10 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mse import MSEObserver
+from tico.quantization.wrapq.observers.mse_matmul import (
+    MSEBatchedMatMulObserver,
+    MSEMatMulObserver,
+)
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
