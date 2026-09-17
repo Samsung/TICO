@@ -821,8 +821,7 @@ def _gptq_ptq_layer_worker_gpu(worker_args: dict) -> dict:
                 mse=gptq_conf_dict.get("mse", None),
                 sensitivity=cur_sensitivity,
                 mse_tolerance=gptq_conf_dict.get("mse_tolerance", 1e-2),
-                chunk_size=gptq_conf_dict.get("chunk_size", 64),
-                use_batched_gptq=gptq_conf_dict.get("use_batched_gptq", True),
+                chunk_size=gptq_conf_dict.get("chunk_size", 0),
             )
 
             # GPTQv2: Assign native_inp
@@ -1944,7 +1943,6 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         sensitivity=cur_sensitivity,
                         mse_tolerance=gptq_conf.mse_tolerance,
                         chunk_size=gptq_conf.chunk_size,
-                        use_batched_gptq=gptq_conf.use_batched_gptq,
                     )
 
                     # GPTQv2: Assign native_inp from FPInputsCache
@@ -2503,7 +2501,6 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                                     sensitivity=cur_sensitivity,
                                     mse_tolerance=gptq_conf.mse_tolerance,
                                     chunk_size=gptq_conf.chunk_size,
-                                    use_batched_gptq=gptq_conf.use_batched_gptq,
                                 )
                                 q.scale = scale_cpu.to(device)
                                 q.zero = zero_cpu.to(device)
@@ -2644,7 +2641,6 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             sensitivity=cur_sensitivity,
             mse_tolerance=gptq_conf.mse_tolerance,
             chunk_size=gptq_conf.chunk_size,
-            use_batched_gptq=gptq_conf.use_batched_gptq,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights
@@ -2772,7 +2768,6 @@ class LlamaGPTQQuantizer(BaseQuantizer):
             sensitivity=cur_sensitivity,
             mse_tolerance=gptq_conf.mse_tolerance,
             chunk_size=gptq_conf.chunk_size,
-            use_batched_gptq=gptq_conf.use_batched_gptq,
         )
 
         # Hook to collect (inp, out) for GPTQ with optional weights

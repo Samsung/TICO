@@ -55,8 +55,7 @@ class Quantizer(nn.Module):
         trits=False,
         sensitivity=None,
         mse_tolerance=1e-5,
-        chunk_size=8,
-        use_batched_gptq=True,
+        chunk_size=0,
     ):
         self.maxq = torch.tensor(2**bits - 1)
         self.perchannel = perchannel
@@ -68,14 +67,10 @@ class Quantizer(nn.Module):
         self.sensitivity = sensitivity
         self.mse_tolerance = mse_tolerance
         # Number of grid points processed simultaneously in the batched
-        # iterate_GPTQ path (mse_for_gptq / smse_for_gptq).  Larger values
-        # improve GPU utilisation at the cost of memory.
+        # iterate_GPTQ path (mse_for_gptq / smse_for_gptq).  0 = disabled
+        # (sequential grid search).  >0 = enable the batched (parallelised)
+        # path with the given chunk size.
         self.chunk_size = chunk_size
-        # When True, use the batched (parallelised) iterate_GPTQ path for
-        # mse_for_gptq / smse_for_gptq.  Set to False to fall back to the
-        # original sequential grid search (useful for debugging / numerical
-        # comparison).
-        self.use_batched_gptq = use_batched_gptq
         if trits:
             self.maxq = torch.tensor(-1)
 
@@ -257,17 +252,16 @@ class Quantizer(nn.Module):
     def _optimize_mse(self, x, xmin, xmax):
         """Optimize scale and zero using MSE-based grid search.
 
-        When ``self.use_batched_gptq`` is True (default), all grid points
-        are evaluated in parallel by vectorising the ``quantize`` call across
-        the grid dimension.  When False, the original sequential grid search
-        is used.
+        When ``self.chunk_size`` is greater than 0, all grid points are
+        evaluated in parallel by vectorising the ``quantize`` call across the
+        grid dimension.  When 0, the original sequential grid search is used.
 
         Args:
             x: Prepared tensor
             xmin: Minimum values per channel
             xmax: Maximum values per channel
         """
-        if self.use_batched_gptq:
+        if self.chunk_size > 0:
             self._optimize_mse_batched(x, xmin, xmax)
         else:
             self._optimize_mse_sequential(x, xmin, xmax)
@@ -381,9 +375,9 @@ class Quantizer(nn.Module):
     def _optimize_gptq_adjusted(self, x, Hinv, sensitivity, xmin, xmax, P=None):
         """Optimize scale and zero using GPTQ-aware MSE/SMSE grid search.
 
-        When ``self.use_batched_gptq`` is True (default), all grid points are
+        When ``self.chunk_size`` is greater than 0, all grid points are
         evaluated in parallel via :func:`iterate_GPTQ_batched`, which batches
-        the GPTQ iteration loop across the grid dimension.  When False, the
+        the GPTQ iteration loop across the grid dimension.  When 0, the
         original sequential grid search is used — each grid point calls
         :func:`iterate_GPTQ` independently.  The fallback is kept for
         debugging and numerical comparison.
@@ -396,7 +390,7 @@ class Quantizer(nn.Module):
             xmax: Maximum values per channel
             P: GPTQv2 P correction matrix (optional)
         """
-        if self.use_batched_gptq:
+        if self.chunk_size > 0:
             self._optimize_gptq_adjusted_batched(
                 x, Hinv, sensitivity, xmin, xmax, P=P
             )

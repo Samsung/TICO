@@ -115,15 +115,11 @@ class GPTQConfig(BaseConfig):
     double_precision: bool = False
 
     # Number of grid points processed simultaneously in the batched
-    # iterate_GPTQ path (mse_for_gptq / smse_for_gptq).  Larger values
-    # improve GPU utilisation at the cost of memory.
-    chunk_size: int = 64
-
-    # When True, use the batched (parallelised) iterate_GPTQ path for
-    # mse_for_gptq / smse_for_gptq.  Set to False to fall back to the
-    # original sequential grid search (useful for debugging / numerical
-    # comparison).
-    use_batched_gptq: bool = True
+    # iterate_GPTQ path (mse_for_gptq / smse_for_gptq).  0 = disabled
+    # (sequential grid search, default).  >0 = enable the batched
+    # (parallelised) path with the given chunk size; larger values improve
+    # GPU utilisation at the cost of memory.
+    chunk_size: int = 0
 
     # Number of parallel worker processes for layer quantization. 0 = sequential
     # (default). When > 0, requires use_orig_model_inference=True because layers

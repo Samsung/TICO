@@ -371,7 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile",
         choices=list(SUPPORTED_EXECUTION_PROFILES),
-        default=DEFAULT_EXECUTION_PROFILE,
+        default=DEFAULT_EXECUTION_PROFILE, #"reference_eval"
         help=(
             "Use 'reference_eval' for a GPU-friendly, HF-like attention path. "
             "Use 'npu_export' for the NPU-export-oriented attention graph."
@@ -382,6 +382,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="tasks to be evaluated using lm_eval, e.g. `winogrande,arc_easy,arc_challenge,openbookqa,mmlu_pro,ifeval,bbh`",
+    )
+    parser.add_argument(
+        "--eval_calib_ppl",
+        action="store_true",
+        help=(
+            "Compute perplexity on the calibration dataset (the same samples used "
+            "for GPTQ/PTQ calibration) for both the original and quantized models. "
+            "Useful for checking how well the model fits its calibration data."
+        ),
     )
     parser.add_argument(
         "--sensitivity_path",
@@ -537,6 +546,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Number of parallel worker processes for GPTQ layer quantization. "
             "0 = sequential (default). Requires --gptq_use_orig_model_inference. "
             "Each worker process runs on GPU using multiprocessing spawn."
+        ),
+    )
+    parser.add_argument(
+        "--gptq_mse_chunk_size",
+        type=int,
+        default=0,
+        help=(
+            "Chunk size for the batched (parallelised) iterate_GPTQ path used by "
+            "mse_for_gptq / smse_for_gptq. 0 = disabled (sequential grid search, "
+            "default). >0 = enable batched GPTQ with the given chunk size; larger "
+            "values improve GPU utilisation at the cost of memory."
         ),
     )
 
@@ -1022,6 +1042,7 @@ def build_gptq_config(
             saturation_threshold=args.gptq_saturation_threshold,
             double_precision=args.gptq_double_precision,
             parallel_workers=args.gptq_parallel_workers,
+            chunk_size=args.gptq_mse_chunk_size,
         )
         return config
     else:
@@ -1043,6 +1064,7 @@ def build_gptq_config(
             saturation_threshold=args.gptq_saturation_threshold,
             double_precision=args.gptq_double_precision,
             parallel_workers=args.gptq_parallel_workers,
+            chunk_size=args.gptq_mse_chunk_size,
         )
         return config
 
@@ -3144,7 +3166,73 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
 
     return q_m
 
-def evaluate(q_m, tokenizer, dataset_test, args):
+def evaluate_ppl_on_calib_inputs(
+    model: torch.nn.Module,
+    calib_inputs: list[torch.Tensor],
+    device: torch.device,
+    no_tqdm: bool = False,
+) -> float:
+    """
+    Compute corpus-level perplexity over the calibration inputs.
+
+    The calibration inputs are independent token windows (``[batch, seq_len]``)
+    sampled from the training corpus.  Unlike :func:`perplexity`, which expects a
+    single contiguous sequence, here each window is scored independently and the
+    per-token negative log-likelihoods are aggregated into a single corpus-level
+    perplexity.
+
+    Args:
+        model: Model (eval mode) to evaluate.
+        calib_inputs: List of calibration tensors, each ``[batch, seq_len]``.
+        device: Device to run the model on.
+        no_tqdm: If True, disable the progress bar.
+
+    Returns:
+        Corpus-level perplexity over all calibration samples.
+    """
+    if not calib_inputs:
+        raise ValueError("calib_inputs is empty; cannot compute perplexity.")
+
+    # Flatten batched inputs into individual [1, seq_len] samples.
+    individual_samples: list[torch.Tensor] = []
+    for batched_input in calib_inputs:
+        for i in range(batched_input.shape[0]):
+            individual_samples.append(batched_input[i : i + 1, ...])
+
+    iterator = individual_samples
+    if not no_tqdm:
+        iterator = tqdm.tqdm(individual_samples, desc="Calib PPL")
+
+    nll_sum = 0.0
+    n_tokens = 0
+
+    model.eval()
+    with torch.no_grad():
+        for sample in iterator:
+            sample_dev = sample.to(device)
+            outputs = model(sample_dev)
+            logits = outputs.logits
+
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = sample_dev[:, 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                reduction="sum",
+            )
+            nll_sum += loss.item()
+            n_tokens += shift_labels.numel()
+
+            del sample_dev, outputs, logits
+
+    if n_tokens == 0:
+        raise ValueError("No tokens were scored; calibration inputs may be empty.")
+
+    avg_nll = nll_sum / n_tokens
+    return math.exp(avg_nll)
+
+
+def evaluate(q_m, tokenizer, dataset_test, args, calib_inputs=None):
     """
     Evaluate the quantized model with perplexity and optional lm-eval tasks.
     """
@@ -3157,6 +3245,15 @@ def evaluate(q_m, tokenizer, dataset_test, args):
     print("\n┌── Wikitext-2 test perplexity ─────────────")
     print(f"│ int16 : {ppl_uint8:8.2f}")
     print("└───────────────────────────────────────────")
+
+    if args.eval_calib_ppl and calib_inputs is not None:
+        print("\nCalculating perplexity on calibration dataset …")
+        ppl_calib = evaluate_ppl_on_calib_inputs(
+            q_m, calib_inputs, args.device, no_tqdm=args.no_tqdm
+        )
+        print("\n┌── Calibration perplexity ─────────────────")
+        print(f"│ int16 : {ppl_calib:8.2f}")
+        print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
@@ -3432,6 +3529,7 @@ def print_config(args, device: torch.device) -> None:
     print(f"GPTQ adaptive percdamp : {args.gptq_adaptive_percdamp}")
     print(f"GPTQ cond threshold    : {args.gptq_cond_threshold_good}")
     print(f"GPTQ use iterate       : {args.gptq_use_iterate}")
+    print(f"GPTQ MSE chunk size    : {args.gptq_mse_chunk_size}")
     print(f"LlamaGPTQ              : {args.llama_gptq}")
     print(f"LlamaGPTQ sequential   : {args.llama_gptq_sequential}")
     print(f"LlamaGPTQ no PTQ       : {args.llama_gptq_no_ptq}")
@@ -3587,7 +3685,7 @@ def load_eval_dataset(args):
 
 
 def evaluate_original_model(
-    model, tokenizer, dataset_test, args, device: torch.device
+    model, tokenizer, dataset_test, args, device: torch.device, calib_inputs=None
 ) -> None:
     """
     Evaluate the original floating-point model before quantization.
@@ -3605,6 +3703,15 @@ def evaluate_original_model(
     print("\n┌── Wikitext-2 test perplexity ─────────────")
     print(f"│ FP32 : {ppl_fp32:8.2f}")
     print("└───────────────────────────────────────────")
+
+    if args.eval_calib_ppl and calib_inputs is not None:
+        print("\nCalculating perplexity on calibration dataset …")
+        ppl_calib = evaluate_ppl_on_calib_inputs(
+            model, calib_inputs, device, no_tqdm=args.no_tqdm
+        )
+        print("\n┌── Calibration perplexity ─────────────────")
+        print(f"│ FP32 : {ppl_calib:8.2f}")
+        print("└───────────────────────────────────────────")
 
     if args.eval_tasks is not None:
         results = evaluate_llm_on_tasks(
@@ -4706,11 +4813,15 @@ def main():
     configure_max_position_embeddings(model, args)
 
     dataset_test = load_eval_dataset(args)
-    evaluate_original_model(model, tokenizer, dataset_test, args, device)
 
     # Build calibration inputs (includes compression if --calibration_samples_to_use is specified)
     # Returns tuple of (calib_inputs, sample_weights) when loading from file, or (calib_inputs, None) when generating
+    #
+    # NOTE: Calibration inputs are built before evaluating the original model so that
+    # they can be reused for calibration-dataset perplexity evaluation (--eval_calib_ppl).
     calib_inputs, sample_weights = build_calibration_inputs(model, tokenizer, args, device)
+
+    evaluate_original_model(model, tokenizer, dataset_test, args, device, calib_inputs)
 
     model = apply_spinquant(model, args)
     model = apply_cle(model, args)
@@ -4770,7 +4881,7 @@ def main():
         model = apply_gptq(model, calib_inputs, args, sample_weights)
         q_m = quantize_using_PTQ(model, calib_inputs, args)
 
-    evaluate(q_m, tokenizer, dataset_test, args)
+    evaluate(q_m, tokenizer, dataset_test, args, calib_inputs)
     save_requested_artifacts(q_m, tokenizer, calib_inputs, args, sample_weights)
 
 
