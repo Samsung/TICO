@@ -117,7 +117,7 @@ class DeadCodeEliminationPass(CirclePass):
                 )
 
         input_cleanup = CirclePassResult(modified=False)
-        if self.prune_unused_inputs:
+        if self.prune_unused_inputs and not context.preserve_io:
             input_cleanup = prune_unused_graph_inputs(document, indices)
 
         changes = removed_operators + input_cleanup.changes

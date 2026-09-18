@@ -516,7 +516,7 @@ class FoldConstantSubgraphPass(CirclePass):
                 subgraph_indices=folded_subgraphs,
                 prune_unused_inputs=False,
             ).run(document, context)
-            if self.policy.prune_unused_inputs:
+            if self.policy.prune_unused_inputs and not context.preserve_io:
                 input_cleanup_result = prune_unused_graph_inputs(
                     document,
                     folded_subgraphs,

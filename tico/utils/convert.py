@@ -346,6 +346,17 @@ def convert_exported_module_to_circle(
     check_training_ops(exported_program)
     circle_program = build_circle(exported_program, config)
 
+    # Keep build_circle() and CircleModel.save() serialization-only. All public
+    # conversion entry points share this post-serialization optimization stage.
+    if config.get("circle_optimize") is not False:
+        from tico.circle.export import optimize_for_export
+
+        circle_program = optimize_for_export(
+            circle_program,
+            logger=logger,
+            dump_directory="." if os.environ.get("TICO_GRAPH_DUMP") else None,
+        )
+
     return circle_program
 
 

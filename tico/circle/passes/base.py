@@ -37,11 +37,37 @@ class CirclePassContext:
     )
     verify_after_each_pass: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Export enables this; standalone optimization keeps its historical behavior.
+    preserve_io: bool = False
     _sessions: dict[int, tuple[Any, CircleOptimizationSession]] = field(
         default_factory=dict,
         init=False,
         repr=False,
     )
+
+    def can_bypass_tensor(
+        self,
+        document: CircleDocument,
+        graph: CircleGraph,
+        tensor_index: int,
+    ) -> bool:
+        """Allow bypassing an internal tensor without replacing a public I/O port."""
+
+        if not self.preserve_io:
+            return True
+        if tensor_index in graph.inputs or tensor_index in graph.outputs:
+            return False
+
+        from tico.circle.graph import as_list
+
+        for signature in as_list(getattr(document.model, "signatureDefs", None)):
+            if int(getattr(signature, "subgraphIndex", -1)) != graph.subgraph_index:
+                continue
+            for field_name in ("inputs", "outputs"):
+                for tensor_map in as_list(getattr(signature, field_name, None)):
+                    if int(getattr(tensor_map, "tensorIndex", -1)) == tensor_index:
+                        return False
+        return True
 
     def session(self, document: CircleDocument) -> CircleOptimizationSession:
         """Return the model-scoped optimization session for this pass context."""

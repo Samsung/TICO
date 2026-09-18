@@ -111,7 +111,6 @@ class _RemoveAddZeroRule(_BypassRule):
     def match(self, document, graph, operator_index, context):
         """Match an activation-free ADD whose output contract equals its data input."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         if operator_builtin_code(document.model, operator) != self.source_code:
             return None
@@ -165,6 +164,8 @@ class _RemoveAddZeroRule(_BypassRule):
             reference_contract=data_contract,
         ):
             return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
+            return None
         return _BypassPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
@@ -173,6 +174,99 @@ class _RemoveAddZeroRule(_BypassRule):
             replacement_input=data_input,
             diagnostic_code="REMOVE_ADD_ZERO",
             diagnostic_message="Removed ADD with an exact real-zero operand.",
+        )
+
+
+class _RemoveMulOneRule(_BypassRule):
+    """Remove scalar floating-point MUL by exactly one, without requantization."""
+
+    def __init__(self, schema: OptimizationSchemaResolver, codec: TensorValueCodec):
+        """Bind MUL schema and constant decoding services."""
+
+        self.schema = schema
+        self.codec = codec
+        self.source_code = schema.builtin_code("MUL")
+
+    def match(self, document, graph, operator_index, context):
+        """Match a static, unquantized MUL that preserves the complete contract."""
+
+        operator = as_list(graph.subgraph.operators)[operator_index]
+        if operator_builtin_code(document.model, operator) != self.source_code:
+            return None
+        inputs = as_indices(operator.inputs)
+        outputs = as_indices(operator.outputs)
+        if len(inputs) != 2 or len(outputs) != 1 or not operator_is_plain(operator):
+            return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
+            return None
+        options = getattr(operator, "builtinOptions", None)
+        if options is None:
+            return None
+        if int(getattr(options, "fusedActivationFunction", 0) or 0) != (
+            self.schema.activation_none
+        ):
+            return None
+        constant_positions = [
+            position
+            for position, index in enumerate(inputs)
+            if graph.is_constant(index)
+        ]
+        if len(constant_positions) != 1:
+            return None
+        constant_position = constant_positions[0]
+        data_input = inputs[1 - constant_position]
+        data_contract = tensor_contract(graph, data_input)
+        if data_contract != tensor_contract(graph, outputs[0]):
+            return None
+        if (
+            not contract_is_fully_static(data_contract)
+            or data_contract.quantization is not None
+            or data_contract.is_variable
+            or data_contract.sparsity is not None
+            or data_contract.variant_tensors is not None
+        ):
+            return None
+        constant_contract = tensor_contract(graph, inputs[constant_position])
+        # Decode only a dense scalar; never scan a model-sized ones tensor.
+        if (
+            constant_contract.tensor_type != data_contract.tensor_type
+            or constant_contract.quantization is not None
+            or constant_contract.is_variable
+            or constant_contract.sparsity is not None
+            or constant_contract.variant_tensors is not None
+            or not contract_is_fully_static(constant_contract)
+            or constant_contract.element_count != 1
+        ):
+            return None
+        constant = decode_constant_value(
+            self.codec,
+            document.model,
+            subgraph_index=graph.subgraph_index,
+            tensor_index=inputs[constant_position],
+        )
+        if constant is None or constant.data.dtype.kind != "f":
+            return None
+        # Exact comparison is intentional: near-one factors are not identities.
+        if constant.data.item() != 1.0:
+            return None
+        try:
+            broadcast_shape = tuple(
+                np.broadcast_shapes(data_contract.shape, constant.shape)
+            )
+        except ValueError:
+            return None
+        if broadcast_shape != data_contract.shape:
+            return None
+        return _BypassPlan.capture(
+            document,
+            subgraph_index=graph.subgraph_index,
+            anchor_operator_index=operator_index,
+            tensor_indices=(*inputs, *outputs),
+            replacement_input=data_input,
+            diagnostic_code="REMOVE_MUL_ONE",
+            diagnostic_message=(
+                "Removed unquantized floating-point MUL by exact scalar one."
+            ),
         )
 
 
@@ -187,7 +281,6 @@ class _RemoveSameTypeCastRule(_BypassRule):
     def match(self, document, graph, operator_index, context):
         """Match a CAST that cannot change type, shape, qparams, or metadata."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         if operator_builtin_code(document.model, operator) != self.source_code:
             return None
@@ -209,6 +302,8 @@ class _RemoveSameTypeCastRule(_BypassRule):
         if hasattr(options, "outDataType") and int(options.outDataType) != (
             output_contract.tensor_type
         ):
+            return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
             return None
         return _BypassPlan.capture(
             document,
@@ -235,7 +330,6 @@ class _RemoveFullRangeSliceRule(_BypassRule):
     def match(self, document, graph, operator_index, context):
         """Match a static full-range SLICE with an identical output contract."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         if operator_builtin_code(document.model, operator) != self.source_code:
             return None
@@ -268,6 +362,8 @@ class _RemoveFullRangeSliceRule(_BypassRule):
             allowed_sizes = {-1} if dynamic else {-1, input_contract.shape[axis]}
             if value not in allowed_sizes:
                 return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
+            return None
         return _BypassPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
@@ -291,7 +387,6 @@ class _RemoveIdentityStridedSliceRule(_BypassRule):
     def match(self, document, graph, operator_index, context):
         """Match a full STRIDED_SLICE whose output contract is identical."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         if operator_builtin_code(document.model, operator) != self.source_code:
             return None
@@ -340,6 +435,8 @@ class _RemoveIdentityStridedSliceRule(_BypassRule):
         )
         if expected != input_contract.shape:
             return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
+            return None
         return _BypassPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
@@ -366,7 +463,6 @@ class _RemoveSingleOutputSplitRule(_BypassRule):
     def match(self, document, graph, operator_index, context):
         """Match one-output split forms whose output contract equals the input."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         builtin_code = operator_builtin_code(document.model, operator)
         if builtin_code not in {self.split_code, self.split_v_code}:
@@ -419,6 +515,8 @@ class _RemoveSingleOutputSplitRule(_BypassRule):
             allowed_sizes = {-1} if dynamic else {-1, data_contract.shape[axis]}
             if size_values[0] not in allowed_sizes:
                 return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
+            return None
         return _BypassPlan.capture(
             document,
             subgraph_index=graph.subgraph_index,
@@ -455,6 +553,7 @@ class EliminateIdentityOpsPass(CirclePass):
         )
         self.rules = (
             _RemoveAddZeroRule(self.schema, self.codec),
+            _RemoveMulOneRule(self.schema, self.codec),
             _RemoveSameTypeCastRule(self.schema),
             _RemoveFullRangeSliceRule(self.schema, self.codec),
             _RemoveIdentityStridedSliceRule(self.schema, self.codec),

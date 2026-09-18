@@ -185,7 +185,6 @@ class _RemoveIdentityReshapeRule(_ViewRule):
     def match(self, document, graph, operator_index, context):
         """Match a static identity RESHAPE."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         if operator_builtin_code(document.model, operator) != self.reshape_code:
             return None
@@ -202,6 +201,8 @@ class _RemoveIdentityReshapeRule(_ViewRule):
             return None
         target = _reshape_target(self.codec, document, graph, operator)
         if target != input_contract.shape:
+            return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
             return None
         return _BypassViewPlan.capture(
             document,
@@ -301,7 +302,6 @@ class _RemoveIdentityTransposeRule(_ViewRule):
     def match(self, document, graph, operator_index, context):
         """Match an identity permutation with an identical output contract."""
 
-        del context
         operator = as_list(graph.subgraph.operators)[operator_index]
         if operator_builtin_code(document.model, operator) != self.transpose_code:
             return None
@@ -322,6 +322,8 @@ class _RemoveIdentityTransposeRule(_ViewRule):
             expected_count=input_contract.rank,
         )
         if permutation != tuple(range(input_contract.rank)):
+            return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
             return None
         return _BypassViewPlan.capture(
             document,
@@ -434,7 +436,6 @@ class _RemoveInverseTransposePairRule(_ViewRule):
     def match(self, document, graph, operator_index, context):
         """Match consecutive transposes whose composed permutation is identity."""
 
-        del context
         match = _match_transpose_chain(
             self.codec,
             document,
@@ -452,6 +453,8 @@ class _RemoveInverseTransposePairRule(_ViewRule):
         if tensor_contract(graph, producer_inputs[0]) != tensor_contract(
             graph, outputs[0]
         ):
+            return None
+        if not context.can_bypass_tensor(document, graph, outputs[0]):
             return None
         return _ProducerBypassViewPlan.capture(
             document,

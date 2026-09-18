@@ -26,6 +26,8 @@ class CompileConfigV1(CompileConfigBase):
     convert_single_batch_lhs_const_bmm_to_fc: bool = False
     convert_expand_to_slice_cat: bool = False
     eliminate_rank_round_trip: bool = False
+    # Apply the Circle O1 post-serialization pipeline, not the existing FX passes.
+    circle_optimize: bool = True
 
     def get(self, name: str):
         return super().get(name)
