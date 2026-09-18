@@ -54,7 +54,12 @@ def has_buffer_payload(buffer: Any) -> bool:
 
 
 def is_constant_tensor(model: Any, subgraph: Any, tensor_index: int) -> bool:
-    """Return whether a tensor is backed by a non-empty model buffer."""
+    """Return whether a tensor has constant storage, including empty constants.
+
+    A statically empty tensor requires zero bytes, so its nonzero buffer may
+    legitimately have an empty or omitted data vector. Buffer zero, dynamic
+    placeholders, graph inputs and produced tensors are not empty constants.
+    """
 
     tensors = as_list(subgraph.tensors)
     if tensor_index < 0 or tensor_index >= len(tensors):
@@ -66,7 +71,29 @@ def is_constant_tensor(model: Any, subgraph: Any, tensor_index: int) -> bool:
     buffers = as_list(model.buffers)
     if buffer_index <= 0 or buffer_index >= len(buffers):
         return False
-    return has_buffer_payload(buffers[buffer_index])
+    buffer = buffers[buffer_index]
+    if buffer is None:
+        return False
+    if has_buffer_payload(buffer):
+        return True
+
+    # shape=[] is a scalar (one element), not an empty tensor. A zero extent
+    # in a concrete shape is required before accepting a zero-byte buffer.
+    shape = as_indices(getattr(tensor, "shape", None))
+    if 0 not in shape or any(dimension < 0 for dimension in shape):
+        return False
+    signature = as_indices(getattr(tensor, "shapeSignature", None))
+    if signature and signature != shape:
+        return False
+
+    # Do not promote a runtime zero-sized tensor to a constant merely because
+    # an imported model assigned it an empty, nonzero buffer.
+    if tensor_index in as_indices(getattr(subgraph, "inputs", None)):
+        return False
+    return not any(
+        tensor_index in as_indices(getattr(operator, "outputs", None))
+        for operator in as_list(getattr(subgraph, "operators", None))
+    )
 
 
 @dataclass(frozen=True)
@@ -179,7 +206,7 @@ class CircleGraph:
         return decode_text(getattr(tensors[tensor_index], "name", ""))
 
     def is_constant(self, tensor_index: int) -> bool:
-        """Return whether a tensor has a constant buffer payload."""
+        """Return whether a tensor has constant storage, possibly zero bytes."""
 
         return is_constant_tensor(self.model, self.subgraph, tensor_index)
 

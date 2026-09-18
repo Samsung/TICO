@@ -19,7 +19,7 @@ from typing import Any, Iterable
 import numpy as np
 
 from tico.circle.errors import CircleValueError
-from tico.circle.graph import as_list
+from tico.circle.graph import as_list, is_constant_tensor
 from tico.circle.value.dtype import (
     default_tensor_type_registry,
     TensorTypeRegistry,
@@ -121,22 +121,21 @@ class TensorValueCodec:
             )
         buffer = buffers[buffer_index]
         data = getattr(buffer, "data", None)
-        if data is None:
-            if int(getattr(buffer, "offset", 0) or 0) or int(
-                getattr(buffer, "size", 0) or 0
-            ):
-                raise CircleValueError(
-                    "External Circle buffers are not supported by TensorValueCodec."
-                )
-            raise CircleValueError(
-                f"Tensor {tensor_index} references a buffer without inline data."
-            )
         if int(getattr(buffer, "offset", 0) or 0) or int(
             getattr(buffer, "size", 0) or 0
         ):
             raise CircleValueError(
                 "External Circle buffers are not supported by TensorValueCodec."
             )
+        if data is None:
+            # FlatBuffers may omit the data vector of a zero-byte constant.
+            # Keep the same guarded classification used by graph verification;
+            # do not turn a missing scalar/non-empty payload into valid storage.
+            if not is_constant_tensor(model, subgraph, tensor_index):
+                raise CircleValueError(
+                    f"Tensor {tensor_index} references a buffer without inline data."
+                )
+            data = b""
 
         return self.decode(
             data,
