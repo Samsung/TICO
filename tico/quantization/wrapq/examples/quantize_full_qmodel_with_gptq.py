@@ -644,7 +644,9 @@ def print_cmd(args) -> None:
     ``--calibration_dataset_mix``) are space-joined.
     """
     parser = build_parser()
-    script = sys.argv[0]
+    # Use a path relative to the current working directory so the printed
+    # reproduce-command is portable across servers / checkouts.
+    script = os.path.relpath(sys.argv[0])
     parts = [f"python {script}"]
 
     for action in parser._actions:

@@ -260,17 +260,12 @@ def _gptq_layer_worker_gpu(worker_args: dict) -> dict:
             cache_kwargs_batch = layer_kwargs[batch_idx]
             cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
 
-            if gptq_conf_dict.get("double_precision", False):
-                # Cast to double for batch-size-independence
-                for pname, param in layer.named_parameters():
-                    param.data = param.data.double()
-                args_d = GPTQQuantizer._cast_to_double(cache_args_batch)
-                kwargs_d = GPTQQuantizer._cast_to_double(cache_kwargs_batch)
-                layer(*args_d, **kwargs_d)
-                for pname, param in layer.named_parameters():
-                    param.data = param.data.float()
-            else:
-                layer(*cache_args_batch, **cache_kwargs_batch)
+            GPTQQuantizer._run_layer_forward_double_precision(
+                layer,
+                cache_args_batch,
+                cache_kwargs_batch,
+                gptq_conf_dict.get("double_precision", False),
+            )
 
         # Remove hooks
         for h in handles:
@@ -313,16 +308,12 @@ def _gptq_layer_worker_gpu(worker_args: dict) -> dict:
                 cache_kwargs_batch = layer_kwargs[batch_idx]
                 cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
 
-                if gptq_conf_dict.get("double_precision", False):
-                    for pname, param in layer.named_parameters():
-                        param.data = param.data.double()
-                    args_d = GPTQQuantizer._cast_to_double(cache_args_batch)
-                    kwargs_d = GPTQQuantizer._cast_to_double(cache_kwargs_batch)
-                    layer(*args_d, **kwargs_d)
-                    for pname, param in layer.named_parameters():
-                        param.data = param.data.float()
-                else:
-                    layer(*cache_args_batch, **cache_kwargs_batch)
+                GPTQQuantizer._run_layer_forward_double_precision(
+                    layer,
+                    cache_args_batch,
+                    cache_kwargs_batch,
+                    gptq_conf_dict.get("double_precision", False),
+                )
 
 
     # Clean up GPU memory
@@ -369,17 +360,23 @@ class GPTQQuantizer(BaseQuantizer):
 
     @staticmethod
     def _cast_to_double(obj):
-        """Recursively cast all tensors in a list/dict/tensor to float64."""
+        """Recursively cast floating-point tensors in a list/dict/tensor to float64.
+
+        Non-float tensors (integer indices like position_ids/cache_position,
+        bool masks like attention_mask) are passed through unchanged - casting
+        them to float64 breaks ops that require integer indices (Embedding,
+        gather, index_select) or bool masks (masked_fill).
+        """
         if isinstance(obj, torch.Tensor):
-            return obj.double()
+            return obj.double() if obj.is_floating_point() else obj
         if isinstance(obj, (list, tuple)):
             return type(obj)(GPTQQuantizer._cast_to_double(o) for o in obj)
         if isinstance(obj, dict):
             return {k: GPTQQuantizer._cast_to_double(v) for k, v in obj.items()}
         return obj
 
+    @staticmethod
     def _run_layer_forward_double_precision(
-        self,
         layer: torch.nn.Module,
         args: List[Any],
         kwargs: Dict[str, Any],
@@ -405,8 +402,8 @@ class GPTQQuantizer(BaseQuantizer):
             buf.data = buf.data.double()
 
         # Cast inputs to double
-        args_d = self._cast_to_double(args)
-        kwargs_d = self._cast_to_double(kwargs)
+        args_d = GPTQQuantizer._cast_to_double(args)
+        kwargs_d = GPTQQuantizer._cast_to_double(kwargs)
 
         outs = layer(*args_d, **kwargs_d)
 
