@@ -20,6 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
+from typing import Any
 from unittest.mock import patch
 
 import numpy as np
@@ -76,6 +77,18 @@ def run_pass(document, circle_pass, preserve=True):
     )
 
 
+# (numpy dtype, Circle TensorType) pairs covering every float width.
+FLOAT_DTYPES: tuple[tuple[type[np.floating], int], ...] = (
+    (np.float16, 1),
+    (np.float32, 0),
+    (np.float64, 10),
+)
+
+
+def add(lhs: Any, rhs: Any) -> Any:
+    return np.add(lhs, rhs)
+
+
 class TestExportConfig(unittest.TestCase):
     def test_default_enabled(self):
         self.assertTrue(CompileConfigV1().circle_optimize)
@@ -85,11 +98,11 @@ class TestExportConfig(unittest.TestCase):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
                 config = CompileConfigV1.from_dict({"circle_optimize": enabled})
-                self.assertIs(config.circle_optimize, enabled)
+                self.assertIs(config.get("circle_optimize"), enabled)
                 self.assertIs(config.to_dict()["circle_optimize"], enabled)
 
     def test_old_dict_inherits_default(self):
-        self.assertTrue(CompileConfigV1.from_dict({}).circle_optimize)
+        self.assertTrue(CompileConfigV1.from_dict({}).get("circle_optimize"))
 
     def test_standalone_context_preserves_old_policy(self):
         self.assertFalse(CirclePassContext().preserve_io)
@@ -97,7 +110,7 @@ class TestExportConfig(unittest.TestCase):
 
 class TestMulOne(unittest.TestCase):
     def test_removes_internal_float_mul_in_either_order(self):
-        for dtype, tensor_type in ((np.float16, 1), (np.float32, 0), (np.float64, 10)):
+        for dtype, tensor_type in FLOAT_DTYPES:
             for reverse in (False, True):
                 with self.subTest(dtype=dtype, reverse=reverse):
                     document = mul_document(
@@ -111,7 +124,7 @@ class TestMulOne(unittest.TestCase):
                     self.assertFalse(run_pass(document, identity_pass()).modified)
 
     def test_numpy_results_match_before_and_after_rewrite(self):
-        for dtype, tensor_type in ((np.float16, 1), (np.float32, 0), (np.float64, 10)):
+        for dtype, tensor_type in FLOAT_DTYPES:
             with self.subTest(dtype=dtype):
                 document = mul_document(dtype=dtype, tensor_type=tensor_type)
                 x = np.array(
@@ -334,7 +347,7 @@ class TestExportBoundaries(unittest.TestCase):
                 operator(document, "ADD", [left, right], [1])
                 before = _interface_snapshot(document)
                 registry = ConstantEvaluatorRegistry(
-                    ((CODES["ADD"], BinaryElementwiseEvaluator("ADD", np.add)),)
+                    ((CODES["ADD"], BinaryElementwiseEvaluator("ADD", add)),)
                 )
                 folder = FoldConstantSubgraphPass(
                     evaluator_registry=registry,
@@ -381,13 +394,15 @@ class TestExportBoundaries(unittest.TestCase):
         original = mul_document(public_mul=True)
         add_signature(original)
         before = _interface_snapshot(original)
+
+        def reshape(d):
+            d.subgraph().tensors[1].shape = [1, 3]
+            d.subgraph().tensors[1].shapeSignature = [-1, 3]
+
         mutations = (
             lambda d: setattr(d.subgraph().tensors[1], "name", "renamed"),
             lambda d: setattr(d.subgraph().tensors[1], "type", TYPES["INT8"]),
-            lambda d: (
-                setattr(d.subgraph().tensors[1], "shape", [1, 3]),
-                setattr(d.subgraph().tensors[1], "shapeSignature", [-1, 3]),
-            ),
+            reshape,
             lambda d: setattr(d.subgraph(), "inputs", []),
             lambda d: setattr(d.subgraph(), "outputs", [0]),
             lambda d: setattr(d.model.signatureDefs[0], "signatureKey", "renamed"),
