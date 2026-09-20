@@ -13,11 +13,13 @@
 # limitations under the License.
 
 import torch
+from tico.passes.module_fusion import llama_rmsnorm
 
-from tico.serialize.operators.adapters.llama_rmsnorm import patched_llama_rmsnorm
+from tico.passes.module_fusion.fusion_registry import replace_modules_with_fused
 from tico.utils.pytree_utils import register_dynamic_cache
 
 from transformers import AutoModelForCausalLM
+from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
 from test.modules.base import TestModuleBase
 
@@ -25,12 +27,14 @@ from test.modules.base import TestModuleBase
 class TinyLlamaWithFusedRMSNorm(TestModuleBase):
     def __init__(self):
         super().__init__()
-        with patched_llama_rmsnorm():
-            self.model = AutoModelForCausalLM.from_pretrained(
-                "Maykeye/TinyLLama-v0"
-            ).to("cpu")
+        self.model = AutoModelForCausalLM.from_pretrained("Maykeye/TinyLLama-v0").to(
+            "cpu"
+        )
+
         self.rtol = 1e-4
         self.atol = 1e-4
+
+        replace_modules_with_fused(self.model, [LlamaRMSNorm])
         register_dynamic_cache()
 
     def forward(self, x):
