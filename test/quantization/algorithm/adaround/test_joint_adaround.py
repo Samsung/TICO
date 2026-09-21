@@ -70,7 +70,10 @@ class JointAdaRoundTest(unittest.TestCase):
         torch.testing.assert_close(proxy.fake_quant(weight), expected)
 
     def test_alpha_and_scale_receive_gradients(self) -> None:
-        weight = torch.tensor([[[[0.13]]], [[[0.81]]]], dtype=torch.float32)
+        # Fractions of 0.4 and 0.6 keep the soft rounding strictly inside the
+        # (0, 1) clamp so the assertion does not depend on how torch defines
+        # the clamp gradient exactly at a boundary.
+        weight = torch.tensor([[[[0.134]]], [[[0.816]]]], dtype=torch.float32)
         proxy = LearnableScaleAdaRoundWeightQuantizer(
             _observer(2),
             weight,
