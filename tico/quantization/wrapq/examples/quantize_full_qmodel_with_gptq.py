@@ -82,6 +82,7 @@ from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
@@ -314,6 +315,57 @@ def build_parser() -> argparse.ArgumentParser:
         default="minmax",
         choices=["minmax", "mse", "mse_matmul"],
         help="Observer type for KV cache value quantization (minmax/mse/mse_matmul). Default: minmax.",
+    )
+    parser.add_argument(
+        "--kv_cache_key_observer_per_channel",
+        action="store_true",
+        default=False,
+        help="When set, KV cache key observers use per-channel quantization "
+        "instead of per-tensor. Applies to all observer types (minmax/mse/"
+        "mse_matmul/mse_batched_matmul).",
+    )
+    parser.add_argument(
+        "--kv_cache_value_observer_per_channel",
+        action="store_true",
+        default=False,
+        help="When set, KV cache value observers use per-channel quantization "
+        "instead of per-tensor. Applies to all observer types (minmax/mse/"
+        "mse_matmul/mse_batched_matmul).",
+    )
+    parser.add_argument(
+        "--linear_io_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for linear activation quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+    )
+    parser.add_argument(
+        "--norm_io_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for norm activation quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+    )
+    parser.add_argument(
+        "--softmax_io_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for softmax activation quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+    )
+    parser.add_argument(
+        "--spinquant_io_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for SpinQuant rotation I/O quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+    )
+    parser.add_argument(
+        "--lm_head_io_observer",
+        type=str,
+        default="minmax",
+        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--gptq_mse",
@@ -2899,6 +2951,7 @@ def quant_spec_from_dtype_string(dtype_str: str):
 def quant_spec_from_dtype_and_observer(
     dtype_str: str,
     observer_str: str = "minmax",
+    per_channel: bool = False,
 ):
     """
     Convert a dtype string and observer string to a QuantSpec.
@@ -2910,6 +2963,11 @@ def quant_spec_from_dtype_and_observer(
         dtype_str: A dtype string such as "int16", "uint8", "mxint8", "mxfp4".
         observer_str: Observer type — ``"minmax"`` (default) or ``"mse"``.
             Ignored for MX dtypes (MXObserver is always used).
+        per_channel: If True, use a per-channel qscheme
+            (``PER_CHANNEL_SYMM`` for signed dtypes, ``PER_CHANNEL_ASYMM`` for
+            unsigned dtypes) instead of the default per-tensor scheme. Applies
+            to all affine observers (minmax and MSE-family). Ignored for MX
+            dtypes.
 
     Returns:
         A QuantSpec instance with the requested observer class.
@@ -2920,27 +2978,134 @@ def quant_spec_from_dtype_and_observer(
 
     if dtype_str in AFFINE_DTYPE_TO_CONFIG:
         bits, signed = AFFINE_DTYPE_TO_CONFIG[dtype_str]
+
+        # Resolve the qscheme and channel_axis when per-channel granularity is
+        # requested.  KV cache K/V tensors are (B, [num_heads,] seq_len, head_dim),
+        # so the head_dim (last axis) is the per-channel granularity.
+        qscheme = None
+        channel_axis = None
+        if per_channel:
+            qscheme = (
+                QScheme.PER_CHANNEL_SYMM if signed else QScheme.PER_CHANNEL_ASYMM
+            )
+            channel_axis = -1
+
         if observer_str == "mse":
             from tico.quantization.wrapq.observers.mse import MSEObserver
 
-            return affine(DType(bits=bits, signed=signed), observer=MSEObserver)
+            return affine(
+                DType(bits=bits, signed=signed),
+                observer=MSEObserver,
+                qscheme=qscheme,
+                channel_axis=channel_axis,
+            )
         elif observer_str == "mse_matmul":
             from tico.quantization.wrapq.observers.mse_matmul import MSEMatMulObserver
 
-            return affine(DType(bits=bits, signed=signed), observer=MSEMatMulObserver)
+            return affine(
+                DType(bits=bits, signed=signed),
+                observer=MSEMatMulObserver,
+                qscheme=qscheme,
+                channel_axis=channel_axis,
+            )
         elif observer_str == "mse_batched_matmul":
             from tico.quantization.wrapq.observers.mse_matmul import (
                 MSEBatchedMatMulObserver,
             )
 
-            return affine(DType(bits=bits, signed=signed), observer=MSEBatchedMatMulObserver)
+            return affine(
+                DType(bits=bits, signed=signed),
+                observer=MSEBatchedMatMulObserver,
+                qscheme=qscheme,
+                channel_axis=channel_axis,
+            )
         else:
-            return affine(DType(bits=bits, signed=signed))
+            return affine(
+                DType(bits=bits, signed=signed),
+                qscheme=qscheme,
+                channel_axis=channel_axis,
+            )
 
     raise ValueError(
         f"Unknown dtype string {dtype_str!r}. "
         f"Expected one of affine: {list(AFFINE_DTYPE_TO_CONFIG.keys())} "
         f"or MX: {list(MX_DTYPE_TO_ELEM_FORMAT.keys())}."
+    )
+
+
+def build_activation_specs(args):
+    """
+    Build activation QuantSpecs from parsed args, honoring per-category observer flags.
+
+    Each activation category (linear / norm / softmax / SpinQuant I/O / lm_head I/O /
+    KV cache key / KV cache value) gets its observer type from the corresponding
+    ``--*_observer`` CLI flag (minmax/mse/mse_matmul/mse_batched_matmul).
+
+    When a category's qdtype is not set (e.g. ``--spinquant_io_qdtype``), the dtype
+    falls back to ``--linear_io_qdtype`` (same as before), but that category's own
+    observer flag still applies.
+    """
+    linear_spec = quant_spec_from_dtype_and_observer(
+        args.linear_io_qdtype, args.linear_io_observer
+    )
+    norm_spec = quant_spec_from_dtype_and_observer(
+        args.norm_io_qdtype, args.norm_io_observer
+    )
+    softmax_spec = quant_spec_from_dtype_and_observer(
+        args.softmax_io_qdtype, args.softmax_io_observer
+    )
+    spinquant_io_spec = (
+        quant_spec_from_dtype_and_observer(
+            args.spinquant_io_qdtype, args.spinquant_io_observer
+        )
+        if args.spinquant_io_qdtype is not None
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype, args.spinquant_io_observer
+        )
+    )
+    lm_head_io_spec = (
+        quant_spec_from_dtype_and_observer(
+            args.lm_head_io_qdtype, args.lm_head_io_observer
+        )
+        if args.lm_head_io_qdtype is not None
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype, args.lm_head_io_observer
+        )
+    )
+    kv_cache_key_spec = (
+        quant_spec_from_dtype_and_observer(
+            args.kv_cache_key_qdtype,
+            args.kv_cache_key_observer,
+            per_channel=args.kv_cache_key_observer_per_channel,
+        )
+        if args.kv_cache_key_qdtype is not None
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype,
+            args.kv_cache_key_observer,
+            per_channel=args.kv_cache_key_observer_per_channel,
+        )
+    )
+    kv_cache_value_spec = (
+        quant_spec_from_dtype_and_observer(
+            args.kv_cache_value_qdtype,
+            args.kv_cache_value_observer,
+            per_channel=args.kv_cache_value_observer_per_channel,
+        )
+        if args.kv_cache_value_qdtype is not None
+        else quant_spec_from_dtype_and_observer(
+            args.linear_io_qdtype,
+            args.kv_cache_value_observer,
+            per_channel=args.kv_cache_value_observer_per_channel,
+        )
+    )
+    return (
+        linear_spec,
+        norm_spec,
+        softmax_spec,
+        spinquant_io_spec,
+        lm_head_io_spec,
+        kv_cache_key_spec,
+        kv_cache_value_spec,
     )
 
 
@@ -2955,37 +3120,15 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     print(f"Using PTQ execution profile: {args.profile}")
 
     
-    linear_spec = quant_spec_from_dtype_string(args.linear_io_qdtype)
-    norm_spec = quant_spec_from_dtype_string(args.norm_io_qdtype)
-    softmax_spec = quant_spec_from_dtype_string(args.softmax_io_qdtype)
-    spinquant_io_spec = (
-        quant_spec_from_dtype_string(args.spinquant_io_qdtype)
-        if args.spinquant_io_qdtype is not None
-        else linear_spec
-    )
-    lm_head_io_spec = (
-        quant_spec_from_dtype_string(args.lm_head_io_qdtype)
-        if args.lm_head_io_qdtype is not None
-        else linear_spec
-    )
-    kv_cache_key_spec = (
-        quant_spec_from_dtype_and_observer(
-            args.kv_cache_key_qdtype, args.kv_cache_key_observer
-        )
-        if args.kv_cache_key_qdtype is not None
-        else quant_spec_from_dtype_and_observer(
-            args.linear_io_qdtype, args.kv_cache_key_observer
-        )
-    )
-    kv_cache_value_spec = (
-        quant_spec_from_dtype_and_observer(
-            args.kv_cache_value_qdtype, args.kv_cache_value_observer
-        )
-        if args.kv_cache_value_qdtype is not None
-        else quant_spec_from_dtype_and_observer(
-            args.linear_io_qdtype, args.kv_cache_value_observer
-        )
-    )
+    (
+        linear_spec,
+        norm_spec,
+        softmax_spec,
+        spinquant_io_spec,
+        lm_head_io_spec,
+        kv_cache_key_spec,
+        kv_cache_value_spec,
+    ) = build_activation_specs(args)
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -3072,37 +3215,15 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
     print(f"Using PTQ execution profile: {args.profile}")
     assert args.norm_io_qdtype != "int16" #otherwise it is incorrect on layers joint
 
-    linear_spec = quant_spec_from_dtype_string(args.linear_io_qdtype)
-    norm_spec = quant_spec_from_dtype_string(args.norm_io_qdtype)
-    softmax_spec = quant_spec_from_dtype_string(args.softmax_io_qdtype)
-    spinquant_io_spec = (
-        quant_spec_from_dtype_string(args.spinquant_io_qdtype)
-        if args.spinquant_io_qdtype is not None
-        else linear_spec
-    )
-    lm_head_io_spec = (
-        quant_spec_from_dtype_string(args.lm_head_io_qdtype)
-        if args.lm_head_io_qdtype is not None
-        else linear_spec
-    )
-    kv_cache_key_spec = (
-        quant_spec_from_dtype_and_observer(
-            args.kv_cache_key_qdtype, args.kv_cache_key_observer
-        )
-        if args.kv_cache_key_qdtype is not None
-        else quant_spec_from_dtype_and_observer(
-            args.linear_io_qdtype, args.kv_cache_key_observer
-        )
-    )
-    kv_cache_value_spec = (
-        quant_spec_from_dtype_and_observer(
-            args.kv_cache_value_qdtype, args.kv_cache_value_observer
-        )
-        if args.kv_cache_value_qdtype is not None
-        else quant_spec_from_dtype_and_observer(
-            args.linear_io_qdtype, args.kv_cache_value_observer
-        )
-    )
+    (
+        linear_spec,
+        norm_spec,
+        softmax_spec,
+        spinquant_io_spec,
+        lm_head_io_spec,
+        kv_cache_key_spec,
+        kv_cache_value_spec,
+    ) = build_activation_specs(args)
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -3542,6 +3663,17 @@ def print_config(args, device: torch.device) -> None:
     print(f"KV cache value qdtype  : {args.kv_cache_value_qdtype}")
     print(f"KV cache key observer  : {args.kv_cache_key_observer}")
     print(f"KV cache value observer: {args.kv_cache_value_observer}")
+    print(
+        f"KV cache key per-channel: {args.kv_cache_key_observer_per_channel}"
+    )
+    print(
+        f"KV cache val per-channel: {args.kv_cache_value_observer_per_channel}"
+    )
+    print(f"Linear IO observer     : {args.linear_io_observer}")
+    print(f"Norm IO observer       : {args.norm_io_observer}")
+    print(f"Softmax IO observer    : {args.softmax_io_observer}")
+    print(f"SpinQuant IO observer  : {args.spinquant_io_observer}")
+    print(f"LM head IO observer    : {args.lm_head_io_observer}")
     print()
     print("--- Calibration ---")
     print(f"Batch size             : {args.batch}")
