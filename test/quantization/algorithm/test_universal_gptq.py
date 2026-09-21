@@ -657,6 +657,341 @@ class TestUniversalGPTQ(unittest.TestCase):
             "Quantized model output should be non-zero",
         )
 
+    @torch.inference_mode()
+    def test_universal_gptq_module_called_twice_same_input(self):
+        """
+        Test a module called twice with the same input (no circular dependency).
+
+        Structure:
+            y = self.M(x)  # invocation 0
+            z = self.M(x)  # invocation 1
+            return (y, z)
+
+        This module is multiply-invoked but does NOT participate in a circular
+        dependency. It should be excluded from GPTQ and handled correctly.
+        """
+        input_dim = 32
+        samples_per_batch = 2
+        num_batches = 3
+
+        class DoubleCallModel(nn.Module):
+            """Model that calls the same module twice with the same input."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.multiply_invoked_module = nn.Linear(dim, dim)
+                self.tail = nn.Linear(dim * 2, dim)
+
+            def forward(self, x):
+                y = self.multiply_invoked_module(x)  # invocation 0
+                z = self.multiply_invoked_module(x)  # invocation 1
+                return self.tail(torch.cat([y, z], dim=-1))
+
+        model = DoubleCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite (no NaN/Inf)",
+        )
+
+    @torch.inference_mode()
+    def test_universal_gptq_module_called_twice_chained(self):
+        """
+        Test a module called twice in a chain (circular dependency).
+
+        Structure:
+            x = self.M(x)        # invocation 0
+            x = self.other(x)
+            x = self.M(x)        # invocation 1
+            return self.tail(x)
+
+        This is the problematic case where M's second invocation depends on
+        intermediate processing. M should be excluded from GPTQ.
+        """
+        input_dim = 32
+        samples_per_batch = 2
+        num_batches = 3
+
+        class ChainedCallModel(nn.Module):
+            """Model that calls the same module twice in a chain."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.multiply_invoked_module = nn.Linear(dim, dim)
+                self.other_module = nn.Linear(dim, dim)
+                self.tail = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                x = self.multiply_invoked_module(x)  # invocation 0
+                x = self.other_module(x)
+                x = self.multiply_invoked_module(x)  # invocation 1
+                return self.tail(x)
+
+        model = ChainedCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite (no NaN/Inf)",
+        )
+
+    @torch.inference_mode()
+    def test_universal_gptq_module_called_once_per_batch(self):
+        """
+        Test a module called once per batch across multiple batches.
+
+        This module should NOT be excluded from GPTQ because it's only
+        invoked once per forward pass, even though it's called multiple
+        times across different calibration batches.
+        """
+        input_dim = 32
+        samples_per_batch = 2
+        num_batches = 5
+
+        class SingleCallPerBatchModel(nn.Module):
+            """Model that calls module once per batch."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.single_call_module = nn.Linear(dim, dim)
+                self.tail = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                x = self.single_call_module(x)  # Only once per forward
+                return self.tail(x)
+
+        model = SingleCallPerBatchModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite (no NaN/Inf)",
+        )
+
+    @torch.inference_mode()
+    def test_universal_gptq_nested_multiply_invoked_modules(self):
+        """
+        Test nested modules where both parent and child are multiply-invoked.
+
+        Structure:
+            outer(x) calls inner(x) twice
+            Model calls outer(x) twice
+
+        Both outer and inner should be excluded from GPTQ.
+        """
+        input_dim = 32
+        samples_per_batch = 2
+        num_batches = 3
+
+        class InnerDoubleCall(nn.Module):
+            """Inner module that calls its submodule twice."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.sub_module = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                a = self.sub_module(x)  # invocation 0
+                b = self.sub_module(x)  # invocation 1
+                return a + b
+
+        class OuterDoubleCall(nn.Module):
+            """Outer module that calls inner twice."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.inner = InnerDoubleCall(dim)
+                self.tail = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                a = self.inner(x)  # invocation 0
+                b = self.inner(x)  # invocation 1
+                return self.tail(a + b)
+
+        model = OuterDoubleCall(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite (no NaN/Inf)",
+        )
+
+    @torch.inference_mode()
+    def test_universal_gptq_multiply_invoked_output_correctness(self):
+        """
+        Test that multiply-invoked modules produce correct outputs.
+
+        For a module M(x) = 2x called twice:
+            y = M(x) = 2x
+            z = M(x) = 2x
+            tail should receive [2x, 2x] concatenated
+
+        This test verifies the cached outputs are correct for each invocation.
+        """
+        input_dim = 16
+        samples_per_batch = 4
+        num_batches = 2
+
+        class DoubleCallWithKnownTransform(nn.Module):
+            """Model with known transform for verification."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.multiply_invoked_module = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.multiply_invoked_module.weight.fill_(2.0 / dim)
+                self.tail = nn.Linear(dim * 2, dim, bias=False)
+                with torch.no_grad():
+                    self.tail.weight.fill_(0.5 / dim)
+
+            def forward(self, x):
+                y = self.multiply_invoked_module(x)  # invocation 0
+                z = self.multiply_invoked_module(x)  # invocation 1
+                return self.tail(torch.cat([y, z], dim=-1))
+
+        torch.manual_seed(42)
+        model = DoubleCallWithKnownTransform(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            original_output = model(test_input)
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        with torch.no_grad():
+            quantized_output = quantized_model(test_input)
+
+        relative_error = torch.norm(quantized_output - original_output) / torch.norm(
+            original_output
+        )
+
+        self.assertLess(
+            relative_error.item(),
+            0.20,
+            f"Quantized output deviates too much. Error: {relative_error.item():.4f}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -6,10 +6,9 @@ algorithm that works with any PyTorch model composed of standard layers (Linear,
 Conv2d, Conv3d, ConvTranspose2d) without requiring model-specific wrapper classes.
 
 The quantizer uses a frontier-based execution strategy with a state machine approach:
-1. COLLECT: Accumulate Hessian information from calibration inputs
-2. CACHE: Cache module outputs for downstream replay
-3. RETURN_CACHED: Return cached outputs without computation
-4. COMPUTE: Normal forward pass after quantization
+1. COLLECT: Accumulate Hessian information from calibration inputs.
+2. CACHE: Return cached outputs if available; otherwise compute and cache.
+3. COMPUTE: Normal forward pass after quantization.
 
 Key Features:
 - Model-agnostic: Works with any PyTorch architecture
@@ -293,18 +292,19 @@ class GPTQ_STATE(Enum):
     """
     State machine for GPTQ layer-by-layer quantization:
 
-    COLLECT (1) --[finish_collection]--> CACHE (2) --[finish_caching]--> RETURN_CACHED (3) --> COMPUTE (4)
-         |                                    |                              |                   |
-         | Hessian accumulation               | Output caching               | Output            | Output cache
-         | StopForward raised                 | StopForward raised           | cached            | cleared
-         v                                    v                              v                   v
-    (quantize weights)                  (ready to return cached)         (return cached)       (compute as usual)
+    COLLECT (1) ------[finish_collection]-------> CACHE (2) ------------------------[finish_caching]
+    |                          |                      |  ^-----------------------------|
+    |                          |                      |                                |
+    |                          |                      |                                |
+    v                          v                      v                                v
+    Hessian accumulation   Quantize weights   Return cached if within cache limit   Clear childrens' cache
+    StopForward raised                        Compute and cache outputs otherwise
+                                              StopForward raised
     """
 
     COLLECT = 1
     CACHE = 2
-    RETURN_CACHED = 3
-    COMPUTE = 4
+    COMPUTE = 3
 
 
 @dataclass
@@ -323,7 +323,6 @@ class GPTQ_Data:
         cached_output: List of cached outputs for replay (freed after use).
         state: Current state in the quantization lifecycle.
         invocation_idx: Current invocation index during replay.
-        num_invocations: Total number of invocations (set after caching phase).
         weight_device: Device where the module's parameters reside.
         out_device: Device where module output should reside.
     """
@@ -335,7 +334,6 @@ class GPTQ_Data:
     cached_output: list[Any]
     state: GPTQ_STATE
     invocation_idx: int
-    num_invocations: int
     weight_device: torch.device | None
     out_device: torch.device | None
 
@@ -406,6 +404,7 @@ def wrap_model(
     model: nn.Module,
     full_model_name: str,
     ignored_module_patterns: Iterable[re.Pattern] = [],
+    ignored_modules: Iterable[nn.Module] = [],
 ) -> None:
     """
     Recursively wrap a model's forward methods for GPTQ quantization.
@@ -415,8 +414,8 @@ def wrap_model(
     handles four states:
 
     - COLLECT: Accumulate Hessian from inputs, raise StopForward
-    - CACHE: Run original forward, cache output, raise StopForward
-    - RETURN_CACHED: Return cached outputs without computation
+    - CACHE: If within cached range - return cached outputs without computation.
+             Otherwise run original forward, cache output, raise StopForward.
     - COMPUTE: Run original forward without caching
 
     After wrapping, the model is ready for layer-by-layer quantization
@@ -426,6 +425,7 @@ def wrap_model(
         model: The model to wrap (modified in-place).
         full_model_name: Hierarchical dot-delimited model name following "grandparent.parent.clild" pattern.
         ignored_module_patterns: Collection of regular expressions to be matched against submodules' full names. If matched a submodule is not quantized.
+        ignored_modules: Modules to exclude from GPTQ quantization.
     """
 
     def new_forward(module: nn.Module, *args, **kwargs) -> Any:
@@ -442,26 +442,26 @@ def wrap_model(
                 raise StopForward(module)
 
             case GPTQ_STATE.CACHE:
-                args = move_to_device(args, gptq_data.weight_device)
-                kwargs = move_to_device(kwargs, gptq_data.weight_device)
-                assert type(kwargs) is dict
-                out: Any = gptq_data.old_forward(*args, **kwargs)
-                if gptq_data.out_device is None:
-                    gptq_data.out_device = infer_object_device(out)
-                # Cache on CPU to save GPU memory
-                gptq_data.cached_output.append(move_to_cpu(out))
-                gptq_data.invocation_idx += 1
-                raise StopForward(module)
-
-            case GPTQ_STATE.RETURN_CACHED:
-                result: Any = gptq_data.cached_output[gptq_data.invocation_idx]
-                gptq_data.invocation_idx = (
-                    gptq_data.invocation_idx + 1
-                ) % gptq_data.num_invocations
-                # Move cached output back to model's device
-                if gptq_data.out_device:
-                    result = move_to_device(result, gptq_data.out_device)
-                return result
+                if gptq_data.invocation_idx < len(gptq_data.cached_output):
+                    # We are within the number of cached outputs ==> return cached
+                    result: Any = gptq_data.cached_output[gptq_data.invocation_idx]
+                    gptq_data.invocation_idx += 1
+                    # Move cached output back to model's device
+                    if gptq_data.out_device:
+                        result = move_to_device(result, gptq_data.out_device)
+                    return result
+                else:
+                    # We have exceeded the cached outputs number ==> the module was called from another call site ==> cache output
+                    args = move_to_device(args, gptq_data.weight_device)
+                    kwargs = move_to_device(kwargs, gptq_data.weight_device)
+                    assert type(kwargs) is dict
+                    out: Any = gptq_data.old_forward(*args, **kwargs)
+                    if gptq_data.out_device is None:
+                        gptq_data.out_device = infer_object_device(out)
+                    # Cache on CPU to save GPU memory
+                    gptq_data.cached_output.append(move_to_cpu(out))
+                    gptq_data.invocation_idx += 1
+                    raise StopForward(module)
 
             case GPTQ_STATE.COMPUTE:
                 args = move_to_device(args, gptq_data.weight_device)
@@ -472,8 +472,13 @@ def wrap_model(
             case _:
                 assert False  # we should never get here
 
-    not_quantizable: bool = type(model) not in _QUANTIZABLE_LAYER_TYPES or any(
-        regex.match(full_model_name) is not None for regex in ignored_module_patterns
+    not_quantizable: bool = (
+        type(model) not in _QUANTIZABLE_LAYER_TYPES
+        or any(
+            regex.match(full_model_name) is not None
+            for regex in ignored_module_patterns
+        )
+        or model in ignored_modules
     )
 
     setattr(
@@ -487,7 +492,6 @@ def wrap_model(
             cached_output=[],
             state=GPTQ_STATE.CACHE if not_quantizable else GPTQ_STATE.COLLECT,
             invocation_idx=0,
-            num_invocations=0,
             weight_device=infer_module_device(model),
             out_device=None,
         ),
@@ -505,6 +509,7 @@ def wrap_model(
             child,
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
+            ignored_modules=ignored_modules,
         )
 
 
@@ -696,6 +701,7 @@ def finish_collection(
     """
     gptq_data: GPTQ_Data = get_gptq_data(module)
     assert gptq_data.gptq is not None
+    assert gptq_data.state == GPTQ_STATE.COLLECT
 
     # Check if Hessian was actually accumulated
     if gptq_data.gptq.H is None or gptq_data.gptq.H.numel() == 0:
@@ -732,30 +738,138 @@ def finish_collection(
     gptq_data.state = GPTQ_STATE.CACHE
     gptq_data.quantizer = gptq_data.gptq.quantizer
     gptq_data.gptq = None
-    gptq_data.invocation_idx = 0
+    assert gptq_data.invocation_idx == 0
 
 
 def finish_caching(module: nn.Module) -> None:
     """
-    Complete output caching and transition a module to RETURN_CACHED state.
+    Complete output caching for a particular call site.
 
     This function is called when a module has cached outputs from all
-    calibration batches. It transitions the module to RETURN_CACHED state
-    and frees children's cached outputs (memory optimization).
+    calibration batches for a particular call site in the python code.
+    It frees children's cached outputs (memory optimization).
 
     Parameters:
         module: The module to transition (must be in CACHE state).
     """
     gptq_data: GPTQ_Data = get_gptq_data(module)
-    gptq_data.state = GPTQ_STATE.RETURN_CACHED
-    gptq_data.num_invocations = gptq_data.invocation_idx
-    gptq_data.invocation_idx = 0
+    assert gptq_data.state == GPTQ_STATE.CACHE
+    assert gptq_data.invocation_idx == 0
 
     # Free children's cached outputs
     for child in module.children():
         child_gptq_data = get_gptq_data(child)
+        assert child_gptq_data.state == GPTQ_STATE.CACHE
+        assert child_gptq_data.invocation_idx == 0
         child_gptq_data.cached_output.clear()
-        child_gptq_data.state = GPTQ_STATE.COMPUTE
+
+
+def reset_invocation_counter(
+    module: nn.Module,
+) -> None:
+    """
+    Reset the invocation counter for all submodules.
+
+    This function resets the `invocation_idx` field in GPTQ_Data for the
+    given module and all its descendants. It is called after each calibration
+    batch to ensure that cached output indices align with the current batch's
+    invocation sequence.
+
+    Parameters:
+        module: The root module whose invocation counters should be reset.
+    """
+    for m in module.modules():
+        gptq_data: GPTQ_Data = get_gptq_data(m)
+        gptq_data.invocation_idx = 0
+
+
+def find_multiply_invoked_modules(
+    model: nn.Module,
+    args_dataset: list[tuple[Any]],
+    kwargs_dataset: list[dict[str, Any]],
+    show_progress: bool,
+) -> set[nn.Module]:
+    """
+    Detect modules that are invoked multiple times within a single forward pass.
+
+    This function identifies modules that participate in circular data dependencies
+    (or are simply called multiple times) by temporarily wrapping each module's
+    forward method to count invocations per batch. Modules with more than one
+    invocation per batch are excluded from GPTQ quantization to avoid violations
+    of the GPTQ algorithm's assumption that each module receives inputs from
+    already-quantized predecessors.
+
+    The detection works as follows:
+    1. Wrap each module's forward to count invocations
+    2. Run the model on calibration data
+    3. Reset invocation count after each batch
+    4. Modules with count > 1 in any batch are marked as multiply-invoked
+    5. Restore original forward methods
+
+    Modules excluded from GPTQ will be handled by the subsequent PTQ stage.
+
+    Parameters:
+        model: The model to analyze for multiply-invoked modules.
+        args_dataset: List of positional argument tuples for calibration.
+        kwargs_dataset: List of keyword argument dicts for calibration.
+        show_progress: Whether to display a progress bar during analysis.
+
+    Returns:
+        A set of modules that are invoked multiple times per batch.
+
+    Raises:
+        AssertionError: If datasets are empty or have mismatched lengths.
+    """
+    assert len(args_dataset) > 0, "Empty calibration dataset"
+    assert len(args_dataset) == len(kwargs_dataset), "Dataset length mismatch"
+
+    multiply_invoked_modules: set[nn.Module] = set()
+
+    def new_forward(module: nn.Module, *args, **kwargs) -> Any:
+        old_forward = getattr(module, "old_forward")
+        assert old_forward is not None
+        invocation_count: int = getattr(module, "invocation_count", 0)
+        invocation_count += 1
+        if invocation_count > 1:
+            multiply_invoked_modules.add(module)
+            module.forward = old_forward
+        else:
+            setattr(module, "invocation_count", invocation_count)
+        return old_forward(*args, **kwargs)
+
+    for m in model.modules():
+        assert not hasattr(m, "old_forward")
+        assert not hasattr(m, "invocation_count")
+        setattr(m, "old_forward", m.forward)
+        setattr(m, "invocation_count", 0)
+        m.forward = types.MethodType(new_forward, m)
+
+    # Infer model device from first parameter
+    model_device = infer_module_device(model)
+
+    try:
+        for args, kwargs in tqdm(
+            zip(args_dataset, kwargs_dataset, strict=True),
+            desc=f"(Re)playing model",
+            leave=False,
+            unit="batch",
+            disable=not show_progress,
+        ):
+            args = move_to_device(args, model_device)
+            kwargs = move_to_device(kwargs, model_device)
+            assert type(kwargs) is dict
+            model(*args, **kwargs)
+            for m in model.modules():
+                setattr(m, "invocation_count", 0)
+    finally:
+        for m in model.modules():
+            old_forward = getattr(m, "old_forward")
+            assert old_forward is not None
+            m.forward = old_forward
+            delattr(m, "invocation_count")
+            delattr(m, "old_forward")
+
+    return multiply_invoked_modules
 
 
 def gptq_quantize(
@@ -797,9 +911,15 @@ def gptq_quantize(
         wrap_model(
             model,
             full_model_name="",
-            ignored_module_patterns=[re.compile("lm_head.*")]
-            if not gptq_config.quantize_lm_head
-            else [],
+            ignored_module_patterns=(
+                [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
+            ),
+            ignored_modules=find_multiply_invoked_modules(
+                model,
+                args_dataset=args_dataset,
+                kwargs_dataset=kwargs_dataset,
+                show_progress=gptq_config.show_progress,
+            ),
         )
 
     try:
@@ -813,6 +933,7 @@ def gptq_quantize(
                 kwargs_dataset,
                 show_progress=gptq_config.show_progress,
             )
+            reset_invocation_counter(model)
             if not frontier_submodules:
                 break
 
