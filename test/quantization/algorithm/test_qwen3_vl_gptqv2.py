@@ -1028,5 +1028,105 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         )
 
 
+class TestGPTQInpAndHessianDtype(unittest.TestCase):
+    """Test inp_dtype / hessian_dtype behavior of the Qwen3-VL GPTQ."""
+
+    @staticmethod
+    def _make_layer(seed: int = 0) -> nn.Linear:
+        torch.manual_seed(seed)
+        return nn.Linear(32, 16).float()
+
+    def _build_and_accumulate(self, inp_dtype, hessian_dtype, gptq_v2=False):
+        layer = self._make_layer()
+        gptq = GPTQ(
+            layer,
+            normalize_H=False,
+            hessian_dtype=hessian_dtype,
+            inp_dtype=inp_dtype,
+        )
+        gptq.quantizer.configure(
+            bits=4,
+            perchannel=True,
+            sym=False,
+            mse=None,
+        )
+        batches = [torch.randn(8, 32) for _ in range(4)]
+        if gptq_v2:
+            gptq.native_inp = [b + 0.01 * torch.randn_like(b) for b in batches]
+        for batch in batches:
+            gptq.add_batch(batch, None)
+        return gptq, layer
+
+    def test_hessian_dtype_controls_H_storage(self):
+        for hessian_dtype in (torch.float32, torch.float64):
+            with self.subTest(hessian_dtype=hessian_dtype):
+                gptq, _ = self._build_and_accumulate(torch.float64, hessian_dtype)
+                self.assertEqual(gptq.H.dtype, hessian_dtype)
+                gptq.free()
+
+    def test_inp_dtype_does_not_leak_into_H(self):
+        # fp64 Gram matmul must not change the fp32 Hessian storage dtype.
+        gptq, _ = self._build_and_accumulate(torch.float64, torch.float32)
+        self.assertEqual(gptq.H.dtype, torch.float32)
+        gptq.free()
+
+    def test_dXXT_follows_hessian_dtype(self):
+        for hessian_dtype in (torch.float32, torch.float64):
+            with self.subTest(hessian_dtype=hessian_dtype):
+                gptq, _ = self._build_and_accumulate(
+                    torch.float64, hessian_dtype, gptq_v2=True
+                )
+                self.assertIsNotNone(gptq.dXXT)
+                self.assertEqual(gptq.dXXT.dtype, hessian_dtype)
+                gptq.free()
+
+    def test_fasterquant_all_dtype_combos(self):
+        for inp_dtype in (torch.float32, torch.float64):
+            for hessian_dtype in (torch.float32, torch.float64):
+                for gptq_v2 in (False, True):
+                    with self.subTest(
+                        inp_dtype=inp_dtype,
+                        hessian_dtype=hessian_dtype,
+                        gptq_v2=gptq_v2,
+                    ):
+                        gptq, layer = self._build_and_accumulate(
+                            inp_dtype, hessian_dtype, gptq_v2=gptq_v2
+                        )
+                        orig_dtype = layer.weight.data.dtype
+                        gptq.fasterquant(
+                            percdamp=0.01,
+                            groupsize=-1,
+                            actorder=True,
+                            verbose=False,
+                        )
+                        self.assertEqual(layer.weight.data.dtype, orig_dtype)
+                        self.assertTrue(torch.isfinite(layer.weight.data).all())
+                        gptq.free()
+
+    def test_config_defaults(self):
+        cfg = Qwen3VLGPTQConfig()
+        self.assertEqual(cfg.hessian_dtype, torch.float32)
+        self.assertIsInstance(cfg.inp_dtype, torch.dtype)
+        cfg.validate()
+
+    def test_config_string_conversion(self):
+        cfg = Qwen3VLGPTQConfig(hessian_dtype="double", inp_dtype="fp32")
+        self.assertEqual(cfg.hessian_dtype, torch.float64)
+        self.assertEqual(cfg.inp_dtype, torch.float32)
+        cfg.validate()
+
+    def test_config_validate_rejects_bad_dtypes(self):
+        with self.assertRaises(TypeError):
+            Qwen3VLGPTQConfig(inp_dtype=123).validate()
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(inp_dtype=torch.float16).validate()
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(hessian_dtype=torch.float16).validate()
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(inp_dtype="float128")
+
+
+if __name__ == "__main__":
+    unittest.main()
 if __name__ == "__main__":
     unittest.main()

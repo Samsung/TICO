@@ -251,6 +251,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         gptq_conf = self.config
         assert isinstance(gptq_conf, Qwen3VLGPTQConfig)
         gptq_conf.validate()
+        print(
+            f"[GPTQ] hessian_dtype={gptq_conf.hessian_dtype}, "
+            f"inp_dtype={gptq_conf.inp_dtype}"
+        )
 
         orig_use_cache = self._disable_model_cache(model)
         components = resolve_qwen3_vl_components(model, gptq_conf)
@@ -1098,7 +1102,12 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
         gptq_objs: dict[str, GPTQ] = {}
         for local_name, submodule in subset.items():
-            gptq_obj = GPTQ(submodule, normalize_H=gptq_conf.normalize_H)
+            gptq_obj = GPTQ(
+                submodule,
+                normalize_H=gptq_conf.normalize_H,
+                hessian_dtype=gptq_conf.hessian_dtype,
+                inp_dtype=gptq_conf.inp_dtype,
+            )
 
             full_name = module_name.get(submodule, local_name)
             weight_bits = self._resolve_weight_bits(

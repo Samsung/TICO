@@ -14,8 +14,35 @@
 
 from typing import Optional
 
+import torch
+
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
+
+
+TORCH_DTYPE_MAP = {
+    "float32": torch.float32,
+    "fp32": torch.float32,
+    "float": torch.float32,
+    "float64": torch.float64,
+    "fp64": torch.float64,
+    "double": torch.float64,
+    "float16": torch.float16,
+    "fp16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16": torch.bfloat16,
+}
+
+
+def torch_dtype_from_name(name: str | torch.dtype | None) -> torch.dtype:
+    if isinstance(name, torch.dtype):
+        return name
+    if name is None:
+        return torch.float32
+    key = str(name).lower()
+    if key not in TORCH_DTYPE_MAP:
+        raise ValueError(f"Unsupported torch dtype: {name}")
+    return TORCH_DTYPE_MAP[key]
 
 
 def dtype_is_unsigned(dtype: DType) -> bool:

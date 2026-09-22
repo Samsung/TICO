@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import torch
 
 from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.config.utils import torch_dtype_from_name
 
 
 @dataclass
@@ -82,6 +83,50 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     text_layers_attr: str = "model.language_model.layers"
     lm_head_attr: str = "lm_head"
 
+    # ------------------------------------------------------------------
+    # Hessian dtype
+    # ------------------------------------------------------------------
+    # Dtype used for Hessian (H) and dXXT accumulation.
+    # Defaults to FP32 for speed and lower memory. Set to torch.float64
+    # for higher-precision accumulation.
+    hessian_dtype: torch.dtype = torch.float32
+
+    # Dtype of the input Gram matrices (inp @ inp.T) and the GPTQv2 dXXT
+    # cross-term (dX @ inp.T). Hessian storage and factorization follow
+    # hessian_dtype. Defaults to torch.float32, it is faster and uses
+    # less memory.
+    inp_dtype: torch.dtype = torch.float32
+
+    # ------------------------------------------------------------------
+    # GPTQv2 options
+    # ------------------------------------------------------------------
+    # GPTQv2: uses FP inference for collecting inputs during quantization
+    gptq_v2: bool = False
+
+    # GPTQv2: Path to save/load FP inputs cache.
+    # If set and file exists, FP inputs are loaded from disk instead of
+    # running the original model. If set and file doesn't exist, FP inputs
+    # are collected during quantization and saved to disk.
+    # If None, FP inputs are collected on-the-fly (default behavior).
+    fp_inputs_cache_path: str | None = None
+
+    # GPTQv2: scaling factor for the asymmetric correction (P matrix)
+    # `alpha` is the correction strength for GPTQv2's input-error compensation.
+    # It scales the `P` matrix that adjusts weight updates to account for upstream quantization error in the activations.
+    # A value of `0` disables the correction (standard GPTQ), while values around `0.25` provide the best empirical results.
+    gptq_v2_alpha: float = 0.25
+
+    # Use running average for Hessian accumulation.
+    # When False, uses summation.
+    normalize_H: bool = False
+
+    def __post_init__(self) -> None:
+        """Convert string dtype options (from YAML) to torch.dtype."""
+        if isinstance(self.hessian_dtype, str):
+            self.hessian_dtype = torch_dtype_from_name(self.hessian_dtype)
+        if isinstance(self.inp_dtype, str):
+            self.inp_dtype = torch_dtype_from_name(self.inp_dtype)
+
     @property
     def name(self) -> str:
         return "qwen3_vl_gptq"
@@ -95,6 +140,18 @@ class Qwen3VLGPTQConfig(GPTQConfig):
             TypeError: If a field has an unexpected type.
         """
         super().validate()
+
+        for dtype_field in ("hessian_dtype", "inp_dtype"):
+            dtype_value = getattr(self, dtype_field)
+            if not isinstance(dtype_value, torch.dtype):
+                raise TypeError(
+                    f"{dtype_field} must be a torch.dtype. got {type(dtype_value)}"
+                )
+            if dtype_value not in (torch.float32, torch.float64):
+                raise ValueError(
+                    f"{dtype_field} must be torch.float32 or torch.float64. "
+                    f"got {dtype_value}"
+                )
 
         if self.model_type != "qwen3_vl":
             raise ValueError(f"model_type must be 'qwen3_vl'. got {self.model_type!r}")

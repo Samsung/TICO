@@ -268,7 +268,13 @@ class GPTQ:
     and then performs blockwise GPTQ quantization of the layer weights.
     """
 
-    def __init__(self, layer: nn.Module, normalize_H: bool = True):
+    def __init__(
+        self,
+        layer: nn.Module,
+        normalize_H: bool = True,
+        hessian_dtype: torch.dtype = torch.float32,
+        inp_dtype: torch.dtype = torch.float32,
+    ):
         """
         Initialize GPTQ state for a single layer.
 
@@ -278,10 +284,19 @@ class GPTQ:
             normalize_H: If True, use running average with sqrt(2/N)
                 normalization for Hessian accumulation.
                 If False, use simple summation.
+            hessian_dtype: Dtype used for Hessian (H) and dXXT accumulation.
+                Defaults to FP32 for speed and lower memory. Set to
+                torch.float64 for higher-precision accumulation.
+            inp_dtype: Dtype of the input Gram matrices (inp @ inp.T) and
+                the GPTQv2 dXXT cross-term (dX @ inp.T). Hessian storage and
+                factorization follow hessian_dtype. Defaults to torch.float32
+                it is faster and uses less memory.
         """
         self.layer = layer
         self.dev = self.layer.weight.device
         self.normalize_H = normalize_H
+        self.hessian_dtype = hessian_dtype
+        self.inp_dtype = inp_dtype
 
         w = layer.weight.data.clone()
         if isinstance(layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
@@ -295,6 +310,7 @@ class GPTQ:
         self.H: Optional[torch.Tensor] = torch.zeros(
             (self.columns, self.columns),
             device=self.dev,
+            dtype=self.hessian_dtype,
         )
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
@@ -445,12 +461,12 @@ class GPTQ:
             self.H *= (self.nsamples - batch_size) / self.nsamples
             if self.dXXT is not None:
                 self.dXXT *= (self.nsamples - batch_size) / self.nsamples
-            inp = math.sqrt(2.0 / self.nsamples) * inp.double()
+            inp = math.sqrt(2.0 / self.nsamples) * inp.to(self.inp_dtype)
         else:
-            inp = inp.double()
+            inp = inp.to(self.inp_dtype)
 
         assert self.H is not None
-        self.H += inp.matmul(inp.t()).to(self.H.device)
+        self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)
 
         # GPTQv2: Compute dXXT using native (FP) vs processed input difference
         if native_inp is not None:
@@ -459,9 +475,11 @@ class GPTQ:
 
             # Scale native_inp the same way as inp
             if self.normalize_H:
-                native_inp = math.sqrt(2.0 / self.nsamples) * native_inp.double()
+                native_inp = math.sqrt(2.0 / self.nsamples) * native_inp.to(
+                    self.inp_dtype
+                )
             else:
-                native_inp = native_inp.double()
+                native_inp = native_inp.to(self.inp_dtype)
 
             dX = native_inp.to(inp.device) - inp
             self.dXXT += dX.matmul(inp.t()).to(dtype=self.H.dtype)
@@ -568,6 +586,13 @@ class GPTQ:
             dXXT = self.dXXT.to(hinv.dtype)
             P = alpha * ((dXXT @ hinv.T).triu(diagonal=1)) @ hinv
 
+        # Downcast to float32 for the weight-update loop (w is float32);
+        # the hessian_dtype precision of H/dXXT and of the Cholesky
+        # factorization is already baked into hinv and P.
+        hinv = hinv.float()
+        if P is not None:
+            P = P.float()
+
         self.quantizer.update(w, hinv, perm)
 
         for i1 in range(0, self.columns, blocksize):
@@ -645,7 +670,7 @@ class GPTQ:
                     self.quantizer.scale,
                     self.quantizer.zero,
                     self.quantizer.maxq,
-                )
+                ).to(q_all.dtype)
         elif isinstance(self.layer, nn.ConvTranspose2d):
             if groupsize == -1:
                 q_all[:, dead] = quantize(
@@ -656,7 +681,7 @@ class GPTQ:
                     self.quantizer.scale,
                     self.quantizer.zero,
                     self.quantizer.maxq,
-                )
+                ).to(q_all.dtype)
         else:
             if groupsize == -1:
                 q_all[:, dead] = quantize(
@@ -664,7 +689,7 @@ class GPTQ:
                     self.quantizer.scale,
                     self.quantizer.zero,
                     self.quantizer.maxq,
-                )
+                ).to(q_all.dtype)
 
         assert (
             groupsize == -1 or torch.sum(dead) == 0
