@@ -24,7 +24,10 @@ import unittest
 import torch
 import torch.nn as nn
 
-from tico.quantization.algorithm.universal_gptq.quantizer import UniversalGPTQQuantizer
+from tico.quantization.algorithm.universal_gptq.quantizer import (
+    find_multiply_invoked_modules,
+    UniversalGPTQQuantizer,
+)
 from tico.quantization.config.gptq import UniversalGPTQConfig
 
 
@@ -990,6 +993,409 @@ class TestUniversalGPTQ(unittest.TestCase):
             relative_error.item(),
             0.20,
             f"Quantized output deviates too much. Error: {relative_error.item():.4f}",
+        )
+
+    def test_find_multiply_invoked_modules_single_call(self):
+        """
+        Test that modules called once per batch are NOT detected as multi-call.
+
+        Structure:
+            Sequential model where each module is called exactly once.
+
+        Expected: Empty set of multi-call modules.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class SingleCallModel(nn.Module):
+            """Model where each module is called exactly once."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.linear1 = nn.Linear(dim, dim)
+                self.relu = nn.ReLU()
+                self.linear2 = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                x = self.linear1(x)
+                x = self.relu(x)
+                x = self.linear2(x)
+                return x
+
+        model = SingleCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            0,
+            f"Expected no multi-call modules, but found: {multiply_invoked}",
+        )
+
+    def test_find_multiply_invoked_modules_same_module_twice(self):
+        """
+        Test detection of a module called twice with the same input.
+
+        Structure:
+            y = self.shared(x)  # invocation 0
+            z = self.shared(x)  # invocation 1
+            return y + z
+
+        Expected: `shared` module detected as multi-call.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class DoubleCallModel(nn.Module):
+            """Model that calls the same module twice."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.shared = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                y = self.shared(x)
+                z = self.shared(x)
+                return y + z
+
+        model = DoubleCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            1,
+            f"Expected 1 multi-call module, but found: {multiply_invoked}",
+        )
+        self.assertIn(
+            model.shared,
+            multiply_invoked,
+            "shared module should be detected as multi-call",
+        )
+
+    def test_find_multiply_invoked_modules_residual_connection(self):
+        """
+        Test detection of modules in residual connections.
+
+        Structure:
+            input --> [Linear -> ReLU -> Linear] --> + --> output
+                         |                        ^
+                         +---- identity ----------+
+
+        Expected: No multi-call modules (identity is not a module call).
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class ResidualModel(nn.Module):
+            """Model with residual connection."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.linear1 = nn.Linear(dim, dim)
+                self.relu = nn.ReLU()
+                self.linear2 = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                residual = x
+                out = self.linear1(x)
+                out = self.relu(out)
+                out = self.linear2(out)
+                return out + residual
+
+        model = ResidualModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            0,
+            f"Expected no multi-call modules in residual model, but found: {multiply_invoked}",
+        )
+
+    def test_find_multiply_invoked_modules_nested_multi_call(self):
+        """
+        Test detection of nested multi-call modules.
+
+        Structure:
+            outer(x):
+                a = self.inner(x)  # invocation 0
+                b = self.inner(x)  # invocation 1
+                return a + b
+
+            inner(x):
+                y = self.shared(x)  # invocation 0
+                z = self.shared(x)  # invocation 1
+                return y + z
+
+        Expected: Both `inner` and `shared` detected as multi-call.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class InnerDoubleCall(nn.Module):
+            """Inner module with multi-call."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.shared = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                y = self.shared(x)
+                z = self.shared(x)
+                return y + z
+
+        class OuterDoubleCall(nn.Module):
+            """Outer module with multi-call."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.inner = InnerDoubleCall(dim)
+
+            def forward(self, x):
+                a = self.inner(x)
+                b = self.inner(x)
+                return a + b
+
+        model = OuterDoubleCall(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            2,
+            f"Expected 2 multi-call modules, but found: {multiply_invoked}",
+        )
+        self.assertIn(
+            model.inner,
+            multiply_invoked,
+            "inner module should be detected as multi-call",
+        )
+        self.assertIn(
+            model.inner.shared,
+            multiply_invoked,
+            "shared module should be detected as multi-call",
+        )
+
+    def test_find_multiply_invoked_modules_chained_call(self):
+        """
+        Test detection of modules in a chained call (circular dependency).
+
+        Structure:
+            x = self.M(x)        # invocation 0
+            x = self.other(x)
+            x = self.M(x)        # invocation 1
+            return x
+
+        Expected: `M` module detected as multi-call.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class ChainedCallModel(nn.Module):
+            """Model with chained multi-call."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.M = nn.Linear(dim, dim)
+                self.other = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                x = self.M(x)
+                x = self.other(x)
+                x = self.M(x)
+                return x
+
+        model = ChainedCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            1,
+            f"Expected 1 multi-call module, but found: {multiply_invoked}",
+        )
+        self.assertIn(
+            model.M,
+            multiply_invoked,
+            "M module should be detected as multi-call",
+        )
+
+    def test_find_multiply_invoked_modules_partial_multi_call(self):
+        """
+        Test detection when only some modules are multi-call.
+
+        Structure:
+            x = self.single1(x)
+            y = self.shared(x)  # invocation 0
+            z = self.shared(x)  # invocation 1
+            w = self.single2(y + z)
+            return w
+
+        Expected: Only `shared` detected as multi-call.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class PartialMultiCallModel(nn.Module):
+            """Model with partial multi-call modules."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.single1 = nn.Linear(dim, dim)
+                self.shared = nn.Linear(dim, dim)
+                self.single2 = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                x = self.single1(x)
+                y = self.shared(x)
+                z = self.shared(x)
+                return self.single2(y + z)
+
+        model = PartialMultiCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            1,
+            f"Expected 1 multi-call module, but found: {multiply_invoked}",
+        )
+        self.assertIn(
+            model.shared,
+            multiply_invoked,
+            "shared module should be detected as multi-call",
+        )
+        self.assertNotIn(
+            model.single1,
+            multiply_invoked,
+            "single1 module should NOT be detected as multi-call",
+        )
+        self.assertNotIn(
+            model.single2,
+            multiply_invoked,
+            "single2 module should NOT be detected as multi-call",
+        )
+
+    def test_find_multiply_invoked_modules_multiple_batches_consistency(self):
+        """
+        Test that multi-call detection is consistent across multiple batches.
+
+        A module should be detected as multi-call if it's called multiple times
+        in ANY batch, not just on average.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 4
+
+        class ConsistentMultiCallModel(nn.Module):
+            """Model consistently calling shared module twice."""
+
+            def __init__(self, dim: int):
+                super().__init__()
+                self.shared = nn.Linear(dim, dim)
+
+            def forward(self, x):
+                y = self.shared(x)
+                z = self.shared(x)
+                return y + z
+
+        model = ConsistentMultiCallModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        multiply_invoked = find_multiply_invoked_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(num_batches)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        self.assertEqual(
+            len(multiply_invoked),
+            1,
+            f"Expected 1 multi-call module, but found: {multiply_invoked}",
+        )
+        self.assertIn(
+            model.shared,
+            multiply_invoked,
+            "shared module should be detected as multi-call",
         )
 
 

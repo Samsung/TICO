@@ -320,9 +320,10 @@ class GPTQ_Data:
         old_forward: The original forward method before wrapping.
         gptq: GPTQ instance for Hessian accumulation (None after quantization).
         quantizer: Quantizer with computed scale/zero-point (None before quantization).
-        cached_output: List of cached outputs for replay (freed after use).
+        cached_output: Cached outputs for replay (freed after use). cached_output[batch_idx][invocation_idx].
         state: Current state in the quantization lifecycle.
         invocation_idx: Current invocation index during replay.
+        batch_idx: Current batch index during replay.
         weight_device: Device where the module's parameters reside.
         out_device: Device where module output should reside.
     """
@@ -331,9 +332,10 @@ class GPTQ_Data:
     old_forward: Callable
     gptq: GPTQ | None
     quantizer: Quantizer | None
-    cached_output: list[Any]
+    cached_output: list[list[Any]]
     state: GPTQ_STATE
     invocation_idx: int
+    batch_idx: int
     weight_device: torch.device | None
     out_device: torch.device | None
 
@@ -442,24 +444,34 @@ def wrap_model(
                 raise StopForward(module)
 
             case GPTQ_STATE.CACHE:
-                if gptq_data.invocation_idx < len(gptq_data.cached_output):
-                    # We are within the number of cached outputs ==> return cached
-                    result: Any = gptq_data.cached_output[gptq_data.invocation_idx]
-                    gptq_data.invocation_idx += 1
-                    # Move cached output back to model's device
+                n_cached_batches: int = len(gptq_data.cached_output)
+                if gptq_data.batch_idx >= n_cached_batches:
+                    assert gptq_data.batch_idx == n_cached_batches
+                    assert gptq_data.invocation_idx == 0
+                    gptq_data.cached_output.append([])
+
+                cached_batch_out: list[Any] = gptq_data.cached_output[
+                    gptq_data.batch_idx
+                ]
+                n_cached_invocations: int = len(cached_batch_out)
+                if gptq_data.invocation_idx < n_cached_invocations:
+                    # Return cached output
+                    result: Any = cached_batch_out[gptq_data.invocation_idx]
+                    # Move cached output from CPU to model's device
                     if gptq_data.out_device:
                         result = move_to_device(result, gptq_data.out_device)
+                    gptq_data.invocation_idx += 1
                     return result
                 else:
-                    # We have exceeded the cached outputs number ==> the module was called from another call site ==> cache output
+                    # Compute output and cache it, then raise StopForward
+                    assert gptq_data.invocation_idx == n_cached_invocations
                     args = move_to_device(args, gptq_data.weight_device)
                     kwargs = move_to_device(kwargs, gptq_data.weight_device)
                     assert type(kwargs) is dict
                     out: Any = gptq_data.old_forward(*args, **kwargs)
                     if gptq_data.out_device is None:
                         gptq_data.out_device = infer_object_device(out)
-                    # Cache on CPU to save GPU memory
-                    gptq_data.cached_output.append(move_to_cpu(out))
+                    cached_batch_out.append(move_to_cpu(out))
                     gptq_data.invocation_idx += 1
                     raise StopForward(module)
 
@@ -492,6 +504,7 @@ def wrap_model(
             cached_output=[],
             state=GPTQ_STATE.CACHE if not_quantizable else GPTQ_STATE.COLLECT,
             invocation_idx=0,
+            batch_idx=0,
             weight_device=infer_module_device(model),
             out_device=None,
         ),
@@ -524,17 +537,11 @@ def unwrap_model(model: nn.Module) -> None:
     Parameters:
         model: The wrapped model to unwrap (modified in-place).
     """
-    gptq_data: GPTQ_Data = get_gptq_data(model)
-
-    model.forward = gptq_data.old_forward
-
-    # Immediately free the cache contents
-    gptq_data.cached_output.clear()
-    delete_gptq_data(model)
-
-    child: nn.Module
-    for child in model.children():
-        unwrap_model(child)
+    for module in model.modules():
+        gptq_data: GPTQ_Data = get_gptq_data(module)
+        module.forward = gptq_data.old_forward
+        gptq_data.cached_output.clear()
+        delete_gptq_data(module)
 
 
 def collect_quantizers(
@@ -594,23 +601,37 @@ def run_model(
     Returns:
         Set of frontier modules that raised StopForward during execution.
     """
-    gptq_data: GPTQ_Data = get_gptq_data(model)
+    model_device = get_gptq_data(model).weight_device
     frontier_submodules: set[nn.Module] = set()
     for args, kwargs in tqdm(
         zip(args_dataset, kwargs_dataset, strict=True),
         desc=f"(Re)playing model",
         leave=False,
         unit="batch",
+        total=len(args_dataset),
         disable=not show_progress,
     ):
-        args = move_to_device(args, gptq_data.weight_device)
-        kwargs = move_to_device(kwargs, gptq_data.weight_device)
+        args = move_to_device(args, model_device)
+        kwargs = move_to_device(kwargs, model_device)
         assert type(kwargs) is dict
         try:
             model(*args, **kwargs)
         except StopForward as stop_fwd:
             assert stop_fwd.module is not None
             frontier_submodules.add(stop_fwd.module)
+        finally:
+            # increment batch counter for modules that were invoked at least once
+            # reset invocation counter
+            for m in model.modules():
+                gptq_data: GPTQ_Data = get_gptq_data(m)
+                if gptq_data.invocation_idx > 0:
+                    gptq_data.batch_idx += 1
+                    gptq_data.invocation_idx = 0
+
+    # reset batch counter
+    for m in model.modules():
+        get_gptq_data(m).batch_idx = 0
+
     return frontier_submodules
 
 
@@ -741,7 +762,10 @@ def finish_collection(
     assert gptq_data.invocation_idx == 0
 
 
-def finish_caching(module: nn.Module) -> None:
+def finish_caching(
+    module: nn.Module,
+    verbose: bool,
+) -> None:
     """
     Complete output caching for a particular call site.
 
@@ -751,36 +775,41 @@ def finish_caching(module: nn.Module) -> None:
 
     Parameters:
         module: The module to transition (must be in CACHE state).
+        verbose: Whether to print out the number of released cached outputs.
     """
     gptq_data: GPTQ_Data = get_gptq_data(module)
     assert gptq_data.state == GPTQ_STATE.CACHE
     assert gptq_data.invocation_idx == 0
 
     # Free children's cached outputs
-    for child in module.children():
+    for child_name, child in module.named_children():
         child_gptq_data = get_gptq_data(child)
         assert child_gptq_data.state == GPTQ_STATE.CACHE
         assert child_gptq_data.invocation_idx == 0
+        assert child_gptq_data.batch_idx == 0
+        if verbose:
+            print(
+                f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
+            )
         child_gptq_data.cached_output.clear()
 
 
-def reset_invocation_counter(
+def increment_batch_counter(
     module: nn.Module,
 ) -> None:
     """
-    Reset the invocation counter for all submodules.
+    Increments the batch counter for all submodules.
 
-    This function resets the `invocation_idx` field in GPTQ_Data for the
-    given module and all its descendants. It is called after each calibration
-    batch to ensure that cached output indices align with the current batch's
-    invocation sequence.
+    This function increments the `batch_idx` field in GPTQ_Data for the
+    given module and all its descendants.
 
     Parameters:
-        module: The root module whose invocation counters should be reset.
+        module: The root module whose batch counters should be inremented.
     """
     for m in module.modules():
         gptq_data: GPTQ_Data = get_gptq_data(m)
-        gptq_data.invocation_idx = 0
+        if gptq_data.invocation_idx > 0:
+            gptq_data.batch_idx += 1
 
 
 def find_multiply_invoked_modules(
@@ -788,6 +817,7 @@ def find_multiply_invoked_modules(
     args_dataset: list[tuple[Any]],
     kwargs_dataset: list[dict[str, Any]],
     show_progress: bool,
+    verbose: bool,
 ) -> set[nn.Module]:
     """
     Detect modules that are invoked multiple times within a single forward pass.
@@ -813,6 +843,7 @@ def find_multiply_invoked_modules(
         args_dataset: List of positional argument tuples for calibration.
         kwargs_dataset: List of keyword argument dicts for calibration.
         show_progress: Whether to display a progress bar during analysis.
+        verbose: Whether to print out found modules' names
 
     Returns:
         A set of modules that are invoked multiple times per batch.
@@ -833,15 +864,20 @@ def find_multiply_invoked_modules(
         if invocation_count > 1:
             multiply_invoked_modules.add(module)
             module.forward = old_forward
+            if verbose:
+                full_module_name: str = getattr(module, "full_name")
+                print(f"[MULTI-CALL MODULE] {full_module_name}")
         else:
             setattr(module, "invocation_count", invocation_count)
         return old_forward(*args, **kwargs)
 
-    for m in model.modules():
+    for name, m in model.named_modules():
         assert not hasattr(m, "old_forward")
         assert not hasattr(m, "invocation_count")
+        assert not hasattr(m, "full_name")
         setattr(m, "old_forward", m.forward)
         setattr(m, "invocation_count", 0)
+        setattr(m, "full_name", name)
         m.forward = types.MethodType(new_forward, m)
 
     # Infer model device from first parameter
@@ -850,9 +886,10 @@ def find_multiply_invoked_modules(
     try:
         for args, kwargs in tqdm(
             zip(args_dataset, kwargs_dataset, strict=True),
-            desc=f"(Re)playing model",
+            desc=f"Detecting multi-call modules",
             leave=False,
             unit="batch",
+            total=len(args_dataset),
             disable=not show_progress,
         ):
             args = move_to_device(args, model_device)
@@ -868,6 +905,12 @@ def find_multiply_invoked_modules(
             m.forward = old_forward
             delattr(m, "invocation_count")
             delattr(m, "old_forward")
+            delattr(m, "full_name")
+
+    if verbose:
+        print(
+            f"[MULTI-CALL MODULE] {len(multiply_invoked_modules)} multi-call modules found"
+        )
 
     return multiply_invoked_modules
 
@@ -908,18 +951,21 @@ def gptq_quantize(
     assert len(args_dataset) == len(kwargs_dataset), "Dataset length mismatch"
 
     if not has_gptq_data(model):
+        multiply_invoked_modules: set[nn.Module] = find_multiply_invoked_modules(
+            model,
+            args_dataset=args_dataset,
+            kwargs_dataset=kwargs_dataset,
+            show_progress=gptq_config.show_progress,
+            verbose=gptq_config.verbose,
+        )
+
         wrap_model(
             model,
             full_model_name="",
             ignored_module_patterns=(
                 [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
             ),
-            ignored_modules=find_multiply_invoked_modules(
-                model,
-                args_dataset=args_dataset,
-                kwargs_dataset=kwargs_dataset,
-                show_progress=gptq_config.show_progress,
-            ),
+            ignored_modules=multiply_invoked_modules,
         )
 
     try:
@@ -933,7 +979,7 @@ def gptq_quantize(
                 kwargs_dataset,
                 show_progress=gptq_config.show_progress,
             )
-            reset_invocation_counter(model)
+
             if not frontier_submodules:
                 break
 
@@ -946,7 +992,7 @@ def gptq_quantize(
                         finish_collection(frontier_submodule, gptq_config)
 
                     case GPTQ_STATE.CACHE:
-                        finish_caching(frontier_submodule)
+                        finish_caching(frontier_submodule, verbose=gptq_config.verbose)
 
                     case _:
                         assert False  # we should never get here
