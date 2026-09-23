@@ -408,6 +408,7 @@ def wrap_model(
     full_model_name: str,
     ignored_module_patterns: Iterable[re.Pattern] = [],
     ignored_modules: Iterable[nn.Module] = [],
+    cache_outputs: bool = True,
     debug_mode: bool = False,
 ) -> None:
     """
@@ -430,6 +431,7 @@ def wrap_model(
         full_model_name: Hierarchical dot-delimited model name following "grandparent.parent.clild" pattern.
         ignored_module_patterns: Collection of regular expressions to be matched against submodules' full names. If matched a submodule is not quantized.
         ignored_modules: Modules to exclude from GPTQ quantization.
+        cache_outputs: Whether to enable modules' outputs caching for performance optimization.
         debug_mode: Whether to check if the cached output is equal to computed output.
     """
 
@@ -501,6 +503,8 @@ def wrap_model(
         or model in ignored_modules
     )
 
+    final_state: GPTQ_STATE = GPTQ_STATE.CACHE if cache_outputs else GPTQ_STATE.COMPUTE
+
     setattr(
         model,
         "gptq_data",
@@ -510,7 +514,7 @@ def wrap_model(
             gptq=None,
             quantizer=None,
             cached_output=[],
-            state=GPTQ_STATE.CACHE if not_quantizable else GPTQ_STATE.COLLECT,
+            state=final_state if not_quantizable else GPTQ_STATE.COLLECT,
             invocation_idx=0,
             batch_idx=0,
             weight_device=infer_module_device(model),
@@ -531,6 +535,7 @@ def wrap_model(
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
             ignored_modules=ignored_modules,
+            cache_outputs=cache_outputs,
             debug_mode=debug_mode,
         )
 
@@ -767,7 +772,9 @@ def finish_collection(
         static_groups=gptq_config.static_groups,
         verbose=gptq_config.verbose,
     )
-    gptq_data.state = GPTQ_STATE.CACHE
+    gptq_data.state = (
+        GPTQ_STATE.CACHE if gptq_config.cache_outputs else GPTQ_STATE.COMPUTE
+    )
     gptq_data.quantizer = gptq_data.gptq.quantizer
     gptq_data.gptq = None
     assert gptq_data.invocation_idx == 0
@@ -776,6 +783,7 @@ def finish_collection(
 def finish_caching(
     module: nn.Module,
     verbose: bool,
+    release_children_cache: bool = True,
 ) -> None:
     """
     Complete output caching for a particular call site.
@@ -787,22 +795,28 @@ def finish_caching(
     Parameters:
         module: The module to transition (must be in CACHE state).
         verbose: Whether to print out the number of released cached outputs.
+        release_children_cache: Whether to release child modules' cached outputs.
     """
     gptq_data: GPTQ_Data = get_gptq_data(module)
     assert gptq_data.state == GPTQ_STATE.CACHE
     assert gptq_data.invocation_idx == 0
+    if verbose:
+        print(
+            f"[{gptq_data.full_module_name}] Cached {len(gptq_data.cached_output)} batches"
+        )
 
     # Free children's cached outputs
-    for child_name, child in module.named_children():
-        child_gptq_data = get_gptq_data(child)
-        assert child_gptq_data.state == GPTQ_STATE.CACHE
-        assert child_gptq_data.invocation_idx == 0
-        assert child_gptq_data.batch_idx == 0
-        if verbose:
-            print(
-                f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
-            )
-        child_gptq_data.cached_output.clear()
+    if release_children_cache:
+        for child_name, child in module.named_children():
+            child_gptq_data = get_gptq_data(child)
+            assert child_gptq_data.state == GPTQ_STATE.CACHE
+            assert child_gptq_data.invocation_idx == 0
+            assert child_gptq_data.batch_idx == 0
+            if verbose:
+                print(
+                    f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
+                )
+            child_gptq_data.cached_output.clear()
 
 
 def increment_batch_counter(
@@ -962,12 +976,16 @@ def gptq_quantize(
     assert len(args_dataset) == len(kwargs_dataset), "Dataset length mismatch"
 
     if not has_gptq_data(model):
-        multiply_invoked_modules: set[nn.Module] = find_multiply_invoked_modules(
-            model,
-            args_dataset=args_dataset,
-            kwargs_dataset=kwargs_dataset,
-            show_progress=gptq_config.show_progress,
-            verbose=gptq_config.verbose,
+        multiply_invoked_modules: set[nn.Module] = (
+            find_multiply_invoked_modules(
+                model,
+                args_dataset=args_dataset,
+                kwargs_dataset=kwargs_dataset,
+                show_progress=gptq_config.show_progress,
+                verbose=gptq_config.verbose,
+            )
+            if gptq_config.ignore_multi_call_modules
+            else set()
         )
 
         wrap_model(
@@ -977,6 +995,7 @@ def gptq_quantize(
                 [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
             ),
             ignored_modules=multiply_invoked_modules,
+            cache_outputs=gptq_config.cache_outputs,
             debug_mode=gptq_config.debug_mode,
         )
 
@@ -1004,7 +1023,11 @@ def gptq_quantize(
                         finish_collection(frontier_submodule, gptq_config)
 
                     case GPTQ_STATE.CACHE:
-                        finish_caching(frontier_submodule, verbose=gptq_config.verbose)
+                        finish_caching(
+                            frontier_submodule,
+                            verbose=gptq_config.verbose,
+                            release_children_cache=gptq_config.release_children_cache,
+                        )
 
                     case _:
                         assert False  # we should never get here
