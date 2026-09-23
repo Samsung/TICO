@@ -306,15 +306,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--kv_cache_key_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_batched_matmul"],
-        help="Observer type for KV cache key quantization (minmax/mse/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_batched_matmul"],
+        help="Observer type for KV cache key quantization (minmax/mse/mse_octav/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_value_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_matmul"],
-        help="Observer type for KV cache value quantization (minmax/mse/mse_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_matmul"],
+        help="Observer type for KV cache value quantization (minmax/mse/mse_octav/mse_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_key_observer_per_channel",
@@ -336,36 +336,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--linear_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for linear activation quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for linear activation quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--norm_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for norm activation quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for norm activation quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--softmax_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for softmax activation quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for softmax activation quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--spinquant_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for SpinQuant rotation I/O quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for SpinQuant rotation I/O quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--lm_head_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--gptq_mse",
@@ -2961,7 +2961,8 @@ def quant_spec_from_dtype_and_observer(
 
     Args:
         dtype_str: A dtype string such as "int16", "uint8", "mxint8", "mxfp4".
-        observer_str: Observer type — ``"minmax"`` (default) or ``"mse"``.
+        observer_str: Observer type — ``"minmax"`` (default), ``"mse"``,
+            ``"mse_octav"``, ``"mse_matmul"``, or ``"mse_batched_matmul"``.
             Ignored for MX dtypes (MXObserver is always used).
         per_channel: If True, use a per-channel qscheme
             (``PER_CHANNEL_SYMM`` for signed dtypes, ``PER_CHANNEL_ASYMM`` for
@@ -2996,6 +2997,15 @@ def quant_spec_from_dtype_and_observer(
             return affine(
                 DType(bits=bits, signed=signed),
                 observer=MSEObserver,
+                qscheme=qscheme,
+                channel_axis=channel_axis,
+            )
+        elif observer_str == "mse_octav":
+            from tico.quantization.wrapq.observers.mse_octav import MSEOCTAVObserver
+
+            return affine(
+                DType(bits=bits, signed=signed),
+                observer=MSEOCTAVObserver,
                 qscheme=qscheme,
                 channel_axis=channel_axis,
             )
@@ -3039,7 +3049,7 @@ def build_activation_specs(args):
 
     Each activation category (linear / norm / softmax / SpinQuant I/O / lm_head I/O /
     KV cache key / KV cache value) gets its observer type from the corresponding
-    ``--*_observer`` CLI flag (minmax/mse/mse_matmul/mse_batched_matmul).
+    ``--*_observer`` CLI flag (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul).
 
     When a category's qdtype is not set (e.g. ``--spinquant_io_qdtype``), the dtype
     falls back to ``--linear_io_qdtype`` (same as before), but that category's own
