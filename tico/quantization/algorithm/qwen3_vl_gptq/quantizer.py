@@ -14,8 +14,12 @@
 
 import copy
 import functools
+import json
 import os
+import re
+import tempfile
 import types
+import uuid
 from typing import Any, Callable, Optional
 
 import torch
@@ -31,6 +35,7 @@ from tico.quantization.algorithm.qwen3_vl_gptq.utils import (
     gather_single_batch_from_list,
     get_deepstack_entry,
     get_quantizable_layers,
+    group_shared_fp_inputs,
     iter_cached_batches,
     maybe_move_cache_to_cpu,
     move_tensor_tree,
@@ -42,6 +47,12 @@ from tico.quantization.algorithm.qwen3_vl_gptq.utils import (
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
+
+# On-disk format tag and schema version of the sharded FP inputs cache.
+_FP_INPUTS_CACHE_FORMAT = "qwen3_vl_gptq.fp_inputs"
+_FP_INPUTS_CACHE_SCHEMA_VERSION = 2
+_FP_INPUTS_MANIFEST_FILENAME = "manifest.json"
+_FP_INPUTS_SHARD_DIRNAME = "shards"
 
 
 class FPInputsCache:
@@ -130,9 +141,14 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         # GPTQv2: reference to original FP model for collecting FP inputs
         self.orig_model: Optional[nn.Module] = None
 
-        # GPTQv2: disk cache for FP inputs (stage_desc -> native_inputs dict)
-        self._fp_inputs_disk_cache: dict[str, dict[str, list[torch.Tensor]]] = {}
-        # GPTQv2: True if FP inputs cache was loaded from disk (skip orig model ops)
+        # GPTQv2: FP inputs cache manifest. During a save run it accumulates
+        # per-stage shard metadata and is published (written to disk with
+        # complete=True) only after convert() succeeds. During a warm run it
+        # holds the validated manifest loaded from disk; tensor data stays in
+        # per-stage shards and is loaded one stage at a time on demand.
+        self._fp_inputs_manifest: Optional[dict[str, Any]] = None
+        # GPTQv2: True if the FP inputs cache manifest was loaded from disk
+        # (skip orig model ops, load per-stage shards on demand).
         self._fp_inputs_disk_loaded: bool = False
 
     def _resolve_weight_bits(
@@ -268,22 +284,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         orig_model_use_cache: dict[str, Any] = {}
 
         if gptq_conf.gptq_v2:
-            # Load FP inputs cache from disk if available
-            if gptq_conf.fp_inputs_cache_path and os.path.exists(
-                gptq_conf.fp_inputs_cache_path
-            ):
-                print(
-                    f"[GPTQv2] Loading FP inputs cache from {gptq_conf.fp_inputs_cache_path}"
-                )
-                self._fp_inputs_disk_cache = torch.load(
-                    gptq_conf.fp_inputs_cache_path,
-                    map_location="cpu",
-                    weights_only=False,
-                )
-                print(
-                    f"[GPTQv2] Loaded FP inputs for {len(self._fp_inputs_disk_cache)} stages"
-                )
-                self._fp_inputs_disk_loaded = True
+            # Load the FP inputs cache manifest from disk if available.
+            # Tensor data stays in per-stage shards and is loaded on demand,
+            # one stage at a time, when each stage requests its FP inputs.
+            if gptq_conf.fp_inputs_cache_path:
+                self._load_fp_inputs_manifest(gptq_conf.fp_inputs_cache_path)
 
             # Only deep-copy the model if FP inputs need to be collected on-the-fly.
             # When the disk cache is loaded, orig_model is not needed.
@@ -292,6 +297,15 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 self.orig_model = orig_model
                 orig_model_use_cache = self._disable_model_cache(orig_model)
                 orig_components = resolve_qwen3_vl_components(orig_model, gptq_conf)
+                if gptq_conf.fp_inputs_cache_path is not None:
+                    # Fresh save run: accumulate a new manifest with a new
+                    # run_id. It is published only after all stages succeed.
+                    self._fp_inputs_manifest = self._new_fp_inputs_manifest()
+                    # No valid manifest was loaded, so any shards left in the
+                    # cache directory are unreachable garbage from previous
+                    # failed/superseded runs: sweep them before writing new
+                    # ones to avoid unbounded accumulation across failed runs.
+                    self._sweep_fp_inputs_shards(gptq_conf.fp_inputs_cache_path)
 
         try:
             if should_quantize_vision_stage(gptq_conf, stage="patch_embed"):
@@ -370,6 +384,18 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                     ),
                 )
 
+            # GPTQv2: publish the FP inputs cache manifest ONLY after all
+            # stages completed successfully. Per-stage shards were written
+            # atomically during collection; the manifest is what marks the
+            # cache complete, so a failed run never publishes a partial cache.
+            if (
+                gptq_conf.fp_inputs_cache_path is not None
+                and not self._fp_inputs_disk_loaded
+                and self._fp_inputs_manifest is not None
+                and self._fp_inputs_manifest["stages"]
+            ):
+                self._publish_fp_inputs_manifest(gptq_conf.fp_inputs_cache_path)
+
             model.quantizers = self._quantizers  # type: ignore[assignment]
             return model
         finally:
@@ -386,21 +412,6 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             self._vision_cache_args.clear()
             self._vision_cache_kwargs.clear()
             self._num_vision_batches = 0
-
-            # GPTQv2: Save FP inputs cache to disk if configured
-            if (
-                gptq_conf.fp_inputs_cache_path is not None
-                and self._fp_inputs_disk_cache
-                and not self._fp_inputs_disk_loaded
-            ):
-                cache_path = gptq_conf.fp_inputs_cache_path
-                os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
-                print(
-                    f"[GPTQv2] Saving FP inputs cache to {cache_path} "
-                    f"({len(self._fp_inputs_disk_cache)} stages)"
-                )
-                torch.save(self._fp_inputs_disk_cache, cache_path)
-                print("[GPTQv2] FP inputs cache saved successfully")
 
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -732,6 +743,400 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         )
 
     # ------------------------------------------------------------------
+    # FP inputs disk cache persistence (sharded, manifest-gated)
+    # ------------------------------------------------------------------
+    #
+    # Layout of the cache directory (config.fp_inputs_cache_path):
+    #     <cache_dir>/manifest.json            - written LAST, atomically;
+    #                                          publishing it marks the cache
+    #                                          complete.
+    #     <cache_dir>/shards/NNNN_<stage>.pt   - one torch.save file per stage,
+    #                                          written atomically right after
+    #                                          the stage's FP inputs are
+    #                                          collected.
+    #
+    # Properties:
+    #   * A failed conversion never publishes a manifest, so a partial cache
+    #     is never treated as complete.
+    #   * Submodules sharing the same input (e.g. q/k/v or gate/up) are
+    #     stored once per shared-input group.
+    #   * Warm runs load the small manifest up front and read one stage shard
+    #     at a time instead of keeping the whole cache in memory.
+    #   * Every shard carries the manifest's run_id, so a stale manifest can
+    #     never validate against shards from a different (crashed) run.
+
+    @staticmethod
+    def _atomic_write_file(path: str, write_fn: Callable[[Any], None]) -> None:
+        """
+        Write a file atomically: write to a temporary file in the same
+        directory, fsync, then os.replace() over the destination.
+        """
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        tmp_path: Optional[str] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=f".{os.path.basename(path)}.",
+                suffix=".tmp",
+                dir=directory,
+                delete=False,
+            ) as stream:
+                tmp_path = stream.name
+                write_fn(stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+    def _atomic_torch_save(self, payload: Any, path: str) -> None:
+        """torch.save() through an atomic temporary-file rename."""
+        self._atomic_write_file(path, lambda stream: torch.save(payload, stream))
+
+    def _atomic_save_json(self, payload: dict[str, Any], path: str) -> None:
+        """json.dump() through an atomic temporary-file rename."""
+
+        def _write(stream: Any) -> None:
+            stream.write(json.dumps(payload, indent=2, sort_keys=True).encode("utf-8"))
+
+        self._atomic_write_file(path, _write)
+
+    @staticmethod
+    def _new_fp_inputs_manifest() -> dict[str, Any]:
+        """Create an empty (incomplete) FP inputs cache manifest."""
+        return {
+            "format": _FP_INPUTS_CACHE_FORMAT,
+            "schema_version": _FP_INPUTS_CACHE_SCHEMA_VERSION,
+            "complete": False,
+            "run_id": uuid.uuid4().hex,
+            "num_stages": 0,
+            "stages": {},
+        }
+
+    def _fp_inputs_save_manifest(self) -> dict[str, Any]:
+        """Return the accumulating save-run manifest, creating it if needed."""
+        if self._fp_inputs_manifest is None:
+            self._fp_inputs_manifest = self._new_fp_inputs_manifest()
+        return self._fp_inputs_manifest
+
+    @staticmethod
+    def _shard_filename(index: int, stage_desc: str, run_id: str) -> str:
+        # The run_id prefix makes the generating run visible in listings and
+        # guarantees shards from different runs never share a filename.
+        sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", stage_desc).strip("_")
+        if not sanitized:
+            sanitized = "stage"
+        return f"{run_id[:8]}_{index:04d}_{sanitized[:80]}.pt"
+
+    @staticmethod
+    def _fp_inputs_group_meta(group: dict[str, Any]) -> dict[str, Any]:
+        """Manifest metadata for one shared-input group."""
+        tensors = group["tensors"]
+        first = tensors[0] if tensors else None
+        return {
+            "members": list(group["members"]),
+            "num_tensors": len(tensors),
+            "shape": list(first.shape) if isinstance(first, torch.Tensor) else None,
+            "dtype": str(first.dtype) if isinstance(first, torch.Tensor) else None,
+        }
+
+    def _write_fp_inputs_shard(
+        self,
+        stage_desc: str,
+        groups: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """
+        Atomically write one stage shard and return its manifest entry.
+
+        Called right after a stage's FP inputs are collected, so tensor data
+        never accumulates across stages in memory.
+        """
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        cache_dir = self.config.fp_inputs_cache_path
+        assert cache_dir is not None
+        manifest = self._fp_inputs_save_manifest()
+        index = len(manifest["stages"])
+        shard_rel = (
+            f"{_FP_INPUTS_SHARD_DIRNAME}/"
+            + self._shard_filename(index, stage_desc, manifest["run_id"])
+        )
+        payload = {
+            "format": _FP_INPUTS_CACHE_FORMAT,
+            "schema_version": _FP_INPUTS_CACHE_SCHEMA_VERSION,
+            "run_id": manifest["run_id"],
+            "stage": stage_desc,
+            "groups": [
+                {"members": list(g["members"]), "tensors": list(g["tensors"])}
+                for g in groups
+            ],
+        }
+        self._atomic_torch_save(payload, os.path.join(cache_dir, shard_rel))
+        num_batches = len(groups[0]["tensors"]) if groups else 0
+        return {
+            "shard": shard_rel,
+            "stage": stage_desc,
+            "num_batches": num_batches,
+            "groups": [self._fp_inputs_group_meta(g) for g in groups],
+        }
+
+    def _persist_stage_fp_inputs(
+        self,
+        stage_desc: str,
+        stage_inputs: dict[str, list[torch.Tensor]],
+    ) -> dict[str, list[torch.Tensor]]:
+        """
+        Deduplicate shared inputs, write the stage shard, record its manifest
+        entry, and return a name -> shared-tensor-list view of the groups.
+
+        The returned lists are aliased across group members so the in-memory
+        footprint stays deduplicated as well. This is safe because
+        ``_assign_native_inputs`` shallow-copies the lists and
+        ``GPTQ.add_batch`` only reads (never mutates) the tensors.
+        """
+        groups = group_shared_fp_inputs(stage_inputs)
+        manifest = self._fp_inputs_save_manifest()
+        manifest["stages"][stage_desc] = self._write_fp_inputs_shard(
+            stage_desc, groups
+        )
+        return {
+            name: group["tensors"]
+            for group in groups
+            for name in group["members"]
+        }
+
+    def _publish_fp_inputs_manifest(self, cache_dir: str) -> None:
+        """
+        Atomically publish the manifest, marking the cache complete.
+
+        Called only after every stage of convert() finished successfully.
+        Also removes orphaned shard files (e.g. from earlier failed runs)
+        that are not referenced by the published manifest.
+        """
+        assert self._fp_inputs_manifest is not None
+        manifest = self._fp_inputs_manifest
+        manifest["complete"] = True
+        manifest["num_stages"] = len(manifest["stages"])
+        manifest_path = os.path.join(cache_dir, _FP_INPUTS_MANIFEST_FILENAME)
+        print(
+            f"[GPTQv2] Publishing FP inputs cache manifest to {manifest_path} "
+            f"({manifest['num_stages']} stages)"
+        )
+        self._atomic_save_json(manifest, manifest_path)
+        referenced = {entry["shard"] for entry in manifest["stages"].values()}
+        shard_dir = os.path.join(cache_dir, _FP_INPUTS_SHARD_DIRNAME)
+        if os.path.isdir(shard_dir):
+            for fname in os.listdir(shard_dir):
+                rel = f"{_FP_INPUTS_SHARD_DIRNAME}/{fname}"
+                if rel not in referenced:
+                    try:
+                        os.unlink(os.path.join(shard_dir, fname))
+                    except OSError:
+                        pass
+        print("[GPTQv2] FP inputs cache published successfully")
+
+    def _sweep_fp_inputs_shards(self, cache_dir: str) -> None:
+        """
+        Remove leftover shard files from previous (failed or superseded) runs.
+
+        Called at the start of a save run, when no valid manifest was loaded:
+        without a published manifest those shards are unreachable garbage, so
+        sweeping prevents unbounded accumulation across consecutive failed
+        runs and removes same-named files from an older generation.
+        """
+        shard_dir = os.path.join(cache_dir, _FP_INPUTS_SHARD_DIRNAME)
+        if not os.path.isdir(shard_dir):
+            return
+        removed = 0
+        for fname in os.listdir(shard_dir):
+            path = os.path.join(shard_dir, fname)
+            try:
+                if os.path.isfile(path):
+                    os.unlink(path)
+                    removed += 1
+            except OSError:
+                pass
+        if removed:
+            print(
+                f"[GPTQv2] Swept {removed} stale FP inputs cache shard(s) "
+                f"from previous run(s)"
+            )
+
+    def _load_fp_inputs_manifest(self, cache_dir: str) -> None:
+        """
+        Load and validate the FP inputs cache manifest (no tensor data).
+
+        Sets ``_fp_inputs_disk_loaded`` on success. A missing manifest means
+        the previous run never published (fresh path or failed run), so the
+        cache is regenerated from scratch.
+        """
+        if os.path.isfile(cache_dir):
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache path {cache_dir} is a file; "
+                f"expected a cache directory with a manifest and per-stage "
+                f"shards. Delete the file or point fp_inputs_cache_path at a "
+                f"directory and re-run."
+            )
+        manifest_path = os.path.join(cache_dir, _FP_INPUTS_MANIFEST_FILENAME)
+        if not os.path.exists(manifest_path):
+            return
+        print(f"[GPTQv2] Loading FP inputs cache manifest from {manifest_path}")
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"[GPTQv2] Failed to read FP inputs cache manifest at "
+                f"{manifest_path}: {error}. Delete the cache directory and "
+                f"re-run to regenerate."
+            ) from error
+        self._validate_fp_inputs_manifest(manifest, cache_dir)
+        self._fp_inputs_manifest = manifest
+        self._fp_inputs_disk_loaded = True
+        print(
+            f"[GPTQv2] FP inputs cache: {len(manifest['stages'])} stages "
+            f"(shards loaded on demand)"
+        )
+
+    @staticmethod
+    def _validate_fp_inputs_manifest(manifest: Any, cache_dir: str) -> None:
+        """Validate the schema and completeness of a loaded manifest."""
+
+        def _fail(reason: str) -> None:
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache manifest at {cache_dir} is invalid: "
+                f"{reason}. Delete the cache directory and re-run to regenerate."
+            )
+
+        if not isinstance(manifest, dict):
+            _fail("not a JSON object")
+        if manifest.get("format") != _FP_INPUTS_CACHE_FORMAT:
+            _fail(f"unexpected format tag {manifest.get('format')!r}")
+        if manifest.get("schema_version") != _FP_INPUTS_CACHE_SCHEMA_VERSION:
+            _fail(f"unsupported schema_version {manifest.get('schema_version')!r}")
+        if manifest.get("complete") is not True:
+            _fail("cache is not marked complete (previous run did not finish)")
+        if not isinstance(manifest.get("run_id"), str) or not manifest["run_id"]:
+            _fail("missing run_id")
+        stages = manifest.get("stages")
+        if not isinstance(stages, dict):
+            _fail("missing stages table")
+        if manifest.get("num_stages") != len(stages):
+            _fail("num_stages does not match the stages table")
+        for stage_desc, entry in stages.items():
+            if not isinstance(entry, dict):
+                _fail(f"stage '{stage_desc}' entry is not an object")
+            if entry.get("stage") != stage_desc:
+                _fail(f"stage '{stage_desc}' entry has mismatched stage name")
+            if not isinstance(entry.get("shard"), str) or not entry["shard"]:
+                _fail(f"stage '{stage_desc}' has no shard path")
+            if not isinstance(entry.get("num_batches"), int):
+                _fail(f"stage '{stage_desc}' has no num_batches")
+            groups = entry.get("groups")
+            if not isinstance(groups, list) or not groups:
+                _fail(f"stage '{stage_desc}' has no shared-input groups")
+            for group in groups:
+                members = group.get("members")
+                if (
+                    not isinstance(members, list)
+                    or not members
+                    or not all(isinstance(m, str) for m in members)
+                ):
+                    _fail(f"stage '{stage_desc}' has a group with invalid members")
+                if not isinstance(group.get("num_tensors"), int):
+                    _fail(f"stage '{stage_desc}' has a group with no num_tensors")
+
+    def _load_fp_inputs_shard(
+        self, stage_desc: str, num_batches: int
+    ) -> dict[str, list[torch.Tensor]]:
+        """
+        Load one stage shard from disk, validate it against the manifest, and
+        expand shared-input groups to a name -> shared-tensor-list mapping.
+        """
+        assert self._fp_inputs_manifest is not None
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        cache_dir = self.config.fp_inputs_cache_path
+        assert cache_dir is not None
+        entry = self._fp_inputs_manifest["stages"][stage_desc]
+        shard_path = os.path.join(cache_dir, entry["shard"])
+        try:
+            payload = torch.load(shard_path, map_location="cpu", weights_only=True)
+        except Exception as error:
+            raise RuntimeError(
+                f"[GPTQv2] Failed to load FP inputs cache shard '{shard_path}': "
+                f"{error}. Delete the cache directory ({cache_dir}) and re-run "
+                f"to regenerate."
+            ) from error
+        self._validate_fp_inputs_shard(
+            payload, stage_desc, entry, shard_path, num_batches
+        )
+        native_inputs: dict[str, list[torch.Tensor]] = {}
+        for group in payload["groups"]:
+            shared = group["tensors"]
+            for name in group["members"]:
+                native_inputs[name] = shared
+        return native_inputs
+
+    def _validate_fp_inputs_shard(
+        self,
+        payload: Any,
+        stage_desc: str,
+        entry: dict[str, Any],
+        shard_path: str,
+        num_batches: int,
+    ) -> None:
+        """Validate a loaded shard against its manifest entry."""
+
+        def _fail(reason: str) -> None:
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache shard '{shard_path}' is invalid: "
+                f"{reason}. Delete the cache directory "
+                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
+            )
+
+        if not isinstance(payload, dict):
+            _fail("not a dictionary")
+        if payload.get("schema_version") != _FP_INPUTS_CACHE_SCHEMA_VERSION:
+            _fail(f"unsupported schema_version {payload.get('schema_version')!r}")
+        assert self._fp_inputs_manifest is not None
+        if payload.get("run_id") != self._fp_inputs_manifest.get("run_id"):
+            _fail("run_id mismatch (stale shard from an earlier run)")
+        if payload.get("stage") != stage_desc:
+            _fail(f"stage mismatch: {payload.get('stage')!r}")
+        groups = payload.get("groups")
+        meta_groups = entry.get("groups")
+        if not isinstance(groups, list) or len(groups) != len(meta_groups):
+            _fail("group count mismatch with manifest")
+        for group, meta in zip(groups, meta_groups):
+            if not isinstance(group, dict):
+                _fail("group is not a dictionary")
+            if group.get("members") != meta.get("members"):
+                _fail(f"member mismatch with manifest: {group.get('members')!r}")
+            tensors = group.get("tensors")
+            if not isinstance(tensors, list) or len(tensors) != meta["num_tensors"]:
+                _fail("tensor count mismatch with manifest")
+            if len(tensors) != num_batches:
+                _fail(
+                    f"cache holds {len(tensors)} batches for stage '{stage_desc}' "
+                    f"but this run uses {num_batches}; calibration data changed"
+                )
+            if not all(isinstance(t, torch.Tensor) for t in tensors):
+                _fail("non-tensor entry in cached FP inputs")
+            first = tensors[0] if tensors else None
+            if isinstance(first, torch.Tensor):
+                if meta.get("shape") is not None and list(first.shape) != list(
+                    meta["shape"]
+                ):
+                    _fail(f"shape mismatch with manifest: {list(first.shape)}")
+                if meta.get("dtype") is not None and str(first.dtype) != meta["dtype"]:
+                    _fail(f"dtype mismatch with manifest: {first.dtype}")
+
+    # ------------------------------------------------------------------
     # Generic stage quantization helpers
     # ------------------------------------------------------------------
 
@@ -755,10 +1160,20 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         """
         assert isinstance(self.config, Qwen3VLGPTQConfig)
 
-        # Check disk cache first
-        if stage_desc in self._fp_inputs_disk_cache:
-            print(f"[GPTQv2] Using cached FP inputs for stage '{stage_desc}'")
-            return self._fp_inputs_disk_cache[stage_desc]
+        # Disk cache hit: load this stage's shard on demand.
+        if self._fp_inputs_disk_loaded:
+            if (
+                self._fp_inputs_manifest is not None
+                and stage_desc in self._fp_inputs_manifest["stages"]
+            ):
+                print(f"[GPTQv2] Loading cached FP inputs for stage '{stage_desc}'")
+                return self._load_fp_inputs_shard(stage_desc, num_batches)
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache miss for stage '{stage_desc}'. "
+                f"Cache was loaded from disk but this stage is not present. "
+                f"Delete the cache directory "
+                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
+            )
 
         # Build full module name -> local name mapping
         full_to_local: dict[str, str] = {}
@@ -797,11 +1212,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         for full_name, local_name in full_to_local.items():
             result[local_name] = fp_cache.fp_cache.get(full_name, [])
 
-        # Save to in-memory disk cache for later persistence
+        # Persist this stage's shard immediately (deduplicated). The manifest
+        # that publishes the cache is written only after convert() succeeds.
         if self.config.fp_inputs_cache_path is not None:
-            self._fp_inputs_disk_cache[stage_desc] = {
-                k: list(v) for k, v in result.items()
-            }
+            result = self._persist_stage_fp_inputs(stage_desc, result)
         return result
 
     @torch.no_grad()
@@ -820,16 +1234,18 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         """
         assert isinstance(self.config, Qwen3VLGPTQConfig)
 
-        # Check disk cache first
-        if stage_desc in self._fp_inputs_disk_cache:
-            print(f"[GPTQv2] Using cached FP inputs for stage '{stage_desc}'")
-            return self._fp_inputs_disk_cache[stage_desc]
-
+        # Disk cache hit: load this stage's shard on demand.
         if self._fp_inputs_disk_loaded:
+            if (
+                self._fp_inputs_manifest is not None
+                and stage_desc in self._fp_inputs_manifest["stages"]
+            ):
+                print(f"[GPTQv2] Loading cached FP inputs for stage '{stage_desc}'")
+                return self._load_fp_inputs_shard(stage_desc, num_batches)
             raise RuntimeError(
                 f"[GPTQv2] FP inputs cache miss for stage '{stage_desc}'. "
                 f"Cache was loaded from disk but this stage is not present. "
-                f"Delete the cache file "
+                f"Delete the cache directory "
                 f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
             )
 
@@ -855,11 +1271,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         finally:
             fp_cache.clear_hook()
 
-        # Save to in-memory disk cache for later persistence
+        # Persist this stage's shard immediately (deduplicated). The manifest
+        # that publishes the cache is written only after convert() succeeds.
         if self.config.fp_inputs_cache_path is not None:
-            self._fp_inputs_disk_cache[stage_desc] = {
-                k: list(v) for k, v in fp_cache.fp_cache.items()
-            }
+            return self._persist_stage_fp_inputs(stage_desc, fp_cache.fp_cache)
 
         return fp_cache.fp_cache
 

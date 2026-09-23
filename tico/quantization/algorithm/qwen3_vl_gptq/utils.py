@@ -232,6 +232,40 @@ def get_quantizable_layers(module: nn.Module) -> dict[str, nn.Module]:
     return find_layers(module, layers=_QUANTIZABLE_LAYER_TYPES)
 
 
+def group_shared_fp_inputs(
+    stage_inputs: dict[str, list[torch.Tensor]],
+) -> list[dict[str, Any]]:
+    """
+    Group submodule FP-input lists that are tensor-identical across all batches.
+
+    Several projections consume exactly the same input tensor (e.g. q/k/v and
+    gate/up in decoder layers). Grouping lets the FP inputs cache store one
+    tensor list per shared-input group instead of one per submodule. Grouping
+    is exact: a submodule joins a group only if ``torch.equal`` holds for every
+    batch, so no heuristic merging can occur.
+
+    Args:
+        stage_inputs: Mapping from local submodule name to per-batch FP inputs.
+
+    Returns:
+        List of groups in first-appearance order. Each group is a dict with:
+            "members": submodule names sharing the input (insertion order).
+            "tensors": the single shared per-batch tensor list.
+    """
+    groups: list[dict[str, Any]] = []
+    for name, tensors in stage_inputs.items():
+        for group in groups:
+            shared = group["tensors"]
+            if len(shared) != len(tensors):
+                continue
+            if all(torch.equal(a, b) for a, b in zip(shared, tensors)):
+                group["members"].append(name)
+                break
+        else:
+            groups.append({"members": [name], "tensors": tensors})
+    return groups
+
+
 def build_module_name_map(model: nn.Module) -> dict[nn.Module, str]:
     """
     Build a reverse lookup from module object to its fully qualified model name.

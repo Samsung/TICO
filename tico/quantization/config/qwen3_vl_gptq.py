@@ -103,10 +103,15 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     # GPTQv2: uses FP inference for collecting inputs during quantization
     gptq_v2: bool = False
 
-    # GPTQv2: Path to save/load FP inputs cache.
-    # If set and file exists, FP inputs are loaded from disk instead of
-    # running the original model. If set and file doesn't exist, FP inputs
-    # are collected during quantization and saved to disk.
+    # GPTQv2: Path to a DIRECTORY for the FP inputs cache.
+    # If set and <dir>/manifest.json exists and passes validation, FP inputs
+    # are loaded from per-stage shards on demand instead of running the
+    # original model. If set and no valid manifest exists, FP inputs are
+    # collected during quantization: each stage is deduplicated (shared
+    # inputs such as q/k/v and gate/up are stored once), written as an
+    # atomic per-stage shard, and the manifest that publishes the cache is
+    # written atomically only after the whole conversion succeeds, so a
+    # failed run never publishes a partial cache.
     # If None, FP inputs are collected on-the-fly (default behavior).
     fp_inputs_cache_path: str | None = None
 

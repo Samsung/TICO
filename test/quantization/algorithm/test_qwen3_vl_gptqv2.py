@@ -22,6 +22,7 @@ These tests verify that:
 """
 
 import copy
+import json
 import os
 import unittest
 from unittest.mock import MagicMock
@@ -34,6 +35,7 @@ from tico.quantization.algorithm.qwen3_vl_gptq.quantizer import (
     FPInputsCache,
     Qwen3VLGPTQQuantizer,
 )
+from tico.quantization.algorithm.qwen3_vl_gptq.utils import group_shared_fp_inputs
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 
 
@@ -201,6 +203,25 @@ def _make_quantizer(fp_inputs_cache_path=None, gptq_v2=True):
     return Qwen3VLGPTQQuantizer(config)
 
 
+def _make_published_cache(tmpdir, stage_inputs_by_desc):
+    """Simulate a successful save run: persist stage shards and publish the
+    manifest. Returns the cache directory path."""
+    cache_dir = os.path.join(tmpdir, "fp_cache")
+    quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+    for stage_desc, inputs in stage_inputs_by_desc.items():
+        quantizer._persist_stage_fp_inputs(stage_desc, inputs)
+    quantizer._publish_fp_inputs_manifest(cache_dir)
+    return cache_dir
+
+
+def _make_warm_quantizer(cache_dir):
+    """Create a quantizer that loaded the published cache manifest from disk."""
+    quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+    quantizer._load_fp_inputs_manifest(cache_dir)
+    assert quantizer._fp_inputs_disk_loaded
+    return quantizer
+
+
 # ---------------------------------------------------------------------------
 # Tests: FPInputsCache
 # ---------------------------------------------------------------------------
@@ -248,73 +269,82 @@ class TestFPInputsCache(unittest.TestCase):
                         self.assertTrue(torch.equal(t, dummy_cache[stage][name][i]))
 
     def test_raw_replay_returns_cached_on_hit(self):
-        """_collect_native_inputs_from_raw_replay returns cached data without
-        running any forward hooks when stage_desc is in the disk cache."""
-        quantizer = _make_quantizer(fp_inputs_cache_path="/tmp/dummy.pt")
-        cached_tensors = [torch.randn(2, 3)]
-        quantizer._fp_inputs_disk_cache = {
-            "vision.merger": {"merger.linear": cached_tensors},
-        }
+        """_collect_native_inputs_from_raw_replay loads the stage shard
+        without running any forward when the manifest lists the stage."""
+        import tempfile
 
-        dummy_model = MagicMock()
-        result = quantizer._collect_native_inputs_from_raw_replay(
-            model=dummy_model,
-            subset={"merger.linear": MagicMock()},
-            module_name={},
-            cache_args=[[]],
-            cache_kwargs={},
-            num_batches=1,
-            stage_desc="vision.merger",
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cached_tensors = [torch.randn(2, 3)]
+            cache_dir = _make_published_cache(
+                tmpdir, {"vision.merger": {"merger.linear": cached_tensors}}
+            )
+            quantizer = _make_warm_quantizer(cache_dir)
 
-        self.assertIn("merger.linear", result)
-        self.assertTrue(torch.equal(result["merger.linear"][0], cached_tensors[0]))
-        dummy_model.assert_not_called()
+            dummy_model = MagicMock()
+            result = quantizer._collect_native_inputs_from_raw_replay(
+                model=dummy_model,
+                subset={"merger.linear": MagicMock()},
+                module_name={},
+                cache_args=[[]],
+                cache_kwargs={},
+                num_batches=1,
+                stage_desc="vision.merger",
+            )
+
+            self.assertIn("merger.linear", result)
+            self.assertTrue(torch.equal(result["merger.linear"][0], cached_tensors[0]))
+            dummy_model.assert_not_called()
 
     @torch.no_grad()
     def test_collect_then_cache_hit(self):
-        """First call collects via hooks and persists to _fp_inputs_disk_cache;
-        second call returns from cache without re-running forward."""
-        quantizer = _make_quantizer(fp_inputs_cache_path="/tmp/dummy.pt")
+        """First call collects via hooks and persists a stage shard; a warm
+        run loads it from disk without re-running forward."""
+        import tempfile
 
-        linear = nn.Linear(4, 4)
-        stage_module = nn.Sequential(linear)
-        subset = {"0": linear}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
 
-        inp = torch.randn(2, 4)
-        cached_args = [[inp]]
-        cached_kwargs: dict = {}
+            linear = nn.Linear(4, 4)
+            stage_module = nn.Sequential(linear)
+            subset = {"0": linear}
 
-        result1 = quantizer._collect_native_inputs_from_stage_cache(
-            stage_module=stage_module,
-            subset=subset,
-            cached_args=cached_args,
-            cached_kwargs=cached_kwargs,
-            stage_desc="test_stage",
-            num_batches=1,
-        )
-        self.assertIn("0", result1)
-        self.assertTrue(torch.equal(result1["0"][0], inp))
+            inp = torch.randn(2, 4)
+            cached_args = [[inp]]
+            cached_kwargs: dict = {}
 
-        # The function should have persisted to _fp_inputs_disk_cache automatically
-        self.assertIn("test_stage", quantizer._fp_inputs_disk_cache)
+            result1 = quantizer._collect_native_inputs_from_stage_cache(
+                stage_module=stage_module,
+                subset=subset,
+                cached_args=cached_args,
+                cached_kwargs=cached_kwargs,
+                stage_desc="test_stage",
+                num_batches=1,
+            )
+            self.assertIn("0", result1)
+            self.assertTrue(torch.equal(result1["0"][0], inp))
 
-        broken_module = MagicMock(side_effect=RuntimeError("should not be called"))
-        result2 = quantizer._collect_native_inputs_from_stage_cache(
-            stage_module=broken_module,
-            subset=subset,
-            cached_args=cached_args,
-            cached_kwargs=cached_kwargs,
-            stage_desc="test_stage",
-            num_batches=1,
-        )
-        self.assertTrue(torch.equal(result2["0"][0], result1["0"][0]))
-        broken_module.assert_not_called()
+            # The stage shard was persisted and recorded in the manifest.
+            self.assertIn("test_stage", quantizer._fp_inputs_manifest["stages"])
+            quantizer._publish_fp_inputs_manifest(cache_dir)
+
+            warm = _make_warm_quantizer(cache_dir)
+            broken_module = MagicMock(side_effect=RuntimeError("should not be called"))
+            result2 = warm._collect_native_inputs_from_stage_cache(
+                stage_module=broken_module,
+                subset=subset,
+                cached_args=cached_args,
+                cached_kwargs=cached_kwargs,
+                stage_desc="test_stage",
+                num_batches=1,
+            )
+            self.assertTrue(torch.equal(result2["0"][0], result1["0"][0]))
+            broken_module.assert_not_called()
 
     @torch.no_grad()
     def test_stage_cache_persist_roundtrip(self):
-        """Cold collection -> save to disk -> new quantizer loads disk ->
-        warm lookup returns cached tensors without calling forward.
+        """Cold collection -> publish manifest -> warm quantizer loads the
+        stage shard -> cached tensors returned without calling forward.
 
         This test verifies that _collect_native_inputs_from_stage_cache()
         persists its result so that a warm-cache run can retrieve it.
@@ -322,10 +352,10 @@ class TestFPInputsCache(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            cache_path = os.path.join(tmpdir, "fp_cache.pt")
+            cache_dir = os.path.join(tmpdir, "fp_cache")
 
             # --- Cold run: collect and persist ---
-            quantizer_cold = _make_quantizer(fp_inputs_cache_path=cache_path)
+            quantizer_cold = _make_quantizer(fp_inputs_cache_path=cache_dir)
 
             linear = nn.Linear(4, 4)
             stage_module = nn.Sequential(linear)
@@ -346,19 +376,14 @@ class TestFPInputsCache(unittest.TestCase):
             self.assertIn("0", result_cold)
             self.assertTrue(torch.equal(result_cold["0"][0], inp))
 
-            # Verify the stage was persisted to the in-memory disk cache
-            self.assertIn("vision.blocks.0", quantizer_cold._fp_inputs_disk_cache)
-
-            # Simulate convert()'s save logic
-            torch.save(quantizer_cold._fp_inputs_disk_cache, cache_path)
-            self.assertTrue(os.path.exists(cache_path))
-
-            # --- Warm run: new quantizer loads cache from disk ---
-            quantizer_warm = _make_quantizer(fp_inputs_cache_path=cache_path)
-            quantizer_warm._fp_inputs_disk_cache = torch.load(
-                cache_path, map_location="cpu", weights_only=False
+            # The stage was recorded in the save-run manifest.
+            self.assertIn(
+                "vision.blocks.0", quantizer_cold._fp_inputs_manifest["stages"]
             )
-            quantizer_warm._fp_inputs_disk_loaded = True
+            quantizer_cold._publish_fp_inputs_manifest(cache_dir)
+
+            # --- Warm run: new quantizer loads the manifest from disk ---
+            quantizer_warm = _make_warm_quantizer(cache_dir)
 
             # Use a broken module that raises if forward is called
             broken_module = MagicMock(side_effect=RuntimeError("should not be called"))
@@ -376,11 +401,12 @@ class TestFPInputsCache(unittest.TestCase):
 
     @torch.no_grad()
     def test_stage_cache_fail_closed_on_miss(self):
-        """When _fp_inputs_disk_loaded is True but the stage is not in the cache,
-        a RuntimeError should be raised instead of silently recomputing."""
+        """When _fp_inputs_disk_loaded is True but the stage is not in the
+        manifest, a RuntimeError is raised instead of silently recomputing."""
         quantizer = _make_quantizer(fp_inputs_cache_path="/tmp/dummy.pt")
         quantizer._fp_inputs_disk_loaded = True
-        # "missing_stage" is NOT in _fp_inputs_disk_cache
+        quantizer._fp_inputs_manifest = quantizer._new_fp_inputs_manifest()
+        # "missing_stage" is NOT in the manifest
 
         linear = nn.Linear(4, 4)
         stage_module = nn.Sequential(linear)
@@ -400,6 +426,344 @@ class TestFPInputsCache(unittest.TestCase):
                 num_batches=1,
             )
         self.assertIn("cache miss", str(ctx.exception).lower())
+
+    @torch.no_grad()
+    def test_raw_replay_fail_closed_on_miss(self):
+        """_collect_native_inputs_from_raw_replay also fails closed on a
+        disk-loaded cache miss (no silent recompute from the quantized model)."""
+        quantizer = _make_quantizer(fp_inputs_cache_path="/tmp/dummy.pt")
+        quantizer._fp_inputs_disk_loaded = True
+        quantizer._fp_inputs_manifest = quantizer._new_fp_inputs_manifest()
+        # "missing_stage" is NOT in the manifest
+
+        with self.assertRaises(RuntimeError) as ctx:
+            quantizer._collect_native_inputs_from_raw_replay(
+                model=MagicMock(),
+                subset={"linear": MagicMock()},
+                module_name={},
+                cache_args=[[]],
+                cache_kwargs={},
+                num_batches=1,
+                stage_desc="missing_stage",
+            )
+        self.assertIn("cache miss", str(ctx.exception).lower())
+
+
+# ---------------------------------------------------------------------------
+# Tests: shared-input deduplication (q/k/v, gate/up share the same input)
+# ---------------------------------------------------------------------------
+
+
+class TestGroupSharedFPInputs(unittest.TestCase):
+    """Unit tests for group_shared_fp_inputs()."""
+
+    def test_merges_identical_inputs(self):
+        shared = [torch.randn(2, 4), torch.randn(2, 4)]
+        groups = group_shared_fp_inputs(
+            {
+                "q": shared,
+                "k": [t.clone() for t in shared],  # equal values, distinct objects
+                "v": [t.clone() for t in shared],
+                "o": [torch.randn(2, 4), torch.randn(2, 4)],
+            }
+        )
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0]["members"], ["q", "k", "v"])
+        self.assertEqual(groups[1]["members"], ["o"])
+
+    def test_no_merge_on_value_difference(self):
+        base = [torch.randn(2, 4)]
+        other = [base[0].clone()]
+        other[0][0, 0] += 1.0
+        groups = group_shared_fp_inputs({"a": base, "b": other})
+        self.assertEqual(len(groups), 2)
+
+    def test_no_merge_on_batch_count_difference(self):
+        groups = group_shared_fp_inputs(
+            {"a": [torch.randn(2, 4)], "b": [torch.randn(2, 4), torch.randn(2, 4)]}
+        )
+        self.assertEqual(len(groups), 2)
+
+    def test_empty_input(self):
+        self.assertEqual(group_shared_fp_inputs({}), [])
+
+
+# ---------------------------------------------------------------------------
+# Tests: sharded, manifest-gated FP inputs disk cache persistence
+# ---------------------------------------------------------------------------
+
+
+class TestFPInputsCachePersistence(unittest.TestCase):
+    """Tests for the sharded FP inputs disk cache layout and validation."""
+
+    def test_dedup_aliases_shared_lists_in_memory(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            shared = [torch.randn(2, 4)]
+            result = quantizer._persist_stage_fp_inputs(
+                "text.layers.0",
+                {"q": shared, "k": [shared[0].clone()], "o": [torch.randn(2, 4)]},
+            )
+            # Group members alias the same list object in memory.
+            self.assertIs(result["q"], result["k"])
+            self.assertIsNot(result["q"], result["o"])
+            entry = quantizer._fp_inputs_manifest["stages"]["text.layers.0"]
+            self.assertEqual(len(entry["groups"]), 2)
+            self.assertEqual(entry["num_batches"], 1)
+
+    def test_shards_written_per_stage_and_manifest_on_publish(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            quantizer._persist_stage_fp_inputs("s0", {"a": [torch.randn(2, 4)]})
+            quantizer._persist_stage_fp_inputs("s1", {"b": [torch.randn(2, 4)]})
+
+            shard_dir = os.path.join(cache_dir, "shards")
+            self.assertEqual(len(os.listdir(shard_dir)), 2)
+            # No manifest before publish -> cache is not visible to warm runs.
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "manifest.json")))
+
+            quantizer._publish_fp_inputs_manifest(cache_dir)
+            manifest_path = os.path.join(cache_dir, "manifest.json")
+            self.assertTrue(os.path.exists(manifest_path))
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            self.assertTrue(manifest["complete"])
+            self.assertEqual(manifest["num_stages"], 2)
+            self.assertEqual(set(manifest["stages"]), {"s0", "s1"})
+            # No temporary files are left behind.
+            for root, _dirs, files in os.walk(cache_dir):
+                self.assertEqual([f for f in files if f.endswith(".tmp")], [])
+
+    def test_unpublished_cache_is_regenerated(self):
+        """Shards without a published manifest are not treated as a cache."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            quantizer._persist_stage_fp_inputs("s0", {"a": [torch.randn(2, 4)]})
+            # No publish: simulate a conversion that failed mid-run.
+            fresh = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            fresh._load_fp_inputs_manifest(cache_dir)
+            self.assertFalse(fresh._fp_inputs_disk_loaded)
+            self.assertIsNone(fresh._fp_inputs_manifest)
+
+    def test_cache_path_is_file_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "fp_cache.pt")
+            torch.save({"s0": {"a": [torch.randn(2, 4)]}}, file_path)
+            quantizer = _make_quantizer(fp_inputs_cache_path=file_path)
+            with self.assertRaises(RuntimeError) as ctx:
+                quantizer._load_fp_inputs_manifest(file_path)
+            self.assertIn("is a file", str(ctx.exception).lower())
+
+    def test_incomplete_manifest_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            os.makedirs(cache_dir)
+            manifest = Qwen3VLGPTQQuantizer._new_fp_inputs_manifest()
+            manifest["complete"] = False
+            with open(os.path.join(cache_dir, "manifest.json"), "w") as handle:
+                json.dump(manifest, handle)
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            with self.assertRaises(RuntimeError) as ctx:
+                quantizer._load_fp_inputs_manifest(cache_dir)
+            self.assertIn("complete", str(ctx.exception).lower())
+
+
+    def test_bad_schema_version_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            os.makedirs(cache_dir)
+            manifest = Qwen3VLGPTQQuantizer._new_fp_inputs_manifest()
+            manifest["complete"] = True
+            manifest["schema_version"] = 1
+            with open(os.path.join(cache_dir, "manifest.json"), "w") as handle:
+                json.dump(manifest, handle)
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            with self.assertRaises(RuntimeError) as ctx:
+                quantizer._load_fp_inputs_manifest(cache_dir)
+            self.assertIn("schema_version", str(ctx.exception))
+
+    def test_corrupt_manifest_json_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            os.makedirs(cache_dir)
+            with open(os.path.join(cache_dir, "manifest.json"), "w") as handle:
+                handle.write("{not valid json")
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            with self.assertRaises(RuntimeError) as ctx:
+                quantizer._load_fp_inputs_manifest(cache_dir)
+            self.assertIn("regenerate", str(ctx.exception).lower())
+
+    def test_shard_run_id_mismatch_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _make_published_cache(
+                tmpdir, {"s0": {"a": [torch.randn(2, 4)]}}
+            )
+            warm = _make_warm_quantizer(cache_dir)
+            # Simulate a stale manifest from an earlier run.
+            warm._fp_inputs_manifest["run_id"] = "0" * 32
+            with self.assertRaises(RuntimeError) as ctx:
+                warm._load_fp_inputs_shard("s0", num_batches=1)
+            self.assertIn("run_id", str(ctx.exception))
+
+    def test_batch_count_mismatch_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _make_published_cache(
+                tmpdir, {"s0": {"a": [torch.randn(2, 4)]}}
+            )
+            warm = _make_warm_quantizer(cache_dir)
+            with self.assertRaises(RuntimeError) as ctx:
+                warm._load_fp_inputs_shard("s0", num_batches=5)
+            self.assertIn("batches", str(ctx.exception))
+
+    def test_failed_shard_write_preserves_published_cache(self):
+        """A failing shard write must not clobber a previously published
+        cache, nor leave temporary files behind."""
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _make_published_cache(
+                tmpdir, {"s0": {"a": [torch.randn(2, 4)]}}
+            )
+            manifest_path = os.path.join(cache_dir, "manifest.json")
+            with open(manifest_path, "rb") as handle:
+                manifest_before = handle.read()
+
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            with patch.object(torch, "save", side_effect=RuntimeError("disk full")):
+                with self.assertRaises(RuntimeError):
+                    quantizer._persist_stage_fp_inputs(
+                        "s1", {"b": [torch.randn(2, 4)]}
+                    )
+
+            # No leftover temp files anywhere in the cache directory.
+            for root, _dirs, files in os.walk(cache_dir):
+                self.assertEqual([f for f in files if f.endswith(".tmp")], [])
+            # Manifest untouched and the old cache still loads.
+            with open(manifest_path, "rb") as handle:
+                self.assertEqual(handle.read(), manifest_before)
+            warm = _make_warm_quantizer(cache_dir)
+            loaded = warm._load_fp_inputs_shard("s0", num_batches=1)
+            self.assertEqual(len(loaded["a"]), 1)
+
+    def test_publish_removes_orphan_shards(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _make_published_cache(
+                tmpdir, {"s0": {"a": [torch.randn(2, 4)]}}
+            )
+            orphan = os.path.join(cache_dir, "shards", "9999_orphan.pt")
+            torch.save({}, orphan)
+            self.assertTrue(os.path.exists(orphan))
+
+            # A fresh successful run publishing to the same directory
+            # garbage-collects the unreferenced shard.
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            quantizer._persist_stage_fp_inputs("s0", {"a": [torch.randn(2, 4)]})
+            quantizer._publish_fp_inputs_manifest(cache_dir)
+            self.assertFalse(os.path.exists(orphan))
+
+    def test_loaded_groups_share_lists_and_pop_is_safe(self):
+        """Expanded groups alias one list per group; GPTQ pops from shallow
+        copies, so consuming one member never drains its siblings."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared = [torch.randn(2, 4)]
+            cache_dir = _make_published_cache(
+                tmpdir, {"s0": {"q": shared, "k": [shared[0].clone()]}}
+            )
+            warm = _make_warm_quantizer(cache_dir)
+            loaded = warm._load_fp_inputs_shard("s0", num_batches=1)
+            self.assertIs(loaded["q"], loaded["k"])
+
+            # _assign_native_inputs shallow-copies; popping must not drain
+            # the shared group list.
+            assigned_q = list(loaded["q"])
+            assigned_q.pop(0)
+            self.assertEqual(len(loaded["k"]), 1)
+
+
+    def test_shard_filename_includes_run_id(self):
+        fname_a = Qwen3VLGPTQQuantizer._shard_filename(0, "text.layers.0", "a" * 32)
+        fname_b = Qwen3VLGPTQQuantizer._shard_filename(0, "text.layers.0", "b" * 32)
+        self.assertTrue(fname_a.startswith("aaaaaaaa_0000_"))
+        self.assertNotEqual(fname_a, fname_b)
+
+    def test_repeated_failed_runs_do_not_accumulate_shards(self):
+        """A fresh save run sweeps the previous failed run's leftover shards,
+        so consecutive failures do not accumulate on disk."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            shard_dir = os.path.join(cache_dir, "shards")
+
+            # Failed run 1: shard written, no manifest published.
+            run1 = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            run1._persist_stage_fp_inputs("s0", {"a": [torch.randn(2, 4)]})
+            self.assertEqual(len(os.listdir(shard_dir)), 1)
+
+            # Run 2 starts as a save run (no valid manifest) and sweeps.
+            run2 = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            run2._load_fp_inputs_manifest(cache_dir)
+            self.assertFalse(run2._fp_inputs_disk_loaded)
+            run2._fp_inputs_manifest = run2._new_fp_inputs_manifest()
+            run2._sweep_fp_inputs_shards(cache_dir)
+            self.assertEqual(os.listdir(shard_dir), [])
+
+            # Run 2 writes its own shard and fails too: one shard on disk.
+            run2._persist_stage_fp_inputs("s0", {"a": [torch.randn(2, 4)]})
+            self.assertEqual(len(os.listdir(shard_dir)), 1)
+
+            # A published cache is never swept: manifest present -> warm run.
+            run2._publish_fp_inputs_manifest(cache_dir)
+            warm = _make_warm_quantizer(cache_dir)
+            loaded = warm._load_fp_inputs_shard("s0", num_batches=1)
+            self.assertEqual(len(loaded["a"]), 1)
+
+    def test_sweep_leaves_manifest_and_other_files_untouched(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _make_published_cache(
+                tmpdir, {"s0": {"a": [torch.randn(2, 4)]}}
+            )
+            manifest_path = os.path.join(cache_dir, "manifest.json")
+            with open(manifest_path, "rb") as handle:
+                manifest_before = handle.read()
+
+            quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
+            quantizer._sweep_fp_inputs_shards(cache_dir)
+
+            # Sweep only targets unreferenced garbage in shards/; a published
+            # cache is fully preserved because it is validated by its manifest.
+            # (convert() only sweeps when NO valid manifest was loaded.)
+            self.assertTrue(os.path.isdir(os.path.join(cache_dir, "shards")))
+            with open(manifest_path, "rb") as handle:
+                self.assertEqual(handle.read(), manifest_before)
 
 
 # ---------------------------------------------------------------------------
@@ -1126,7 +1490,5 @@ class TestGPTQInpAndHessianDtype(unittest.TestCase):
             Qwen3VLGPTQConfig(inp_dtype="float128")
 
 
-if __name__ == "__main__":
-    unittest.main()
 if __name__ == "__main__":
     unittest.main()
