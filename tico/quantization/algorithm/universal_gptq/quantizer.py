@@ -44,6 +44,7 @@ from tico.quantization.algorithm.gptq.quant import Quantizer
 from tico.quantization.config.gptq import UniversalGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
+from tico.quantization.wrapq.utils.introspection import outputs_close
 from tico.utils.utils import move_to_device
 from tqdm.auto import tqdm
 
@@ -407,6 +408,7 @@ def wrap_model(
     full_model_name: str,
     ignored_module_patterns: Iterable[re.Pattern] = [],
     ignored_modules: Iterable[nn.Module] = [],
+    debug_mode: bool = False,
 ) -> None:
     """
     Recursively wrap a model's forward methods for GPTQ quantization.
@@ -428,7 +430,14 @@ def wrap_model(
         full_model_name: Hierarchical dot-delimited model name following "grandparent.parent.clild" pattern.
         ignored_module_patterns: Collection of regular expressions to be matched against submodules' full names. If matched a submodule is not quantized.
         ignored_modules: Modules to exclude from GPTQ quantization.
+        debug_mode: Whether to check if the cached output is equal to computed output.
     """
+
+    def old_forward(gptq_data: GPTQ_Data, *args, **kwargs) -> Any:
+        args = move_to_device(args, gptq_data.weight_device)
+        kwargs = move_to_device(kwargs, gptq_data.weight_device)
+        assert type(kwargs) is dict
+        return gptq_data.old_forward(*args, **kwargs)
 
     def new_forward(module: nn.Module, *args, **kwargs) -> Any:
         gptq_data: GPTQ_Data = get_gptq_data(module)
@@ -460,15 +469,17 @@ def wrap_model(
                     # Move cached output from CPU to model's device
                     if gptq_data.out_device:
                         result = move_to_device(result, gptq_data.out_device)
+                    if debug_mode:
+                        reference_result: Any = old_forward(gptq_data, *args, **kwargs)
+                        assert outputs_close(
+                            result, reference_result
+                        ), f"[{gptq_data.full_module_name} Cached output at batch={gptq_data.batch_idx} invocation={gptq_data.invocation_idx}] diverges from computed output"
                     gptq_data.invocation_idx += 1
                     return result
                 else:
                     # Compute output and cache it, then raise StopForward
                     assert gptq_data.invocation_idx == n_cached_invocations
-                    args = move_to_device(args, gptq_data.weight_device)
-                    kwargs = move_to_device(kwargs, gptq_data.weight_device)
-                    assert type(kwargs) is dict
-                    out: Any = gptq_data.old_forward(*args, **kwargs)
+                    out: Any = old_forward(gptq_data, *args, **kwargs)
                     if gptq_data.out_device is None:
                         gptq_data.out_device = infer_object_device(out)
                     cached_batch_out.append(move_to_cpu(out))
@@ -476,10 +487,7 @@ def wrap_model(
                     raise StopForward(module)
 
             case GPTQ_STATE.COMPUTE:
-                args = move_to_device(args, gptq_data.weight_device)
-                kwargs = move_to_device(kwargs, gptq_data.weight_device)
-                assert type(kwargs) is dict
-                return gptq_data.old_forward(*args, **kwargs)
+                return old_forward(gptq_data, *args, **kwargs)
 
             case _:
                 assert False  # we should never get here
@@ -523,10 +531,11 @@ def wrap_model(
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
             ignored_modules=ignored_modules,
+            debug_mode=debug_mode,
         )
 
 
-def unwrap_model(model: nn.Module) -> None:
+def unwrap_model(model: nn.Module, retain_gptq_data: bool = False) -> None:
     """
     Restore original module structure after GPTQ quantization.
 
@@ -536,12 +545,14 @@ def unwrap_model(model: nn.Module) -> None:
 
     Parameters:
         model: The wrapped model to unwrap (modified in-place).
+        retain_gptq_data: Whether to retain gptq_data.
     """
     for module in model.modules():
         gptq_data: GPTQ_Data = get_gptq_data(module)
         module.forward = gptq_data.old_forward
-        gptq_data.cached_output.clear()
-        delete_gptq_data(module)
+        if not retain_gptq_data:
+            gptq_data.cached_output.clear()
+            delete_gptq_data(module)
 
 
 def collect_quantizers(
@@ -966,6 +977,7 @@ def gptq_quantize(
                 [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
             ),
             ignored_modules=multiply_invoked_modules,
+            debug_mode=gptq_config.debug_mode,
         )
 
     try:
@@ -1005,4 +1017,4 @@ def gptq_quantize(
         )
         setattr(model, "quantizers", quantizers)
     finally:
-        unwrap_model(model)
+        unwrap_model(model, retain_gptq_data=gptq_config.debug_mode)

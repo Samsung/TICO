@@ -118,6 +118,8 @@ class UniversalGPTQConfig(GPTQConfig):
         model = convert(model)
     """
 
+    debug_mode: bool = False
+
     @property
     def name(self) -> str:
         return "universal_gptq"

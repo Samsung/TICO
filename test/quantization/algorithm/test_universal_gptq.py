@@ -250,6 +250,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -339,6 +340,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -394,6 +396,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -469,6 +472,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -627,6 +631,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -704,6 +709,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -770,6 +776,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -828,6 +835,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -901,6 +909,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -972,6 +981,7 @@ class TestUniversalGPTQ(unittest.TestCase):
             actorder=False,
             show_progress=False,
             verbose=False,
+            debug_mode=True,
         )
         quantizer = UniversalGPTQQuantizer(config)
 

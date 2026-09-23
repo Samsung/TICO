@@ -556,7 +556,7 @@ def outputs_close(
         return torch.allclose(lhs, rhs)
 
     # Number (float, int)
-    if isinstance(lhs, SupportsFloat | SupportsIndex):
+    if isinstance(lhs, (SupportsFloat, SupportsIndex)):
         return math.isclose(lhs, rhs)
 
     # List, Tuple: compare element-wise
@@ -581,6 +581,10 @@ def outputs_close(
                 return False
 
         return True
+
+    # str, bytes, bytearray
+    if isinstance(lhs, (str, bytes, bytearray)):
+        return lhs == rhs
 
     # Iterable
     if isinstance(lhs, Iterable):
