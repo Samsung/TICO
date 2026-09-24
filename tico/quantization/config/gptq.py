@@ -121,7 +121,6 @@ class UniversalGPTQConfig(GPTQConfig):
     debug_mode: bool = False
     ignore_multi_call_modules: bool = True
     cache_outputs: bool = True
-    release_children_cache: bool = True
 
     @property
     def name(self) -> str:
@@ -142,11 +141,6 @@ class UniversalGPTQConfig(GPTQConfig):
         if not isinstance(self.cache_outputs, bool):
             raise TypeError(
                 f"cache_outputs must be bool. got {type(self.cache_outputs)}"
-            )
-
-        if not isinstance(self.release_children_cache, bool):
-            raise TypeError(
-                f"release_children_cache must be bool. got {type(self.release_children_cache)}"
             )
 
         # use_orig_model_inference is incompatible with frontier-based execution

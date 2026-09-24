@@ -31,7 +31,7 @@ from typing import (
 )
 
 import torch
-from transformers.modeling_outputs import ModelOutput
+from transformers.utils.generic import ModelOutput
 
 from tico.quantization.evaluation.metric import MetricCalculator
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase

@@ -39,7 +39,6 @@ pipeline:
     debug_mode: false
     ignore_multi_call_modules: false
     cache_outputs: true
-    release_children_cache: true
 
   - name: ptq
     enabled: true
