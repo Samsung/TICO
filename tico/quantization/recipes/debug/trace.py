@@ -17,9 +17,16 @@ from collections import OrderedDict
 from typing import Any, Iterable, Mapping
 
 import torch
+import torch.nn as nn
 
 from tico.quantization import convert, prepare
+from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.utils.introspection import (
+    DifferenceStatistics,
+    get_tensor_statistics,
+    TensorStatistics,
+)
 
 
 def _summarize(value: Any) -> str:
@@ -61,6 +68,7 @@ def collect_forward_outputs(
 
     hooks = []
     for name, module in model.named_modules():
+        name = name.replace(".wrapped", "").replace("wrapped.", "")
         if skip_wrappers and module.__class__.__name__.startswith("Quant"):
             continue
         if (
@@ -94,9 +102,15 @@ def collect_forward_outputs(
     return outputs
 
 
-def compare_outputs(left: Mapping[str, Any], right: Mapping[str, Any]) -> None:
-    print("\n=== Side-by-side diff ===")
+def compare_outputs(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    verbose: bool = True,
+) -> dict[str, DifferenceStatistics]:
+    if verbose:
+        print("\n=== Side-by-side diff ===")
     common = [name for name in left.keys() if name in right]
+    result: dict[str, DifferenceStatistics] = {}
     for name in common:
         lval, rval = left[name], right[name]
         if (
@@ -104,12 +118,18 @@ def compare_outputs(left: Mapping[str, Any], right: Mapping[str, Any]) -> None:
             and isinstance(rval, torch.Tensor)
             and lval.shape == rval.shape
         ):
-            diff = (lval.detach().float() - rval.detach().float()).abs()
-            print(
-                f"{name}: mean|diff|={diff.mean().item():.8f}, max|diff|={diff.max().item():.8f}"
-            )
-        else:
+            diff: torch.Tensor = (lval.detach().float() - rval.detach().float()).abs()
+            delta_stats: TensorStatistics = get_tensor_statistics(diff)
+            interval = (lval.detach().max() - lval.detach().min()).item()
+            peir = delta_stats.max / interval if interval != 0.0 else float("nan")
+            result[name] = DifferenceStatistics(**delta_stats._asdict(), peir=peir)
+            if verbose:
+                print(
+                    f"{name}: mean|diff|={delta_stats.mean:.8f}, max|diff|={delta_stats.max:.8f}, peir={peir * 100:.6f}%"
+                )
+        elif verbose:
             print(f"{name}: non-tensor or shape-mismatched output")
+    return result
 
 
 def trace_ptq_parity(
