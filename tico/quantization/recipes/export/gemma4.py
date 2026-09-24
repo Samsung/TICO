@@ -52,6 +52,7 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
+from tico.utils.convert import convert_to_extended_circle_file
 from tico.utils.utils import SuppressWarning
 
 
@@ -789,13 +790,25 @@ def _export_gemma4_ple_embedding_stage(
         dtype=torch.long,
         device="cpu",
     )
-    _convert_and_save(
-        ple_embedding,
-        (ple_input_ids,),
-        output_dir / artifact,
-        dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
-        strict=strict,
-    )
+    if estimated_bytes >= CIRCLE_FLATBUFFER_LIMIT_BYTES:
+        save_path = output_dir / artifact
+        print(f"Saving {save_path.name} to {save_path.resolve()}")
+        convert_to_extended_circle_file(
+            ple_embedding.eval(),
+            (ple_input_ids,),
+            save_path,
+            dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
+            strict=strict,
+            external_buffer_threshold=CIRCLE_FLATBUFFER_LIMIT_BYTES,
+        )
+    else:
+        _convert_and_save(
+            ple_embedding,
+            (ple_input_ids,),
+            output_dir / artifact,
+            dynamic_shapes=make_token_embedding_dynamic_shapes(max_seq_len),
+            strict=strict,
+        )
     manifest["artifact"] = artifact
     return manifest
 
@@ -945,7 +958,8 @@ def export_gemma4_per_layer(
       ``ple_embedding_format`` selects ``circle`` (dynamic Circle graph),
       ``pt`` (host ``.pt`` table loaded by
       ``Gemma4PLEEmbeddingHostTable``), or ``auto`` (Circle when the packed
-      table fits the 2 GiB flatbuffer limit, otherwise ``.pt``);
+      table fits the 2 GiB flatbuffer limit, otherwise ``.pt``). Explicit
+      ``circle`` uses an extended Buffer for an oversized table;
     - ``ple_projection_prefill`` (``S = max_seq_len``) and
       ``ple_projection_decode`` (``S = 1``): fixed-shape NPU graphs running the
       complete projection/norm/combine stage. With ``prefill_decode=False`` only

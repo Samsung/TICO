@@ -77,7 +77,10 @@ from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropP
 from tico.quantization.passes.quantize_bias import QuantizeBias
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.quantization.wrapq.utils.check_missing_qparam import check_missing_qparam
-from tico.serialize.circle_serializer import build_circle
+from tico.serialize.circle_serializer import (
+    build_circle,
+    save_circle_with_extended_buffers,
+)
 from tico.serialize.operators.node_visitor import get_support_targets
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -209,6 +212,9 @@ def check_training_ops(exported_program: ExportedProgram):
 def convert_exported_module_to_circle(
     exported_program: ExportedProgram,
     config: Optional[CompileConfigBase] = None,
+    *,
+    circle_path: str | os.PathLike[str] | None = None,
+    external_buffer_threshold: int = 2**31,
 ) -> bytes:
     if not config:
         config = get_default_config()
@@ -344,6 +350,19 @@ def convert_exported_module_to_circle(
 
     check_unsupported_target(exported_program)
     check_training_ops(exported_program)
+    if circle_path is not None:
+        if config.get("circle_optimize") is not False:
+            logger.warning(
+                "optimize_for_export is not applied to Circle models with "
+                "extended buffers."
+            )
+        return save_circle_with_extended_buffers(
+            exported_program,
+            circle_path,
+            config,
+            external_buffer_threshold=external_buffer_threshold,
+        )
+
     circle_program = build_circle(exported_program, config)
 
     # Keep build_circle() and CircleModel.save() serialization-only. All public
@@ -358,6 +377,38 @@ def convert_exported_module_to_circle(
         )
 
     return circle_program
+
+
+def convert_to_extended_circle_file(
+    mod: torch.nn.Module,
+    args: Tuple[Any, ...],
+    circle_path: str | os.PathLike[str],
+    kwargs: Optional[Dict[str, Any]] = None,
+    dynamic_shapes: Optional[dict] = None,
+    strict: bool = True,
+    config: CompileConfigBase = get_default_config(),
+    *,
+    external_buffer_threshold: int = 2**31,
+) -> None:
+    """Convert a module and stream oversized constants as extended Buffers."""
+    if hasattr(mod, "training") and mod.training:
+        logger = logging.getLogger(__name__)
+        logger.fatal(
+            "Your model is in TRAINING MODE. PLEASE CHECK IF YOU FORGOT `model.eval()`."
+        )
+
+    with torch.no_grad():
+        exported_program = export(
+            mod, args, kwargs, dynamic_shapes=dynamic_shapes, strict=strict
+        )
+
+    with SuppressWarning(FutureWarning, ".*LeafSpec"):
+        convert_exported_module_to_circle(
+            exported_program,
+            config,
+            circle_path=circle_path,
+            external_buffer_threshold=external_buffer_threshold,
+        )
 
 
 def convert(

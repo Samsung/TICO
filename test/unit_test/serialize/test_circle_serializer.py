@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import tempfile
 import unittest
+from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from circle_schema import circle
 
 from tico.serialize.circle_serializer import (
     _export_tensors,
     _handle_get_attr_node,
     _initialize_model,
+    save_circle_with_extended_buffers,
 )
 from tico.utils.errors import NotYetSupportedError
 
@@ -62,6 +67,15 @@ class TensorAttributeModel(nn.Module):
 
     def forward(self, x):
         return x + self.value
+
+
+class EmbeddingModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embedding = nn.Embedding(8, 4)
+
+    def forward(self, tokens):
+        return self.embedding(tokens)
 
 
 class CircleSerializerInvariantTest(unittest.TestCase):
@@ -128,6 +142,43 @@ class CircleSerializerInvariantTest(unittest.TestCase):
             "nested GraphModule",
         ):
             _handle_get_attr_node(node)
+
+
+class CircleSerializerExtendedBufferTest(unittest.TestCase):
+    def test_oversized_constant_is_appended_and_addressed_by_offset(self):
+        model = EmbeddingModel().eval()
+        with torch.no_grad():
+            model.embedding.weight.copy_(
+                torch.arange(32, dtype=torch.float32).reshape(8, 4)
+            )
+        tokens = torch.tensor([[1, 3]], dtype=torch.long)
+        exported_program = torch.export.export(model, (tokens,))
+        expected = model.embedding.weight.detach().numpy().reshape(-1)
+        expected = expected.view(np.uint8).tobytes()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            circle_path = Path(tmpdir) / "embedding.circle"
+            save_circle_with_extended_buffers(
+                exported_program,
+                circle_path,
+                external_buffer_threshold=1,
+            )
+            contents = circle_path.read_bytes()
+
+        circle_model = circle.Model.Model.GetRootAsModel(bytearray(contents), 0)
+        external = [
+            circle_model.Buffers(index)
+            for index in range(circle_model.BuffersLength())
+            if circle_model.Buffers(index).Offset() > 1
+        ]
+        self.assertEqual(len(external), 1)
+        buffer = external[0]
+        self.assertEqual(buffer.DataLength(), 0)
+        self.assertEqual(buffer.Offset() % 16, 0)
+        self.assertEqual(buffer.Size(), len(expected))
+        self.assertEqual(
+            contents[buffer.Offset() : buffer.Offset() + buffer.Size()], expected
+        )
 
 
 class CircleSerializerSharedTensorTest(unittest.TestCase):

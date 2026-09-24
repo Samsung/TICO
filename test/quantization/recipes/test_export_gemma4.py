@@ -25,6 +25,7 @@ import json
 import tempfile
 import unittest
 from types import SimpleNamespace
+from typing import List
 from unittest.mock import patch
 
 import tico.quantization.recipes.adapters.gemma4 as gemma_adapter_mod
@@ -448,7 +449,12 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         )
 
     def _run_export_with_ple_format(
-        self, *, artifact_tag, ple_embedding_format, estimated_bytes=None
+        self,
+        *,
+        artifact_tag,
+        ple_embedding_format,
+        estimated_bytes=None,
+        extended_circle_names=None,
     ):
         """Run the exporter and return (circle names, saved .pt paths, manifest)."""
         circle_names = []
@@ -458,6 +464,14 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
             del module, example_inputs, kwargs
             circle_names.append(save_path.name)
+
+        def fake_convert_to_extended_circle_file(
+            module, example_inputs, save_path, **kwargs
+        ):
+            del module, example_inputs, kwargs
+            circle_names.append(save_path.name)
+            if extended_circle_names is not None:
+                extended_circle_names.append(save_path.name)
 
         def fake_save_pt(module, path):
             pt_saves.append((module, gemma_export.Path(path).name))
@@ -472,6 +486,10 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             return_value=(export_model, artifact_tag),
         ), patch.object(
             gemma_export, "_convert_and_save", fake_convert_and_save
+        ), patch.object(
+            gemma_export,
+            "convert_to_extended_circle_file",
+            fake_convert_to_extended_circle_file,
         ), patch.object(
             gemma_export, "save_gemma4_ple_embedding_artifact", fake_save_pt
         ), _patch_small_ple_table(
@@ -557,6 +575,18 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         self.assertIn("ple_embedding.q.circle", circle_names)
         self.assertEqual(pt_saves, [])
         self.assertEqual(manifest["embedding"]["format"], "circle")
+
+    def test_explicit_large_circle_uses_extended_buffer_writer(self):
+        """Explicit Circle export routes an oversized table to the file writer."""
+        extended_circle_names: List[str] = []
+        self._run_export_with_ple_format(
+            artifact_tag="q",
+            ple_embedding_format="circle",
+            estimated_bytes=gemma_export.CIRCLE_FLATBUFFER_LIMIT_BYTES,
+            extended_circle_names=extended_circle_names,
+        )
+
+        self.assertEqual(extended_circle_names, ["ple_embedding.q.circle"])
 
     def test_invalid_ple_embedding_format_is_rejected(self):
         """Unknown formats fail before any artifact is written."""

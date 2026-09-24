@@ -13,7 +13,8 @@
 # limitations under the License.
 
 import operator
-from typing import Dict, Optional
+import os
+from typing import Any, Dict, Optional
 
 import flatbuffers
 import torch
@@ -79,8 +80,15 @@ def build_circle(
     Returns:
         bytes: Raw bytes of the Circle model
     """
-    logger = logging.getLogger(__name__)
+    model = _build_circle_model(ep, config)
     builder = flatbuffers.Builder()
+    builder.Finish(model.Pack(builder), "CIR0".encode("utf8"))
+    return bytes(builder.Output())
+
+
+def _build_circle_model(ep: ExportedProgram, config: CompileConfigBase) -> CircleModel:
+    """Build the Circle Object API model before FlatBuffer packing."""
+    logger = logging.getLogger(__name__)
     model, graph = _initialize_model()
 
     # Export tensors
@@ -146,11 +154,72 @@ def build_circle(
     model.description = "circle"
     model.version = 0
 
-    # Finish model
-    builder.Finish(model.Pack(builder), "CIR0".encode("utf8"))
-    buf = builder.Output()
+    return model
 
-    return bytes(buf)
+
+def save_circle_with_extended_buffers(
+    ep: ExportedProgram,
+    path: str | os.PathLike[str],
+    config: CompileConfigBase = get_default_config(),
+    *,
+    external_buffer_threshold: int = 2**31,
+) -> bytes:
+    """Save Circle with oversized constant buffers appended after the FlatBuffer.
+
+    Only buffers at or above ``external_buffer_threshold`` are externalized.
+    Smaller buffers retain the ordinary inline representation.
+    """
+    if external_buffer_threshold <= 0:
+        raise ValueError("external_buffer_threshold must be positive")
+
+    model = _build_circle_model(ep, config)
+    external_buffers: list[tuple[Any, object, int]] = []
+    for buffer in model.buffers:
+        data = buffer.data
+        if data is None:
+            continue
+        nbytes = getattr(data, "nbytes", None)
+        size = int(nbytes) if nbytes is not None else len(memoryview(data).cast("B"))
+        if size < external_buffer_threshold:
+            continue
+        external_buffers.append((buffer, data, size))
+        buffer.data = None
+        # Non-zero placeholders force both ulong fields into the FlatBuffer.
+        buffer.offset = 1
+        buffer.size = 1
+
+    if not external_buffers:
+        raise ValueError(
+            "No Circle constant buffer meets the external-buffer threshold"
+        )
+
+    builder = flatbuffers.Builder()
+    builder.Finish(model.Pack(builder), "CIR0".encode("utf8"))
+    placeholder_header = bytes(builder.Output())
+    next_offset = (len(placeholder_header) + 15) // 16 * 16
+    for buffer, _, size in external_buffers:
+        buffer.offset = next_offset
+        buffer.size = size
+        next_offset = (next_offset + size + 15) // 16 * 16
+
+    builder = flatbuffers.Builder()
+    builder.Finish(model.Pack(builder), "CIR0".encode("utf8"))
+    header = bytes(builder.Output())
+    if len(header) != len(placeholder_header):
+        raise RuntimeError(
+            "Circle header size changed while resolving external-buffer offsets"
+        )
+
+    with open(path, "wb") as file:
+        file.write(header)
+        file.write(b"\0" * ((file.tell() + 15) // 16 * 16 - file.tell()))
+        for _, data, _ in external_buffers:
+            view = memoryview(data).cast("B")
+            for start in range(0, len(view), 64 * 1024 * 1024):
+                file.write(view[start : start + 64 * 1024 * 1024])
+            file.write(b"\0" * ((file.tell() + 15) // 16 * 16 - file.tell()))
+
+    return header
 
 
 def _get_quantization_alias_key(node: torch.fx.Node) -> QuantizationAliasKey | None:

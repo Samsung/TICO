@@ -103,9 +103,10 @@ ple_pipeline.json                     # chosen format, shapes, and observer boun
 - `export.ple_embedding_format` selects the lookup artifact: `auto` (default)
   writes the Circle graph when the packed table fits the 2 GiB flatbuffer
   limit and otherwise writes `ple_embedding.<tag>.pt`; `circle` and `pt`
-  force one format. The E2B table (262144 x 35 x 256 elements) is 9.4 GB in
-  float32 and 2.35 GB at 8-bit weights, so E2B exports use `.pt` for both
-  `f32` and `q` tags.
+  force one format. Explicit `circle` stores an oversized table after the
+  FlatBuffer and addresses it through `Buffer.offset/size`. The E2B table
+  (262144 x 35 x 256 elements) is 9.4 GB in float32 and 2.35 GB at 8-bit
+  weights, so E2B `auto` exports use `.pt` for both `f32` and `q` tags.
 - The `.pt` artifact stores the complete stage contract: the float table (or
   the integer table with its per-row weight qparams), `embed_scale`, the packed
   geometry, and the frozen `embedding`, `embed_scale`, `act_out`, and
