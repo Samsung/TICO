@@ -368,6 +368,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
+        "--kv_cache_key_global_calibration",
+        action="store_true",
+        default=False,
+        help="Use global two-stage calibration (max_merge=False) for KV cache key "
+        "observers. Collects global min/max in pass 1, builds a fixed grid, "
+        "then accumulates errors in pass 2. Default: False (max_merge=True).",
+    )
+    parser.add_argument(
+        "--kv_cache_value_global_calibration",
+        action="store_true",
+        default=False,
+        help="Use global two-stage calibration (max_merge=False) for KV cache value "
+        "observers. Collects global min/max in pass 1, builds a fixed grid, "
+        "then accumulates errors in pass 2. Default: False (max_merge=True).",
+    )
+    parser.add_argument(
+        "--kv_cache_key_layer_specs",
+        type=str,
+        default=None,
+        help="Per-layer KV cache key quantization specs. Format: "
+        "'start-end:dtype:observer;start-end:dtype:observer;...'. "
+        "Example: '0-15:uint8:minmax;16-29:uint8:mse'. "
+        "Layers not covered by any range get no KV cache key quantization. "
+        "When set, overrides --kv_cache_key_qdtype and --kv_cache_key_observer.",
+    )
+    parser.add_argument(
+        "--kv_cache_value_layer_specs",
+        type=str,
+        default=None,
+        help="Per-layer KV cache value quantization specs. Format: "
+        "'start-end:dtype:observer;start-end:dtype:observer;...'. "
+        "Example: '0-15:uint8:minmax;16-29:uint4:mse'. "
+        "Layers not covered by any range get no KV cache value quantization. "
+        "When set, overrides --kv_cache_value_qdtype and --kv_cache_value_observer.",
+    )
+    parser.add_argument(
         "--gptq_mse",
         type=str,
         default=None,
@@ -1466,6 +1502,11 @@ def calibrate_ptq_observers(
     phase runs a short manual autoregressive loop with `use_cache=True`
     so cache-related observers can see realistic decode-time values as well.
 
+    When any observer uses the global two-stage strategy (``max_merge=False``
+    with a ``prepare_stage2`` method), a second calibration pass is run
+    after :meth:`prepare_stage2` builds the fixed grid.  This matches the
+    two-pass flow in ``llama_quantizer.py``.
+
     Args:
         q_m: PTQ-prepared model.
         calib_inputs: List of token tensors with shape [1, seq_len].
@@ -1476,40 +1517,67 @@ def calibrate_ptq_observers(
     """
     q_m.eval()
 
-    iterator = calib_inputs
-    if not no_tqdm:
-        iterator = tqdm.tqdm(calib_inputs, desc="PTQ calibration")
+    def _run_pass(desc: str):
+        """Run one calibration pass over all inputs."""
+        iterator = calib_inputs
+        if not no_tqdm:
+            iterator = tqdm.tqdm(calib_inputs, desc=desc)
+        with torch.no_grad():
+            for inp in iterator:
+                inp = inp.to(device)
 
-    with torch.no_grad():
-        for inp in iterator:
-            inp = inp.to(device)
+                # Prefill calibration
+                if decode_calibration_steps <= 0:
+                    q_m(inp)
+                    continue
 
-            # Prefill calibration
-            if decode_calibration_steps <= 0:
-                q_m(inp)
-                continue
-
-            # Prefill with cache enabled so decode can continue from it.
-            outputs = q_m(
-                input_ids=inp,
-                use_cache=True,
-                return_dict=True,
-            )
-            past_key_values = outputs.past_key_values
-            next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-
-            # Short decode calibration for cache-related observers.
-            for _ in range(decode_calibration_steps):
+                # Prefill with cache enabled so decode can continue from it.
                 outputs = q_m(
-                    input_ids=next_input_ids,
-                    past_key_values=past_key_values,
+                    input_ids=inp,
                     use_cache=True,
                     return_dict=True,
                 )
                 past_key_values = outputs.past_key_values
-
-                # Greedy next token is enough for calibration purposes.
                 next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+                # Short decode calibration for cache-related observers.
+                for _ in range(decode_calibration_steps):
+                    outputs = q_m(
+                        input_ids=next_input_ids,
+                        past_key_values=past_key_values,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                    past_key_values = outputs.past_key_values
+
+                    # Greedy next token is enough for calibration purposes.
+                    next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+    # --- Pass 1: collect min/max + running Grams ---
+    _run_pass("PTQ calibration")
+
+    # --- Check if any observer needs a second stage ---
+    has_two_stage = False
+    for m in q_m.modules():
+        if isinstance(m, QuantModuleBase):
+            for _, obs in m.named_observers():
+                if hasattr(obs, "prepare_stage2") and not getattr(obs, "max_merge", True):
+                    has_two_stage = True
+                    break
+        if has_two_stage:
+            break
+
+    if has_two_stage:
+        # Build the fixed grid and disable non-two-stage observers.
+        if isinstance(q_m, QuantModuleBase):
+            q_m.prepare_stage2()
+        for m in q_m.modules():
+            if isinstance(m, QuantModuleBase):
+                m.prepare_stage2()
+
+        # --- Pass 2: accumulate per-grid errors on the fixed grid ---
+        _run_pass("PTQ calibration (stage 2)")
+
 
 
 class StopForward(Exception):
@@ -2952,6 +3020,7 @@ def quant_spec_from_dtype_and_observer(
     dtype_str: str,
     observer_str: str = "minmax",
     per_channel: bool = False,
+    max_merge: Optional[bool] = None,
 ):
     """
     Convert a dtype string and observer string to a QuantSpec.
@@ -2969,6 +3038,9 @@ def quant_spec_from_dtype_and_observer(
             unsigned dtypes) instead of the default per-tensor scheme. Applies
             to all affine observers (minmax and MSE-family). Ignored for MX
             dtypes.
+        max_merge: If not None, forwarded to MSE-family observers as the
+            ``max_merge`` constructor kwarg. When False, enables the global
+            two-stage calibration strategy. Ignored for minmax and MX dtypes.
 
     Returns:
         A QuantSpec instance with the requested observer class.
@@ -2999,6 +3071,7 @@ def quant_spec_from_dtype_and_observer(
                 observer=MSEObserver,
                 qscheme=qscheme,
                 channel_axis=channel_axis,
+                **({"max_merge": max_merge} if max_merge is not None else {}),
             )
         elif observer_str == "mse_octav":
             from tico.quantization.wrapq.observers.mse_octav import MSEOCTAVObserver
@@ -3008,6 +3081,7 @@ def quant_spec_from_dtype_and_observer(
                 observer=MSEOCTAVObserver,
                 qscheme=qscheme,
                 channel_axis=channel_axis,
+                **({"max_merge": max_merge} if max_merge is not None else {}),
             )
         elif observer_str == "mse_matmul":
             from tico.quantization.wrapq.observers.mse_matmul import MSEMatMulObserver
@@ -3017,6 +3091,7 @@ def quant_spec_from_dtype_and_observer(
                 observer=MSEMatMulObserver,
                 qscheme=qscheme,
                 channel_axis=channel_axis,
+                **({"max_merge": max_merge} if max_merge is not None else {}),
             )
         elif observer_str == "mse_batched_matmul":
             from tico.quantization.wrapq.observers.mse_matmul import (
@@ -3028,6 +3103,7 @@ def quant_spec_from_dtype_and_observer(
                 observer=MSEBatchedMatMulObserver,
                 qscheme=qscheme,
                 channel_axis=channel_axis,
+                **({"max_merge": max_merge} if max_merge is not None else {}),
             )
         else:
             return affine(
@@ -3041,6 +3117,51 @@ def quant_spec_from_dtype_and_observer(
         f"Expected one of affine: {list(AFFINE_DTYPE_TO_CONFIG.keys())} "
         f"or MX: {list(MX_DTYPE_TO_ELEM_FORMAT.keys())}."
     )
+
+
+def parse_layer_wise_kv_cache_spec(
+    spec_str: str,
+    per_channel: bool,
+    max_merge: Optional[bool],
+) -> Dict[int, "QuantSpec"]:
+    """
+    Parse a per-layer KV cache spec string into a layer-index-to-QuantSpec dict.
+
+    Format: ``"start-end:dtype:observer;start-end:dtype:observer;..."``
+
+    Example: ``"0-15:uint8:minmax;16-29:uint4:mse"``
+
+    Args:
+        spec_str: The spec string to parse.
+        per_channel: If True, use per-channel qscheme for all segments.
+        max_merge: If not None, forwarded to MSE-family observers.
+
+    Returns:
+        A dict mapping layer index to QuantSpec.
+    """
+    result: Dict[int, QuantSpec] = {}
+    for segment in spec_str.split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        parts = segment.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"Invalid layer spec segment {segment!r}: expected "
+                f"'start-end:dtype:observer' format."
+            )
+        range_part, dtype_str, observer_str = parts
+        start_str, end_str = range_part.split("-")
+        start, end = int(start_str), int(end_str)
+        spec = quant_spec_from_dtype_and_observer(
+            dtype_str,
+            observer_str,
+            per_channel=per_channel,
+            max_merge=max_merge,
+        )
+        for idx in range(start, end + 1):
+            result[idx] = spec
+    return result
 
 
 def build_activation_specs(args):
@@ -3083,29 +3204,49 @@ def build_activation_specs(args):
         )
     )
     kv_cache_key_spec = (
-        quant_spec_from_dtype_and_observer(
-            args.kv_cache_key_qdtype,
-            args.kv_cache_key_observer,
+        parse_layer_wise_kv_cache_spec(
+            args.kv_cache_key_layer_specs,
             per_channel=args.kv_cache_key_observer_per_channel,
+            max_merge=False if args.kv_cache_key_global_calibration else None,
         )
-        if args.kv_cache_key_qdtype is not None
-        else quant_spec_from_dtype_and_observer(
-            args.linear_io_qdtype,
-            args.kv_cache_key_observer,
-            per_channel=args.kv_cache_key_observer_per_channel,
+        if args.kv_cache_key_layer_specs is not None
+        else (
+            quant_spec_from_dtype_and_observer(
+                args.kv_cache_key_qdtype,
+                args.kv_cache_key_observer,
+                per_channel=args.kv_cache_key_observer_per_channel,
+                max_merge=False if args.kv_cache_key_global_calibration else None,
+            )
+            if args.kv_cache_key_qdtype is not None
+            else quant_spec_from_dtype_and_observer(
+                args.linear_io_qdtype,
+                args.kv_cache_key_observer,
+                per_channel=args.kv_cache_key_observer_per_channel,
+                max_merge=False if args.kv_cache_key_global_calibration else None,
+            )
         )
     )
     kv_cache_value_spec = (
-        quant_spec_from_dtype_and_observer(
-            args.kv_cache_value_qdtype,
-            args.kv_cache_value_observer,
+        parse_layer_wise_kv_cache_spec(
+            args.kv_cache_value_layer_specs,
             per_channel=args.kv_cache_value_observer_per_channel,
+            max_merge=False if args.kv_cache_value_global_calibration else None,
         )
-        if args.kv_cache_value_qdtype is not None
-        else quant_spec_from_dtype_and_observer(
-            args.linear_io_qdtype,
-            args.kv_cache_value_observer,
-            per_channel=args.kv_cache_value_observer_per_channel,
+        if args.kv_cache_value_layer_specs is not None
+        else (
+            quant_spec_from_dtype_and_observer(
+                args.kv_cache_value_qdtype,
+                args.kv_cache_value_observer,
+                per_channel=args.kv_cache_value_observer_per_channel,
+                max_merge=False if args.kv_cache_value_global_calibration else None,
+            )
+            if args.kv_cache_value_qdtype is not None
+            else quant_spec_from_dtype_and_observer(
+                args.linear_io_qdtype,
+                args.kv_cache_value_observer,
+                per_channel=args.kv_cache_value_observer_per_channel,
+                max_merge=False if args.kv_cache_value_global_calibration else None,
+            )
         )
     )
     return (
@@ -3128,6 +3269,10 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
 
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
+    if args.kv_cache_key_global_calibration:
+        print("KV cache key: global calibration enabled (max_merge=False, two-stage)")
+    if args.kv_cache_value_global_calibration:
+        print("KV cache value: global calibration enabled (max_merge=False, two-stage)")
 
     
     (
@@ -3223,6 +3368,10 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
     # Step 1: PTQ prepare
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
+    if args.kv_cache_key_global_calibration:
+        print("KV cache key: global calibration enabled (max_merge=False, two-stage)")
+    if args.kv_cache_value_global_calibration:
+        print("KV cache value: global calibration enabled (max_merge=False, two-stage)")
     assert args.norm_io_qdtype != "int16" #otherwise it is incorrect on layers joint
 
     (
@@ -3679,6 +3828,10 @@ def print_config(args, device: torch.device) -> None:
     print(
         f"KV cache val per-channel: {args.kv_cache_value_observer_per_channel}"
     )
+    if args.kv_cache_key_layer_specs:
+        print(f"KV cache key layer specs: {args.kv_cache_key_layer_specs}")
+    if args.kv_cache_value_layer_specs:
+        print(f"KV cache val layer specs: {args.kv_cache_value_layer_specs}")
     print(f"Linear IO observer     : {args.linear_io_observer}")
     print(f"Norm IO observer       : {args.norm_io_observer}")
     print(f"Softmax IO observer    : {args.softmax_io_observer}")

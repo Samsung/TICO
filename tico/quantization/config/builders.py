@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import copy
-from typing import Any, Dict, Mapping, Optional, Tuple, Type
+from typing import Any, Dict, Mapping, Optional, Tuple, Type, Union
 
 from tico.quantization.config.llama_attention import (
     DEFAULT_EXECUTION_PROFILE,
@@ -27,6 +27,22 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
+
+
+LayerWiseQuantSpec = Union[QuantSpec, Dict[int, QuantSpec]]
+"""Either a single QuantSpec applied to all layers, or a per-layer mapping."""
+
+
+def _resolve_layer_spec(
+    spec: Optional[LayerWiseQuantSpec],
+    layer_idx: int,
+) -> Optional[QuantSpec]:
+    """Resolve a possibly per-layer QuantSpec to the spec for ``layer_idx``."""
+    if spec is None:
+        return None
+    if isinstance(spec, dict):
+        return spec.get(layer_idx)
+    return spec
 
 
 _RMSNORM_ACTIVATION_OBSERVERS = ("act_in", "act_out")
@@ -305,8 +321,8 @@ def _build_llama_overrides(
     norm: Optional[QuantSpec],
     norm_weight: Optional[QuantSpec],
     softmax: Optional[QuantSpec],
-    kv_cache_key: Optional[QuantSpec] = None,
-    kv_cache_value: Optional[QuantSpec] = None,
+    kv_cache_key: Optional[LayerWiseQuantSpec] = None,
+    kv_cache_value: Optional[LayerWiseQuantSpec] = None,
 ) -> Dict[str, Any]:
     """Build PTQ overrides for a Llama-style causal LM."""
     overrides: Dict[str, Any] = {"model": {"layers": {}}}
@@ -343,8 +359,8 @@ def _build_llama_overrides(
             norm=norm,
             norm_weight=norm_weight,
             softmax=softmax,
-            kv_cache_key=kv_cache_key,
-            kv_cache_value=kv_cache_value,
+            kv_cache_key=_resolve_layer_spec(kv_cache_key, layer_idx),
+            kv_cache_value=_resolve_layer_spec(kv_cache_value, layer_idx),
         )
 
     return overrides
@@ -366,8 +382,8 @@ def build_llm_ptq_config(
     norm: Optional[QuantSpec] = None,
     norm_weight: Optional[QuantSpec] = None,
     softmax: Optional[QuantSpec] = None,
-    kv_cache_key: Optional[QuantSpec] = None,
-    kv_cache_value: Optional[QuantSpec] = None,
+    kv_cache_key: Optional[LayerWiseQuantSpec] = None,
+    kv_cache_value: Optional[LayerWiseQuantSpec] = None,
     strict_wrap: bool = True,
     profile: ExecutionProfile = DEFAULT_EXECUTION_PROFILE,
 ) -> PTQConfig:
@@ -385,8 +401,11 @@ def build_llm_ptq_config(
         spin_rotation_weight: Weight spec for SpinLlama rotation matrices.
         norm: Activation spec for norm module internals.
         norm_weight: Weight spec for norm affine parameters.
-        kv_cache_key: Activation spec for KV cache key quantization.
-        kv_cache_value: Activation spec for KV cache value quantization.
+        kv_cache_key: Activation spec for KV cache key quantization. May be a
+            single QuantSpec (applied to all layers) or a dict mapping layer
+            index to QuantSpec for per-layer mixed-precision KV cache.
+        kv_cache_value: Activation spec for KV cache value quantization. May
+            be a single QuantSpec or a per-layer dict, same as kv_cache_key.
         strict_wrap: If True, unsupported modules raise during wrapping.
         profile: Llama execution profile stored in model_args.
 

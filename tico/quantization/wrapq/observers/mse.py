@@ -105,6 +105,12 @@ class MSEObserver(AffineObserverBase):
         self._running_zp.fill_(0.0)
         self._zp_count = 0
 
+        # Two-stage (global) state — used when max_merge=False
+        self._stage: int = 1
+        self._err_accumulator: Optional[torch.Tensor] = None  # [G, Z]
+        self._grid_scales: Optional[torch.Tensor] = None      # [G]
+        self._grid_zps: Optional[torch.Tensor] = None         # [Z]
+
     def reset(self) -> None:
         super().reset()
         if hasattr(self, "_running_scale"):
@@ -112,6 +118,10 @@ class MSEObserver(AffineObserverBase):
         if hasattr(self, "_running_zp"):
             self._running_zp.fill_(0.0)
             self._zp_count = 0
+        self._stage = 1
+        self._err_accumulator = None
+        self._grid_scales = None
+        self._grid_zps = None
 
     # ------------------------------------------------------------------
     # Core: search for MSE-optimal scale on a single batch
@@ -381,6 +391,177 @@ class MSEObserver(AffineObserverBase):
             )
 
     # ------------------------------------------------------------------
+    # Two-stage (global) strategy — used when max_merge=False
+    # ------------------------------------------------------------------
+    def prepare_stage2(self) -> None:
+        """Build the fixed 2-D (scale, zp) grid from global min/max.
+
+        Called between the two calibration passes.  After this call,
+        :meth:`collect` switches to stage-2 mode (error accumulation on
+        the fixed grid).
+
+        When ``max_merge=True``, this observer is disabled instead — it
+        already has its stats from pass 1 and should not double-collect.
+
+        Supports both per-tensor (accumulator ``[1, G, Z]``) and
+        per-channel (accumulator ``[C, G, Z]``).
+        """
+        if self.max_merge:
+            self.enabled = False
+            return
+
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        is_symmetric = self.qscheme.is_symmetric()
+
+        if is_symmetric:
+            max_abs = torch.maximum(
+                self.max_val.abs(), self.min_val.abs()
+            ).clamp(min=1e-12)
+            base_scale = max_abs / qmax
+        else:
+            rng = (self.max_val - self.min_val).clamp(min=1e-12)
+            base_scale = rng / (qmax - qmin)
+
+        alphas = torch.linspace(
+            1.0 / self.num_grid, 1.0, self.num_grid,
+            device=self.min_val.device, dtype=torch.float32,
+        )
+
+        if self.channel_axis is None:
+            # Per-tensor: grid_scales [G]
+            self._grid_scales = alphas * base_scale  # [G]
+            C = 1
+        else:
+            # Per-channel: grid_scales [C, G]
+            self._grid_scales = (
+                alphas[None, :] * base_scale[:, None]
+            )  # [C, G]
+            C = base_scale.shape[0]
+
+        if is_symmetric:
+            self._grid_zps = torch.zeros(
+                1, dtype=torch.float32, device=self.min_val.device,
+            )
+        else:
+            self._grid_zps = torch.arange(
+                qmin, qmax + 1, dtype=torch.float32, device=self.min_val.device,
+            )
+
+        Z = len(self._grid_zps)
+        self._err_accumulator = torch.zeros(
+            C, self.num_grid, Z,
+            device=self.min_val.device, dtype=torch.float32,
+        )  # [C, G, Z]
+        self._stage = 2
+
+    @torch.no_grad()
+    def _update_stats_global(self, x: torch.Tensor, **kwargs) -> None:
+        """Two-stage update: stage 1 accumulates global min/max; stage 2
+        accumulates per-grid element-wise MSE on the fixed grid built by
+        :meth:`prepare_stage2`.
+
+        Unlike :class:`MSEMatMulObserver`, there is no consuming weight,
+        so the error is plain element-wise ``Σ (x - Q(x, scale, zp))²``.
+
+        Per-tensor accumulator is ``[1, G, Z]``; per-channel is ``[C, G, Z]``.
+        """
+        # Update min/max — always, both stages
+        if self.channel_axis is None:
+            curr_min, curr_max = x.min(), x.max()
+        else:
+            curr_min, curr_max = channelwise_minmax(x, self.channel_axis)
+        self.min_val = torch.minimum(self.min_val, curr_min)
+        self.max_val = torch.maximum(self.max_val, curr_max)
+
+        if self._stage == 1:
+            return
+
+        # Stage 2: accumulate per-grid errors.
+        assert self._grid_scales is not None and self._grid_zps is not None
+        assert self._err_accumulator is not None
+
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        is_symmetric = self.qscheme.is_symmetric()
+
+        zps = self._grid_zps  # [Z]
+        Z = zps.shape[0]
+
+        if self.channel_axis is None:
+            # --- Per-tensor: accumulator [1, G, Z] ---
+            scales = self._grid_scales  # [G]
+            G = scales.shape[0]
+            x_flat = x.flatten().float()  # [N]
+            N = x_flat.numel()
+
+            # Chunk over N to bound peak memory of [chunk, Z] intermediate.
+            mem_per_row = Z * 4  # float32
+            chunk = max(1, (64 << 20) // mem_per_row)
+
+            for gi in range(G):
+                scale = scales[gi]
+                err_z = torch.zeros(Z, device=x.device, dtype=torch.float32)
+
+                for start in range(0, N, chunk):
+                    end = min(start + chunk, N)
+                    xc = x_flat[start:end]  # [chunk]
+                    if is_symmetric:
+                        q = torch.round(
+                            xc[:, None] / scale
+                        ).clamp(-qmax, qmax)
+                        x_q = q * scale
+                    else:
+                        q = torch.round(
+                            xc[:, None] / scale + zps[None, :]
+                        ).clamp(qmin, qmax)
+                        x_q = (q - zps[None, :]) * scale
+                    e = xc[:, None] - x_q  # [chunk, Z]
+                    err_z += (e * e).sum(dim=0)
+
+                self._err_accumulator[0, gi, :] += err_z
+        else:
+            # --- Per-channel: accumulator [C, G, Z] ---
+            scales = self._grid_scales  # [C, G]
+            C, G = scales.shape
+
+            ca = self.channel_axis % x.dim()
+            x_perm = x.movedim(ca, -1)  # [..., C]
+            x_flat = x_perm.reshape(-1, x_perm.shape[-1]).float()  # [N, C]
+            N = x_flat.shape[0]
+
+            # Chunk over N to bound peak memory of [chunk, C, Z] intermediate.
+            mem_per_row = C * Z * 4  # float32
+            chunk = max(1, (64 << 20) // mem_per_row)
+
+            for gi in range(G):
+                scale_g = scales[:, gi]  # [C]
+                err_cz = torch.zeros(
+                    C, Z, device=x.device, dtype=torch.float32
+                )
+
+                for start in range(0, N, chunk):
+                    end = min(start + chunk, N)
+                    xc = x_flat[start:end]  # [chunk, C]
+                    if is_symmetric:
+                        q = torch.round(
+                            xc[:, :, None] / scale_g[None, :, None]
+                        ).clamp(-qmax, qmax)
+                        x_q = q * scale_g[None, :, None]
+                    else:
+                        q = torch.round(
+                            xc[:, :, None] / scale_g[None, :, None]
+                            + zps[None, None, :]
+                        ).clamp(qmin, qmax)
+                        x_q = (
+                            q - zps[None, None, :]
+                        ) * scale_g[None, :, None]
+                    e = xc[:, :, None] - x_q  # [chunk, C, Z]
+                    err_cz += (e * e).sum(dim=0)  # [C, Z]
+
+                self._err_accumulator[:, gi, :] += err_cz
+
+    # ------------------------------------------------------------------
     # ObserverBase interface
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -391,6 +572,12 @@ class MSEObserver(AffineObserverBase):
         Scale is merged via max-merge across batches.
         Zero-point is merged via running mean across batches.
         """
+        # Two-stage global dispatch: when max_merge=False, use the global
+        # grid-accumulation path instead of per-batch search.
+        if not self.max_merge:
+            self._update_stats_global(x, **kwargs)
+            return
+
         # Update min/max
         if self.channel_axis is None:
             curr_min, curr_max = x.min(), x.max()
@@ -442,7 +629,39 @@ class MSEObserver(AffineObserverBase):
 
         For symmetric: scale from MSE search, zp=0.
         For asymmetric: scale from MSE search (max-merged), zp from running mean.
+
+        When ``max_merge=False`` (two-stage global), pick the best (scale, zp)
+        from the 3-D error accumulator ``[C, G, Z]``.
         """
+        # Two-stage global path: pick best (scale, zp) from the grid.
+        if not self.max_merge:
+            assert self._err_accumulator is not None, (
+                "max_merge=False requires prepare_stage2() before "
+                "compute_qparams()"
+            )
+            Z = self._grid_zps.shape[0]
+            C, G, _ = self._err_accumulator.shape
+
+            # Flatten G*Z per channel, pick argmin → best (g, z) per channel.
+            best_flat = self._err_accumulator.reshape(C, -1).argmin(dim=1)
+            best_g = best_flat // Z  # [C]
+            best_z = best_flat % Z   # [C]
+
+            if self.channel_axis is None:
+                # Per-tensor: squeeze C=1
+                best_scale = self._grid_scales[best_g[0]].float()
+                best_zp = self._grid_zps[best_z[0]].to(torch.int)
+            else:
+                # Per-channel: [C]
+                best_scale = self._grid_scales[
+                    torch.arange(C, device=best_g.device), best_g
+                ].float()
+                best_zp = self._grid_zps[best_z].to(torch.int)
+
+            self._cached_scale = best_scale
+            self._cached_zp = best_zp
+            return best_scale, best_zp
+
         assert isinstance(self.min_val, torch.Tensor)
         assert isinstance(self.max_val, torch.Tensor)
         qmin, qmax = self.dtype.qmin, self.dtype.qmax

@@ -34,6 +34,8 @@ After merging, scale and zero-point are derived from the running
 min/max by the standard affine formula in ``AffineObserverBase``.
 """
 
+from __future__ import annotations
+
 import torch
 
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
@@ -67,11 +69,34 @@ class MSEOCTAVObserver(AffineObserverBase):
         *,
         max_iters: int = 20,
         tol: float = 1e-10,
+        max_merge: bool = True,
+        num_bins: int = 255,
         **kwargs,
     ):
         self.max_iters = max_iters
         self.tol = tol
+        self.max_merge = max_merge
+        self.num_bins = num_bins
         super().__init__(**kwargs)
+
+        # Two-stage (global) state — used when max_merge=False
+        self._stage: int = 1
+        self._hist_counts = None   # [B] or [C, B]
+        self._hist_sums = None     # [B] or [C, B]
+        self._hist_min = None      # scalar or [C]
+        self._hist_max = None      # scalar or [C]
+        self._bin_width = None     # scalar or [C]
+        self._zero_count = None    # scalar or [C] (symmetric only)
+
+    def reset(self) -> None:
+        super().reset()
+        self._stage = 1
+        self._hist_counts = None
+        self._hist_sums = None
+        self._hist_min = None
+        self._hist_max = None
+        self._bin_width = None
+        self._zero_count = None
 
     # ------------------------------------------------------------------
     # OCTAV core
@@ -276,6 +301,252 @@ class MSEOCTAVObserver(AffineObserverBase):
             return x_min, x_max
 
     # ------------------------------------------------------------------
+    # Two-stage (global) strategy — used when max_merge=False
+    # ------------------------------------------------------------------
+    def prepare_stage2(self) -> None:
+        if self.max_merge:
+            self.enabled = False
+            return
+
+        is_symmetric = self.qscheme.is_symmetric()
+        device = self.min_val.device
+
+        if is_symmetric:
+            max_abs = torch.maximum(self.max_val.abs(), self.min_val.abs()).clamp(min=1e-12)
+            self._hist_min = torch.zeros_like(max_abs)
+            self._hist_max = max_abs
+        else:
+            self._hist_min = self.min_val.clone()
+            self._hist_max = self.max_val.clone()
+
+        self._bin_width = ((self._hist_max - self._hist_min) / self.num_bins).clamp(min=1e-30)
+
+        if self.channel_axis is None:
+            self._hist_counts = torch.zeros(self.num_bins, device=device, dtype=torch.float32)
+            self._hist_sums = torch.zeros(self.num_bins, device=device, dtype=torch.float32)
+            self._zero_count = torch.tensor(0.0, device=device, dtype=torch.float32)
+        else:
+            C = self.min_val.shape[0]
+            self._hist_counts = torch.zeros(C, self.num_bins, device=device, dtype=torch.float32)
+            self._hist_sums = torch.zeros(C, self.num_bins, device=device, dtype=torch.float32)
+            self._zero_count = torch.zeros(C, device=device, dtype=torch.float32)
+
+        self._stage = 2
+
+    @torch.no_grad()
+    def _update_stats_global(self, x: torch.Tensor, **kwargs) -> None:
+        if self.channel_axis is None:
+            curr_min, curr_max = x.min(), x.max()
+        else:
+            curr_min, curr_max = channelwise_minmax(x, self.channel_axis)
+        self.min_val = torch.minimum(self.min_val, curr_min)
+        self.max_val = torch.maximum(self.max_val, curr_max)
+
+        if self._stage == 1:
+            return
+
+        assert self._hist_counts is not None
+        is_symmetric = self.qscheme.is_symmetric()
+        num_bins = self.num_bins
+
+        if self.channel_axis is None:
+            x_flat = x.flatten().float()
+            if is_symmetric:
+                abs_x = x_flat.abs()
+                nonzero = abs_x > 0
+                abs_nz = abs_x[nonzero]
+                if abs_nz.numel() > 0:
+                    bin_idx = (abs_nz / self._bin_width).long().clamp(0, num_bins - 1)
+                    self._hist_counts += torch.bincount(bin_idx, minlength=num_bins).float()
+                    self._hist_sums.scatter_add_(0, bin_idx, abs_nz)
+                self._zero_count += (~nonzero).sum().float()
+            else:
+                bin_idx = ((x_flat - self._hist_min) / self._bin_width).long().clamp(0, num_bins - 1)
+                self._hist_counts += torch.bincount(bin_idx, minlength=num_bins).float()
+                self._hist_sums.scatter_add_(0, bin_idx, x_flat)
+        else:
+            ca = self.channel_axis % x.dim()
+            x_perm = x.movedim(ca, 0)
+            x_flat = x_perm.reshape(x_perm.shape[0], -1).float()
+            C = x_flat.shape[0]
+
+            if is_symmetric:
+                for c in range(C):
+                    abs_c = x_flat[c].abs()
+                    nz = abs_c > 0
+                    abs_nz = abs_c[nz]
+                    if abs_nz.numel() > 0:
+                        bin_idx = (abs_nz / self._bin_width[c]).long().clamp(0, num_bins - 1)
+                        self._hist_counts[c] += torch.bincount(bin_idx, minlength=num_bins).float()
+                        self._hist_sums[c].scatter_add_(0, bin_idx, abs_nz)
+                    self._zero_count[c] += (~nz).sum().float()
+            else:
+                for c in range(C):
+                    x_c = x_flat[c]
+                    bin_idx = ((x_c - self._hist_min[c]) / self._bin_width[c]).long().clamp(0, num_bins - 1)
+                    self._hist_counts[c] += torch.bincount(bin_idx, minlength=num_bins).float()
+                    self._hist_sums[c].scatter_add_(0, bin_idx, x_c)
+
+
+    @torch.no_grad()
+    def _octav_symmetric_hist(
+        self, counts, sums, bin_width
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        qmax = self.dtype.qmax
+        gamma = 1.0 / (12.0 * qmax * qmax)
+        num_bins = self.num_bins
+
+        cumcount = counts.cumsum(dim=-1)
+        cumsum = sums.cumsum(dim=-1)
+        total_count = cumcount[..., -1]
+        total_sum = cumsum[..., -1]
+
+        s = total_sum / total_count.clamp(min=1)
+
+        if s.dim() == 0:
+            for _ in range(self.max_iters):
+                s_bin = (s / bin_width).long().clamp(0, num_bins - 2)
+                num_in = cumcount[s_bin]
+                sum_in = cumsum[s_bin]
+                num_out = total_count - num_in
+                sum_out = total_sum - sum_in
+                denom = torch.clamp(gamma * num_in + num_out, min=1e-30)
+                s_new = sum_out / denom
+                if (s_new - s).abs() < self.tol:
+                    s = s_new
+                    break
+                if s_new < s:
+                    s = 0.5 * (s + s_new)
+                else:
+                    s = s_new
+        else:
+            active = torch.ones_like(s, dtype=torch.bool)
+            for _ in range(self.max_iters):
+                s_bin = (s / bin_width).long().clamp(0, num_bins - 2)
+                num_in = cumcount.gather(-1, s_bin.unsqueeze(-1)).squeeze(-1)
+                sum_in = cumsum.gather(-1, s_bin.unsqueeze(-1)).squeeze(-1)
+                num_out = total_count - num_in
+                sum_out = total_sum - sum_in
+                denom = torch.clamp(gamma * num_in + num_out, min=1e-30)
+                s_new = sum_out / denom
+                converged = (s_new - s).abs() < self.tol
+                damp = s_new < s
+                s_new = torch.where(damp, 0.5 * (s + s_new), s_new)
+                s = torch.where(active, s_new, s)
+                active = active & ~converged
+                if not active.any():
+                    break
+
+        return -s, s
+
+    @torch.no_grad()
+    def _octav_asymmetric_hist(
+        self, counts, sums, hist_min, bin_width
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        gamma = 1.0 / (12.0 * (qmax - qmin) ** 2)
+        num_bins = self.num_bins
+
+        cumcount = counts.cumsum(dim=-1)
+        cumsum = sums.cumsum(dim=-1)
+        total_count = cumcount[..., -1]
+        total_sum = cumsum[..., -1]
+
+        a = self._hist_percentile(cumcount, total_count, 0.05, hist_min, bin_width)
+        b = self._hist_percentile(cumcount, total_count, 0.95, hist_min, bin_width)
+
+        if a.dim() == 0:
+            for _ in range(self.max_iters):
+                a_bin = ((a - hist_min) / bin_width).long().clamp(1, num_bins - 2)
+                b_bin = ((b - hist_min) / bin_width).long().clamp(1, num_bins - 2)
+                q = cumcount[a_bin]
+                m_q = cumsum[a_bin]
+                r = total_count - cumcount[b_bin]
+                m_r = total_sum - cumsum[b_bin]
+                p = total_count - q - r
+                denom = torch.clamp(gamma * p * (q + r) + q * r, min=1e-30)
+                a_new = (gamma * p * (m_q + m_r) + m_q * r) / denom
+                b_new = (gamma * p * (m_q + m_r) + m_r * q) / denom
+                if (a_new - a).abs() < self.tol and (b_new - b).abs() < self.tol:
+                    a, b = a_new, b_new
+                    break
+                if b_new <= a_new:
+                    break
+                if a_new > a:
+                    a_new = 0.5 * (a + a_new)
+                if b_new < b:
+                    b_new = 0.5 * (b + b_new)
+                a, b = a_new, b_new
+        else:
+            active = torch.ones_like(a, dtype=torch.bool)
+            for _ in range(self.max_iters):
+                a_bin = ((a - hist_min) / bin_width).long().clamp(1, num_bins - 2)
+                b_bin = ((b - hist_min) / bin_width).long().clamp(1, num_bins - 2)
+                q = cumcount.gather(-1, a_bin.unsqueeze(-1)).squeeze(-1)
+                m_q = cumsum.gather(-1, a_bin.unsqueeze(-1)).squeeze(-1)
+                r = total_count - cumcount.gather(-1, b_bin.unsqueeze(-1)).squeeze(-1)
+                m_r = total_sum - cumsum.gather(-1, b_bin.unsqueeze(-1)).squeeze(-1)
+                p = total_count - q - r
+                denom = torch.clamp(gamma * p * (q + r) + q * r, min=1e-30)
+                a_new = (gamma * p * (m_q + m_r) + m_q * r) / denom
+                b_new = (gamma * p * (m_q + m_r) + m_r * q) / denom
+                converged = ((a_new - a).abs() < self.tol) & ((b_new - b).abs() < self.tol)
+                collapse = b_new <= a_new
+                damp_a = a_new > a
+                damp_b = b_new < b
+                a_new = torch.where(damp_a, 0.5 * (a + a_new), a_new)
+                b_new = torch.where(damp_b, 0.5 * (b + b_new), b_new)
+                a = torch.where(active & ~collapse, a_new, a)
+                b = torch.where(active & ~collapse, b_new, b)
+                active = active & ~converged & ~collapse
+                if not active.any():
+                    break
+
+        return a, b
+
+    @staticmethod
+    def _hist_percentile(cumcount, total_count, pct, hist_min, bin_width):
+        target = pct * total_count
+        if cumcount.dim() == 1:
+            mask = cumcount >= target
+            idx = mask.int().argmax()
+            if not mask.any():
+                idx = torch.tensor(cumcount.shape[0] - 1, device=cumcount.device)
+            return hist_min + (idx + 0.5) * bin_width
+        else:
+            mask = cumcount >= target.unsqueeze(-1)
+            idx = mask.int().argmax(dim=-1)
+            no_match = ~mask.any(dim=-1)
+            idx = torch.where(no_match, torch.tensor(cumcount.shape[-1] - 1, device=cumcount.device, dtype=idx.dtype), idx)
+            return hist_min + (idx + 0.5) * bin_width
+
+    def compute_qparams(self):
+        if not self.max_merge:
+            assert self._hist_counts is not None, (
+                "max_merge=False requires prepare_stage2() and a second pass"
+            )
+            is_symmetric = self.qscheme.is_symmetric()
+            if is_symmetric:
+                x_min, x_max = self._octav_symmetric_hist(
+                    self._hist_counts, self._hist_sums, self._bin_width
+                )
+            else:
+                x_min, x_max = self._octav_asymmetric_hist(
+                    self._hist_counts, self._hist_sums, self._hist_min, self._bin_width
+                )
+            if torch.any(torch.isnan(x_min)) or torch.any(torch.isnan(x_max)):
+                x_min, x_max = self.min_val, self.max_val
+            if torch.any(x_min >= x_max):
+                x_min = torch.minimum(x_min, self.min_val)
+                x_max = torch.maximum(x_max, self.max_val)
+            self.min_val = x_min
+            self.max_val = x_max
+            return super().compute_qparams()
+        return super().compute_qparams()
+
+
+    # ------------------------------------------------------------------
     # ObserverBase interface
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -284,6 +555,10 @@ class MSEOCTAVObserver(AffineObserverBase):
         Run OCTAV to find MSE-optimal clipping thresholds for this batch,
         then merge with running min/max.
         """
+        if not self.max_merge:
+            self._update_stats_global(x, **kwargs)
+            return
+
         # Also update raw min/max for edge-case fallback
         if self.channel_axis is None:
             curr_min, curr_max = x.min(), x.max()

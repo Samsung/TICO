@@ -120,6 +120,25 @@ class QuantModuleBase(nn.Module, ABC):
         for child in self._child_quant_modules():
             child.freeze_qparams()
 
+    def prepare_stage2(self) -> None:
+        """Propagate ``prepare_stage2`` to all observers that support it
+        (two-stage global-gram observers), and to child quant modules.
+        Disable observers that don't support stage 2 so they don't
+        double-collect during the second calibration pass.
+        Called between the two calibration passes.
+        """
+        for obs in self._all_observers():
+            if hasattr(obs, "prepare_stage2"):
+                obs.prepare_stage2()
+            else:
+                # Non-two-stage observers already have their stats from
+                # pass 1; disable so they don't double-collect in pass 2.
+                obs.enabled = False
+
+        # propagate to children
+        for child in self._child_quant_modules():
+            child.prepare_stage2()
+
     def _fq(self, x, obs: ObserverBase, **kwargs):
         """Fake-quant or collect.
 

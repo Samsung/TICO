@@ -2091,7 +2091,33 @@ class LlamaGPTQQuantizer(BaseQuantizer):
                         )
                     else:
                         layer(*cache_args_batch, **cache_kwargs_batch)
-                    
+
+                # Two-stage global-gram: prepare stage 2 grid, then re-run
+                # the same calibration data for error accumulation.
+                layer.prepare_stage2()
+                for batch_idx in tqdm(
+                    range(batch_num),
+                    desc=f"[L{l_idx}] activations calibration (stage 2)",
+                    leave=False,
+                    unit="batch",
+                    disable=not gptq_conf.show_progress,
+                ):
+                    cache_args_batch = gather_single_batch_from_list(
+                        self.cache_args, batch_idx
+                    )
+                    cache_args_batch = move_to_device(cache_args_batch, device)
+
+                    cache_kwargs_batch = gather_single_batch_from_dict(
+                        self.cache_kwargs, batch_idx
+                    )
+                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+                    if gptq_conf.double_precision:
+                        self._run_layer_forward_double_precision(
+                            layer, cache_args_batch, cache_kwargs_batch, True
+                        )
+                    else:
+                        layer(*cache_args_batch, **cache_kwargs_batch)
+
                 if ptq_wrapped:
                     layer.freeze_qparams()   
                     calibrated = True

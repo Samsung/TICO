@@ -141,11 +141,325 @@ class MSEMatMulObserver(MSEObserver):
         # Keyed by (data_ptr, shape, device) so a weight change is detected.
         self._gram: Optional[torch.Tensor] = None
         self._gram_key: Optional[tuple] = None
+        # Two-stage (global) state — used when max_merge=False
+        self._stage: int = 1
+        self._err_accumulator: Optional[torch.Tensor] = None  # [G, Z]
+        self._grid_scales: Optional[torch.Tensor] = None      # [G]
+        self._grid_zps: Optional[torch.Tensor] = None         # [Z]
+        
+        # Default to max-merge strategy (consistent with MSEObserver),
+        # unless the caller explicitly passed max_merge via kwargs.
+        if "max_merge" not in kwargs:
+            self.max_merge = True
 
     def reset(self) -> None:
         super().reset()
         self._gram = None
         self._gram_key = None
+        self._stage = 1
+        self._err_accumulator = None
+        self._grid_scales = None
+        self._grid_zps = None
+
+    # ------------------------------------------------------------------
+    # Two-stage (global) strategy — used when max_merge=False
+    # ------------------------------------------------------------------
+    def prepare_stage2(self) -> None:
+        """Build the fixed 2-D (scale, zp) grid from global min/max.
+
+        Called between the two calibration passes.  After this call,
+        :meth:`collect` switches to stage-2 mode (error accumulation on
+        the fixed grid).
+
+        When ``max_merge=True``, this observer is disabled instead — it
+        already has its stats from pass 1 and should not double-collect.
+        """
+        if self.max_merge:
+            self.enabled = False
+            return
+
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        is_symmetric = self.qscheme.is_symmetric()
+
+        if is_symmetric:
+            max_abs = torch.maximum(self.max_val.abs(), self.min_val.abs()).clamp(min=1e-12)
+            base_scale = max_abs / qmax
+        else:
+            rng = (self.max_val - self.min_val).clamp(min=1e-12)
+            base_scale = rng / (qmax - qmin)
+
+        alphas = torch.linspace(
+            1.0 / self.num_grid, 1.0, self.num_grid,
+            device=self.min_val.device, dtype=torch.float32,
+        )
+
+        if self.channel_axis is None:
+            # Per-tensor: grid_scales [G]
+            self._grid_scales = alphas * base_scale  # [G]
+            C = 1
+        else:
+            # Per-channel: grid_scales [C, G]
+            self._grid_scales = (
+                alphas[None, :] * base_scale[:, None]
+            )  # [C, G]
+            C = base_scale.shape[0]
+
+        if is_symmetric:
+            self._grid_zps = torch.zeros(
+                1, dtype=torch.float32, device=self.min_val.device,
+            )
+        else:
+            self._grid_zps = torch.arange(
+                qmin, qmax + 1, dtype=torch.float32, device=self.min_val.device,
+            )
+
+        Z = len(self._grid_zps)
+        if self.channel_axis is None:
+            self._err_accumulator = torch.zeros(
+                self.num_grid, Z,
+                device=self.min_val.device, dtype=torch.float32,
+            )  # [G, Z]
+        else:
+            self._err_accumulator = torch.zeros(
+                C, self.num_grid, Z,
+                device=self.min_val.device, dtype=torch.float32,
+            )  # [C, G, Z]
+        self._stage = 2
+
+    @torch.no_grad()
+    def _update_stats_global(self, x: torch.Tensor, **kwargs) -> None:
+        """Two-stage update: stage 1 accumulates global min/max; stage 2
+        accumulates per-grid errors on the fixed grid built by
+        :meth:`prepare_stage2`.
+
+        Unlike :class:`MSEBatchedMatMulObserver`, the Gram matrix is fixed
+        (it depends on the consuming weight, not on per-batch activations),
+        so stage 1 only needs min/max — no running Gram accumulation.
+        """
+        weight = kwargs.pop("weight", None)
+        if weight is None:
+            return
+
+        # Update min/max (same as MSEObserver) — always, both stages
+        if self.channel_axis is None:
+            curr_min, curr_max = x.min(), x.max()
+        else:
+            curr_min, curr_max = channelwise_minmax(x, self.channel_axis)
+        self.min_val = torch.minimum(self.min_val, curr_min)
+        self.max_val = torch.maximum(self.max_val, curr_max)
+
+        if self._stage == 1:
+            return
+
+        # Stage 2: accumulate per-grid errors.
+        assert self._grid_scales is not None and self._grid_zps is not None
+        assert self._err_accumulator is not None
+
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        is_symmetric = self.qscheme.is_symmetric()
+
+        zps = self._grid_zps  # [Z]
+        Z = zps.shape[0]
+
+        if self.channel_axis is None:
+            # --- Per-tensor: accumulator [G, Z] ---
+            scales = self._grid_scales  # [G]
+            G = scales.shape[0]
+
+            if weight.dim() == 2:
+                # --- 2D weight: Gram-matrix trick (fast) ---
+                # weight: [out_features, in_features], x: [..., in_features]
+                # Gram = W^T W is fixed and can be cached.
+                gram = self._get_gram(weight)  # [K_in, K_in]
+                x_rows = x.reshape(-1, x.shape[-1]).float()  # [N, K_in]
+                N, K_in = x_rows.shape
+
+                # Chunk over rows to bound peak memory of [chunk, K_in, Z] intermediate.
+                mem_per_row = K_in * Z * 4  # float32
+                chunk = max(1, (64 << 20) // mem_per_row)
+
+                for gi in range(G):
+                    scale = scales[gi]
+                    zps_col = zps.view(1, 1, Z)  # [1, 1, Z]
+                    err_z = torch.zeros(Z, device=x.device, dtype=torch.float32)
+
+                    for start in range(0, N, chunk):
+                        end = min(start + chunk, N)
+                        xc = x_rows[start:end]  # [chunk, K_in]
+                        if is_symmetric:
+                            q = torch.round(xc[:, :, None] / scale).clamp(-qmax, qmax)
+                        else:
+                            q = torch.round(xc[:, :, None] / scale + zps_col).clamp(qmin, qmax)
+                        x_deq = (q - zps_col) * scale  # [chunk, K_in, Z]
+                        e = xc[:, :, None] - x_deq     # [chunk, K_in, Z]
+                        # Weighted error per zp: sum_n e_n^T H e_n
+                        err_z += torch.einsum("ckz,kl,clz->z", e, gram, e)
+
+                    self._err_accumulator[gi, :] += err_z
+            else:
+                # --- N-D weight: direct matmul (no fixed Gram possible) ---
+                # weight: [..., S, K], x: [..., K, D]
+                # The contraction is over K (last dim of weight, second-to-last
+                # dim of x).  The weight changes per batch (e.g. attention
+                # weights), so a single Gram cannot be precomputed.
+                # error = ||weight @ (x - Q(x))||^2
+                wf = weight.detach().float()
+                xf = x.detach().float()
+                x_3d = xf.reshape(-1, xf.shape[-2], xf.shape[-1])  # [N, K, D]
+                w_3d = wf.reshape(-1, wf.shape[-2], wf.shape[-1])  # [N, S, K]
+                N, K, D = x_3d.shape
+
+                # Chunk over N to bound peak memory of [chunk, K, D, Z] intermediate.
+                mem_per_row = K * D * Z * 4  # float32
+                chunk = max(1, (64 << 20) // mem_per_row)
+
+                for gi in range(G):
+                    scale = scales[gi]
+                    zps_col = zps.view(1, 1, 1, Z)  # [1, 1, 1, Z]
+                    err_z = torch.zeros(Z, device=x.device, dtype=torch.float32)
+
+                    for start in range(0, N, chunk):
+                        end = min(start + chunk, N)
+                        xc = x_3d[start:end]  # [chunk, K, D]
+                        wc = w_3d[start:end]  # [chunk, S, K]
+                        if is_symmetric:
+                            q = torch.round(xc[:, :, :, None] / scale).clamp(-qmax, qmax)
+                        else:
+                            q = torch.round(xc[:, :, :, None] / scale + zps_col).clamp(qmin, qmax)
+                        x_deq = (q - zps_col) * scale  # [chunk, K, D, Z]
+                        e = xc[:, :, :, None] - x_deq  # [chunk, K, D, Z]
+                        # Weighted error: ||w @ e||^2 for each zp
+                        # einsum: w[chunk,S,K] @ e[chunk,K,D,Z] -> [chunk,S,D,Z]
+                        err = torch.einsum("csk,ckdz->csdz", wc, e)
+                        err_z += (err * err).sum(dim=(0, 1, 2))  # [Z]
+
+                    self._err_accumulator[gi, :] += err_z
+        else:
+            # --- Per-channel: accumulator [C, G, Z] ---
+            scales = self._grid_scales  # [C, G]
+            C, G = scales.shape
+
+            if weight.dim() == 2:
+                # --- 2D weight: diagonal Gram approximation ---
+                # H_diag[c] = ||W[:,c]||^2 makes the error separable per
+                # channel: err_c = H_diag[c] * sum_n E_{n,c}^2
+                gram = self._get_gram(weight)  # [K_in, K_in]
+                gram_diag = gram.diagonal()  # [K_in] = [C]
+
+                ca = self.channel_axis % x.dim()
+                x_perm = x.movedim(ca, -1)  # [..., C]
+                x_rows = x_perm.reshape(-1, x_perm.shape[-1]).float()  # [N, C]
+                N = x_rows.shape[0]
+
+                # Chunk over rows to bound peak memory of [chunk, C, Z] intermediate.
+                mem_per_row = C * Z * 4  # float32
+                chunk = max(1, (64 << 20) // mem_per_row)
+
+                for gi in range(G):
+                    scale_g = scales[:, gi]  # [C]
+                    err_cz = torch.zeros(C, Z, device=x.device, dtype=torch.float32)
+
+                    for start in range(0, N, chunk):
+                        end = min(start + chunk, N)
+                        xc = x_rows[start:end]  # [chunk, C]
+                        if is_symmetric:
+                            q = torch.round(
+                                xc[:, :, None] / scale_g[None, :, None]
+                            ).clamp(-qmax, qmax)
+                            x_deq = q * scale_g[None, :, None]
+                        else:
+                            zps_col = zps.view(1, 1, Z)
+                            q = torch.round(
+                                xc[:, :, None] / scale_g[None, :, None] + zps_col
+                            ).clamp(qmin, qmax)
+                            x_deq = (q - zps_col) * scale_g[None, :, None]
+                        e = xc[:, :, None] - x_deq  # [chunk, C, Z]
+                        # Diagonal Gram: H_diag[c] * sum_n e_{n,c}^2
+                        err_cz += gram_diag[:, None] * (e * e).sum(dim=0)  # [C, Z]
+
+                    self._err_accumulator[:, gi, :] += err_cz
+            else:
+                # --- N-D weight: exact separable per channel ---
+                # weight: [..., S, K], x: [..., K, D], channel_axis = D (last dim).
+                # The contraction is over K (not the channel dim D), so the
+                # error is exactly separable per channel.
+                wf = weight.detach().float()
+                xf = x.detach().float()
+                x_3d = xf.reshape(-1, xf.shape[-2], xf.shape[-1])  # [N, K, D]
+                w_3d = wf.reshape(-1, wf.shape[-2], wf.shape[-1])  # [N, S, K]
+                N, K, D = x_3d.shape
+                # C = D (channel axis is the last dim)
+
+                # Chunk over N to bound peak memory of [chunk, K, D, Z] intermediate.
+                mem_per_row = K * D * Z * 4  # float32
+                chunk = max(1, (64 << 20) // mem_per_row)
+
+                for gi in range(G):
+                    scale_g = scales[:, gi]  # [D] = [C]
+                    err_cz = torch.zeros(D, Z, device=x.device, dtype=torch.float32)
+
+                    for start in range(0, N, chunk):
+                        end = min(start + chunk, N)
+                        xc = x_3d[start:end]  # [chunk, K, D]
+                        wc = w_3d[start:end]  # [chunk, S, K]
+                        if is_symmetric:
+                            q = torch.round(
+                                xc[:, :, :, None] / scale_g[None, None, :, None]
+                            ).clamp(-qmax, qmax)
+                            x_deq = q * scale_g[None, None, :, None]
+                        else:
+                            zps_col = zps.view(1, 1, 1, Z)
+                            q = torch.round(
+                                xc[:, :, :, None] / scale_g[None, None, :, None] + zps_col
+                            ).clamp(qmin, qmax)
+                            x_deq = (q - zps_col) * scale_g[None, None, :, None]
+                        e = xc[:, :, :, None] - x_deq  # [chunk, K, D, Z]
+                        # Weighted error: ||w @ e||^2, separable per channel D
+                        # einsum: w[chunk,S,K] @ e[chunk,K,D,Z] -> [chunk,S,D,Z]
+                        err = torch.einsum("csk,ckdz->csdz", wc, e)
+                        err_cz += (err * err).sum(dim=(0, 1))  # [D, Z] = [C, Z]
+
+                    self._err_accumulator[:, gi, :] += err_cz
+
+    @torch.no_grad()
+    def compute_qparams(self):
+        """Pick best (scale, zp) from the error accumulator (global),
+        or fall back to the parent implementation for max_merge.
+
+        When per-channel, the accumulator is [C, G, Z] and the best
+        (scale, zp) is selected independently per channel.
+        """
+        if self.max_merge:
+            return super().compute_qparams()
+
+        assert self._err_accumulator is not None
+        Z = self._grid_zps.shape[0]
+
+        if self.channel_axis is None:
+            # Per-tensor: accumulator [G, Z]
+            best_flat = self._err_accumulator.argmin().item()
+            best_g = best_flat // Z
+            best_z = best_flat % Z
+
+            best_scale = self._grid_scales[best_g].float()
+            best_zp = self._grid_zps[best_z].to(torch.int)
+        else:
+            # Per-channel: accumulator [C, G, Z]
+            C, G, _ = self._err_accumulator.shape
+            best_flat = self._err_accumulator.reshape(C, -1).argmin(dim=1)  # [C]
+            best_g = best_flat // Z  # [C]
+            best_z = best_flat % Z   # [C]
+
+            best_scale = self._grid_scales[
+                torch.arange(C, device=best_g.device), best_g
+            ].float()
+            best_zp = self._grid_zps[best_z].to(torch.int)
+
+        self._cached_scale = best_scale
+        self._cached_zp = best_zp
+        return best_scale, best_zp
 
     # ------------------------------------------------------------------
     # Gram matrix cache
@@ -446,9 +760,13 @@ class MSEMatMulObserver(MSEObserver):
         ``weight`` kwarg: the consuming layer's weight [out_features, in_features].
         Falls back to plain MSEObserver behavior when absent.
         """
+        if not self.max_merge:
+            self._update_stats_global(x, **kwargs)
+            return
+
         weight = kwargs.pop("weight", None)
         if weight is None:
-            return None
+            return
         
         # Update min/max (same as MSEObserver)
         if self.channel_axis is None:
@@ -508,7 +826,113 @@ class MSEBatchedMatMulObserver(MSEObserver):
     Grams are recomputed every batch (Q changes per batch — no caching).
 
     Falls back to plain :class:`MSEObserver` behavior when no weight is given.
+
+    Parameters
+    ----------
+    max_merge : bool
+        ``True`` (default) — per-batch scale/zp search with max-merge
+        across batches.  This is the original strategy inherited from
+        :class:`MSEObserver`.
+
+        ``False`` — two-pass strategy that exactly matches global
+        calibration without storing raw activations:
+
+        * Stage 1 (first calibration pass): accumulate a running Gram
+          ``Σ_t Q_t^T Q_t`` and global min/max.  No scale search is done.
+        * :meth:`prepare_stage2` (called between passes): build a fixed
+          2-D ``(scale, zp)`` grid from the global min/max.
+        * Stage 2 (second calibration pass): accumulate per-grid errors
+          on the fixed grid using the accumulated Gram.
+        * :meth:`compute_qparams`: pick the ``(scale, zp)`` pair with the
+          minimum accumulated error.
+
+        Memory cost: ``O(H·D² + G·Z)`` — no raw data stored between passes.
     """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # Two-stage (global) state
+        self._running_grams: Optional[torch.Tensor] = None  # [H, D, D]
+        self._stage: int = 1
+        self._err_accumulator: Optional[torch.Tensor] = None  # [G, Z]
+        self._grid_scales: Optional[torch.Tensor] = None  # [G]
+        self._grid_zps: Optional[torch.Tensor] = None  # [Z]
+        # Default to max-merge strategy (consistent with MSEObserver),
+        # unless the caller explicitly passed max_merge via kwargs.
+        if "max_merge" not in kwargs:
+            self.max_merge = True
+
+    def reset(self) -> None:
+        super().reset()
+        self._running_grams = None
+        self._stage = 1
+        self._err_accumulator = None
+        self._grid_scales = None
+        self._grid_zps = None
+
+    def prepare_stage2(self) -> None:
+        """Build the fixed 2-D (scale, zp) grid from global min/max.
+
+        Called between the two calibration passes.  After this call,
+        :meth:`collect` switches to stage-2 mode (error accumulation on
+        the fixed grid using the accumulated running Gram).
+
+        When ``max_merge=True``, this observer is disabled
+        instead — it already has its stats from pass 1 and should not
+        double-collect.
+        """
+        if self.max_merge:
+            self.enabled = False
+            return
+
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        is_symmetric = self.qscheme.is_symmetric()
+
+        if is_symmetric:
+            max_abs = torch.maximum(self.max_val.abs(), self.min_val.abs()).clamp(min=1e-12)
+            base_scale = max_abs / qmax
+        else:
+            rng = (self.max_val - self.min_val).clamp(min=1e-12)
+            base_scale = rng / (qmax - qmin)
+
+        alphas = torch.linspace(
+            1.0 / self.num_grid, 1.0, self.num_grid,
+            device=self.min_val.device, dtype=torch.float32,
+        )
+
+        if self.channel_axis is None:
+            # Per-tensor: grid_scales [G]
+            self._grid_scales = alphas * base_scale  # [G]
+            C = 1
+        else:
+            # Per-channel: grid_scales [C, G]
+            self._grid_scales = (
+                alphas[None, :] * base_scale[:, None]
+            )  # [C, G]
+            C = base_scale.shape[0]
+
+        if is_symmetric:
+            self._grid_zps = torch.zeros(
+                1, dtype=torch.float32, device=self.min_val.device,
+            )
+        else:
+            self._grid_zps = torch.arange(
+                qmin, qmax + 1, dtype=torch.float32, device=self.min_val.device,
+            )
+
+        Z = len(self._grid_zps)
+        if self.channel_axis is None:
+            self._err_accumulator = torch.zeros(
+                self.num_grid, Z,
+                device=self.min_val.device, dtype=torch.float32,
+            )  # [G, Z]
+        else:
+            self._err_accumulator = torch.zeros(
+                C, self.num_grid, Z,
+                device=self.min_val.device, dtype=torch.float32,
+            )  # [C, G, Z]
+        self._stage = 2
 
     @staticmethod
     def _head_grams(q: torch.Tensor, kv_rep: int) -> torch.Tensor:
@@ -662,9 +1086,13 @@ class MSEBatchedMatMulObserver(MSEObserver):
             kv_rep: number of Q heads attending each KV head.
         Falls back to plain MSEObserver behavior when weight is absent.
         """
+        if not self.max_merge:
+            self._update_stats_global_gram(x, **kwargs)
+            return
+
         weight = kwargs.pop("weight", None)
         if weight is None:
-            return None
+            return
         kv_rep = int(kwargs.pop("kv_rep", 1))
 
         # Update min/max (same as MSEObserver)
@@ -709,4 +1137,160 @@ class MSEBatchedMatMulObserver(MSEObserver):
             else:
                 n = self._zp_count
                 self._running_zp = self._running_zp + (batch_zp.float() - self._running_zp) / n
+
+    # ------------------------------------------------------------------
+    # Global-Gram (two-stage) strategy
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _update_stats_global_gram(self, x: torch.Tensor, **kwargs) -> None:
+        """Two-stage update: stage 1 accumulates Gram + min/max; stage 2
+        accumulates per-grid errors on the fixed grid built by
+        :meth:`prepare_stage2`.
+        """
+        weight = kwargs.pop("weight", None)
+        if weight is None:
+            return
+        kv_rep = int(kwargs.pop("kv_rep", 1))
+
+        # Update min/max (same as MSEObserver) — always, both stages
+        if self.channel_axis is None:
+            curr_min, curr_max = x.min(), x.max()
+        else:
+            curr_min, curr_max = channelwise_minmax(x, self.channel_axis)
+        self.min_val = torch.minimum(self.min_val, curr_min)
+        self.max_val = torch.maximum(self.max_val, curr_max)
+
+        # Compute per-KV-head Gram for this batch
+        grams = self._head_grams(weight, kv_rep)  # [H, D, D]
+
+        if self._stage == 1:
+            # Accumulate running Gram
+            if self._running_grams is None:
+                self._running_grams = grams.clone()
+            else:
+                self._running_grams = self._running_grams + grams
+            return
+
+        # Stage 2: accumulate per-grid errors using the accumulated Gram.
+        # Vectorise over the zero-point dimension to avoid a Python loop.
+        assert self._grid_scales is not None and self._grid_zps is not None
+        assert self._err_accumulator is not None
+
+        qmin = self.dtype.qmin
+        qmax = self.dtype.qmax
+        is_symmetric = self.qscheme.is_symmetric()
+        B, H, S, D = x.shape
+
+        grams_global = self._running_grams  # [H, D, D]
+        zps = self._grid_zps  # [Z]
+        Z = zps.shape[0]
+
+        if self.channel_axis is None:
+            # --- Per-tensor: accumulator [G, Z] ---
+            scales = self._grid_scales  # [G]
+            G = scales.shape[0]
+
+            # Chunk over rows to bound peak memory of the [chunk, D, Z] intermediate.
+            mem_per_row = D * Z * 4  # float32
+            chunk = max(1, (64 << 20) // mem_per_row)
+
+            for h in range(H):
+                x_rows = x[:, h].reshape(-1, D).float()  # [N, D]
+                N = x_rows.shape[0]
+                gram_h = grams_global[h]  # [D, D]
+
+                for gi in range(G):
+                    scale = scales[gi]
+                    zps_col = zps.view(1, 1, Z)  # [1, 1, Z]
+                    err_z = torch.zeros(Z, device=x.device, dtype=torch.float32)
+
+                    for start in range(0, N, chunk):
+                        end = min(start + chunk, N)
+                        xc = x_rows[start:end]  # [chunk, D]
+                        q = torch.round(xc[:, :, None] / scale + zps_col).clamp(qmin, qmax)  # [chunk, D, Z]
+                        x_deq = (q - zps_col) * scale  # [chunk, D, Z]
+                        e = xc[:, :, None] - x_deq  # [chunk, D, Z]
+                        # Weighted error per zp: sum_n e_n^T H_h e_n
+                        err_z += torch.einsum("cdz,de,cez->z", e, gram_h, e)
+
+                    self._err_accumulator[gi, :] += err_z
+        else:
+            # --- Per-channel: accumulator [C, G, Z] ---
+            # Diagonal Gram approximation: H_h_diag[d] = H_h[d,d] makes
+            # the error separable per channel.
+            scales = self._grid_scales  # [C, G]
+            C, G = scales.shape
+            grams_diag = grams_global.diagonal(dim1=-2, dim2=-1)  # [H, D]
+
+            # Chunk over rows to bound peak memory of [chunk, C, Z] intermediate.
+            mem_per_row = C * Z * 4  # float32
+            chunk = max(1, (64 << 20) // mem_per_row)
+
+            for h in range(H):
+                x_rows = x[:, h].reshape(-1, D).float()  # [N, D] = [N, C]
+                N = x_rows.shape[0]
+                gram_h_diag = grams_diag[h]  # [D] = [C]
+
+                for gi in range(G):
+                    scale_g = scales[:, gi]  # [C]
+                    err_cz = torch.zeros(C, Z, device=x.device, dtype=torch.float32)
+
+                    for start in range(0, N, chunk):
+                        end = min(start + chunk, N)
+                        xc = x_rows[start:end]  # [chunk, C]
+                        if is_symmetric:
+                            q = torch.round(
+                                xc[:, :, None] / scale_g[None, :, None]
+                            ).clamp(-qmax, qmax)
+                            x_deq = q * scale_g[None, :, None]
+                        else:
+                            zps_col = zps.view(1, 1, Z)
+                            q = torch.round(
+                                xc[:, :, None] / scale_g[None, :, None] + zps_col
+                            ).clamp(qmin, qmax)
+                            x_deq = (q - zps_col) * scale_g[None, :, None]
+                        e = xc[:, :, None] - x_deq  # [chunk, C, Z]
+                        # Diagonal Gram: H_diag[c] * sum_n e_{n,c}^2
+                        err_cz += gram_h_diag[:, None] * (e * e).sum(dim=0)  # [C, Z]
+
+                    self._err_accumulator[:, gi, :] += err_cz
+
+    @torch.no_grad()
+    def compute_qparams(self):
+        """Pick best (scale, zp) from the error accumulator (global),
+        or fall back to the parent implementation for max_merge.
+
+        When per-channel, the accumulator is [C, G, Z] and the best
+        (scale, zp) is selected independently per channel.
+        """
+        if self.max_merge:
+            return super().compute_qparams()
+
+        assert self._err_accumulator is not None
+        Z = self._grid_zps.shape[0]
+
+        if self.channel_axis is None:
+            # Per-tensor: accumulator [G, Z]
+            best_flat = self._err_accumulator.argmin().item()
+            best_g = best_flat // Z
+            best_z = best_flat % Z
+
+            best_scale = self._grid_scales[best_g].float()
+            best_zp = self._grid_zps[best_z].to(torch.int)
+        else:
+            # Per-channel: accumulator [C, G, Z]
+            C, G, _ = self._err_accumulator.shape
+            best_flat = self._err_accumulator.reshape(C, -1).argmin(dim=1)  # [C]
+            best_g = best_flat // Z  # [C]
+            best_z = best_flat % Z   # [C]
+
+            best_scale = self._grid_scales[
+                torch.arange(C, device=best_g.device), best_g
+            ].float()
+            best_zp = self._grid_zps[best_z].to(torch.int)
+
+        self._cached_scale = best_scale
+        self._cached_zp = best_zp
+        return best_scale, best_zp
+
 
