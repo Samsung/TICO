@@ -80,7 +80,7 @@ def _normalize_filter_config(filter_cfg: Any, *, context: str) -> dict[str, Any]
     """Normalize a per-dataset ``filter`` block.
 
     Expected keys (all optional except ``n_per_class``):
-      - ``n_per_class`` (int, required for the filter to activate)
+      - ``n_per_class`` (int, >= 0; required for the filter to activate)
       - ``field`` (str, default ``"image_classes"``)
       - ``classes`` (list[str] | None)
       - ``max_classes`` (int | None)
@@ -97,6 +97,11 @@ def _normalize_filter_config(filter_cfg: Any, *, context: str) -> dict[str, Any]
     if n_per_class is not None:
         n_per_class = int(n_per_class)
     normalized["n_per_class"] = n_per_class or 0
+    if normalized["n_per_class"] < 0:
+        raise ValueError(
+            f"{context}.filter.n_per_class must be >= 0, "
+            f"got {normalized['n_per_class']}."
+        )
 
     field = filter_cfg.get("field", "image_classes")
     normalized["field"] = str(field)
@@ -118,6 +123,7 @@ def _normalize_filter_config(filter_cfg: Any, *, context: str) -> dict[str, Any]
     normalized["max_classes"] = max_classes
 
     normalized["distinct_images"] = bool(filter_cfg.get("distinct_images", True))
+    normalized["verbose"] = bool(filter_cfg.get("verbose", True))
 
     return normalized
 

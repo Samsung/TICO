@@ -63,7 +63,7 @@ class CalibFilterConfig:
     max_classes: Optional[int] = None
     distinct_images: bool = True
     filter_field: str = "image_classes"
-    verbose: bool = True
+    verbose: bool = False
 
     @property
     def is_active(self) -> bool:
@@ -1743,7 +1743,7 @@ def get_mixed_calib_inputs(
 
         # --- Per-dataset filter block (e.g. TextVQA class filtering) ---
         filter_dict: Optional[Dict[str, Any]] = config.get("filter")
-        if filter_dict and filter_dict.get("n_per_class", 0):
+        if filter_dict and filter_dict.get("n_per_class", 0) > 0:
             fc = CalibFilterConfig(
                 n_per_class=int(filter_dict["n_per_class"]),
                 classes=filter_dict.get("classes"),
@@ -1760,8 +1760,11 @@ def get_mixed_calib_inputs(
             class_inputs = get_calib_inputs(
                 dataset=dataset,
                 processor=processor,
+                n_samples=n_samples,
                 split=split,
                 max_seq_len=max_seq_len,
+                allow_benchmark_overlap=allow_benchmark_overlap,
+                allow_unregistered_dataset=allow_unregistered_dataset,
                 filter_config=fc,
             )
 
@@ -1857,7 +1860,7 @@ def get_mixed_calib_inputs(
 
 def dataset_filter(
     examples: List[Dict[str, Any]],
-    filter_config: CalibFilterConfig,
+    filter_config: Optional[CalibFilterConfig] = None,
     dataset_name: str = "",
 ) -> List[Dict[str, Any]]:
     """
@@ -1880,17 +1883,22 @@ def dataset_filter(
           the top-``filter_config.max_classes`` most frequent ones.
 
     3.  **Select samples** — iterate over *examples* in order.  A sample is
-        kept when at least one of its classes is still under the per-class
-        quota (``filter_config.n_per_class``).  The counter for every
-        under-quota class is then incremented.
+        kept only when **all** of its target classes are still under the
+        per-class quota (``filter_config.n_per_class``).  The counter for
+        every target class of the sample is then incremented, so no class
+        appears in more than ``n_per_class`` selected samples (even for
+        multi-label examples) and the reported per-class counts match the
+        actual selected-set distribution.
 
     4.  **Image deduplication** — when ``filter_config.distinct_images`` is
         ``True`` (the default), each unique ``image_id`` appears at most once
         in the output, ensuring maximum image diversity.
 
-    If no classes are found in any example, a :class:`ValueError` is raised so
-    that configuration errors (e.g. a misspelled field name) are detected early
-    instead of silently returning the entire dataset.
+    If the configured ``filter_field`` is absent from every sample (e.g. a
+    misspelled field name), a :class:`ValueError` is raised so that
+    configuration errors are detected early instead of silently returning the
+    entire dataset.  When the field is present but no sample carries any class
+    value, there is nothing to filter by and *examples* is returned unchanged.
 
     Args:
         examples: List of raw dataset examples.  Each example is expected to
@@ -1912,6 +1920,23 @@ def dataset_filter(
             entire dataset, which can be very expensive in time and memory.
     """
 
+    if filter_config is None or not filter_config.is_active:
+        return examples
+
+    # A misspelled ``filter_field`` (e.g. ``image_class`` instead of the
+    # default ``image_classes``) must not silently fall back to returning the
+    # entire dataset: the filtered path loads with ``n=-1`` and ignores
+    # ``n_samples``, so a typo would unexpectedly turn a small calibration run
+    # into full-dataset preprocessing.  Detect it by requiring the configured
+    # field to be present in at least one sample.
+    if examples and not any(filter_config.filter_field in ex for ex in examples):
+        raise ValueError(
+            f"Filter field '{filter_config.filter_field}' was not found in any "
+            f"sample of dataset '{dataset_name}'. This usually means the field "
+            f"name is misspelled or the dataset does not contain it. "
+            f"Please check the 'filter.field' configuration."
+        )
+
     # --- Phase 1: discover classes and their frequencies ---
     class_freq: Dict[str, int] = {}
     for ex in examples:
@@ -1923,12 +1948,15 @@ def dataset_filter(
             class_freq[cls_str] = class_freq.get(cls_str, 0) + 1
 
     if not class_freq:
-        raise ValueError(
-            f"Filter field '{filter_config.filter_field}' was not found in any "
-            f"sample of dataset '{dataset_name}'. This usually means the field "
-            f"name is misspelled or the dataset does not contain it. "
-            f"Please check the 'filter.field' configuration."
-        )
+        # The field exists but no sample carries any class value (or the input
+        # is empty): there is nothing to filter by, so keep the data as-is.
+        if filter_config.verbose:
+            print(
+                f"[warn] Filter field '{filter_config.filter_field}' contains no "
+                f"class values in dataset '{dataset_name}'; returning "
+                f"{len(examples)} samples unchanged."
+            )
+        return examples
 
     # Determine target classes
     if filter_config.classes is not None:
@@ -1970,13 +1998,19 @@ def dataset_filter(
         if not filter_classes:
             continue
 
-        # Check if any of this sample's classes is still under quota
-        under_quota = [
-            str(c)
-            for c in filter_classes
-            if str(c) in target_set and class_counts[str(c)] < filter_config.n_per_class
-        ]
-        if not under_quota:
+        # Deduplicated target classes carried by this sample (order preserved).
+        sample_classes = list(
+            dict.fromkeys(str(c) for c in filter_classes if str(c) in target_set)
+        )
+        if not sample_classes:
+            continue
+
+        # Strict per-class cap: a multi-label sample is selected only when ALL
+        # of its target classes are still under quota.  This keeps class_counts 
+        # equal to the actual selected-set distribution.
+        if any(
+            class_counts[cls] >= filter_config.n_per_class for cls in sample_classes
+        ):
             continue
 
         # When distinct_images is enabled, skip samples whose image has
@@ -1991,7 +2025,7 @@ def dataset_filter(
                 seen_image_ids.add(image_id)
 
         selected.append(ex)
-        for cls in under_quota:
+        for cls in sample_classes:
             class_counts[cls] += 1
 
         # Print selected sample info: question_id and truncated question
@@ -2000,18 +2034,17 @@ def dataset_filter(
             question = ex.get("question", "")
             question_preview = question[:80] + ("..." if len(question) > 80 else "")
             print(
-                f"  [selected] question_id={qid}  classes={under_quota}  "
+                f"  [selected] question_id={qid}  classes={sample_classes}  "
                 f"Q: {question_preview}"
             )
 
     # Print summary
     total_selected = len(selected)
-    if filter_config.verbose:
-        print(f"[info] Selected {total_selected} unique samples")
-        if filter_config.distinct_images:
-            print(f"[info] Skipped {skipped_dup_images} samples with duplicate images")
-        print(f"[info] Per-class counts (first 20):")
-        for cls in target_classes[:20]:
-            print(f"  {cls}: {class_counts[cls]}")
+    print(f"[info] Selected {total_selected} unique samples")
+    if filter_config.distinct_images:
+        print(f"[info] Skipped {skipped_dup_images} samples with duplicate images")
+    print(f"[info] Per-class counts (first 20):")
+    for cls in target_classes[:20]:
+        print(f"  {cls}: {class_counts[cls]}")
 
     return selected
