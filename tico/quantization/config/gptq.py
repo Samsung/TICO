@@ -120,7 +120,7 @@ class UniversalGPTQConfig(GPTQConfig):
 
     debug_mode: bool = False
     ignore_multi_call_modules: bool = True
-    cache_outputs: bool = True
+    cacheable_modules: list[str] = field(default_factory=list)
 
     @property
     def name(self) -> str:
@@ -138,9 +138,9 @@ class UniversalGPTQConfig(GPTQConfig):
                 f"ignore_multi_call_modules must be bool. got {type(self.ignore_multi_call_modules)}"
             )
 
-        if not isinstance(self.cache_outputs, bool):
+        if not isinstance(self.cacheable_modules, list):
             raise TypeError(
-                f"cache_outputs must be bool. got {type(self.cache_outputs)}"
+                f"cacheable_modules must be list. got {type(self.cacheable_modules)}"
             )
 
         # use_orig_model_inference is incompatible with frontier-based execution
