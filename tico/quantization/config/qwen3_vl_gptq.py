@@ -123,7 +123,7 @@ class Qwen3VLGPTQConfig(GPTQConfig):
 
     # Use running average for Hessian accumulation.
     # When False, uses summation.
-    normalize_H: bool = False
+    normalize_H: bool = True
 
     def __post_init__(self) -> None:
         """Convert string dtype options (from YAML) to torch.dtype."""
