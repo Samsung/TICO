@@ -41,6 +41,9 @@ pipeline:
     use_orig_model_inference: false
     verbose: true
     show_progress: true
+    debug_mode: false
+    ignore_multi_call_modules: false
+    cache_outputs: true
 
   - name: ptq
     enabled: true
