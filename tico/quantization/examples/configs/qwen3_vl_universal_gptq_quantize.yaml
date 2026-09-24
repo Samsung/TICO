@@ -38,7 +38,7 @@ pipeline:
     show_progress: true
     debug_mode: false
     ignore_multi_call_modules: false
-    cache_outputs: true
+    cacheable_modules: ["model.visual.blocks.[0-9]+", "model.language_model.layers.[0-9]+"]
 
   - name: ptq
     enabled: true

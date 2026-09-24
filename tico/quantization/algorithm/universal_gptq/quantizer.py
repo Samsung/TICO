@@ -32,6 +32,7 @@ Example:
 
 import re
 import types
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -45,7 +46,7 @@ from tico.quantization.config.gptq import UniversalGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
 from tico.quantization.wrapq.utils.introspection import outputs_close
-from tico.utils.utils import move_to_device
+from tico.utils.utils import move_to_device, Stack
 from tqdm.auto import tqdm
 
 
@@ -321,6 +322,7 @@ class GPTQ_Data:
         old_forward: The original forward method before wrapping.
         gptq: GPTQ instance for Hessian accumulation (None after quantization).
         quantizer: Quantizer with computed scale/zero-point (None before quantization).
+        is_cacheable: Whether the module's outputs are cached during model replay.
         cached_output: Cached outputs for replay (freed after use). cached_output[batch_idx][invocation_idx].
         state: Current state in the quantization lifecycle.
         invocation_idx: Current invocation index during 1 batch replay.
@@ -334,6 +336,7 @@ class GPTQ_Data:
     old_forward: Callable
     gptq: GPTQ | None
     quantizer: Quantizer | None
+    is_cacheable: bool
     cached_output: list[list[Any]]
     state: GPTQ_STATE
     invocation_idx: int
@@ -408,10 +411,9 @@ def delete_gptq_data(module: nn.Module) -> None:
 def wrap_model(
     model: nn.Module,
     full_model_name: str,
-    ignored_module_patterns: Iterable[re.Pattern] = [],
-    ignored_modules: Iterable[nn.Module] = [],
-    cache_outputs: bool = True,
-    debug_mode: bool = False,
+    ignored_module_patterns: Iterable[re.Pattern],
+    ignored_modules: Iterable[nn.Module],
+    debug_mode: bool,
 ) -> None:
     """
     Recursively wrap a model's forward methods for GPTQ quantization.
@@ -457,10 +459,13 @@ def wrap_model(
                 raise StopForward(module)
 
             case GPTQ_STATE.CACHE:
+                assert gptq_data.is_cacheable
+
                 n_cached_batches: int = len(gptq_data.cached_output)
                 if gptq_data.batch_idx >= n_cached_batches:
                     assert gptq_data.batch_idx == n_cached_batches
                     assert gptq_data.invocation_idx == 0
+                    # Allocate new list for this batche's invocations
                     gptq_data.cached_output.append([])
 
                 cached_batch_out: list[Any] = gptq_data.cached_output[
@@ -505,7 +510,9 @@ def wrap_model(
         or model in ignored_modules
     )
 
-    final_state: GPTQ_STATE = GPTQ_STATE.CACHE if cache_outputs else GPTQ_STATE.COMPUTE
+    is_cacheable: bool = getattr(model, "is_cacheable")
+    assert is_cacheable is not None
+    delattr(model, "is_cacheable")
 
     total_invocations: int = getattr(model, "total_invocations")
     assert total_invocations is not None
@@ -519,8 +526,11 @@ def wrap_model(
             old_forward=model.forward,
             gptq=None,
             quantizer=None,
+            is_cacheable=is_cacheable,
             cached_output=[],
-            state=final_state if not_quantizable else GPTQ_STATE.COLLECT,
+            state=(GPTQ_STATE.CACHE if is_cacheable else GPTQ_STATE.COMPUTE)
+            if not_quantizable
+            else GPTQ_STATE.COLLECT,
             invocation_idx=0,
             batch_idx=0,
             total_invocations=total_invocations,
@@ -542,7 +552,6 @@ def wrap_model(
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
             ignored_modules=ignored_modules,
-            cache_outputs=cache_outputs,
             debug_mode=debug_mode,
         )
 
@@ -628,7 +637,7 @@ def run_model(
     frontier_submodules: set[nn.Module] = set()
     for args, kwargs in tqdm(
         zip(args_dataset, kwargs_dataset, strict=True),
-        desc=f"(Re)playing model",
+        desc="(Re)playing model",
         leave=False,
         unit="batch",
         total=len(args_dataset),
@@ -647,13 +656,26 @@ def run_model(
             # reset invocation counter
             for m in model.modules():
                 gptq_data: GPTQ_Data = get_gptq_data(m)
+
+                assert (
+                    not gptq_data.is_cacheable or
+                    len(gptq_data.cached_output) == 0 or
+                    gptq_data.invocation_idx == len(gptq_data.cached_output[gptq_data.batch_idx])
+                ), "Not all cached invocations were acquired for this batch"
+
                 if gptq_data.invocation_idx > 0:
                     gptq_data.batch_idx += 1
                     gptq_data.invocation_idx = 0
 
     # reset batch counter
     for m in model.modules():
-        get_gptq_data(m).batch_idx = 0
+        gptq_data: GPTQ_Data = get_gptq_data(m)
+        assert (
+            not gptq_data.is_cacheable or
+            gptq_data.batch_idx == len(gptq_data.cached_output) or
+            (gptq_data.batch_idx == 0 and len(gptq_data.cached_output) == 1 and len(gptq_data.cached_output[0]) == 0)
+        ), "Not all cached batches were acquired"
+        gptq_data.batch_idx = 0
 
     return frontier_submodules
 
@@ -779,9 +801,7 @@ def finish_collection(
         static_groups=gptq_config.static_groups,
         verbose=gptq_config.verbose,
     )
-    gptq_data.state = (
-        GPTQ_STATE.CACHE if gptq_config.cache_outputs else GPTQ_STATE.COMPUTE
-    )
+    gptq_data.state = GPTQ_STATE.CACHE if gptq_data.is_cacheable else GPTQ_STATE.COMPUTE
     gptq_data.quantizer = gptq_data.gptq.quantizer
     gptq_data.gptq = None
     assert gptq_data.invocation_idx == 0
@@ -898,7 +918,9 @@ def find_multicall_modules(
         old_forward = getattr(module, "old_forward")
         assert old_forward is not None
 
-        per_batch_invocation_count: int = getattr(module, "per_batch_invocation_count", 0)
+        per_batch_invocation_count: int = getattr(
+            module, "per_batch_invocation_count", 0
+        )
         per_batch_invocation_count += 1
         setattr(module, "per_batch_invocation_count", per_batch_invocation_count)
 
@@ -930,7 +952,7 @@ def find_multicall_modules(
     try:
         for args, kwargs in tqdm(
             zip(args_dataset, kwargs_dataset, strict=True),
-            desc=f"Detecting multi-call modules",
+            desc="Detecting multi-call modules",
             leave=False,
             unit="batch",
             total=len(args_dataset),
@@ -952,11 +974,107 @@ def find_multicall_modules(
             delattr(m, "full_module_name")
 
     if verbose:
-        print(
-            f"[MULTI-CALL MODULE] {len(multicall_modules)} multi-call modules found"
-        )
+        print(f"[MULTI-CALL MODULE] {len(multicall_modules)} multi-call modules found")
 
     return multicall_modules
+
+
+def find_caller_and_callee_modules(
+    model: nn.Module,
+    caller_criterion: Callable[[nn.Module], bool],
+    callee_criterion: Callable[[nn.Module], bool],
+    relate_criterion: Callable[[nn.Module, nn.Module], bool],
+    args_dataset: list[tuple[Any]],
+    kwargs_dataset: list[dict[str, Any]],
+    show_progress: bool,
+    verbose: bool,
+    description: str,
+) -> dict[nn.Module, set[nn.Module]]:
+    """
+    Runs specified model on a specified dataset to find the pairs of modules that satisfy the following criteria:
+    1. Caller module satisfies condition defined by 'caller_criterion(caller)' function.
+    2. Callee module satisfies condition defined by 'callee_criterion(callee)' function.
+    3. Caller module's forward method calls (directly or indirectly) callee's forward method.
+    4. Caller and callee are related to each other according to `relate_criterion(caller, callee)` function (e.g. callee is a direct child of caller).
+    The same caller module may call any number of different callee modules.
+
+    Parameters:
+        model: The PyTorch model to be analyzed.
+        caller_criterion: Function returning True iff specified module is a caller.
+        callee_criterion: Function returning True iff specified module is a callee.
+        args_dataset: List of positional arguments.
+        kwargs_dataset: List of keyword arguments.
+        show_progress: Whether to display a progress bar during analysis.
+        verbose: Whether to print out found modules' names.
+
+    Returns:
+        dict[nn.Module, set[nn.Module]]: Dictionary with caller modules as keys and callee modules as values.
+    """
+    assert len(args_dataset) > 0, "Empty calibration dataset"
+    assert len(args_dataset) == len(kwargs_dataset), "Dataset length mismatch"
+
+    result: dict[nn.Module, set[nn.Module]] = defaultdict(set)
+    call_stack: Stack[nn.Module] = Stack()
+
+    def new_forward(module: nn.Module, *args, **kwargs) -> Any:
+        old_forward = getattr(module, "old_forward")
+        assert old_forward is not None
+
+        if callee_criterion(module):
+            for caller in call_stack:
+                if relate_criterion(caller, module):
+                    result[caller].add(module)
+
+        if caller_criterion(module):
+            call_stack.push(module)
+            try:
+                return old_forward(*args, **kwargs)
+            finally:
+                call_stack.pop()
+        else:
+            return old_forward(*args, **kwargs)
+
+    for name, m in model.named_modules():
+        assert not hasattr(m, "old_forward")
+        assert not hasattr(m, "full_module_name")
+        setattr(m, "old_forward", m.forward)
+        setattr(m, "full_module_name", name)
+        m.forward = types.MethodType(new_forward, m)
+
+    model_device = infer_module_device(model)
+
+    try:
+        for args, kwargs in tqdm(
+            zip(args_dataset, kwargs_dataset, strict=True),
+            desc=description,
+            leave=False,
+            unit="batch",
+            total=len(args_dataset),
+            disable=not show_progress,
+        ):
+            args = move_to_device(args, model_device)
+            kwargs = move_to_device(kwargs, model_device)
+            assert type(kwargs) is dict
+            model(*args, **kwargs)
+
+        if verbose:
+            caller: nn.Module
+            callees: set[nn.Module]
+            for caller, callees in result.items():
+                caller_name: str = getattr(caller, "full_module_name")
+                callee_names: Iterable[str] = (
+                    getattr(c, "full_module_name") for c in callees
+                )
+                print(f"[INFO] {caller_name} CALLS {', '.join(callee_names)}")
+    finally:
+        for m in model.modules():
+            old_forward = getattr(m, "old_forward")
+            assert old_forward is not None
+            m.forward = old_forward
+            delattr(m, "old_forward")
+            delattr(m, "full_module_name")
+
+    return result
 
 
 def gptq_quantize(
@@ -995,6 +1113,38 @@ def gptq_quantize(
     assert len(args_dataset) == len(kwargs_dataset), "Dataset length mismatch"
 
     if not has_gptq_data(model):
+        cacheable_module_patterns: list[re.Pattern] = [
+            re.compile(pattern) for pattern in gptq_config.cacheable_modules
+        ]
+
+        # For each module determine if it is cacheable
+        for full_module_name, m in model.named_modules():
+            is_cacheable: bool = (
+                bool(full_module_name) and
+                any(
+                    regex.match(full_module_name) is not None
+                    for regex in cacheable_module_patterns
+                )
+            )
+            assert not hasattr(m, "is_cacheable")
+            setattr(m, "is_cacheable", is_cacheable)
+
+        # Detect cacheable modules that call other cacheable modules
+        cacheable_modules_callers_to_callees: dict[
+            nn.Module, set[nn.Module]
+        ] = find_caller_and_callee_modules(
+            model=model,
+            caller_criterion=lambda m: getattr(m, "is_cacheable", False),
+            callee_criterion=lambda m: getattr(m, "is_cacheable", False),
+            relate_criterion=lambda caller, callee: callee not in caller.children(),
+            args_dataset=args_dataset,
+            kwargs_dataset=kwargs_dataset,
+            show_progress=gptq_config.show_progress,
+            verbose=gptq_config.verbose,
+            description="Detecting cacheable modules calling other cacheable modules",
+        )
+
+        # Detect modules that are called multiple times in a single input batch
         multicall_modules: set[nn.Module] = (
             find_multicall_modules(
                 model,
@@ -1014,8 +1164,12 @@ def gptq_quantize(
                 [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
             ),
             ignored_modules=multicall_modules,
-            cache_outputs=gptq_config.cache_outputs,
             debug_mode=gptq_config.debug_mode,
+        )
+
+    if cacheable_modules_callers_to_callees:
+        raise RuntimeError(
+            f"Cacheable modules calling other cacheable modules detected: {cacheable_modules_callers_to_callees}"
         )
 
     try:
