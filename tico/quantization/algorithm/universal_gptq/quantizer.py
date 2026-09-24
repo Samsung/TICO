@@ -45,7 +45,6 @@ from tico.quantization.algorithm.gptq.quant import Quantizer
 from tico.quantization.config.gptq import UniversalGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
-from tico.quantization.wrapq.utils.introspection import outputs_close
 from tico.utils.utils import move_to_device, Stack
 from tqdm.auto import tqdm
 
@@ -413,7 +412,6 @@ def wrap_model(
     full_model_name: str,
     ignored_module_patterns: Iterable[re.Pattern],
     ignored_modules: Iterable[nn.Module],
-    debug_mode: bool,
 ) -> None:
     """
     Recursively wrap a model's forward methods for GPTQ quantization.
@@ -436,7 +434,6 @@ def wrap_model(
         ignored_module_patterns: Collection of regular expressions to be matched against submodules' full names. If matched a submodule is not quantized.
         ignored_modules: Modules to exclude from GPTQ quantization.
         cache_outputs: Whether to enable modules' outputs caching for performance optimization.
-        debug_mode: Whether to check if the cached output is equal to computed output.
     """
 
     def old_forward(gptq_data: GPTQ_Data, *args, **kwargs) -> Any:
@@ -478,11 +475,6 @@ def wrap_model(
                     # Move cached output from CPU to model's device
                     if gptq_data.out_device:
                         result = move_to_device(result, gptq_data.out_device)
-                    if debug_mode:
-                        reference_result: Any = old_forward(gptq_data, *args, **kwargs)
-                        assert outputs_close(
-                            result, reference_result
-                        ), f"[{gptq_data.full_module_name} Cached output at batch={gptq_data.batch_idx} invocation={gptq_data.invocation_idx}] diverges from computed output"
                     gptq_data.invocation_idx += 1
                     return result
                 else:
@@ -552,7 +544,6 @@ def wrap_model(
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
             ignored_modules=ignored_modules,
-            debug_mode=debug_mode,
         )
 
 
@@ -1164,7 +1155,6 @@ def gptq_quantize(
                 [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
             ),
             ignored_modules=multicall_modules,
-            debug_mode=gptq_config.debug_mode,
         )
 
     if cacheable_modules_callers_to_callees:
