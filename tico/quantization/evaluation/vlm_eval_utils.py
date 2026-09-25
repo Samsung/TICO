@@ -40,7 +40,7 @@ class CalibFilterConfig:
     When ``n_per_class > 0``, the dataset is loaded in non-streaming mode and
     filtered to select up to ``n_per_class`` samples per class (as determined
     by ``filter_field``, default ``image_classes``), instead of taking the
-    first ``n_samples``.
+    first ``n_samples``.  Only selected rows are materialized (decoded).
 
     Attributes:
         n_per_class: Maximum number of samples to keep per class.  When ``0``
@@ -1505,7 +1505,8 @@ def get_calib_inputs(
     the dataset is loaded in non-streaming mode and filtered to select up to
     ``filter_config.n_per_class`` samples per class (as determined by
     ``filter_config.filter_field``, default ``image_classes``), instead of
-    taking the first ``n_samples``.
+    taking the first ``n_samples``.  Only the lightweight label/id columns are
+    scanned for selection; images are decoded only for the selected rows.
 
     Args:
         dataset: Dataset key defined in ``DATASETS``.
@@ -1536,13 +1537,27 @@ def get_calib_inputs(
             allow_benchmark_overlap=allow_benchmark_overlap,
             allow_unregistered_dataset=allow_unregistered_dataset,
         )
-        examples = list(ds)
-
-        selected = dataset_filter(
-            examples=examples,
+        # Select rows using only the lightweight label/id columns — the full
+        # dataset (in particular decoded images) is never materialized; only
+        # the selected rows are decoded below.
+        if filter_config.filter_field not in ds.column_names:
+            raise ValueError(
+                f"Filter field '{filter_config.filter_field}' was not found in any "
+                f"sample of dataset '{dataset}'. This usually means the field "
+                f"name is misspelled or the dataset does not contain it. "
+                f"Please check the 'filter.field' configuration."
+            )
+        selected_indices = dataset_filter_indices(
+            class_values=ds[filter_config.filter_field],
+            image_ids=ds["image_id"] if "image_id" in ds.column_names else None,
             filter_config=filter_config,
             dataset_name=dataset,
+            question_ids=(
+                ds["question_id"] if "question_id" in ds.column_names else None
+            ),
+            questions=ds["question"] if "question" in ds.column_names else None,
         )
+        selected = ds.select(selected_indices)
 
         calib_inputs = []
         for ex in selected:
@@ -1858,6 +1873,150 @@ def get_mixed_calib_inputs(
 # ============================================================
 
 
+def dataset_filter_indices(
+    class_values: List[Any],
+    image_ids: Optional[List[Any]] = None,
+    filter_config: Optional[CalibFilterConfig] = None,
+    dataset_name: str = "",
+    question_ids: Optional[List[Any]] = None,
+    questions: Optional[List[str]] = None,
+) -> List[int]:
+    """
+    Index-based core of :func:`dataset_filter`.
+
+    Applies the same per-class quota selection (see :func:`dataset_filter`
+    for the full algorithm description) but operates on lightweight per-row
+    columns instead of example dicts and returns the selected row indices.
+    This lets callers keep the dataset lazy (e.g. a HuggingFace ``Dataset``)
+    and materialize only the selected rows via ``ds.select(indices)``.
+
+    Args:
+        class_values: Per-row values of ``filter_config.filter_field`` (a
+            list of class names, possibly empty).
+        image_ids: Optional per-row ``image_id`` values used for
+            deduplication when ``filter_config.distinct_images`` is True.
+            Pass None when the dataset has no ``image_id`` column.
+        filter_config: Filtering configuration.  When None or inactive
+            (``n_per_class <= 0``), all indices are returned.
+        dataset_name: Dataset name for log/error messages.
+        question_ids: Optional per-row question ids (verbose logging only).
+        questions: Optional per-row question texts (verbose logging only).
+
+    Returns:
+        Selected row indices, in dataset order.
+    """
+    n_rows = len(class_values)
+    if filter_config is None or not filter_config.is_active:
+        return list(range(n_rows))
+
+    # --- Phase 1: discover classes and their frequencies ---
+    class_freq: Dict[str, int] = {}
+    for filter_classes in class_values:
+        if not filter_classes:
+            continue
+        for cls in filter_classes:
+            cls_str = str(cls)
+            class_freq[cls_str] = class_freq.get(cls_str, 0) + 1
+
+    if not class_freq:
+        # The field exists but no sample carries any class value (or the input
+        # is empty): there is nothing to filter by, so keep the data as-is.
+        if filter_config.verbose:
+            print(
+                f"[warn] Filter field '{filter_config.filter_field}' contains no "
+                f"class values in dataset '{dataset_name}'; returning "
+                f"{n_rows} samples unchanged."
+            )
+        return list(range(n_rows))
+
+    # Determine target classes
+    if filter_config.classes is not None:
+        target_classes = [str(c) for c in filter_config.classes]
+        # Warn about requested classes not present in data
+        missing = [c for c in target_classes if c not in class_freq]
+        if missing and filter_config.verbose:
+            print(f"[warn] Requested classes not found in data: {missing}")
+    else:
+        # Sort by frequency (descending) and optionally cap
+        sorted_classes = sorted(class_freq.keys(), key=lambda c: -class_freq[c])
+        if filter_config.max_classes is not None and filter_config.max_classes > 0:
+            target_classes = sorted_classes[: filter_config.max_classes]
+        else:
+            target_classes = sorted_classes
+
+    if filter_config.verbose:
+        print(
+            f"[info] {len(class_freq)} unique filter classes discovered, "
+            f"using {len(target_classes)} classes"
+        )
+        print(
+            f"[info] Selecting up to {filter_config.n_per_class} samples per class "
+            f"→ up to {len(target_classes) * filter_config.n_per_class} total samples"
+        )
+
+    # --- Phase 2: select samples ---
+    class_counts: Dict[str, int] = {c: 0 for c in target_classes}
+    target_set = set(target_classes)
+    selected_indices: List[int] = []
+    seen_image_ids: set = set()
+    skipped_dup_images = 0
+
+    for idx, filter_classes in enumerate(class_values):
+        if not filter_classes:
+            continue
+
+        # Deduplicated target classes carried by this sample (order preserved).
+        sample_classes = list(
+            dict.fromkeys(str(c) for c in filter_classes if str(c) in target_set)
+        )
+        if not sample_classes:
+            continue
+
+        # Strict per-class cap: a multi-label sample is selected only when ALL
+        # of its target classes are still under quota.  This keeps class_counts
+        # equal to the actual selected-set distribution.
+        if any(
+            class_counts[cls] >= filter_config.n_per_class for cls in sample_classes
+        ):
+            continue
+
+        # When distinct_images is enabled, skip samples whose image has
+        # already been selected. Deduplicating by image_id ensures each calibration
+        # sample comes from a distinct image.
+        if filter_config.distinct_images and image_ids is not None:
+            image_id = image_ids[idx]
+            if image_id is not None:
+                if image_id in seen_image_ids:
+                    skipped_dup_images += 1
+                    continue
+                seen_image_ids.add(image_id)
+
+        selected_indices.append(idx)
+        for cls in sample_classes:
+            class_counts[cls] += 1
+
+        # Print selected sample info: question_id and truncated question
+        if filter_config.verbose:
+            qid = question_ids[idx] if question_ids is not None else "?"
+            question = questions[idx] if questions is not None else ""
+            question = question if isinstance(question, str) else str(question)
+            question_preview = question[:80] + ("..." if len(question) > 80 else "")
+            print(
+                f"  [selected] question_id={qid}  classes={sample_classes}  "
+                f"Q: {question_preview}"
+            )
+
+    # Print summary
+    print(f"[info] Selected {len(selected_indices)} unique samples")
+    if filter_config.distinct_images:
+        print(f"[info] Skipped {skipped_dup_images} samples with duplicate images")
+    print(f"[info] Per-class counts (first 20):")
+    for cls in target_classes[:20]:
+        print(f"  {cls}: {class_counts[cls]}")
+
+    return selected_indices
+
+
 def dataset_filter(
     examples: List[Dict[str, Any]],
     filter_config: Optional[CalibFilterConfig] = None,
@@ -1937,114 +2096,12 @@ def dataset_filter(
             f"Please check the 'filter.field' configuration."
         )
 
-    # --- Phase 1: discover classes and their frequencies ---
-    class_freq: Dict[str, int] = {}
-    for ex in examples:
-        filter_classes = ex.get(filter_config.filter_field, [])
-        if not filter_classes:
-            continue
-        for cls in filter_classes:
-            cls_str = str(cls)
-            class_freq[cls_str] = class_freq.get(cls_str, 0) + 1
-
-    if not class_freq:
-        # The field exists but no sample carries any class value (or the input
-        # is empty): there is nothing to filter by, so keep the data as-is.
-        if filter_config.verbose:
-            print(
-                f"[warn] Filter field '{filter_config.filter_field}' contains no "
-                f"class values in dataset '{dataset_name}'; returning "
-                f"{len(examples)} samples unchanged."
-            )
-        return examples
-
-    # Determine target classes
-    if filter_config.classes is not None:
-        target_classes = [str(c) for c in filter_config.classes]
-        # Warn about requested classes not present in data
-        missing = [c for c in target_classes if c not in class_freq]
-        if missing and filter_config.verbose:
-            print(f"[warn] Requested classes not found in data: {missing}")
-    else:
-        # Sort by frequency (descending) and optionally cap
-        sorted_classes = sorted(class_freq.keys(), key=lambda c: -class_freq[c])
-        if filter_config.max_classes is not None and filter_config.max_classes > 0:
-            target_classes = sorted_classes[: filter_config.max_classes]
-        else:
-            target_classes = sorted_classes
-
-    if filter_config.verbose:
-        print(
-            f"[info] {len(class_freq)} unique filter classes discovered, "
-            f"using {len(target_classes)} classes"
-        )
-        print(
-            f"[info] Selecting up to {filter_config.n_per_class} samples per class "
-            f"→ up to {len(target_classes) * filter_config.n_per_class} total samples"
-        )
-
-    # --- Phase 2: select samples ---
-    # Each example in the list is a distinct dict from the HuggingFace dataset,
-    # so there is no need for explicit deduplication — a single pass over the
-    # list naturally visits each example at most once.
-    class_counts: Dict[str, int] = {c: 0 for c in target_classes}
-    target_set = set(target_classes)
-    selected: List[Dict[str, Any]] = []
-    seen_image_ids: set = set()
-    skipped_dup_images = 0
-
-    for ex in examples:
-        filter_classes = ex.get(filter_config.filter_field, [])
-        if not filter_classes:
-            continue
-
-        # Deduplicated target classes carried by this sample (order preserved).
-        sample_classes = list(
-            dict.fromkeys(str(c) for c in filter_classes if str(c) in target_set)
-        )
-        if not sample_classes:
-            continue
-
-        # Strict per-class cap: a multi-label sample is selected only when ALL
-        # of its target classes are still under quota.  This keeps class_counts 
-        # equal to the actual selected-set distribution.
-        if any(
-            class_counts[cls] >= filter_config.n_per_class for cls in sample_classes
-        ):
-            continue
-
-        # When distinct_images is enabled, skip samples whose image has
-        # already been selected. Deduplicating by image_id ensures each calibration
-        # sample comes from a distinct image.
-        if filter_config.distinct_images:
-            image_id = ex.get("image_id")
-            if image_id is not None:
-                if image_id in seen_image_ids:
-                    skipped_dup_images += 1
-                    continue
-                seen_image_ids.add(image_id)
-
-        selected.append(ex)
-        for cls in sample_classes:
-            class_counts[cls] += 1
-
-        # Print selected sample info: question_id and truncated question
-        if filter_config.verbose:
-            qid = ex.get("question_id", "?")
-            question = ex.get("question", "")
-            question_preview = question[:80] + ("..." if len(question) > 80 else "")
-            print(
-                f"  [selected] question_id={qid}  classes={sample_classes}  "
-                f"Q: {question_preview}"
-            )
-
-    # Print summary
-    total_selected = len(selected)
-    print(f"[info] Selected {total_selected} unique samples")
-    if filter_config.distinct_images:
-        print(f"[info] Skipped {skipped_dup_images} samples with duplicate images")
-    print(f"[info] Per-class counts (first 20):")
-    for cls in target_classes[:20]:
-        print(f"  {cls}: {class_counts[cls]}")
-
-    return selected
+    indices = dataset_filter_indices(
+        class_values=[ex.get(filter_config.filter_field, []) for ex in examples],
+        image_ids=[ex.get("image_id") for ex in examples],
+        filter_config=filter_config,
+        dataset_name=dataset_name,
+        question_ids=[ex.get("question_id", "?") for ex in examples],
+        questions=[ex.get("question", "") for ex in examples],
+    )
+    return [examples[i] for i in indices]

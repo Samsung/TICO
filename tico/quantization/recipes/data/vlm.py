@@ -250,7 +250,7 @@ def build_vlm_calibration_inputs(
     ``n_per_class > 0``, that dataset is loaded in non-streaming mode and
     filtered to select up to ``n_per_class`` samples per class (as determined
     by ``filter.field``, default ``image_classes``), instead of taking the
-    first ``n_samples``.
+    first ``n_samples``.  Only selected rows are materialized (decoded).
 
     Example YAML::
 

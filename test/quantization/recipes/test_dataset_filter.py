@@ -16,12 +16,14 @@
 
 from typing import Any, Dict
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 import tico.quantization.recipes.data.vlm as vlm_data
 from tico.quantization.evaluation.vlm_eval_utils import (
     CalibFilterConfig,
     dataset_filter,
+    dataset_filter_indices,
     get_mixed_calib_inputs,
 )
 
@@ -488,3 +490,133 @@ class TestMixedModeClassFiltering:
 
             # get_calib_inputs (class filtering path) should NOT have been called
             mock_calib.assert_not_called()
+
+
+class TestDatasetFilterIndices:
+    """dataset_filter_indices must match dataset_filter's selection exactly."""
+
+    def _examples(self):
+        return [
+            {"image_classes": ["cat"], "image_id": 1, "question_id": 11, "question": "q1"},
+            {"image_classes": ["dog"], "image_id": 2, "question_id": 12, "question": "q2"},
+            {"image_classes": ["cat"], "image_id": 3, "question_id": 13, "question": "q3"},
+            {"image_classes": ["cat", "dog"], "image_id": 1, "question_id": 14, "question": "q4"},
+            {"image_classes": [], "image_id": 4, "question_id": 15, "question": "q5"},
+            {"image_classes": ["dog"], "image_id": 5, "question_id": 16, "question": "q6"},
+        ]
+
+    def _assert_parity(self, filter_config):
+        examples = self._examples()
+        selected = dataset_filter(examples, filter_config, dataset_name="toy")
+        indices = dataset_filter_indices(
+            class_values=[ex["image_classes"] for ex in examples],
+            image_ids=[ex["image_id"] for ex in examples],
+            filter_config=filter_config,
+            dataset_name="toy",
+            question_ids=[ex["question_id"] for ex in examples],
+            questions=[ex["question"] for ex in examples],
+        )
+        assert indices == [examples.index(ex) for ex in selected]
+        return indices
+
+    def test_parity_quota_one(self):
+        indices = self._assert_parity(CalibFilterConfig(n_per_class=1, verbose=False))
+        # first cat + first dog; later rows capped / duplicate image / empty
+        assert indices == [0, 1]
+
+    def test_parity_quota_two(self):
+        self._assert_parity(CalibFilterConfig(n_per_class=2, verbose=False))
+
+    def test_parity_distinct_images_off(self):
+        self._assert_parity(
+            CalibFilterConfig(n_per_class=2, distinct_images=False, verbose=False)
+        )
+
+    def test_parity_classes_allowlist(self):
+        indices = self._assert_parity(
+            CalibFilterConfig(n_per_class=2, classes=["dog"], verbose=False)
+        )
+        assert indices == [1, 3]
+
+    def test_parity_max_classes(self):
+        self._assert_parity(
+            CalibFilterConfig(n_per_class=1, max_classes=1, verbose=False)
+        )
+
+    def test_inactive_returns_all_indices(self):
+        indices = dataset_filter_indices([["cat"], ["dog"]], filter_config=None)
+        assert indices == [0, 1]
+
+    def test_empty_field_returns_all_indices(self):
+        indices = dataset_filter_indices(
+            [[], []], filter_config=CalibFilterConfig(n_per_class=1, verbose=False)
+        )
+        assert indices == [0, 1]
+
+
+class TestGetCalibInputsLazyFilter:
+    """get_calib_inputs filter path selects rows via lazy columns only."""
+
+    def _toy_hf_dataset(self):
+        from datasets import Dataset as HFDataset
+
+        return HFDataset.from_list(
+            [
+                {"image": "img0", "image_classes": ["cat"], "image_id": 1,
+                 "question_id": 11, "question": "q1", "answers": ["a"]},
+                {"image": "img1", "image_classes": ["dog"], "image_id": 2,
+                 "question_id": 12, "question": "q2", "answers": ["a"]},
+                {"image": "img2", "image_classes": ["cat"], "image_id": 3,
+                 "question_id": 13, "question": "q3", "answers": ["a"]},
+                {"image": "img3", "image_classes": ["dog"], "image_id": 2,
+                 "question_id": 14, "question": "q4", "answers": ["a"]},
+            ]
+        )
+
+    def test_get_calib_inputs_filter_selects_lazily(self):
+        import tico.quantization.evaluation.vlm_eval_utils as vlm
+
+        hf_ds = self._toy_hf_dataset()
+        vlm.DATASETS["toy"] = {"adapter": lambda ex: ex, "is_text_only": False}
+        built_images: list = []
+        try:
+            with patch.object(
+                vlm, "get_dataset", return_value=(hf_ds, vlm.DATASETS["toy"]["adapter"])
+            ), patch.object(
+                vlm,
+                "build_vlm_inputs",
+                side_effect=lambda **kw: built_images.append(kw["image"])
+                or {"mock": kw["image"]},
+            ):
+                out = vlm.get_calib_inputs(
+                    "toy",
+                    processor=None,
+                    filter_config=CalibFilterConfig(n_per_class=1, verbose=False),
+                )
+        finally:
+            vlm.DATASETS.pop("toy", None)
+
+        # n_per_class=1: first cat (img0) + first dog (img1); img2 is capped
+        # by the quota and img3 is a duplicate image_id.
+        assert built_images == ["img0", "img1"]
+        assert len(out) == 2
+
+    def test_get_calib_inputs_filter_field_missing_raises(self):
+        import tico.quantization.evaluation.vlm_eval_utils as vlm
+        from datasets import Dataset as HFDataset
+
+        hf_ds = HFDataset.from_list([{"image": "img0", "question": "q"}])
+        vlm.DATASETS["toy"] = {"adapter": lambda ex: ex, "is_text_only": False}
+        try:
+            with patch.object(
+                vlm, "get_dataset", return_value=(hf_ds, vlm.DATASETS["toy"]["adapter"])
+            ):
+                with pytest.raises(ValueError, match="image_classes"):
+                    vlm.get_calib_inputs(
+                        "toy",
+                        processor=None,
+                        filter_config=CalibFilterConfig(n_per_class=1, verbose=False),
+                    )
+        finally:
+            vlm.DATASETS.pop("toy", None)
+
