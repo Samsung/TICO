@@ -493,7 +493,7 @@ def wrap_model(
     not_quantizable: bool = (
         type(model) not in _QUANTIZABLE_LAYER_TYPES
         or any(
-            regex.match(full_model_name) is not None
+            regex.fullmatch(full_model_name) is not None
             for regex in ignored_module_patterns
         )
         or model in ignored_modules
@@ -518,9 +518,11 @@ def wrap_model(
             is_cacheable=is_cacheable,
             cached_output=[],
             collected_inputs=[],
-            state=(GPTQ_STATE.CACHE if is_cacheable else GPTQ_STATE.COMPUTE)
-            if not_quantizable
-            else GPTQ_STATE.COLLECT,
+            state=(
+                (GPTQ_STATE.CACHE if is_cacheable else GPTQ_STATE.COMPUTE)
+                if not_quantizable
+                else GPTQ_STATE.COLLECT
+            ),
             invocation_idx=0,
             batch_idx=0,
             total_invocations=total_invocations,
@@ -641,19 +643,21 @@ def run_model(
             assert stop_fwd.module is not None
             frontier_submodules.add(stop_fwd.module)
         finally:
-            # increment batch counter for modules that were invoked at least once
-            # reset invocation counter
+            # Update all modules' state after batch completion
             for m in model.modules():
                 gptq_data: GPTQ_Data = get_gptq_data(m)
 
+                # For cacheable modules check that all cached outputs for this batch were actually acquired
                 assert (
                     not gptq_data.is_cacheable or
-                    len(gptq_data.cached_output) == 0 or
+                    len(gptq_data.cached_output) == gptq_data.batch_idx or
                     gptq_data.invocation_idx == len(gptq_data.cached_output[gptq_data.batch_idx])
                 ), "Not all cached invocations were acquired for this batch"
 
+                # Increment batch counter for modules that were invoked at least once
                 if gptq_data.invocation_idx > 0:
                     gptq_data.batch_idx += 1
+                    # Reset invocation counter
                     gptq_data.invocation_idx = 0
 
     # reset batch counter
@@ -829,35 +833,22 @@ def finish_caching(
             f"[{gptq_data.full_module_name}] Cached {len(gptq_data.cached_output)} outputs"
         )
 
-    # Free children's cached outputs
-    for child_name, child in module.named_children():
-        child_gptq_data = get_gptq_data(child)
-        assert child_gptq_data.state == GPTQ_STATE.CACHE
+    # Free (grand)children's cached outputs
+    for child_name, child in module.named_modules():
+        if not child_name:
+            continue
+        child_gptq_data: GPTQ_Data = get_gptq_data(child)
+        if not child_gptq_data.is_cacheable or child_gptq_data.state != GPTQ_STATE.CACHE:
+            continue
+
         assert child_gptq_data.invocation_idx == 0
         assert child_gptq_data.batch_idx == 0
-        if verbose:
-            print(
-                f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
-            )
-        child_gptq_data.cached_output.clear()
-
-
-def increment_batch_counter(
-    module: nn.Module,
-) -> None:
-    """
-    Increments the batch counter for all submodules.
-
-    This function increments the `batch_idx` field in GPTQ_Data for the
-    given module and all its descendants.
-
-    Parameters:
-        module: The root module whose batch counters should be inremented.
-    """
-    for m in module.modules():
-        gptq_data: GPTQ_Data = get_gptq_data(m)
-        if gptq_data.invocation_idx > 0:
-            gptq_data.batch_idx += 1
+        if child_gptq_data.cached_output:
+            if verbose:
+                print(
+                    f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
+                )
+            child_gptq_data.cached_output.clear()
 
 
 def find_multicall_modules(
@@ -1055,6 +1046,7 @@ def find_caller_and_callee_modules(
             kwargs = move_to_device(kwargs, model_device)
             assert type(kwargs) is dict
             model(*args, **kwargs)
+            assert len(call_stack) == 0
 
         if verbose:
             caller: nn.Module
@@ -1121,7 +1113,7 @@ def gptq_quantize(
             is_cacheable: bool = (
                 bool(full_module_name) and
                 any(
-                    regex.match(full_module_name) is not None
+                    regex.fullmatch(full_module_name) is not None
                     for regex in cacheable_module_patterns
                 )
             )
@@ -1135,13 +1127,18 @@ def gptq_quantize(
             model=model,
             caller_criterion=lambda m: getattr(m, "is_cacheable", False),
             callee_criterion=lambda m: getattr(m, "is_cacheable", False),
-            relate_criterion=lambda caller, callee: callee not in caller.children(),
+            relate_criterion=lambda caller, callee: callee not in caller.modules(),
             args_dataset=args_dataset,
             kwargs_dataset=kwargs_dataset,
             show_progress=gptq_config.show_progress,
             verbose=gptq_config.verbose,
             description="Detecting cacheable modules calling other cacheable modules",
         )
+
+        if cacheable_modules_callers_to_callees:
+            raise RuntimeError(
+                f"Cacheable modules calling other cacheable modules detected: {cacheable_modules_callers_to_callees}"
+            )
 
         # Detect modules that are called multiple times in a single input batch
         multicall_modules: set[nn.Module] = (
@@ -1163,11 +1160,6 @@ def gptq_quantize(
                 [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
             ),
             ignored_modules=multicall_modules,
-        )
-
-    if cacheable_modules_callers_to_callees:
-        raise RuntimeError(
-            f"Cacheable modules calling other cacheable modules detected: {cacheable_modules_callers_to_callees}"
         )
 
     try:
