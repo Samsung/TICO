@@ -44,6 +44,7 @@ pipeline:
     debug_mode: true
     ignore_multi_call_modules: true
     cacheable_modules: ["model.layers.[0-9]+"]
+    allow_calls_between_cacheable_modules: false
 
   - name: ptq
     enabled: true

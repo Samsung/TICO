@@ -766,7 +766,13 @@ def finish_collection(
     if gptq_data.gptq is None:
         gptq_data.gptq = GPTQ(module)
     input: torch.Tensor
-    for input in gptq_data.collected_inputs:
+    for input in tqdm(
+        gptq_data.collected_inputs,
+        desc=f"[{gptq_data.full_module_name}] -> Accumulating Hessian",
+        leave=False,
+        unit="batch",
+        disable=not gptq_config.show_progress,
+    ):
         gptq_data.gptq.add_batch(
             inp=input,
             out=None,  # out is ignored in GPTQ.add_batch
@@ -812,6 +818,7 @@ def finish_collection(
 
 def finish_caching(
     module: nn.Module,
+    release_children_cache: bool,
     verbose: bool,
 ) -> None:
     """
@@ -823,6 +830,7 @@ def finish_caching(
 
     Parameters:
         module: The module to transition (must be in CACHE state).
+        release_children_cache: Whether to release child modules cached outputs.
         verbose: Whether to print out the number of released cached outputs.
     """
     gptq_data: GPTQ_Data = get_gptq_data(module)
@@ -834,21 +842,22 @@ def finish_caching(
         )
 
     # Free (grand)children's cached outputs
-    for child_name, child in module.named_modules():
-        if not child_name:
-            continue
-        child_gptq_data: GPTQ_Data = get_gptq_data(child)
-        if not child_gptq_data.is_cacheable or child_gptq_data.state != GPTQ_STATE.CACHE:
-            continue
+    if release_children_cache:
+        for child_name, child in module.named_modules():
+            if not child_name:
+                continue
+            child_gptq_data: GPTQ_Data = get_gptq_data(child)
+            if not child_gptq_data.is_cacheable or child_gptq_data.state != GPTQ_STATE.CACHE:
+                continue
 
-        assert child_gptq_data.invocation_idx == 0
-        assert child_gptq_data.batch_idx == 0
-        if child_gptq_data.cached_output:
-            if verbose:
-                print(
-                    f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
-                )
-            child_gptq_data.cached_output.clear()
+            assert child_gptq_data.invocation_idx == 0
+            assert child_gptq_data.batch_idx == 0
+            if child_gptq_data.cached_output:
+                if verbose:
+                    print(
+                        f"[{gptq_data.full_module_name}.{child_name}] Released {len(child_gptq_data.cached_output)} cached outputs"
+                    )
+                child_gptq_data.cached_output.clear()
 
 
 def find_multicall_modules(
@@ -1121,24 +1130,34 @@ def gptq_quantize(
             setattr(m, "is_cacheable", is_cacheable)
 
         # Detect cacheable modules that call other cacheable modules
-        cacheable_modules_callers_to_callees: dict[
-            nn.Module, set[nn.Module]
-        ] = find_caller_and_callee_modules(
-            model=model,
-            caller_criterion=lambda m: getattr(m, "is_cacheable", False),
-            callee_criterion=lambda m: getattr(m, "is_cacheable", False),
-            relate_criterion=lambda caller, callee: callee not in caller.modules(),
-            args_dataset=args_dataset,
-            kwargs_dataset=kwargs_dataset,
-            show_progress=gptq_config.show_progress,
-            verbose=gptq_config.verbose,
-            description="Detecting cacheable modules calling other cacheable modules",
-        )
+        cacheable_modules_callers_to_callees: dict[nn.Module, set[nn.Module]]
+        if gptq_config.allow_calls_between_cacheable_modules:
+            cacheable_modules_callers_to_callees = find_caller_and_callee_modules(
+                model=model,
+                caller_criterion=lambda m: getattr(m, "is_cacheable", False),
+                callee_criterion=lambda m: getattr(m, "is_cacheable", False),
+                relate_criterion=lambda caller, callee: callee not in caller.modules(),
+                args_dataset=args_dataset,
+                kwargs_dataset=kwargs_dataset,
+                show_progress=gptq_config.show_progress,
+                verbose=gptq_config.verbose,
+                description="Detecting cacheable modules calling other cacheable modules",
+            )
+        else:
+            cacheable_modules_callers_to_callees = find_caller_and_callee_modules(
+                model=model,
+                caller_criterion=lambda m: getattr(m, "is_cacheable", False),
+                callee_criterion=lambda m: getattr(m, "is_cacheable", False),
+                relate_criterion=lambda caller, callee: True,
+                args_dataset=args_dataset,
+                kwargs_dataset=kwargs_dataset,
+                show_progress=gptq_config.show_progress,
+                verbose=gptq_config.verbose,
+                description="Detecting cacheable modules calling other cacheable modules",
+            )
 
         if cacheable_modules_callers_to_callees:
-            raise RuntimeError(
-                f"Cacheable modules calling other cacheable modules detected: {cacheable_modules_callers_to_callees}"
-            )
+            raise RuntimeError("Cacheable modules calling other cacheable modules detected")
 
         # Detect modules that are called multiple times in a single input batch
         multicall_modules: set[nn.Module] = (
@@ -1203,6 +1222,7 @@ def gptq_quantize(
                 for module_to_cache in modules_to_cache:
                     finish_caching(
                         module_to_cache,
+                        release_children_cache=gptq_config.allow_calls_between_cacheable_modules,
                         verbose=gptq_config.verbose,
                     )
 
