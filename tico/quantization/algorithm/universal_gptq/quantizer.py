@@ -449,7 +449,9 @@ def wrap_model(
         match gptq_data.state:
             case GPTQ_STATE.COLLECT:
                 # Move input to model's weight device for Hessian accumulation
-                gptq_data.collected_inputs.append(args[0].data.to(gptq_data.weight_device))
+                gptq_data.collected_inputs.append(
+                    args[0].data.to(gptq_data.weight_device)
+                )
                 raise StopForward(module)
 
             case GPTQ_STATE.CACHE:
@@ -637,6 +639,7 @@ def run_model(
         args = move_to_device(args, model_device)
         kwargs = move_to_device(kwargs, model_device)
         assert type(kwargs) is dict
+        gptq_data: GPTQ_Data
         try:
             model(*args, **kwargs)
         except StopForward as stop_fwd:
@@ -645,13 +648,14 @@ def run_model(
         finally:
             # Update all modules' state after batch completion
             for m in model.modules():
-                gptq_data: GPTQ_Data = get_gptq_data(m)
+                gptq_data = get_gptq_data(m)
 
                 # For cacheable modules check that all cached outputs for this batch were actually acquired
                 assert (
-                    not gptq_data.is_cacheable or
-                    len(gptq_data.cached_output) == gptq_data.batch_idx or
-                    gptq_data.invocation_idx == len(gptq_data.cached_output[gptq_data.batch_idx])
+                    not gptq_data.is_cacheable
+                    or gptq_data.batch_idx == len(gptq_data.cached_output)
+                    or gptq_data.invocation_idx
+                    == len(gptq_data.cached_output[gptq_data.batch_idx])
                 ), "Not all cached invocations were acquired for this batch"
 
                 # Increment batch counter for modules that were invoked at least once
@@ -662,11 +666,16 @@ def run_model(
 
     # reset batch counter
     for m in model.modules():
-        gptq_data: GPTQ_Data = get_gptq_data(m)
+        gptq_data = get_gptq_data(m)
+        # For cacheable modules check that all cached outputs for entire dataset were actually acquired
         assert (
-            not gptq_data.is_cacheable or
-            gptq_data.batch_idx == len(gptq_data.cached_output) or
-            (gptq_data.batch_idx == 0 and len(gptq_data.cached_output) == 1 and len(gptq_data.cached_output[0]) == 0)
+            not gptq_data.is_cacheable
+            or gptq_data.batch_idx == len(gptq_data.cached_output)
+            or (
+                gptq_data.batch_idx == 0
+                and len(gptq_data.cached_output) == 1
+                and len(gptq_data.cached_output[0]) == 0
+            )
         ), "Not all cached batches were acquired"
         gptq_data.batch_idx = 0
 
@@ -761,7 +770,7 @@ def finish_collection(
     assert type(module) in _QUANTIZABLE_LAYER_TYPES
     gptq_data: GPTQ_Data = get_gptq_data(module)
     assert gptq_data.state == GPTQ_STATE.COLLECT
-    assert len(gptq_data.collected_inputs)  > 0
+    assert len(gptq_data.collected_inputs) > 0
 
     if gptq_data.gptq is None:
         gptq_data.gptq = GPTQ(module)
@@ -847,7 +856,10 @@ def finish_caching(
             if not child_name:
                 continue
             child_gptq_data: GPTQ_Data = get_gptq_data(child)
-            if not child_gptq_data.is_cacheable or child_gptq_data.state != GPTQ_STATE.CACHE:
+            if (
+                not child_gptq_data.is_cacheable
+                or child_gptq_data.state != GPTQ_STATE.CACHE
+            ):
                 continue
 
             assert child_gptq_data.invocation_idx == 0
@@ -1119,12 +1131,9 @@ def gptq_quantize(
 
         # For each module determine if it is cacheable
         for full_module_name, m in model.named_modules():
-            is_cacheable: bool = (
-                bool(full_module_name) and
-                any(
-                    regex.fullmatch(full_module_name) is not None
-                    for regex in cacheable_module_patterns
-                )
+            is_cacheable: bool = bool(full_module_name) and any(
+                regex.fullmatch(full_module_name) is not None
+                for regex in cacheable_module_patterns
             )
             assert not hasattr(m, "is_cacheable")
             setattr(m, "is_cacheable", is_cacheable)
@@ -1157,7 +1166,9 @@ def gptq_quantize(
             )
 
         if cacheable_modules_callers_to_callees:
-            raise RuntimeError("Cacheable modules calling other cacheable modules detected")
+            raise RuntimeError(
+                "Cacheable modules calling other cacheable modules detected"
+            )
 
         # Detect modules that are called multiple times in a single input batch
         multicall_modules: set[nn.Module] = (
@@ -1181,6 +1192,7 @@ def gptq_quantize(
             ignored_modules=multicall_modules,
         )
 
+    gptq_data: GPTQ_Data
     try:
         while True:
             # Run model to do either of the following:
@@ -1204,12 +1216,15 @@ def gptq_quantize(
             modules_ready_to_quantize: list[nn.Module] = []
             modules_not_ready_to_quantize: list[nn.Module] = []
             for frontier_submodule in frontier_submodules:
-                gptq_data: GPTQ_Data = get_gptq_data(frontier_submodule)
+                gptq_data = get_gptq_data(frontier_submodule)
                 match gptq_data.state:
                     case GPTQ_STATE.CACHE:
                         modules_to_cache.append(frontier_submodule)
                     case GPTQ_STATE.COLLECT:
-                        if len(gptq_data.collected_inputs) == gptq_data.total_invocations:
+                        if (
+                            len(gptq_data.collected_inputs)
+                            == gptq_data.total_invocations
+                        ):
                             modules_ready_to_quantize.append(frontier_submodule)
                         else:
                             modules_not_ready_to_quantize.append(frontier_submodule)
@@ -1232,7 +1247,7 @@ def gptq_quantize(
 
                 # 2.3.
                 for module_not_ready_to_quantize in modules_not_ready_to_quantize:
-                    gptq_data: GPTQ_Data = get_gptq_data(module_not_ready_to_quantize)
+                    gptq_data = get_gptq_data(module_not_ready_to_quantize)
                     gptq_data.collected_inputs.clear()
 
             # 3. No cacheable modules were hit
@@ -1245,29 +1260,44 @@ def gptq_quantize(
 
                     # 3.1.2. Reset modules that haven't collected all required inputs (they will start over at the next model replay)
                     for module_not_ready_to_quantize in modules_not_ready_to_quantize:
-                        gptq_data: GPTQ_Data = get_gptq_data(module_not_ready_to_quantize)
+                        gptq_data = get_gptq_data(module_not_ready_to_quantize)
                         gptq_data.collected_inputs.clear()
 
                 # 3.2. No modules ready to be quantized
                 else:
                     if gptq_config.verbose:
-                        print(f"[WARNING] No modules have collected all required inputs")
+                        print(
+                            f"[WARNING] No modules have collected all required inputs"
+                        )
 
                     # Pick the module that has the maximum percantage of collected inputs and quantize it,
                     # reset others (they will start over at the next model replay)
                     max_collected_inputs_percentage = 0.0
                     best_module_to_quantize: nn.Module | None = None
                     for module_not_ready_to_quantize in modules_not_ready_to_quantize:
-                        gptq_data: GPTQ_Data = get_gptq_data(module_not_ready_to_quantize)
-                        collected_inputs_percentage = len(gptq_data.collected_inputs) / gptq_data.total_invocations * 100.0
+                        gptq_data = get_gptq_data(module_not_ready_to_quantize)
+                        collected_inputs_percentage = (
+                            len(gptq_data.collected_inputs)
+                            / gptq_data.total_invocations
+                            * 100.0
+                        )
                         if gptq_config.verbose:
-                            print(f"[{gptq_data.full_module_name}] collected {len(gptq_data.collected_inputs)} / {gptq_data.total_invocations} ({collected_inputs_percentage:.0f}%) inputs")
+                            print(
+                                f"[{gptq_data.full_module_name}] collected {len(gptq_data.collected_inputs)} / {gptq_data.total_invocations} ({collected_inputs_percentage:.0f}%) inputs"
+                            )
                         assert collected_inputs_percentage > 0.0
-                        if collected_inputs_percentage > max_collected_inputs_percentage:
+                        if (
+                            collected_inputs_percentage
+                            > max_collected_inputs_percentage
+                        ):
                             if best_module_to_quantize:
-                                get_gptq_data(best_module_to_quantize).collected_inputs.clear()
+                                get_gptq_data(
+                                    best_module_to_quantize
+                                ).collected_inputs.clear()
                             best_module_to_quantize = module_not_ready_to_quantize
-                            max_collected_inputs_percentage = collected_inputs_percentage
+                            max_collected_inputs_percentage = (
+                                collected_inputs_percentage
+                            )
                         else:
                             gptq_data.collected_inputs.clear()
                     assert best_module_to_quantize is not None

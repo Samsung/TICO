@@ -118,14 +118,19 @@ class UniversalGPTQConfig(GPTQConfig):
         model = convert(model)
     """
 
-    # Retain gptq_data attributes after quantization finishes
+    # Retain gptq_data attributes after quantization finishes (to explore them in debugger)
     debug_mode: bool = False
 
     # Disable GPTQ quantization of modules that are called multiple times in a single batch
     ignore_multi_call_modules: bool = True
 
     # Regex patterns specifying full hierarchical module names of modules
-    # that should cache their outputs for performance optimization during model replay
+    # that should cache their outputs for performance optimization during model replay.
+    # Recommendation: enable caching for relatively large repeating blocks of the model,
+    # e.g. decoder layers (something like "model\.language_model\.decoder_layers\.[0-9]+").
+    # If you also want to allow caching of the large blocks' submodules add ".*" at the end
+    # e.g. "model\.language_model\.decoder_layers\.[0-9]+.*". In this case you also need to
+    # enable calls between cacheable modules by setting `allow_calls_between_cacheable_modules` to `True`
     cacheable_modules: list[str] = field(default_factory=list)
 
     # Allow parent cacheable module calls to its cacheable submodules.
