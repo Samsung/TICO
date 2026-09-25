@@ -288,7 +288,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             # Tensor data stays in per-stage shards and is loaded on demand,
             # one stage at a time, when each stage requests its FP inputs.
             if gptq_conf.fp_inputs_cache_path:
-                self._load_fp_inputs_manifest(gptq_conf.fp_inputs_cache_path)
+                self._load_fp_inputs_manifest(
+                    gptq_conf.fp_inputs_cache_path, model=model
+                )
 
             # Only deep-copy the model if FP inputs need to be collected on-the-fly.
             # When the disk cache is loaded, orig_model is not needed.
@@ -394,7 +396,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 and self._fp_inputs_manifest is not None
                 and self._fp_inputs_manifest["stages"]
             ):
-                self._publish_fp_inputs_manifest(gptq_conf.fp_inputs_cache_path)
+                self._publish_fp_inputs_manifest(
+                    gptq_conf.fp_inputs_cache_path, model=model
+                )
 
             model.quantizers = self._quantizers  # type: ignore[assignment]
             return model
@@ -910,18 +914,23 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             for name in group["members"]
         }
 
-    def _publish_fp_inputs_manifest(self, cache_dir: str) -> None:
+    def _publish_fp_inputs_manifest(
+        self, cache_dir: str, model: Optional[nn.Module] = None
+    ) -> None:
         """
         Atomically publish the manifest, marking the cache complete.
 
         Called only after every stage of convert() finished successfully.
-        Also removes orphaned shard files (e.g. from earlier failed runs)
-        that are not referenced by the published manifest.
+        Stamps the run fingerprint (model identifier, config hash, calibration
+        dataset spec) so warm runs can detect a cache built for different
+        inputs. Also removes orphaned shard files (e.g. from earlier failed
+        runs) that are not referenced by the published manifest.
         """
         assert self._fp_inputs_manifest is not None
         manifest = self._fp_inputs_manifest
         manifest["complete"] = True
         manifest["num_stages"] = len(manifest["stages"])
+        manifest["fingerprint"] = self._compute_fp_inputs_fingerprint(model)
         manifest_path = os.path.join(cache_dir, _FP_INPUTS_MANIFEST_FILENAME)
         print(
             f"[GPTQv2] Publishing FP inputs cache manifest to {manifest_path} "
@@ -967,13 +976,108 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 f"from previous run(s)"
             )
 
-    def _load_fp_inputs_manifest(self, cache_dir: str) -> None:
+    def _compute_fp_inputs_fingerprint(
+        self, model: Optional[nn.Module] = None
+    ) -> dict[str, Any]:
+        """
+        Compute the fingerprint of the current run for the FP inputs cache.
+
+        The fingerprint is a small set of plain strings capturing what the
+        collected FP inputs depend on:
+            * ``model``: the model's HF ``_name_or_path`` identifier (None
+              when no model is passed, e.g. in unit tests).
+            * ``calibration``: the ``config.calibration_dataset_spec`` string
+              (dataset names with sample counts; None when unset).
+            * ``cache_dtype``: the dtype cached native inputs are cast to
+              (changes cached values, so it must invalidate).
+
+        Quantization math parameters (weight_bits, percdamp, ...) are not
+        part of the fingerprint on purpose: FP inputs are collected from the
+        pristine model and do not depend on them, so a warm cache stays
+        valid while tuning quantization settings. Components that are None
+        on either side are skipped by ``_verify_fp_inputs_fingerprint``.
+        """
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+
+        model_id: Optional[str] = None
+        if model is not None:
+            model_id = str(getattr(getattr(model, "config", None), "_name_or_path", "?"))
+
+        cache_dtype = self.config.cache_dtype
+        return {
+            "model": model_id,
+            "calibration": self.config.calibration_dataset_spec,
+            # Always a string: None (no cast) is a value, not "unknown", so
+            # this component is never skipped by the verifier.
+            "cache_dtype": str(cache_dtype),
+        }
+
+    def _verify_fp_inputs_fingerprint(
+        self,
+        manifest: dict[str, Any],
+        cache_dir: str,
+        model: Optional[nn.Module] = None,
+    ) -> None:
+        """
+        Verify a loaded manifest's fingerprint against the current run.
+
+        A manifest without a fingerprint (written before fingerprinting was
+        introduced or by external tooling) loads with a warning. Components
+        that are None on either side are skipped. Any mismatch raises a
+        RuntimeError naming the mismatched components, since reusing FP
+        inputs collected for a different model/config/calibration setup would
+        silently corrupt the GPTQv2 correction.
+        """
+        fingerprint = manifest.get("fingerprint")
+        if fingerprint is None:
+            print(
+                "[GPTQv2] Warning: FP inputs cache has no fingerprint; cannot "
+                "verify it matches the current model, config, and calibration "
+                "data. Regenerate the cache to enable verification."
+            )
+            return
+        if not isinstance(fingerprint, dict):
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache manifest at {cache_dir} is invalid: "
+                "fingerprint is not an object. Delete the cache directory and "
+                "re-run to regenerate."
+            )
+
+        def _short(value: Any) -> str:
+            text = repr(value)
+            return text if len(text) <= 120 else text[:117] + "..."
+
+        current = self._compute_fp_inputs_fingerprint(model)
+        mismatched = [
+            key
+            for key in ("model", "calibration", "cache_dtype")
+            if fingerprint.get(key) is not None
+            and current.get(key) is not None
+            and fingerprint.get(key) != current.get(key)
+        ]
+        if mismatched:
+            details = "; ".join(
+                f"{key}: cache={_short(fingerprint.get(key))} vs "
+                f"current={_short(current.get(key))}"
+                for key in mismatched
+            )
+            raise RuntimeError(
+                f"[GPTQv2] FP inputs cache at {cache_dir} does not match the "
+                f"current run ({details}). Delete the cache directory and "
+                "re-run to regenerate."
+            )
+
+    def _load_fp_inputs_manifest(
+        self, cache_dir: str, model: Optional[nn.Module] = None
+    ) -> None:
         """
         Load and validate the FP inputs cache manifest (no tensor data).
 
         Sets ``_fp_inputs_disk_loaded`` on success. A missing manifest means
         the previous run never published (fresh path or failed run), so the
-        cache is regenerated from scratch.
+        cache is regenerated from scratch. When the manifest carries a
+        fingerprint, it is verified against the current model/config/
+        calibration setup before the cache is accepted.
         """
         if os.path.isfile(cache_dir):
             raise RuntimeError(
@@ -996,6 +1100,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 f"re-run to regenerate."
             ) from error
         self._validate_fp_inputs_manifest(manifest, cache_dir)
+        self._verify_fp_inputs_fingerprint(manifest, cache_dir, model)
         self._fp_inputs_manifest = manifest
         self._fp_inputs_disk_loaded = True
         print(

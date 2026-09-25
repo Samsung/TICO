@@ -37,6 +37,7 @@ from tico.quantization.algorithm.qwen3_vl_gptq.quantizer import (
 )
 from tico.quantization.algorithm.qwen3_vl_gptq.utils import group_shared_fp_inputs
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
+from tico.quantization.recipes.stages.gptq import GPTQStage
 
 
 class TestQwen3VLGPTQv2Core(unittest.TestCase):
@@ -1042,19 +1043,22 @@ def _reference_fasterquant(
     # Production code (gptq.py):
     #   - Uses a single w1 = w[:, i1:i2].clone()
     #   - Clones individual w_col = w1[:, i].clone() inside the loop
-    #   - Precomputes P_update = w1.matmul(P[...]) BEFORE the inner loop
+    #   - Applies the cross-block P correction AFTER the inner loop as
+    #     w[:, i2:] += w1.matmul(P[i1:i2, i2:]) using the post-loop w1
     #
     # This reference:
     #   - Uses a single w1 = w[:, i1:i2].clone() (same as production)
     #   - Clones w_col = w1[:, i].clone() inside the loop (same as production)
-    #   - Precomputes P_update BEFORE the inner loop (same as production)
+    #   - Applies the cross-block P correction AFTER the inner loop from the
+    #     fully-updated w1 (same as production)
     #   - BUT uses a different code structure: separates the GPTQ error
     #     correction and P-correction into distinct named variables, and
     #     uses explicit outer-product construction instead of in-place -=
     #
     # The key correctness invariant: w_col must be the value of w1[:, i]
     # AFTER previous columns' updates but BEFORE the current column's
-    # update. This matches production's w1[:, i].clone().
+    # update, and the cross-block P correction must use w1 AFTER the inner
+    # loop finished (live-weight semantics). Both match production.
     # ------------------------------------------------------------------
 
     for i1 in range(0, columns, blocksize):
@@ -1066,13 +1070,7 @@ def _reference_fasterquant(
         err1 = torch.zeros_like(w1)
         hinv1 = hinv[i1:i2, i1:i2]
 
-        if P is not None:
-            P1 = P[i1:i2, i1:i2]
-            # Precompute cross-block P correction from the pre-loop w1 snapshot
-            P_update = w1.matmul(P[i1:i2, i2:])
-        else:
-            P1 = None
-            P_update = None
+        P1 = P[i1:i2, i1:i2] if P is not None else None
 
         for i in range(count):
             # Clone to snapshot the value before this column's update
@@ -1108,9 +1106,10 @@ def _reference_fasterquant(
         q_all[:, i1:i2] = q1
         # Cross-block GPTQ update
         w[:, i2:] -= err1.matmul(hinv[i1:i2, i2:])
-        # Cross-block P-correction (precomputed from pre-loop w1)
-        if P_update is not None:
-            w[:, i2:] += P_update
+        # Cross-block P-correction: computed AFTER the inner loop from the
+        # fully-updated w1 (live-weight semantics, same as production).
+        if P is not None:
+            w[:, i2:] += w1.matmul(P[i1:i2, i2:])
 
 
     if actorder:
@@ -1488,6 +1487,200 @@ class TestGPTQInpAndHessianDtype(unittest.TestCase):
             Qwen3VLGPTQConfig(hessian_dtype=torch.float16).validate()
         with self.assertRaises(ValueError):
             Qwen3VLGPTQConfig(inp_dtype="float128")
+
+
+# ---------------------------------------------------------------------------
+# Tests: FP inputs cache fingerprint
+# ---------------------------------------------------------------------------
+
+
+def _make_fingerprint_model(name_or_path="/fake/qwen3-vl", model_type="qwen3_vl"):
+    """Tiny stand-in model carrying the config attributes used by the
+    FP-inputs cache fingerprint."""
+    model = nn.Linear(4, 3)
+    model.config = MagicMock()
+    model.config.model_type = model_type
+    model.config._name_or_path = name_or_path
+    return model
+
+
+def _make_fingerprint_quantizer(cache_dir=None, **config_overrides):
+    """Create a quantizer whose config carries the given overrides."""
+    kwargs = dict(
+        weight_bits=8,
+        gptq_v2=True,
+        fp_inputs_cache_path=cache_dir,
+        show_progress=False,
+        verbose=False,
+    )
+    kwargs.update(config_overrides)
+    return Qwen3VLGPTQQuantizer(Qwen3VLGPTQConfig(**kwargs))
+
+
+def _publish_fingerprinted_cache(tmpdir, model=None, **config_overrides):
+    """Simulate a successful save run that publishes a fingerprinted manifest."""
+    cache_dir = os.path.join(tmpdir, "fp_cache")
+    quantizer = _make_fingerprint_quantizer(cache_dir, **config_overrides)
+    quantizer._persist_stage_fp_inputs("s0", {"a": [torch.randn(2, 4)]})
+    quantizer._publish_fp_inputs_manifest(cache_dir, model=model)
+    return cache_dir
+
+
+class TestFPInputsCacheFingerprint(unittest.TestCase):
+    """The published manifest carries a run fingerprint; warm runs verify it."""
+
+    def test_fingerprint_stamped_on_publish(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model = _make_fingerprint_model()
+            cache_dir = _publish_fingerprinted_cache(
+                tmpdir, model=model, calibration_dataset_spec="ds:v1"
+            )
+            with open(
+                os.path.join(cache_dir, "manifest.json"), encoding="utf-8"
+            ) as handle:
+                manifest = json.load(handle)
+            fingerprint = manifest["fingerprint"]
+            self.assertEqual(
+                fingerprint,
+                {
+                    "model": "/fake/qwen3-vl",
+                    "calibration": "ds:v1",
+                    "cache_dtype": "None",
+                },
+            )
+
+    def test_fingerprint_match_accepted(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model = _make_fingerprint_model()
+            cache_dir = _publish_fingerprinted_cache(
+                tmpdir, model=model, calibration_dataset_spec="ds:v1"
+            )
+            warm = _make_fingerprint_quantizer(
+                cache_dir, calibration_dataset_spec="ds:v1"
+            )
+            warm._load_fp_inputs_manifest(cache_dir, model=model)
+            self.assertTrue(warm._fp_inputs_disk_loaded)
+
+    def test_fingerprint_cache_dtype_mismatch_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _publish_fingerprinted_cache(tmpdir)
+            # cache_dtype casts the cached native entry inputs, so a different
+            # value must invalidate the cache.
+            warm = _make_fingerprint_quantizer(cache_dir, cache_dtype=torch.float16)
+            with self.assertRaises(RuntimeError) as ctx:
+                warm._load_fp_inputs_manifest(cache_dir)
+            self.assertIn("cache_dtype", str(ctx.exception))
+
+    def test_fingerprint_dataset_spec_mismatch_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _publish_fingerprinted_cache(
+                tmpdir, calibration_dataset_spec="textvqa:n5"
+            )
+            warm = _make_fingerprint_quantizer(
+                cache_dir, calibration_dataset_spec="textvqa:n10"
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                warm._load_fp_inputs_manifest(cache_dir)
+            self.assertIn("calibration", str(ctx.exception))
+
+    def test_fingerprint_model_mismatch_rejected(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = _publish_fingerprinted_cache(
+                tmpdir, model=_make_fingerprint_model("/fake/model-a")
+            )
+            warm = _make_fingerprint_quantizer(cache_dir)
+            with self.assertRaises(RuntimeError) as ctx:
+                warm._load_fp_inputs_manifest(
+                    cache_dir, model=_make_fingerprint_model("/fake/model-b")
+                )
+            self.assertIn("model", str(ctx.exception))
+
+    def test_fingerprint_unset_components_skip_check(self):
+        """Components that are None on either side are not verified."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Published with a dataset spec; warm run provides none -> skipped.
+            cache_dir = _publish_fingerprinted_cache(
+                tmpdir, calibration_dataset_spec="ds:v1"
+            )
+            warm = _make_fingerprint_quantizer(cache_dir)
+            warm._load_fp_inputs_manifest(cache_dir)
+            self.assertTrue(warm._fp_inputs_disk_loaded)
+
+    def test_fingerprint_missing_tolerated(self):
+        """A manifest without a fingerprint (legacy/external) still loads."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = os.path.join(tmpdir, "fp_cache")
+            os.makedirs(cache_dir)
+            manifest = Qwen3VLGPTQQuantizer._new_fp_inputs_manifest()
+            manifest["complete"] = True
+            with open(
+                os.path.join(cache_dir, "manifest.json"), "w", encoding="utf-8"
+            ) as handle:
+                json.dump(manifest, handle)
+            warm = _make_fingerprint_quantizer(cache_dir)
+            warm._load_fp_inputs_manifest(cache_dir)
+            self.assertTrue(warm._fp_inputs_disk_loaded)
+
+    def test_fingerprint_contains_no_quant_math_params(self):
+        """Quantization math params are not part of the fingerprint."""
+        fingerprint = _make_fingerprint_quantizer(
+            weight_bits=4, percdamp=0.5, groupsize=128, gptq_v2_alpha=0.5
+        )._compute_fp_inputs_fingerprint()
+        self.assertEqual(set(fingerprint), {"model", "calibration", "cache_dtype"})
+
+
+class TestCalibrationDatasetSpec(unittest.TestCase):
+    """Compact 'name:count' calibration spec for the cache fingerprint."""
+
+    def test_mapping_form(self):
+        spec = GPTQStage._calibration_dataset_spec(
+            {
+                "datasets": {
+                    "wikitext2": {"n_samples": 128},
+                    "textvqa": {"n_samples": 50},
+                },
+                "n_samples": 128,
+            }
+        )
+        self.assertEqual(spec, "textvqa:50,wikitext2:128")
+
+    def test_mapping_form_scalar_count_and_default(self):
+        spec = GPTQStage._calibration_dataset_spec(
+            {"datasets": {"textvqa": 50, "wikitext2": {}}, "n_samples": 32}
+        )
+        self.assertEqual(spec, "textvqa:50,wikitext2:32")
+
+    def test_sequence_form(self):
+        spec = GPTQStage._calibration_dataset_spec(
+            {
+                "datasets": ["wikitext2", {"dataset": "textvqa", "n_samples": 50}],
+                "n_samples": 128,
+            }
+        )
+        self.assertEqual(spec, "textvqa:50,wikitext2:128")
+
+    def test_single_dataset_fallback(self):
+        spec = GPTQStage._calibration_dataset_spec(
+            {"dataset": "textvqa", "n_samples": 16}
+        )
+        self.assertEqual(spec, "textvqa:16")
+
+    def test_defaults(self):
+        self.assertEqual(GPTQStage._calibration_dataset_spec({}), "vqav2:128")
 
 
 if __name__ == "__main__":

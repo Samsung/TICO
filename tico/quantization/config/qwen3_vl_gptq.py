@@ -115,6 +115,15 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     # If None, FP inputs are collected on-the-fly (default behavior).
     fp_inputs_cache_path: str | None = None
 
+    # GPTQv2: Optional calibration dataset spec (dataset names with sample
+    # counts, e.g. "textvqa:50,wikitext2:128") recorded in the FP inputs
+    # cache manifest fingerprint. On a warm run the spec is compared against
+    # the cached one so that a cache built for different calibration data is
+    # rejected instead of silently reused. If None, the calibration component
+    # of the fingerprint is not verified. The recipe pipeline stamps this
+    # automatically from the ``calibration`` section of the YAML config.
+    calibration_dataset_spec: str | None = None
+
     # GPTQv2: scaling factor for the asymmetric correction (P matrix)
     # `alpha` is the correction strength for GPTQv2's input-error compensation.
     # It scales the `P` matrix that adjusts weight updates to account for upstream quantization error in the activations.
@@ -199,6 +208,14 @@ class Qwen3VLGPTQConfig(GPTQConfig):
         ):
             raise TypeError(
                 f"cache_dtype must be torch.dtype or None. got {type(self.cache_dtype)}"
+            )
+
+        if self.calibration_dataset_spec is not None and not isinstance(
+            self.calibration_dataset_spec, str
+        ):
+            raise TypeError(
+                "calibration_dataset_spec must be str or None. "
+                f"got {type(self.calibration_dataset_spec)}"
             )
 
         attr_fields = {
