@@ -18,7 +18,7 @@ import typing
 import warnings
 from collections import OrderedDict
 from functools import wraps
-from typing import List
+from typing import Generic, Iterator, List, TypeVar
 
 import torch
 from circle_schema import circle
@@ -27,6 +27,81 @@ from torch.export import ExportedProgram
 from torch.utils import _pytree as pytree
 
 from tico.serialize.quant_param import QuantParam
+
+T = TypeVar("T")
+
+
+class Stack(Generic[T]):
+    """
+    A generic LIFO stack data structure with push/pop operations.
+
+    Type Parameters:
+        T: The type of elements stored in the stack.
+
+    Example:
+        stack = Stack[int]()
+        stack.push(1)
+        stack.push(2)
+        assert stack.pop() == 2
+        assert stack.pop() == 1
+    """
+
+    def __init__(self) -> None:
+        self._items: list[T] = []
+
+    def push(self, item: T) -> None:
+        """Push an item onto the top of the stack."""
+        self._items.append(item)
+
+    def pop(self) -> T:
+        """
+        Pop and return the top item from the stack.
+
+        Raises:
+            IndexError: If the stack is empty.
+        """
+        return self._items.pop()
+
+    def top(self) -> T:
+        """
+        Return the top item without removing it.
+
+        Raises:
+            IndexError: If the stack is empty.
+        """
+        return self._items[-1]
+
+    def __len__(self) -> int:
+        """Return the number of items in the stack."""
+        return len(self._items)
+
+    def __bool__(self) -> bool:
+        """Return True if the stack is non-empty."""
+        return bool(self._items)
+
+    def __iter__(self) -> Iterator[T]:
+        """
+        Iterate over stack items from bottom to top.
+
+        Note: Iteration does not modify the stack.
+        """
+        return iter(self._items)
+
+    def __reversed__(self) -> Iterator[T]:
+        """Iterate over stack items from top to bottom."""
+        return reversed(self._items)
+
+    def __contains__(self, item: object) -> bool:
+        """Check if an item is in the stack."""
+        return item in self._items
+
+    def __repr__(self) -> str:
+        """Return a string representation of the stack."""
+        return f"Stack({list(self._items)})"
+
+    def clear(self) -> None:
+        """Remove all items from the stack."""
+        self._items.clear()
 
 
 def get_fake_mode(exported_program: ExportedProgram):

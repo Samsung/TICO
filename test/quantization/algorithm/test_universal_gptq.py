@@ -25,7 +25,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.algorithm.universal_gptq.quantizer import (
-    find_multiply_invoked_modules,
+    find_multicall_modules,
     UniversalGPTQQuantizer,
 )
 from tico.quantization.config.gptq import UniversalGPTQConfig
@@ -187,7 +187,7 @@ class MultiBlockModel(nn.Module):
         else:
             self.output_proj = nn.Linear(hidden_dim, input_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         # Input projection
         x = self.input_proj(x)  # (batch, hidden_dim)
 
@@ -198,7 +198,8 @@ class MultiBlockModel(nn.Module):
         # Only do conv path if we have conv blocks
         if self.num_conv_blocks > 0:
             # Project to conv_dim
-            x = self.residual_to_conv(x)  # (batch, conv_dim)
+            if self.residual_to_conv:
+                x = self.residual_to_conv(x)  # (batch, conv_dim)
 
             # Reshape for convolution: (batch, conv_dim) -> (batch, channels, H, W)
             batch_size = x.shape[0]
@@ -209,7 +210,10 @@ class MultiBlockModel(nn.Module):
                 x = block(x)  # Each block has internal skip connection
 
             # Global pooling and output
-            x = self.global_pool(x).squeeze(-1).squeeze(-1)  # (batch, conv_channels)
+            if self.global_pool:
+                x = (
+                    self.global_pool(x).squeeze(-1).squeeze(-1)
+                )  # (batch, conv_channels)
 
         # Output projection (input dim depends on which path was taken)
         x = self.output_proj(x)
@@ -249,8 +253,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=["layers.[0-9]+"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -339,8 +344,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=["layers.[0-9]+"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -395,8 +401,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=["layers.[0-9]+"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -471,8 +478,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -630,8 +638,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -708,8 +717,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -775,8 +785,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -834,8 +845,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -908,8 +920,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -980,8 +993,9 @@ class TestUniversalGPTQ(unittest.TestCase):
             groupsize=-1,
             actorder=False,
             show_progress=False,
-            verbose=False,
+            verbose=True,
             debug_mode=True,
+            cacheable_modules=[".*"],
         )
         quantizer = UniversalGPTQQuantizer(config)
 
@@ -1040,12 +1054,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(
@@ -1088,12 +1102,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(
@@ -1145,12 +1159,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(
@@ -1211,12 +1225,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(
@@ -1272,12 +1286,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(
@@ -1330,12 +1344,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(
@@ -1389,12 +1403,12 @@ class TestUniversalGPTQ(unittest.TestCase):
             (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
         ]
 
-        multiply_invoked = find_multiply_invoked_modules(
+        multiply_invoked = find_multicall_modules(
             model,
             args_dataset=calibration_data,
             kwargs_dataset=[{} for _ in range(num_batches)],
             show_progress=False,
-            verbose=False,
+            verbose=True,
         )
 
         self.assertEqual(

@@ -19,7 +19,7 @@
 # https://github.com/IST-DASLab/gptq/blob/2d65066/gptq.py
 
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.nn as nn
@@ -181,7 +181,7 @@ class GPTQ:
         self.nsamples = 0
         self.quantizer: Quantizer = Quantizer()
 
-    def add_batch(self, inp, out):
+    def add_batch(self, inp: torch.Tensor, out: Any):
         if len(inp.shape) == 2:
             inp = inp.unsqueeze(0)
         tmp = inp.shape[0]
@@ -468,6 +468,5 @@ class GPTQ:
     def free(self):
         self.H = None
         self.Losses = None
-        self.Trace = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
