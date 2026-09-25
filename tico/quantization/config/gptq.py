@@ -118,9 +118,19 @@ class UniversalGPTQConfig(GPTQConfig):
         model = convert(model)
     """
 
+    # Retain gptq_data attributes after quantization finishes
     debug_mode: bool = False
+
+    # Disable GPTQ quantization of modules that are called multiple times in a single batch
     ignore_multi_call_modules: bool = True
+
+    # Regex patterns specifying full hierarchical module names of modules
+    # that should cache their outputs for performance optimization during model replay
     cacheable_modules: list[str] = field(default_factory=list)
+
+    # Allow parent cacheable module calls to its cacheable submodules.
+    # Switching this option may affect performance depending on specific model.
+    allow_calls_between_cacheable_modules: bool = True
 
     @property
     def name(self) -> str:
@@ -141,6 +151,11 @@ class UniversalGPTQConfig(GPTQConfig):
         if not isinstance(self.cacheable_modules, list):
             raise TypeError(
                 f"cacheable_modules must be list. got {type(self.cacheable_modules)}"
+            )
+
+        if not isinstance(self.allow_calls_between_cacheable_modules, bool):
+            raise TypeError(
+                f"allow_calls_between_cacheable_modules must be bool. got {type(self.allow_calls_between_cacheable_modules)}"
             )
 
         # use_orig_model_inference is incompatible with frontier-based execution
