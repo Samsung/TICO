@@ -36,8 +36,8 @@ pipeline:
       model.visual.patch_embed.proj: 8
     verbose: true
     show_progress: true
-    debug_mode: false
-    ignore_multi_call_modules: false
+    debug_mode: true
+    ignore_multi_call_modules: true
     cacheable_modules: ["model.visual.blocks.[0-9]+", "model.language_model.layers.[0-9]+"]
 
   - name: ptq
