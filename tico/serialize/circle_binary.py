@@ -127,8 +127,9 @@ def _pack_flatbuffer(model: Any, limit: int) -> bytearray:
     """Pack one bounded header; reject oversized vectors before copying them."""
 
     flatbuffers = _load_flatbuffers()
+    builder_type: Any = flatbuffers.Builder
 
-    class BoundedBuilder(flatbuffers.Builder):
+    class BoundedBuilder(builder_type):
         def Prep(self, size: int, additionalBytes: int) -> None:
             # Match Builder.Prep's alignment calculation. Checking before the
             # superclass runs also precedes CreateNumpyVector's tobytes() copy.

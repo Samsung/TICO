@@ -88,12 +88,16 @@ class CircleExternalIOUnitTest(unittest.TestCase):
         root = SimpleNamespace(
             BuffersLength=lambda: 2, Buffers=lambda i: (empty, external)[i]
         )
+
         def get_root(data, offset):
             calls.append(data)
             return root
+
         restored = SimpleNamespace(
-            buffers=[SimpleNamespace(data=None, offset=0, size=0),
-                     SimpleNamespace(data=None, offset=32, size=len(source) - 32)],
+            buffers=[
+                SimpleNamespace(data=None, offset=0, size=0),
+                SimpleNamespace(data=None, offset=32, size=len(source) - 32),
+            ],
             subgraphs=[],
         )
         accessor = SimpleNamespace(GetRootAsModel=get_root)
@@ -127,6 +131,7 @@ class CircleExternalIOUnitTest(unittest.TestCase):
 class LargeCircleSchemaRoundTripTest(unittest.TestCase):
     def test_small_output_is_byte_identical_to_the_original_packer(self):
         import flatbuffers
+
         document = make_model(
             np.arange(37, dtype=np.uint8), np.array([255], dtype=np.uint8)
         )
@@ -138,6 +143,7 @@ class LargeCircleSchemaRoundTripTest(unittest.TestCase):
 
     def test_aggregate_payloads_use_aligned_offsets_and_full_bytes(self):
         from circle_schema import circle
+
         first = np.arange(2301, dtype=np.uint8)
         second = np.arange(2407, dtype=np.uint8)[::-1]
         document = make_model(first, second, np.array([42], dtype=np.uint8))
@@ -161,6 +167,7 @@ class LargeCircleSchemaRoundTripTest(unittest.TestCase):
 
     def test_edit_repack_recomputes_offsets_and_keeps_payloads(self):
         from circle_schema import circle
+
         values = np.arange(5001, dtype=np.uint8)
         with patch.object(binary, "_FLATBUFFER_LIMIT", 4096):
             original = binary.serialize_circle_model(make_model(values))
@@ -179,6 +186,7 @@ class LargeCircleSchemaRoundTripTest(unittest.TestCase):
 
     def test_smaller_edited_document_can_return_to_inline_layout(self):
         from circle_schema import circle
+
         with patch.object(binary, "_FLATBUFFER_LIMIT", 4096):
             original = binary.serialize_circle_model(
                 make_model(np.arange(5001, dtype=np.uint8))
@@ -193,6 +201,7 @@ class LargeCircleSchemaRoundTripTest(unittest.TestCase):
 
     def test_truncated_or_placeholder_offsets_rejected(self):
         from circle_schema import circle
+
         with patch.object(binary, "_FLATBUFFER_LIMIT", 4096):
             original = binary.serialize_circle_model(
                 make_model(np.arange(5001, dtype=np.uint8))
@@ -219,6 +228,7 @@ class LargeCircleSchemaRoundTripTest(unittest.TestCase):
 
     def test_packed_uint4_data_and_quantization_metadata_survive(self):
         from circle_schema import circle
+
         packed = np.arange(5001, dtype=np.uint8)
         document = make_model(packed)
         tensor = circle.Tensor.TensorT()
@@ -260,6 +270,7 @@ class LargeCircleConversionTest(unittest.TestCase):
     @staticmethod
     def _module_and_inputs():
         import torch
+
         module = torch.nn.Embedding(257, 16).eval()
         with torch.no_grad():
             module.weight.copy_(
@@ -268,8 +279,8 @@ class LargeCircleConversionTest(unittest.TestCase):
         return module, (torch.tensor([[2, 200]], dtype=torch.long),)
 
     def test_public_module_exported_program_and_pt2_apis_with_o1(self):
-        import torch
         import tico
+        import torch
         from tico.circle.export import optimize_for_export
         from tico.utils.model import CircleModel
 
@@ -300,15 +311,16 @@ class LargeCircleConversionTest(unittest.TestCase):
                 self.assertGreater(len(result.circle_binary), 4096)
                 self.assertIn(expected, payloads_from_bytes(result.circle_binary))
                 self.assertEqual(
-                    CircleModel.load(path).circle_binary, result.circle_binary
+                    CircleModel.load(str(path)).circle_binary, result.circle_binary
                 )
 
     @unittest.skipUnless(
         os.environ.get("TICO_RUN_ONE_LARGE_CIRCLE") == "1", "opt-in ONE inference"
     )
     def test_small_external_embedding_executes_with_one(self):
-        import torch
         import tico
+        import torch
+
         module, args = self._module_and_inputs()
         with patch.object(binary, "_FLATBUFFER_LIMIT", 4096):
             result = tico.convert(module, args)

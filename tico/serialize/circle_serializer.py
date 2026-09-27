@@ -20,8 +20,8 @@ from torch.export.exported_program import ConstantArgument, ExportedProgram, Inp
 
 from tico.config import CompileConfigBase, get_default_config
 from tico.serialize.operators import *
-from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.circle_binary import serialize_circle_model
+from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import get_node_visitors
 from tico.serialize.quant_param import QPARAM_KEY

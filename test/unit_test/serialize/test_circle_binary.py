@@ -207,9 +207,15 @@ class CircleBinaryRangeTest(unittest.TestCase):
 
     def test_external_custom_options_fail_explicitly(self):
         document = model()
-        document.subgraphs = [SimpleNamespace(operators=[
-            SimpleNamespace(largeCustomOptionsOffset=64, largeCustomOptionsSize=8)
-        ])]
+        document.subgraphs = [
+            SimpleNamespace(
+                operators=[
+                    SimpleNamespace(
+                        largeCustomOptionsOffset=64, largeCustomOptionsSize=8
+                    )
+                ]
+            )
+        ]
         with self.assertRaisesRegex(binary.CircleSerializationError, "custom operator"):
             binary.serialize_circle_model(document)
 
@@ -223,14 +229,20 @@ class CircleBinaryPolicyTest(unittest.TestCase):
         # compatibility is tested separately in test_large_circle_roundtrip.py.
         def get_root(header, offset):
             def get_buffer(index):
-                return SimpleNamespace(_tab=SimpleNamespace(
-                    Pos=index * 16,
-                    Offset=lambda slot: 8 if slot == 6 else 0,
-                ))
+                return SimpleNamespace(
+                    _tab=SimpleNamespace(
+                        Pos=index * 16,
+                        Offset=lambda slot: 8 if slot == 6 else 0,
+                    )
+                )
+
             return SimpleNamespace(Buffers=get_buffer)
-        return SimpleNamespace(circle=SimpleNamespace(Model=SimpleNamespace(
-            Model=SimpleNamespace(GetRootAsModel=get_root)
-        )))
+
+        return SimpleNamespace(
+            circle=SimpleNamespace(
+                Model=SimpleNamespace(Model=SimpleNamespace(GetRootAsModel=get_root))
+            )
+        )
 
     def test_small_model_keeps_complete_inline_bytes(self):
         document = model(b"abc")
@@ -267,9 +279,14 @@ class CircleBinaryPolicyTest(unittest.TestCase):
 
     def test_actual_pack_overflow_uses_external_layout(self):
         document = model(b"abcd")
-        with patch.object(binary, "_pack_flatbuffer", side_effect=[
-            binary._FlatbufferTooLarge("metadata overhead"), bytearray(64)
-        ]) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with patch.object(
+            binary,
+            "_pack_flatbuffer",
+            side_effect=[
+                binary._FlatbufferTooLarge("metadata overhead"),
+                bytearray(64),
+            ],
+        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
             result = binary.serialize_circle_model(document)
         self.assertEqual(pack.call_count, 2)
         self.assertTrue(result.endswith(b"abcd"))
@@ -304,9 +321,11 @@ class CircleBinaryPolicyTest(unittest.TestCase):
 
     def test_one_byte_and_empty_buffers_remain_inline(self):
         document = model(b"z", b"", b"abc")
-        with patch.object(binary, "_pack_flatbuffer", side_effect=[
-            binary._FlatbufferTooLarge(), bytearray(96)
-        ]) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with patch.object(
+            binary,
+            "_pack_flatbuffer",
+            side_effect=[binary._FlatbufferTooLarge(), bytearray(96)],
+        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
             binary.serialize_circle_model(document)
         projected = pack.call_args.args[0]
         self.assertEqual(projected.buffers[1].data, b"z")
@@ -330,10 +349,13 @@ class CircleBinaryPolicyTest(unittest.TestCase):
         class Builder:
             def __init__(self, initial_size):
                 self.prep_called = False
+
             def Finish(self, offset, identifier):
                 pass
+
             def Offset(self):
                 return 0
+
             def Prep(self, size, additional):
                 self.prep_called = True
 
@@ -341,9 +363,11 @@ class CircleBinaryPolicyTest(unittest.TestCase):
             Builder=Builder, builder=SimpleNamespace(BuilderSizeError=RuntimeError)
         )
         copied = []
+
         def pack(builder):
             builder.Prep(4, 2**31)
             copied.append(True)
+
         document = SimpleNamespace(Pack=pack)
         with patch.object(binary, "_load_flatbuffers", return_value=runtime):
             with self.assertRaises(binary._FlatbufferTooLarge):
