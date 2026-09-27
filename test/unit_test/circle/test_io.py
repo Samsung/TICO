@@ -37,7 +37,13 @@ class FakeAccessor:
 
     @staticmethod
     def GetRootAsModel(data, offset):
-        return (bytes(data), offset)
+        return FakeAccessor(bytes(data), offset)
+
+    def __init__(self, data, offset):
+        self.source = (data, offset)
+
+    def BuffersLength(self):
+        return 0
 
 
 class FakeObjectType:
@@ -45,7 +51,7 @@ class FakeObjectType:
 
     @staticmethod
     def InitFromObj(root):
-        return {"root": root}
+        return {"root": root.source}
 
 
 class FakeBuilder:
@@ -91,7 +97,10 @@ class CircleIOTest(unittest.TestCase):
 
     def test_serialize_uses_circle_file_identifier(self):
         model = FakePackableModel()
-        with patch("tico.circle.io._load_flatbuffers", return_value=FakeFlatbuffers):
+        with patch(
+            "tico.serialize.circle_binary._load_flatbuffers",
+            return_value=FakeFlatbuffers,
+        ):
             data = model_to_bytes(model)
 
         self.assertEqual(data, b"serialized")
