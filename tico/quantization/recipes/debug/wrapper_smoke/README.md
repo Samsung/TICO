@@ -415,7 +415,7 @@ Wrapper smoke check supports:
 - module-level quantization sanity checks
 - floating-point vs quantized parity metrics
 - PEIR and mean absolute error reporting
-- `plot_two_outputs()` visualization
+- `plot_two_outputs()` visualization (supports Plotext 5 and 6)
 - Circle export for wrapped modules
 - deterministic synthetic calibration data
 - reusable shared runner infrastructure

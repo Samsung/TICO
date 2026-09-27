@@ -150,6 +150,18 @@ def plot_two_outputs(x_values: torch.Tensor, y_values: torch.Tensor):
 
     import plotext as plt
 
+    # Plotext 6 moved plotting operations onto the master figure.
+    if not hasattr(plt, "clear_data"):
+        fig = plt.figure
+        fig.clear.data()
+        fig.ruler(axis=0).lim(axis_min, axis_max)
+        fig.ruler(axis=1).lim(axis_min, axis_max)
+        fig.plot_size(width=50, height=25)
+        # Match the legacy first plot: terminal colors with blue scatter points.
+        fig.theme("simple")
+        fig.draw(fig.signal(x_np, y_np, marker="dot"))
+        return fig.build().string()
+
     plt.clear_data()
     plt.xlim(axis_min, axis_max)
     plt.ylim(axis_min, axis_max)
