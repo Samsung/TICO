@@ -14,7 +14,7 @@
 
 import unittest
 from typing import Dict
-from unittest.mock import Mock, patch
+from unittest.mock import call, Mock, patch
 
 import numpy as np
 import torch
@@ -289,7 +289,10 @@ class TestEvaluationUtils(unittest.TestCase):
     def test_plot_two_outputs(self):
         """Test plot_two_outputs function"""
         # Patch plotext import more directly by patching the module in sys.modules
-        with patch.dict("sys.modules", {"plotext": Mock()}):
+        legacy_plotext = Mock(
+            spec=["clear_data", "xlim", "ylim", "plotsize", "scatter", "theme", "build"]
+        )
+        with patch.dict("sys.modules", {"plotext": legacy_plotext}):
             import plotext
 
             # Setup mock for plotext
@@ -309,6 +312,45 @@ class TestEvaluationUtils(unittest.TestCase):
 
             # Verify results
             self.assertEqual(result, "mock_figure")
+            plotext.clear_data.assert_called_once_with()
+
+    def test_plot_two_outputs_figure_api(self):
+        plotext = Mock(spec=["figure"])
+        fig = plotext.figure
+        fig.build.return_value.string.return_value = "figure_text"
+        with patch.dict("sys.modules", {"plotext": plotext}):
+            result = plot_two_outputs(torch.tensor([1.0]), torch.tensor([1.0]))
+
+        self.assertEqual(result, "figure_text")
+        fig.clear.data.assert_called_once_with()
+        self.assertEqual(fig.ruler.call_args_list, [call(axis=0), call(axis=1)])
+        fig.ruler.return_value.lim.assert_called_with(0.95, 1.05)
+        fig.plot_size.assert_called_once_with(width=50, height=25)
+        fig.draw.assert_called_once_with(fig.signal.return_value)
+        fig.theme.assert_called_once_with("simple")
+
+    def test_plot_two_outputs_installed_plotext(self):
+        try:
+            import plotext
+        except ModuleNotFoundError as exc:
+            if exc.name != "plotext":
+                raise
+            self.skipTest("Optional plotting dependency plotext is not installed")
+
+        self.addCleanup(
+            plotext.clear_figure
+            if hasattr(plotext, "clear_figure")
+            else plotext.figure.clear
+        )
+        x_values = torch.tensor([1.0, 2.0, 3.0])
+        first = plot_two_outputs(x_values, x_values * 2)
+        second = plot_two_outputs(x_values, x_values * 2)
+        self.assertIsInstance(first, str)
+        self.assertIn("┌", first)
+        self.assertNotIn("\033[48;", first)
+        self.assertNotIn("\033[38;5;0m", first)
+        self.assertIn("\033[38;5;12m", first)
+        self.assertEqual(first, second)
 
     def test_ensure_list_single_element(self):
         """Test ensure_list with single element"""
