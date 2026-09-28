@@ -33,7 +33,7 @@ Usage: ./ccex configure test [OPTIONS]
 --torch_ver VER       Validate the installed Torch version before installing
                       its matching TorchVision package. Accepts:
                         • ${PYTORCH_INSTALLABLE_FAMILY_MIN} ~ ${PYTORCH_INSTALLABLE_FAMILY_MAX}
-                        • 2.10.0, 2.13.0+cu132 ...
+                        • 2.11.0, 2.14.0+cu132 ...
                         • ${PYTORCH_PINNED_NIGHTLY_SELECTOR}
                         • ${PYTORCH_LATEST_NIGHTLY_SELECTOR}
                       If omitted, the installed Torch version is used.

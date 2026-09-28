@@ -228,10 +228,10 @@ The package metadata requires Python 3.10 or newer.
 
 - Package metadata intentionally declares the unbounded dependency `torch`, so
   installation does not reject a user-managed older or newer Torch version.
-- Source tooling keeps Torch 2.5 through 2.9 as legacy best-effort install choices.
-- The qualified stable support window is Torch 2.10, 2.11, and 2.12.
-- The default source-install family is 2.12.
-- Torch 2.13 is explicitly installable as a qualification candidate and is not part of
+- Source tooling keeps Torch 2.5 through 2.10 as legacy best-effort install choices.
+- The qualified stable support window is Torch 2.11, 2.12, and 2.13.
+- The default source-install family is 2.13.
+- Torch 2.14 is explicitly installable as a qualification candidate and is not part of
   release support until it is promoted.
 - `nightly` installs the repository-pinned Torch/TorchVision builds for reproducible
   local debugging.

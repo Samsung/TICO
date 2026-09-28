@@ -16,10 +16,10 @@ TICO deliberately separates package installation from qualified compatibility:
 | Tier | Meaning | Current value |
 |---|---|---|
 | Package dependency | Allows installation into an existing Torch environment | Unbounded `torch` |
-| Legacy installable | Accepted by `./ccex install`, but maintained on a best-effort basis | `2.5` through `2.9` |
-| Supported stable | Qualified stable families used for release support | `2.10`, `2.11`, `2.12` |
-| Default | Newest qualified stable family used by `./ccex install` | `2.12` |
-| Candidate | Newly released stable family under qualification | `2.13` |
+| Legacy installable | Accepted by `./ccex install`, but maintained on a best-effort basis | `2.5` through `2.10` |
+| Supported stable | Qualified stable families used for release support | `2.11`, `2.12`, `2.13` |
+| Default | Newest qualified stable family used by `./ccex install` | `2.13` |
+| Candidate | Newly released stable family under qualification | `2.14` |
 | Pinned nightly | Reproducible nightly channel for local debugging | `nightly` |
 | Moving nightly | Latest compatible Torch/TorchVision nightly pair | `nightly-latest` |
 
@@ -28,8 +28,8 @@ already-installed older Torch release can satisfy `pip install tico`; package me
 does not force an upgrade or reject it. This is an installation contract, not a claim
 that every Torch release is qualified.
 
-The source installer has explicit metadata for families 2.5 through 2.13. Families
-2.5 through 2.9 are retained for existing users and reproducibility, but are not run in
+The source installer has explicit metadata for families 2.5 through 2.14. Families
+2.5 through 2.10 are retained for existing users and reproducibility, but are not run in
 the regular CI matrix. Their usability also depends on PyTorch publishing a wheel for
 the requested Python, operating-system, and compute-platform combination.
 
