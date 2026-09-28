@@ -30,6 +30,8 @@ Example:
     model = quantizer.convert(model)
 """
 
+import datetime
+import gc
 import re
 import types
 from collections import defaultdict
@@ -45,7 +47,7 @@ from tico.quantization.algorithm.gptq.quant import Quantizer
 from tico.quantization.config.gptq import UniversalGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
-from tico.utils.utils import move_to_device, Stack
+from tico.utils.utils import move_to_device, print_gpu_memory, Stack
 from tqdm.auto import tqdm
 
 
@@ -347,6 +349,12 @@ class GPTQ_Data:
     out_device: torch.device | None
 
 
+@dataclass
+class ModuleTypeStatistic:
+    n_cacheable: int
+    n_quantizable: int
+
+
 class StopForward(Exception):
     """
     Exception raised to halt forward propagation during GPTQ quantization.
@@ -414,7 +422,7 @@ def wrap_model(
     full_model_name: str,
     ignored_module_patterns: Iterable[re.Pattern],
     ignored_modules: Iterable[nn.Module],
-) -> None:
+) -> ModuleTypeStatistic:
     """
     Recursively wrap a model's forward methods for GPTQ quantization.
 
@@ -436,7 +444,15 @@ def wrap_model(
         ignored_module_patterns: Collection of regular expressions to be matched against submodules' full names. If matched a submodule is not quantized.
         ignored_modules: Modules to exclude from GPTQ quantization.
         cache_outputs: Whether to enable modules' outputs caching for performance optimization.
+
+    Returns:
+        ModuleTypeStatistic: The number of cacheable modules and the number of quantizable modules.
     """
+
+    statistics = ModuleTypeStatistic(
+        n_cacheable=0,
+        n_quantizable=0,
+    )
 
     def old_forward(gptq_data: GPTQ_Data, *args, **kwargs) -> Any:
         args = move_to_device(args, gptq_data.weight_device)
@@ -492,13 +508,13 @@ def wrap_model(
             case _:
                 assert False, "We should never get here"
 
-    not_quantizable: bool = (
-        type(model) not in _QUANTIZABLE_LAYER_TYPES
-        or any(
-            regex.fullmatch(full_model_name) is not None
+    is_quantizable: bool = (
+        type(model) in _QUANTIZABLE_LAYER_TYPES
+        and all(
+            regex.fullmatch(full_model_name) is None
             for regex in ignored_module_patterns
         )
-        or model in ignored_modules
+        and model not in ignored_modules
     )
 
     is_cacheable: bool = getattr(model, "is_cacheable")
@@ -521,9 +537,9 @@ def wrap_model(
             cached_output=[],
             collected_inputs=[],
             state=(
-                (GPTQ_STATE.CACHE if is_cacheable else GPTQ_STATE.COMPUTE)
-                if not_quantizable
-                else GPTQ_STATE.COLLECT
+                GPTQ_STATE.COLLECT
+                if is_quantizable
+                else (GPTQ_STATE.CACHE if is_cacheable else GPTQ_STATE.COMPUTE)
             ),
             invocation_idx=0,
             batch_idx=0,
@@ -532,6 +548,10 @@ def wrap_model(
             out_device=None,
         ),
     )
+    if is_cacheable:
+        statistics.n_cacheable += 1
+    if is_quantizable:
+        statistics.n_quantizable += 1
 
     model.forward = types.MethodType(new_forward, model)
 
@@ -541,12 +561,16 @@ def wrap_model(
         full_child_name = (
             f"{full_model_name}.{child_name}" if full_model_name else child_name
         )
-        wrap_model(
+        child_stats: ModuleTypeStatistic = wrap_model(
             child,
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
             ignored_modules=ignored_modules,
         )
+        statistics.n_cacheable += child_stats.n_cacheable
+        statistics.n_quantizable += child_stats.n_quantizable
+
+    return statistics
 
 
 def unwrap_model(model: nn.Module, retain_gptq_data: bool = False) -> None:
@@ -566,7 +590,11 @@ def unwrap_model(model: nn.Module, retain_gptq_data: bool = False) -> None:
         module.forward = gptq_data.old_forward
         if not retain_gptq_data:
             gptq_data.cached_output.clear()
+            gptq_data.collected_inputs.clear()
+            gptq_data.gptq = None
+            gptq_data.quantizer = None
             delete_gptq_data(module)
+    gc.collect()
 
 
 def collect_quantizers(
@@ -1124,75 +1152,96 @@ def gptq_quantize(
     assert len(args_dataset) > 0, "Empty calibration dataset"
     assert len(args_dataset) == len(kwargs_dataset), "Dataset length mismatch"
 
-    if not has_gptq_data(model):
-        cacheable_module_patterns: list[re.Pattern] = [
-            re.compile(pattern) for pattern in gptq_config.cacheable_modules
-        ]
+    assert not has_gptq_data(model), "The model should not be already wrapped"
+    start_time: datetime.datetime = datetime.datetime.now()
+    if gptq_config.verbose:
+        print(f"[START] {start_time}")
 
-        # For each module determine if it is cacheable
-        for full_module_name, m in model.named_modules():
-            is_cacheable: bool = bool(full_module_name) and any(
-                regex.fullmatch(full_module_name) is not None
-                for regex in cacheable_module_patterns
-            )
-            assert not hasattr(m, "is_cacheable")
-            setattr(m, "is_cacheable", is_cacheable)
+    cacheable_module_patterns: list[re.Pattern] = [
+        re.compile(pattern) for pattern in gptq_config.cacheable_modules
+    ]
 
-        # Detect cacheable modules that call other cacheable modules
-        cacheable_modules_callers_to_callees: dict[nn.Module, set[nn.Module]]
-        if gptq_config.allow_calls_between_cacheable_modules:
-            cacheable_modules_callers_to_callees = find_caller_and_callee_modules(
-                model=model,
-                caller_criterion=lambda m: getattr(m, "is_cacheable", False),
-                callee_criterion=lambda m: getattr(m, "is_cacheable", False),
-                relate_criterion=lambda caller, callee: callee not in caller.modules(),
-                args_dataset=args_dataset,
-                kwargs_dataset=kwargs_dataset,
-                show_progress=gptq_config.show_progress,
-                verbose=gptq_config.verbose,
-                description="Detecting cacheable modules calling other cacheable modules",
-            )
-        else:
-            cacheable_modules_callers_to_callees = find_caller_and_callee_modules(
-                model=model,
-                caller_criterion=lambda m: getattr(m, "is_cacheable", False),
-                callee_criterion=lambda m: getattr(m, "is_cacheable", False),
-                relate_criterion=lambda caller, callee: True,
-                args_dataset=args_dataset,
-                kwargs_dataset=kwargs_dataset,
-                show_progress=gptq_config.show_progress,
-                verbose=gptq_config.verbose,
-                description="Detecting cacheable modules calling other cacheable modules",
-            )
+    # For each module determine if it is cacheable
+    for full_module_name, m in model.named_modules():
+        is_cacheable: bool = bool(full_module_name) and any(
+            regex.fullmatch(full_module_name) is not None
+            for regex in cacheable_module_patterns
+        )
+        assert not hasattr(m, "is_cacheable")
+        setattr(m, "is_cacheable", is_cacheable)
 
-        if cacheable_modules_callers_to_callees:
-            raise RuntimeError(
-                "Cacheable modules calling other cacheable modules detected"
-            )
-
-        # Detect modules that are called multiple times in a single input batch
-        multicall_modules: set[nn.Module] = (
-            find_multicall_modules(
-                model,
-                args_dataset=args_dataset,
-                kwargs_dataset=kwargs_dataset,
-                show_progress=gptq_config.show_progress,
-                verbose=gptq_config.verbose,
-            )
-            if gptq_config.ignore_multi_call_modules
-            else set()
+    # Detect cacheable modules that call other cacheable modules
+    cacheable_modules_callers_to_callees: dict[nn.Module, set[nn.Module]]
+    if gptq_config.allow_calls_between_cacheable_modules:
+        cacheable_modules_callers_to_callees = find_caller_and_callee_modules(
+            model=model,
+            caller_criterion=lambda m: getattr(m, "is_cacheable", False),
+            callee_criterion=lambda m: getattr(m, "is_cacheable", False),
+            relate_criterion=lambda caller, callee: callee not in caller.modules(),
+            args_dataset=args_dataset,
+            kwargs_dataset=kwargs_dataset,
+            show_progress=gptq_config.show_progress,
+            verbose=gptq_config.verbose,
+            description="Detecting cacheable modules calling other cacheable modules",
+        )
+    else:
+        cacheable_modules_callers_to_callees = find_caller_and_callee_modules(
+            model=model,
+            caller_criterion=lambda m: getattr(m, "is_cacheable", False),
+            callee_criterion=lambda m: getattr(m, "is_cacheable", False),
+            relate_criterion=lambda caller, callee: True,
+            args_dataset=args_dataset,
+            kwargs_dataset=kwargs_dataset,
+            show_progress=gptq_config.show_progress,
+            verbose=gptq_config.verbose,
+            description="Detecting cacheable modules calling other cacheable modules",
         )
 
-        wrap_model(
-            model,
-            full_model_name="",
-            ignored_module_patterns=(
-                [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
-            ),
-            ignored_modules=multicall_modules,
-        )
+    if cacheable_modules_callers_to_callees:
+        for m in model.modules():
+            delattr(m, "is_cacheable")
+        raise RuntimeError("Cacheable modules calling other cacheable modules detected")
+
+    # Detect modules that are called multiple times in a single input batch
+    multicall_modules: set[nn.Module] = find_multicall_modules(
+        model,
+        args_dataset=args_dataset,
+        kwargs_dataset=kwargs_dataset,
+        show_progress=gptq_config.show_progress,
+        verbose=gptq_config.verbose,
+    )
+
+    module_stats: ModuleTypeStatistic = wrap_model(
+        model,
+        full_model_name="",
+        ignored_module_patterns=(
+            [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
+        ),
+        ignored_modules=multicall_modules
+        if gptq_config.ignore_multi_call_modules
+        else set(),
+    )
 
     gptq_data: GPTQ_Data
+
+    if gptq_config.show_progress:
+        progress_bar = tqdm(
+            desc="Processing the model",
+            unit="module",
+            total=module_stats.n_cacheable + module_stats.n_quantizable,
+        )
+
+        def update_progress():
+            progress_bar.update(1)
+            if gptq_config.verbose:
+                print_gpu_memory(f"{progress_bar.n}")
+
+    else:
+        progress_bar = None
+
+        def update_progress():
+            pass
+
     try:
         while True:
             # Run model to do either of the following:
@@ -1240,10 +1289,12 @@ def gptq_quantize(
                         release_children_cache=gptq_config.allow_calls_between_cacheable_modules,
                         verbose=gptq_config.verbose,
                     )
+                    update_progress()
 
                 # 2.2. Process quantizable modules that have collected their inputs
                 for module_ready_to_quantize in modules_ready_to_quantize:
                     finish_collection(module_ready_to_quantize, gptq_config)
+                    update_progress()
 
                 # 2.3.
                 for module_not_ready_to_quantize in modules_not_ready_to_quantize:
@@ -1257,6 +1308,7 @@ def gptq_quantize(
                     # 3.1.1. Quantize modules that have callected all required inputs
                     for module_ready_to_quantize in modules_ready_to_quantize:
                         finish_collection(module_ready_to_quantize, gptq_config)
+                        update_progress()
 
                     # 3.1.2. Reset modules that haven't collected all required inputs (they will start over at the next model replay)
                     for module_not_ready_to_quantize in modules_not_ready_to_quantize:
@@ -1302,6 +1354,7 @@ def gptq_quantize(
                             gptq_data.collected_inputs.clear()
                     assert best_module_to_quantize is not None
                     finish_collection(best_module_to_quantize, gptq_config)
+                    update_progress()
 
         quantizers: dict[str, Quantizer] = {}
         collect_quantizers(
@@ -1311,4 +1364,13 @@ def gptq_quantize(
         )
         setattr(model, "quantizers", quantizers)
     finally:
+        if progress_bar:
+            progress_bar.close()
+
         unwrap_model(model, retain_gptq_data=gptq_config.debug_mode)
+
+        end_time: datetime.datetime = datetime.datetime.now()
+        time_delta: datetime.timedelta = end_time - start_time
+        if gptq_config.verbose:
+            print(f"[FINISH] {end_time}")
+            print(f"[START-TO-FINISH] {time_delta.seconds / 3600:.2} hours")

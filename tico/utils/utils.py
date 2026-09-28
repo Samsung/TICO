@@ -492,3 +492,13 @@ def move_to_device(obj, device):
 
     # preserve everything else (bool, int, None, custom objects, etc.)
     return obj
+
+
+def print_gpu_memory(label: str):
+    """Print GPU memory usage for debugging."""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(
+            f"[{label}] GPU: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved"
+        )
