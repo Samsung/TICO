@@ -19,6 +19,12 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 
+from tico.circle._buffer import (
+    inline_payload_view,
+    payload_fingerprint,
+    PayloadFingerprint,
+    payloads_equal,
+)
 from tico.circle._object import create_object, ObjectFactory
 from tico.circle._schema import decode_text
 from tico.circle.analysis import TensorContract
@@ -35,8 +41,22 @@ class ConstantKey:
     payload: bytes
 
 
+@dataclass(frozen=True)
+class _PooledConstantKey:
+    """Pair a semantic contract with an exact-content canonical buffer index."""
+
+    contract: TensorContract
+    buffer_index: int
+
+
 class ConstantPool:
-    """Deduplicate inline buffers globally and constant tensors per subgraph."""
+    """Deduplicate constants without retaining payload-sized index copies.
+
+    Digests select candidates, never establish equality. Indexes own only small
+    fingerprints and integer references to model storage. Payload mutations must
+    be followed by synchronize(force=True); append/metadata-only edits can use
+    incremental synchronization. Public ConstantKey remains a bytes-based value.
+    """
 
     def __init__(
         self,
@@ -50,8 +70,9 @@ class ConstantPool:
         self.model = model
         self.codec = codec or TensorValueCodec()
         self.object_factory = object_factory
-        self._buffers: dict[bytes, int] = {}
-        self._tensors: dict[tuple[int, ConstantKey], int] = {}
+        self._buffers: dict[PayloadFingerprint, list[int]] = {}
+        self._canonical_buffers: dict[int, int] = {}
+        self._tensors: dict[tuple[int, _PooledConstantKey], int] = {}
         self._buffer_count = 0
         self._tensor_counts: tuple[int, ...] = ()
         self._rebuilds = 0
@@ -85,7 +106,9 @@ class ConstantPool:
         if self._delegate is not None:
             return self._delegate.add_buffer(payload, deduplicate=deduplicate)
         normalized = bytes(payload)
-        existing = self._buffers.get(normalized)
+        view = memoryview(normalized)
+        fingerprint = payload_fingerprint(view)
+        existing = self._find_buffer(view, fingerprint)
         if deduplicate and existing is not None:
             return existing
 
@@ -98,7 +121,9 @@ class ConstantPool:
         buffers = _mutable_list(self.model, "buffers")
         buffers.append(buffer)
         index = len(buffers) - 1
-        self._buffers.setdefault(normalized, index)
+        if existing is None:
+            self._buffers.setdefault(fingerprint, []).append(index)
+        self._canonical_buffers[index] = index if existing is None else existing
         self._buffer_count = len(buffers)
         self._incremental_updates += 1
         return index
@@ -129,12 +154,14 @@ class ConstantPool:
         resolved_contract = contract or TensorContract.from_value(value)
         _validate_constant_contract(value, resolved_contract)
         payload = self.codec.encode(value)
-        key = ConstantKey(resolved_contract, payload)
+        buffer_index = self.intern_buffer(payload)
+        key = _PooledConstantKey(
+            resolved_contract, self._canonical_buffers[buffer_index]
+        )
         existing = self._tensors.get((subgraph_index, key))
         if existing is not None:
             return existing
 
-        buffer_index = self.intern_buffer(payload)
         tensor_name = _unique_tensor_name(subgraph, name)
         tensor = resolved_contract.make_tensor(
             name=tensor_name,
@@ -156,7 +183,7 @@ class ConstantPool:
         if self._delegate is not None:
             return self._delegate.statistics
         return {
-            "buffers": len(self._buffers),
+            "buffers": sum(len(candidates) for candidates in self._buffers.values()),
             "tensors": len(self._tensors),
             "rebuilds": self._rebuilds,
             "incremental_updates": self._incremental_updates,
@@ -190,6 +217,7 @@ class ConstantPool:
             )
         ):
             self._buffers.clear()
+            self._canonical_buffers.clear()
             self._tensors.clear()
             self._index_existing_objects()
             self._rebuilds += 1
@@ -197,9 +225,7 @@ class ConstantPool:
 
         changed = False
         for buffer_index in range(max(1, self._buffer_count), len(buffers)):
-            payload = _inline_buffer_payload(buffers[buffer_index])
-            if payload is not None:
-                self._buffers.setdefault(payload, buffer_index)
+            self._index_buffer(buffer_index, buffers[buffer_index])
             changed = True
 
         previous_counts = self._tensor_counts or (0,) * len(tensor_counts)
@@ -239,9 +265,7 @@ class ConstantPool:
         for buffer_index, buffer in enumerate(buffers):
             if buffer_index == 0:
                 continue
-            payload = _inline_buffer_payload(buffer)
-            if payload is not None:
-                self._buffers.setdefault(payload, buffer_index)
+            self._index_buffer(buffer_index, buffer)
 
         for subgraph_index, subgraph in enumerate(
             as_list(getattr(self.model, "subgraphs", None))
@@ -265,8 +289,8 @@ class ConstantPool:
         self,
         subgraph_index: int,
         tensor_index: int,
-    ) -> ConstantKey | None:
-        """Return one tensor's semantic constant key when it has inline storage."""
+    ) -> _PooledConstantKey | None:
+        """Reuse buffer identity without rehashing/copying each tensor's weight."""
 
         subgraph = _subgraph(self.model, subgraph_index)
         tensors = as_list(getattr(subgraph, "tensors", None))
@@ -279,14 +303,43 @@ class ConstantPool:
         buffers = as_list(getattr(self.model, "buffers", None))
         if buffer_index <= 0 or buffer_index >= len(buffers):
             return None
-        payload = _inline_buffer_payload(buffers[buffer_index])
-        if payload is None:
+        canonical = self._canonical_buffers.get(buffer_index)
+        if canonical is None:
             return None
         try:
             contract = TensorContract.from_tensor(tensor)
         except CircleValueError:
             return None
-        return ConstantKey(contract, payload)
+        return _PooledConstantKey(contract, canonical)
+
+    def _find_buffer(
+        self, payload: memoryview, fingerprint: PayloadFingerprint
+    ) -> int | None:
+        """Resolve a digest bucket by exact comparison against live model data."""
+
+        candidates = self._buffers.get(fingerprint)
+        if not candidates:
+            return None
+        buffers = as_list(getattr(self.model, "buffers", None))
+        for index in candidates:
+            if index >= len(buffers):
+                continue
+            candidate = inline_payload_view(buffers[index])
+            if candidate is not None and payloads_equal(payload, candidate):
+                return index
+        return None
+
+    def _index_buffer(self, index: int, buffer: Any) -> None:
+        """Hash each buffer once per indexing sweep, regardless of tensor aliases."""
+
+        payload = inline_payload_view(buffer)
+        if payload is None:
+            return
+        fingerprint = payload_fingerprint(payload)
+        existing = self._find_buffer(payload, fingerprint)
+        if existing is None:
+            self._buffers.setdefault(fingerprint, []).append(index)
+        self._canonical_buffers[index] = index if existing is None else existing
 
     def _refresh_tensors(
         self,
@@ -785,21 +838,6 @@ def _mutable_list(owner: Any, field_name: str) -> list[Any]:
     normalized = as_list(value)
     setattr(owner, field_name, normalized)
     return normalized
-
-
-def _inline_buffer_payload(buffer: Any) -> bytes | None:
-    """Return inline bytes or None for unresolved external or absent payloads."""
-
-    if int(getattr(buffer, "offset", 0) or 0) or int(getattr(buffer, "size", 0) or 0):
-        return None
-    data = getattr(buffer, "data", None)
-    if data is None:
-        return None
-    try:
-        array = np.asarray(data, dtype=np.uint8)
-    except (TypeError, ValueError):
-        return None
-    return bytes(np.ascontiguousarray(array).reshape(-1))
 
 
 def _unique_tensor_name(

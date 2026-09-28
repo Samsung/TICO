@@ -205,6 +205,9 @@ class CircleMutationTransaction:
         self.session.mark_modified(
             (self.subgraph_index,),
             touched_tensors=({self.subgraph_index: touched} if touched else None),
+            rebuild_constant_pools=bool(
+                self._buffer_snapshots or "buffers" in self._model_fields
+            ),
         )
         self._committed = True
 
