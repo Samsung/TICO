@@ -68,6 +68,51 @@ Rules:
 - Prefer `hf_token: null`; pass secrets through the environment or runtime
   tooling instead of YAML.
 
+### `model.adapter` (optional)
+
+`model.adapter` selects a differently registered adapter for the same family,
+for example a variant registered by an out-of-tree package through
+`register_adapter()`. `model.family` keeps its meaning for dataset defaults,
+GPTQ/PTQ config selection, and export helpers, so the selected adapter must
+declare the same `family`; a mismatch is rejected before model loading.
+
+```yaml
+extensions:
+  - my_extension.recipes:activate   # registers the "gemma4_variant" key
+
+model:
+  family: gemma4
+  adapter: gemma4_variant
+  name_or_path: google/gemma-4-e2b-it
+```
+
+Without `model.adapter`, the built-in family adapter is used; registering a
+variant never changes the default.
+
+## `extensions` (optional)
+
+`extensions` is a top-level list of `package.module` or
+`package.module:callable` entries. Each entry is imported (and the callable
+invoked without arguments) by `quantize`, `evaluate`, `export`, and
+`inspector` before adapter resolution, model loading, and checkpoint loading.
+Extensions register additional adapters, quantizers, or wrappers through the
+public registration APIs.
+
+```yaml
+extensions:
+  - my_extension.recipes:activate
+```
+
+Rules:
+
+- Loading an extension executes trusted Python code installed in the current
+  environment. It is an explicit opt-in per config and not a sandbox.
+- A missing module or callable fails the run; nothing is skipped silently.
+- Every process that consumes the config loads the entries again. An import
+  performed by another process is not activation.
+- Repeated loading must be safe; registration APIs treat re-registering the
+  same object as a no-op and reject conflicting registrations.
+
 ## `runtime`
 
 ```yaml
@@ -525,6 +570,8 @@ Before committing a config:
 - No secrets, personal paths, or machine-specific cache directories.
 - `runtime.seed` is set when the config uses recipe runners.
 - `model.family` is registered when the config uses recipe runners.
+- `model.adapter`, when set, names a registered adapter for the same family and
+  the package providing it is listed under `extensions`.
 - Every `pipeline[*].name` is registered when the config has a pipeline.
 - The config has a clear purpose: smoke, PTQ-only, GPTQ+PTQ, benchmark, debug,
   or export.

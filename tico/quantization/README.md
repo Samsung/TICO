@@ -145,10 +145,20 @@ steps:
   - Implement a new quantizer class (e.g., `NewAlgoQuantizer`) that inherits from
     `BaseQuantizer`. Implement the _prepare_ and _convert_ methods.
 
-2. Update Public Interface Dispatch (if necessary)
+2. Register the Quantizer
 
-Modify the dispatch logic in the public interface functions (`prepare` and `convert`) to
-recognize your new configuration type and instantiate your new quantizer accordingly.
+Decorate the quantizer with `register_quantizer(NewAlgoConfig)` from
+`tico/quantization/quantizer_registry.py`. `prepare()` resolves the quantizer by exact
+config type; configs whose `name` matches `tico.quantization.algorithm.<name>.quantizer`
+are also imported lazily on first use. Registration rules:
+
+- One config type maps to exactly one quantizer class. Re-registering the same class is
+  a no-op, so repeated activation of an extension is safe.
+- Registering a different quantizer for an already mapped config type raises
+  `ValueError`. Do not reuse a built-in config type for a new algorithm; define your own
+  config class, including for quantizers shipped in separately installed packages.
+- `registered_quantizer(config_cls)` returns the current mapping without triggering the
+  lazy import.
 
 3. Write Tests
 

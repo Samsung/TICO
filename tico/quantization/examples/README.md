@@ -48,6 +48,12 @@ Summary:
 | `export.py` | No | No | No | Yes |
 | `inspector.py` | Mode-dependent | Mode-dependent | Debug only | Debug only |
 
+All four commands load the optional top-level `extensions` list from the config
+before resolving the adapter, and honor `model.adapter` for selecting a
+registered adapter variant. See the
+[config guide](./configs/README.md#extensions-optional) for the schema and the
+trust implications.
+
 Common usage patterns:
 
 ```bash

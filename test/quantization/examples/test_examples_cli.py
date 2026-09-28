@@ -141,8 +141,8 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             lambda seed: calls.setdefault("seed", seed),
         ), patch.object(
             evaluate_cli,
-            "get_adapter",
-            lambda family: FakeAdapter(),
+            "resolve_adapter",
+            lambda cfg: FakeAdapter(),
         ), patch.object(
             evaluate_cli.torch,
             "load",
@@ -202,8 +202,8 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             },
         ), patch.object(
             evaluate_cli,
-            "get_adapter",
-            lambda family: FakeAdapter(),
+            "resolve_adapter",
+            lambda cfg: FakeAdapter(),
         ), patch.object(
             sys,
             "argv",
@@ -387,7 +387,7 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "load_recipe_config",
             lambda path, overrides: {"runtime": {}, "model": {"family": "llama"}},
         ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
-            inspect_cli, "get_adapter", lambda family: FakeAdapter()
+            inspect_cli, "resolve_adapter", lambda cfg: FakeAdapter()
         ), patch.object(
             inspect_cli,
             "trace_ptq_parity",

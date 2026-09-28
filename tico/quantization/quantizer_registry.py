@@ -30,13 +30,39 @@ def register_quantizer(config_cls: Type[BaseConfig]):
     Usage:
         @register_quantizer(GPTQConfig)
         class GPTQQuantizer(BaseQuantizer): ...
+
+    Duplicate-registration policy:
+        Registering the same quantizer class for a config type again is a
+        no-op, so re-running an extension's registration is safe. Registering
+        a *different* quantizer class for an already mapped config type raises
+        ``ValueError``; a built-in mapping is never replaced implicitly.
+        Out-of-tree algorithms must define their own config type.
     """
 
     def wrapper(quantizer_cls: Type[TQ]) -> Type[TQ]:
+        existing = _REGISTRY.get(config_cls)
+        if existing is not None and existing is not quantizer_cls:
+            raise ValueError(
+                f"Config type {config_cls.__name__} is already registered to "
+                f"{existing.__name__}; refusing to replace it with "
+                f"{quantizer_cls.__name__}. Define a distinct config type for "
+                "the new quantizer."
+            )
         _REGISTRY[config_cls] = quantizer_cls
         return quantizer_cls
 
     return wrapper
+
+
+def registered_quantizer(
+    config_cls: Type[BaseConfig],
+) -> Optional[Type[BaseQuantizer]]:
+    """Return the quantizer class currently registered for ``config_cls``.
+
+    This performs an exact-type lookup without triggering the lazy import
+    fallback used by ``get_quantizer``.
+    """
+    return _REGISTRY.get(config_cls)
 
 
 def _lookup(cfg: BaseConfig) -> Optional[Type[BaseQuantizer]]:

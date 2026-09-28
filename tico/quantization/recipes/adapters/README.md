@@ -45,6 +45,13 @@ model:
 
 and registered in `recipes/adapters/__init__.py`.
 
+Adapters that live outside the TICO source tree are registered at runtime with
+`register_adapter(key, adapter)` from the same module, and selected with
+`model.adapter` while `model.family` keeps naming the served family. See the
+"Adapter registry and out-of-tree adapters" section in
+[`../README.md`](../README.md) for the collision rules and the `extensions`
+config key that loads such packages before adapter resolution.
+
 ## Evaluation target registry
 
 Every adapter declares the canonical top-level evaluation targets that it

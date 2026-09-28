@@ -16,13 +16,14 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
-from tico.quantization.recipes.adapters import get_adapter
+from tico.quantization.recipes.adapters import resolve_adapter
 from tico.quantization.recipes.config import save_effective_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.dataset_usage import validate_recipe_dataset_usage
 from tico.quantization.recipes.evaluation.selection import (
     validate_adapter_evaluation_config,
 )
+from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.stages import get_stage
 from tico.quantization.recipes.utils import set_seed
 
@@ -362,7 +363,10 @@ class QuantizationRunner:
         set_seed(cfg.get("runtime", {}).get("seed", 42))
         _print_config_summary(cfg)
 
-        adapter = get_adapter(model_cfg["family"])
+        # Extensions must be loaded before adapter lookup so that out-of-tree
+        # adapters, quantizers, and wrappers are registered in this process.
+        load_recipe_extensions(cfg)
+        adapter = resolve_adapter(cfg)
         validate_adapter_evaluation_config(adapter, cfg)
         needs_calibration = _requires_calibration_inputs(cfg, adapter)
         validate_recipe_dataset_usage(

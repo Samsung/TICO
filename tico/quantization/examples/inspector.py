@@ -15,7 +15,7 @@
 import argparse
 from pathlib import Path
 
-from tico.quantization.recipes.adapters import get_adapter
+from tico.quantization.recipes.adapters import resolve_adapter
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.debug.static_gemma4_assistant_runtime import (
@@ -40,6 +40,7 @@ from tico.quantization.recipes.debug.wrapper_smoke import (
     run_wrapper_smoke,
     run_wrapper_smoke_suite,
 )
+from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.utils import set_seed
 
 
@@ -273,7 +274,8 @@ def main() -> None:
         run_static_gemma4_assistant_runtime(assistant_runtime_cfg)
         return
 
-    adapter = get_adapter(cfg["model"]["family"])
+    load_recipe_extensions(cfg)
+    adapter = resolve_adapter(cfg)
     ctx = RecipeContext(cfg=cfg, adapter=adapter)
     ctx = adapter.load_model(ctx)
     ctx.calibration_inputs = adapter.build_calibration_inputs(ctx)

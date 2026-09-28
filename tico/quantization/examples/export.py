@@ -17,9 +17,10 @@ from pathlib import Path
 
 import torch
 
-from tico.quantization.recipes.adapters import get_adapter
+from tico.quantization.recipes.adapters import resolve_adapter
 from tico.quantization.recipes.config import load_recipe_config, save_effective_config
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.utils import set_seed, torch_dtype_from_name
 
 _EXPORT_SOURCES = ("model", "checkpoint")
@@ -125,7 +126,10 @@ def main() -> None:
     cfg = load_recipe_config(args.config, overrides=overrides)
     set_seed(cfg.get("runtime", {}).get("seed", 42))
 
-    adapter = get_adapter(cfg["model"]["family"])
+    # Load extensions before adapter lookup and before torch.load, which may
+    # need classes registered by them to unpickle a checkpoint.
+    load_recipe_extensions(cfg)
+    adapter = resolve_adapter(cfg)
     if args.source == "model":
         ctx = RecipeContext(cfg=cfg, adapter=adapter)
         ctx = adapter.load_model(ctx)

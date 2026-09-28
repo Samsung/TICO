@@ -20,7 +20,11 @@ from unittest.mock import patch
 from tico.quantization.config.base import BaseConfig
 from tico.quantization.quantizer import BaseQuantizer
 
-from tico.quantization.quantizer_registry import get_quantizer, register_quantizer
+from tico.quantization.quantizer_registry import (
+    get_quantizer,
+    register_quantizer,
+    registered_quantizer,
+)
 
 
 # ---------- Helper classes used only in tests ----------
@@ -28,6 +32,24 @@ class _ExactConfig(BaseConfig):
     @property
     def name(self) -> str:
         return "exact_algo"
+
+
+class _ExactConfig2(BaseConfig):
+    @property
+    def name(self) -> str:
+        return "exact_algo_2"
+
+
+class _ConflictConfig(BaseConfig):
+    @property
+    def name(self) -> str:
+        return "conflict_algo"
+
+
+class _NoopConfig(BaseConfig):
+    @property
+    def name(self) -> str:
+        return "noop_algo"
 
 
 class _LazyConfig(BaseConfig):
@@ -71,6 +93,14 @@ class _AnotherDummyQuantizer(BaseQuantizer):
 
     def convert(self, model):
         return model
+
+
+class _NoopQuantizer(_DummyQuantizer):
+    pass
+
+
+class _ConflictQuantizer(_DummyQuantizer):
+    pass
 
 
 def _install_fake_quantizer_module(
@@ -185,12 +215,31 @@ class QuantizerRegistryTest(unittest.TestCase):
     def test_get_quantizer_returns_instance_not_class(self):
         """Factory must instantiate the quantizer with the provided config."""
 
-        @register_quantizer(_ExactConfig)
+        @register_quantizer(_ExactConfig2)
         class _ExactQuant2(_DummyQuantizer):
             pass
 
-        cfg = _ExactConfig()
+        cfg = _ExactConfig2()
         q = get_quantizer(cfg)
         self.assertIsInstance(q, _ExactQuant2)
         # Ensure the instance carries the same config reference
         self.assertIs(q.config, cfg)
+
+    def test_reregistering_same_quantizer_is_noop(self):
+        """Repeating an identical registration must be accepted silently."""
+        register_quantizer(_NoopConfig)(_NoopQuantizer)
+        self.assertIs(register_quantizer(_NoopConfig)(_NoopQuantizer), _NoopQuantizer)
+        self.assertIs(registered_quantizer(_NoopConfig), _NoopQuantizer)
+        self.assertIsInstance(get_quantizer(_NoopConfig()), _NoopQuantizer)
+
+    def test_conflicting_registration_is_rejected(self):
+        """A different quantizer for an occupied config type raises ValueError."""
+        register_quantizer(_ConflictConfig)(_ConflictQuantizer)
+        with self.assertRaisesRegex(ValueError, "already registered"):
+            register_quantizer(_ConflictConfig)(_AnotherDummyQuantizer)
+        self.assertIs(registered_quantizer(_ConflictConfig), _ConflictQuantizer)
+        self.assertIsInstance(get_quantizer(_ConflictConfig()), _ConflictQuantizer)
+
+    def test_registered_quantizer_does_not_trigger_lazy_import(self):
+        """The exact-type accessor returns None without importing by convention."""
+        self.assertIsNone(registered_quantizer(_ImportFailConfig))
