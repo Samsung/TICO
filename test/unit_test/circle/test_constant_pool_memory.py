@@ -115,7 +115,7 @@ class PayloadViewTest(unittest.TestCase):
     def test_contiguous_array_is_borrowed_and_not_frozen(self):
         array = np.arange(17, dtype=np.uint8)
         view = _buffer.inline_payload_view(SimpleNamespace(data=array))
-        self.assertIsNotNone(view)
+        assert view is not None
         self.assertTrue(np.shares_memory(array, np.frombuffer(view, np.uint8)))
         self.assertTrue(array.flags.writeable)
         array[5] = 99
@@ -124,6 +124,7 @@ class PayloadViewTest(unittest.TestCase):
     def test_read_only_payload_remains_read_only(self):
         array = np.frombuffer(b"payload", dtype=np.uint8)
         view = _buffer.inline_payload_view(SimpleNamespace(data=array))
+        assert view is not None
         self.assertTrue(view.readonly)
         self.assertEqual(bytes(view), b"payload")
 
@@ -131,16 +132,19 @@ class PayloadViewTest(unittest.TestCase):
         for source in (b"abc", bytearray(b"abc"), memoryview(b"abc"), [97, 98, 99]):
             with self.subTest(storage=type(source).__name__):
                 view = _buffer.inline_payload_view(SimpleNamespace(data=source))
+                assert view is not None
                 self.assertEqual(bytes(view), b"abc")
 
     def test_noncontiguous_array_preserves_logical_order(self):
         values = np.arange(31, dtype=np.uint8)[::-3]
         view = _buffer.inline_payload_view(SimpleNamespace(data=values))
+        assert view is not None
         self.assertEqual(bytes(view), values.tobytes())
 
     def test_noncontiguous_memoryview_preserves_logical_order(self):
         values = memoryview(b"0123456789")[::2]
         view = _buffer.inline_payload_view(SimpleNamespace(data=values))
+        assert view is not None
         self.assertEqual(bytes(view), b"02468")
 
     def test_absent_and_unresolved_payloads_are_not_indexed(self):
@@ -154,6 +158,7 @@ class PayloadViewTest(unittest.TestCase):
 
     def test_empty_payload_is_distinct_from_absent(self):
         view = _buffer.inline_payload_view(SimpleNamespace(data=b""))
+        assert view is not None
         self.assertEqual(bytes(view), b"")
         self.assertIsNone(_buffer.inline_payload_view(SimpleNamespace(data=None)))
 
@@ -472,6 +477,7 @@ class ConstantFoldPreflightMemoryTest(unittest.TestCase):
         tracemalloc.start()
         try:
             payloads = _required_input_payloads(model, graph, (0,), (0,))
+            assert payloads is not None
             reason = budget.rejection_reason(
                 input_bytes=sum(len(value) for value in payloads.values()),
                 output_bytes=1,
@@ -480,6 +486,7 @@ class ConstantFoldPreflightMemoryTest(unittest.TestCase):
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
+        assert reason is not None
         self.assertIn("constant inputs", reason)
         self.assertIsInstance(payloads[0], memoryview)
         self.assertTrue(np.shares_memory(array, np.frombuffer(payloads[0], np.uint8)))
@@ -512,6 +519,7 @@ class ConstantFoldPreflightMemoryTest(unittest.TestCase):
         payloads = _required_input_payloads(
             model, CircleGraph(model, 0), (0, 0), (0, 1)
         )
+        assert payloads is not None
         self.assertEqual(sum(len(value) for value in payloads.values()), 7)
 
 

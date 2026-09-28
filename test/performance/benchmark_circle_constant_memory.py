@@ -23,13 +23,14 @@ numbers exclude input allocation and are not whole-export peak RSS estimates.
 from __future__ import annotations
 
 import argparse
+import functools
 import gc
 import json
 import sys
 import time
 import tracemalloc
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -77,19 +78,20 @@ def main() -> None:
     )
     graph = CircleGraph(model, 0)
     existing_optimization_session(model)
-    if args.mode == "preflight":
+    measured: Callable[[], Any]
+    if args.mode == "pool":
+        measured = functools.partial(ConstantPool, model, codec=codec)
+    else:
         from tico.circle.passes.optimization.fold.constant_subgraph import (
             _required_input_payloads,
         )
 
+        measured = functools.partial(_required_input_payloads, model, graph, (0,), (0,))
+
     gc.collect()
     tracemalloc.start()
     started = time.perf_counter()
-    result: Any
-    if args.mode == "pool":
-        result = ConstantPool(model, codec=codec)
-    else:
-        result = _required_input_payloads(model, graph, (0,), (0,))
+    result = measured()
     elapsed = time.perf_counter() - started
     retained, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
