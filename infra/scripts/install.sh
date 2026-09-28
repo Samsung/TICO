@@ -34,7 +34,7 @@ Usage: ./ccex install [OPTIONS]
                        Accepts:
                          • ${PYTORCH_INSTALLABLE_FAMILY_MIN} ~ ${PYTORCH_INSTALLABLE_FAMILY_MAX}
                            (family, installs latest configured patch)
-                         • 2.10.0, 2.13.0+cu132 ... (exact)
+                         • 2.11.0, 2.14.0+cu132 ... (exact)
                          • ${PYTORCH_PINNED_NIGHTLY_SELECTOR}
                            (repository-pinned nightly Torch)
                          • ${PYTORCH_LATEST_NIGHTLY_SELECTOR}

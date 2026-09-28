@@ -25,9 +25,9 @@ workflow; a Circle runtime is needed only when the generated model is executed.
 - A supported PyTorch installation
 - An inference-mode, `torch.export`-compatible module
 
-TICO's source installer keeps Torch 2.5 through 2.9 as legacy best-effort choices,
-while the qualified stable support window is 2.10 through 2.12 and the default is 2.12.
-Torch 2.13 is available as a qualification candidate. The package metadata keeps a
+TICO's source installer keeps Torch 2.5 through 2.10 as legacy best-effort choices,
+while the qualified stable support window is 2.11 through 2.13 and the default is 2.13.
+Torch 2.14 is available as a qualification candidate. The package metadata keeps a
 bare `torch` dependency so a normal `pip install` can coexist with a user-managed old
 version. `nightly` is repository-pinned for reproducibility, while `nightly-latest` is
 used as a moving early-compatibility signal rather than release support. See the
@@ -64,10 +64,10 @@ Useful source-install options include:
 
 ```bash
 ./ccex install --cpu_only
-./ccex install --torch_ver 2.12
-./ccex install --torch_ver 2.7    # legacy best-effort
-./ccex install --torch_ver 2.10
 ./ccex install --torch_ver 2.13
+./ccex install --torch_ver 2.7    # legacy best-effort
+./ccex install --torch_ver 2.11
+./ccex install --torch_ver 2.14
 ./ccex install --torch_ver nightly
 ./ccex install --torch_ver nightly-latest
 ./ccex install --cuda_ver 12.8

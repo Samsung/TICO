@@ -64,17 +64,17 @@ The source installer accepts a stable family, an exact version, a qualification
 candidate, a repository-pinned nightly, or the latest published nightly pair:
 
 ```bash
-./ccex install --torch_ver 2.12
-./ccex install --torch_ver 2.7    # legacy best-effort
-./ccex install --torch_ver 2.10
-./ccex install --torch_ver 2.12.1+cu132
 ./ccex install --torch_ver 2.13
+./ccex install --torch_ver 2.7    # legacy best-effort
+./ccex install --torch_ver 2.11
+./ccex install --torch_ver 2.13.0+cu132
+./ccex install --torch_ver 2.14
 ./ccex install --torch_ver nightly          # repository-pinned Torch/TorchVision
 ./ccex install --torch_ver nightly-latest   # latest published nightly pair
 ```
 
-TICO keeps Torch 2.5 through 2.9 as legacy best-effort source-install choices,
-qualifies 2.10, 2.11, and 2.12, and uses 2.12 as the default. Torch 2.13 is installable
+TICO keeps Torch 2.5 through 2.10 as legacy best-effort source-install choices,
+qualifies 2.11, 2.12, and 2.13, and uses 2.13 as the default. Torch 2.14 is installable
 as a qualification candidate but is not part of the release-support window. Family
 requests resolve to a project-pinned patch rather than allowing pip to select an
 arbitrary patch release. The package metadata itself keeps a bare `torch` dependency,
@@ -125,8 +125,8 @@ A clean wheel workflow similar to CI is:
 
 ```bash
 ./ccex build
-./ccex install --dist --torch_ver 2.12
-./ccex configure test --torch_ver 2.12
+./ccex install --dist --torch_ver 2.13
+./ccex configure test --torch_ver 2.13
 pt2-to-circle -h
 ```
 
@@ -387,11 +387,11 @@ central policy module rather than duplicated in workflow YAML.
    - Uploads one short-lived artifact reused by all versioned test jobs.
 
 4. **Versioned tests**
-   - Runs the complete suite on the default qualified family, currently 2.12.
+   - Runs the complete suite on the default qualified family, currently 2.13.
    - Runs blocking export and quantization smoke tests on the oldest supported family,
-     currently 2.10.
+     currently 2.11.
    - Runs the same smoke tests non-blockingly on the qualification candidate, currently
-     2.13.
+     2.14.
 
 A separate compatibility workflow runs `nightly-latest` smoke tests daily and the
 complete supported/candidate/`nightly-latest` matrix weekly. Official package

@@ -37,10 +37,10 @@ import shlex
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Final
 
-DEFAULT_FAMILY: Final = "2.12"
-LEGACY_INSTALLABLE_FAMILIES: Final = ("2.5", "2.6", "2.7", "2.8", "2.9")
-SUPPORTED_STABLE_FAMILIES: Final = ("2.10", "2.11", "2.12")
-QUALIFICATION_CANDIDATE_FAMILIES: Final = ("2.13",)
+DEFAULT_FAMILY: Final = "2.13"
+LEGACY_INSTALLABLE_FAMILIES: Final = ("2.5", "2.6", "2.7", "2.8", "2.9", "2.10")
+SUPPORTED_STABLE_FAMILIES: Final = ("2.11", "2.12", "2.13")
+QUALIFICATION_CANDIDATE_FAMILIES: Final = ("2.14",)
 QUALIFICATION_WINDOW_DAYS: Final = 28
 PACKAGE_TORCH_DEPENDENCY: Final = "torch"
 PINNED_NIGHTLY_SELECTOR: Final = "nightly"
@@ -60,6 +60,7 @@ LATEST_STABLE_VERSION: Final[dict[str, str]] = {
     "2.11": "2.11.0",
     "2.12": "2.12.1",
     "2.13": "2.13.0",
+    "2.14": "2.14.0",
 }
 
 # Values are ordered from newest to oldest. The installer selects the newest
@@ -74,6 +75,7 @@ STABLE_CUDA_WHEELS: Final[dict[str, tuple[str, ...]]] = {
     "2.11": ("13.0", "12.8", "12.6"),
     "2.12": ("13.2", "13.0", "12.6"),
     "2.13": ("13.2", "13.0", "12.6"),
+    "2.14": ("13.2", "13.0", "12.6"),
 }
 
 NIGHTLY_CUDA_FALLBACKS: Final = ("13.2", "13.0", "12.6")

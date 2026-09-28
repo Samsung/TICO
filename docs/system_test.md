@@ -509,11 +509,11 @@ test jobs download and reuse that wheel instead of rebuilding it for each Torch 
 
 #### Versioned tests
 
-- The complete suite runs on the default qualified family, currently 2.12.
+- The complete suite runs on the default qualified family, currently 2.13.
 - Blocking export and quantization smoke tests run on the oldest supported family,
-  currently 2.10.
+  currently 2.11.
 - The same smoke tests run non-blockingly on the qualification candidate, currently
-  2.13.
+  2.14.
 
 The smoke path includes a small `torch.export`/PT2/Circle conversion and a quantized CNN
 Circle export. It is intended to detect version-contract breakage without multiplying

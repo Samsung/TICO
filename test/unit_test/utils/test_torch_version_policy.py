@@ -152,8 +152,12 @@ class TorchVersionPolicyTest(unittest.TestCase):
             + 'test "$PYTORCH_DEFAULT_FAMILY" = "'
             + policy.DEFAULT_FAMILY
             + '"\n'
-            + 'test "${#PYTORCH_LEGACY_INSTALLABLE_FAMILIES[@]}" -eq 5\n'
-            + 'test "${#PYTORCH_SUPPORTED_FAMILIES[@]}" -eq 3\n'
+            + 'test "${#PYTORCH_LEGACY_INSTALLABLE_FAMILIES[@]}" -eq '
+            + str(len(policy.LEGACY_INSTALLABLE_FAMILIES))
+            + "\n"
+            + 'test "${#PYTORCH_SUPPORTED_FAMILIES[@]}" -eq '
+            + str(len(policy.SUPPORTED_STABLE_FAMILIES))
+            + "\n"
             + 'test "$PYTORCH_PINNED_NIGHTLY_SELECTOR" = "'
             + policy.PINNED_NIGHTLY_SELECTOR
             + '"\n'
