@@ -866,9 +866,8 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         assert cache_dir is not None
         manifest = self._fp_inputs_save_manifest()
         index = len(manifest["stages"])
-        shard_rel = (
-            f"{_FP_INPUTS_SHARD_DIRNAME}/"
-            + self._shard_filename(index, stage_desc, manifest["run_id"])
+        shard_rel = f"{_FP_INPUTS_SHARD_DIRNAME}/" + self._shard_filename(
+            index, stage_desc, manifest["run_id"]
         )
         payload = {
             "format": _FP_INPUTS_CACHE_FORMAT,
@@ -905,14 +904,8 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         """
         groups = group_shared_fp_inputs(stage_inputs)
         manifest = self._fp_inputs_save_manifest()
-        manifest["stages"][stage_desc] = self._write_fp_inputs_shard(
-            stage_desc, groups
-        )
-        return {
-            name: group["tensors"]
-            for group in groups
-            for name in group["members"]
-        }
+        manifest["stages"][stage_desc] = self._write_fp_inputs_shard(stage_desc, groups)
+        return {name: group["tensors"] for group in groups for name in group["members"]}
 
     def _publish_fp_inputs_manifest(
         self, cache_dir: str, model: Optional[nn.Module] = None
@@ -1001,7 +994,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
         model_id: Optional[str] = None
         if model is not None:
-            model_id = str(getattr(getattr(model, "config", None), "_name_or_path", "?"))
+            model_id = str(
+                getattr(getattr(model, "config", None), "_name_or_path", "?")
+            )
 
         cache_dtype = self.config.cache_dtype
         return {
@@ -1201,7 +1196,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             raise RuntimeError(
                 f"[GPTQv2] FP inputs cache shard '{shard_path}' is invalid: "
                 f"{reason}. Delete the cache directory "
-                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
+                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."  # type: ignore[attr-defined]
             )
 
         if not isinstance(payload, dict):
@@ -1215,9 +1210,9 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             _fail(f"stage mismatch: {payload.get('stage')!r}")
         groups = payload.get("groups")
         meta_groups = entry.get("groups")
-        if not isinstance(groups, list) or len(groups) != len(meta_groups):
+        if not isinstance(groups, list) or len(groups) != len(meta_groups):  # type: ignore[arg-type]
             _fail("group count mismatch with manifest")
-        for group, meta in zip(groups, meta_groups):
+        for group, meta in zip(groups, meta_groups):  # type: ignore[arg-type]
             if not isinstance(group, dict):
                 _fail("group is not a dictionary")
             if group.get("members") != meta.get("members"):
@@ -1277,7 +1272,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 f"[GPTQv2] FP inputs cache miss for stage '{stage_desc}'. "
                 f"Cache was loaded from disk but this stage is not present. "
                 f"Delete the cache directory "
-                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
+                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."  # type: ignore[attr-defined]
             )
 
         # Build full module name -> local name mapping
@@ -1351,7 +1346,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 f"[GPTQv2] FP inputs cache miss for stage '{stage_desc}'. "
                 f"Cache was loaded from disk but this stage is not present. "
                 f"Delete the cache directory "
-                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."
+                f"({self.config.fp_inputs_cache_path}) and re-run to regenerate."  # type: ignore[attr-defined]
             )
 
         fp_cache = FPInputsCache(list(subset.keys()))

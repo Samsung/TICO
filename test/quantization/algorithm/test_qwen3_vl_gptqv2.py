@@ -581,7 +581,6 @@ class TestFPInputsCachePersistence(unittest.TestCase):
                 quantizer._load_fp_inputs_manifest(cache_dir)
             self.assertIn("complete", str(ctx.exception).lower())
 
-
     def test_bad_schema_version_rejected(self):
         import tempfile
 
@@ -654,9 +653,7 @@ class TestFPInputsCachePersistence(unittest.TestCase):
             quantizer = _make_quantizer(fp_inputs_cache_path=cache_dir)
             with patch.object(torch, "save", side_effect=RuntimeError("disk full")):
                 with self.assertRaises(RuntimeError):
-                    quantizer._persist_stage_fp_inputs(
-                        "s1", {"b": [torch.randn(2, 4)]}
-                    )
+                    quantizer._persist_stage_fp_inputs("s1", {"b": [torch.randn(2, 4)]})
 
             # No leftover temp files anywhere in the cache directory.
             for root, _dirs, files in os.walk(cache_dir):
@@ -705,7 +702,6 @@ class TestFPInputsCachePersistence(unittest.TestCase):
             assigned_q = list(loaded["q"])
             assigned_q.pop(0)
             self.assertEqual(len(loaded["k"]), 1)
-
 
     def test_shard_filename_includes_run_id(self):
         fname_a = Qwen3VLGPTQQuantizer._shard_filename(0, "text.layers.0", "a" * 32)
@@ -1111,7 +1107,6 @@ def _reference_fasterquant(
         if P is not None:
             w[:, i2:] += w1.matmul(P[i1:i2, i2:])
 
-
     if actorder:
         q_all = q_all[:, invperm]
 
@@ -1140,7 +1135,9 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
       - Wrong indexing in the in-block P-correction
     """
 
-    def _make_gptq_with_state(self, rows, cols, batch=32, seed_w=42, seed_inp=123, bits=8):
+    def _make_gptq_with_state(
+        self, rows, cols, batch=32, seed_w=42, seed_inp=123, bits=8
+    ):
         """
         Create a GPTQ object, add a batch, and return:
           (gptq, w_orig, H, quantizer_config_snapshot)
@@ -1149,7 +1146,6 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         layer = nn.Linear(cols, rows, bias=False)
         gptq = GPTQ(layer)
         gptq.quantizer.configure(bits=bits, perchannel=True, sym=False)
-
 
         torch.manual_seed(seed_inp)
         inp = torch.randn(batch, cols)
@@ -1171,7 +1167,9 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         gptq_ref = self._make_gptq_with_state(rows, cols)
 
         # Verify they have identical state
-        self.assertTrue(torch.allclose(gptq_actual.layer.weight.data, gptq_ref.layer.weight.data))
+        self.assertTrue(
+            torch.allclose(gptq_actual.layer.weight.data, gptq_ref.layer.weight.data)
+        )
         self.assertTrue(torch.allclose(gptq_actual.H, gptq_ref.H))
 
         # Set a known non-zero dXXT
@@ -1187,8 +1185,11 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
 
         # Run actual fasterquant
         gptq_actual.fasterquant(
-            blocksize=128, percdamp=0.01, groupsize=-1,
-            actorder=True, alpha=alpha,
+            blocksize=128,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=True,
+            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1233,8 +1234,11 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         dXXT_saved = gptq_ref.dXXT.clone()
 
         gptq_actual.fasterquant(
-            blocksize=blocksize, percdamp=0.01, groupsize=-1,
-            actorder=True, alpha=alpha,
+            blocksize=blocksize,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=True,
+            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1278,8 +1282,11 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         dXXT_saved = gptq_ref.dXXT.clone()
 
         gptq_actual.fasterquant(
-            blocksize=blocksize, percdamp=0.01, groupsize=-1,
-            actorder=True, alpha=alpha,
+            blocksize=blocksize,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=True,
+            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1323,8 +1330,11 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         dXXT_saved = gptq_ref.dXXT.clone()
 
         gptq_actual.fasterquant(
-            blocksize=blocksize, percdamp=0.01, groupsize=-1,
-            actorder=False, alpha=alpha,
+            blocksize=blocksize,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1367,8 +1377,11 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         dXXT_saved = gptq_ref.dXXT.clone()
 
         gptq_actual.fasterquant(
-            blocksize=blocksize, percdamp=0.01, groupsize=-1,
-            actorder=True, alpha=alpha,
+            blocksize=blocksize,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=True,
+            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 

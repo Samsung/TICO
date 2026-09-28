@@ -16,7 +16,6 @@
 
 from typing import Any, Dict
 
-import pytest
 from unittest.mock import MagicMock, patch
 
 import tico.quantization.recipes.data.vlm as vlm_data
@@ -497,12 +496,37 @@ class TestDatasetFilterIndices:
 
     def _examples(self):
         return [
-            {"image_classes": ["cat"], "image_id": 1, "question_id": 11, "question": "q1"},
-            {"image_classes": ["dog"], "image_id": 2, "question_id": 12, "question": "q2"},
-            {"image_classes": ["cat"], "image_id": 3, "question_id": 13, "question": "q3"},
-            {"image_classes": ["cat", "dog"], "image_id": 1, "question_id": 14, "question": "q4"},
+            {
+                "image_classes": ["cat"],
+                "image_id": 1,
+                "question_id": 11,
+                "question": "q1",
+            },
+            {
+                "image_classes": ["dog"],
+                "image_id": 2,
+                "question_id": 12,
+                "question": "q2",
+            },
+            {
+                "image_classes": ["cat"],
+                "image_id": 3,
+                "question_id": 13,
+                "question": "q3",
+            },
+            {
+                "image_classes": ["cat", "dog"],
+                "image_id": 1,
+                "question_id": 14,
+                "question": "q4",
+            },
             {"image_classes": [], "image_id": 4, "question_id": 15, "question": "q5"},
-            {"image_classes": ["dog"], "image_id": 5, "question_id": 16, "question": "q6"},
+            {
+                "image_classes": ["dog"],
+                "image_id": 5,
+                "question_id": 16,
+                "question": "q6",
+            },
         ]
 
     def _assert_parity(self, filter_config):
@@ -562,14 +586,38 @@ class TestGetCalibInputsLazyFilter:
 
         return HFDataset.from_list(
             [
-                {"image": "img0", "image_classes": ["cat"], "image_id": 1,
-                 "question_id": 11, "question": "q1", "answers": ["a"]},
-                {"image": "img1", "image_classes": ["dog"], "image_id": 2,
-                 "question_id": 12, "question": "q2", "answers": ["a"]},
-                {"image": "img2", "image_classes": ["cat"], "image_id": 3,
-                 "question_id": 13, "question": "q3", "answers": ["a"]},
-                {"image": "img3", "image_classes": ["dog"], "image_id": 2,
-                 "question_id": 14, "question": "q4", "answers": ["a"]},
+                {
+                    "image": "img0",
+                    "image_classes": ["cat"],
+                    "image_id": 1,
+                    "question_id": 11,
+                    "question": "q1",
+                    "answers": ["a"],
+                },
+                {
+                    "image": "img1",
+                    "image_classes": ["dog"],
+                    "image_id": 2,
+                    "question_id": 12,
+                    "question": "q2",
+                    "answers": ["a"],
+                },
+                {
+                    "image": "img2",
+                    "image_classes": ["cat"],
+                    "image_id": 3,
+                    "question_id": 13,
+                    "question": "q3",
+                    "answers": ["a"],
+                },
+                {
+                    "image": "img3",
+                    "image_classes": ["dog"],
+                    "image_id": 2,
+                    "question_id": 14,
+                    "question": "q4",
+                    "answers": ["a"],
+                },
             ]
         )
 
@@ -585,7 +633,7 @@ class TestGetCalibInputsLazyFilter:
             ), patch.object(
                 vlm,
                 "build_vlm_inputs",
-                side_effect=lambda **kw: built_images.append(kw["image"])
+                side_effect=lambda **kw: built_images.append(kw["image"])  # type: ignore[func-returns-value]
                 or {"mock": kw["image"]},
             ):
                 out = vlm.get_calib_inputs(
@@ -607,16 +655,21 @@ class TestGetCalibInputsLazyFilter:
 
         hf_ds = HFDataset.from_list([{"image": "img0", "question": "q"}])
         vlm.DATASETS["toy"] = {"adapter": lambda ex: ex, "is_text_only": False}
+        raised = None
         try:
             with patch.object(
                 vlm, "get_dataset", return_value=(hf_ds, vlm.DATASETS["toy"]["adapter"])
             ):
-                with pytest.raises(ValueError, match="image_classes"):
+                try:
                     vlm.get_calib_inputs(
                         "toy",
                         processor=None,
                         filter_config=CalibFilterConfig(n_per_class=1, verbose=False),
                     )
+                except ValueError as e:
+                    raised = e
         finally:
             vlm.DATASETS.pop("toy", None)
 
+        assert raised is not None, "expected ValueError for missing filter field"
+        assert "image_classes" in str(raised)

@@ -18,6 +18,7 @@ import torch
 
 from tico.quantization.config.base import BaseConfig
 
+
 @dataclass
 class GPTQConfig(BaseConfig):
     """
@@ -67,7 +68,6 @@ class GPTQConfig(BaseConfig):
 
     # use this option to stabilize GPTQ for deep models
     use_orig_model_inference: bool = False
-
 
     @property
     def name(self) -> str:

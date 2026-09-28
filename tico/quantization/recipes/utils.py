@@ -21,8 +21,8 @@ import torch
 
 from tico.quantization.config.specs import affine, mx, no_quant, QuantSpec
 from tico.quantization.config.utils import (  # noqa: F401  (re-export)
-    TORCH_DTYPE_MAP,
     torch_dtype_from_name,
+    TORCH_DTYPE_MAP,
 )
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
