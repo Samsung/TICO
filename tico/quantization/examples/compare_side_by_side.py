@@ -42,6 +42,7 @@ The script requires:
 """
 
 import argparse
+import gc
 import math
 from typing import Any, Mapping
 
@@ -60,6 +61,7 @@ from tico.quantization.recipes.debug.trace import (
 from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.runner import QuantizationRunner
 from tico.quantization.wrapq.utils.introspection import DifferenceStatistics
+from tico.utils.utils import print_gpu_memory
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -180,6 +182,11 @@ def trace_parity(
                     n=i + 1,
                 )
 
+        fp_outputs.clear()
+        q_outputs.clear()
+        gc.collect()
+        print_gpu_memory(f"Batch {i}")
+
         i += 1
 
     for layer_name, delta_stats in accumulated_diff_stats.items():
@@ -203,13 +210,22 @@ def main() -> None:
     if "export" in cfg:
         cfg["export"]["enabled"] = False
 
+    print_gpu_memory("Init")
+
     q_ctx: RecipeContext = get_quanized_model_context(cfg)
+    print_gpu_memory("After get_quanized_model_context")
+
     fp_ctx: RecipeContext = get_fp_model_context(cfg)
+    print_gpu_memory("After get_fp_model_context")
+
     q_model: nn.Module = q_ctx.model.eval()
     fp_model: nn.Module = fp_ctx.model.eval()
 
     adapter = resolve_adapter(cfg)
     fp_ctx.calibration_inputs = adapter.build_calibration_inputs(fp_ctx)
+
+    gc.collect()
+    print_gpu_memory("Before trace_parity")
 
     trace_parity(
         fp_model=fp_model,
