@@ -52,6 +52,10 @@ jobs:
         env:
           INPUT_REF: ${{ inputs.ref_name }}
         run: |
+          # `python -m build` installs versioningit only inside its isolated
+          # build environment, so install it explicitly for the CLI check.
+          python3 -m pip install versioningit
+
           TAG_VERSION="${INPUT_REF#v}"
           VERSION="$(versioningit)"
           CLEAN_VERSION="$(echo "$VERSION" | cut -d'.' -f1-3)"
