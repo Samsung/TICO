@@ -259,7 +259,7 @@ class TestExportMain(unittest.TestCase):
         ), patch.object(
             export_example, "load_recipe_config", return_value=cfg
         ), patch.object(
-            export_example, "get_adapter", return_value=adapter
+            export_example, "resolve_adapter", return_value=adapter
         ), patch.object(
             export_example, "set_seed"
         ), patch.object(
@@ -291,7 +291,7 @@ class TestExportMain(unittest.TestCase):
         ), patch.object(
             export_example, "load_recipe_config", return_value=cfg
         ), patch.object(
-            export_example, "get_adapter", return_value=adapter
+            export_example, "resolve_adapter", return_value=adapter
         ), patch.object(
             export_example, "set_seed"
         ), patch.object(

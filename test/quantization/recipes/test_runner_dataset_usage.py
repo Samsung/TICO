@@ -101,7 +101,7 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         cfg = self._base_config()
 
         with patch(
-            "tico.quantization.recipes.runner.get_adapter",
+            "tico.quantization.recipes.runner.resolve_adapter",
             return_value=adapter,
         ), contextlib.redirect_stdout(io.StringIO()):
             result = QuantizationRunner().run(cfg)
@@ -120,7 +120,7 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         stage = _FakeStage(requires_calibration_inputs=True)
 
         with patch(
-            "tico.quantization.recipes.runner.get_adapter",
+            "tico.quantization.recipes.runner.resolve_adapter",
             return_value=adapter,
         ), patch(
             "tico.quantization.recipes.runner.get_stage",
@@ -142,7 +142,7 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         stage = _FakeStage(requires_calibration_inputs=True)
 
         with patch(
-            "tico.quantization.recipes.runner.get_adapter",
+            "tico.quantization.recipes.runner.resolve_adapter",
             return_value=adapter,
         ), patch(
             "tico.quantization.recipes.runner.get_stage",
@@ -164,7 +164,7 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         stage = _FakeStage(requires_calibration_inputs=True)
 
         with patch(
-            "tico.quantization.recipes.runner.get_adapter",
+            "tico.quantization.recipes.runner.resolve_adapter",
             return_value=adapter,
         ), patch(
             "tico.quantization.recipes.runner.get_stage",

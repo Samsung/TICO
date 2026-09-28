@@ -50,13 +50,14 @@ import torch.nn as nn
 
 from tqdm import tqdm
 
-from tico.quantization.recipes.adapters import get_adapter
+from tico.quantization.recipes.adapters import resolve_adapter
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.debug.trace import (
     collect_forward_outputs,
     compare_outputs,
 )
+from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.runner import QuantizationRunner
 from tico.quantization.wrapq.utils.introspection import DifferenceStatistics
 
@@ -86,7 +87,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def get_fp_model_context(cfg: dict[str, Any]) -> RecipeContext:
-    adapter = get_adapter(cfg["model"]["family"])
+    adapter = resolve_adapter(cfg)
     ctx = RecipeContext(cfg=cfg, adapter=adapter)
     ctx = adapter.load_model(ctx)
     return ctx
@@ -194,6 +195,7 @@ def main() -> None:
     # Load config with overrides
     overrides = list(args.set)
     cfg = load_recipe_config(args.config, overrides=overrides)
+    load_recipe_extensions(cfg)
 
     # Disable evaluation and export stages (we only want quantization)
     if "evaluation" in cfg:
@@ -206,7 +208,7 @@ def main() -> None:
     q_model: nn.Module = q_ctx.model.eval()
     fp_model: nn.Module = fp_ctx.model.eval()
 
-    adapter = get_adapter(cfg["model"]["family"])
+    adapter = resolve_adapter(cfg)
     fp_ctx.calibration_inputs = adapter.build_calibration_inputs(fp_ctx)
 
     trace_parity(

@@ -82,7 +82,7 @@ class TestRecipePipelineSmoke(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir, patch.object(
             runner_mod, "set_seed", lambda seed: events.append(("seed", seed))
         ), patch.object(
-            runner_mod, "get_adapter", lambda family: SmokeAdapter(events)
+            runner_mod, "resolve_adapter", lambda cfg: SmokeAdapter(events)
         ), patch.object(
             runner_mod, "get_stage", lambda name: SmokeStage(name, events)
         ), patch.object(

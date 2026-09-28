@@ -51,6 +51,7 @@ tico/quantization/recipes/
 ├── config.py              # Config loading, dotted overrides, effective config saving
 ├── context.py             # RecipeContext shared by adapters and stages
 ├── runner.py              # Pipeline runner used by examples/quantize.py
+├── extensions.py          # Opt-in loading of out-of-tree extensions listed in configs
 ├── utils.py               # Small reusable helpers
 ├── qparams.py             # GPTQ -> PTQ qparam transfer helpers
 ├── adapters/              # Model-family-specific behavior
@@ -69,7 +70,8 @@ The default quantization flow is:
 examples/quantize.py
   └─ load_recipe_config(...)
   └─ QuantizationRunner.run(cfg)
-       ├─ get_adapter(cfg["model"]["family"])
+       ├─ load_recipe_extensions(cfg)        # only when cfg["extensions"] is set
+       ├─ resolve_adapter(cfg)               # model.adapter or model.family
        ├─ validate_adapter_evaluation_config(adapter, cfg)
        ├─ adapter.load_model(ctx)
        ├─ adapter.build_calibration_inputs(ctx)
@@ -138,6 +140,40 @@ as an exclusive allow-list and rejects unsupported names before model loading.
 Benchmark details remain under their existing config keys, such as
 `evaluation.lm_eval_tasks`, `evaluation.vlm_tasks`, or
 `evaluation.mmmu.subjects`.
+
+#### Adapter registry and out-of-tree adapters
+
+Built-in adapters are registered in `recipes/adapters/__init__.py`. Separately
+installed packages can add adapters without editing TICO:
+
+```python
+from tico.quantization.recipes.adapters import register_adapter
+
+register_adapter("gemma4_variant", MyGemma4Variant())  # family stays "gemma4"
+```
+
+Registry rules:
+
+- Keys are normalized (stripped, lower-cased) like `get_adapter()` lookups.
+- Registering the same adapter object under the same key again is a no-op.
+- Registering a different adapter under an occupied key raises `ValueError`.
+  Built-in keys are therefore never replaced; pick a distinct key.
+- `resolve_adapter(cfg)` selects `model.adapter` when set, otherwise
+  `model.family`, and requires the selected adapter's `family` to equal
+  `model.family` so family-keyed helpers (dataset defaults, GPTQ/PTQ config
+  maps, export) keep working.
+
+#### Extension loading
+
+Registration must happen in the process that runs the recipe. Configs opt in
+with a top-level `extensions` list of `package.module[:callable]` entries,
+which `load_recipe_extensions(cfg)` imports and invokes before adapter
+resolution in `quantize`, `evaluate`, `export`, and `inspector`. Loading runs
+trusted Python code from the environment; missing modules or callables raise
+instead of being skipped. See
+[`examples/configs/README.md`](../examples/configs/README.md) for the config
+schema. Python callers can equivalently call the extension's activation
+function themselves before using the recipe APIs.
 
 ### `Stage`
 

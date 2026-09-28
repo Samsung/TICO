@@ -17,13 +17,14 @@ from collections.abc import MutableMapping
 
 import torch
 
-from tico.quantization.recipes.adapters import get_adapter
+from tico.quantization.recipes.adapters import resolve_adapter
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.evaluation.selection import (
     parse_evaluation_targets,
     validate_adapter_evaluation_config,
 )
+from tico.quantization.recipes.extensions import load_recipe_extensions
 from tico.quantization.recipes.utils import set_seed
 
 
@@ -73,7 +74,10 @@ def main() -> None:
         overrides.append("runtime.show_progress=false")
 
     cfg = load_recipe_config(args.config, overrides=overrides)
-    adapter = get_adapter(cfg["model"]["family"])
+    # Load extensions before adapter lookup and before any checkpoint load
+    # that may depend on classes registered by them.
+    load_recipe_extensions(cfg)
+    adapter = resolve_adapter(cfg)
 
     if args.tasks is not None:
         eval_cfg = cfg.setdefault("evaluation", {})
