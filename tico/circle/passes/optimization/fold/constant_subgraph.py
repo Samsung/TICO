@@ -19,6 +19,7 @@ from typing import Any, cast, Iterable
 
 import numpy as np
 
+from tico.circle._buffer import inline_payload_view
 from tico.circle._object import ObjectFactory
 from tico.circle.analysis import TensorContract
 from tico.circle.builder import ConstantPool
@@ -646,13 +647,13 @@ def _required_input_payloads(
     graph: CircleGraph,
     input_indices: tuple[int, ...],
     positions: Iterable[int],
-) -> dict[int, bytes] | None:
-    """Return unique inline payloads for all required constant input positions."""
+) -> dict[int, memoryview] | None:
+    """Borrow required constant payloads before applying the fold-size budget."""
 
     tensors = as_list(getattr(graph.subgraph, "tensors", None))
     buffers = as_list(getattr(model, "buffers", None))
     graph_inputs = set(graph.inputs)
-    payloads: dict[int, bytes] = {}
+    payloads: dict[int, memoryview] = {}
     for position in positions:
         tensor_index = input_indices[position]
         if tensor_index in payloads:
@@ -665,30 +666,11 @@ def _required_input_payloads(
         buffer_index = int(getattr(tensor, "buffer", 0) or 0)
         if buffer_index <= 0 or buffer_index >= len(buffers):
             return None
-        payload = _inline_payload(buffers[buffer_index])
+        payload = inline_payload_view(buffers[buffer_index])
         if payload is None:
             return None
         payloads[tensor_index] = payload
     return payloads
-
-
-def _inline_payload(buffer: Any) -> bytes | None:
-    """Return exact inline bytes while rejecting external or absent storage."""
-
-    if int(getattr(buffer, "offset", 0) or 0) or int(getattr(buffer, "size", 0) or 0):
-        return None
-    data = getattr(buffer, "data", None)
-    if data is None:
-        return None
-    if isinstance(data, bytes):
-        return data
-    if isinstance(data, (bytearray, memoryview)):
-        return bytes(data)
-    try:
-        array = np.asarray(data, dtype=np.uint8)
-    except (TypeError, ValueError):
-        return None
-    return bytes(np.ascontiguousarray(array).reshape(-1))
 
 
 def _estimate_output_bytes(

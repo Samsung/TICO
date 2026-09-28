@@ -17,24 +17,22 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from importlib import import_module
 from pathlib import Path
 from typing import Any, BinaryIO, TypeAlias
 
 from tico.circle._schema import accessor_api_type, object_api_type
 from tico.circle.errors import CircleIOError
+from tico.serialize.circle_binary import (
+    external_buffer_ranges,
+    restore_external_buffers,
+    serialize_circle_model,
+)
 
 PathLike: TypeAlias = str | os.PathLike[str]
 BinarySource: TypeAlias = PathLike | BinaryIO
 BinaryDestination: TypeAlias = PathLike | BinaryIO
 
 CIRCLE_FILE_IDENTIFIER = b"CIR0"
-
-
-def _load_flatbuffers() -> Any:
-    """Import the FlatBuffers runtime lazily."""
-
-    return import_module("flatbuffers")
 
 
 def read_circle_bytes(source: BinarySource) -> bytes:
@@ -133,17 +131,30 @@ def model_from_bytes(data: bytes) -> Any:
 
     try:
         accessor_type = accessor_api_type("Model")
-        root = accessor_type.GetRootAsModel(bytearray(data), 0)
+        root = accessor_type.GetRootAsModel(data, 0)
+        ranges = external_buffer_ranges(root, len(data))
+        # Only copy the FlatBuffer portion, not multi-gigabyte external data.
+        # Metadata vectors remain writable as in the ordinary document API.
+        header_end = min((region.offset for region in ranges), default=len(data))
+        header = bytearray(memoryview(data)[:header_end])
+        root = accessor_type.GetRootAsModel(header, 0)
         model_type = object_api_type("Model")
         if hasattr(model_type, "InitFromObj"):
-            return model_type.InitFromObj(root)
-        if hasattr(root, "UnPack"):
-            return root.UnPack()
-        raise RuntimeError("The Circle schema does not expose an Object API unpacker.")
+            model = model_type.InitFromObj(root)
+        elif hasattr(root, "UnPack"):
+            model = root.UnPack()
+        else:
+            raise RuntimeError(
+                "The Circle schema does not expose an Object API unpacker."
+            )
+        restore_external_buffers(model, data, ranges)
+        return model
     except Exception as error:
         if isinstance(error, CircleIOError):
             raise
-        raise CircleIOError("Failed to deserialize Circle binary data.") from error
+        raise CircleIOError(
+            f"Failed to deserialize Circle binary data: {error}"
+        ) from error
 
 
 def model_to_bytes(model: Any) -> bytes:
@@ -153,13 +164,9 @@ def model_to_bytes(model: Any) -> bytes:
         raise TypeError("Expected a Circle Object API model with a Pack method.")
 
     try:
-        flatbuffers = _load_flatbuffers()
-        builder = flatbuffers.Builder(1024)
-        root_offset = model.Pack(builder)
-        builder.Finish(root_offset, CIRCLE_FILE_IDENTIFIER)
-        return bytes(builder.Output())
+        return serialize_circle_model(model)
     except Exception as error:
-        raise CircleIOError("Failed to serialize the Circle model.") from error
+        raise CircleIOError(f"Failed to serialize the Circle model: {error}") from error
 
 
 def load_model(source: BinarySource) -> Any:

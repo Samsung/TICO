@@ -15,12 +15,12 @@
 import operator
 from typing import Dict, Optional
 
-import flatbuffers
 import torch
 from torch.export.exported_program import ConstantArgument, ExportedProgram, InputKind
 
 from tico.config import CompileConfigBase, get_default_config
 from tico.serialize.operators import *
+from tico.serialize.circle_binary import serialize_circle_model
 from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import get_node_visitors
@@ -77,10 +77,9 @@ def build_circle(
         ep: The exported PyTorch program to convert
 
     Returns:
-        bytes: Raw bytes of the Circle model
+        bytes: Complete Circle binary, including any out-of-line constants.
     """
     logger = logging.getLogger(__name__)
-    builder = flatbuffers.Builder()
     model, graph = _initialize_model()
 
     # Export tensors
@@ -146,11 +145,8 @@ def build_circle(
     model.description = "circle"
     model.version = 0
 
-    # Finish model
-    builder.Finish(model.Pack(builder), "CIR0".encode("utf8"))
-    buf = builder.Output()
-
-    return bytes(buf)
+    # The serializer owns the size-dependent binary layout, not callers.
+    return serialize_circle_model(model)
 
 
 def _get_quantization_alias_key(node: torch.fx.Node) -> QuantizationAliasKey | None:
