@@ -13,10 +13,14 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import torch
 
 from tico.quantization.config.base import BaseConfig
+
+if TYPE_CHECKING:
+    from tico.quantization.algorithm.universal_gptq.quantizer import GPTQFactory
 
 
 @dataclass
@@ -137,6 +141,12 @@ class UniversalGPTQConfig(GPTQConfig):
     # Switching this option may affect performance depending on specific model.
     allow_calls_between_cacheable_modules: bool = True
 
+    # Factory function for creating GPTQ instances.
+    # Allows using different GPTQ implementations (GPTQ v1, GPTQv2, etc.)
+    # with the UniversalGPTQQuantizer.
+    # Default: lambda layer: GPTQ(layer) - uses classic GPTQ v1.
+    gptq_factory: "GPTQFactory | None" = None
+
     @property
     def name(self) -> str:
         return "universal_gptq"
@@ -161,6 +171,12 @@ class UniversalGPTQConfig(GPTQConfig):
         if not isinstance(self.allow_calls_between_cacheable_modules, bool):
             raise TypeError(
                 f"allow_calls_between_cacheable_modules must be bool. got {type(self.allow_calls_between_cacheable_modules)}"
+            )
+
+        # gptq_factory is optional - if provided, it must be callable
+        if self.gptq_factory is not None and not callable(self.gptq_factory):
+            raise TypeError(
+                f"gptq_factory must be callable or None. got {type(self.gptq_factory)}"
             )
 
         # use_orig_model_inference is incompatible with frontier-based execution

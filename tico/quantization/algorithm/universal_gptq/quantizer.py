@@ -37,7 +37,15 @@ import types
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    Optional,
+    Protocol,
+    runtime_checkable,
+)
 
 import torch
 import torch.nn as nn
@@ -52,6 +60,8 @@ from tqdm.auto import tqdm
 
 
 __all__ = [
+    "GPTQProtocol",
+    "GPTQFactory",
     "UniversalGPTQQuantizer",
     "UniversalGPTQConfig",
 ]
@@ -64,6 +74,94 @@ _QUANTIZABLE_LAYER_TYPES: tuple[type[nn.Module], ...] = (
     nn.Conv3d,
     nn.ConvTranspose2d,
 )
+
+
+@runtime_checkable
+class GPTQProtocol(Protocol):
+    """
+    Protocol defining the interface for GPTQ quantization helpers.
+
+    This protocol allows UniversalGPTQQuantizer to work with any GPTQ
+    implementation (GPTQ v1, GPTQv2/GPTAQ, etc.)
+    without depending on a specific concrete class.
+
+    Attributes:
+        layer: The layer being quantized.
+        H: Hessian matrix accumulator (None after quantization).
+        nsamples: Number of calibration samples processed.
+        quantizer: Quantizer object with scale/zero-point parameters.
+
+    Example:
+        >>> from tico.quantization.algorithm.gptq.gptq import GPTQ
+        >>> from tico.quantization.algorithm.universal_gptq.quantizer import GPTQProtocol
+        >>> assert isinstance(GPTQ(nn.Linear(10, 10)), GPTQProtocol)
+        True
+    """
+
+    layer: nn.Module
+    H: Optional[torch.Tensor]
+    nsamples: int
+    quantizer: Any
+
+    def __init__(self, layer: nn.Module, **kwargs) -> None:
+        """Initialize GPTQ state for a layer."""
+        ...
+
+    @torch.no_grad()
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor) -> None:
+        """
+        Accumulate Hessian statistics from one calibration batch.
+
+        Args:
+            inp: Layer input tensor.
+            out: Layer output tensor (may be ignored by some implementations).
+        """
+        ...
+
+    @torch.no_grad()
+    def fasterquant(
+        self,
+        blocksize: int = 128,
+        percdamp: float = 0.01,
+        groupsize: int = -1,
+        actorder: bool = False,
+        static_groups: bool = False,
+        verbose: bool = False,
+        **kwargs,
+    ) -> None:
+        """
+        Run blockwise GPTQ quantization on layer weights.
+
+        Modifies layer.weight.data in-place.
+        """
+        ...
+
+    @torch.no_grad()
+    def free(self) -> None:
+        """Release temporary GPTQ state (Hessian, buffers, etc.)."""
+        ...
+
+
+GPTQFactory = Callable[[nn.Module], GPTQProtocol]
+"""
+Type alias for a factory function that creates GPTQ instances.
+
+The factory receives a layer module and returns a GPTQProtocol-compliant object.
+
+Example:
+    >>> # Default factory (classic GPTQ v1)
+    >>> factory: GPTQFactory = lambda layer: GPTQ(layer)
+    >>>
+    >>> # Custom factory with configuration
+    >>> def custom_factory(layer: nn.Module) -> GPTQProtocol:
+    ...     return GPTQ(layer, normalize_H=True, hessian_dtype=torch.float32)
+    >>>
+    >>> # GPTQv2 factory (when available)
+    >>> from tico.quantization.algorithm.qwen3_vl_gptq.gptq import GPTQ as GPTQv2
+    >>> gptq_v2_factory: GPTQFactory = lambda layer: GPTQv2(
+    ...     layer, normalize_H=True, inp_dtype=torch.float32
+    ... )
+"""
 
 
 def move_to_cpu(obj) -> Any:
@@ -336,7 +434,7 @@ class GPTQ_Data:
 
     full_module_name: str
     old_forward: Callable
-    gptq: GPTQ | None
+    gptq: GPTQProtocol | None
     quantizer: Quantizer | None
     is_cacheable: bool
     cached_output: list[list[Any]]
@@ -779,6 +877,7 @@ def get_sensitivity(
 def finish_collection(
     module: nn.Module,
     gptq_config: UniversalGPTQConfig,
+    gptq_factory: GPTQFactory,
 ) -> None:
     """
     Complete Hessian collection and quantize a module's weights.
@@ -791,6 +890,7 @@ def finish_collection(
     Parameters:
         module: The module to quantize (must be in COLLECT state).
         gptq_config: GPTQ configuration with quantization parameters.
+        gptq_factory: Factory function to create GPTQ instances.
 
     Raises:
         RuntimeError: If the module received no calibration data (empty Hessian).
@@ -801,7 +901,7 @@ def finish_collection(
     assert len(gptq_data.collected_inputs) > 0
 
     if gptq_data.gptq is None:
-        gptq_data.gptq = GPTQ(module)
+        gptq_data.gptq = gptq_factory(module)
     input: torch.Tensor
     for input in tqdm(
         gptq_data.collected_inputs,
@@ -849,6 +949,7 @@ def finish_collection(
     )
     gptq_data.state = GPTQ_STATE.CACHE if gptq_data.is_cacheable else GPTQ_STATE.COMPUTE
     gptq_data.quantizer = gptq_data.gptq.quantizer
+    gptq_data.gptq.free()
     gptq_data.gptq = None
     assert gptq_data.invocation_idx == 0
 
@@ -1157,6 +1258,13 @@ def gptq_quantize(
     if gptq_config.verbose:
         print(f"[START] {start_time}")
 
+    # Create GPTQ factory - use provided factory or default to classic GPTQ v1
+    gptq_factory: GPTQFactory = (
+        gptq_config.gptq_factory
+        if gptq_config.gptq_factory is not None
+        else lambda layer: GPTQ(layer)
+    )
+
     cacheable_module_patterns: list[re.Pattern] = [
         re.compile(pattern) for pattern in gptq_config.cacheable_modules
     ]
@@ -1293,7 +1401,9 @@ def gptq_quantize(
 
                 # 2.2. Process quantizable modules that have collected their inputs
                 for module_ready_to_quantize in modules_ready_to_quantize:
-                    finish_collection(module_ready_to_quantize, gptq_config)
+                    finish_collection(
+                        module_ready_to_quantize, gptq_config, gptq_factory
+                    )
                     update_progress()
 
                 # 2.3.
@@ -1307,7 +1417,9 @@ def gptq_quantize(
                 if modules_ready_to_quantize:
                     # 3.1.1. Quantize modules that have callected all required inputs
                     for module_ready_to_quantize in modules_ready_to_quantize:
-                        finish_collection(module_ready_to_quantize, gptq_config)
+                        finish_collection(
+                            module_ready_to_quantize, gptq_config, gptq_factory
+                        )
                         update_progress()
 
                     # 3.1.2. Reset modules that haven't collected all required inputs (they will start over at the next model replay)
@@ -1353,7 +1465,9 @@ def gptq_quantize(
                         else:
                             gptq_data.collected_inputs.clear()
                     assert best_module_to_quantize is not None
-                    finish_collection(best_module_to_quantize, gptq_config)
+                    finish_collection(
+                        best_module_to_quantize, gptq_config, gptq_factory
+                    )
                     update_progress()
 
         quantizers: dict[str, Quantizer] = {}
