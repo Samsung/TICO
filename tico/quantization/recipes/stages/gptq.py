@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,6 +25,12 @@ from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.config.gptq import GPTQConfig, UniversalGPTQConfig
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.data.dataset_config import (
+    DEFAULT_CALIBRATION_DATASET,
+    DEFAULT_CALIBRATION_N_SAMPLES,
+    DEFAULT_CALIBRATION_SEED,
+    normalize_mixed_dataset_config,
+)
 from tico.quantization.recipes.stages.base import Stage
 from tico.quantization.recipes.utils import filter_dataclass_kwargs, stage_payload
 
@@ -148,38 +155,65 @@ class GPTQStage(Stage):
         raise AssertionError(f"Unhandled sensitivity mode: {mode}")
 
     @staticmethod
-    def _calibration_dataset_spec(calibration_cfg: Mapping[str, Any]) -> str:
+    def _calibration_dataset_spec(
+        calibration_cfg: Mapping[str, Any],
+        runtime_cfg: Mapping[str, Any] | None = None,
+    ) -> str:
         """
-        Build a compact ``name:count`` spec of the calibration datasets.
+        Build a complete, order-preserving provenance spec of the calibration
+        datasets.
 
         Recorded in the FP-inputs cache manifest fingerprint so a warm cache
-        is only reused when the same datasets with the same sample counts are
-        used for calibration. Mirrors the defaults of
-        ``build_vlm_calibration_inputs`` (dataset "vqav2", n_samples 128).
+        is only reused for identical calibration data.  The spec is built from
+        the same normalized form the loader produces
+        (``normalize_mixed_dataset_config``), so every accepted ``datasets``
+        form (string, mapping, sequence) is covered, entry order is
+        significant, and split/filter settings are included.  Mirrors
+        the defaults of ``build_vlm_calibration_inputs`` (imported from
+        ``recipes.data.dataset_config`` so both sides stay in sync).
+
+        The sampling seed is taken from the ``runtime`` section, exactly as
+        the adapters and the runner do (``runtime.seed``, int-coerced);
+        ``calibration.seed`` has never reached the loader, so it is ignored
+        here as well (with a warning).  ``seq_len`` and
+        ``allow_benchmark_overlap`` are included because they change the
+        calibration inputs; the top-level ``split`` is included only for the
+        single-dataset path, mirroring the adapters, which ignore it when
+        ``datasets`` is set.  ``allow_unregistered_dataset`` is a guard flag
+        with no effect on the data and is deliberately excluded.
         """
-        default_n = calibration_cfg.get("n_samples", 128)
-        entries: list[str] = []
-
+        if "seed" in calibration_cfg:
+            print(
+                "[GPTQ] WARNING: calibration.seed does not reach the "
+                "calibration loader; set runtime.seed instead. It is ignored "
+                "by the FP-inputs cache fingerprint."
+            )
+        default_n = calibration_cfg.get("n_samples", DEFAULT_CALIBRATION_N_SAMPLES)
         datasets = calibration_cfg.get("datasets")
-        if isinstance(datasets, Mapping):
-            for name, ds_cfg in datasets.items():
-                if isinstance(ds_cfg, Mapping):
-                    entries.append(f"{name}:{ds_cfg.get('n_samples', default_n)}")
-                else:
-                    entries.append(f"{name}:{ds_cfg}")
-        elif isinstance(datasets, (list, tuple)):
-            for item in datasets:
-                if isinstance(item, str):
-                    entries.append(f"{item}:{default_n}")
-                elif isinstance(item, Mapping):
-                    entries.append(
-                        f"{item.get('dataset')}:{item.get('n_samples', default_n)}"
-                    )
-
-        if not entries:
-            entries.append(f"{calibration_cfg.get('dataset', 'vqav2')}:{default_n}")
-
-        return ",".join(sorted(entries))
+        single_dataset = datasets is None
+        if single_dataset:
+            datasets = calibration_cfg.get("dataset") or DEFAULT_CALIBRATION_DATASET
+        normalized = normalize_mixed_dataset_config(datasets, default_n)  # type: ignore[arg-type]
+        provenance = {
+            # The loader's sampling seed lives in the runtime section
+            # (adapters and runner use runtime.seed, int-coerced).
+            "seed": int((runtime_cfg or {}).get("seed", DEFAULT_CALIBRATION_SEED)),
+            "seq_len": calibration_cfg.get("seq_len"),
+            "allow_benchmark_overlap": bool(
+                calibration_cfg.get("allow_benchmark_overlap", False)
+            ),
+            "datasets": [
+                {
+                    "dataset": name,
+                    **{k: v for k, v in entry.items() if v is not None},
+                }
+                for name, entry in normalized.items()
+            ],
+        }
+        # Top-level split reaches the loader only on the single-dataset path.
+        if single_dataset:
+            provenance["split"] = calibration_cfg.get("split")
+        return json.dumps(provenance, sort_keys=True, default=str)
 
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         payload = stage_payload(stage_cfg)
@@ -204,8 +238,10 @@ class GPTQStage(Stage):
         if "calibration_dataset_spec" not in payload:
             calibration_cfg = ctx.cfg.get("calibration", {})
             if isinstance(calibration_cfg, Mapping) and calibration_cfg:
+                runtime_cfg = ctx.cfg.get("runtime", {})
                 payload["calibration_dataset_spec"] = self._calibration_dataset_spec(
-                    calibration_cfg
+                    calibration_cfg,
+                    runtime_cfg if isinstance(runtime_cfg, Mapping) else None,
                 )
 
         # Map model family to the appropriate GPTQ config class.

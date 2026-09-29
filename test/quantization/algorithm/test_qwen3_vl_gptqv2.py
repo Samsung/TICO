@@ -1559,6 +1559,7 @@ class TestFPInputsCacheFingerprint(unittest.TestCase):
                 fingerprint,
                 {
                     "model": "/fake/qwen3-vl",
+                    "model_state": Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
                     "calibration": "ds:v1",
                     "cache_dtype": "None",
                 },
@@ -1653,47 +1654,251 @@ class TestFPInputsCacheFingerprint(unittest.TestCase):
         fingerprint = _make_fingerprint_quantizer(
             weight_bits=4, percdamp=0.5, groupsize=128, gptq_v2_alpha=0.5
         )._compute_fp_inputs_fingerprint()
-        self.assertEqual(set(fingerprint), {"model", "calibration", "cache_dtype"})
+        self.assertEqual(
+            set(fingerprint), {"model", "model_state", "calibration", "cache_dtype"}
+        )
 
 
 class TestCalibrationDatasetSpec(unittest.TestCase):
-    """Compact 'name:count' calibration spec for the cache fingerprint."""
+    """Complete, order-preserving calibration provenance for the FP-inputs
+    cache fingerprint: all input forms, entry order, seed, split, filter."""
 
-    def test_mapping_form(self):
-        spec = GPTQStage._calibration_dataset_spec(
-            {
-                "datasets": {
-                    "wikitext2": {"n_samples": 128},
-                    "textvqa": {"n_samples": 50},
-                },
-                "n_samples": 128,
-            }
+    def test_string_forms_distinguish_datasets(self):
+        """Regression: 'wikitext2:2' and 'alpaca:2' must NOT share a spec."""
+        self.assertNotEqual(
+            GPTQStage._calibration_dataset_spec({"datasets": "wikitext2:2"}),
+            GPTQStage._calibration_dataset_spec({"datasets": "alpaca:2"}),
         )
-        self.assertEqual(spec, "textvqa:50,wikitext2:128")
 
-    def test_mapping_form_scalar_count_and_default(self):
-        spec = GPTQStage._calibration_dataset_spec(
+    def test_dataset_order_is_significant(self):
+        forward = GPTQStage._calibration_dataset_spec(
+            {"datasets": {"textvqa": {"n_samples": 5}, "wikitext2": {"n_samples": 8}}}
+        )
+        reversed_ = GPTQStage._calibration_dataset_spec(
+            {"datasets": {"wikitext2": {"n_samples": 8}, "textvqa": {"n_samples": 5}}}
+        )
+        self.assertNotEqual(forward, reversed_)
+
+    def test_seed_split_and_filter_change_spec(self):
+        base = {"datasets": {"textvqa": {"n_samples": 5}}}
+        base_spec = GPTQStage._calibration_dataset_spec(base)
+        # The loader's sampling seed lives in the runtime section, so the
+        # fingerprint must take it from there too.
+        self.assertNotEqual(
+            base_spec,
+            GPTQStage._calibration_dataset_spec(base, {"seed": 7}),
+        )
+        # calibration.seed never reaches the loader, so it must NOT affect
+        # the spec either (users should set runtime.seed instead).
+        self.assertEqual(
+            base_spec,
+            GPTQStage._calibration_dataset_spec({**base, "seed": 7}),
+        )
+        self.assertNotEqual(
+            base_spec,
+            GPTQStage._calibration_dataset_spec(
+                {"datasets": {"textvqa": {"n_samples": 5, "split": "validation"}}}
+            ),
+        )
+        self.assertNotEqual(
+            base_spec,
+            GPTQStage._calibration_dataset_spec(
+                {
+                    "datasets": {
+                        "textvqa": {"n_samples": 5, "filter": {"n_per_class": 2}}
+                    }
+                }
+            ),
+        )
+
+    def test_runtime_seed_int_coercion(self):
+        """Adapters int()-coerce runtime.seed; the spec must do the same."""
+        self.assertEqual(
+            GPTQStage._calibration_dataset_spec({}, {"seed": "7"}),
+            GPTQStage._calibration_dataset_spec({}, {"seed": 7}),
+        )
+
+    def test_top_level_split_tracked_only_for_single_dataset(self):
+        """Adapters pass the top-level split only on the single-dataset path;
+        the mixed-datasets path ignores it, so the spec must mirror that."""
+        single_base = GPTQStage._calibration_dataset_spec({"dataset": "textvqa"})
+        self.assertNotEqual(
+            single_base,
+            GPTQStage._calibration_dataset_spec(
+                {"dataset": "textvqa", "split": "validation"}
+            ),
+        )
+        mixed_base = GPTQStage._calibration_dataset_spec({"datasets": "textvqa:50"})
+        self.assertEqual(
+            mixed_base,
+            GPTQStage._calibration_dataset_spec(
+                {"datasets": "textvqa:50", "split": "validation"}
+            ),
+        )
+
+    def test_seq_len_and_benchmark_overlap_change_spec(self):
+        base = {"datasets": {"textvqa": {"n_samples": 5}}}
+        base_spec = GPTQStage._calibration_dataset_spec(base)
+        self.assertNotEqual(
+            base_spec,
+            GPTQStage._calibration_dataset_spec({**base, "seq_len": 512}),
+        )
+        self.assertNotEqual(
+            base_spec,
+            GPTQStage._calibration_dataset_spec(
+                {**base, "allow_benchmark_overlap": True}
+            ),
+        )
+
+    def test_equivalent_string_and_mapping_forms_match(self):
+        self.assertEqual(
+            GPTQStage._calibration_dataset_spec({"datasets": "textvqa:50"}),
+            GPTQStage._calibration_dataset_spec(
+                {"datasets": {"textvqa": {"n_samples": 50}}}
+            ),
+        )
+
+    def test_scalar_count_and_sequence_form_normalized(self):
+        """Scalar counts and string sequence items normalize identically."""
+        mapping_form = GPTQStage._calibration_dataset_spec(
             {"datasets": {"textvqa": 50, "wikitext2": {}}, "n_samples": 32}
         )
-        self.assertEqual(spec, "textvqa:50,wikitext2:32")
-
-    def test_sequence_form(self):
-        spec = GPTQStage._calibration_dataset_spec(
-            {
-                "datasets": ["wikitext2", {"dataset": "textvqa", "n_samples": 50}],
-                "n_samples": 128,
-            }
+        sequence_form = GPTQStage._calibration_dataset_spec(
+            {"datasets": ["textvqa:50", "wikitext2:32"]}
         )
-        self.assertEqual(spec, "textvqa:50,wikitext2:128")
+        self.assertEqual(mapping_form, sequence_form)
 
-    def test_single_dataset_fallback(self):
-        spec = GPTQStage._calibration_dataset_spec(
-            {"dataset": "textvqa", "n_samples": 16}
+    def test_default_fallback_is_vqav2_128(self):
+        spec = GPTQStage._calibration_dataset_spec({})
+        self.assertIn("vqav2", spec)
+        self.assertIn("128", spec)
+
+    def test_defaults_come_from_loader_module(self):
+        """The spec defaults must mirror build_vlm_calibration_inputs()
+        defaults via the shared constants, not hardcoded duplicates."""
+        from tico.quantization.recipes.data import vlm as vlm_data
+
+        self.assertEqual(vlm_data.DEFAULT_CALIBRATION_DATASET, "vqav2")
+        self.assertEqual(vlm_data.DEFAULT_CALIBRATION_N_SAMPLES, 128)
+        self.assertEqual(vlm_data.DEFAULT_CALIBRATION_SEED, 42)
+        import inspect
+
+        sig = inspect.signature(vlm_data.build_vlm_calibration_inputs)
+        self.assertIs(
+            sig.parameters["n_samples"].default,
+            vlm_data.DEFAULT_CALIBRATION_N_SAMPLES,
         )
-        self.assertEqual(spec, "textvqa:16")
+        self.assertIs(sig.parameters["seed"].default, vlm_data.DEFAULT_CALIBRATION_SEED)
+        # The spec for an empty calibration config must equal the spec built
+        # explicitly from the loader defaults (dataset/count in the
+        # calibration section, seed in the runtime section).
+        self.assertEqual(
+            GPTQStage._calibration_dataset_spec({}),
+            GPTQStage._calibration_dataset_spec(
+                {
+                    "dataset": vlm_data.DEFAULT_CALIBRATION_DATASET,
+                    "n_samples": vlm_data.DEFAULT_CALIBRATION_N_SAMPLES,
+                },
+                {"seed": vlm_data.DEFAULT_CALIBRATION_SEED},
+            ),
+        )
 
-    def test_defaults(self):
-        self.assertEqual(GPTQStage._calibration_dataset_spec({}), "vqav2:128")
+
+class TestModelStateFingerprint(unittest.TestCase):
+    """Pre-mutation weight-state fingerprint for FP inputs cache identity."""
+
+    def test_identical_weights_same_fingerprint(self):
+        model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 2))
+        clone = copy.deepcopy(model)
+        self.assertEqual(
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
+        )
+
+    def test_different_weights_different_fingerprint(self):
+        model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 2))
+        clone = copy.deepcopy(model)
+        with torch.no_grad():
+            clone[0].weight[0, 0] += 1.0
+        self.assertNotEqual(
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
+        )
+
+    def test_publication_stamps_pre_mutation_fingerprint(self):
+        """The fingerprint is captured before quantization; later weight
+        mutations must not change what gets published."""
+        model = nn.Sequential(nn.Linear(4, 4))
+        quantizer = _make_quantizer()
+        pre_mutation = quantizer._fp_model_state(model)
+        with torch.no_grad():
+            model[0].weight.add_(torch.randn_like(model[0].weight))
+        fingerprint = quantizer._compute_fp_inputs_fingerprint(model)
+        self.assertEqual(fingerprint["model_state"], pre_mutation)
+        # A fresh quantizer sees the mutated model as a different state.
+        self.assertNotEqual(_make_quantizer()._fp_model_state(model), pre_mutation)
+
+    def test_verifier_rejects_model_state_mismatch(self):
+        model_a = nn.Linear(4, 4)
+        model_b = copy.deepcopy(model_a)
+        with torch.no_grad():
+            model_b.weight[0, 0] += 0.5
+        manifest = {
+            "fingerprint": _make_quantizer()._compute_fp_inputs_fingerprint(model_a)
+        }
+        with self.assertRaises(RuntimeError) as ctx:
+            _make_quantizer()._verify_fp_inputs_fingerprint(
+                manifest, "/tmp/fp_cache", model=model_b
+            )
+        self.assertIn("model_state", str(ctx.exception))
+
+    def test_verifier_skips_missing_model_state(self):
+        """Manifests written before model_state existed remain loadable."""
+        model = nn.Linear(4, 4)
+        quantizer = _make_quantizer()
+        fingerprint = quantizer._compute_fp_inputs_fingerprint(model)
+        del fingerprint["model_state"]
+        # Must not raise (per-key None skip keeps older manifests loadable).
+        quantizer._verify_fp_inputs_fingerprint(
+            {"fingerprint": fingerprint}, "/tmp/fp_cache", model=model
+        )
+
+
+class TestStageImportDependencies(unittest.TestCase):
+    """recipes.stages.gptq must be importable without the HF datasets stack.
+
+    The GPTQv2 algorithm CI job has no evaluation dependencies installed;
+    the calibration-config normalization used for the FP-inputs cache
+    fingerprint therefore lives in the dependency-free
+    ``recipes.data.dataset_config`` module.
+    """
+
+    def test_stages_gptq_importable_without_hf_datasets(self):
+        import subprocess
+        import sys
+
+        repo_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, os.pardir)
+        )
+        code = (
+            "import sys; sys.modules['datasets'] = None; "
+            "import tico.quantization.recipes.stages.gptq; print('OK')"
+        )
+        env = dict(os.environ)
+        env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+        self.assertEqual(
+            proc.returncode,
+            0,
+            msg=f"stdout: {proc.stdout}\nstderr: {proc.stderr[-2000:]}",
+        )
+        self.assertIn("OK", proc.stdout)
 
 
 if __name__ == "__main__":
