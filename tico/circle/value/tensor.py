@@ -175,7 +175,8 @@ class TensorValue:
                 f"Tensor shape {shape} requires {expected_elements} elements, "
                 f"but data provides {array.size}."
             )
-        array = np.ascontiguousarray(array.reshape(shape)).copy()
+        # np.ascontiguousarray would promote a 0-d array to rank 1; keep scalars.
+        array = np.array(array.reshape(shape), order="C", copy=True)
         array.setflags(write=False)
 
         fingerprint = (

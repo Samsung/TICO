@@ -79,9 +79,10 @@ the auxiliary requirements, and TICO itself. It replaces the automatically selec
 PyTorch CPU, CUDA, or nightly index, so the supplied index must provide the requested
 Torch and TorchVision wheels.
 
-`one-compiler` is not required to create Circle files. It is required for the bundled
-Circle interpreter used by `CircleModel.__call__()` and by the default end-to-end test
-runtime. Install a compatible ONE release when local Circle execution is needed.
+`one-compiler` and `onert` are not required to create or execute Circle files.
+`CircleModel.__call__()` and the end-to-end tests use TICO's built-in reference runtime.
+Install ONE or `onert` only when you explicitly want to compare against those runtimes
+(`CircleModel(..., runtime="circle-interpreter")` or `runtime="onert"`).
 
 ## Convert a PyTorch module
 
@@ -205,10 +206,10 @@ circle_model.save("row_sum_dynamic.circle")
 A symbolic dimension is serialized with a Circle `shapeSignature` value of `-1` and a
 concrete placeholder dimension of `1` in `shape`. Static dimensions are preserved.
 
-Dynamic-shape export and dynamic-shape execution are separate capabilities. TICO's
-model test harness uses the `onert` runtime for dynamic-shape execution and updates the
-runtime input tensor information from the actual inputs. The bundled Python Circle
-interpreter is primarily used for static-shape validation.
+Dynamic-shape export and dynamic-shape execution are separate capabilities. The
+built-in reference runtime executes dynamic models directly from the actual input
+sizes, so `circle_model(x_batch_3)` and `circle_model(x_batch_7)` both work for the
+model above. External runtimes may impose their own limits.
 
 ## Compile configuration
 
@@ -348,7 +349,12 @@ Runtime behavior:
 - A single Circle output is returned as one `numpy.ndarray`.
 - Multiple outputs are returned as a list of NumPy arrays.
 - Input count, names, dtypes, ranks, and static dimensions are checked before execution.
+- Every operator result is validated against the serialized shape and dtype; dynamic
+  (`-1`) dimensions follow the actual inputs.
 - The built-in execution path currently requires a one-subgraph Circle model.
+- Quantized models execute with `ExecutionMode.FAKE_QUANTIZE` through
+  `tico.quantization.evaluation.evaluate(..., BACKEND.CIRCLE)`; see
+  [Circle artifact tools](../tico/circle/README.md#reference-runtime).
 
 ## Inspect and verify Circle artifacts
 

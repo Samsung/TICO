@@ -146,8 +146,8 @@ supports a versioned YAML compile configuration.
 | `tico/passes/` | Rewrites over PyTorch `ExportedProgram` / FX graphs. |
 | `tico/serialize/` | Circle graph construction, tensor/buffer encoding, dtype/shape mapping, and operator visitors. |
 | `tico/serialize/operators/` | Registered ATen-overload-to-Circle operator lowering. |
-| `tico/interpreter/` | In-process execution of supported one-subgraph Circle models. |
-| `tico/circle/` | Post-serialization Circle document APIs, verification, extraction, and Circle-to-Circle passes. |
+| `tico/interpreter/` | Runtime selection and input binding for `CircleModel` execution (default: the reference runtime; optional `circle-interpreter`/`onert` adapters). |
+| `tico/circle/` | Post-serialization Circle document APIs, verification, extraction, Circle-to-Circle passes, and the reference runtime (`tico/circle/runtime/`). |
 | `tico/quantization/` | Model quantization APIs, algorithms, WrapQ infrastructure, graph quantization passes, recipes, evaluation, export, and analysis. |
 | `test/modules/` | Small PyTorch programs used by generated conversion/parity tests. |
 | `test/unit_test/` | Focused core conversion and artifact-tool tests. |
@@ -457,12 +457,13 @@ CircleModel.load(path)
 CircleModel(*args, **kwargs)
 ```
 
-The built-in inference path currently asserts one subgraph. It returns one NumPy array
-for one output and a list for multiple outputs.
-
-The end-to-end test harness can instead execute through `onert`. For dynamic-shape
-models it updates the runtime tensor information from concrete input shapes before
-inference.
+The built-in inference path executes the serialized bytes with the reference runtime
+in `tico/circle/runtime/`. It supports one subgraph, validates every operator result
+against the serialized shape/dtype contract, executes dynamic shape signatures from
+the actual input sizes, and returns one NumPy array for one output and a list for
+multiple outputs. `CircleModel(..., runtime=...)` can select the optional
+`circle-interpreter` (ONE) or `onert` adapters explicitly; the default never depends on
+which external packages are installed.
 
 ## 10. Quantization integration
 
@@ -566,7 +567,10 @@ inputs and treats stateful, non-deterministic, custom, variable, and
 subgraph-referencing operators as observable roots.
 
 Verification does not execute inference or validate numerical parity or target-backend
-support. Those concerns belong to runtime tests and backend compilation tests.
+support. The reference runtime (`tico/circle/runtime/`) provides in-process execution
+with per-operator contract validation and a fake-quantize mode for quantized models;
+backend-specific integer arithmetic is out of scope and is rejected explicitly. See the
+"Reference runtime" section of `tico/circle/README.md`.
 
 ## 12. Validation, errors, and diagnostics
 
@@ -646,8 +650,8 @@ the detailed rewrite and testing contract.
 - Core serialization emits one subgraph.
 - Built-in `CircleModel` inference also supports one subgraph.
 - Only registered ATen overloads can reach serialization.
-- Dynamic shape signatures are preserved, but dynamic execution depends on the chosen
-  runtime; the test harness uses `onert`.
+- Dynamic shape signatures are preserved and executed by the reference runtime; the
+  optional `circle-interpreter` adapter cannot execute them.
 - The main exported-graph pass schedule is a fixed list in `tico/utils/convert.py`, not
   a plugin-discovered pipeline.
 - Legalization and optimization passes are currently combined in one main bundle.
@@ -656,8 +660,9 @@ the detailed rewrite and testing contract.
 - Unknown YAML configuration keys are ignored by the current dataclass loader.
 - Successful Circle serialization does not imply compatibility with a particular NPU
   compiler.
-- The default runtime and tests do not cover every dtype supported by specialized
-  quantized serialization.
+- The reference runtime rejects integer arithmetic on quantized tensors in native mode
+  and offers a fake-quantize mode instead; it does not emulate a specific NPU backend
+  bit-exactly.
 
 ## 15. Implementation source map
 
@@ -674,7 +679,7 @@ Use these files as the source of truth when updating this document:
 | Shape and dtype mapping | `tico/serialize/circle_mapping.py` |
 | Operator registry | `tico/serialize/operators/node_visitor.py` |
 | Input binding and dynamic signatures | `tico/utils/signature.py` |
-| Built-in runtime | `tico/utils/model.py`, `tico/interpreter/` |
+| Built-in runtime | `tico/utils/model.py`, `tico/interpreter/`, `tico/circle/runtime/` |
 | Quantization public API | `tico/quantization/public_interface.py` |
 | Circle artifact APIs and pass taxonomy | `tico/circle/README.md`, `tico/circle/passes/optimization/` |
 | Circle optimization presets and scheduling | `tico/circle/passes/presets.py`, `tico/circle/passes/manager.py` |

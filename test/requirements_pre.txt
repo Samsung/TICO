@@ -1,2 +1,5 @@
 # TEST DEPENDENCIES TO BE INSTALLED WITH `pip install --pre`
-onert==0.2.0.dev250922
+#
+# The default test suite executes Circle models with the built-in reference
+# runtime and therefore has no pre-release dependency. The optional `onert`
+# compatibility runtime is installed manually; see docs/development.md.

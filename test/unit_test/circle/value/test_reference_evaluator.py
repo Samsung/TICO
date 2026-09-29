@@ -16,13 +16,17 @@ import unittest
 
 import numpy as np
 from circle_schema import circle
+from tico.circle.runtime import (
+    CircleRuntimeValidationError,
+    UnsupportedCircleOperatorError,
+)
 
 from test.support.circle.builder import CircleModelBuilder
 from test.support.circle.evaluator import CircleReferenceEvaluator
 
 
 class CircleReferenceEvaluatorTest(unittest.TestCase):
-    """Test the NumPy reference semantics independently of Circle passes."""
+    """Test the value-test evaluator wrapper around the Circle reference runtime."""
 
     def setUp(self):
         """Create a fresh evaluator for each test."""
@@ -104,7 +108,7 @@ class CircleReferenceEvaluatorTest(unittest.TestCase):
         builder.set_outputs(x)
         document = builder.build()
 
-        with self.assertRaisesRegex(ValueError, "shape"):
+        with self.assertRaisesRegex(CircleRuntimeValidationError, "shape"):
             self.evaluator.evaluate(
                 document,
                 (np.zeros((3, 2), dtype=np.float32),),
@@ -118,14 +122,14 @@ class CircleReferenceEvaluatorTest(unittest.TestCase):
         builder.set_outputs(x)
         document = builder.build()
 
-        with self.assertRaisesRegex(TypeError, "dtype"):
+        with self.assertRaisesRegex(CircleRuntimeValidationError, "dtype"):
             self.evaluator.evaluate(
                 document,
                 (np.zeros((2, 3), dtype=np.float64),),
             )
 
-    def test_unsupported_operator_is_rejected(self):
-        """Reject builtin operators outside the explicit evaluator subset."""
+    def test_unsupported_operator_is_rejected_with_operator_location(self):
+        """Reject builtin operators without a reference kernel and name the operator."""
 
         builder = CircleModelBuilder()
         x = builder.input("x", [3])
@@ -134,22 +138,26 @@ class CircleReferenceEvaluatorTest(unittest.TestCase):
         builder.set_outputs(output)
         document = builder.build()
         operator_code = document.model.operatorCodes[0]
-        operator_code.builtinCode = circle.BuiltinOperator.BuiltinOperator.ABS
-        operator_code.deprecatedBuiltinCode = circle.BuiltinOperator.BuiltinOperator.ABS
+        operator_code.builtinCode = circle.BuiltinOperator.BuiltinOperator.UNIQUE
+        operator_code.deprecatedBuiltinCode = (
+            circle.BuiltinOperator.BuiltinOperator.UNIQUE
+        )
 
-        with self.assertRaisesRegex(NotImplementedError, "builtin operator"):
+        with self.assertRaisesRegex(
+            UnsupportedCircleOperatorError, r"UNIQUE[\s\S]*operators\[0\]"
+        ):
             self.evaluator.evaluate(
                 document,
                 (np.ones(3, dtype=np.float32),),
             )
 
-    def test_fused_activation_is_rejected(self):
-        """Reject arithmetic operators whose fused activation is not NONE."""
+    def test_fused_relu_activation_is_applied(self):
+        """Apply a fused RELU after ADD instead of ignoring the option."""
 
         builder = CircleModelBuilder()
         x = builder.input("x", [3])
-        one = builder.const_f32("one", 1.0)
-        output = builder.add(x, one, name="output")
+        bias = builder.const_f32("bias", [-2.0, 0.0, 2.0])
+        output = builder.add(x, bias, name="output")
         builder.set_outputs(output)
         document = builder.build()
         document.subgraph().operators[
@@ -158,14 +166,18 @@ class CircleReferenceEvaluatorTest(unittest.TestCase):
             circle.ActivationFunctionType.ActivationFunctionType.RELU
         )
 
-        with self.assertRaisesRegex(NotImplementedError, "activation"):
-            self.evaluator.evaluate(
-                document,
-                (np.ones(3, dtype=np.float32),),
-            )
+        result = self.evaluator.evaluate(
+            document,
+            (np.ones(3, dtype=np.float32),),
+        )
 
-    def test_optional_input_is_rejected(self):
-        """Reject an optional operator input instead of guessing semantics."""
+        np.testing.assert_array_equal(
+            result.outputs[0], np.array([0.0, 1.0, 3.0], dtype=np.float32)
+        )
+        self.assertEqual(result.outputs[0].dtype, np.float32)
+
+    def test_absent_required_input_is_rejected(self):
+        """Reject an absent (-1) operand for an operator that requires it."""
 
         builder = CircleModelBuilder()
         x = builder.input("x", [3])
@@ -175,7 +187,9 @@ class CircleReferenceEvaluatorTest(unittest.TestCase):
         document = builder.build()
         document.subgraph().operators[0].inputs[1] = -1
 
-        with self.assertRaisesRegex(NotImplementedError, "optional inputs"):
+        with self.assertRaisesRegex(
+            CircleRuntimeValidationError, r"input 1 must not be absent"
+        ):
             self.evaluator.evaluate(
                 document,
                 (np.ones(3, dtype=np.float32),),
@@ -195,7 +209,7 @@ class CircleReferenceEvaluatorTest(unittest.TestCase):
         external_buffer.offset = 16
         external_buffer.size = 4
 
-        with self.assertRaisesRegex(NotImplementedError, "external buffers"):
+        with self.assertRaisesRegex(UnsupportedCircleOperatorError, "external buffer"):
             self.evaluator.evaluate(
                 document,
                 (np.ones(3, dtype=np.float32),),

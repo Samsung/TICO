@@ -58,10 +58,21 @@ def test_without_pt2(orig_class):
     return orig_class
 
 
-def test_negative(expected_err):
+def test_negative(expected_err, runtime=None):
+    """
+    Decorator to mark a test class whose conversion or execution must fail with
+     a message containing `expected_err`.
+
+    When `runtime` is given (e.g. "onert"), the failure is expected only while
+     the tests execute Circle models with that runtime. Under any other runtime
+    the class runs as a normal parity test, so a backend-specific limitation
+    does not hide the numerical check of the converted model.
+    """
+
     def __inner_test_negative(orig_class):
         setattr(orig_class, "__tag_test_negative", True)
         setattr(orig_class, "__tag_expected_err", expected_err)
+        setattr(orig_class, "__tag_negative_runtime", runtime)
 
         return orig_class
 
@@ -75,11 +86,12 @@ def target(orig_class):
 
 def use_onert(orig_class):
     """
-    Decorator to mark a test class so that Circle models are executed
-     with the 'onert' runtime.
+    Decorator to mark a test class whose model cannot be executed by ONE's
+     'circle-interpreter' (for example, dynamic shapes).
 
-    Useful when the default 'circle-interpreter' cannot run the model
-     under test.
+    The default 'reference' runtime executes these models like any other test.
+     The tag only matters when the legacy 'circle-interpreter' runtime is
+    selected explicitly: the harness then falls back to 'onert' for this class.
     """
     setattr(orig_class, "__tag_use_onert", True)
     return orig_class

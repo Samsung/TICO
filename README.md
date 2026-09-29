@@ -22,8 +22,9 @@ representation in ONE designed for optimized on-device neural network inference.
 ### Prerequisites
 
 - Python **3.10+**
-- (Optional) [one-compiler](https://github.com/Samsung/ONE/releases) — only required to run
-  inference with converted Circle models. Conversion itself does not need it.
+- No ONE or `onert` installation is needed: conversion and Circle execution
+  (`CircleModel.__call__()`) use TICO's built-in reference runtime. ONE's
+  `circle-interpreter` and `onert` can optionally be selected as external runtimes.
 
 We highly recommend using a virtual environment (e.g., conda, venv).
 

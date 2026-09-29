@@ -50,7 +50,7 @@ class SimpleSingleBatchLhsConstBmm(TestModuleBase):
 
 
 @use_onert
-@test_negative(expected_err="NNFW_STATUS_ERROR")
+@test_negative(expected_err="NNFW_STATUS_ERROR", runtime="onert")
 class SimpleSingleBatchLhsConstBmm_NEG(TestModuleBase):
     """
     Without CompileConfigV1(convert_single_batch_lhs_const_bmm_to_fc=True), it fails

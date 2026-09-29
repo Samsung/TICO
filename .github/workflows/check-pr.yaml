@@ -125,6 +125,28 @@ jobs:
       - name: Run all tests
         run: ./ccex test
 
+      - name: Execute a Circle model from the installed wheel outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          python3 - <<'PY'
+          import numpy as np
+          import torch
+          import tico
+          from tico.utils.model import CircleModel
+
+          class Add(torch.nn.Module):
+              def forward(self, x, y):
+                  return x + y
+
+          model = tico.convert(Add().eval(), (torch.ones(2, 3), torch.ones(2, 3)))
+          model.save("add.circle")
+          reloaded = CircleModel.load("add.circle")
+          assert reloaded.runtime == "reference", reloaded.runtime
+          out = reloaded(torch.full((2, 3), 2.0), torch.full((2, 3), 3.0))
+          np.testing.assert_array_equal(out, np.full((2, 3), 5.0, dtype=np.float32))
+          print("wheel smoke test passed")
+          PY
+
   test_compatibility:
     name: Smoke (${{ matrix.tier }}, torch ${{ matrix.torch-version }})
     needs:
@@ -157,4 +179,5 @@ jobs:
           ./ccex test -k SimpleAdd
           python3 -m unittest \
             test.quantization.wrapq.test_cnn_quantized_export.CNNQuantizedExportTest.test_uint8_circle_export \
+            test.unit_test.utils.test_runtime_independence \
             -v

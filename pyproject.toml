@@ -12,7 +12,6 @@ license = {file = "LICENSE"}
 dependencies = [
     "circle-schema",
     "packaging",
-    "cffi",
     "torch",
     "pyyaml",
     "tqdm",

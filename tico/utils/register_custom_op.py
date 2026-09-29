@@ -1211,8 +1211,24 @@ def RegisterGatherNdOp() -> None:
         return params.new_empty(output_shape)
 
 
+_REGISTERED = False
+
+
 # Add custom ops to the torch namespace
 def RegisterOps():
+    """
+    Register every `circle_custom` operator exactly once per process.
+
+    Registering a `torch.library.custom_op` a second time replaces the
+    `torch.ops.circle_custom.*` overload objects. Serializer visitors are keyed
+    by those objects, so a re-registration would silently make every
+    `circle_custom` operator unsupported for the rest of the process.
+    """
+    global _REGISTERED
+    if _REGISTERED:
+        return
+    _REGISTERED = True
+
     CircleResizeNearestNeighbor()
     CircleResizeBilinear()
     CirclePReLU()

@@ -89,6 +89,7 @@ jobs:
           ./ccex test -k SimpleAdd
           python3 -m unittest \
             test.quantization.wrapq.test_cnn_quantized_export.CNNQuantizedExportTest.test_uint8_circle_export \
+            test.unit_test.utils.test_runtime_independence \
             -v
 
   full_matrix:

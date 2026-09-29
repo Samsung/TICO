@@ -62,7 +62,7 @@ class SimpleMatmulConstRhsOnert(TestModuleBase):
 
 
 @use_onert
-@test_negative(expected_err="NNFW_STATUS_ERROR")
+@test_negative(expected_err="NNFW_STATUS_ERROR", runtime="onert")
 class SimpleMatmulConstLhsOnert(TestModuleBase):
     """ """
 

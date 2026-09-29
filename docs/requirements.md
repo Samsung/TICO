@@ -172,10 +172,12 @@ criterion on the current branch.
 ### QR-2: Structural validity precedes runtime parity
 
 Generated test artifacts shall be checked for Circle validity before runtime output
-comparison. The current module harness invokes `circle2circle` for this purpose.
+comparison. The module harness uses `CircleDocument.verify()` for structural
+consistency and the reference runtime's preparation and static contract probe for
+operator support and per-operator shape/dtype contracts.
 
-The `tico-circle verify` command provides an additional internal-consistency checker
-for serialized artifacts, but it is not a substitute for runtime parity.
+Structural verification is not a substitute for runtime parity; the harness executes
+every converted model and compares it with PyTorch.
 
 ### QR-3: Pattern rewrites require positive and negative coverage
 
@@ -254,10 +256,12 @@ workflow.
 
 ### Circle runtime and ONE
 
-Circle generation itself does not require `one-compiler`. Local execution through the
-bundled Circle interpreter and the end-to-end test harness requires the corresponding
-runtime components. The test harness can alternatively use the project-pinned `onert`
-Python package.
+Neither Circle generation nor Circle execution requires `one-compiler` or `onert`.
+`CircleModel.__call__()`, `tico.interpreter.infer()`, the end-to-end test harness, and
+`evaluate(..., BACKEND.CIRCLE)` use the built-in reference runtime
+(`tico.circle.runtime`). ONE's `circle-interpreter` and the `onert` package remain
+optional, explicitly selected compatibility runtimes; the default suite must not import,
+install, or invoke them.
 
 ### External models and data
 
@@ -301,8 +305,8 @@ source are the authoritative way to obtain results.
 - Every serialized ATen overload must have a registered `NodeVisitor`.
 - Tensor metadata must be available and representable in Circle.
 - Only supported dense tensor layouts and dtypes can be serialized.
-- Dynamic execution depends on runtime support; the test harness uses `onert` for
-  dynamic-shape cases.
+- Dynamic shape signatures are executed by the reference runtime from the actual input
+  sizes; the optional `circle-interpreter` adapter cannot execute them.
 - The exported-graph pass order is an explicit list, not plugin-discovered.
 - Unknown keys in version 1.0 YAML configuration are currently ignored.
 - `CompileConfigV1.eliminate_rank_round_trip` is declared but not currently wired; the
@@ -329,7 +333,7 @@ TICO does not currently promise:
 | Operator serialization and parity | `test/modules/op/`, `test/pt2_to_circle_test/test_op.py`, `test/unit_test/ops/`, `test/unit_test/serialize/` |
 | Network-pattern conversion | `test/modules/net/`, `test/pt2_to_circle_test/test_net.py` |
 | PyTorch-IR passes | `test/unit_test/passes/` plus E2E module tests where applicable |
-| Dynamic shape signatures/execution | dynamic module tests and `onert` runtime path in the test harness |
+| Dynamic shape signatures/execution | dynamic module tests and `test/unit_test/circle/runtime/` |
 | Core quantization graph passes | `test/quantization/passes/`, `test/unit_test/quantization/` |
 | Quantization algorithms and WrapQ | `test/quantization/algorithm/`, `test/quantization/wrapq/` |
 | Quantization recipes/export/evaluation | `test/quantization/recipes/`, `test/quantization/examples/`, related smoke tests |
