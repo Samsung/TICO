@@ -92,6 +92,7 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.mode import Mode
 
 from tico.utils.utils import SuppressWarning
 
@@ -306,15 +307,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--kv_cache_key_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_batched_matmul"],
-        help="Observer type for KV cache key quantization (minmax/mse/mse_octav/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_batched_matmul"],
+        help="Observer type for KV cache key quantization (minmax/mse/mse_octav/mse_grad_octav/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_value_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_matmul"],
-        help="Observer type for KV cache value quantization (minmax/mse/mse_octav/mse_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul"],
+        help="Observer type for KV cache value quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_key_observer_per_channel",
@@ -336,36 +337,36 @@ def build_parser() -> argparse.ArgumentParser:
         "--linear_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for linear activation quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for linear activation quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--norm_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for norm activation quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for norm activation quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--softmax_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for softmax activation quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for softmax activation quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--spinquant_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for SpinQuant rotation I/O quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for SpinQuant rotation I/O quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--lm_head_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
+        help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_key_global_calibration",
@@ -390,6 +391,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-layer KV cache key quantization specs. Format: "
         "'start-end:dtype:observer;start-end:dtype:observer;...'. "
         "Example: '0-15:uint8:minmax;16-29:uint8:mse'. "
+        "Use '...' as the end for an open-ended range, e.g. '16-...:uint4:mse'. "
+        "Append ':per_channel' to a segment to enable per-channel qscheme, "
+        "e.g. '16-...:uint4:mse:per_channel'. "
         "Layers not covered by any range get no KV cache key quantization. "
         "When set, overrides --kv_cache_key_qdtype and --kv_cache_key_observer.",
     )
@@ -400,6 +404,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Per-layer KV cache value quantization specs. Format: "
         "'start-end:dtype:observer;start-end:dtype:observer;...'. "
         "Example: '0-15:uint8:minmax;16-29:uint4:mse'. "
+        "Use '...' as the end for an open-ended range, e.g. '16-...:uint4:mse'. "
+        "Append ':per_channel' to a segment to enable per-channel qscheme, "
+        "e.g. '16-...:uint4:mse:per_channel'. "
         "Layers not covered by any range get no KV cache value quantization. "
         "When set, overrides --kv_cache_value_qdtype and --kv_cache_value_observer.",
     )
@@ -1487,6 +1494,132 @@ def save_layers_to(
     )
 
 
+def _capture_batch_gradients(
+    q_m: torch.nn.Module,
+    inp: torch.Tensor,
+) -> None:
+    """
+    Forward + backward pass to capture per-activation task-loss gradients.
+
+    Similar to ``SensitivityCalibrator.compute_sensitivity_info``: forward
+    to logits, cross-entropy loss on next-token prediction, backward, then
+    read ``|x.grad|`` from captured leaf tensors.
+
+    1. Set all quant modules to NO_QUANT mode.
+    2. Monkey-patch ``_fq`` to capture activations **only for
+       MSEGradOCTAVObserver instances** — non-grad observers pass through
+       with no graph overhead.
+    3. Forward → logits → cross-entropy loss → ``loss.backward()``.
+    4. Read ``|x.grad|`` for each captured activation and register it
+       in the module-level ``_GRAD_REGISTRY`` keyed by ``(id(observer), shape)``.
+       The gradient tensor is a sufficient statistic for gradient-weighted
+       OCTAV — it is offloaded to CPU between passes to free GPU memory.
+    5. Restore original ``_fq`` and quant-module modes.
+
+    Memory notes
+    ------------
+    Only ``MSEGradOCTAVObserver`` instances trigger ``retain_grad()`` /
+    leaf-tensor capture, so the autograd graph retains ``.grad`` tensors
+    only for the observers that actually need them.  ``use_cache`` is
+    always False here to avoid retaining KV-cache tensors in the graph;
+    the shape-keyed registry means cache-finalization calls (different
+    shapes) simply find no gradient and fall back to plain OCTAV.
+    """
+    from tico.quantization.wrapq.observers.mse_grad_octav import (
+        MSEGradOCTAVObserver,
+        clear_gradient_registry,
+        register_gradient,
+    )
+    from tico.quantization.wrapq.wrappers.ops.quant_rmsnorm import QuantRMSNorm
+
+    original_fq = QuantModuleBase._fq
+    original_modes: dict[int, Mode] = {}
+    for m in q_m.modules():
+        if isinstance(m, QuantModuleBase):
+            original_modes[id(m)] = m._mode
+            m._mode = Mode.NO_QUANT
+
+    captured: list[tuple[Any, torch.Tensor]] = []
+
+    def _grad_fq(self, x, obs, **kwargs):
+        # Only MSEGradOCTAVObserver needs gradients.  For all other
+        # observers, return x as-is — no retain_grad(), no capture, no
+        # extra .grad tensor allocation.  This dramatically reduces peak
+        # memory when only a subset of observer types use mse_grad_octav.
+        if not isinstance(obs, MSEGradOCTAVObserver):
+            return x
+
+        # When x already requires grad (i.e. it is a non-leaf tensor in the
+        # autograd graph built by earlier _fq calls), we must NOT detach —
+        # detaching would break the graph and loss.backward() would only
+        # populate .grad for the last captured tensor.  Instead, call
+        # retain_grad() so the non-leaf tensor's .grad is populated after
+        # backward(), and return x as-is to keep the graph intact.
+        #
+        # When x does NOT require grad (e.g. embedding output with frozen
+        # params), we create a leaf tensor that starts the autograd graph.
+        if x.requires_grad:
+            x.retain_grad()
+            captured.append((obs, x))
+            return x
+        else:
+            x_req = x.detach().requires_grad_(True)
+            captured.append((obs, x_req))
+            return x_req
+
+    # The circle_custom.rms_norm custom op has no autograd formula registered,
+    # so loss.backward() would raise RuntimeError.  Temporarily replace
+    # QuantRMSNorm.forward with a native autograd-compatible implementation.
+    original_rmsnorm_forward = QuantRMSNorm.forward
+
+    def _native_rmsnorm_forward(self, x: torch.Tensor):
+        x_q = self._fq(x, self.obs_act_in)
+        w = self.module.weight
+        if self._mode is Mode.QUANT:
+            w = self.obs_weight.fake_quant(w)
+        # Native RMSNorm — mirrors circle_custom.rms_norm but is differentiable.
+        input_dtype = x_q.dtype
+        compute_dtype = (
+            torch.float64 if input_dtype == torch.float64 else torch.float32
+        )
+        x_c = x_q.to(compute_dtype)
+        variance = x_c.pow(2).mean(-1, keepdim=True)
+        x_normed = x_c * torch.rsqrt(variance + self.eps)
+        rms = w * x_normed.to(input_dtype)
+        return self._fq(rms, self.obs_act_out)
+
+    QuantModuleBase._fq = _grad_fq
+    QuantRMSNorm.forward = _native_rmsnorm_forward
+    clear_gradient_registry()
+
+    outputs = q_m(input_ids=inp, use_cache=False, return_dict=True)
+    logits = outputs.logits
+    shift_logits = logits[:, :-1].contiguous()
+    shift_labels = inp[:, 1:].contiguous()
+    loss = F.cross_entropy(
+        shift_logits.view(-1, shift_logits.size(-1)),
+        shift_labels.view(-1),
+    )
+    loss.backward()
+
+    for obs, x_req in captured:
+        if x_req.grad is not None:
+            register_gradient(obs, x_req, x_req.grad.abs().detach())
+
+    # Eagerly free captured tensors and gradients so the memory is released
+    # before the (no_grad) calibration forward pass that follows.
+    del captured
+    q_m.zero_grad(set_to_none=True)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    QuantModuleBase._fq = original_fq
+    QuantRMSNorm.forward = original_rmsnorm_forward
+    for m in q_m.modules():
+        if isinstance(m, QuantModuleBase):
+            m._mode = original_modes.get(id(m), m._mode)
+
+
 def calibrate_ptq_observers(
     q_m: torch.nn.Module,
     calib_inputs: list[torch.Tensor],
@@ -1507,6 +1640,13 @@ def calibrate_ptq_observers(
     after :meth:`prepare_stage2` builds the fixed grid.  This matches the
     two-pass flow in ``llama_quantizer.py``.
 
+    When any observer is an :class:`MSEGradOCTAVObserver`, per-activation
+    task-loss gradients are captured via :func:`_capture_batch_gradients`
+    (forward + backward, similar to ``SensitivityCalibrator``) right inside
+    ``_run_pass``.  For the ``max_merge`` strategy (pass 1) gradients are
+    captured in pass 1; for the global two-stage strategy they are captured
+    in pass 2.
+
     Args:
         q_m: PTQ-prepared model.
         calib_inputs: List of token tensors with shape [1, seq_len].
@@ -1517,15 +1657,46 @@ def calibrate_ptq_observers(
     """
     q_m.eval()
 
-    def _run_pass(desc: str):
-        """Run one calibration pass over all inputs."""
+    # --- Check if any observer needs gradient-weighted OCTAV ---
+    has_grad_octav = False
+    for m in q_m.modules():
+        if isinstance(m, QuantModuleBase):
+            for _, obs in m.named_observers():
+                if type(obs).__name__ == "MSEGradOCTAVObserver":
+                    has_grad_octav = True
+                    break
+        if has_grad_octav:
+            break
+
+    # --- Check if any observer needs a second stage (max_merge=False) ---
+    has_two_stage = False
+    for m in q_m.modules():
+        if isinstance(m, QuantModuleBase):
+            for _, obs in m.named_observers():
+                if hasattr(obs, "prepare_stage2") and not getattr(obs, "max_merge", True):
+                    has_two_stage = True
+                    break
+        if has_two_stage:
+            break
+
+    def _run_pass(desc: str, compute_gradients: bool = False):
+        """Run one calibration pass over all inputs.
+
+        When *compute_gradients* is True, a forward+backward pass
+        (:func:`_capture_batch_gradients`) is run before the CALIB
+        forward for each batch, populating ``_GRAD_REGISTRY`` so
+        ``MSEGradOCTAVObserver`` can use per-activation gradients.
+        """
         iterator = calib_inputs
         if not no_tqdm:
             iterator = tqdm.tqdm(calib_inputs, desc=desc)
-        with torch.no_grad():
-            for inp in iterator:
-                inp = inp.to(device)
+        for inp in iterator:
+            inp = inp.to(device)
 
+            if compute_gradients:
+                _capture_batch_gradients(q_m, inp)
+
+            with torch.no_grad():
                 # Prefill calibration
                 if decode_calibration_steps <= 0:
                     q_m(inp)
@@ -1554,18 +1725,11 @@ def calibrate_ptq_observers(
                     next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
     # --- Pass 1: collect min/max + running Grams ---
-    _run_pass("PTQ calibration")
-
-    # --- Check if any observer needs a second stage ---
-    has_two_stage = False
-    for m in q_m.modules():
-        if isinstance(m, QuantModuleBase):
-            for _, obs in m.named_observers():
-                if hasattr(obs, "prepare_stage2") and not getattr(obs, "max_merge", True):
-                    has_two_stage = True
-                    break
-        if has_two_stage:
-            break
+    # For max_merge strategy, gradients are captured here.
+    _run_pass(
+        "PTQ calibration",
+        compute_gradients=has_grad_octav and not has_two_stage,
+    )
 
     if has_two_stage:
         # Build the fixed grid and disable non-two-stage observers.
@@ -1576,7 +1740,19 @@ def calibrate_ptq_observers(
                 m.prepare_stage2()
 
         # --- Pass 2: accumulate per-grid errors on the fixed grid ---
-        _run_pass("PTQ calibration (stage 2)")
+        # For global strategy, gradients are captured here.
+        _run_pass(
+            "PTQ calibration (stage 2)",
+            compute_gradients=has_grad_octav,
+        )
+
+    # Clean up gradient registry
+    if has_grad_octav:
+        from tico.quantization.wrapq.observers.mse_grad_octav import (
+            clear_gradient_registry,
+        )
+
+        clear_gradient_registry()
 
 
 
@@ -3031,7 +3207,8 @@ def quant_spec_from_dtype_and_observer(
     Args:
         dtype_str: A dtype string such as "int16", "uint8", "mxint8", "mxfp4".
         observer_str: Observer type — ``"minmax"`` (default), ``"mse"``,
-            ``"mse_octav"``, ``"mse_matmul"``, or ``"mse_batched_matmul"``.
+            ``"mse_octav"``, ``"mse_grad_octav"``, ``"mse_matmul"``, or
+            ``"mse_batched_matmul"``.
             Ignored for MX dtypes (MXObserver is always used).
         per_channel: If True, use a per-channel qscheme
             (``PER_CHANNEL_SYMM`` for signed dtypes, ``PER_CHANNEL_ASYMM`` for
@@ -3083,6 +3260,18 @@ def quant_spec_from_dtype_and_observer(
                 channel_axis=channel_axis,
                 **({"max_merge": max_merge} if max_merge is not None else {}),
             )
+        elif observer_str == "mse_grad_octav":
+            from tico.quantization.wrapq.observers.mse_grad_octav import (
+                MSEGradOCTAVObserver,
+            )
+
+            return affine(
+                DType(bits=bits, signed=signed),
+                observer=MSEGradOCTAVObserver,
+                qscheme=qscheme,
+                channel_axis=channel_axis,
+                **({"max_merge": max_merge} if max_merge is not None else {}),
+            )
         elif observer_str == "mse_matmul":
             from tico.quantization.wrapq.observers.mse_matmul import MSEMatMulObserver
 
@@ -3123,18 +3312,33 @@ def parse_layer_wise_kv_cache_spec(
     spec_str: str,
     per_channel: bool,
     max_merge: Optional[bool],
+    num_hidden_layers: Optional[int] = None,
 ) -> Dict[int, "QuantSpec"]:
     """
     Parse a per-layer KV cache spec string into a layer-index-to-QuantSpec dict.
 
-    Format: ``"start-end:dtype:observer;start-end:dtype:observer;..."``
+    Format: ``"start-end:dtype:observer[:per_channel];..."``
 
-    Example: ``"0-15:uint8:minmax;16-29:uint4:mse"``
+    The end index may be ``...`` to mean "to the last layer". In that case
+    ``num_hidden_layers`` must be provided to resolve the open-ended range.
+
+    Each segment may include an optional 4th field, the literal keyword
+    ``per_channel``, to enable per-channel qscheme for that segment only.
+    If omitted, the global ``per_channel`` argument is used.
+
+    Examples::
+
+        "0-15:uint8:minmax;16-29:uint4:mse"
+        "0-15:uint8:minmax;16-...:uint4:mse"                    # requires num_hidden_layers
+        "0-15:uint8:minmax;16-...:uint4:mse:per_channel"       # per-channel for 16+
 
     Args:
         spec_str: The spec string to parse.
-        per_channel: If True, use per-channel qscheme for all segments.
+        per_channel: Default per-channel qscheme flag. Used when a segment does
+            not include the ``per_channel`` keyword.
         max_merge: If not None, forwarded to MSE-family observers.
+        num_hidden_layers: Total number of decoder layers. Required when ``...``
+            is used as the end of a range.
 
     Returns:
         A dict mapping layer index to QuantSpec.
@@ -3145,18 +3349,36 @@ def parse_layer_wise_kv_cache_spec(
         if not segment:
             continue
         parts = segment.split(":")
-        if len(parts) != 3:
+        if len(parts) not in (3, 4):
             raise ValueError(
                 f"Invalid layer spec segment {segment!r}: expected "
-                f"'start-end:dtype:observer' format."
+                f"'start-end:dtype:observer[:per_channel]' format."
             )
-        range_part, dtype_str, observer_str = parts
+        range_part, dtype_str, observer_str = parts[:3]
+        # Optional per-segment per_channel keyword; fall back to global.
+        seg_per_channel = per_channel
+        if len(parts) == 4:
+            if parts[3].strip() != "per_channel":
+                raise ValueError(
+                    f"Invalid 4th field {parts[3]!r} in segment {segment!r}: "
+                    f"expected 'per_channel'."
+                )
+            seg_per_channel = True
         start_str, end_str = range_part.split("-")
-        start, end = int(start_str), int(end_str)
+        start = int(start_str)
+        if end_str == "...":
+            if num_hidden_layers is None:
+                raise ValueError(
+                    f"Cannot resolve '...' in segment {segment!r}: "
+                    f"num_hidden_layers must be provided."
+                )
+            end = num_hidden_layers - 1
+        else:
+            end = int(end_str)
         spec = quant_spec_from_dtype_and_observer(
             dtype_str,
             observer_str,
-            per_channel=per_channel,
+            per_channel=seg_per_channel,
             max_merge=max_merge,
         )
         for idx in range(start, end + 1):
@@ -3164,13 +3386,13 @@ def parse_layer_wise_kv_cache_spec(
     return result
 
 
-def build_activation_specs(args):
+def build_activation_specs(args, num_hidden_layers: Optional[int] = None):
     """
     Build activation QuantSpecs from parsed args, honoring per-category observer flags.
 
     Each activation category (linear / norm / softmax / SpinQuant I/O / lm_head I/O /
     KV cache key / KV cache value) gets its observer type from the corresponding
-    ``--*_observer`` CLI flag (minmax/mse/mse_octav/mse_matmul/mse_batched_matmul).
+    ``--*_observer`` CLI flag (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul).
 
     When a category's qdtype is not set (e.g. ``--spinquant_io_qdtype``), the dtype
     falls back to ``--linear_io_qdtype`` (same as before), but that category's own
@@ -3208,6 +3430,7 @@ def build_activation_specs(args):
             args.kv_cache_key_layer_specs,
             per_channel=args.kv_cache_key_observer_per_channel,
             max_merge=False if args.kv_cache_key_global_calibration else None,
+            num_hidden_layers=num_hidden_layers,
         )
         if args.kv_cache_key_layer_specs is not None
         else (
@@ -3231,6 +3454,7 @@ def build_activation_specs(args):
             args.kv_cache_value_layer_specs,
             per_channel=args.kv_cache_value_observer_per_channel,
             max_merge=False if args.kv_cache_value_global_calibration else None,
+            num_hidden_layers=num_hidden_layers,
         )
         if args.kv_cache_value_layer_specs is not None
         else (
@@ -3283,7 +3507,7 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
         lm_head_io_spec,
         kv_cache_key_spec,
         kv_cache_value_spec,
-    ) = build_activation_specs(args)
+    ) = build_activation_specs(args, num_hidden_layers=len(q_m.model.layers))
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
@@ -3382,7 +3606,7 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
         lm_head_io_spec,
         kv_cache_key_spec,
         kv_cache_value_spec,
-    ) = build_activation_specs(args)
+    ) = build_activation_specs(args, num_hidden_layers=len(model.model.layers))
 
     qcfg = build_llm_ptq_config(
         model_type="llama",
