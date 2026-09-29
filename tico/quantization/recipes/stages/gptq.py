@@ -147,6 +147,40 @@ class GPTQStage(Stage):
 
         raise AssertionError(f"Unhandled sensitivity mode: {mode}")
 
+    @staticmethod
+    def _calibration_dataset_spec(calibration_cfg: Mapping[str, Any]) -> str:
+        """
+        Build a compact ``name:count`` spec of the calibration datasets.
+
+        Recorded in the FP-inputs cache manifest fingerprint so a warm cache
+        is only reused when the same datasets with the same sample counts are
+        used for calibration. Mirrors the defaults of
+        ``build_vlm_calibration_inputs`` (dataset "vqav2", n_samples 128).
+        """
+        default_n = calibration_cfg.get("n_samples", 128)
+        entries: list[str] = []
+
+        datasets = calibration_cfg.get("datasets")
+        if isinstance(datasets, Mapping):
+            for name, ds_cfg in datasets.items():
+                if isinstance(ds_cfg, Mapping):
+                    entries.append(f"{name}:{ds_cfg.get('n_samples', default_n)}")
+                else:
+                    entries.append(f"{name}:{ds_cfg}")
+        elif isinstance(datasets, (list, tuple)):
+            for item in datasets:
+                if isinstance(item, str):
+                    entries.append(f"{item}:{default_n}")
+                elif isinstance(item, Mapping):
+                    entries.append(
+                        f"{item.get('dataset')}:{item.get('n_samples', default_n)}"
+                    )
+
+        if not entries:
+            entries.append(f"{calibration_cfg.get('dataset', 'vqav2')}:{default_n}")
+
+        return ",".join(sorted(entries))
+
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         payload = stage_payload(stage_cfg)
 
@@ -162,6 +196,17 @@ class GPTQStage(Stage):
                 f"Unsupported GPTQ variant {variant!r}. "
                 "Supported variants: default, universal."
             )
+        # Stamp the calibration dataset spec for configs that declare it
+        # (e.g. Qwen3VLGPTQConfig): the FP-inputs cache fingerprint compares
+        # it on warm runs so a cache built for different calibration data is
+        # rejected instead of silently reused. filter_dataclass_kwargs drops
+        # the key for config classes without the field.
+        if "calibration_dataset_spec" not in payload:
+            calibration_cfg = ctx.cfg.get("calibration", {})
+            if isinstance(calibration_cfg, Mapping) and calibration_cfg:
+                payload["calibration_dataset_spec"] = self._calibration_dataset_spec(
+                    calibration_cfg
+                )
 
         # Map model family to the appropriate GPTQ config class.
         # Families with a dedicated multimodal GPTQ config (vision + text
