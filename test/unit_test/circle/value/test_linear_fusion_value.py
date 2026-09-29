@@ -38,7 +38,6 @@ if _HAS_GENERATED_SCHEMA:
     from tico.circle.passes.cleanup import DeadCodeEliminationPass
 
     from test.support.circle.builder import CircleModelBuilder
-    from test.support.circle.evaluator import CircleReferenceEvaluator
     from test.support.circle.value_test import CircleValueTestCase
 else:
     circle = None  # type: ignore[assignment]
@@ -47,7 +46,6 @@ else:
     FuseLinearOpsPass = None  # type: ignore[misc, assignment]
     DeadCodeEliminationPass = None  # type: ignore[misc, assignment]
     CircleModelBuilder = object  # type: ignore[misc, assignment]
-    CircleReferenceEvaluator = object  # type: ignore[misc, assignment]
     CircleValueTestCase = unittest.TestCase  # type: ignore[misc, assignment]
 
 
@@ -99,46 +97,12 @@ class _LinearCircleModelBuilder(CircleModelBuilder):
         return output
 
 
-class _LinearReferenceEvaluator(CircleReferenceEvaluator):
-    """Add the FullyConnected kernel required by linear-fusion value tests."""
-
-    def __init__(self) -> None:
-        """Register one conservative FLOAT32 FullyConnected handler."""
-
-        super().__init__()
-        code = int(circle.BuiltinOperator.BuiltinOperator.FULLY_CONNECTED)
-        self._handlers[code] = self._evaluate_fully_connected
-
-    def _evaluate_fully_connected(
-        self,
-        operator: Any,
-        inputs: tuple[np.ndarray, ...],
-    ) -> tuple[np.ndarray, ...]:
-        """Evaluate a three-input activation-free FullyConnected operator."""
-
-        self._require_no_fused_activation(operator)
-        if len(inputs) != 3:
-            raise ValueError(
-                "FULLY_CONNECTED value tests require data, weight, and bias."
-            )
-        source, weight, bias = inputs
-        if source.ndim != 2 or weight.ndim != 2 or bias.ndim != 1:
-            raise ValueError("Unsupported FullyConnected value-test ranks.")
-        return (np.matmul(source, weight.T) + bias,)
-
-
 @unittest.skipUnless(
     _HAS_GENERATED_SCHEMA,
     "circle-schema and flatbuffers are required for Circle value tests",
 )
 class CircleLinearFusionValueTest(CircleValueTestCase):
     """Check generated Circle round trips and values after linear fusion."""
-
-    def setUp(self) -> None:
-        """Use the value evaluator extended with FullyConnected support."""
-
-        super().setUp()
-        self.evaluator = _LinearReferenceEvaluator()
 
     def test_post_fc_add_fuses_without_changing_values(self) -> None:
         """Fold a channel ADD into FC bias and remove old operators with DCE."""

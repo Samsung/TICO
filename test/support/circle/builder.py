@@ -57,7 +57,7 @@ class CircleModelBuilder:
         self.model.subgraphs = [self.subgraph]
 
         self._tensor_names: dict[str, int] = {}
-        self._operator_codes: dict[int, int] = {}
+        self._operator_codes: dict[tuple[int, int], int] = {}
 
     def input(
         self,
@@ -88,11 +88,11 @@ class CircleModelBuilder:
     ) -> int:
         """Add an inline constant tensor and return its tensor index."""
 
-        array = np.asarray(value, dtype=dtype)
-        array = np.ascontiguousarray(array)
+        # np.require keeps 0-d arrays; np.ascontiguousarray would promote them.
+        array = np.require(np.asarray(value, dtype=dtype), requirements="C")
         circle_type = circle_tensor_type_from_numpy_dtype(array.dtype)
         storage_dtype = numpy_dtype_from_circle_tensor_type(circle_type)
-        array = np.ascontiguousarray(array.astype(storage_dtype, copy=False))
+        array = np.require(array.astype(storage_dtype, copy=False), requirements="C")
 
         buffer = circle.Buffer.BufferT()
         buffer.data = array.reshape(-1).view(np.uint8)
@@ -230,6 +230,113 @@ class CircleModelBuilder:
         )
         return output_index
 
+    def activation(
+        self,
+        name: str,
+        shape: Sequence[int],
+        *,
+        dtype: np.dtype[Any] | type[Any] = np.float32,
+        shape_signature: Sequence[int] | None = None,
+        quantization: Any = None,
+    ) -> int:
+        """Add a non-constant tensor (operator output) and return its index."""
+
+        tensor_index = self._add_tensor(
+            name,
+            shape,
+            dtype=dtype,
+            buffer_index=0,
+            shape_signature=shape_signature,
+        )
+        if quantization is not None:
+            self.subgraph.tensors[tensor_index].quantization = quantization
+        return tensor_index
+
+    def quantized_constant(
+        self,
+        name: str,
+        value: Any,
+        *,
+        tensor_type: int,
+        scale: Sequence[float],
+        zero_point: Sequence[int],
+        quantized_dimension: int = 0,
+    ) -> int:
+        """Add an integer constant with affine quantization parameters."""
+
+        storage = numpy_dtype_from_circle_tensor_type(tensor_type)
+        array = np.require(np.asarray(value, dtype=storage), requirements="C")
+        buffer = circle.Buffer.BufferT()
+        buffer.data = array.reshape(-1).view(np.uint8)  # type: ignore[assignment]
+        self.model.buffers.append(buffer)
+        tensor_index = self._add_tensor(
+            name,
+            array.shape,
+            dtype=storage,
+            buffer_index=len(self.model.buffers) - 1,
+        )
+        self.subgraph.tensors[tensor_index].type = int(tensor_type)
+        self.subgraph.tensors[tensor_index].quantization = self.quantization(
+            scale, zero_point, quantized_dimension=quantized_dimension
+        )
+        return tensor_index
+
+    @staticmethod
+    def quantization(
+        scale: Sequence[float],
+        zero_point: Sequence[int],
+        *,
+        quantized_dimension: int = 0,
+    ) -> Any:
+        """Create a QuantizationParameters table."""
+
+        quantization = circle.QuantizationParameters.QuantizationParametersT()
+        quantization.scale = [float(value) for value in scale]
+        quantization.zeroPoint = [int(value) for value in zero_point]
+        quantization.quantizedDimension = int(quantized_dimension)
+        return quantization
+
+    def operator(
+        self,
+        builtin_name: str,
+        inputs: Sequence[int],
+        outputs: Sequence[int],
+        *,
+        options: Any = None,
+        version: int = 1,
+    ) -> None:
+        """Append a builtin operator with an optional Object API options table.
+
+        ``inputs`` may contain ``-1`` for absent optional operands. The options
+        union type is derived from the options class name (``FooOptionsT``).
+        """
+
+        for index in inputs:
+            if index != -1:
+                self._tensor(index)
+        for index in outputs:
+            self._tensor(index)
+        if options is None:
+            options_type = self._builtin_options("NONE")
+        else:
+            options_name = type(options).__name__
+            if not options_name.endswith("T"):
+                raise TypeError(
+                    f"Expected a generated Object API options table, got {options_name}."
+                )
+            options_type = self._builtin_options(options_name[:-1])
+        operator = circle.Operator.OperatorT()
+        operator.opcodeIndex = self._operator_code_index(
+            self._builtin_operator(builtin_name), version=version
+        )
+        operator.inputs = [int(index) for index in inputs]
+        operator.outputs = [int(index) for index in outputs]
+        operator.intermediates = []
+        operator.mutatingVariableInputs = []
+        operator.builtinOptionsType = int(options_type)
+        operator.builtinOptions = options
+        self.subgraph.operators.append(operator)
+
     def set_outputs(self, *tensor_indices: int) -> None:
         """Set graph outputs in the supplied order."""
 
@@ -365,22 +472,23 @@ class CircleModelBuilder:
         operator.builtinOptions = options
         self.subgraph.operators.append(operator)
 
-    def _operator_code_index(self, builtin_code: int) -> int:
+    def _operator_code_index(self, builtin_code: int, *, version: int = 1) -> int:
         """Return an existing operator-code index or create one."""
 
-        existing = self._operator_codes.get(int(builtin_code))
+        key = (int(builtin_code), int(version))
+        existing = self._operator_codes.get(key)
         if existing is not None:
             return existing
 
         operator_code = circle.OperatorCode.OperatorCodeT()
         operator_code.builtinCode = int(builtin_code)
         operator_code.deprecatedBuiltinCode = min(127, int(builtin_code))
-        operator_code.version = 1
+        operator_code.version = int(version)
         operator_code.customCode = None
 
         index = len(self.model.operatorCodes)
         self.model.operatorCodes.append(operator_code)
-        self._operator_codes[int(builtin_code)] = index
+        self._operator_codes[key] = index
         return index
 
     def _make_signature(self, signature_key: str) -> Any:

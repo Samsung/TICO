@@ -18,20 +18,30 @@ from pathlib import Path
 from typing import Any
 
 from tico.interpreter import infer
+from tico.interpreter.backends import resolve_runtime_name
 
 
 class CircleModel:
-    def __init__(self, circle_binary: bytes):
+    """Serialized Circle model that can be saved, loaded, and executed.
+
+    ``runtime`` selects how ``__call__`` executes the model. The default,
+    ``"reference"``, is the built-in NumPy/PyTorch reference runtime. The names
+    ``"circle-interpreter"`` and ``"onert"`` select optional external runtimes
+    that must be installed separately; they are never chosen implicitly.
+    """
+
+    def __init__(self, circle_binary: bytes, *, runtime: str | None = None):
         self.circle_binary = circle_binary
+        self.runtime = resolve_runtime_name(runtime)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return infer.infer(self.circle_binary, *args, **kwargs)
+        return infer.infer_with_runtime(self.circle_binary, self.runtime, args, kwargs)
 
     @staticmethod
-    def load(circle_path: str) -> CircleModel:
+    def load(circle_path: str, *, runtime: str | None = None) -> CircleModel:
         with open(circle_path, "rb") as f:
             buf = bytes(f.read())
-        return CircleModel(buf)
+        return CircleModel(buf, runtime=runtime)
 
     def save(self, circle_path: str | Path) -> None:
         with open(circle_path, "wb") as f:

@@ -36,7 +36,6 @@ if _HAS_GENERATED_SCHEMA:
     from tico.circle.passes.cleanup import DeadCodeEliminationPass
 
     from test.support.circle.builder import CircleModelBuilder
-    from test.support.circle.evaluator import CircleReferenceEvaluator
     from test.support.circle.value_test import CircleValueTestCase
 else:
     circle = None  # type: ignore[assignment]
@@ -45,7 +44,6 @@ else:
     CirclePassManager = None  # type: ignore[misc, assignment]
     DeadCodeEliminationPass = None  # type: ignore[misc, assignment]
     CircleModelBuilder = object  # type: ignore[misc, assignment]
-    CircleReferenceEvaluator = object  # type: ignore[misc, assignment]
     CircleValueTestCase = unittest.TestCase  # type: ignore[misc, assignment]
 
 
@@ -67,40 +65,12 @@ class _ArithmeticCircleModelBuilder(CircleModelBuilder):
         )
 
 
-class _ArithmeticReferenceEvaluator(CircleReferenceEvaluator):
-    """Add the DIV kernel required by arithmetic canonicalization tests."""
-
-    def __init__(self) -> None:
-        """Register one conservative activation-free DIV handler."""
-
-        super().__init__()
-        code = int(circle.BuiltinOperator.BuiltinOperator.DIV)
-        self._handlers[code] = self._evaluate_div
-
-    def _evaluate_div(
-        self,
-        operator: Any,
-        inputs: tuple[np.ndarray, ...],
-    ) -> tuple[np.ndarray, ...]:
-        """Evaluate a two-input DIV operator."""
-
-        self._require_no_fused_activation(operator)
-        self._require_input_count("DIV", inputs, 2)
-        return (np.divide(inputs[0], inputs[1]),)
-
-
 @unittest.skipUnless(
     _HAS_GENERATED_SCHEMA,
     "circle-schema and flatbuffers are required for Circle value tests",
 )
 class ArithmeticCanonicalizationValueTest(CircleValueTestCase):
     """Check generated Circle values after arithmetic canonicalization."""
-
-    def setUp(self) -> None:
-        """Use the value evaluator extended with DIV support."""
-
-        super().setUp()
-        self.evaluator = _ArithmeticReferenceEvaluator()
 
     def test_mul_div_chain_is_canonicalized_without_changing_values(self) -> None:
         """Rewrite `(x * 2) / 4` to `x * 0.5` and preserve output values."""

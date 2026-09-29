@@ -19,6 +19,7 @@ CircleDocument
     ├── verify_document()       internal consistency checks
     ├── inspect                 stable summaries and text output
     ├── operations.extract      workflow-level graph extraction
+    ├── runtime                 NumPy/PyTorch reference execution of the serialized model
     └── passes                  composable Circle-to-Circle rewrites
             ├── compatibility     optional legacy custom-op recovery
             ├── legalize          optional dynamic-FC lowering
@@ -589,6 +590,11 @@ Run the Circle tool unit tests:
 ./ccex test -k circle
 ```
 
+Reference runtime tests live under `test/unit_test/circle/runtime/`. Their expected
+values are hand-computed or derived from independent formulas so that the kernels are
+not validated against themselves; module tests under `test/modules/` then compare
+execution results with PyTorch end to end.
+
 The tests include a schema-independent Object API fixture so graph, selection, rewrite, verification, pass scheduling,
  and extraction behavior can be tested without generating binary fixtures. When `circle-schema` and `flatbuffers` are
  installed, an additional integration test serializes and deserializes a minimal generated `ModelT`.
@@ -616,12 +622,142 @@ Important test scenarios include:
 - atomic mutation rollback and optimization-session invalidation
 - non-empty O1 idempotence and scheduler-equivalence coverage
 
+## Reference runtime
+
+`tico.circle.runtime` executes a serialized `.circle` model in-process with NumPy and
+CPU PyTorch kernels. It is the default runtime behind `CircleModel.__call__()`,
+`tico.interpreter.infer()`, the end-to-end test harness, and the quantization
+evaluation backend `BACKEND.CIRCLE`. It needs no ONE (`one-compiler`) or `onert`
+installation.
+
+The runtime is a correctness reference, not a performance runtime. It reads only the
+Circle bytes (weights, options, shapes, shape signatures, quantization parameters);
+it never consults the PyTorch graph that produced the model.
+
+### Python API
+
+```python
+from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
+
+runtime = CircleReferenceRuntime(circle_bytes)      # parses and decodes constants once
+result = runtime.run([x_numpy, y_numpy])            # positional graph inputs
+outputs = result.outputs                            # tuple of NumPy arrays
+
+traced = runtime.run([x_numpy, y_numpy], trace=True)
+traced.tensor_values[7]                             # every tensor value by tensor index
+
+runtime.probe_static_contracts()                    # zero-input contract check for static models
+```
+
+`CircleModel(circle_bytes, runtime="reference")` and
+`CircleModel.load(path, runtime=...)` select the runtime for the high-level API; the
+names `"circle-interpreter"` (ONE luci-interpreter through CFFI) and `"onert"` are
+optional compatibility adapters that must be requested explicitly and need the external
+package. The selection never changes based on which packages are installed.
+
+### Execution contract
+
+- Inputs are bound positionally in graph-input order and must already have the
+  serialized dtype. `CircleModel` binds positional and keyword arguments by tensor
+  name first (see `ModelInputSpec`).
+- Every operator result is checked against the serialized tensor contract: the dtype
+  must match exactly and every static dimension must match. Dimensions marked `-1` in
+  `shapeSignature` may take any size, so dynamic-shape models run with any input size
+  the exporter allowed. Results are never reshaped or cast to fit the metadata; a
+  mismatch raises `CircleRuntimeValidationError` naming the operator.
+- Constants are decoded with `TensorValueCodec` (little-endian, packed INT4/UINT4,
+  zero-sized tensors, scalars). External buffers (`offset`/`size`) are rejected.
+- Absent optional operands are encoded as tensor index `-1`; kernels that require the
+  operand report it. A graph input that is also a graph output is returned as a copy.
+- Inputs are never modified. Repeated `run()` calls share decoded constants and hold no
+  state between calls. Multi-subgraph, control-flow, variable, and custom operators
+  are rejected with `UnsupportedCircleOperatorError`.
+- Intermediate values are released after their last consumer unless `trace=True`.
+
+### Supported operators
+
+FLOAT32 activations are supported for every operator below; integer dtypes are
+supported where TFLite defines integer semantics and the operator is not a quantized
+arithmetic operator (see the next section).
+
+| Group | Builtin operators |
+|---|---|
+| Arithmetic | `ADD`, `SUB`, `MUL`, `DIV`, `POW`, `MAXIMUM`, `MINIMUM` (broadcasting, fused activation) |
+| Comparison / logical | `EQUAL`, `NOT_EQUAL`, `GREATER`, `GREATER_EQUAL`, `LESS`, `LESS_EQUAL`, `LOGICAL_AND`, `LOGICAL_NOT`, `SELECT`, `SELECT_V2` |
+| Unary | `ABS`, `NEG`, `EXP`, `LOG`, `SIN`, `COS`, `SQRT`, `RSQRT`, `TANH`, `LOGISTIC`, `ROUND` |
+| Activation | `RELU`, `RELU6`, `RELU_N1_TO_1`, `LEAKY_RELU`, `ELU`, `GELU` (exact and tanh approximation), `PRELU` |
+| Data movement | `RESHAPE`, `TRANSPOSE`, `SQUEEZE`, `EXPAND_DIMS`, `BROADCAST_TO`, `CONCATENATION`, `SPLIT`, `SPLIT_V`, `SLICE`, `STRIDED_SLICE` (begin/end/shrink masks), `PAD`, `PADV2`, `GATHER` (axis, batchDims), `GATHER_ND`, `SHAPE`, `CAST` |
+| Reduction | `MEAN`, `SUM`, `REDUCE_MAX`, `REDUCE_MIN`, `REDUCE_PROD`, `REDUCE_ANY`, `ARG_MAX`, `ARG_MIN`, `CUMSUM`, `SOFTMAX`, `LOG_SOFTMAX` |
+| Neural network | `CONV_2D`, `DEPTHWISE_CONV_2D`, `TRANSPOSE_CONV`, `AVERAGE_POOL_2D`, `MAX_POOL_2D`, `FULLY_CONNECTED` (default weights format, `keepNumDims`, optional bias), `BATCH_MATMUL` (adjoint flags, batch broadcasting), `RESIZE_BILINEAR`, `RESIZE_NEAREST_NEIGHBOR`, `INSTANCE_NORM`, `RMS_NORM` |
+| Quantization | `QUANTIZE`, `DEQUANTIZE` (per-tensor and per-channel, FLOAT16 to FLOAT32) |
+
+Semantics follow the TFLite reference kernels used by ONE's luci-interpreter:
+`SAME` padding puts the extra padding element at the end, average pooling excludes
+padded cells, `ROUND` rounds half to even, `QUANTIZE` rounds half away from zero,
+resize follows `ComputeInterpolationValues`/`GetNearestNeighbor`, and `TRANSPOSE_CONV`
+derives its implicit padding from the declared output shape.
+
+Not supported: `STRIDED_SLICE` ellipsis/new-axis masks, `FULLY_CONNECTED` shuffled
+weight formats, MX tensor types (`MXINT8`, `MXFP4`), `ATTENTION` and other custom or
+backend-specific operators, control flow, and variables. Requests for these raise
+`UnsupportedCircleOperatorError` with the operator index, builtin code, version, and
+operand contracts.
+
+### Quantized models
+
+Integer tensors that carry affine quantization parameters are handled by an explicit
+execution mode instead of by guessing backend arithmetic:
+
+- `ExecutionMode.NATIVE` (default) executes tensors with their serialized dtype.
+  Integer tensors *without* quantization parameters (indices, shapes, INT32/INT64
+  arithmetic) use ordinary integer arithmetic. Quantized integer tensors may flow
+  through value-preserving operators (`RESHAPE`, `TRANSPOSE`, `GATHER`, `CONCATENATION`,
+  `SLICE`, `PAD`, ...), `QUANTIZE`, `DEQUANTIZE`, `ARG_MAX`, and `SHAPE` exactly.
+  Arithmetic operators on quantized integer tensors (`FULLY_CONNECTED`, `CONV_2D`,
+  `ADD`, ...) are rejected, because their integer requantization arithmetic is defined
+  per backend and no bit-exact reference is claimed.
+- `ExecutionMode.FAKE_QUANTIZE` reproduces the evaluation semantics that
+  `onecc quantize --fake_quantize` used to provide (ONE's
+  `ConvertToFakeQuantizedModelPass`): quantized constants are dequantized with their
+  serialized parameters, every operator computes in FLOAT32, and each quantized
+  activation is rounded to its serialized grid (quantize, clamp, dequantize) after the
+  producing operator. Value-preserving operators pass dequantized values through
+  without a requantization step, `QUANTIZE` becomes a grid round trip, `DEQUANTIZE`
+  becomes an identity, and quantized graph inputs and outputs are exchanged as FLOAT32.
+  This is a semantic reference of the quantization error, not a bit-exact emulation
+  of an integer backend. Differences from ONE's pass: ONE applied it only to the
+  operators it listed and rejected the others; the runtime classifies every supported
+  operator as either value-preserving or requantizing.
+
+`tico.quantization.evaluation.evaluate(..., BACKEND.CIRCLE)` uses the fake-quantize
+mode through `CircleExecutor`.
+
+### Dynamic shapes
+
+A serialized dimension with `shapeSignature == -1` is dynamic. The runtime validates
+input ranks and static dimensions, computes every intermediate shape from the actual
+inputs (including `SHAPE`-derived reshape targets), and validates each result against
+the static part of its contract. The same runtime instance can be called with different
+dynamic sizes.
+
+### Debugging
+
+- `CircleReferenceRuntime(...).run(inputs, trace=True)` keeps every tensor value in
+  `tensor_values`, keyed by tensor index; combine it with
+  `tico-circle inspect --tensors` to map indices to names.
+- Error messages include the operator index, builtin name and code, operator version,
+  and every operand's index, name, dtype, shape, and constant/activation role.
+- `probe_static_contracts()` runs a static model on zero-valued inputs to find
+  operators whose declared output shape or dtype disagrees with their computed result.
+
 ## Current limitations
 
 This implementation performs structural Circle rewrites, bounded constant evaluation,
-and the documented optional legalizations. It does not perform numerical equivalence
-testing, runtime execution, general shape inference, backend capability validation,
-or comprehensive target-specific legalization.
+the documented optional legalizations, and reference execution through
+`tico.circle.runtime`. Verification does not perform general static shape inference
+or backend capability validation; execution provides operator-level shape/dtype
+contract checks, and numerical parity is established by the tests that compare
+execution results with PyTorch.
 
 Additional limitations:
 
@@ -635,6 +771,7 @@ Additional limitations:
 - Control-flow references are discovered from scalar `*SubgraphIndex` fields, vector `*SubgraphIndices` fields,
  and `CallOptions.subgraph`. A new schema option with a different naming convention must be added to the reference walker.
 - Structural verification does not guarantee that a runtime accepts the model or that outputs are numerically equivalent.
+- The reference runtime is limited to the operator set listed under "Reference runtime" and to single-subgraph models.
 
 ## Pass taxonomy
 

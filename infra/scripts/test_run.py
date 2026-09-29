@@ -36,9 +36,13 @@ def main():
     parser.add_argument(
         "-r",
         "--runtime",
-        choices=["circle-interpreter", "onert"],
-        default=os.environ.get("CCEX_RUNTIME", "circle-interpreter"),
-        help="Which inference runtime to use (or set CCEX_RUNTIME)",
+        choices=["reference", "circle-interpreter", "onert"],
+        default=os.environ.get("CCEX_RUNTIME", "reference"),
+        help=(
+            "Which Circle runtime executes converted models (or set CCEX_RUNTIME). "
+            "'reference' (default) is built into TICO; 'circle-interpreter' and "
+            "'onert' need the corresponding external package."
+        ),
     )
     parser.add_argument(
         "-p", "--perf", action="store_true", help="Run performance tests."

@@ -18,12 +18,14 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from cffi import FFI
-
 
 class Interpreter:
     """
     Python wrapper for C++ luci-interperter class in ONE using CFFI.
+
+    This is an optional compatibility adapter. It is used only when the
+    ``circle-interpreter`` runtime is selected explicitly; the default
+    ``reference`` runtime does not load this library or import ``cffi``.
 
     This class provides a Python interface to the underlying C++ luci-interpreter class in ONE,
      preserving the original C++ API. Each method corresponds to a method in the C++ class,
@@ -42,6 +44,17 @@ class Interpreter:
         return cls.LIB_PATH.is_file()
 
     def __init__(self, circle_binary: bytes):
+        # TODO Check if one-compiler version is compatible. Whether it has .so file or not for CFFI.
+        if not self.is_available():
+            raise RuntimeError("Please install one-compiler for circle inference.")
+        try:
+            from cffi import FFI
+        except ImportError as error:
+            raise RuntimeError(
+                "The 'cffi' package is required for the optional circle-interpreter "
+                "runtime. Install it with 'pip install cffi'."
+            ) from error
+
         self.ffi = FFI()
         self.ffi.cdef(
             """
@@ -56,9 +69,6 @@ class Interpreter:
           void Interpreter_readOutputTensor(InterpreterWrapper *intp, const int output_idx, void *output, size_t output_size);
         """
         )
-        # TODO Check if one-compiler version is compatible. Whether it has .so file or not for CFFI.
-        if not self.is_available():
-            raise RuntimeError("Please install one-compiler for circle inference.")
         self.C = self.ffi.dlopen(str(self.LIB_PATH))
 
         # Initialize interpreter

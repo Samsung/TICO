@@ -33,7 +33,7 @@ Evaluate the two models (PyTorch vs. Circle on CPU, for example)
 results = evaluate(
     torch_module=torch_module,
     circle_model=circle_model_path,
-    backend=BACKEND.CIRCLE,  # Use circle interperter
+    backend=BACKEND.CIRCLE,  # Built-in reference runtime in fake-quantize mode
     # input_data=input_data, # Use random data if not specified
     mode='return',  # Could be 'return', 'plot', etc.
     metrics=['peir'],  # Built-in metrics (default: peir)
@@ -44,6 +44,14 @@ print("Evaluation results:", results)
 ```
 
 A more detailed explanation of each parameter is available in the docstrings within the codebase.
+
+`BACKEND.CIRCLE` executes the quantized Circle model with TICO's reference runtime in
+`ExecutionMode.FAKE_QUANTIZE` (see `tico/circle/README.md`, "Reference runtime"). This
+reproduces the semantics of the former `onecc quantize --fake_quantize` evaluation
+without any ONE installation: weights are dequantized, operators compute in FLOAT32,
+and each quantized activation is rounded to its serialized grid. It measures the
+quantization error of the exported parameters and is not a bit-exact emulation of an
+integer backend; use `BACKEND.TRIV24` for backend-exact results.
 
 ### Adding a New Backend
 

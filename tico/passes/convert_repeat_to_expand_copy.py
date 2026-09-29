@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, TYPE_CHECKING
+from typing import List, TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     import torch.fx
@@ -51,23 +51,39 @@ class ConvertRepeatToExpandCopy(PassBase):
             reshape_args = RepeatArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
             tensor, repeats = reshape_args.input, reshape_args.repeats
 
-            tensor_shape: List[int] = [int(dim) for dim in tensor.meta["val"].shape]
+            # Keep symbolic dimensions symbolic: `int(SymInt)` would freeze the
+            # example size into the graph and break other runtime shapes.
+            tensor_shape: List[Union[int, torch.SymInt]] = list(
+                tensor.meta["val"].shape
+            )
 
             # Check if it is possible to convert to aten.expand_copy.default
             cannot_converted = False
             extending_idx = len(repeats) - len(tensor_shape)
             for idx, dim in enumerate(tensor_shape):
-                if not (dim == 1 or repeats[extending_idx + idx] == 1):
+                repeat = repeats[extending_idx + idx]
+                if isinstance(dim, torch.SymInt):
+                    # A dynamic dimension can only be kept (repeat == 1); its
+                    # size is unknown at conversion time.
+                    if repeat != 1:
+                        cannot_converted = True
+                elif not (dim == 1 or repeat == 1):
                     cannot_converted = True
             if cannot_converted:
                 continue
 
-            size = []
+            size: List[int] = []
             for idx, repeats_dim in enumerate(repeats):
+                assert isinstance(repeats_dim, int), type(repeats_dim)
                 if idx < extending_idx:
                     size.append(repeats_dim)
+                    continue
+                dim = tensor_shape[idx - extending_idx]
+                if isinstance(dim, torch.SymInt):
+                    # `-1` keeps the (dynamic) input dimension in aten.expand_copy.
+                    size.append(-1)
                 else:
-                    size.append(repeats_dim * tensor_shape[idx - extending_idx])
+                    size.append(repeats_dim * int(dim))
 
             expand_copy_args = (tensor, size)
 

@@ -162,30 +162,38 @@ Both paths call the same core `ExportedProgram` conversion implementation.
 
 ### 4.4 Validate the Circle artifact
 
-The harness invokes the installed `circle2circle` binary, currently expected at
-`/usr/share/one/bin/circle2circle`, and writes an optimized validation artifact next to
-the generated model.
+The harness validates the serialized file with TICO's own artifact layer:
 
-This check catches malformed or unsupported Circle structures before numerical
-comparison. It is distinct from `tico-circle verify`, which validates the generated
-Circle object model through TICO's artifact layer.
+1. `CircleDocument.verify()` checks indices, dataflow, constant buffers, interfaces,
+   and signatures.
+2. Preparing a `CircleReferenceRuntime` checks that every operator is a supported
+   builtin with valid operand references and decodable constants.
+3. For models with static inputs, `probe_static_contracts()` executes the model on
+   zero-valued inputs and validates the shape and dtype computed by every operator
+   against the serialized tensor contracts. Dynamic models receive the same
+   per-operator contract validation during the real inference step.
+
+This replaces the former external `circle2circle` invocation and catches malformed or
+unsupported Circle structures before numerical comparison.
 
 ### 4.5 Validate symbolic shape metadata
 
 When a test declares dynamic shapes, the harness reads `ModelInputSpec` from the Circle
-file and requires at least one `-1` entry in an input shape signature. A dynamic test
-must opt into `onert` execution.
+file and requires at least one `-1` entry in an input shape signature. Dynamic models
+execute with the reference runtime (or `onert`); the legacy `circle-interpreter`
+runtime rejects them.
 
 ### 4.6 Execute the Circle model
 
 Unless inference is disabled by a test tag, the harness selects:
 
-- `circle-interpreter` by default
-- `onert` when required by the test or selected with `CCEX_RUNTIME` / `-r onert`
+- `reference` (built-in `tico.circle.runtime`) by default
+- `circle-interpreter` or `onert` when selected with `CCEX_RUNTIME` / `-r`; a test
+  tagged `use_onert` falls back to `onert` under `circle-interpreter`
 
 The runtime helper binds inputs through the serialized model input specification.
-For dynamic `onert` inputs, it replaces unspecified runtime tensor dimensions with the
-concrete input shapes before inference.
+For dynamic `onert` inputs, the adapter replaces unspecified runtime tensor dimensions
+with the concrete input shapes before inference.
 
 ### 4.7 Compare outputs
 
@@ -265,8 +273,9 @@ All commands below run from the repository root.
 ```
 
 `configure test` expects Torch and TICO to be installed already. It installs the matching
-TorchVision package, `test/requirements.txt`, and the pre-release requirements from
-`test/requirements_pre.txt`, then validates the package environment.
+TorchVision package and `test/requirements.txt`, then validates the package environment.
+`test/requirements_pre.txt` is kept for pre-release test dependencies and is currently
+empty; the optional `onert` runtime is installed manually (see the development guide).
 
 ### Default test suite
 
@@ -313,8 +322,9 @@ TICO_LOG=4 ./ccex test -k add
 ### Select a runtime
 
 ```bash
-./ccex test -r circle-interpreter -k add
-./ccex test -r onert -k add
+./ccex test -r reference -k add            # default
+./ccex test -r circle-interpreter -k add   # optional ONE luci-interpreter
+./ccex test -r onert -k add                # optional onert package
 CCEX_RUNTIME=onert ./ccex test -k add
 ```
 
@@ -352,30 +362,43 @@ python3 -m test.performance.benchmark_circle_optimizer \
 
 ## 7. Runtime selection and dynamic shapes
 
-### Circle interpreter
+### Reference runtime
 
 The default runtime loads the Circle file through `CircleModel`, binds inputs with
-`ModelInputSpec`, and executes TICO's interpreter wrapper. Local use requires the
-corresponding ONE runtime component.
+`ModelInputSpec`, and executes the serialized bytes with `tico.circle.runtime`. It
+validates every operator result against the serialized shape/dtype contract, supports
+dynamic shape signatures, and requires no external package. Its operator coverage,
+quantized execution modes, and debugging options are documented in
+[Circle artifact tools](../tico/circle/README.md#reference-runtime).
 
-### onert
+A guard test (`test/unit_test/utils/test_runtime_independence.py`) fails if the
+default conversion, execution, or quantized evaluation path imports `onert` or `cffi`,
+spawns a subprocess, or loads a native library. CI additionally asserts that the test
+environment contains neither ONE nor `onert`.
 
-The test setup installs the pinned `onert` package from `test/requirements_pre.txt`.
-Use it to validate runtime behavior that the Circle interpreter cannot cover, including
-the current dynamic-shape test path.
+### Optional external runtimes
+
+`circle-interpreter` (ONE luci-interpreter via CFFI) and `onert` remain available as
+explicitly selected compatibility runtimes. They are not installed by
+`./ccex configure test`; see the development guide for the manual installation
+commands. Comparing against them is additional validation, not a replacement for the
+default suite.
 
 ### Dynamic input rules
 
 A dynamic-shape test shall:
 
 1. Supply `get_dynamic_shapes()` compatible with `torch.export`.
-2. Mark itself to use `onert`.
-3. Verify that the generated Circle input contains a `-1` shape-signature dimension.
-4. Execute with concrete tensor shapes allowed by the export constraints.
-5. Validate outputs with the same count/shape/dtype/value rules as static tests.
+2. Verify that the generated Circle input contains a `-1` shape-signature dimension.
+3. Execute with concrete tensor shapes allowed by the export constraints.
+4. Validate outputs with the same count/shape/dtype/value rules as static tests.
 
-A successful dynamic export does not by itself prove that every Circle runtime supports
-the resulting shape signature.
+After the example-input comparison, the harness re-runs every dynamic model with
+inputs whose dynamic dimensions differ from the example sizes and compares the results
+with PyTorch again. This proves that the serialized graph is shape-generic (for example,
+`repeat`/`expand` sizes derived from a dynamic dimension are read from the runtime
+`SHAPE` instead of being frozen at export time). A successful dynamic export does not by
+itself prove that every external Circle runtime supports the resulting shape signature.
 
 ## 8. Quantization testing
 
@@ -611,7 +634,9 @@ and make the assertion distinguish the bug from unrelated failures.
 | Unsupported/training error behavior | Negative module tests and focused conversion tests |
 | Pass semantics and scheduler behavior | `test/unit_test/passes/` |
 | Operator serialization | `test/unit_test/ops/`, `serialize/`, generated operator tests |
-| Static and dynamic input contracts | `ModelInputSpec` tests and dynamic module/onert tests |
+| Static and dynamic input contracts | `ModelInputSpec` tests, dynamic module tests, `test/unit_test/circle/runtime/` |
+| Reference runtime kernels and execution contracts | `test/unit_test/circle/runtime/`, `test/unit_test/quantization/test_circle_executor.py` |
+| Independence from ONE/onert | `test/unit_test/utils/test_runtime_independence.py`, CI environment assertion |
 | Quantized graph legalization | `test/quantization/passes/`, quantization unit tests |
 | Quantization API and workflows | registry/config/WrapQ/algorithm/recipe tests |
 | Circle artifact structural contracts, pass scheduling, and rewrite transactions | `test/unit_test/circle/` |

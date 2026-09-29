@@ -20,17 +20,16 @@ import numpy as np
 
 import tico
 import torch
-from tico.interpreter import infer as infer_module
+from tico.interpreter import interpreter as interpreter_module
+from tico.interpreter.backends import run_circle
 from tico.interpreter.interpreter import Interpreter
+from tico.utils.model import CircleModel
 
 from test.modules.op.add import SimpleAdd
 from test.modules.op.avg_pool2d import AvgPoolWithPaddingKwargs
 from test.modules.op.cat import SimpleCatDefault, SimpleCatWithDim
 
 
-@unittest.skipUnless(
-    Interpreter.is_available(), "one-compiler is required for circle inference"
-)
 class InferSimpleAddTest(unittest.TestCase):
     def setUp(self):
         # Input: torch.ones(1), torch.ones(1)
@@ -65,9 +64,6 @@ class InferSimpleAddTest(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    Interpreter.is_available(), "one-compiler is required for circle inference"
-)
 class InferCatTest(unittest.TestCase):
     def test_concat(self):
         # convert
@@ -100,9 +96,6 @@ class InferCatTest(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(
-    Interpreter.is_available(), "one-compiler is required for circle inference"
-)
 class InferAvgPoolReverseKwargsTest(unittest.TestCase):
     def test_avgpool_reverse_kwargs(self):
         # convert
@@ -145,8 +138,10 @@ class FakeInterpreter:
         output.fill(0)
 
 
-class InferInputBindingTest(unittest.TestCase):
-    def test_infer_binds_kwargs_in_model_input_order(self):
+class CircleInterpreterAdapterBindingTest(unittest.TestCase):
+    """Check the call convention of the optional CFFI adapter without ONE."""
+
+    def test_adapter_writes_inputs_in_model_input_order(self):
         m = AvgPoolWithPaddingKwargs()
         args, kwargs = m.get_example_inputs()
         circle_model = tico.convert(m.eval(), args, kwargs)
@@ -155,10 +150,11 @@ class InferInputBindingTest(unittest.TestCase):
         tensor1 = torch.randn(2, 4, 4, 8)
         FakeInterpreter.instances = []
 
-        with patch.object(infer_module, "Interpreter", FakeInterpreter):
-            infer_module.infer(
-                circle_model.circle_binary, tensor0=tensor0, tensor1=tensor1
-            )
+        # ModelInputSpec orders the bound inputs; the adapter must forward them
+        # positionally to writeInputTensor.
+        model = CircleModel(circle_model.circle_binary, runtime="circle-interpreter")
+        with patch.object(interpreter_module, "Interpreter", FakeInterpreter):
+            model(tensor0=tensor0, tensor1=tensor1)
 
         fake = FakeInterpreter.instances[0]
         self.assertTrue(fake.interpreted)
@@ -168,6 +164,29 @@ class InferInputBindingTest(unittest.TestCase):
         self.assertEqual(fake.writes[1][0], 1)
         self.assertEqual(fake.writes[1][1].shape, tensor0.shape)
         self.assertTrue(torch.equal(fake.writes[1][1], tensor0))
+
+    def test_adapter_is_not_used_by_the_default_runtime(self):
+        m = SimpleAdd()
+        args, kwargs = m.get_example_inputs()
+        circle_model = tico.convert(m.eval(), args, kwargs)
+        FakeInterpreter.instances = []
+
+        with patch.object(interpreter_module, "Interpreter", FakeInterpreter):
+            result = run_circle(circle_model.circle_binary, list(args))
+
+        self.assertEqual(FakeInterpreter.instances, [])
+        with torch.no_grad():
+            expected = m(*args).numpy()
+        np.testing.assert_allclose(result[0], expected, rtol=1e-6, atol=1e-6)
+
+
+class RuntimeSelectionTest(unittest.TestCase):
+    def test_unknown_runtime_name_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unknown Circle runtime"):
+            CircleModel(b"", runtime="tflite")
+
+    def test_default_runtime_is_reference(self):
+        self.assertEqual(CircleModel(b"").runtime, "reference")
 
 
 class InterpreterAvailabilityTest(unittest.TestCase):

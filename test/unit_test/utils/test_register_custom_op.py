@@ -411,6 +411,19 @@ class TestRegisterCustomOp(unittest.TestCase):
             expected_batch_size = batch_size
             self.assertEqual(result.shape[0], expected_batch_size)
 
+    def test_register_ops_is_idempotent(self):
+        """Repeated registration must keep the overload objects used by serializers."""
+        from tico.serialize.operators.node_visitor import get_node_visitor
+
+        conv2d_before = torch.ops.circle_custom.conv2d
+        register_custom_op.RegisterOps()
+        register_custom_op.RegisterOps()
+        self.assertIs(torch.ops.circle_custom.conv2d, conv2d_before)
+        # The visitor registry is keyed by the overload object; a stale key
+        # would make every custom operator "unsupported" after this test.
+        get_node_visitor(torch.ops.circle_custom.conv2d)
+        get_node_visitor(torch.ops.circle_custom.conv2d.padding)
+
     def test_custom_ops_with_conv2d_different_data_types(self):
         """Test custom ops with conv2d different data types"""
         # Test with different data types

@@ -25,11 +25,11 @@ commands are routed through the `./ccex` helper in the project root.
 - Python 3.10 or newer
 - `git`
 - A Python virtual environment is strongly recommended
-- A compatible ONE installation when running `circle-interpreter`-based end-to-end
-  tests locally
 
-TICO conversion does not require ONE. The default end-to-end test runtime does because
-it executes the generated Circle model.
+Neither conversion nor the test suite requires ONE (`one-compiler`) or `onert`.
+Converted Circle models are executed by the built-in reference runtime
+(`tico.circle.runtime`). ONE's `circle-interpreter` and the `onert` package are
+optional compatibility runtimes that are used only when selected explicitly.
 
 ## Create a development environment
 
@@ -166,7 +166,8 @@ to the complete suite for cross-cutting changes.
 ./ccex test --all                 # Explicit full suite
 ./ccex test -i                    # Include internal-only tests
 ./ccex test -v                    # Set TICO_LOG=4 for this run
-./ccex test -r onert              # Select onert for runtime parity checks
+./ccex test -r reference          # Built-in reference runtime (default)
+./ccex test -r onert              # Optional: execute with the onert package
 ./ccex test -p                    # Run performance benchmarks
 ```
 
@@ -222,31 +223,48 @@ The module test harness normally:
 1. Creates the PyTorch reference outputs before export.
 2. Exports directly or saves and reloads a `.pt2` file.
 3. Converts the `ExportedProgram` to Circle.
-4. Runs `circle2circle` to validate the serialized model.
-5. Executes with `circle-interpreter` or `onert`, unless inference is disabled by a
-   test tag.
+4. Validates the serialized model: `CircleDocument.verify()` for structural
+   consistency, reference-runtime preparation for operator support, and a zero-input
+   contract probe for static models.
+5. Executes with the reference runtime (or an explicitly selected external runtime),
+   unless inference is disabled by a test tag.
 6. Compares output count, shape, dtype, and values with explicit tolerances.
 
 See [System Test Guide](./system_test.md) for the complete test strategy.
 
 ## Runtime selection
 
-The default runtime for module parity tests is `circle-interpreter`:
+The default runtime for module parity tests, `CircleModel.__call__()`, and
+`tico.interpreter.infer()` is the built-in `reference` runtime. It executes the
+serialized Circle bytes with NumPy/CPU PyTorch kernels, supports dynamic shapes, and
+needs no external package:
 
 ```bash
 ./ccex test -k add
+./ccex test -r reference -k add
 ```
 
-Select `onert` from the command line or environment:
+Two optional compatibility runtimes can be selected from the command line or the
+environment. They are never chosen implicitly, even when installed:
 
 ```bash
+# ONE luci-interpreter through /usr/share/one/lib/libcircle_interpreter_cffi.so
+pip install cffi              # plus a ONE release providing the shared library
+./ccex test -r circle-interpreter -k add
+
+# onert Python package (pre-release wheels)
+pip install --pre onert==0.2.0.dev250922
 ./ccex test -r onert -k add
 CCEX_RUNTIME=onert ./ccex test -k add
 ```
 
-A test module may explicitly require `onert`; this is used for dynamic-shape execution.
-The test setup installs the project-pinned pre-release `onert` package from
-`test/requirements_pre.txt`.
+`circle-interpreter` cannot execute dynamic-shape models; the harness runs a test tagged
+`use_onert` with `onert` when that legacy runtime is selected. A negative test whose
+expected error is runtime-specific (`@test_negative(..., runtime="onert")`) runs as a
+normal parity test under the other runtimes.
+
+See [Circle artifact tools](../tico/circle/README.md#reference-runtime) for the
+supported operator set, quantized execution modes, and debugging options.
 
 ## Model tests
 
@@ -313,7 +331,8 @@ tico-circle optimize model.circle --preset o1 -o model.o1.circle
 ```
 
 Use `tico-circle verify` for static Circle consistency. Use an end-to-end runtime test
-for numerical parity and backend execution.
+for numerical parity and backend execution. `CircleReferenceRuntime(...).run(inputs,
+trace=True)` returns every intermediate tensor value for debugging.
 
 ## Formatting and static checks
 

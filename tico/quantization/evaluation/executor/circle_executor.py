@@ -12,63 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import tempfile
-from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
 
+from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
 from tico.quantization.evaluation.executor.backend_executor import BackendExecutor
 from tico.utils.model import CircleModel
-from tico.utils.utils import run_bash_cmd
 
 
 class CircleExecutor(BackendExecutor):
     """
-    A class for running inference on fake-quantized circle models.
+    A class for running inference on quantized circle models with the built-in
+    reference runtime in fake-quantize mode.
 
-    Instead of leveraging the actual backend for quantized circle execution,
-     it applies fake quantization to the models and performs inference.
+    Instead of leveraging the actual backend for quantized circle execution, the
+    model is evaluated with the semantics of ONE's ``onecc quantize
+    --fake_quantize`` conversion: quantized constants are dequantized, every
+    operator computes in FLOAT32, quantized activations are rounded to their
+    serialized quantization grid after each producing operator, and quantized
+    graph inputs and outputs are exchanged as FLOAT32. See
+    ``tico/circle/README.md`` for the exact rules and their differences from
+    integer backend execution.
     """
 
     def __init__(self):
-        self.compiler_path = Path("/usr/share/one/bin/onecc")
-        self.interpreter_path = None  # Use circle-interpreter
-        self.fq_circle_path = None
-
-        # Check if the toolchain is installed.
-        if not self.compiler_path.is_file():
-            raise RuntimeError(
-                "Not found one-compiler. Please install the one-compiler package first."
-            )
-
-        self.temp_dir = tempfile.TemporaryDirectory()
+        self._runtime: Optional[CircleReferenceRuntime] = None
 
     def compile(self, circle_model: CircleModel) -> None:
         assert isinstance(circle_model, CircleModel)
-        circle_path = Path(self.temp_dir.name) / "quantized.circle"
-        circle_model.save(str(circle_path))
-        self.fq_circle_path = Path(self.temp_dir.name) / "fake_quantized.circle"
-        args = []
-        args += ["quantize"]
-        args += ["--fake_quantize"]
-        args += ["-i", str(circle_path)]
-        args += ["-o", str(self.fq_circle_path)]
-        cmd = [str(self.compiler_path)] + args
-        run_bash_cmd(cmd)
+        self._runtime = CircleReferenceRuntime(circle_model.circle_binary)
 
     def run_inference(self, input_data: List[torch.Tensor]) -> List[np.ndarray]:
-        if not self.fq_circle_path:
+        if self._runtime is None:
             raise RuntimeError("You must compile the model before running inference.")
 
-        fq_circle = CircleModel.load(self.fq_circle_path)
-        assert isinstance(fq_circle, CircleModel)
-        out = fq_circle(*input_data)
-        if not isinstance(out, list):
-            out = [out]
-        return out
-
-    def __del__(self):
-        if hasattr(self, "temp_dir") and self.temp_dir:
-            self.temp_dir.cleanup()
+        result = self._runtime.run(input_data, mode=ExecutionMode.FAKE_QUANTIZE)
+        return list(result.outputs)

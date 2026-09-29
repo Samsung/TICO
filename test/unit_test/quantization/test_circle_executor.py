@@ -12,100 +12,161 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""End-to-end tests for the fake-quantized Circle executor used by evaluate()."""
+
 import unittest
-from unittest.mock import MagicMock, patch
 
+import numpy as np
+
+import tico
 import torch
-import torch.export
-
+from circle_schema import circle
+from tico.circle.runtime import (
+    CircleReferenceRuntime,
+    ExecutionMode,
+    UnsupportedCircleOperatorError,
+)
+from tico.quantization import convert, prepare
+from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.specs import affine
+from tico.quantization.evaluation.backend import BACKEND
+from tico.quantization.evaluation.evaluate import evaluate
 from tico.quantization.evaluation.executor.circle_executor import CircleExecutor
-from tico.serialize.circle_serializer import build_circle
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.utils.model import CircleModel
+from torch import nn
 
 
-class AddModule(torch.nn.Module):
-    def forward(self, x, y):
-        return x + y
+class TwoLinear(nn.Module):
+    """Two chained linear layers; the first output is a quantized activation."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first = nn.Linear(4, 6)
+        self.second = nn.Linear(6, 3)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.second(torch.relu(self.first(x)))
 
 
-class TestCircleExecutor(unittest.TestCase):
-    def _create_dummy_circle_model(self):
-        mod = AddModule()
-        ep = torch.export.export(mod, (torch.randn(1, 3), torch.randn(1, 3)))
-        circle_bytes = build_circle(ep)
-        return CircleModel(circle_bytes)
+def _quantize_and_export(seed: int) -> tuple[nn.Module, CircleModel, torch.Tensor]:
+    """Calibrate a UINT8 PTQ model, freeze it, and export it to Circle."""
 
-    @patch("pathlib.Path.is_file")
-    def test_init_raises_runtime_error_if_compiler_not_found(self, mock_is_file):
-        mock_is_file.return_value = False
-        with self.assertRaises(RuntimeError):
-            CircleExecutor()
+    torch.manual_seed(seed)
+    model = TwoLinear().eval()
+    config = PTQConfig(
+        activation=affine(DType.uint(8), qscheme=QScheme.PER_TENSOR_ASYMM),
+        weight=affine(DType.uint(8), qscheme=QScheme.PER_CHANNEL_ASYMM),
+        strict_wrap=False,
+    )
+    prepared = prepare(model, config, inplace=True)
+    with torch.inference_mode():
+        for _ in range(8):
+            prepared(torch.randn(2, 4))
+    quantized = convert(prepared, inplace=True).eval()
+    sample = torch.randn(2, 4)
+    return quantized, tico.convert(quantized, (sample,)), sample
 
-    @patch("pathlib.Path.is_file")
-    @patch("tico.quantization.evaluation.executor.circle_executor.run_bash_cmd")
-    @patch("tico.quantization.evaluation.executor.circle_executor.CircleModel.load")
-    def test_compile_and_run_inference(self, mock_load, mock_run_bash, mock_is_file):
-        mock_is_file.return_value = True
 
-        # Create a real CircleModel
-        circle_model = self._create_dummy_circle_model()
-
-        # Mock the load to return a model that returns a predictable value
-        mock_loaded_model = MagicMock(spec=CircleModel)
-        mock_loaded_model.return_value = [torch.tensor([1, 2, 3])]
-        mock_load.return_value = mock_loaded_model
-
+class CircleExecutorTest(unittest.TestCase):
+    def test_run_inference_before_compile_raises_error(self):
         executor = CircleExecutor()
-        executor.compile(circle_model)
-
-        # Check that the bash command was called
-        self.assertTrue(mock_run_bash.called)
-
-        # Run inference
-        input_data = [torch.tensor([4, 5, 6])]
-        result = executor.run_inference(input_data)
-
-        # Check that the loaded model was called with the input data
-        mock_loaded_model.assert_called_with(input_data[0])
-
-        # Check the result
-        self.assertEqual(len(result), 1)
-        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3])))  # type: ignore[arg-type]
-
-    @patch("pathlib.Path.is_file")
-    def test_run_inference_before_compile_raises_error(self, mock_is_file):
-        mock_is_file.return_value = True
-        executor = CircleExecutor()
-        with self.assertRaises(RuntimeError):
+        with self.assertRaisesRegex(RuntimeError, "compile the model"):
             executor.run_inference([])
 
-    @patch("pathlib.Path.is_file")
-    @patch("tico.quantization.evaluation.executor.circle_executor.run_bash_cmd")
-    @patch("tico.quantization.evaluation.executor.circle_executor.CircleModel.load")
-    def test_run_inference_with_single_tensor_output(
-        self, mock_load, mock_run_bash, mock_is_file
-    ):
-        mock_is_file.return_value = True
+    def test_quantized_graph_is_exported_with_integer_tensors(self):
+        """The executor must face a really quantized graph, not a float one."""
 
-        # Create a real CircleModel
-        circle_model = self._create_dummy_circle_model()
+        _, circle_model, _ = _quantize_and_export(seed=1)
+        runtime = CircleReferenceRuntime(circle_model.circle_binary)
+        uint8 = circle.TensorType.TensorType.UINT8
+        self.assertTrue(
+            all(tensor.tensor_type == uint8 for tensor in runtime.input_tensors)
+        )
+        self.assertTrue(
+            all(tensor.tensor_type == uint8 for tensor in runtime.output_tensors)
+        )
+        fully_connected = circle.BuiltinOperator.BuiltinOperator.FULLY_CONNECTED
+        self.assertEqual(
+            sum(
+                1
+                for op in runtime.program.operators
+                if op.builtin_code == fully_connected
+            ),
+            2,
+        )
 
-        # Mock the load to return a model that returns a single tensor
-        mock_loaded_model = MagicMock(spec=CircleModel)
-        mock_loaded_model.return_value = torch.tensor([1, 2, 3])
-        mock_load.return_value = mock_loaded_model
+    def test_native_mode_rejects_integer_fully_connected(self):
+        """Integer FC arithmetic is backend-defined and must not be approximated."""
 
+        _, circle_model, sample = _quantize_and_export(seed=2)
+        runtime = CircleReferenceRuntime(circle_model.circle_binary)
+        input_tensor = runtime.input_tensors[0]
+        assert input_tensor.quantization is not None
+        scale = input_tensor.quantization.scale[0]
+        zero_point = input_tensor.quantization.zero_point[0]
+        quantized_input = np.clip(
+            np.round(sample.numpy() / scale) + zero_point, 0, 255
+        ).astype(np.uint8)
+        with self.assertRaisesRegex(
+            UnsupportedCircleOperatorError, "FULLY_CONNECTED[\\s\\S]*FAKE_QUANTIZE"
+        ):
+            runtime.run([quantized_input], mode=ExecutionMode.NATIVE)
+
+    def test_fake_quantized_inference_matches_torch_fake_quant_model(self):
+        """Outputs are FLOAT32 and follow the frozen fake-quant PyTorch module."""
+
+        quantized, circle_model, sample = _quantize_and_export(seed=3)
         executor = CircleExecutor()
         executor.compile(circle_model)
+        outputs = executor.run_inference([sample])
 
-        self.assertTrue(mock_run_bash.called)
+        self.assertEqual(len(outputs), 1)
+        self.assertEqual(outputs[0].dtype, np.float32)
+        self.assertEqual(outputs[0].shape, (2, 3))
 
-        # Run inference
-        input_data = [torch.tensor([4, 5, 6])]
-        result = executor.run_inference(input_data)
+        with torch.no_grad():
+            expected = quantized(sample).numpy()
+        runtime = CircleReferenceRuntime(circle_model.circle_binary)
+        output_tensor = runtime.output_tensors[0]
+        assert output_tensor.quantization is not None
+        output_scale = output_tensor.quantization.scale[0]
+        # Both sides quantize the output to the same UINT8 grid; a one-step
+        # difference can only come from a rounding tie or accumulated float
+        # error near a grid boundary.
+        np.testing.assert_allclose(outputs[0], expected, atol=output_scale, rtol=0.0)
+        self.assertTrue(np.all(np.isfinite(outputs[0])))
 
-        mock_loaded_model.assert_called_with(input_data[0])
+    def test_fake_quantized_output_lies_on_the_serialized_grid(self):
+        """Every output value must equal (q - zero_point) * scale for some q."""
 
-        # Check the result
-        self.assertEqual(len(result), 1)
-        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3])))  # type: ignore[arg-type]
+        _, circle_model, sample = _quantize_and_export(seed=4)
+        executor = CircleExecutor()
+        executor.compile(circle_model)
+        output = executor.run_inference([sample])[0]
+        runtime = CircleReferenceRuntime(circle_model.circle_binary)
+        quantization = runtime.output_tensors[0].quantization
+        assert quantization is not None
+        scale = np.float32(quantization.scale[0])
+        zero_point = np.float32(quantization.zero_point[0])
+        levels = output / scale + zero_point
+        np.testing.assert_allclose(levels, np.round(levels), atol=1e-3, rtol=0.0)
+        self.assertTrue(np.all(levels >= -1e-3))
+        self.assertTrue(np.all(levels <= 255 + 1e-3))
+
+    def test_evaluate_with_circle_backend_reports_peir(self):
+        """evaluate() runs the reference executor without any external toolchain."""
+
+        quantized, circle_model, sample = _quantize_and_export(seed=5)
+        results = evaluate(
+            quantized, circle_model, BACKEND.CIRCLE, [sample], mode="return"
+        )
+        assert results is not None
+        self.assertIn("peir", results)
+        self.assertEqual(len(results["peir"]), 1)
+        self.assertLess(results["peir"][0], 5.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

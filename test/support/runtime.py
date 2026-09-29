@@ -12,6 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Literal
 
-Runtime = Literal["circle-interpreter", "onert"]
+from tico.interpreter.backends import (
+    DEFAULT_RUNTIME,
+    resolve_runtime_name,
+    RUNTIME_CHOICES,
+)
+
+Runtime = Literal["reference", "circle-interpreter", "onert"]
+
+assert set(RUNTIME_CHOICES) == {"reference", "circle-interpreter", "onert"}
+
+
+def selected_runtime() -> Runtime:
+    """Return the runtime chosen through ``CCEX_RUNTIME`` (default: reference)."""
+
+    name = resolve_runtime_name(os.environ.get("CCEX_RUNTIME") or DEFAULT_RUNTIME)
+    return name  # type: ignore[return-value]

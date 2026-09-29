@@ -37,6 +37,7 @@ from test.pt2_to_circle_test.test_pt2_to_circle import (
     verify_circle,
 )
 from test.support.base_builders import TestDictBuilderBase, TestRunnerBase
+from test.support.runtime import Runtime, selected_runtime
 from test.support.tag import is_tagged
 
 
@@ -73,7 +74,24 @@ class NNModuleTest(TestRunnerBase):
         if hasattr(self.nnmodule, "atol"):
             self.tolerance["atol"] = self.nnmodule.atol
 
+    def runtime(self) -> Runtime:
+        """
+        Resolve the runtime used to execute the converted Circle model.
+
+        `CCEX_RUNTIME` (or `./ccex test --runtime`) selects the runtime for the
+         whole run; the default is the built-in 'reference' runtime. A class
+        tagged `use_onert` cannot run on ONE's 'circle-interpreter', so that
+        legacy selection falls back to 'onert' for it.
+        """
+        runtime = selected_runtime()
+        if runtime == "circle-interpreter" and self.use_onert:
+            return "onert"
+        return runtime
+
     def make(self):
+        negative = self.test_negative and (
+            self.negative_runtime is None or self.negative_runtime == self.runtime()
+        )
         if self.skip:
 
             @unittest.skip(self.skip_reason)
@@ -81,7 +99,7 @@ class NNModuleTest(TestRunnerBase):
                 self._run()
 
             return wrapper
-        elif self.test_negative:
+        elif negative:
 
             def wrapper(s):
                 # Suppress the error message by redirecting stdout and discarding it.
@@ -116,12 +134,15 @@ class NNModuleTest(TestRunnerBase):
         assert hasattr(self.nnmodule, "get_example_inputs")
         self.forward_args, self.forward_kwargs = self.nnmodule.get_example_inputs()
 
+        runtime = self.runtime()
+
         if hasattr(self.nnmodule, "get_dynamic_shapes"):
             dynamic_shapes = self.nnmodule.get_dynamic_shapes()
-            if dynamic_shapes is not None:
-                assert (
-                    self.use_onert
-                ), "Dynamic shapes are only supported with onert runtime. Please set 'use_onert' to True."
+            if dynamic_shapes is not None and runtime == "circle-interpreter":
+                raise RuntimeError(
+                    "Dynamic shapes cannot be executed with the 'circle-interpreter' "
+                    "runtime. Use the default 'reference' runtime or 'onert'."
+                )
 
         compile_config: Optional[CompileConfigBase] = None
         if hasattr(self.nnmodule, "get_compile_config"):
@@ -135,7 +156,6 @@ class NNModuleTest(TestRunnerBase):
         os.makedirs(os.path.dirname(test_prefix), exist_ok=True)
 
         circle_model_path = str(test_prefix) + ".circle"
-        opt_circle_model_path = str(test_prefix) + ".opt.circle"
         pt2_model_path = str(test_prefix) + ".pt2"
 
         # Let's infer torch model before `export`
@@ -174,7 +194,7 @@ class NNModuleTest(TestRunnerBase):
                 config=compile_config,
             )
 
-        verify_circle(circle_model_path, opt_circle_model_path)
+        verify_circle(circle_model_path)
 
         if dynamic_shapes:
 
@@ -198,26 +218,18 @@ class NNModuleTest(TestRunnerBase):
         if without_inference:
             return
 
-        USE_ONERT = os.environ.get("CCEX_RUNTIME") == "onert"
-        if self.use_onert or USE_ONERT:
-            circle_result = infer_circle(
-                circle_model_path,
-                forward_args=deepcopy(self.forward_args),
-                forward_kwargs=deepcopy(self.forward_kwargs),
-                runtime="onert",
-            )
-            for idx, (tr, cr) in enumerate(zip(torch_result, circle_result)):
+        circle_result = infer_circle(
+            circle_model_path,
+            forward_args=deepcopy(self.forward_args),
+            forward_kwargs=deepcopy(self.forward_kwargs),
+            runtime=runtime,
+        )
+        if runtime == "onert":
+            # Legacy onert adapter quirk: dynamic outputs are reported with
+            # their placeholder shape.
+            for idx, tr in enumerate(torch_result):
                 if isinstance(tr, torch.Tensor):
                     circle_result[idx] = circle_result[idx].reshape(tr.shape)
-                else:  # if torch result is scalar
-                    torch_result[idx] = torch.tensor([tr], dtype=torch.int32)
-        else:
-            circle_result = infer_circle(
-                circle_model_path,
-                forward_args=deepcopy(self.forward_args),
-                forward_kwargs=deepcopy(self.forward_kwargs),
-                runtime="circle-interpreter",
-            )
         if with_golden:
             assert hasattr(self.nnmodule, "get_golden_outputs")
 
@@ -227,6 +239,69 @@ class NNModuleTest(TestRunnerBase):
             # trim None outputs
             torch_result = [res for res in torch_result if res is not None]
             validate_result(torch_result, circle_result, **self.tolerance)
+
+        if dynamic_shapes and runtime != "circle-interpreter":
+            self._run_with_alternative_dynamic_shapes(circle_model_path, runtime)
+
+    def _run_with_alternative_dynamic_shapes(
+        self, circle_model_path: str, runtime: Runtime
+    ) -> None:
+        """
+        Re-run a dynamic model with inputs whose dynamic dimensions differ from
+         the example inputs, and compare with PyTorch.
+
+        This checks that the serialized model is really shape-generic: every
+         intermediate shape must follow the actual inputs instead of the example
+        sizes that were visible during export.
+        """
+        ispec = ModelInputSpec.load(circle_model_path)
+        flat_args = ispec.bind(
+            deepcopy(self.forward_args), deepcopy(self.forward_kwargs), check=True
+        )
+        positional_count = len(flat_args) - len(self.forward_kwargs)
+        generator = torch.Generator().manual_seed(0)
+        new_inputs = []
+        for value, shape_sig in zip(flat_args, ispec.shape_signatures):
+            assert isinstance(value, torch.Tensor)
+            if shape_sig is None or not any(dim == -1 for dim in shape_sig):
+                new_inputs.append(value)
+                continue
+            new_shape = [
+                (3 if size != 3 else 2) if dim == -1 else size
+                for size, dim in zip(value.shape, shape_sig)
+            ]
+            if value.dtype.is_floating_point:
+                new_inputs.append(
+                    torch.randn(new_shape, generator=generator, dtype=value.dtype)
+                )
+            else:
+                new_inputs.append(
+                    torch.randint(
+                        0, 2, new_shape, generator=generator, dtype=value.dtype
+                    )
+                )
+        new_args = tuple(new_inputs[:positional_count])
+        new_kwargs = {
+            name: new_inputs[positional_count + idx]
+            for idx, name in enumerate(ispec.names[positional_count:])
+        }
+        torch_result = infer_nnmodule(
+            self.nnmodule,
+            forward_args=deepcopy(new_args),
+            forward_kwargs=deepcopy(new_kwargs),
+        )
+        circle_result = infer_circle(
+            circle_model_path,
+            forward_args=deepcopy(new_args),
+            forward_kwargs=deepcopy(new_kwargs),
+            runtime=runtime,
+        )
+        if runtime == "onert":
+            for idx, tr in enumerate(torch_result):
+                if isinstance(tr, torch.Tensor):
+                    circle_result[idx] = circle_result[idx].reshape(tr.shape)
+        torch_result = [res for res in torch_result if res is not None]
+        validate_result(torch_result, circle_result, **self.tolerance)
 
 
 class NormalTestDictBuilder(TestDictBuilderBase):

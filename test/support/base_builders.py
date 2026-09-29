@@ -46,6 +46,8 @@ class TestRunnerBase:
         self.skip_reason: str = getattr(self.nnmodule, "__tag_skip_reason", "")
         self.test_negative: bool = is_tagged(self.nnmodule, "test_negative")
         self.expected_err: str = getattr(self.nnmodule, "__tag_expected_err", "")
+        # Runtime name for which the negative expectation applies (None: always).
+        self.negative_runtime = getattr(self.nnmodule, "__tag_negative_runtime", None)
         self.use_onert: bool = is_tagged(self.nnmodule, "use_onert")
 
     @abstractmethod
