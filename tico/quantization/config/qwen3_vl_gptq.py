@@ -115,13 +115,16 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     # If None, FP inputs are collected on-the-fly (default behavior).
     fp_inputs_cache_path: str | None = None
 
-    # GPTQv2: Optional calibration dataset spec (dataset names with sample
-    # counts, e.g. "textvqa:50,wikitext2:128") recorded in the FP inputs
-    # cache manifest fingerprint. On a warm run the spec is compared against
-    # the cached one so that a cache built for different calibration data is
-    # rejected instead of silently reused. If None, the calibration component
-    # of the fingerprint is not verified. The recipe pipeline stamps this
-    # automatically from the ``calibration`` section of the YAML config.
+    # GPTQv2: Optional calibration provenance spec recorded in the FP inputs
+    # cache manifest fingerprint: a JSON document built from the normalized
+    # calibration dataset configuration (dataset names, sample counts, per-
+    # dataset splits/filters, entry order) plus the runtime sampling seed,
+    # the calibration sequence length, and the benchmark-overlap flag. On a
+    # warm run the spec is compared against the cached one so that a cache
+    # built for different calibration data is rejected instead of silently
+    # reused. If None, the calibration component of the fingerprint is not
+    # verified. The recipe pipeline stamps this automatically from the
+    # ``calibration`` and ``runtime`` sections of the YAML config.
     calibration_dataset_spec: str | None = None
 
     # GPTQv2: scaling factor for the asymmetric correction (P matrix)

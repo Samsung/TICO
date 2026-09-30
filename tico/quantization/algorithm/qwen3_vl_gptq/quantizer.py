@@ -14,6 +14,7 @@
 
 import copy
 import functools
+import hashlib
 import json
 import os
 import re
@@ -151,6 +152,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         # (skip orig model ops, load per-stage shards on demand).
         self._fp_inputs_disk_loaded: bool = False
 
+        # GPTQv2: weight-state fingerprint of the pristine model, captured
+        # before any stage quantization mutates the weights (see convert()).
+        self._fp_model_fingerprint: Optional[str] = None
+
     def _resolve_weight_bits(
         self,
         gptq_conf: Qwen3VLGPTQConfig,
@@ -284,6 +289,12 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         orig_model_use_cache: dict[str, Any] = {}
 
         if gptq_conf.gptq_v2:
+            # Capture the pristine model's weight-state fingerprint BEFORE any
+            # stage quantization mutates the weights: FP inputs are collected
+            # from this exact state, so the cache identity must be tied to it.
+            if gptq_conf.fp_inputs_cache_path is not None:
+                self._fp_model_state(model)
+
             # Load the FP inputs cache manifest from disk if available.
             # Tensor data stays in per-stage shards and is loaded on demand,
             # one stage at a time, when each stage requests its FP inputs.
@@ -969,6 +980,50 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 f"from previous run(s)"
             )
 
+    @staticmethod
+    def _model_state_fingerprint(model: nn.Module, samples_per_param: int = 64) -> str:
+        """Hash a compact signature of the model's current weight state.
+
+        Covers parameter names, shapes, dtypes, and a strided sample of each
+        tensor's values, so it distinguishes checkpoints that merely share
+        the same ``_name_or_path`` and detects upstream weight
+        transformations (e.g. SpinQuant rotations) applied before GPTQ.
+        Sampling keeps the cost independent of the model size.
+        """
+        h = hashlib.sha1()
+        for name, param in sorted(model.named_parameters()):
+            h.update(name.encode())
+            h.update(str(tuple(param.shape)).encode())
+            h.update(str(param.dtype).encode())
+            flat = param.detach().reshape(-1)
+            numel = flat.numel()
+            if numel:
+                count = min(samples_per_param, numel)
+
+                # Generate sample positions using integer arithmetic to avoid
+                # floating-point rounding and out-of-bounds indices.
+                idx = torch.tensor(
+                    [i * (numel - 1) // max(count - 1, 1) for i in range(count)],
+                    dtype=torch.int64,
+                    device=flat.device,
+                )
+
+                # Hash the original byte representation, including BF16.
+                sample = flat[idx].cpu().contiguous()
+                h.update(sample.view(torch.uint8).numpy().tobytes())
+        return h.hexdigest()[:16]
+
+    def _fp_model_state(self, model: nn.Module) -> str:
+        """Return the cached pre-mutation weight fingerprint.
+
+        Computed on first use and then frozen: the first call must happen
+        before GPTQ mutates any weights (see convert()).  One quantizer
+        instance handles one model per run.
+        """
+        if self._fp_model_fingerprint is None:
+            self._fp_model_fingerprint = self._model_state_fingerprint(model)
+        return self._fp_model_fingerprint
+
     def _compute_fp_inputs_fingerprint(
         self, model: Optional[nn.Module] = None
     ) -> dict[str, Any]:
@@ -979,6 +1034,10 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         collected FP inputs depend on:
             * ``model``: the model's HF ``_name_or_path`` identifier (None
               when no model is passed, e.g. in unit tests).
+            * ``model_state``: a hash of the pristine model's weight state,
+              captured before any stage quantization mutates the weights, so
+              changed checkpoints or upstream transforms (e.g. SpinQuant)
+              invalidate the cache even when ``_name_or_path`` is unchanged.
             * ``calibration``: the ``config.calibration_dataset_spec`` string
               (dataset names with sample counts; None when unset).
             * ``cache_dtype``: the dtype cached native inputs are cast to
@@ -993,14 +1052,17 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         assert isinstance(self.config, Qwen3VLGPTQConfig)
 
         model_id: Optional[str] = None
+        model_state: Optional[str] = None
         if model is not None:
             model_id = str(
                 getattr(getattr(model, "config", None), "_name_or_path", "?")
             )
+            model_state = self._fp_model_state(model)
 
         cache_dtype = self.config.cache_dtype
         return {
             "model": model_id,
+            "model_state": model_state,
             "calibration": self.config.calibration_dataset_spec,
             # Always a string: None (no cast) is a value, not "unknown", so
             # this component is never skipped by the verifier.
@@ -1045,7 +1107,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         current = self._compute_fp_inputs_fingerprint(model)
         mismatched = [
             key
-            for key in ("model", "calibration", "cache_dtype")
+            for key in ("model", "model_state", "calibration", "cache_dtype")
             if fingerprint.get(key) is not None
             and current.get(key) is not None
             and fingerprint.get(key) != current.get(key)
