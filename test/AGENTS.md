@@ -9,14 +9,21 @@ These rules apply to changes under `test/` in addition to the repository root
 
 Place a test in the narrowest directory that owns the behavior:
 
-- Local implementation contract: `test/unit_test/<subsystem>/`
+- Core conversion or Circle implementation contract: `test/unit_test/<subsystem>/`
 - PyTorch-to-Circle conversion and numerical parity: `test/modules/`
-- Quantization workflow and integration: `test/quantization/`
+- Quantization algorithms, WrapQ, recipes, configs, export, and analysis, including
+  their synthetic unit tests: `test/quantization/`
 - CLI `.pt2` conversion: `test/pt2_to_circle_test/`
 - Performance behavior: `test/performance/`
 
-Mirror the production subsystem and nearby naming conventions. Do not add an expensive
-model test for behavior that can be proven with a small synthetic unit test.
+Mirror the production subsystem and nearby naming conventions. Extend existing tests
+under `test/unit_test/quantization/` when they own the behavior; this is not the default
+location for all new quantization tests. Do not add an expensive model test for behavior
+that can be proven with a small synthetic unit test.
+
+Read `docs/development.md` and `docs/system_test.md` for harness behavior. Circle and
+runtime test changes should also follow `tico/circle/AGENTS.md` and the testing and
+reference-runtime sections of `tico/circle/README.md`.
 
 ## Test design
 
@@ -55,6 +62,21 @@ Do not require:
 Mock external boundaries only when the real dependency is outside the unit under test.
 Do not mock the behavior being validated.
 
+## Runtime independence and validation levels
+
+- Use the built-in `reference` runtime by default. ONE/ONERT compatibility tests must
+  select their backend explicitly; do not auto-select an installed external package or
+  use one to bypass a reference-runtime failure.
+- For default execution or evaluation plumbing changes, run the real public API paths
+  guarded by `test/unit_test/utils/test_runtime_independence.py`. Do not mock the
+  converted outputs or runtime under test to satisfy the independence checks.
+- Keep structural verification, runtime support/shape/dtype checks, numerical parity,
+  and target-backend validation separate. Passing one does not establish the others.
+- Quantized fake-quantize evaluation is a semantic reference, not proof of bit-exact
+  integer backend behavior. Assert the intended execution mode and boundary dtypes.
+- A backend-specific expected failure must not suppress normal parity coverage for a
+  different backend that supports the case.
+
 ## Numerical assertions
 
 - Prefer exact equality for integer, shape, graph-structure, and metadata contracts.
@@ -65,8 +87,19 @@ Do not mock the behavior being validated.
   of the contract.
 - For pass tests, compare outputs before and after the rewrite when computation
   changes.
+- For reference-kernel tests, derive expected values by hand or from independent
+  formulas, not from the kernel or the same calculation helper being tested. Keep
+  separate PyTorch-to-Circle end-to-end parity coverage.
 - Avoid broad aggregate metrics when a direct tensor or graph assertion can localize
   failure more precisely.
+
+## Large artifacts
+
+Use small synthetic buffers with a reduced private serialization budget to exercise
+appended-payload selection, offsets, non-mutation, and round trips in normal CI. Keep
+real multi-GiB and external-runtime checks explicitly opt-in; see
+`docs/large_circle_export.md` for the existing tests and their resource requirements.
+Adding an opt-in test is not evidence that a large model or target backend was tested.
 
 ## Skips and expected failures
 
@@ -88,6 +121,7 @@ Examples:
 
 ```bash
 ./ccex test -k <specific-test-or-keyword>
+./ccex test -k runtime_independence  # When default execution plumbing changes
 ./ccex test
 ./ccex test -m <model-name-or-pattern>
 ```
