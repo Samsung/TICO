@@ -998,10 +998,19 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             flat = param.detach().reshape(-1)
             numel = flat.numel()
             if numel:
-                idx = torch.linspace(
-                    0, numel - 1, steps=min(samples_per_param, numel)
-                ).long()
-                h.update(flat[idx].cpu().numpy().tobytes())
+                count = min(samples_per_param, numel)
+
+                # Generate sample positions using integer arithmetic to avoid
+                # floating-point rounding and out-of-bounds indices.
+                idx = torch.tensor(
+                    [i * (numel - 1) // max(count - 1, 1) for i in range(count)],
+                    dtype=torch.int64,
+                    device=flat.device,
+                )
+
+                # Hash the original byte representation, including BF16.
+                sample = flat[idx].cpu().contiguous()
+                h.update(sample.view(torch.uint8).numpy().tobytes())
         return h.hexdigest()[:16]
 
     def _fp_model_state(self, model: nn.Module) -> str:

@@ -1863,6 +1863,53 @@ class TestModelStateFingerprint(unittest.TestCase):
             {"fingerprint": fingerprint}, "/tmp/fp_cache", model=model
         )
 
+    def test_bfloat16_params_supported(self):
+        """BF16 params cannot go through .cpu().numpy() (TypeError: Got
+        unsupported ScalarType BFloat16); the fingerprint hashes their raw
+        byte representation instead."""
+        model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 2)).to(torch.bfloat16)
+        clone = copy.deepcopy(model)
+        self.assertEqual(
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
+        )
+        with torch.no_grad():
+            clone[0].weight[0, 0] += 1.0
+        self.assertNotEqual(
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
+        )
+
+    def test_mixed_dtype_model_supported(self):
+        """Realistic checkpoint: FP32 and BF16 params in the same model."""
+        model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 2))
+        model[1].to(torch.bfloat16)
+        clone = copy.deepcopy(model)
+        self.assertEqual(
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
+        )
+
+    def test_large_param_sample_indices_in_bounds(self):
+        """FP32 torch.linspace rounds numel - 1 up to numel for large
+        tensors (smallest case: 2**24 + 4 elements), so .long() produced
+        an out-of-bounds sample index; integer arithmetic stays in bounds."""
+        model = nn.Module()
+        model.weight = nn.Parameter(torch.randn(2**24 + 4))
+        fingerprint = Qwen3VLGPTQQuantizer._model_state_fingerprint(model)
+        self.assertEqual(
+            fingerprint, Qwen3VLGPTQQuantizer._model_state_fingerprint(model)
+        )
+
+    def test_single_element_and_undersized_params(self):
+        """numel == 1 and numel < samples_per_param must not crash."""
+        model = nn.Linear(1, 1)
+        clone = copy.deepcopy(model)
+        self.assertEqual(
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
+            Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
+        )
+
 
 class TestStageImportDependencies(unittest.TestCase):
     """recipes.stages.gptq must be importable without the HF datasets stack.
