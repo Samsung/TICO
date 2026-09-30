@@ -17,6 +17,7 @@
 import copy
 import io
 import unittest
+from typing import Any
 from unittest import mock
 
 import torch
@@ -274,8 +275,11 @@ class TestGemma4PLEScaleFusionConfig(unittest.TestCase):
                 gemma4_ple_scale_fusion_enabled(
                     {"text": {"ple_embedding_scale_fusion": value}}
                 )
-        for config in (None, [], {"text": None}, {"text": "true"}):
-            with self.assertRaisesRegex(TypeError, "mapping"):
+        invalid_configs: list[Any] = [None, [], {"text": None}, {"text": "true"}]
+        for config in invalid_configs:
+            with self.subTest(config=config), self.assertRaisesRegex(
+                TypeError, "mapping"
+            ):
                 gemma4_ple_scale_fusion_enabled(config)
 
 
