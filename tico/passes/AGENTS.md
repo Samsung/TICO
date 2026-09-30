@@ -5,6 +5,10 @@
 These rules apply to changes under `tico/passes/` in addition to the repository root
 `AGENTS.md`.
 
+This package transforms PyTorch `ExportedProgram` IR. Rewrites of serialized Circle
+artifacts belong in `tico/circle/` and follow `tico/circle/AGENTS.md`; do not mix the
+two pass infrastructures or move artifact cleanup into a PyTorch-IR pass.
+
 ## Required context
 
 Before changing a pass, read the relevant sections of `docs/design.md`, especially the
@@ -77,7 +81,10 @@ For a bug fix, add a regression test that fails before the fix and identifies th
 specific unsafe match or missing rewrite.
 
 For changes that affect Circle serialization or runtime behavior, also add the closest
-end-to-end module conversion and parity test.
+end-to-end module conversion and parity test. Exercise the public conversion path with
+its default Circle O1 post-processing enabled; an isolated PyTorch-IR pass test does
+not cover interaction with serialized-graph optimization. Do not disable O1 merely to
+make an end-to-end regression pass.
 
 ## Common review failures
 

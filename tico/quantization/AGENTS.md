@@ -14,8 +14,14 @@ Read the documents relevant to the change:
   `tico/quantization/wrapq/README.md`
 - Recipe ownership, stages, adapters, import rules, configs, and debug workflows:
   `tico/quantization/recipes/README.md`
-- Algorithm-specific README files under `tico/quantization/algorithm/` when modifying
-  an existing algorithm.
+- Dataset roles, provenance, and benchmark safety:
+  `tico/quantization/recipes/data/README.md`
+- Artifact boundaries, static profiles, and staged export:
+  `tico/quantization/recipes/export/README.md` and the relevant model-specific guide
+- Public configuration and extension schema:
+  `tico/quantization/examples/configs/README.md`
+- Algorithm-specific README files under `tico/quantization/algorithm/` when available;
+  otherwise inspect the implementation and its focused tests.
 
 Inspect a nearby implementation and its tests before adding a new quantizer, wrapper,
 adapter, stage, export path, or configuration field.
@@ -39,6 +45,22 @@ Do not add a model-family conditional to generic infrastructure when the behavio
 be expressed through an adapter, wrapper, registration, protocol method, or
 configuration.
 
+## Out-of-tree extensions
+
+Use the public adapter/quantizer registries and opt-in recipe extensions for separately
+installed packages instead of patching built-in registries or adding private imports.
+Follow `recipes/README.md` for the API and collision rules.
+
+- `model.adapter` selects an adapter; it does not redefine `model.family`. Preserve
+  family-consistency validation and the family keys used by downstream helpers.
+- Preserve idempotent registration of the same object/class and reject a different
+  registration under an occupied key. Do not silently replace built-ins.
+- Load configured extensions before adapter resolution in every affected entrypoint.
+  Loading executes trusted Python code; never discover or activate packages implicitly,
+  and do not swallow import or activation failures.
+- Test repeated loading, collisions, missing modules/callables, and family mismatches
+  with synthetic extensions. Restore registry and loader state after each test.
+
 ## Quantization lifecycle
 
 Preserve the expected lifecycle:
@@ -58,6 +80,11 @@ prepare -> calibration/statistics collection -> convert
   mode.
 - State-dict save and load behavior must preserve the documented lifecycle stage and
   qparams.
+- For caching quantizers, distinguish collecting calibration inputs from collecting
+  algorithm statistics during conversion. Preserve cache ownership, collection order,
+  and state transitions; test nested or repeated module calls when affected. Verify
+  hook/forward restoration and cache cleanup at the documented lifecycle boundaries,
+  including failure paths.
 
 ## Qparam correctness
 
@@ -82,6 +109,24 @@ mapping is proven compatible.
 
 A change to qparam propagation, folding, sharing, or transfer must include tests for
 both the intended propagation path and a nearby path that must not propagate.
+
+### GPTQ-to-PTQ handoff
+
+When GPTQ qparam reuse is enabled, preserve the stage ordering:
+
+```text
+PTQ prepare -> inject and lock compatible GPTQ weight qparams -> calibrate -> convert
+```
+
+Use `recipes/qparams.py` and the existing PTQ-stage flow rather than a parallel
+handoff implementation. Preserve wrapper `fp_name` mappings and folding-aware scale
+adjustments. Loaded weight qparams must stay locked through calibration without
+preventing unrelated activation observers from collecting statistics.
+
+Keep failure modes distinct: enabled GPTQ followed by requested reuse must not silently
+fall back when quantizers are missing or no observer matches. Pure PTQ and explicitly
+disabled reuse remain valid workflows. Test mappings, folded weights, lock persistence,
+non-target observers, and those separate workflow paths when the handoff changes.
 
 ## Numerical behavior
 
@@ -108,9 +153,45 @@ both the intended propagation path and a nearby path that must not propagate.
 - A new configuration field requires validation, a default or migration strategy, and
   documentation in the relevant config reference.
 
+## Dataset roles and benchmark safety
+
+Use the centralized policy in `recipes/data/dataset_usage.py`; a split named `train`
+is not by itself proof that a dataset is calibration-safe. Preserve role validation
+before model loading or data downloads, and preserve resolved source provenance in
+`effective_config.yaml`.
+
+Do not enable `calibration.allow_benchmark_overlap` or
+`calibration.allow_unregistered_dataset` automatically to bypass errors or improve
+scores. Explicit experimental opt-ins must retain their warnings and provenance;
+overlap-enabled results must not be described as strictly held out. Keep gold targets
+out of calibration rendering by default. Add policy and routing tests for new dataset
+sources without downloading those datasets in unit tests.
+
+## Staged export and runtime contracts
+
+Treat each exported stage boundary as an interface, not just a filename. When input or
+output order, names, shapes, dtypes, qparams, static profiles, or stage composition
+changes, review the wrapper, exporter, runtime consumer, manifests, and contract tests
+together. Use `recipes/export/README.md` and the relevant model/profile implementation
+as the source of truth instead of copying model dimensions into these rules.
+
+- Reuse the intended frozen observer/qparams at producer-consumer boundaries; do not
+  independently recalibrate the two sides. Test that split artifacts can be chained.
+- Keep host/NPU responsibilities, prefill/decode, KV-cache capacity/update behavior,
+  and RoPE/profile conventions explicit. Reject incompatible profiles rather than
+  silently casting, reshaping, or substituting another stage.
+- Keep artifact-format policy in recipes and inline/appended Circle storage selection
+  in the shared serializer. Large-Circle support does not implicitly change a recipe's
+  existing host-artifact `auto` policy; see `docs/large_circle_export.md`.
+- Use the default reference runtime for ordinary Circle evaluation. Report structural,
+  reference-numerical, and target-backend validation separately, especially for
+  fake-quantize execution.
+
 ## Testing
 
-Prefer tiny deterministic modules and synthetic inputs.
+Prefer tiny deterministic modules and synthetic inputs under the matching
+`test/quantization/` directory. Extend `test/unit_test/quantization/` only when it
+already owns the relevant behavior; see `test/AGENTS.md`.
 
 Unit tests must not:
 
