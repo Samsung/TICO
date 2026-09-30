@@ -20,6 +20,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from tico.circle.cli.main import (
@@ -179,7 +180,7 @@ class CircleCLITest(unittest.TestCase):
     def test_extract_validates_selection_before_loading(self) -> None:
         """Reject ambiguous or empty selections without reading the input."""
 
-        base = dict(
+        base: dict[str, Any] = dict(
             input="missing.circle",
             output="out.circle",
             subgraph=0,
@@ -190,7 +191,7 @@ class CircleCLITest(unittest.TestCase):
             preserve_compatible_signatures=False,
             no_verify=False,
         )
-        cases = (
+        cases: tuple[tuple[dict[str, Any], str], ...] = (
             ({"ops": "0", "from_tensor": ["x"]}, "cannot be combined"),
             ({"ops": None}, "Provide --ops"),
         )

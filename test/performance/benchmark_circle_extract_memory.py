@@ -119,7 +119,9 @@ def _run_measurement(
         # Keep the output layout identical across modes when the fixture used a
         # lowered private budget; the save path also honours it.
         circle_binary._FLATBUFFER_LIMIT = limit
-        circle_io._STREAMING_INLINE_BUDGET = min(circle_io._STREAMING_INLINE_BUDGET, limit)
+        circle_io._STREAMING_INLINE_BUDGET = min(
+            circle_io._STREAMING_INLINE_BUDGET, limit
+        )
 
     if trace:
         tracemalloc.start()
@@ -299,7 +301,9 @@ def main() -> None:
         f"{args.buffers} x {args.buffer_mib} MiB payloads, "
         f"flatbuffer limit {args.flatbuffer_limit or 'default'}"
     )
-    print(f"{'scenario':<10} {'mode':<8} {'peak RSS MiB':>13} {'output MiB':>11} {'seconds':>8}")
+    print(
+        f"{'scenario':<10} {'mode':<8} {'peak RSS MiB':>13} {'output MiB':>11} {'seconds':>8}"
+    )
     for report in results:
         print(
             f"{report['scenario']:<10} {report['mode']:<8} "
