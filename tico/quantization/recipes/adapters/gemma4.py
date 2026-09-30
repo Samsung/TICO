@@ -54,6 +54,10 @@ from tico.quantization.recipes.utils import (
     quant_spec_from_config,
     torch_dtype_from_name,
 )
+from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
+    fuse_gemma4_ple_embedding_scale,
+    gemma4_ple_scale_fusion_enabled,
+)
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     build_gemma4_static_vision_profile,
     canonicalize_gemma4_static_vision_model_args,
@@ -84,6 +88,7 @@ class Gemma4Adapter(ModelAdapter):
         cfg = ctx.cfg
         model_cfg = cfg.get("model", {})
         runtime_cfg = cfg.get("runtime", {})
+        fuse_ple_scale = gemma4_ple_scale_fusion_enabled(cfg.get("model_args", {}))
 
         ctx.device = torch.device(
             runtime_cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
@@ -136,6 +141,12 @@ class Gemma4Adapter(ModelAdapter):
         ctx.model.eval()
         self._disable_cache(ctx.model)
         assert_gemma4_e2b_no_moe(ctx.model)
+        # Load-time preprocessing: this must precede every algorithm stage,
+        # including weight-only GPTQ and activation calibration.
+        if fuse_ple_scale:
+            ctx.artifacts[
+                "gemma4_ple_scale_fused_modules"
+            ] = fuse_gemma4_ple_embedding_scale(ctx.model)
 
         calib_seq_len = get_by_path(cfg, "calibration.seq_len")
         if calib_seq_len is not None and hasattr(ctx.model.config, "text_config"):

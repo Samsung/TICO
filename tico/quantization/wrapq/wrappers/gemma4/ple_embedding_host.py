@@ -37,8 +37,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
+    FusedGemma4PLEEmbedding,
+)
 
 PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION = 1
+# Version 2 has the same tensor payload but omits the embed_scale operation.
+# Old readers reject it instead of silently replaying the unfused contract.
+PLE_EMBEDDING_FUSED_ARTIFACT_SCHEMA_VERSION = 2
 PLE_EMBEDDING_ARTIFACT_STAGE = "ple_embedding"
 
 # flatbuffers builders cannot grow beyond 2 GiB. Circle stores the packed table
@@ -207,7 +213,11 @@ def build_gemma4_ple_embedding_artifact(adapter: nn.Module) -> dict[str, Any]:
     quantized = bool(adapter.quantized)
 
     artifact: dict[str, Any] = {
-        "schema_version": PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION,
+        "schema_version": (
+            PLE_EMBEDDING_FUSED_ARTIFACT_SCHEMA_VERSION
+            if isinstance(module, FusedGemma4PLEEmbedding)
+            else PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION
+        ),
         "stage": PLE_EMBEDDING_ARTIFACT_STAGE,
         "quantized": quantized,
         "num_hidden_layers": int(adapter.num_hidden_layers),
@@ -257,11 +267,18 @@ def _validate_artifact(artifact: Mapping[str, Any]) -> None:
             f"Expected a {PLE_EMBEDDING_ARTIFACT_STAGE!r} artifact, got {stage!r}."
         )
     version = artifact.get("schema_version")
-    if version != PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION:
+    if version not in (
+        PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION,
+        PLE_EMBEDDING_FUSED_ARTIFACT_SCHEMA_VERSION,
+    ):
         raise ValueError(
             "Unsupported Gemma4 PLE embedding artifact schema_version "
-            f"{version!r}; expected {PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION}."
+            f"{version!r}; expected 1 (unfused) or 2 (pre-quantization fused)."
         )
+    if version == PLE_EMBEDDING_FUSED_ARTIFACT_SCHEMA_VERSION:
+        scale = artifact["embed_scale"]
+        if scale.numel() != 1 or float(scale) != 1.0:
+            raise ValueError("Fused PLE embedding artifacts must have embed_scale=1.")
     if artifact.get("quantized"):
         missing = [
             key for key in _ACTIVATION_OBSERVER_KEYS if key not in artifact["observers"]
@@ -288,6 +305,9 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
         super().__init__()
         _validate_artifact(artifact)
         self.quantized = bool(artifact["quantized"])
+        self.embed_scale_fused = (
+            artifact["schema_version"] == PLE_EMBEDDING_FUSED_ARTIFACT_SCHEMA_VERSION
+        )
         self.num_hidden_layers = int(artifact["num_hidden_layers"])
         self.hidden_size_per_layer_input = int(artifact["hidden_size_per_layer_input"])
         self.vocab_size_per_layer_input = int(artifact["vocab_size_per_layer_input"])
@@ -353,10 +373,11 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
         weight = self._dequantized_weight() if self.quantized else self.weight
         hidden_states = F.embedding(input_ids, weight, padding_idx=self.padding_idx)
         hidden_states = self._fq(hidden_states, "embedding")
-        scale = self._fq(self.embed_scale, "embed_scale")
-        hidden_states = hidden_states * scale.to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        if not getattr(self, "embed_scale_fused", False):
+            scale = self._fq(self.embed_scale, "embed_scale")
+            hidden_states = hidden_states * scale.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            )
         hidden_states = self._fq(hidden_states, "act_out")
         hidden_states = hidden_states.reshape(
             *input_ids.shape[:-1],

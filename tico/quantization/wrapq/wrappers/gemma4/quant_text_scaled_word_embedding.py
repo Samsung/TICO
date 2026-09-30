@@ -21,10 +21,14 @@ import torch.nn.functional as F
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.qscheme import QScheme
+from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
+    FusedGemma4PLEEmbedding,
+)
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
-from tico.quantization.wrapq.wrappers.registry import try_register
+from tico.quantization.wrapq.wrappers.registry import register, try_register
 
 
+@register(FusedGemma4PLEEmbedding)
 @try_register(
     "transformers.models.gemma4.modeling_gemma4.Gemma4TextScaledWordEmbedding"
 )
@@ -74,13 +78,15 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
         )
         hidden_states = self._fq(hidden_states, self.obs_embedding)
 
-        # Apply quantized embed_scale
-        scale = self.module.embed_scale
-        if self._mode is Mode.QUANT:
-            scale = self.obs_embed_scale.fake_quant(scale)
-        hidden_states = hidden_states * scale.to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
+        # The raw-model transform has already scaled the FP weight before any
+        # observer is created. Do not export even a redundant MUL by one.
+        if not isinstance(self.module, FusedGemma4PLEEmbedding):
+            scale = self.module.embed_scale
+            if self._mode is Mode.QUANT:
+                scale = self.obs_embed_scale.fake_quant(scale)
+            hidden_states = hidden_states * scale.to(
+                dtype=hidden_states.dtype, device=hidden_states.device
+            )
 
         return self._fq(hidden_states, self.obs_act_out)
 
