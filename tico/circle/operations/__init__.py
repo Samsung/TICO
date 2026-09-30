@@ -17,11 +17,13 @@ from tico.circle.operations.extract import (
     extract_by_tensor_indices,
     extract_by_tensor_patterns,
     ExtractionResult,
+    PayloadOwnership,
     SignaturePolicy,
 )
 
 __all__ = [
     "ExtractionResult",
+    "PayloadOwnership",
     "SignaturePolicy",
     "extract_by_operator_indices",
     "extract_by_tensor_indices",

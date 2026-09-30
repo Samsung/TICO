@@ -84,10 +84,13 @@ have not been resolved, retain stale file offsets after a rewrite, or silently d
 unsupported payloads. Preserve complete-`bytes` API contracts and configured O1 behavior
 regardless of model size.
 
-Appended payloads may be read-only views that retain the source bytes. Copy explicitly
-before an in-place edit, but review whole-document clones, `deepcopy`, and `tobytes()`
-for unnecessary payload duplication. Header parsing should not copy multi-GiB payloads
-merely to make metadata writable. This is an in-memory path, not a streaming guarantee.
+Appended payloads may be read-only views that retain the source bytes or a file mapping.
+Copy explicitly before an in-place edit, but review whole-document clones, `deepcopy`,
+and `tobytes()` for unnecessary payload duplication. Header parsing should not copy
+multi-GiB payloads merely to make metadata writable. Keep the payload-ownership rules in
+`docs/large_circle_export.md`: public extraction returns detached results, only the CLI
+borrows payloads from a document it owns, file saves stream the planned layout, and
+bytes-returning APIs still return the complete binary.
 
 Distinguish absent storage from a valid zero-element constant using the existing
 ownership helpers; do not classify a tensor only by whether its payload is non-empty.

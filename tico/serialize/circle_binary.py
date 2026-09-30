@@ -16,7 +16,9 @@
 
 The FlatBuffers Python builder has a 2 GiB limit. The complete Circle file does not:
 Buffer.offset/size can address constant data after the FlatBuffer. This module
-chooses the representation automatically and always returns the *entire* model.
+chooses the representation automatically. ``serialize_circle_model`` returns the
+*entire* model as bytes; ``plan_circle_layout`` exposes the same layout so a file
+writer can emit the header, padding, and payload views without joining them.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import struct
 import sys
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, Sequence
+from typing import Any, BinaryIO, Sequence
 
 import numpy as np
 
@@ -40,6 +42,9 @@ _ALIGNMENT = 16
 _UINT64_MAX = (1 << 64) - 1
 # Buffer's second field (offset: ulong), including the two vtable header slots.
 _BUFFER_OFFSET_VTABLE_SLOT = 6
+# Streaming writes slice payload views into bounded chunks; no chunk is copied.
+_WRITE_CHUNK_BYTES = 8 << 20
+_PADDING = bytes(_ALIGNMENT)
 
 
 class CircleSerializationError(ValueError):
@@ -196,17 +201,120 @@ def _join_payloads(
     return b"".join(parts)
 
 
-def serialize_circle_model(model: Any) -> bytes:
-    """Serialize an Object API model, automatically relocating large payloads.
+def _write_all(stream: BinaryIO, view: memoryview) -> None:
+    """Write one bounded view completely, honoring partial writes."""
+
+    while view.nbytes:
+        written = stream.write(view)
+        if written is None:
+            # Non-blocking raw streams report "nothing yet" this way; treating it
+            # as success would silently drop payload bytes.
+            raise OSError("The Circle output stream did not accept data.")
+        if written <= 0 or written > view.nbytes:
+            raise OSError(
+                f"The Circle output stream reported an invalid write of {written} "
+                f"bytes for a {view.nbytes}-byte chunk."
+            )
+        view = view[written:]
+
+
+def _write_chunked(stream: BinaryIO, view: memoryview, chunk_size: int) -> None:
+    """Emit a contiguous byte view as bounded slices without copying it."""
+
+    for start in range(0, view.nbytes, chunk_size):
+        _write_all(stream, view[start : start + chunk_size])
+
+
+@dataclass(frozen=True)
+class CircleBinaryLayout:
+    """A finished Circle header plus the payload views it already references.
+
+    ``header`` is the complete FlatBuffer; for the inline layout it is the whole
+    file. For the appended layout every ``Buffer.offset`` inside the header has
+    been patched to the file-relative ``offsets`` measured from the start of the
+    output, so the layout can be emitted to a stream that cannot seek. The payload
+    views borrow the model's storage and stay valid only while the model does.
+    """
+
+    header: bytearray
+    payloads: tuple[memoryview, ...]
+    offsets: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        if len(self.payloads) != len(self.offsets):
+            raise CircleSerializationError("Every Circle payload must have one offset.")
+        cursor = len(self.header)
+        for payload, offset in zip(self.payloads, self.offsets):
+            if offset < cursor:
+                raise CircleSerializationError(
+                    "Circle payloads overlap the preceding data."
+                )
+            cursor = offset + payload.nbytes
+
+    @property
+    def inline(self) -> bool:
+        """Return whether every constant lives inside the FlatBuffer header."""
+
+        return not self.payloads
+
+    @property
+    def size(self) -> int:
+        """Return the complete output size in bytes."""
+
+        if not self.payloads:
+            return len(self.header)
+        return self.offsets[-1] + self.payloads[-1].nbytes
+
+    def to_bytes(self) -> bytes:
+        """Materialize the complete binary; this is the bytes-API contract."""
+
+        if not self.payloads:
+            return bytes(self.header)
+        return _join_payloads(self.header, self.payloads, self.offsets)
+
+    def write_to(
+        self, stream: BinaryIO, *, chunk_size: int = _WRITE_CHUNK_BYTES
+    ) -> int:
+        """Emit header, padding, and payloads in order; return the byte count.
+
+        Nothing the size of the complete binary or of a whole payload is
+        allocated here: the header is written from its existing storage and each
+        payload view is sliced into bounded chunks. Padding never exceeds the
+        alignment. The inline layout still writes the builder-produced header,
+        which the packer materialized in full.
+        """
+
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive.")
+        _write_chunked(stream, memoryview(self.header).cast("B"), chunk_size)
+        cursor = len(self.header)
+        for payload, offset in zip(self.payloads, self.offsets):
+            padding = offset - cursor
+            if padding:
+                _write_all(stream, memoryview(_PADDING)[:padding])
+            _write_chunked(stream, payload, chunk_size)
+            cursor = offset + payload.nbytes
+        return cursor
+
+
+def plan_circle_layout(
+    model: Any,
+    *,
+    inline_budget: int | None = None,
+) -> CircleBinaryLayout:
+    """Pack the header and lay out payloads without joining them.
 
     Small models retain the ordinary inline layout. An aggregate payload check
     reserves headroom for metadata; an actual bounded pack also handles cases
     where metadata, padding, or many individually small constants reach the
     limit. Only a size-limit exception selects the alternative representation.
 
-    No file is created here. The result is always complete bytes, not a header,
-    a path, or a lazily materialized object. Callers must have enough RAM for the
-    resulting binary in addition to the conversion graph and tensor storage.
+    ``inline_budget`` optionally lowers the aggregate payload size below which an
+    inline pack is attempted. Inline packing copies every payload into the
+    FlatBuffers builder (whose storage grows by doubling) and again into the
+    finished header, so a caller that streams to a file can pass a smaller budget
+    to keep that transient cost bounded. It never raises the FlatBuffer limit and
+    it never affects the layout of models below the budget.
     """
 
     if model is None or not hasattr(model, "Pack"):
@@ -218,9 +326,14 @@ def serialize_circle_model(model: Any) -> bytes:
         raise CircleSerializationError("Circle buffer 0 must remain empty.")
     limit = _FLATBUFFER_LIMIT
     reserve = min(_METADATA_RESERVE, limit // 8)
-    if sum(sizes) <= limit - reserve:
+    inline_threshold = limit - reserve
+    if inline_budget is not None:
+        if inline_budget < 0:
+            raise ValueError("inline_budget must not be negative.")
+        inline_threshold = min(inline_threshold, inline_budget)
+    if sum(sizes) <= inline_threshold:
         try:
-            return bytes(_pack_flatbuffer(model, limit))
+            return CircleBinaryLayout(_pack_flatbuffer(model, limit), (), ())
         except _FlatbufferTooLarge:
             # The failed builder is out of scope before allocating the header.
             # Do not turn graph errors, invalid values, or MemoryError into a
@@ -270,7 +383,19 @@ def serialize_circle_model(model: Any) -> bytes:
         if not field:
             raise CircleSerializationError("Circle schema omitted Buffer.offset.")
         struct.pack_into("<Q", header, table.Pos + field, offset)
-    return _join_payloads(header, payloads, offsets)
+    return CircleBinaryLayout(header, tuple(payloads), offsets)
+
+
+def serialize_circle_model(model: Any) -> bytes:
+    """Serialize an Object API model, automatically relocating large payloads.
+
+    See ``plan_circle_layout`` for the selection policy. No file is created here.
+    The result is always complete bytes, not a header, a path, or a lazily
+    materialized object. Callers must have enough RAM for the resulting binary in
+    addition to the conversion graph and tensor storage.
+    """
+
+    return plan_circle_layout(model).to_bytes()
 
 
 def external_buffer_ranges(
@@ -306,14 +431,16 @@ def external_buffer_ranges(
 
 def restore_external_buffers(
     model: Any,
-    data: bytes,
+    data: Any,
     ranges: Sequence[ExternalBufferRange],
 ) -> None:
     """Resolve payloads to read-only NumPy views and clear stale file positions.
 
-    These views keep the source bytes alive. A transform that edits a payload
-    in place must copy it first; assigning a replacement buffer remains valid.
-    Repacking then recomputes the layout rather than preserving old offsets.
+    ``data`` is the complete binary as ``bytes`` or any other buffer-protocol
+    object such as a read-only file mapping. These views keep that storage alive.
+    A transform that edits a payload in place must copy it first; assigning a
+    replacement buffer remains valid. Repacking then recomputes the layout rather
+    than preserving old offsets.
     """
 
     for region in ranges:
