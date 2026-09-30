@@ -14,6 +14,16 @@
 
 """Unit tests for dataset_filter (per-class calibration sample filtering)."""
 
+try:
+    from quantization.recipes.optional_dependency_stubs import (
+        install_optional_dependency_stubs,
+    )
+except ModuleNotFoundError:
+    from optional_dependency_stubs import install_optional_dependency_stubs
+
+install_optional_dependency_stubs()
+
+import unittest
 from typing import Any, Dict
 
 from unittest.mock import MagicMock, patch
@@ -45,7 +55,7 @@ def _class_occurrences(examples):
     return occurrences
 
 
-class TestDatasetFilter:
+class TestDatasetFilter(unittest.TestCase):
     def test_basic_quota(self):
         """Each class should get at most n_per_class samples."""
         examples = [
@@ -56,7 +66,7 @@ class TestDatasetFilter:
             _make_example(["bird"]),
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=2))
-        assert len(result) == 4
+        self.assertEqual(len(result), 4)
 
     def test_no_image_classes(self):
         """Samples without image_classes should be kept as-is."""
@@ -65,7 +75,7 @@ class TestDatasetFilter:
             {"image_classes": []},
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=5))
-        assert len(result) == 2
+        self.assertEqual(len(result), 2)
 
     def test_n_per_class_one(self):
         """With n_per_class=1, each class can only appear once."""
@@ -75,7 +85,7 @@ class TestDatasetFilter:
             _make_example(["dog"]),
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=1))
-        assert len(result) == 2
+        self.assertEqual(len(result), 2)
 
     def test_multi_class_sample(self):
         """A sample with multiple classes counts for all of them."""
@@ -86,11 +96,11 @@ class TestDatasetFilter:
             _make_example(["bird"]),
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=1))
-        assert len(result) == 1
+        self.assertEqual(len(result), 1)
 
     def test_empty_input(self):
         result = dataset_filter([], CalibFilterConfig(n_per_class=5))
-        assert result == []
+        self.assertEqual(result, [])
 
     def test_large_n_per_class(self):
         """n_per_class larger than available samples keeps everything."""
@@ -100,7 +110,7 @@ class TestDatasetFilter:
             _make_example(["dog"]),
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=100))
-        assert len(result) == 3
+        self.assertEqual(len(result), 3)
 
     def test_missing_filter_field_raises(self):
         """A misspelled filter_field raises ValueError naming dataset and field.
@@ -114,25 +124,23 @@ class TestDatasetFilter:
             _make_example(["cat"]),
             _make_example(["dog"]),
         ]
-        raised = None
-        try:
+        with self.assertRaises(ValueError) as ctx:
             dataset_filter(
                 examples,
                 CalibFilterConfig(n_per_class=1, filter_field="image_class"),
                 dataset_name="textvqa",
             )
-        except ValueError as e:
-            raised = e
-        assert raised is not None, "expected ValueError for unknown filter field"
-        msg = str(raised)
-        assert "image_class" in msg
-        assert "textvqa" in msg
+        msg = str(ctx.exception)
+        self.assertIn("image_class", msg)
+        self.assertIn("textvqa", msg)
 
     def test_inactive_config_returns_unchanged(self):
         """Filtering is disabled for n_per_class <= 0 or a missing config."""
         examples = [_make_example(["cat"])]
-        assert dataset_filter(examples, CalibFilterConfig(n_per_class=0)) is examples
-        assert dataset_filter(examples, None) is examples
+        self.assertIs(
+            dataset_filter(examples, CalibFilterConfig(n_per_class=0)), examples
+        )
+        self.assertIs(dataset_filter(examples, None), examples)
 
     def test_strict_multilabel_cap(self):
         """A multi-label sample is kept only when ALL its classes are under quota.
@@ -148,9 +156,9 @@ class TestDatasetFilter:
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=1))
         occurrences = _class_occurrences(result)
-        assert len(result) == 1
-        assert occurrences == {"cat": 1}
-        assert all(n <= 1 for n in occurrences.values())
+        self.assertEqual(len(result), 1)
+        self.assertEqual(occurrences, {"cat": 1})
+        self.assertTrue(all(n <= 1 for n in occurrences.values()))
 
     def test_class_occurrences_never_exceed_quota(self):
         """Class occurrences in the selected set never exceed n_per_class."""
@@ -164,12 +172,12 @@ class TestDatasetFilter:
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=2))
         occurrences = _class_occurrences(result)
-        assert occurrences == {"cat": 2, "dog": 2, "bird": 1}
-        assert all(n <= 2 for n in occurrences.values())
-        assert len(result) == 3
+        self.assertEqual(occurrences, {"cat": 2, "dog": 2, "bird": 1})
+        self.assertTrue(all(n <= 2 for n in occurrences.values()))
+        self.assertEqual(len(result), 3)
 
 
-class TestDistinctImages:
+class TestDistinctImages(unittest.TestCase):
     """Tests for the distinct_images deduplication feature."""
 
     def test_distinct_images_dedup(self):
@@ -182,9 +190,9 @@ class TestDistinctImages:
         result = dataset_filter(
             examples, CalibFilterConfig(n_per_class=10, distinct_images=True)
         )
-        assert len(result) == 2
-        assert result[0]["question_id"] == 1
-        assert result[1]["question_id"] == 3
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["question_id"], 1)
+        self.assertEqual(result[1]["question_id"], 3)
 
     def test_distinct_images_false_allows_duplicates(self):
         """When distinct_images=False, same image_id can appear multiple times."""
@@ -195,7 +203,7 @@ class TestDistinctImages:
         result = dataset_filter(
             examples, CalibFilterConfig(n_per_class=10, distinct_images=False)
         )
-        assert len(result) == 2
+        self.assertEqual(len(result), 2)
 
     def test_distinct_images_default_true(self):
         """distinct_images defaults to True."""
@@ -204,7 +212,7 @@ class TestDistinctImages:
             {**_make_example(["cat"]), "image_id": "img_001", "question_id": 2},
         ]
         result = dataset_filter(examples, CalibFilterConfig(n_per_class=10))
-        assert len(result) == 1
+        self.assertEqual(len(result), 1)
 
     def test_distinct_images_no_image_id(self):
         """Samples without image_id are not deduplicated."""
@@ -215,10 +223,10 @@ class TestDistinctImages:
         result = dataset_filter(
             examples, CalibFilterConfig(n_per_class=10, distinct_images=True)
         )
-        assert len(result) == 2
+        self.assertEqual(len(result), 2)
 
 
-class TestFilterConfigNormalization:
+class TestFilterConfigNormalization(unittest.TestCase):
     """_normalize_filter_config must preserve every supported filter key."""
 
     @staticmethod
@@ -235,11 +243,11 @@ class TestFilterConfigNormalization:
         return config["textvqa"]["filter"]["verbose"]
 
     def test_verbose_true_preserved(self):
-        assert self._normalize_verbose(True) is True
+        self.assertIs(self._normalize_verbose(True), True)
 
     def test_verbose_false_preserved(self):
         """A YAML ``verbose: false`` must not be discarded by normalization."""
-        assert self._normalize_verbose(False) is False
+        self.assertIs(self._normalize_verbose(False), False)
 
     def test_verbose_defaults_true(self):
         """Without an explicit key, verbose falls back to True."""
@@ -247,22 +255,18 @@ class TestFilterConfigNormalization:
             {"textvqa": {"n_samples": 8, "filter": {"n_per_class": 2}}},
             default_n_samples=8,
         )
-        assert config["textvqa"]["filter"]["verbose"] is True
+        self.assertIs(config["textvqa"]["filter"]["verbose"], True)
 
     def test_negative_n_per_class_raises(self):
         """A negative n_per_class is a configuration error, not 'disabled'."""
-        raised = None
-        try:
+        with self.assertRaises(ValueError) as ctx:
             vlm_data.normalize_mixed_dataset_config(
                 {"textvqa": {"n_samples": 8, "filter": {"n_per_class": -1}}},
                 default_n_samples=8,
             )
-        except ValueError as e:
-            raised = e
-        assert raised is not None, "expected ValueError for negative n_per_class"
-        msg = str(raised)
-        assert "n_per_class" in msg
-        assert ">= 0" in msg
+        msg = str(ctx.exception)
+        self.assertIn("n_per_class", msg)
+        self.assertIn(">= 0", msg)
 
     def test_n_per_class_none_and_zero_allowed(self):
         """null and 0 mean the filter is disabled; they are not errors."""
@@ -271,10 +275,10 @@ class TestFilterConfigNormalization:
                 {"textvqa": {"n_samples": 8, "filter": {"n_per_class": value}}},
                 default_n_samples=8,
             )
-            assert config["textvqa"]["filter"]["n_per_class"] == 0
+            self.assertEqual(config["textvqa"]["filter"]["n_per_class"], 0)
 
 
-class TestMixedModeClassFiltering:
+class TestMixedModeClassFiltering(unittest.TestCase):
     """Tests that get_mixed_calib_inputs routes textvqa through class filtering
     when a per-dataset ``filter`` block is present."""
 
@@ -310,8 +314,8 @@ class TestMixedModeClassFiltering:
 
         mock_calib.assert_called_once()
         fc = mock_calib.call_args.kwargs["filter_config"]
-        assert isinstance(fc, CalibFilterConfig)
-        assert fc.verbose is False
+        self.assertIsInstance(fc, CalibFilterConfig)
+        self.assertIs(fc.verbose, False)
 
     def test_filtered_branch_forwards_dataset_policy_flags(self):
         """The filtered branch must forward dataset-usage policy flags.
@@ -346,13 +350,13 @@ class TestMixedModeClassFiltering:
         kwargs = _call_and_get_kwargs(
             allow_benchmark_overlap=True, allow_unregistered_dataset=True
         )
-        assert kwargs["allow_benchmark_overlap"] is True
-        assert kwargs["allow_unregistered_dataset"] is True
+        self.assertIs(kwargs["allow_benchmark_overlap"], True)
+        self.assertIs(kwargs["allow_unregistered_dataset"], True)
 
         # Defaults must be forwarded explicitly as False, not omitted.
         kwargs = _call_and_get_kwargs()
-        assert kwargs["allow_benchmark_overlap"] is False
-        assert kwargs["allow_unregistered_dataset"] is False
+        self.assertIs(kwargs["allow_benchmark_overlap"], False)
+        self.assertIs(kwargs["allow_unregistered_dataset"], False)
 
     def test_inactive_filter_falls_through_to_normal_path(self):
         """A non-positive n_per_class must not enter the filtered branch.
@@ -392,7 +396,7 @@ class TestMixedModeClassFiltering:
                 )
 
             mock_calib.assert_not_called()
-            assert mock_get_dataset.call_args.kwargs["n"] == 7
+            self.assertEqual(mock_get_dataset.call_args.kwargs["n"], 7)
 
     def test_textvqa_uses_class_filter_when_filter_block_set(self):
         """When a filter block with n_per_class > 0 is set, textvqa should use
@@ -448,15 +452,15 @@ class TestMixedModeClassFiltering:
             # textvqa should have been routed through get_calib_inputs with filter_config
             mock_calib.assert_called_once()
             call_kwargs = mock_calib.call_args.kwargs
-            assert call_kwargs["dataset"] == "textvqa"
-            assert call_kwargs["n_samples"] == 50
+            self.assertEqual(call_kwargs["dataset"], "textvqa")
+            self.assertEqual(call_kwargs["n_samples"], 50)
             fc = call_kwargs["filter_config"]
-            assert isinstance(fc, CalibFilterConfig)
-            assert fc.n_per_class == 5
-            assert fc.filter_field == "image_classes"
+            self.assertIsInstance(fc, CalibFilterConfig)
+            self.assertEqual(fc.n_per_class, 5)
+            self.assertEqual(fc.filter_field, "image_classes")
 
             # Result should contain textvqa filtered + vqav2 + wikitext inputs
-            assert len(result) >= 1
+            self.assertGreaterEqual(len(result), 1)
 
     def test_textvqa_not_filtered_when_no_filter_block(self):
         """When no filter block is present, textvqa uses the default streaming path."""
@@ -491,7 +495,7 @@ class TestMixedModeClassFiltering:
             mock_calib.assert_not_called()
 
 
-class TestDatasetFilterIndices:
+class TestDatasetFilterIndices(unittest.TestCase):
     """dataset_filter_indices must match dataset_filter's selection exactly."""
 
     def _examples(self):
@@ -540,13 +544,13 @@ class TestDatasetFilterIndices:
             question_ids=[ex["question_id"] for ex in examples],
             questions=[ex["question"] for ex in examples],
         )
-        assert indices == [examples.index(ex) for ex in selected]
+        self.assertEqual(indices, [examples.index(ex) for ex in selected])
         return indices
 
     def test_parity_quota_one(self):
         indices = self._assert_parity(CalibFilterConfig(n_per_class=1, verbose=False))
         # first cat + first dog; later rows capped / duplicate image / empty
-        assert indices == [0, 1]
+        self.assertEqual(indices, [0, 1])
 
     def test_parity_quota_two(self):
         self._assert_parity(CalibFilterConfig(n_per_class=2, verbose=False))
@@ -560,7 +564,7 @@ class TestDatasetFilterIndices:
         indices = self._assert_parity(
             CalibFilterConfig(n_per_class=2, classes=["dog"], verbose=False)
         )
-        assert indices == [1, 3]
+        self.assertEqual(indices, [1, 3])
 
     def test_parity_max_classes(self):
         self._assert_parity(
@@ -569,16 +573,16 @@ class TestDatasetFilterIndices:
 
     def test_inactive_returns_all_indices(self):
         indices = dataset_filter_indices([["cat"], ["dog"]], filter_config=None)
-        assert indices == [0, 1]
+        self.assertEqual(indices, [0, 1])
 
     def test_empty_field_returns_all_indices(self):
         indices = dataset_filter_indices(
             [[], []], filter_config=CalibFilterConfig(n_per_class=1, verbose=False)
         )
-        assert indices == [0, 1]
+        self.assertEqual(indices, [0, 1])
 
 
-class TestGetCalibInputsLazyFilter:
+class TestGetCalibInputsLazyFilter(unittest.TestCase):
     """get_calib_inputs filter path selects rows via lazy columns only."""
 
     def _toy_hf_dataset(self):
@@ -646,8 +650,8 @@ class TestGetCalibInputsLazyFilter:
 
         # n_per_class=1: first cat (img0) + first dog (img1); img2 is capped
         # by the quota and img3 is a duplicate image_id.
-        assert built_images == ["img0", "img1"]
-        assert len(out) == 2
+        self.assertEqual(built_images, ["img0", "img1"])
+        self.assertEqual(len(out), 2)
 
     def test_get_calib_inputs_filter_field_missing_raises(self):
         import tico.quantization.evaluation.vlm_eval_utils as vlm
@@ -655,21 +659,21 @@ class TestGetCalibInputsLazyFilter:
 
         hf_ds = HFDataset.from_list([{"image": "img0", "question": "q"}])
         vlm.DATASETS["toy"] = {"adapter": lambda ex: ex, "is_text_only": False}
-        raised = None
         try:
             with patch.object(
                 vlm, "get_dataset", return_value=(hf_ds, vlm.DATASETS["toy"]["adapter"])
             ):
-                try:
+                with self.assertRaises(ValueError) as ctx:
                     vlm.get_calib_inputs(
                         "toy",
                         processor=None,
                         filter_config=CalibFilterConfig(n_per_class=1, verbose=False),
                     )
-                except ValueError as e:
-                    raised = e
         finally:
             vlm.DATASETS.pop("toy", None)
 
-        assert raised is not None, "expected ValueError for missing filter field"
-        assert "image_classes" in str(raised)
+        self.assertIn("image_classes", str(ctx.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()
