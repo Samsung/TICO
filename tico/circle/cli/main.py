@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from typing import Any
@@ -27,6 +28,7 @@ from tico.circle.inspect import format_document, summarize_document
 from tico.circle.operations import (
     extract_by_operator_indices,
     extract_by_tensor_patterns,
+    PayloadOwnership,
     SignaturePolicy,
 )
 
@@ -319,10 +321,54 @@ def _verify_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def _extract_command(args: argparse.Namespace) -> int:
-    """Extract one operator region from a Circle document."""
+def _can_map_source(source: str, destination: str) -> bool:
+    """Return whether the input file may stay mapped while the output is written.
 
-    document = CircleDocument.load(args.input)
+    An atomic save replaces the destination after writing a sibling temporary
+    file. On POSIX the replaced inode stays readable through an existing mapping,
+    so extracting a file onto itself is safe. Other platforms refuse to replace a
+    mapped file, so the same-file case falls back to reading the input eagerly.
+    """
+
+    if os.name == "posix" or destination == "-":
+        return True
+    try:
+        return not os.path.samefile(source, destination)
+    except OSError:
+        # A missing destination cannot alias the input.
+        return True
+
+
+def _open_extraction_source(source: str, destination: str) -> CircleDocument:
+    """Open the extraction input, mapping regular files instead of reading them.
+
+    Standard input, pipes, and other non-regular inputs use the ordinary eager
+    loader. The returned document owns any mapping; the caller releases it.
+    """
+
+    if (
+        source != "-"
+        and os.path.isfile(source)
+        and _can_map_source(source, destination)
+    ):
+        return CircleDocument.load_mapped(source)
+    return CircleDocument.load(source)
+
+
+def _extract_command(args: argparse.Namespace) -> int:
+    """Extract one operator region from a Circle document.
+
+    The command owns the loaded document exclusively and saves the result at
+    once, so it borrows the surviving payloads from the source instead of copying
+    them; the streaming save reads them straight from the input mapping.
+    """
+
+    if args.ops is not None and (args.from_tensor or args.to_tensor):
+        raise ValueError("--ops cannot be combined with --from-tensor or --to-tensor.")
+    if args.ops is None and not args.from_tensor and not args.to_tensor:
+        raise ValueError(
+            "Provide --ops or at least one --from-tensor/--to-tensor pattern."
+        )
     policy = (
         SignaturePolicy.PRESERVE_COMPATIBLE
         if args.preserve_compatible_signatures
@@ -333,35 +379,34 @@ def _extract_command(args: argparse.Namespace) -> int:
         "keep_other_subgraphs": args.keep_other_subgraphs,
         "signature_policy": policy,
         "verify": not args.no_verify,
+        "payload_ownership": PayloadOwnership.BORROWED,
     }
-    if args.ops is not None and (args.from_tensor or args.to_tensor):
-        raise ValueError("--ops cannot be combined with --from-tensor or --to-tensor.")
-    if args.ops is not None:
-        result = extract_by_operator_indices(
-            document,
-            parse_operator_spec(args.ops),
-            **common,
-        )
-    else:
-        if not args.from_tensor and not args.to_tensor:
-            raise ValueError(
-                "Provide --ops or at least one --from-tensor/--to-tensor pattern."
+    with _open_extraction_source(args.input, args.output) as document:
+        if args.ops is not None:
+            result = extract_by_operator_indices(
+                document,
+                parse_operator_spec(args.ops),
+                **common,
             )
-        result = extract_by_tensor_patterns(
-            document,
-            from_patterns=args.from_tensor,
-            to_patterns=args.to_tensor,
-            full_match=args.full_match,
-            **common,
+        else:
+            result = extract_by_tensor_patterns(
+                document,
+                from_patterns=args.from_tensor,
+                to_patterns=args.to_tensor,
+                full_match=args.full_match,
+                **common,
+            )
+        # Borrowed payloads stay valid until the mapping is released after this
+        # block; the save reads them without materializing the complete binary.
+        result.document.save(args.output)
+        message = (
+            "Extracted operators "
+            f"{list(result.selected_operator_indices)} with inputs "
+            f"{list(result.boundary.inputs)} and outputs "
+            f"{list(result.boundary.outputs)}."
         )
-
-    result.document.save(args.output)
-    print(
-        "Extracted operators "
-        f"{list(result.selected_operator_indices)} with inputs "
-        f"{list(result.boundary.inputs)} and outputs {list(result.boundary.outputs)}.",
-        file=sys.stderr,
-    )
+        del result
+    print(message, file=sys.stderr)
     return 0
 
 

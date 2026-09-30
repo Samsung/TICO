@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Sequence
 
+from tico.circle._buffer import clone_model_borrowing_payloads, detach_borrowed_payloads
 from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleSelectionError
 from tico.circle.graph import as_indices, as_list, GraphBoundary
@@ -37,6 +38,21 @@ class SignaturePolicy(str, Enum):
     PRESERVE_COMPATIBLE = "preserve-compatible"
 
 
+class PayloadOwnership(str, Enum):
+    """Control who owns the constant payload storage of an extracted document.
+
+    ``DETACHED`` (the default) copies only the payloads that survive extraction, so
+    the result is independent of the source document and of any bytes or file
+    mapping backing it. ``BORROWED`` keeps the surviving payload storage shared
+    with the source; the result is valid only while the source document and its
+    backing storage stay alive and unmodified. It is intended for callers that own
+    the source exclusively and save the result immediately.
+    """
+
+    DETACHED = "detached"
+    BORROWED = "borrowed"
+
+
 @dataclass(frozen=True)
 class ExtractionResult:
     """Return an extracted document together with selection and cleanup metadata."""
@@ -47,6 +63,7 @@ class ExtractionResult:
     boundary: GraphBoundary
     removed_operators: int
     rewrite_stats: RewriteStats
+    payload_ownership: PayloadOwnership = PayloadOwnership.DETACHED
 
 
 def _signature_tensor_indices(signature: object, field_name: str) -> set[int]:
@@ -99,9 +116,19 @@ def extract_by_operator_indices(
     keep_other_subgraphs: bool = False,
     signature_policy: SignaturePolicy = SignaturePolicy.DROP,
     verify: bool = True,
+    payload_ownership: PayloadOwnership = PayloadOwnership.DETACHED,
 ) -> ExtractionResult:
-    """Extract an operator-induced region into a new Circle document."""
+    """Extract an operator-induced region into a new Circle document.
 
+    Graph and buffer-table metadata are cloned first; constant payload storage is
+    borrowed from the source while the selection, signature policy, dead-code
+    elimination, and index compaction run. None of those steps modifies payload
+    bytes, so discarded constants are never copied. With the default
+    ``PayloadOwnership.DETACHED`` the payloads that remain are then copied once
+    per buffer storage object, making the result independent of the source.
+    """
+
+    ownership = PayloadOwnership(payload_ownership)
     selected = tuple(sorted(set(int(index) for index in operator_indices)))
     source_graph = document.graph(subgraph_index)
     boundary = source_graph.region_boundary(selected)
@@ -110,7 +137,8 @@ def extract_by_operator_indices(
             "The selected operator region does not expose any output tensors."
         )
 
-    result = document.clone()
+    cloned_model, borrowed = clone_model_borrowing_payloads(document.model)
+    result = CircleDocument(cloned_model, source=document.source)
     target_subgraph = result.subgraph(subgraph_index)
     source_operator_count = len(as_list(target_subgraph.operators))
     selected_set = set(selected)
@@ -151,6 +179,11 @@ def extract_by_operator_indices(
     if verify:
         result.verify(raise_on_error=True)
 
+    if ownership is PayloadOwnership.DETACHED:
+        # Only buffers that survived compaction are still present, so this copies
+        # exactly the retained payloads and releases the source's backing storage.
+        detach_borrowed_payloads(result.model, borrowed)
+
     final_subgraph = result.subgraph(target_index_after_rewrite)
     final_boundary = GraphBoundary(
         tuple(as_indices(final_subgraph.inputs)),
@@ -163,6 +196,7 @@ def extract_by_operator_indices(
         boundary=final_boundary,
         removed_operators=removed_operators,
         rewrite_stats=stats,
+        payload_ownership=ownership,
     )
 
 
@@ -175,6 +209,7 @@ def extract_by_tensor_indices(
     keep_other_subgraphs: bool = False,
     signature_policy: SignaturePolicy = SignaturePolicy.DROP,
     verify: bool = True,
+    payload_ownership: PayloadOwnership = PayloadOwnership.DETACHED,
 ) -> ExtractionResult:
     """Extract all operators on paths between tensor index boundaries."""
 
@@ -191,6 +226,7 @@ def extract_by_tensor_indices(
         keep_other_subgraphs=keep_other_subgraphs,
         signature_policy=signature_policy,
         verify=verify,
+        payload_ownership=payload_ownership,
     )
 
 
@@ -204,6 +240,7 @@ def extract_by_tensor_patterns(
     keep_other_subgraphs: bool = False,
     signature_policy: SignaturePolicy = SignaturePolicy.DROP,
     verify: bool = True,
+    payload_ownership: PayloadOwnership = PayloadOwnership.DETACHED,
 ) -> ExtractionResult:
     """Extract all operators on paths between tensor name patterns."""
 
@@ -226,4 +263,5 @@ def extract_by_tensor_patterns(
         keep_other_subgraphs=keep_other_subgraphs,
         signature_policy=signature_policy,
         verify=verify,
+        payload_ownership=payload_ownership,
     )

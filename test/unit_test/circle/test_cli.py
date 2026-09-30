@@ -13,10 +13,29 @@
 # limitations under the License.
 
 import argparse
+import importlib
+import io
+import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
-from tico.circle.cli.main import _build_parser, _optimize_command, _parse_passes
+from tico.circle.cli.main import (
+    _build_parser,
+    _can_map_source,
+    _extract_command,
+    _open_extraction_source,
+    _optimize_command,
+    _parse_passes,
+)
+from tico.circle.document import CircleDocument
+from tico.circle.operations import PayloadOwnership
+
+# ``tico.circle.cli`` re-exports ``main``, so the module must be looked up here.
+cli_main = importlib.import_module("tico.circle.cli.main")
 from tico.circle.passes import (
     CanonicalizeEquivalentOpsPass,
     CircleOptimizationPreset,
@@ -157,6 +176,106 @@ class CircleCLITest(unittest.TestCase):
                 _optimize_command(args)
 
         load.assert_not_called()
+
+    def test_extract_validates_selection_before_loading(self) -> None:
+        """Reject ambiguous or empty selections without reading the input."""
+
+        base: dict[str, Any] = dict(
+            input="missing.circle",
+            output="out.circle",
+            subgraph=0,
+            from_tensor=[],
+            to_tensor=[],
+            full_match=False,
+            keep_other_subgraphs=False,
+            preserve_compatible_signatures=False,
+            no_verify=False,
+        )
+        cases: tuple[tuple[dict[str, Any], str], ...] = (
+            ({"ops": "0", "from_tensor": ["x"]}, "cannot be combined"),
+            ({"ops": None}, "Provide --ops"),
+        )
+        for overrides, message in cases:
+            with self.subTest(overrides=overrides):
+                args = argparse.Namespace(**{**base, **overrides})
+                with mock.patch.object(
+                    cli_main, "_open_extraction_source"
+                ) as open_source:
+                    with self.assertRaisesRegex(ValueError, message):
+                        _extract_command(args)
+                open_source.assert_not_called()
+
+    def test_extract_borrows_payloads_and_releases_the_source(self) -> None:
+        """Use the borrowed ownership path and release the document afterwards."""
+
+        document = mock.MagicMock()
+        document.__enter__.return_value = document
+        result = mock.Mock()
+        result.selected_operator_indices = (1,)
+        result.boundary.inputs = (0,)
+        result.boundary.outputs = (2,)
+        args = argparse.Namespace(
+            input="in.circle",
+            output="out.circle",
+            subgraph=0,
+            ops="1",
+            from_tensor=[],
+            to_tensor=[],
+            full_match=False,
+            keep_other_subgraphs=False,
+            preserve_compatible_signatures=False,
+            no_verify=False,
+        )
+        with mock.patch.object(
+            cli_main, "_open_extraction_source", return_value=document
+        ), mock.patch.object(
+            cli_main, "extract_by_operator_indices", return_value=result
+        ) as extract, mock.patch.object(
+            sys, "stderr", new_callable=io.StringIO
+        ) as stderr:
+            self.assertEqual(_extract_command(args), 0)
+
+        self.assertIs(
+            extract.call_args.kwargs["payload_ownership"], PayloadOwnership.BORROWED
+        )
+        result.document.save.assert_called_once_with("out.circle")
+        document.__exit__.assert_called_once()
+        self.assertIn("Extracted operators [1]", stderr.getvalue())
+
+    def test_open_extraction_source_maps_regular_files_only(self) -> None:
+        """Map regular files; read stdin and non-regular inputs eagerly."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.circle"
+            path.write_bytes(b"\x08\x00\x00\x00CIR0!")
+            with mock.patch.object(
+                CircleDocument, "load_mapped"
+            ) as mapped, mock.patch.object(CircleDocument, "load") as eager:
+                _open_extraction_source(str(path), "-")
+                mapped.assert_called_once_with(str(path))
+                eager.assert_not_called()
+
+                mapped.reset_mock()
+                _open_extraction_source("-", str(path))
+                _open_extraction_source(temporary, str(path))
+                mapped.assert_not_called()
+                self.assertEqual(eager.call_count, 2)
+
+    def test_same_file_mapping_policy_depends_on_platform(self) -> None:
+        """Keep the mapping on POSIX; fall back for same-file outputs elsewhere."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.circle"
+            path.write_bytes(b"x")
+            other = Path(temporary) / "other.circle"
+            with mock.patch.object(os, "name", "posix"):
+                self.assertTrue(_can_map_source(str(path), str(path)))
+            with mock.patch.object(os, "name", "nt"):
+                self.assertFalse(_can_map_source(str(path), str(path)))
+                self.assertTrue(_can_map_source(str(path), str(other)))
+                self.assertTrue(_can_map_source(str(path), "-"))
+                other.write_bytes(b"y")
+                self.assertTrue(_can_map_source(str(path), str(other)))
 
     def test_optimize_rejects_preset_with_explicit_passes(self) -> None:
         """Reject ambiguous preset and explicit-pass selection."""

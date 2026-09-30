@@ -78,6 +78,21 @@ copy = model.clone()
 assert copy.model is not model.model
 ```
 
+`CircleDocument.load()` reads the complete input into memory. `CircleDocument.load_mapped()`
+maps a regular file read-only instead: graph metadata is unpacked into ordinary writable
+objects, while appended constant payloads stay views of the mapping. The document owns the
+mapping; release it with `release_payloads()` or by using the document as a context manager.
+`clone()`, `copy.deepcopy()`, and detached extraction results copy their payloads and never
+depend on the mapping. `save()` streams the header and payload views to a file without first
+joining the complete binary, whereas `to_bytes()` always returns the complete binary. See
+[Large Circle export](../../docs/large_circle_export.md) for the layout and ownership rules.
+
+```python
+with CircleDocument.load_mapped("model.circle") as mapped:
+    result = extract_by_operator_indices(mapped, range(20, 65))
+result.document.save("attention.circle")  # Independent of the released mapping.
+```
+
 ### Extract operators by index
 
 Operator ranges are inclusive in the CLI. The Python API accepts explicit indices.
@@ -108,6 +123,15 @@ Extraction computes a new graph boundary from the selected region:
 4. A terminal selected tensor with no selected consumer becomes an output.
 5. Constant tensors remain internal and retain their referenced buffers.
 6. Dead operators, tensors, buffers, and operator codes are removed after boundary reconstruction.
+
+Extraction clones graph and buffer-table metadata first and borrows the source's constant
+payload storage while it trims the graph, so constants that will be discarded are never
+copied. With the default `payload_ownership=PayloadOwnership.DETACHED`, the payloads that
+remain are then copied once per buffer, and the returned document is independent of the
+source document, its bytes, and any file mapping. `PayloadOwnership.BORROWED` skips that
+final copy and keeps the surviving payload storage shared with the source; the result is
+valid only while the source and its backing storage stay alive and unmodified. The CLI uses
+the borrowed path because it owns the loaded document exclusively and saves at once.
 
 ### Extract paths between tensor names
 
@@ -331,6 +355,13 @@ tico-circle extract model.circle \
 ```
 
 A colon can also delimit an inclusive range, for example `20:64`.
+
+When the input is a regular file, `extract` maps it read-only instead of reading it into
+memory, borrows the surviving constant payloads from that mapping, and streams the result
+to the output. Standard input and non-regular files use the ordinary in-memory loader.
+Writing the result over the input path is supported through the atomic temporary-file
+replacement; see [Large Circle export](../../docs/large_circle_export.md#mapped-input-and-extraction-ownership)
+for the platform notes and memory semantics.
 
 ### Extract by tensor boundary
 
