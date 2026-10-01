@@ -443,6 +443,26 @@ def extract_text_config(config: Any) -> Any:
     return getattr(config, "text_config", config)
 
 
+def gemma4_layer_type_head_dim(text_config: Any, layer_type: str) -> int:
+    """Return the attention head dim used by one Gemma4 text layer type.
+
+    Mirrors ``Gemma4TextAttention.__init__``. transformers 5.15+ consumes the
+    ``global_head_dim`` constructor argument into a full-attention override in
+    ``per_layer_config`` and no longer exposes it as a plain attribute, so the
+    per-layer view is authoritative whenever the config owns a layer of the
+    requested type. Older configs expose ``global_head_dim`` directly; sliding
+    layers always use ``head_dim``.
+    """
+    per_layer_config = getattr(text_config, "per_layer_config", None)
+    layer_types = tuple(getattr(text_config, "layer_types", ()) or ())
+    if per_layer_config is not None and layer_type in layer_types:
+        return int(per_layer_config[layer_type].head_dim)
+    global_head_dim = getattr(text_config, "global_head_dim", None)
+    if layer_type == "full_attention" and global_head_dim:
+        return int(global_head_dim)
+    return int(text_config.head_dim)
+
+
 def ensure_static_shape(
     name: str, tensor: torch.Tensor, expected: Iterable[int]
 ) -> None:

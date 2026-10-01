@@ -300,9 +300,9 @@ def write_gemma4_assistant_manifest(
             "num_hidden_layers": int(text_config.num_hidden_layers),
             "num_attention_heads": int(text_config.num_attention_heads),
             "num_key_value_heads": kv_heads,
-            "head_dim": int(text_config.head_dim),
-            "global_head_dim": int(
-                getattr(text_config, "global_head_dim", 0) or text_config.head_dim
+            "head_dim": assistant_layer_type_head_dim(text_config, "sliding_attention"),
+            "global_head_dim": assistant_layer_type_head_dim(
+                text_config, "full_attention"
             ),
             "layer_types": list(text_config.layer_types),
             "sliding_window": int(getattr(text_config, "sliding_window", 0) or 0),

@@ -63,33 +63,22 @@ else:
 
 
 def _make_dynamic_inputs(model: torch.nn.Module, kv_len: int = 10) -> dict:
-    # Use text_config directly instead of get_text_config() to ensure flag persists
-    text_cfg = model.config.text_config
-    try:
-        text_cfg.allow_global_per_layer_attribute_access = True
-    except AttributeError:
-        pass  # transformers < 5.15.0 doesn't have this
+    text_cfg = model.config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
-    # Get per-layer head dimensions from model weights for correctness
-    # (config values may not match actual model in some transformers versions)
-    layer_head_dims = {}
-    for i, (layer_type, layer) in enumerate(zip(text_cfg.layer_types, model.model.layers)):
-        # Head dim = q_proj output dim / num_attention_heads
-        q_proj_out = layer.self_attn.q_proj.weight.shape[0]
-        layer_head_dims[layer_type] = q_proj_out // text_cfg.num_attention_heads
-
+    full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
+    sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
     return {
         "inputs_embeds": torch.randn(1, 1, 2 * int(model.config.backbone_hidden_size)),
         "position_ids": torch.tensor([[kv_len - 1]]),
         "attention_mask": torch.ones(1, kv_len, dtype=torch.long),
         "shared_kv_states": {
             "full_attention": (
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
+                torch.randn(1, kv_heads, kv_len, full_head_dim),
+                torch.randn(1, kv_heads, kv_len, full_head_dim),
             ),
             "sliding_attention": (
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
+                torch.randn(1, kv_heads, kv_len, sliding_head_dim),
+                torch.randn(1, kv_heads, kv_len, sliding_head_dim),
             ),
         },
         "use_cache": False,
@@ -103,12 +92,6 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(2031)
         self.fp_model = make_tiny_gemma4_assistant_model()
-        # Enable global attribute access for per-layer config (transformers 5.15.0+)
-        text_cfg = self.fp_model.config.get_text_config()
-        try:
-            text_cfg.allow_global_per_layer_attribute_access = True
-        except AttributeError:
-            pass  # transformers < 5.15.0 doesn't have this
         self.shape = Gemma4AssistantStaticShapeConfig(
             full_kv_length=16, sliding_kv_length=16
         )

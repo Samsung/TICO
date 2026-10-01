@@ -65,21 +65,10 @@ def _make_dynamic_inputs(
     attention_mask: torch.Tensor | None = None,
 ) -> dict:
     """Create dynamic HF assistant inputs for one draft-one step."""
-    # Use text_config directly instead of get_text_config() to ensure flag persists
-    text_cfg = model.config.text_config
-    try:
-        text_cfg.allow_global_per_layer_attribute_access = True
-    except AttributeError:
-        pass  # transformers < 5.15.0 doesn't have this
+    text_cfg = model.config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
-    # Get per-layer head dimensions from model weights for correctness
-    # (config values may not match actual model in some transformers versions)
-    layer_head_dims = {}
-    for i, (layer_type, layer) in enumerate(zip(text_cfg.layer_types, model.model.layers)):
-        # Head dim = q_proj output dim / num_attention_heads
-        q_proj_out = layer.self_attn.q_proj.weight.shape[0]
-        layer_head_dims[layer_type] = q_proj_out // text_cfg.num_attention_heads
-
+    full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
+    sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
     if attention_mask is None:
         attention_mask = torch.ones(1, kv_len, dtype=torch.long)
     return {
@@ -88,12 +77,12 @@ def _make_dynamic_inputs(
         "attention_mask": attention_mask,
         "shared_kv_states": {
             "full_attention": (
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
+                torch.randn(1, kv_heads, kv_len, full_head_dim),
+                torch.randn(1, kv_heads, kv_len, full_head_dim),
             ),
             "sliding_attention": (
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
-                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
+                torch.randn(1, kv_heads, kv_len, sliding_head_dim),
+                torch.randn(1, kv_heads, kv_len, sliding_head_dim),
             ),
         },
         "use_cache": False,
@@ -107,13 +96,7 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(2026)
         self.fp_model = make_tiny_gemma4_assistant_model()
-        # Enable global attribute access for per-layer config (transformers 5.15.0+)
-        text_cfg = self.fp_model.config.text_config
-        try:
-            text_cfg.allow_global_per_layer_attribute_access = True
-        except AttributeError:
-            pass  # transformers < 5.15.0 doesn't have this
-        self.window = int(text_cfg.sliding_window)
+        self.window = int(self.fp_model.config.get_text_config().sliding_window)
 
     def _canonicalize(self, inputs, shape):
         return canonicalize_gemma4_assistant_static_inputs(
@@ -122,7 +105,7 @@ class TestGemma4AssistantStaticCanonicalization(unittest.TestCase):
             attention_mask=inputs["attention_mask"],
             shared_kv_states=inputs["shared_kv_states"],
             shape=shape,
-            model_or_config=self.fp_model,  # Pass model instead of config so validator can extract layer head dims
+            model_or_config=self.fp_model.config,
             rotary_emb=self.fp_model.model.rotary_emb,
         )
 

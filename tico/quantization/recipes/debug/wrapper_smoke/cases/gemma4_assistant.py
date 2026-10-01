@@ -88,11 +88,6 @@ def make_tiny_gemma4_assistant_config() -> Any:
     )
     config._attn_implementation = "eager"
     config.text_config._attn_implementation = "eager"
-    # Enable global attribute access for per-layer config (transformers 5.15.0+)
-    try:
-        config.text_config.allow_global_per_layer_attribute_access = True
-    except AttributeError:
-        pass  # transformers < 5.15.0 doesn't have this
     return config
 
 
@@ -113,28 +108,17 @@ def make_tiny_gemma4_assistant_model() -> torch.nn.Module:
 def _make_assistant_sample(model: torch.nn.Module, kv_len: int) -> ForwardInput:
     """Create one synthetic draft-one assistant sample."""
     text_cfg = model.config.get_text_config()
-    # Enable global attribute access for per-layer config (transformers 5.15.0+)
-    try:
-        text_cfg.allow_global_per_layer_attribute_access = True
-    except AttributeError:
-        pass  # transformers < 5.15.0 doesn't have this
     kv_heads = int(text_cfg.num_key_value_heads)
-    # Get per-layer head dimensions from model weights for correctness
-    # (config values may not match actual model in some transformers versions)
-    layer_head_dims = {}
-    for i, (layer_type, layer) in enumerate(zip(text_cfg.layer_types, model.model.layers)):
-        # Head dim = q_proj output dim / num_attention_heads
-        q_proj_out = layer.self_attn.q_proj.weight.shape[0]
-        layer_head_dims[layer_type] = q_proj_out // text_cfg.num_attention_heads
-
+    full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
+    sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
     shared_kv_states = {
         "full_attention": (
-            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
-            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
+            torch.randn(1, kv_heads, kv_len, full_head_dim),
+            torch.randn(1, kv_heads, kv_len, full_head_dim),
         ),
         "sliding_attention": (
-            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
-            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
+            torch.randn(1, kv_heads, kv_len, sliding_head_dim),
+            torch.randn(1, kv_heads, kv_len, sliding_head_dim),
         ),
     }
     return ForwardInput(

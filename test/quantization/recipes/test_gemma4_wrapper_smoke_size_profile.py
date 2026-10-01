@@ -27,6 +27,7 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
     Gemma4VisionModelCase,
     Gemma4VisionPatchEmbedderCase,
 )
+from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
 
 
 def _profile_cfg(profile: str) -> dict:
@@ -74,8 +75,8 @@ class TestGemma4WrapperSmokeSizeProfile(unittest.TestCase):
         self.assertEqual(text_cfg.intermediate_size, 6_144)
         self.assertEqual(text_cfg.num_attention_heads, 8)
         self.assertEqual(text_cfg.num_key_value_heads, 1)
-        self.assertEqual(text_cfg.head_dim, 256)
-        self.assertEqual(text_cfg.global_head_dim, 512)
+        self.assertEqual(gemma4_layer_type_head_dim(text_cfg, "sliding_attention"), 256)
+        self.assertEqual(gemma4_layer_type_head_dim(text_cfg, "full_attention"), 512)
         self.assertEqual(text_cfg.num_hidden_layers, 2)
         self.assertEqual(
             text_cfg.layer_types,
