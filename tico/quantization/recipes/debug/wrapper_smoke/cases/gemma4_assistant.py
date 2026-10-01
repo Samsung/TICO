@@ -24,6 +24,9 @@ from tico.quantization.recipes.debug.wrapper_smoke.case import (
     ForwardInput,
     WrapperSmokeCase,
 )
+from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
+    assistant_layer_type_head_dim,
+)
 
 
 def _has_gemma4_assistant() -> CaseAvailability:
@@ -85,6 +88,8 @@ def make_tiny_gemma4_assistant_config() -> Any:
     )
     config._attn_implementation = "eager"
     config.text_config._attn_implementation = "eager"
+    # Enable global attribute access for per-layer config (transformers 5.15.0+)
+    config.text_config.allow_global_per_layer_attribute_access = True
     return config
 
 
@@ -105,15 +110,25 @@ def make_tiny_gemma4_assistant_model() -> torch.nn.Module:
 def _make_assistant_sample(model: torch.nn.Module, kv_len: int) -> ForwardInput:
     """Create one synthetic draft-one assistant sample."""
     text_cfg = model.config.get_text_config()
+    # Enable global attribute access for per-layer config (transformers 5.15.0+)
+    text_cfg.allow_global_per_layer_attribute_access = True
     kv_heads = int(text_cfg.num_key_value_heads)
+    # Get per-layer head dimensions from model weights for correctness
+    # (config values may not match actual model in some transformers versions)
+    layer_head_dims = {}
+    for i, (layer_type, layer) in enumerate(zip(text_cfg.layer_types, model.model.layers)):
+        # Head dim = q_proj output dim / num_attention_heads
+        q_proj_out = layer.self_attn.q_proj.weight.shape[0]
+        layer_head_dims[layer_type] = q_proj_out // text_cfg.num_attention_heads
+
     shared_kv_states = {
         "full_attention": (
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
+            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
+            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
         ),
         "sliding_attention": (
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
+            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
+            torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
         ),
     }
     return ForwardInput(

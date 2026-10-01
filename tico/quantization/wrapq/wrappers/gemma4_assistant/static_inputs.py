@@ -309,6 +309,8 @@ def canonicalize_gemma4_assistant_static_inputs(
     device = torch.device(device)
 
     text_config = extract_assistant_text_config(model_or_config)
+    # Enable global attribute access for per-layer config (transformers 5.15.0+)
+    text_config.allow_global_per_layer_attribute_access = True
     shape.validate(text_config)
 
     if inputs_embeds.dim() != 3:
@@ -336,19 +338,39 @@ def canonicalize_gemma4_assistant_static_inputs(
     full_key, full_value = shared_kv_states["full_attention"]
     sliding_key, sliding_value = shared_kv_states["sliding_attention"]
 
+    # Compute per-layer head dims from model if available, or use config
+    layer_head_dims = {"full_attention": None, "sliding_attention": None}
+    try:
+        # If a model was passed (vs just config), extract layer head dims from weights
+        if hasattr(model_or_config, "model") and hasattr(model_or_config.model, "layers"):
+            for i, layer in enumerate(model_or_config.model.layers):
+                if i < len(text_config.layer_types):
+                    layer_type = text_config.layer_types[i]
+                    if hasattr(layer, "self_attn") and hasattr(layer.self_attn, "q_proj"):
+                        q_proj_out = layer.self_attn.q_proj.weight.shape[0]
+                        head_dim = q_proj_out // text_config.num_attention_heads
+                        layer_head_dims[layer_type] = head_dim
+    except (AttributeError, TypeError, IndexError):
+        pass
+
+    # Fall back to config if model weights not available
+    for layer_type in ["full_attention", "sliding_attention"]:
+        if layer_head_dims[layer_type] is None:
+            layer_head_dims[layer_type] = assistant_layer_type_head_dim(text_config, layer_type)
+
     full_valid = _validate_kv_pair(
         "full_attention",
         full_key,
         full_value,
         num_kv_heads=num_kv_heads,
-        head_dim=assistant_layer_type_head_dim(text_config, "full_attention"),
+        head_dim=layer_head_dims["full_attention"],
     )
     sliding_valid = _validate_kv_pair(
         "sliding_attention",
         sliding_key,
         sliding_value,
         num_kv_heads=num_kv_heads,
-        head_dim=assistant_layer_type_head_dim(text_config, "sliding_attention"),
+        head_dim=layer_head_dims["sliding_attention"],
     )
 
     if full_valid > shape.full_kv_length:

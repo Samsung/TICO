@@ -473,9 +473,7 @@ class TestTreeSpecSerialization(unittest.TestCase):
         self.assertIsInstance(actual, DynamicCache)
         self.assertEqual(actual.layers[0].keys.shape, (1, 2, 8, 8))
         torch.testing.assert_close(actual.layers[0].keys, expected.layers[0].keys)
-        torch.testing.assert_close(
-            actual.layers[0].values, expected.layers[0].values
-        )
+        torch.testing.assert_close(actual.layers[0].values, expected.layers[0].values)
 
 
 # ---------------------------------------------------------------------------

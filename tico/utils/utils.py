@@ -153,6 +153,13 @@ def enforce_type(callable):
         parameters = dict(zip(spec.args, args))
         parameters.update(kwargs)
 
+        # Resolve string annotations to actual types
+        try:
+            type_hints = typing.get_type_hints(callable)
+        except Exception:
+            # Fallback if get_type_hints fails (e.g., missing imports in module)
+            type_hints = spec.annotations or {}
+
         # Return tuple of flattened types.
         # Q) What is flatten?
         # A) Optional/Union is not included. Below are included.
@@ -211,10 +218,10 @@ def enforce_type(callable):
                 continue
 
             assert (
-                name in spec.annotations
+                name in type_hints
             ), f"All parameter require type hints. {name} needs a type hint"
 
-            type_hint = spec.annotations[name]
+            type_hint = type_hints[name]
             type_hint = _flatten_type(type_hint)
             type_check_result = _check_type(value, type_hint)
             if not type_check_result:

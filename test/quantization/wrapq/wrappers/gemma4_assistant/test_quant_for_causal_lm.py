@@ -50,29 +50,41 @@ if _has_gemma4_assistant():
     )
     from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
         Gemma4AssistantGenerationAdapter,
+        assistant_layer_type_head_dim,
     )
 else:
     make_tiny_gemma4_assistant_model = None  # type: ignore[assignment]
     QuantGemma4AssistantForCausalLM = None  # type: ignore[assignment, misc]
     Gemma4AssistantGenerationAdapter = None  # type: ignore[assignment, misc]
+    assistant_layer_type_head_dim = None  # type: ignore[assignment]
 
 
 def _make_sample(model: torch.nn.Module, kv_len: int = 10) -> dict:
     """Create one shape-valid draft-one assistant sample."""
-    text_cfg = model.config.get_text_config()
+    # Use text_config directly instead of get_text_config() to ensure flag persists
+    text_cfg = model.config.text_config
+    text_cfg.allow_global_per_layer_attribute_access = True
     kv_heads = int(text_cfg.num_key_value_heads)
+    # Get per-layer head dimensions from model weights for correctness
+    # (config values may not match actual model in some transformers versions)
+    layer_head_dims = {}
+    for i, (layer_type, layer) in enumerate(zip(text_cfg.layer_types, model.model.layers)):
+        # Head dim = q_proj output dim / num_attention_heads
+        q_proj_out = layer.self_attn.q_proj.weight.shape[0]
+        layer_head_dims[layer_type] = q_proj_out // text_cfg.num_attention_heads
+
     return {
         "inputs_embeds": torch.randn(1, 1, 2 * int(model.config.backbone_hidden_size)),
         "position_ids": torch.tensor([[kv_len - 1]]),
         "attention_mask": torch.ones(1, kv_len, dtype=torch.long),
         "shared_kv_states": {
             "full_attention": (
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
+                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
+                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["full_attention"])),
             ),
             "sliding_attention": (
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
+                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
+                torch.randn(1, kv_heads, kv_len, int(layer_head_dims["sliding_attention"])),
             ),
         },
         "use_cache": False,
@@ -86,6 +98,9 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(2026)
         self.fp_model = make_tiny_gemma4_assistant_model()
+        # Enable global attribute access for per-layer config (transformers 5.15.0+)
+        text_cfg = self.fp_model.config.get_text_config()
+        text_cfg.allow_global_per_layer_attribute_access = True
         self.fp_ref = copy.deepcopy(self.fp_model).eval()
         self.sample = _make_sample(self.fp_model)
 

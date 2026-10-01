@@ -51,6 +51,8 @@ class TestGemma4AssistantRoPEConvention(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(915)
         self.fp = make_tiny_gemma4_assistant_model().eval()
+        # Enable global attribute access for per-layer config (transformers 5.15.0+)
+        self.fp.config.get_text_config().allow_global_per_layer_attribute_access = True
         self.shape = Gemma4AssistantStaticShapeConfig(
             full_kv_length=8, sliding_kv_length=5
         )
