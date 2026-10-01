@@ -354,6 +354,129 @@ class TestRegisterEncoderDecoderCache(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# TreeSpec (de)serialization — required by torch.export.save / .pt2 files
+# ---------------------------------------------------------------------------
+
+
+def _dumps_loads_roundtrip(obj):
+    """Flatten, serialize the TreeSpec to JSON, deserialize it, unflatten."""
+    leaves, treespec = pytree.tree_flatten(obj)
+    restored_spec = pytree.treespec_loads(pytree.treespec_dumps(treespec))
+    return pytree.tree_unflatten(leaves, restored_spec)
+
+
+@unittest.skipIf(_SKIP, _SKIP_REASON)
+class TestTreeSpecSerialization(unittest.TestCase):
+    """aux_data holds torch.dtype / torch.device / class objects, which json
+    cannot dump; registration must supply dumpable-context converters."""
+
+    def setUp(self):
+        import transformers
+        from packaging.version import Version
+
+        if Version(transformers.__version__) < Version("4.54.0"):
+            self.skipTest("Layer-based caches require transformers >= 4.54.0")
+
+        from tico.utils.pytree_utils import (
+            register_dynamic_cache,
+            register_dynamic_layer,
+            register_static_cache,
+            register_static_layer,
+        )
+
+        register_dynamic_cache()
+        register_dynamic_layer()
+        register_static_cache()
+        register_static_layer()
+
+    def test_dynamic_layer_treespec_roundtrip(self):
+        from transformers.cache_utils import DynamicLayer
+
+        layer = DynamicLayer()
+        layer.is_initialized = True
+        layer.keys = _make_tensor(1, 2, 4, 8)
+        layer.values = _make_tensor(1, 2, 4, 8)
+        layer.dtype = layer.keys.dtype
+        layer.device = layer.keys.device
+
+        restored = _dumps_loads_roundtrip(layer)
+        self.assertIsInstance(restored, DynamicLayer)
+        self.assertEqual(restored.dtype, torch.float32)
+        self.assertEqual(restored.device, layer.device)
+        torch.testing.assert_close(restored.keys, layer.keys)
+        torch.testing.assert_close(restored.values, layer.values)
+
+    def test_dynamic_cache_treespec_roundtrip(self):
+        from transformers.cache_utils import DynamicCache, DynamicLayer
+
+        cache = DynamicCache()
+        k = _make_tensor(1, 2, 4, 8)
+        v = _make_tensor(1, 2, 4, 8)
+        cache.update(k, v, layer_idx=0)
+        # `layer_class_to_replicate` is a class object on this layout.
+        self.assertIs(getattr(cache, "layer_class_to_replicate", None), DynamicLayer)
+
+        restored = _dumps_loads_roundtrip(cache)
+        self.assertIsInstance(restored, DynamicCache)
+        self.assertIs(restored.layer_class_to_replicate, DynamicLayer)
+        self.assertEqual(len(restored.layers), 1)
+        torch.testing.assert_close(restored.layers[0].keys, k)
+        torch.testing.assert_close(restored.layers[0].values, v)
+
+    def test_static_layer_treespec_roundtrip(self):
+        layer = _create_static_layer(
+            max_cache_len=8, batch_size=1, num_heads=2, head_dim=4
+        )
+        layer.is_initialized = True
+        layer.keys = _make_tensor(1, 2, 8, 4)
+        layer.values = _make_tensor(1, 2, 8, 4)
+        layer.dtype = layer.keys.dtype
+        layer.device = layer.keys.device
+        layer.max_batch_size = 1
+        layer.num_heads = 2
+        layer.head_dim = 4
+
+        restored = _dumps_loads_roundtrip(layer)
+        self.assertEqual(restored.dtype, torch.float32)
+        self.assertEqual(restored.device, layer.device)
+        self.assertEqual(restored.max_cache_len, 8)
+        torch.testing.assert_close(restored.keys, layer.keys)
+
+    def test_exported_program_with_dynamic_cache_saves_and_loads(self):
+        """End-to-end: a .pt2 round trip must preserve a DynamicCache output."""
+        import io
+
+        from transformers.cache_utils import DynamicCache, DynamicLayer
+
+        # The example inputs pickled into the .pt2 contain cache objects.
+        torch.serialization.add_safe_globals([DynamicCache, DynamicLayer])
+
+        class AppendToCache(torch.nn.Module):
+            def forward(self, k, v, cache: DynamicCache):
+                cache.update(k, v, layer_idx=0)
+                return cache
+
+        torch.manual_seed(0)
+        k = _make_tensor(1, 2, 3, 8)
+        v = _make_tensor(1, 2, 3, 8)
+        cache = DynamicCache()
+        cache.update(_make_tensor(1, 2, 5, 8), _make_tensor(1, 2, 5, 8), layer_idx=0)
+
+        ep = torch.export.export(AppendToCache(), (k, v, cache))
+        buffer = io.BytesIO()
+        torch.export.save(ep, buffer)
+        buffer.seek(0)
+        loaded = torch.export.load(buffer)
+
+        expected = ep.module()(k, v, cache)
+        actual = loaded.module()(k, v, cache)
+        self.assertIsInstance(actual, DynamicCache)
+        self.assertEqual(actual.layers[0].keys.shape, (1, 2, 8, 8))
+        torch.testing.assert_close(actual.layers[0].keys, expected.layers[0].keys)
+        torch.testing.assert_close(actual.layers[0].values, expected.layers[0].values)
+
+
+# ---------------------------------------------------------------------------
 # Consistent flatten key paths
 # ---------------------------------------------------------------------------
 

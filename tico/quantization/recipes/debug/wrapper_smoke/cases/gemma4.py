@@ -346,6 +346,7 @@ def _build_text_config(
         attention_k_eq_v=attention_k_eq_v,
         num_kv_shared_layers=num_kv_shared_layers,
         hidden_size_per_layer_input=hidden_size_per_layer_input,
+        allow_global_per_layer_attribute_access=True,
     )
     return _set_eager_attention(text_cfg)
 
@@ -373,6 +374,7 @@ def _build_vision_config(*, size_profile: str) -> Any:
             use_clipped_linears=False,
             rope_parameters={"rope_type": "default", "rope_theta": 100.0},
             standardize=True,
+            allow_global_per_layer_attribute_access=True,
         )
     elif size_profile in _GEMMA4_E2B_WIDTH_PROFILES:
         vision_cfg = Gemma4VisionConfig(
@@ -393,6 +395,7 @@ def _build_vision_config(*, size_profile: str) -> Any:
             use_clipped_linears=True,
             rope_parameters={"rope_type": "default", "rope_theta": 100.0},
             standardize=False,
+            allow_global_per_layer_attribute_access=True,
         )
     else:
         raise AssertionError(f"Unhandled Gemma4 size profile: {size_profile}")
@@ -409,6 +412,7 @@ def _build_vision_patch_embedder_config(*, size_profile: str) -> Any:
             hidden_size=32,
             patch_size=4,
             position_embedding_size=8,
+            allow_global_per_layer_attribute_access=True,
         )
     return _build_vision_config(size_profile=size_profile)
 

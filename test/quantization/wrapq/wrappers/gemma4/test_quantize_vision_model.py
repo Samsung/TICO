@@ -64,6 +64,7 @@ def _make_vision_config(**overrides):
         use_clipped_linears=False,
         rope_parameters={"rope_type": "default", "rope_theta": 100.0},
         standardize=True,
+        allow_global_per_layer_attribute_access=True,
     )
     kwargs.update(overrides)
     cfg = Gemma4VisionConfig(**kwargs)

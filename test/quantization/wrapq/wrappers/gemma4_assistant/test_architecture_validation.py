@@ -125,6 +125,35 @@ class TestGemma4AssistantArchitectureValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "layer type"):
             assistant_layer_type_head_dim(text_config, "chunked_attention")
 
+    def test_layer_type_head_dims_prefer_per_layer_config(self):
+        """transformers 5.15+ moves ``global_head_dim`` into ``per_layer_config``."""
+        text_config = _make_text_config(
+            global_head_dim=None,
+            per_layer_config={
+                "full_attention": SimpleNamespace(head_dim=48),
+                "sliding_attention": SimpleNamespace(head_dim=16),
+            },
+        )
+        self.assertEqual(
+            assistant_layer_type_head_dim(text_config, "full_attention"), 48
+        )
+        self.assertEqual(
+            assistant_layer_type_head_dim(text_config, "sliding_attention"), 16
+        )
+
+    def test_layer_type_head_dims_fall_back_for_absent_layer_type(self):
+        """A layer type the model does not own is sized from the plain attributes."""
+        text_config = _make_text_config(
+            layer_types=["full_attention", "full_attention"],
+            per_layer_config={"full_attention": SimpleNamespace(head_dim=48)},
+        )
+        self.assertEqual(
+            assistant_layer_type_head_dim(text_config, "full_attention"), 48
+        )
+        self.assertEqual(
+            assistant_layer_type_head_dim(text_config, "sliding_attention"), 16
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

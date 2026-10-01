@@ -81,6 +81,7 @@ def _make_text_config() -> Gemma4TextConfig:
         enable_moe_block=False,
         # Enable logit softcapping to exercise that code path.
         final_logit_softcapping=30.0,
+        allow_global_per_layer_attribute_access=True,
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")

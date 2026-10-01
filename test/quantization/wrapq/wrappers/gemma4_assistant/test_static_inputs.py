@@ -47,11 +47,15 @@ if _has_gemma4_assistant():
         GEMMA4_ASSISTANT_CORE_INPUT_NAMES,
         Gemma4AssistantStaticShapeConfig,
     )
+    from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
+        assistant_layer_type_head_dim,
+    )
 else:
     make_tiny_gemma4_assistant_model = None  # type: ignore[assignment]
     canonicalize_gemma4_assistant_static_inputs = None  # type: ignore[assignment]
     GEMMA4_ASSISTANT_CORE_INPUT_NAMES = None  # type: ignore[assignment]
     Gemma4AssistantStaticShapeConfig = None  # type: ignore[assignment, misc]
+    assistant_layer_type_head_dim = None  # type: ignore[assignment]
 
 
 def _make_dynamic_inputs(
@@ -63,6 +67,8 @@ def _make_dynamic_inputs(
     """Create dynamic HF assistant inputs for one draft-one step."""
     text_cfg = model.config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
+    full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
+    sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
     if attention_mask is None:
         attention_mask = torch.ones(1, kv_len, dtype=torch.long)
     return {
@@ -71,12 +77,12 @@ def _make_dynamic_inputs(
         "attention_mask": attention_mask,
         "shared_kv_states": {
             "full_attention": (
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
+                torch.randn(1, kv_heads, kv_len, full_head_dim),
+                torch.randn(1, kv_heads, kv_len, full_head_dim),
             ),
             "sliding_attention": (
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
-                torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
+                torch.randn(1, kv_heads, kv_len, sliding_head_dim),
+                torch.randn(1, kv_heads, kv_len, sliding_head_dim),
             ),
         },
         "use_cache": False,

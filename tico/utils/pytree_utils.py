@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 from typing import Any, Dict, Tuple
 
 import torch
@@ -71,6 +72,54 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
+# aux_data (pytree context) serialization
+# ---------------------------------------------------------------------------
+#
+# `torch.export.save` serializes the TreeSpec of every pytree node to JSON.
+# Our aux_data carries `torch.dtype`, `torch.device`, and class objects, which
+# json cannot dump, so each registration passes these converters as
+# `to_dumpable_context` / `from_dumpable_context`.
+
+_DTYPE_TAG = "__torch_dtype__"
+_DEVICE_TAG = "__torch_device__"
+_CLASS_TAG = "__class__"
+
+
+def _to_dumpable_value(value: Any) -> Any:
+    if isinstance(value, torch.dtype):
+        # str(torch.float32) == "torch.float32"
+        return {_DTYPE_TAG: str(value).removeprefix("torch.")}
+    if isinstance(value, torch.device):
+        return {_DEVICE_TAG: str(value)}
+    if isinstance(value, type):
+        return {_CLASS_TAG: f"{value.__module__}.{value.__qualname__}"}
+    return value
+
+
+def _from_dumpable_value(value: Any) -> Any:
+    if isinstance(value, dict) and len(value) == 1:
+        if _DTYPE_TAG in value:
+            return getattr(torch, value[_DTYPE_TAG])
+        if _DEVICE_TAG in value:
+            return torch.device(value[_DEVICE_TAG])
+        if _CLASS_TAG in value:
+            module_name, _, qualname = value[_CLASS_TAG].rpartition(".")
+            obj: Any = importlib.import_module(module_name)
+            for attr in qualname.split("."):
+                obj = getattr(obj, attr)
+            return obj
+    return value
+
+
+def _aux_to_dumpable(aux_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: _to_dumpable_value(value) for key, value in aux_data.items()}
+
+
+def _aux_from_dumpable(aux_data: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: _from_dumpable_value(value) for key, value in aux_data.items()}
+
+
+# ---------------------------------------------------------------------------
 # StaticCache
 # ---------------------------------------------------------------------------
 
@@ -124,6 +173,8 @@ def register_static_cache():
             _flatten_static_cache,
             _unflatten_static_cache,
             serialized_type_name=f"{StaticCache.__module__}.{StaticCache.__name__}",
+            to_dumpable_context=_aux_to_dumpable,
+            from_dumpable_context=_aux_from_dumpable,
             flatten_with_keys_fn=_flatten_with_keys_static_cache,
         )
         fx_pytree.register_pytree_flatten_spec(
@@ -226,6 +277,8 @@ def register_static_layer():
             _flatten_static_layer,
             _unflatten_static_layer,
             serialized_type_name=f"{StaticLayer.__module__}.{StaticLayer.__name__}",
+            to_dumpable_context=_aux_to_dumpable,
+            from_dumpable_context=_aux_from_dumpable,
             flatten_with_keys_fn=_flatten_with_keys_static_layer,
         )
         fx_pytree.register_pytree_flatten_spec(
@@ -299,6 +352,8 @@ def register_dynamic_layer():
             _flatten_dynamic_layer,
             _unflatten_dynamic_layer,
             serialized_type_name=f"{DynamicLayer.__module__}.{DynamicLayer.__name__}",
+            to_dumpable_context=_aux_to_dumpable,
+            from_dumpable_context=_aux_from_dumpable,
             flatten_with_keys_fn=_flatten_with_keys_dynamic_layer,
         )
         fx_pytree.register_pytree_flatten_spec(
@@ -435,6 +490,8 @@ def register_dynamic_cache():
             _flatten_dynamic_cache,
             _unflatten_dynamic_cache,
             serialized_type_name=f"{DynamicCache.__module__}.{DynamicCache.__name__}",
+            to_dumpable_context=_aux_to_dumpable,
+            from_dumpable_context=_aux_from_dumpable,
             flatten_with_keys_fn=_flatten_with_keys_dynamic_cache,
         )
         fx_pytree.register_pytree_flatten_spec(

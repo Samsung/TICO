@@ -55,6 +55,7 @@ def _make_patch_embedder(
         hidden_size=hidden_size,
         patch_size=patch_size,
         position_embedding_size=position_embedding_size,
+        allow_global_per_layer_attribute_access=True,
     )
     return Gemma4VisionPatchEmbedder(config).eval()
 

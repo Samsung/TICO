@@ -38,6 +38,7 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
 from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
     QuantGemma4VisionModel,
 )
+from tico.quantization.wrapq.wrappers.gemma4.utils import gemma4_layer_type_head_dim
 
 
 def _static_cfg(**overrides: int) -> dict:
@@ -161,7 +162,7 @@ class TestGemma4StaticRuntimeConfigs(unittest.TestCase):
         self.assertEqual(text_cfg.intermediate_size, 6_144)
         self.assertEqual(text_cfg.hidden_size_per_layer_input, 256)
         self.assertEqual(text_cfg.sliding_window, 512)
-        self.assertEqual(text_cfg.global_head_dim, 512)
+        self.assertEqual(gemma4_layer_type_head_dim(text_cfg, "full_attention"), 512)
 
     def test_vision_config_uses_e2b_width_without_standardization(self):
         """The real E2B vision config should retain standardize=False."""

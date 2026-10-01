@@ -52,6 +52,7 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
     build_decode_attention_mask,
+    gemma4_layer_type_head_dim,
     StaticGemma4Layout,
 )
 
@@ -413,11 +414,7 @@ class StaticGemma4Runtime:
             is_sliding = layer_type == "sliding_attention"
 
             # Per-layer-type head_dim (HF Gemma4TextAttention.__init__)
-            global_head_dim = getattr(self.text_config, "global_head_dim", None)
-            if not is_sliding and global_head_dim:
-                head_dim = int(global_head_dim)
-            else:
-                head_dim = int(self.text_config.head_dim)
+            head_dim = gemma4_layer_type_head_dim(self.text_config, layer_type)
 
             # Per-layer-type num_kv_heads
             # use_alternative_attention = attention_k_eq_v and not is_sliding

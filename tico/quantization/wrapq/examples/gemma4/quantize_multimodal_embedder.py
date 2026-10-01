@@ -105,6 +105,7 @@ def main():
         rms_norm_eps=1e-6,
         use_clipped_linears=False,
         rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+        allow_global_per_layer_attribute_access=True,
     )
     if not hasattr(vision_cfg, "_attn_implementation"):
         setattr(vision_cfg, "_attn_implementation", "eager")
@@ -130,6 +131,7 @@ def main():
         attention_dropout=0.0,
         use_cache=False,
         enable_moe_block=False,
+        allow_global_per_layer_attribute_access=True,
     )
     if not hasattr(text_cfg, "_attn_implementation"):
         setattr(text_cfg, "_attn_implementation", "eager")

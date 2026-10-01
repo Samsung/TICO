@@ -24,6 +24,9 @@ from tico.quantization.recipes.debug.wrapper_smoke.case import (
     ForwardInput,
     WrapperSmokeCase,
 )
+from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
+    assistant_layer_type_head_dim,
+)
 
 
 def _has_gemma4_assistant() -> CaseAvailability:
@@ -73,6 +76,7 @@ def make_tiny_gemma4_assistant_config() -> Any:
         num_kv_shared_layers=2,
         hidden_size_per_layer_input=0,
         vocab_size_per_layer_input=0,
+        allow_global_per_layer_attribute_access=True,
     )
     config = Gemma4AssistantConfig(
         text_config=text_cfg,
@@ -105,14 +109,16 @@ def _make_assistant_sample(model: torch.nn.Module, kv_len: int) -> ForwardInput:
     """Create one synthetic draft-one assistant sample."""
     text_cfg = model.config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
+    full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
+    sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
     shared_kv_states = {
         "full_attention": (
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.global_head_dim)),
+            torch.randn(1, kv_heads, kv_len, full_head_dim),
+            torch.randn(1, kv_heads, kv_len, full_head_dim),
         ),
         "sliding_attention": (
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
-            torch.randn(1, kv_heads, kv_len, int(text_cfg.head_dim)),
+            torch.randn(1, kv_heads, kv_len, sliding_head_dim),
+            torch.randn(1, kv_heads, kv_len, sliding_head_dim),
         ),
     }
     return ForwardInput(

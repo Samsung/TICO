@@ -27,8 +27,12 @@ class DeepSeek_R1_Distill_Qwen_1_5B(TestModuleBase):
         super().__init__()
         config = AutoConfig.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
         config.use_cache = False
+        # The checkpoint is stored in bfloat16; load it as float32 for the
+        # reference comparison.
         self.model = AutoModelForCausalLM.from_pretrained(
-            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", config=config
+            "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            config=config,
+            dtype=torch.float32,
         )
         self.rtol = 1e-4
         self.atol = 1e-4

@@ -19,7 +19,10 @@ from typing import Any, Mapping
 import torch
 import torch.nn as nn
 
-from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+from tico.quantization.wrapq.wrappers.gemma4.utils import (
+    assert_gemma4_e2b_no_moe,
+    gemma4_layer_type_head_dim,
+)
 
 
 HF_GEMMA4_ASSISTANT_CLASS_PATH = (
@@ -45,15 +48,13 @@ def extract_assistant_text_config(model_or_config: Any) -> Any:
 def assistant_layer_type_head_dim(text_config: Any, layer_type: str) -> int:
     """Return the attention head dim used by one assistant layer type.
 
-    Mirrors ``Gemma4TextAttention.__init__``: full-attention layers use
-    ``global_head_dim`` when it is set, sliding layers always use ``head_dim``.
+    Rejects layer types outside the supported assistant contract and then
+    delegates to :func:`gemma4_layer_type_head_dim`, which resolves the
+    per-layer ``head_dim`` across transformers versions.
     """
     if layer_type not in SUPPORTED_ASSISTANT_LAYER_TYPES:
         raise ValueError(f"Unsupported Gemma4 assistant layer type: {layer_type!r}.")
-    global_head_dim = getattr(text_config, "global_head_dim", None)
-    if layer_type == "full_attention" and global_head_dim:
-        return int(global_head_dim)
-    return int(text_config.head_dim)
+    return gemma4_layer_type_head_dim(text_config, layer_type)
 
 
 def assistant_shared_kv_num_heads(text_config: Any) -> int:

@@ -15,7 +15,7 @@
 import torch
 
 from tico.serialize.operators.adapters.llama_rmsnorm import patched_llama_rmsnorm
-from tico.utils.pytree_utils import register_dynamic_cache
+from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 
 from transformers import AutoModelForCausalLM
 
@@ -26,12 +26,15 @@ class TinyLlamaWithFusedRMSNorm(TestModuleBase):
     def __init__(self):
         super().__init__()
         with patched_llama_rmsnorm():
+            # The checkpoint is stored in bfloat16; load it as float32 for the
+            # reference comparison.
             self.model = AutoModelForCausalLM.from_pretrained(
-                "Maykeye/TinyLLama-v0"
+                "Maykeye/TinyLLama-v0", dtype=torch.float32
             ).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
         register_dynamic_cache()
+        register_dynamic_layer()
 
     def forward(self, x):
         return self.model(x)

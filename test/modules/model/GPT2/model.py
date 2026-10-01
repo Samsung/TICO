@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import GPT2Config, GPT2LMHeadModel
 
 from test.modules.base import TestModuleBase
@@ -24,13 +25,17 @@ class GPT2(TestModuleBase):
         self.model = GPT2LMHeadModel(config=GPT2Config.from_pretrained("gpt2")).to(
             "cpu"
         )
+        # The model returns its KV cache as a DynamicCache, which must be
+        # pytree-flattenable for torch.export.
+        register_dynamic_cache()
+        register_dynamic_layer()
 
     def forward(self, x):
         return self.model(x)
 
     def get_example_inputs(self):
         # >>> tokenizer = GPT2Tokenizer.from_pretrained("openai-community/gpt2")
-        # >>> tokenizer("Hello world")["input_ids"]
-        # [15496, 995]
-        input_ids = torch.Tensor([15496, 995]).to(dtype=torch.int32)
+        # >>> tokenizer("Hello world", return_tensors="pt")["input_ids"]
+        # [[15496, 995]]
+        input_ids = torch.Tensor([[15496, 995]]).to(dtype=torch.int32)
         return (input_ids,), {}

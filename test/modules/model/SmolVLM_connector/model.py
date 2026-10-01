@@ -23,8 +23,10 @@ class SmolVLM_connector(TestModuleBase):
         super().__init__()
         self.rtol = 1e-4
         self.atol = 1e-4
+        # The checkpoint is stored in bfloat16; load it as float32 for the
+        # reference comparison.
         self.model = AutoModelForImageTextToText.from_pretrained(
-            "HuggingFaceTB/SmolVLM-256M-Instruct"
+            "HuggingFaceTB/SmolVLM-256M-Instruct", dtype=torch.float32
         ).model.connector.to("cpu")
 
     def forward(self, *x):

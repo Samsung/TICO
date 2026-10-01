@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import LlamaConfig, LlamaModel
 from transformers.cache_utils import DynamicCache
 
@@ -31,6 +32,10 @@ class LlamaWithKVCache(TestModuleBase):
         self.model = LlamaModel(config=self.config).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
+        # DynamicCache is both an input and an output here; register the
+        # pytree flatten/unflatten so torch.export can trace through it.
+        register_dynamic_cache()
+        register_dynamic_layer()
 
     def forward(self, *args, **kwargs):
         return self.model(*args, **kwargs)
