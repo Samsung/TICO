@@ -73,6 +73,7 @@ def make_tiny_gemma4_assistant_config() -> Any:
         num_kv_shared_layers=2,
         hidden_size_per_layer_input=0,
         vocab_size_per_layer_input=0,
+        allow_global_per_layer_attribute_access=True,
     )
     config = Gemma4AssistantConfig(
         text_config=text_cfg,

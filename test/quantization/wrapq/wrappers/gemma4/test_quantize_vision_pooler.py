@@ -60,6 +60,7 @@ def _make_vision_config():
         rms_norm_eps=1e-6,
         use_clipped_linears=False,
         rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+        allow_global_per_layer_attribute_access=True,
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
