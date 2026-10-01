@@ -14,9 +14,6 @@
 
 import torch
 from transformers import Gemma3ForCausalLM
-from transformers.integrations.executorch import sdpa_mask_without_vmap
-from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from test.modules.base import TestModuleBase
 from test.support import tag
@@ -29,17 +26,11 @@ class Gemma3(TestModuleBase):
 
         ckpt = "google/gemma-3-270m"
 
+        # The default `sdpa` mask creation is index-based (no `vmap`) in
+        # transformers 5.x, so it is exportable as-is.
         self.model = Gemma3ForCausalLM.from_pretrained(
-            ckpt, torch_dtype=torch.float32, device_map="cpu"
+            ckpt, dtype=torch.float32, device_map="cpu", attn_implementation="sdpa"
         )
-        # This is the same as sdpa, but mask creation does not use `vmap` which is not exportable
-        ALL_MASK_ATTENTION_FUNCTIONS.register(
-            "sdpa_without_vmap", sdpa_mask_without_vmap
-        )
-        ALL_ATTENTION_FUNCTIONS.register(
-            "sdpa_without_vmap", ALL_ATTENTION_FUNCTIONS["sdpa"]
-        )
-        self.model.config._attn_implementation = "sdpa_without_vmap"
         self.model.config.use_cache = False
 
         self.rtol = 1e-3

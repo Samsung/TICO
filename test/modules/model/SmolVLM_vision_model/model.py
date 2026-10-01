@@ -15,11 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple, Union
+from typing import Optional
 
 import torch
 from transformers import AutoModelForImageTextToText
-from transformers.modeling_outputs import BaseModelOutput
+from transformers.modeling_outputs import BaseModelOutputWithPooling
 
 from test.modules.base import TestModuleBase
 
@@ -28,24 +28,8 @@ def Idefics3VisionTransformer_forward(
     self,
     pixel_values,
     patch_attention_mask: Optional[torch.BoolTensor] = None,
-    output_attentions: Optional[bool] = None,
-    output_hidden_states: Optional[bool] = None,
-    return_dict: Optional[bool] = None,
-) -> Union[Tuple, BaseModelOutput]:
-    output_attentions = (
-        output_attentions
-        if output_attentions is not None
-        else self.config.output_attentions
-    )
-    output_hidden_states = (
-        output_hidden_states
-        if output_hidden_states is not None
-        else self.config.output_hidden_states
-    )
-    return_dict = (
-        return_dict if return_dict is not None else self.config.use_return_dict
-    )
-
+    **kwargs,
+) -> BaseModelOutputWithPooling:
     batch_size = pixel_values.size(0)
     if patch_attention_mask is None:
         patch_size = self.patch_size
@@ -64,41 +48,31 @@ def Idefics3VisionTransformer_forward(
         pixel_values=pixel_values, patch_attention_mask=patch_attention_mask
     )
 
-    patch_attention_mask = patch_attention_mask.view(batch_size, -1)
-
-    # The call to `_upad_input` in `_flash_attention_forward` is expensive
-    # So when the `patch_attention_mask` is full of 1s (i.e. attending to the whole sequence),
-    # avoiding passing the attention_mask, which is equivalent to attending to the full sequence
+    # Every patch is valid here (the mask is all ones), so attending to the full
+    # sequence is equivalent to applying the mask. Skip building the 4-D
+    # bidirectional mask, which is data-dependent and not export-friendly.
     #
     # [ORIGINAL CODE]
     #
     # ```py
-    # if not torch.any(~patch_attention_mask):
-    #     patch_attention_mask = None
-    # elif not self._use_flash_attention_2:
-    #     patch_attention_mask = _prepare_4d_attention_mask(patch_attention_mask, hidden_states.dtype)
+    # patch_attention_mask = patch_attention_mask.view(batch_size, -1)
+    # patch_attention_mask = create_bidirectional_mask(
+    #     config=self.config,
+    #     inputs_embeds=hidden_states,
+    #     attention_mask=patch_attention_mask,
+    # )
     # ```
-
-    patch_attention_mask = None
 
     encoder_outputs = self.encoder(
         inputs_embeds=hidden_states,
-        attention_mask=patch_attention_mask,
-        output_attentions=output_attentions,
-        output_hidden_states=output_hidden_states,
-        return_dict=return_dict,
+        attention_mask=None,
     )
 
-    last_hidden_state = encoder_outputs[0]
+    last_hidden_state = encoder_outputs.last_hidden_state
     last_hidden_state = self.post_layernorm(last_hidden_state)
 
-    if not return_dict:
-        return (last_hidden_state,) + encoder_outputs[1:]
-
-    return BaseModelOutput(
+    return BaseModelOutputWithPooling(
         last_hidden_state=last_hidden_state,
-        hidden_states=encoder_outputs.hidden_states,
-        attentions=encoder_outputs.attentions,
     )
 
 
@@ -148,8 +122,10 @@ class SmolVLM_vision_model(TestModuleBase):
         super().__init__()
         self.rtol = 1e-2
         self.atol = 1e-3
+        # The checkpoint is stored in bfloat16; load it as float32 for the
+        # reference comparison.
         self.model = AutoModelForImageTextToText.from_pretrained(
-            "HuggingFaceTB/SmolVLM-256M-Instruct"
+            "HuggingFaceTB/SmolVLM-256M-Instruct", dtype=torch.float32
         ).model.vision_model.to("cpu")
         self.model.embeddings.forward = Idefics3VisionEmbeddings_forward.__get__(
             self.model.embeddings, type(self.model.embeddings).__class__

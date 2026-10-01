@@ -15,31 +15,43 @@
 import requests  # type: ignore[import-untyped]
 import torch
 from PIL import Image
-from transformers import AutoModelForCausalLM, AutoProcessor
+from transformers import AutoProcessor, Florence2ForConditionalGeneration
 
 from test.modules.base import TestModuleBase
 
 
 class Florence2(TestModuleBase):
+    """
+    Florence-2-base through the native `transformers` implementation.
+
+    `florence-community/Florence-2-base` is the same checkpoint as
+    `microsoft/Florence-2-base` converted to the in-tree model class, so no
+    `trust_remote_code` is needed.
+    """
+
     def __init__(self):
         super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained(
-            "microsoft/Florence-2-base",
-            torch_dtype=torch.float32,
-            trust_remote_code=True,
+        model_id = "florence-community/Florence-2-base"
+        self.model = Florence2ForConditionalGeneration.from_pretrained(
+            model_id, dtype=torch.float32
         ).to("cpu")
-        self.processor = AutoProcessor.from_pretrained(
-            "microsoft/Florence-2-base", trust_remote_code=True
-        )
+        self.processor = AutoProcessor.from_pretrained(model_id)
         # TODO: Revisit the threshold values
         self.rtol = 4e-3
         self.atol = 4e-3
 
     def forward(self, input_ids, pixel_values, attention_mask, decoder_input_ids):
-        return self.model(input_ids, pixel_values, attention_mask, decoder_input_ids)
+        return self.model(
+            input_ids,
+            pixel_values,
+            attention_mask,
+            decoder_input_ids,
+            use_cache=False,
+        )
 
     def get_example_inputs(self):
         torch.manual_seed(0)
+        # Encoder sequence length: 577 image tokens + the tokenized "<OD>" prompt.
         seq_len = 590
 
         prompt = "<OD>"
@@ -51,6 +63,7 @@ class Florence2(TestModuleBase):
 
         input_ids = inputs["input_ids"]
         pixel_values = inputs["pixel_values"]
+        assert input_ids.shape == (1, seq_len)
         attention_mask = torch.ones(1, seq_len, dtype=torch.int64)
         max_id = int(torch.max(input_ids))
         decoder_input_ids = torch.randint(

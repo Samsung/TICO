@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import List, Optional, TYPE_CHECKING, Union
 
@@ -147,6 +149,17 @@ class AdaptiveAvgPool2dArgs:
 
     input: torch.fx.Node
     output_size: List[int]
+
+
+@enforce_type
+@dataclass
+class BitwiseAndArgs:
+    """
+    bitwise_and.Tensor(Tensor self, Tensor other) -> Tensor
+    """
+
+    input: torch.fx.Node
+    other: torch.fx.Node
 
 
 @enforce_type

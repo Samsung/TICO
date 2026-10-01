@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import torch
-from tico.utils.pytree_utils import register_dynamic_cache
+from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaConfig
 
@@ -47,6 +47,7 @@ class LlamaAttentionWithKVCache(TestModuleBase):
         prev_seq_len = 4
         past_key_values = DynamicCache()
         register_dynamic_cache()
+        register_dynamic_layer()
 
         past_key_values.update(
             torch.randn(1, num_heads, prev_seq_len, head_dim),

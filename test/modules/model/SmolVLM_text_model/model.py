@@ -23,8 +23,10 @@ class SmolVLM_text_model(TestModuleBase):
         super().__init__()
         self.rtol = 1e-2
         self.atol = 1e-2
+        # The checkpoint is stored in bfloat16; load it as float32 for the
+        # reference comparison.
         self.model = AutoModelForImageTextToText.from_pretrained(
-            "HuggingFaceTB/SmolVLM-256M-Instruct"
+            "HuggingFaceTB/SmolVLM-256M-Instruct", dtype=torch.float32
         ).model.text_model.to("cpu")
 
     def forward(self, *args, **kwargs):

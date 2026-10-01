@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.cache_utils import DynamicCache
 
@@ -34,12 +35,14 @@ class BitNet(TestModuleBase):
         super().__init__()
         model_id = "microsoft/bitnet-b1.58-2B-4T"
         self.config = AutoConfig.from_pretrained(model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id, torch_dtype=torch.float32
-        )
+        self.model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float32)
 
         self.rtol = 1e-3
         self.atol = 1e-3
+        # The decoder layer updates the DynamicCache passed in as an input, so it
+        # must be pytree-flattenable for torch.export.
+        register_dynamic_cache()
+        register_dynamic_layer()
 
     def forward(self, *args, **kwargs):
         return self.model.model.layers[0](*args, **kwargs)
@@ -90,7 +93,7 @@ class BitNet(TestModuleBase):
             (hidden_states,),
             {
                 "position_ids": position_ids,
-                "past_key_value": past_key_value,
+                "past_key_values": past_key_value,
                 "cache_position": cache_position,
                 "position_embeddings": position_embeddings,
             },

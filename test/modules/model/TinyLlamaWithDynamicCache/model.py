@@ -36,7 +36,7 @@ import torch
 
 from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import AutoModelForCausalLM
-from transformers.cache_utils import DynamicCache
+from transformers.cache_utils import DynamicCache, DynamicLayer
 
 from test.modules.base import TestModuleBase
 
@@ -48,7 +48,7 @@ _PAST_SEQ_LEN = 5
 #  (1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.
 #  (2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.
 #  WeightsUnpickler error: Unsupported global: GLOBAL transformers.cache_utils.DynamicCache was not an allowed global by default. Please use `torch.serialization.add_safe_globals([transformers.cache_utils.DynamicCache])` or the `torch.serialization.safe_globals([transformers.cache_utils.DynamicCache])` context manager to allowlist this global if you trust this class/function.
-torch.serialization.add_safe_globals([DynamicCache])
+torch.serialization.add_safe_globals([DynamicCache, DynamicLayer])
 
 
 class TinyLlamaWithDynamicCache(TestModuleBase):
@@ -56,9 +56,11 @@ class TinyLlamaWithDynamicCache(TestModuleBase):
 
     def __init__(self):
         super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained("Maykeye/TinyLLama-v0").to(
-            "cpu"
-        )
+        # The checkpoint is stored in bfloat16; load it as float32 so the random
+        # float32 KV cache below matches the model dtype.
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "Maykeye/TinyLLama-v0", dtype=torch.float32
+        ).to("cpu")
         self.cfg = self.model.config
         self.rtol = 1e-4
         self.atol = 1e-4

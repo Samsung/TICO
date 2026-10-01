@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import AutoModelForCausalLM
 
 from test.modules.base import TestModuleBase
@@ -21,11 +22,17 @@ from test.modules.base import TestModuleBase
 class TinyLlama(TestModuleBase):
     def __init__(self):
         super().__init__()
-        self.model = AutoModelForCausalLM.from_pretrained("Maykeye/TinyLLama-v0").to(
-            "cpu"
-        )
+        # The checkpoint is stored in bfloat16; load it as float32 for the
+        # reference comparison.
+        self.model = AutoModelForCausalLM.from_pretrained(
+            "Maykeye/TinyLLama-v0", dtype=torch.float32
+        ).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
+        # The model returns its KV cache as a DynamicCache, which must be
+        # pytree-flattenable for torch.export.
+        register_dynamic_cache()
+        register_dynamic_layer()
 
     def forward(self, x):
         return self.model(x)

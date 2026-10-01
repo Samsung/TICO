@@ -98,21 +98,21 @@ class Wrapper(torch.nn.Module):
         past_key_values = DynamicCache()
         position_embeddings = self.rotary_emb(hidden_states, self.position_ids)
         causal_mask = self._create_causal_mask()
-        layer_outputs = self.model.forward(
+        hidden_states = self.model.forward(
             *args,
             **{
                 "position_ids": self.position_ids,
                 "cache_position": self.cache_position,
                 "attention_mask": causal_mask,
-                "past_key_value": past_key_values,
+                "past_key_values": past_key_values,
                 "use_cache": self.config.use_cache,
                 "position_embeddings": position_embeddings,
             },
         )
-        hidden_states = layer_outputs[0]
+        # Return the updated KV cache of the single layer as plain tensors.
         return (
             hidden_states,
-            past_key_values.to_legacy_cache(),
+            tuple((layer.keys, layer.values) for layer in past_key_values.layers),
         )
 
 
