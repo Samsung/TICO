@@ -89,7 +89,10 @@ def make_tiny_gemma4_assistant_config() -> Any:
     config._attn_implementation = "eager"
     config.text_config._attn_implementation = "eager"
     # Enable global attribute access for per-layer config (transformers 5.15.0+)
-    config.text_config.allow_global_per_layer_attribute_access = True
+    try:
+        config.text_config.allow_global_per_layer_attribute_access = True
+    except AttributeError:
+        pass  # transformers < 5.15.0 doesn't have this
     return config
 
 
@@ -111,7 +114,10 @@ def _make_assistant_sample(model: torch.nn.Module, kv_len: int) -> ForwardInput:
     """Create one synthetic draft-one assistant sample."""
     text_cfg = model.config.get_text_config()
     # Enable global attribute access for per-layer config (transformers 5.15.0+)
-    text_cfg.allow_global_per_layer_attribute_access = True
+    try:
+        text_cfg.allow_global_per_layer_attribute_access = True
+    except AttributeError:
+        pass  # transformers < 5.15.0 doesn't have this
     kv_heads = int(text_cfg.num_key_value_heads)
     # Get per-layer head dimensions from model weights for correctness
     # (config values may not match actual model in some transformers versions)

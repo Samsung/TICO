@@ -63,7 +63,10 @@ def _make_sample(model: torch.nn.Module, kv_len: int = 10) -> dict:
     """Create one shape-valid draft-one assistant sample."""
     # Use text_config directly instead of get_text_config() to ensure flag persists
     text_cfg = model.config.text_config
-    text_cfg.allow_global_per_layer_attribute_access = True
+    try:
+        text_cfg.allow_global_per_layer_attribute_access = True
+    except AttributeError:
+        pass  # transformers < 5.15.0 doesn't have this
     kv_heads = int(text_cfg.num_key_value_heads)
     # Get per-layer head dimensions from model weights for correctness
     # (config values may not match actual model in some transformers versions)
@@ -100,7 +103,10 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
         self.fp_model = make_tiny_gemma4_assistant_model()
         # Enable global attribute access for per-layer config (transformers 5.15.0+)
         text_cfg = self.fp_model.config.get_text_config()
-        text_cfg.allow_global_per_layer_attribute_access = True
+        try:
+            text_cfg.allow_global_per_layer_attribute_access = True
+        except AttributeError:
+            pass  # transformers < 5.15.0 doesn't have this
         self.fp_ref = copy.deepcopy(self.fp_model).eval()
         self.sample = _make_sample(self.fp_model)
 
