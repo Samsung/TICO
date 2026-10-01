@@ -24,11 +24,24 @@ import unittest
 import torch
 import torch.nn as nn
 
+from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.universal_gptq.quantizer import (
     find_multicall_modules,
     UniversalGPTQQuantizer,
 )
 from tico.quantization.config.gptq import UniversalGPTQConfig
+
+
+def gptaQ_factory_with_native_inputs(layer):
+    """
+    Mock GPTQ factory that supports native inputs (for GPTAQ testing).
+
+    This factory creates a standard GPTQ instance but adds the native_inp
+    attribute expected by GPTAQ implementations.
+    """
+    gptq = GPTQ(layer)
+    gptq.native_inp = None  # type: ignore[attr-defined]
+    return gptq
 
 
 class FiveLinearModel(nn.Module):
@@ -1421,6 +1434,230 @@ class TestUniversalGPTQ(unittest.TestCase):
             multiply_invoked,
             "shared module should be detected as multi-call",
         )
+
+    @torch.inference_mode()
+    def test_universal_gptq_v2_collect_native_inputs_config(self):
+        """
+        Test that collect_native_inputs config option is properly validated.
+        """
+        # Test 1: Default value is False (GPTQ v1)
+        config1 = UniversalGPTQConfig()
+        self.assertFalse(config1.collect_native_inputs)
+
+        # Test 2: Can be set to True (GPTQ v2/GPTAQ)
+        config2 = UniversalGPTQConfig(collect_native_inputs=True)
+        self.assertTrue(config2.collect_native_inputs)
+
+        # Test 3: Validation rejects non-bool values
+        with self.assertRaises(TypeError):
+            config3 = UniversalGPTQConfig(collect_native_inputs="yes")  # type: ignore[arg-type]
+            config3.validate()
+
+        with self.assertRaises(TypeError):
+            config4 = UniversalGPTQConfig(collect_native_inputs=1)  # type: ignore[arg-type]
+            config4.validate()
+
+    @torch.inference_mode()
+    def test_universal_gptq_v2_native_inputs_collected(self):
+        """
+        Test that native inputs are collected when collect_native_inputs=True.
+        """
+        input_dim = 32
+        samples_per_batch = 2
+        num_batches = 2
+
+        class TwoLayerModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.layer1 = nn.Linear(dim, dim, bias=False)
+                self.layer2 = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.layer1.weight.fill_(1.0 / dim)
+                    self.layer2.weight.fill_(1.0 / dim)
+
+            def forward(self, x):
+                x = self.layer1(x)
+                return self.layer2(x)
+
+        torch.manual_seed(42)
+        model = TwoLayerModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite",
+        )
+
+    @torch.inference_mode()
+    def test_universal_gptq_v2_dual_replay_execution(self):
+        """
+        Test that dual replay (NATIVE + QUANT) executes correctly.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class ThreeLayerModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.layers = nn.Sequential(
+                    nn.Linear(dim, dim, bias=False),
+                    nn.ReLU(),
+                    nn.Linear(dim, dim, bias=False),
+                )
+                with torch.no_grad():
+                    for m in self.layers.modules():
+                        if isinstance(m, nn.Linear):
+                            m.weight.fill_(1.0 / dim)
+
+            def forward(self, x):
+                return self.layers(x)
+
+        torch.manual_seed(42)
+        model = ThreeLayerModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            cacheable_modules=[],
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite",
+        )
+
+
+class TestGPTQFactoryResolution(unittest.TestCase):
+    """Tests for gptq_factory string resolution in UniversalGPTQConfig."""
+
+    def test_gptq_factory_none(self):
+        """Test that None factory resolves to None."""
+        config = UniversalGPTQConfig()
+        factory = config.resolve_gptq_factory()
+        self.assertIsNone(factory)
+
+    def test_gptq_factory_string_valid(self):
+        """Test that valid string path resolves to callable factory."""
+        config = UniversalGPTQConfig(
+            gptq_factory="tico.quantization.algorithm.gptq.gptq.GPTQ"
+        )
+        factory = config.resolve_gptq_factory()
+        self.assertIsNotNone(factory)
+        self.assertTrue(callable(factory))
+
+        # Test that the factory creates GPTQ instances
+        layer = nn.Linear(10, 10)
+        gptq = factory(layer)  # type: ignore[misc]
+        self.assertEqual(gptq.layer, layer)
+        self.assertTrue(hasattr(gptq, "H"))
+        self.assertTrue(hasattr(gptq, "add_batch"))
+
+    def test_gptq_factory_callable(self):
+        """Test that callable factory is returned as-is."""
+        custom_factory = lambda layer: type("MockGPTQ", (), {"layer": layer})()
+        config = UniversalGPTQConfig(gptq_factory=custom_factory)
+        factory = config.resolve_gptq_factory()
+        self.assertIs(factory, custom_factory)
+
+    def test_gptq_factory_string_invalid_module(self):
+        """Test that invalid module path raises ImportError."""
+        config = UniversalGPTQConfig(gptq_factory="nonexistent.module.path.GPTQ")
+        config.validate()
+        with self.assertRaises((ImportError, ModuleNotFoundError)):
+            config.resolve_gptq_factory()
+
+    def test_gptq_factory_string_invalid_class(self):
+        """Test that invalid class name raises AttributeError."""
+        config = UniversalGPTQConfig(gptq_factory="torch.nn.NonExistentClass")
+        config.validate()
+        with self.assertRaises(AttributeError):
+            config.resolve_gptq_factory()
+
+    def test_gptq_factory_empty_string(self):
+        """Test that empty string raises ValueError during validation."""
+        config = UniversalGPTQConfig(gptq_factory="")
+        with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_gptq_factory_invalid_type(self):
+        """Test that invalid type raises TypeError during validation."""
+        config = UniversalGPTQConfig(gptq_factory=123)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            config.validate()
+
+    def test_gptq_factory_with_collect_native_inputs(self):
+        """Test that collect_native_inputs=True requires gptq_factory."""
+        # This should fail - no factory provided
+        config = UniversalGPTQConfig(collect_native_inputs=True)
+        with self.assertRaises(ValueError):
+            config.validate()
+
+        # This should pass - factory provided as string
+        config = UniversalGPTQConfig(
+            collect_native_inputs=True,
+            gptq_factory="tico.quantization.algorithm.gptq.gptq.GPTQ",
+        )
+        config.validate()
+        factory = config.resolve_gptq_factory()
+        self.assertIsNotNone(factory)
+
+        # This should pass - factory provided as callable
+        config = UniversalGPTQConfig(
+            collect_native_inputs=True,
+            gptq_factory=lambda layer: GPTQ(layer),  # type: ignore[arg-type, return-value]
+        )
+        config.validate()
+        factory = config.resolve_gptq_factory()
+        self.assertIsNotNone(factory)
 
 
 if __name__ == "__main__":
