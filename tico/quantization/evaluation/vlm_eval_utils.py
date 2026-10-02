@@ -26,6 +26,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypedDict
 import torch
 from datasets import Dataset, IterableDataset, load_dataset
 
+from tico.quantization.evaluation.vlm_generation_utils import (
+    record_generation_inputs,
+    record_generation_output,
+    resolve_generation_input_budget,
+)
 from tico.quantization.recipes.data.dataset_usage import (
     CALIBRATION_ROLE,
     resolve_dataset_usage,
@@ -680,19 +685,14 @@ def _build_processor_inputs(
 
 
 def _generation_input_max_seq_len(
-    max_seq_len: Optional[int], max_new_tokens: int
+    max_seq_len: Optional[int],
+    max_new_tokens: int,
+    input_max_seq_len: Optional[int] = None,
 ) -> Optional[int]:
-    """Reserve generation tokens from a model's total sequence budget."""
-    if max_seq_len is None:
-        return None
-
-    input_max_seq_len = max_seq_len - max_new_tokens
-    if input_max_seq_len <= 0:
-        raise ValueError(
-            "Generation token budget must be smaller than max_seq_len: "
-            f"max_seq_len={max_seq_len}, max_new_tokens={max_new_tokens}."
-        )
-    return input_max_seq_len
+    """Reserve output space, or validate an explicitly fixed input cap."""
+    return resolve_generation_input_budget(
+        max_seq_len, max_new_tokens, input_max_seq_len
+    )
 
 
 def build_vlm_inputs(
@@ -757,6 +757,9 @@ def generate_answer(
     max_new_tokens: int = 16,
     temperature: float = 0.0,
     max_seq_len: Optional[int] = None,
+    *,
+    input_max_seq_len: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """
     Generate an answer for a single image-question example.
@@ -770,19 +773,28 @@ def generate_answer(
         max_new_tokens: Maximum number of generated tokens.
         temperature: Sampling temperature. Greedy decoding is used when this
                      value is less than or equal to zero.
-        max_seq_len: Optional maximum text sequence length for processor
-                     tokenization.
+        max_seq_len: Optional total input-plus-output sequence budget.
+        input_max_seq_len: Optional fixed input cap; must fit with the output
+            budget inside max_seq_len. None preserves automatic budgeting.
+        diagnostics: Optional caller-owned dict populated with input tensor
+            hashes, generated token IDs, observed length and EOS information.
+            No diagnostic tensor copies are made when this is None.
 
     Returns:
         The decoded model answer string.
     """
-    input_max_seq_len = _generation_input_max_seq_len(max_seq_len, max_new_tokens)
+    effective_input_max_seq_len = _generation_input_max_seq_len(
+        max_seq_len, max_new_tokens, input_max_seq_len
+    )
     inputs = build_vlm_inputs(
         processor=processor,
         image=image,
         question=question,
         return_tensors="pt",
-        max_seq_len=input_max_seq_len,
+        max_seq_len=effective_input_max_seq_len,
+    )
+    record_generation_inputs(
+        diagnostics, inputs, input_max_seq_len=effective_input_max_seq_len
     )
     inputs = move_inputs_to_device(inputs, device)
 
@@ -796,9 +808,13 @@ def generate_answer(
         gen_kwargs["temperature"] = temperature
 
     out_ids = model.generate(**inputs, **gen_kwargs)
+    out_ids = getattr(out_ids, "sequences", out_ids)
 
     input_len = inputs["input_ids"].shape[1]
     gen_ids = out_ids[0, input_len:]
+    record_generation_output(
+        diagnostics, gen_ids, model=model, max_new_tokens=max_new_tokens
+    )
 
     return processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 
@@ -813,6 +829,9 @@ def generate_image_only_answer(
     max_new_tokens: int = 16,
     temperature: float = 0.0,
     max_seq_len: int | None = None,
+    *,
+    input_max_seq_len: int | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> str:
     """
     Generate an answer from the image only.
@@ -826,8 +845,12 @@ def generate_image_only_answer(
         max_new_tokens: Maximum number of generated tokens.
         temperature: Sampling temperature. Greedy decoding is used when this
                      value is less than or equal to zero.
-        max_seq_len: Optional maximum text sequence length for processor
-                     tokenization.
+        max_seq_len: Optional total input-plus-output sequence budget.
+        input_max_seq_len: Optional fixed input cap; must fit with the output
+            budget inside max_seq_len. None preserves automatic budgeting.
+        diagnostics: Optional caller-owned dict populated with input tensor
+            hashes, generated token IDs, observed length and EOS information.
+            No diagnostic tensor copies are made when this is None.
 
     Returns:
         The decoded model answer string.
@@ -855,13 +878,18 @@ def generate_image_only_answer(
         add_generation_prompt=True,
     )
 
-    input_max_seq_len = _generation_input_max_seq_len(max_seq_len, max_new_tokens)
+    effective_input_max_seq_len = _generation_input_max_seq_len(
+        max_seq_len, max_new_tokens, input_max_seq_len
+    )
     inputs = _build_processor_inputs(
         processor=processor,
         prompt=prompt,
         image=image,
         return_tensors="pt",
-        max_seq_len=input_max_seq_len,
+        max_seq_len=effective_input_max_seq_len,
+    )
+    record_generation_inputs(
+        diagnostics, inputs, input_max_seq_len=effective_input_max_seq_len
     )
     inputs = move_inputs_to_device(inputs, device)
 
@@ -874,8 +902,12 @@ def generate_image_only_answer(
         gen_kwargs["temperature"] = temperature
 
     out_ids = model.generate(**inputs, **gen_kwargs)
+    out_ids = getattr(out_ids, "sequences", out_ids)
     input_len = inputs["input_ids"].shape[1]
     gen_ids = out_ids[0, input_len:]
+    record_generation_output(
+        diagnostics, gen_ids, model=model, max_new_tokens=max_new_tokens
+    )
 
     return processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
 

@@ -114,9 +114,14 @@ evaluation:
     dataset: MMMU/MMMU_Pro
     subjects:
       - vision
-    n_shots: 5
+    n_shots: 0
     n_samples: 1000
-    max_new_tokens: 16
+    prompt_mode: official_direct
+    max_new_tokens: 256
+    # Set the same input cap in both runs for a generation-length sweep.
+    input_max_seq_len: null
+    # A new file is created exclusively; use a different path for each run.
+    output_jsonl: null
     temperature: 0.0
     verbose: false
   ppl:
