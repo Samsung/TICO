@@ -7,6 +7,9 @@ workflow is implemented**.
 
 Most new examples should be added as config files in this directory.
 
+For MMMU-Pro vision prompt modes, fixed-input generation comparisons and
+per-sample JSONL diagnostics, see the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md).
+
 ## File naming
 
 Use:
