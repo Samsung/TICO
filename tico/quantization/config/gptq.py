@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING, Union
 
 import torch
 
@@ -21,6 +21,17 @@ from tico.quantization.config.base import BaseConfig
 
 if TYPE_CHECKING:
     from tico.quantization.algorithm.universal_gptq.quantizer import GPTQFactory
+
+
+GPTQFactoryArg = Union["GPTQFactory", str, None]
+"""
+Type alias for GPTQ factory argument.
+
+Accepts either:
+- A factory callable: `lambda layer: GPTQ(layer)`
+- A fully-qualified class path string: `"tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"`
+- None (uses default classic GPTQ v1)
+"""
 
 
 @dataclass
@@ -144,8 +155,20 @@ class UniversalGPTQConfig(GPTQConfig):
     # Factory function for creating GPTQ instances.
     # Allows using different GPTQ implementations (GPTQ v1, GPTQv2, etc.)
     # with the UniversalGPTQQuantizer.
-    # Default: lambda layer: GPTQ(layer) - uses classic GPTQ v1.
-    gptq_factory: "GPTQFactory | None" = None
+    #
+    # Accepts either:
+    # - None: Uses default classic GPTQ v1 (lambda layer: GPTQ(layer))
+    # - str: Fully-qualified class path, e.g., "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
+    # - Callable: Factory function, e.g., lambda layer: GPTQ(layer, normalize_H=True)
+    #
+    # Default: None (uses classic GPTQ v1).
+    gptq_factory: GPTQFactoryArg = None
+
+    # GPTQ (v1) requires collecting only inputs from upstream quantized layers: collect_native_inputs=False.
+    # GPTAQ (GPTQ v2) requires collecting the "native" inputs from the original unquantized model: collect_native_inputs=True.
+    # Set this flag to True if you are going to use GPTAQ (GPTQ v2).
+    # Note that in this case you should also use the appropriate gptq_factory supporting GPTAQ.
+    collect_native_inputs: bool = False
 
     @property
     def name(self) -> str:
@@ -173,10 +196,33 @@ class UniversalGPTQConfig(GPTQConfig):
                 f"allow_calls_between_cacheable_modules must be bool. got {type(self.allow_calls_between_cacheable_modules)}"
             )
 
-        # gptq_factory is optional - if provided, it must be callable
-        if self.gptq_factory is not None and not callable(self.gptq_factory):
+        if not isinstance(self.collect_native_inputs, bool):
             raise TypeError(
-                f"gptq_factory must be callable or None. got {type(self.gptq_factory)}"
+                f"collect_native_inputs must be bool. got {type(self.collect_native_inputs)}"
+            )
+
+        # gptq_factory is optional - if provided, it must be str or callable
+        if self.gptq_factory is not None and not isinstance(
+            self.gptq_factory, (str, Callable)  # type: ignore[arg-type]
+        ):
+            raise TypeError(
+                f"gptq_factory must be str, callable, or None. got {type(self.gptq_factory)}"
+            )
+        if isinstance(self.gptq_factory, str) and not self.gptq_factory.strip():
+            raise ValueError("gptq_factory string cannot be empty")
+
+        if self.collect_native_inputs and self.gptq_factory is None:
+            raise ValueError(
+                "collect_native_inputs=True requires a GPTQ factory that supports native inputs. "
+                "Please provide gptq_factory parameter."
+            )
+
+        if (
+            self.collect_native_inputs
+            and not self.allow_calls_between_cacheable_modules
+        ):
+            raise ValueError(
+                "collect_native_inputs=True requires allow_calls_between_cacheable_modules to also be True."
             )
 
         # use_orig_model_inference is incompatible with frontier-based execution
@@ -188,3 +234,59 @@ class UniversalGPTQConfig(GPTQConfig):
                 "modules during replay. If you need this feature, use GPTQConfig with "
                 "the layer-by-layer quantizer instead."
             )
+
+    def resolve_gptq_factory(self) -> "GPTQFactory | None":
+        """
+        Resolve gptq_factory from string path to callable.
+
+        Returns:
+            GPTQFactory if gptq_factory is set, None otherwise.
+
+        Raises:
+            ImportError: If the specified class cannot be imported.
+            AttributeError: If the specified class does not exist in the module.
+        """
+        if self.gptq_factory is None:
+            return None
+
+        if callable(self.gptq_factory):
+            return self.gptq_factory
+
+        if isinstance(self.gptq_factory, str):
+            return _create_factory_from_class_path(self.gptq_factory)
+
+        # Should never reach here due to validation
+        raise TypeError(
+            f"gptq_factory must be str, callable, or None. "
+            f"got {type(self.gptq_factory)}"
+        )
+
+
+def _create_factory_from_class_path(class_path: str) -> "GPTQFactory":
+    """
+    Create a GPTQ factory from a fully-qualified class path.
+
+    Example:
+        >>> factory = _create_factory_from_class_path(
+        ...     "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
+        ... )
+        >>> gptq = factory(nn.Linear(10, 10))
+
+    Args:
+        class_path: Fully-qualified Python class path, e.g.,
+            "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
+
+    Returns:
+        A factory function that takes a layer module and returns a GPTQ instance.
+
+    Raises:
+        ImportError: If the module cannot be imported.
+        AttributeError: If the class does not exist in the module.
+    """
+    import importlib
+
+    module_path, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    gptq_class = getattr(module, class_name)
+
+    return lambda layer: gptq_class(layer)
