@@ -309,6 +309,7 @@ class UniversalGPTQQuantizer(BaseQuantizer):
             config: GPTQ configuration specifying quantization parameters
                     (weight_bits, percdamp, groupsize, etc.).
         """
+        config.validate()
         super().__init__(config)
         self._cache_args: list[
             tuple[Any]
@@ -462,6 +463,23 @@ class GPTQ_Data:
     weight_device: torch.device | None
     out_device: torch.device | None
 
+    def __str__(self) -> str:
+        return self.__repr__()
+
+    def __repr__(self) -> str:
+        return (
+            f"full_module_name={self.full_module_name}\n"
+            f"is_cacheable={self.is_cacheable}\n"
+            f"state={self.state}\n"
+            f"len(cached_output)={len(self.cached_output)}\n"
+            f"len(cached_native_output)={len(self.cached_native_output)}\n"
+            f"len(collected_inputs)={len(self.collected_inputs)}\n"
+            f"len(collected_native_inputs)={len(self.collected_native_inputs)}\n"
+            f"invocation_idx={self.invocation_idx}\n"
+            f"batch_idx={self.batch_idx}\n"
+            f"total_invocations={self.total_invocations}"
+        )
+
 
 def get_cached_output(
     gptq_data: GPTQ_Data,
@@ -562,6 +580,7 @@ def wrap_model(
     full_model_name: str,
     ignored_module_patterns: Iterable[re.Pattern],
     ignored_modules: Iterable[nn.Module],
+    enforce_quantizable_modules_caching: bool,
 ) -> ModuleTypeStatistic:
     """
     Recursively wrap a model's forward methods for GPTQ quantization.
@@ -604,52 +623,65 @@ def wrap_model(
         gptq_data: GPTQ_Data = get_gptq_data(module)
 
         global ReplayMode
-        cached_output: list[list[Any]] = get_cached_output(gptq_data, ReplayMode)
         collected_inputs: list[torch.Tensor] = get_collected_inputs(
             gptq_data, ReplayMode
         )
 
-        match gptq_data.state:
-            case GPTQ_STATE.COLLECT:
-                # Move input to CPU to save GPU RAM
-                collected_inputs.append(move_to_cpu(args[0].data))
+        assert gptq_data.state.value in tuple(
+            e.value for e in GPTQ_STATE
+        ), "Invalid GPTQ state"
+
+        if gptq_data.state == GPTQ_STATE.COMPUTE:
+            return old_forward(gptq_data, *args, **kwargs)
+
+        if gptq_data.state == GPTQ_STATE.COLLECT:
+            # Move input to CPU to save GPU RAM
+            assert len(collected_inputs) < gptq_data.total_invocations
+            collected_inputs.append(move_to_cpu(args[0].data))
+            if ReplayMode == REPLAY_MODE.QUANT:
+                raise StopForward(module)
+            # if ReplayMode == REPLAY_MODE.NATIVE we also need to cache native outputs, hence, proceed
+
+        assert gptq_data.state == GPTQ_STATE.CACHE or ReplayMode == REPLAY_MODE.NATIVE
+        assert (
+            gptq_data.is_cacheable
+        ), "GPTQ-quantizable modulde must be cacheable if GPTAQ (GPTQ v2) is being run"
+
+        cached_output: list[list[Any]] = get_cached_output(gptq_data, ReplayMode)
+        n_cached_batches: int = len(cached_output)
+        if gptq_data.batch_idx >= n_cached_batches:
+            assert gptq_data.batch_idx == n_cached_batches
+            assert gptq_data.invocation_idx == 0
+            # Allocate new list for this batche's invocations
+            cached_output.append([])
+
+        cached_batch_out: list[Any] = cached_output[gptq_data.batch_idx]
+        n_cached_invocations: int = len(cached_batch_out)
+        if gptq_data.invocation_idx < n_cached_invocations:
+            assert gptq_data.state == GPTQ_STATE.CACHE
+
+            if ReplayMode == REPLAY_MODE.NATIVE and len(gptq_data.cached_output) < len(
+                gptq_data.cached_native_output
+            ):
+                gptq_data.invocation_idx += 1
                 raise StopForward(module)
 
-            case GPTQ_STATE.CACHE:
-                assert gptq_data.is_cacheable
-
-                n_cached_batches: int = len(cached_output)
-                if gptq_data.batch_idx >= n_cached_batches:
-                    assert gptq_data.batch_idx == n_cached_batches
-                    assert gptq_data.invocation_idx == 0
-                    # Allocate new list for this batche's invocations
-                    cached_output.append([])
-
-                cached_batch_out: list[Any] = cached_output[gptq_data.batch_idx]
-                n_cached_invocations: int = len(cached_batch_out)
-                if gptq_data.invocation_idx < n_cached_invocations:
-                    # Return cached output
-                    result: Any = cached_batch_out[gptq_data.invocation_idx]
-                    # Move cached output from CPU to model's device
-                    if gptq_data.out_device:
-                        result = move_to_device(result, gptq_data.out_device)
-                    gptq_data.invocation_idx += 1
-                    return result
-                else:
-                    # Compute output and cache it, then raise StopForward
-                    assert gptq_data.invocation_idx == n_cached_invocations
-                    out: Any = old_forward(gptq_data, *args, **kwargs)
-                    if gptq_data.out_device is None:
-                        gptq_data.out_device = infer_object_device(out)
-                    cached_batch_out.append(move_to_cpu(out))
-                    gptq_data.invocation_idx += 1
-                    raise StopForward(module)
-
-            case GPTQ_STATE.COMPUTE:
-                return old_forward(gptq_data, *args, **kwargs)
-
-            case _:
-                assert False, "We should never get here"
+            # Return cached output
+            result: Any = cached_batch_out[gptq_data.invocation_idx]
+            # Move cached output from CPU to model's device
+            if gptq_data.out_device:
+                result = move_to_device(result, gptq_data.out_device)
+            gptq_data.invocation_idx += 1
+            return result
+        else:
+            # Compute output and cache it, then raise StopForward
+            assert gptq_data.invocation_idx == n_cached_invocations
+            out: Any = old_forward(gptq_data, *args, **kwargs)
+            if gptq_data.out_device is None:
+                gptq_data.out_device = infer_object_device(out)
+            cached_batch_out.append(move_to_cpu(out))
+            gptq_data.invocation_idx += 1
+            raise StopForward(module)
 
     is_quantizable: bool = (
         type(model) in _QUANTIZABLE_LAYER_TYPES
@@ -663,6 +695,11 @@ def wrap_model(
     is_cacheable: bool = getattr(model, "is_cacheable")
     assert is_cacheable is not None
     delattr(model, "is_cacheable")
+    if not is_cacheable and is_quantizable and enforce_quantizable_modules_caching:
+        print(
+            f"[Warning] Quantizable module '{full_model_name}' forced to be cacheable"
+        )
+        is_cacheable = True
 
     total_invocations: int = getattr(model, "total_invocations")
     assert total_invocations is not None
@@ -711,6 +748,7 @@ def wrap_model(
             full_model_name=full_child_name,
             ignored_module_patterns=ignored_module_patterns,
             ignored_modules=ignored_modules,
+            enforce_quantizable_modules_caching=enforce_quantizable_modules_caching,
         )
         statistics.n_cacheable += child_stats.n_cacheable
         statistics.n_quantizable += child_stats.n_quantizable
@@ -831,7 +869,7 @@ def run_model(
                 gptq_data = get_gptq_data(m)
 
                 # For cacheable modules check that all cached outputs for this batch were actually acquired
-                if gptq_data.is_cacheable:
+                if gptq_data.state == GPTQ_STATE.CACHE:
                     cached_output = get_cached_output(gptq_data, replay_mode)
                     assert gptq_data.batch_idx == len(
                         cached_output
@@ -849,7 +887,7 @@ def run_model(
     for m in model.modules():
         gptq_data = get_gptq_data(m)
         # For cacheable modules check that all cached outputs for entire dataset were actually acquired
-        if gptq_data.is_cacheable:
+        if gptq_data.state == GPTQ_STATE.CACHE:
             cached_output = get_cached_output(gptq_data, replay_mode)
             assert gptq_data.batch_idx == len(cached_output) or (
                 gptq_data.batch_idx == 0
@@ -1405,6 +1443,7 @@ def gptq_quantize(
         ignored_modules=multicall_modules
         if gptq_config.ignore_multi_call_modules
         else set(),
+        enforce_quantizable_modules_caching=gptq_config.collect_native_inputs,
     )
 
     replay_modes = (
@@ -1462,12 +1501,14 @@ def gptq_quantize(
                 modules_not_ready_to_quantize: list[nn.Module] = []
                 for frontier_submodule in frontier_submodules:
                     gptq_data = get_gptq_data(frontier_submodule)
-                    collected_inputs = get_collected_inputs(gptq_data, replay_mode)
                     match gptq_data.state:
                         case GPTQ_STATE.CACHE:
                             modules_to_cache.append(frontier_submodule)
 
                         case GPTQ_STATE.COLLECT:
+                            collected_inputs = get_collected_inputs(
+                                gptq_data, replay_mode
+                            )
                             if len(collected_inputs) == gptq_data.total_invocations:
                                 modules_ready_to_quantize.append(frontier_submodule)
                             else:

@@ -217,6 +217,14 @@ class UniversalGPTQConfig(GPTQConfig):
                 "Please provide gptq_factory parameter."
             )
 
+        if (
+            self.collect_native_inputs
+            and not self.allow_calls_between_cacheable_modules
+        ):
+            raise ValueError(
+                "collect_native_inputs=True requires allow_calls_between_cacheable_modules to also be True."
+            )
+
         # use_orig_model_inference is incompatible with frontier-based execution
         if self.use_orig_model_inference:
             raise ValueError(
