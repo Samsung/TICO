@@ -45,10 +45,7 @@ def resolve_generation_input_budget(
         max_seq_len = positive_int(max_seq_len, "max_seq_len")
     if input_max_seq_len is not None:
         input_max_seq_len = positive_int(input_max_seq_len, "input_max_seq_len")
-        if (
-            max_seq_len is not None
-            and input_max_seq_len + max_new_tokens > max_seq_len
-        ):
+        if max_seq_len is not None and input_max_seq_len + max_new_tokens > max_seq_len:
             raise ValueError(
                 "input_max_seq_len + max_new_tokens must not exceed max_seq_len: "
                 f"{input_max_seq_len} + {max_new_tokens} > {max_seq_len}."

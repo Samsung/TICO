@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import torch
+
 from tico.quantization.evaluation.vlm_generation_utils import (
     positive_int,
     resolve_generation_input_budget,
@@ -110,9 +111,7 @@ _EXPLICIT_ANSWER_PATTERN = re.compile(
     r"\(?([A-Ja-j])\)?(?=$|[\s.,;:!?])"
 )
 _BARE_ANSWER_PATTERN = re.compile(r"\s*\(?([A-Ja-j])\)?[.):]?\s*")
-_LEADING_ANSWER_PATTERN = re.compile(
-    r"^\s*(?:\(([A-J])\)|([A-J])[.):])(?=\s|$)"
-)
+_LEADING_ANSWER_PATTERN = re.compile(r"^\s*(?:\(([A-J])\)|([A-J])[.):])(?=\s|$)")
 _CHOICE_LINE_PATTERN = re.compile(
     r"(?i:(?:I\s+(?:would\s+)?(?:choose|select)\s+(?:option\s+)?|"
     r"(?:the\s+)?(?:correct\s+)?(?:option|choice)\s*(?::|=|is)?\s*))"
@@ -184,16 +183,17 @@ def _parse_answer(generated_text: str, num_choices: int = 10) -> tuple[str | Non
 
     answer: str | None = None
     method = "unparsed"
+    match: re.Match[str] | None
     declarations = list(_EXPLICIT_ANSWER_PATTERN.finditer(text))
     if declarations:
         match = declarations[-1]
         candidate = match.group(1)
-        tail = text[match.end():].split("\n", 1)[0].strip()
+        tail = text[match.end() :].split("\n", 1)[0].strip()
         # A lowercase article followed by prose is not a declared option.
         # Also avoid treating an explicitly ambiguous answer as a single choice.
-        if (
-            candidate.islower() and tail and tail[0] not in ".,;:!?"
-        ) or re.match(r"(?i)^(?:or|and)\b|^[/-]", tail):
+        if (candidate.islower() and tail and tail[0] not in ".,;:!?") or re.match(
+            r"(?i)^(?:or|and)\b|^[/-]", tail
+        ):
             return None, "ambiguous_declaration"
         answer, method = candidate.upper(), "explicit"
     else:
@@ -551,17 +551,19 @@ def evaluate_subject(
                 **generation_kwargs,
             )
         except (ValueError, RuntimeError) as error:
-            is_token_mismatch = (
-                isinstance(error, ValueError)
-                and "Mismatch in `image` token count between text and `input_ids`."
-                in str(error)
+            is_token_mismatch = isinstance(
+                error, ValueError
+            ) and "Mismatch in `image` token count between text and `input_ids`." in str(
+                error
             )
             # Preserve the existing skip policy, but make every skip auditable.
             can_skip = is_token_mismatch or isinstance(error, RuntimeError)
             record.update(
                 status="skipped" if can_skip else "error",
                 skip_reason=(
-                    "image_token_mismatch" if is_token_mismatch else type(error).__name__
+                    "image_token_mismatch"
+                    if is_token_mismatch
+                    else type(error).__name__
                 ),
                 error=str(error),
                 generation=generation,
@@ -684,18 +686,19 @@ def evaluate_mmmu(
     few_shot_split = "test"
     results: dict[str, tuple[int, int, int]] = {}
     with ExitStack() as stack:
-        record_callback = None
+        record_callback: Callable[[dict[str, Any]], None] | None = None
         if output_jsonl is not None:
             log_path = Path(output_jsonl)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             stream = stack.enter_context(log_path.open("x", encoding="utf-8"))
 
-            def record_callback(record: dict[str, Any]) -> None:
+            def _write_record(record: dict[str, Any]) -> None:
                 stream.write(
                     json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n"
                 )
                 stream.flush()
 
+            record_callback = _write_record
             record_callback(
                 {
                     "record_type": "run_start",
@@ -742,7 +745,9 @@ def evaluate_mmmu(
                 results[subject] = (correct, total, skipped)
                 if verbose:
                     accuracy = correct / total if total else 0.0
-                    print(f"  {subject}: {accuracy:.4f} ({correct}/{total}), skipped: {skipped}")
+                    print(
+                        f"  {subject}: {accuracy:.4f} ({correct}/{total}), skipped: {skipped}"
+                    )
         except Exception as error:
             if record_callback is not None:
                 record_callback(
