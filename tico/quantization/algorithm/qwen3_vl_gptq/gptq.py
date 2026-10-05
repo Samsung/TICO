@@ -324,8 +324,17 @@ class GPTQ:
         self.dXXT: Optional[torch.Tensor] = None
         self.native_inp: Optional[list] = None
 
+        # Optional per-call token weights. The Qwen3-VL quantizer populates
+        # this for gradient-saliency weighted Hessian accumulation.
+        self.token_weights: Optional[list[torch.Tensor]] = None
+
     @torch.no_grad()
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor) -> None:
+    def add_batch(
+        self,
+        inp: torch.Tensor,
+        out: torch.Tensor,
+        token_weight: Optional[torch.Tensor] = None,
+    ) -> None:
         """
         Accumulate Hessian statistics from one calibration batch.
 
@@ -334,8 +343,16 @@ class GPTQ:
         Args:
             inp: Layer input tensor (from the model being quantized).
             out: Layer output tensor. Present for interface consistency.
+            token_weight: Optional non-negative token weights for Linear inputs.
+                The flattened token count must match the flattened Linear input
+                columns. The Hessian contribution becomes X diag(w) X.T.
         """
         del out
+
+        if token_weight is not None and not isinstance(self.layer, nn.Linear):
+            raise NotImplementedError(
+                "token_weight is currently supported only for nn.Linear GPTQ layers."
+            )
 
         # Process native input for GPTQv2 (before reshaping inp)
         native_inp_raw = None
@@ -353,11 +370,30 @@ class GPTQ:
             inp = inp.unsqueeze(0)
 
         batch_size = inp.shape[0]
+        linear_token_scale = None
 
         if isinstance(self.layer, nn.Linear):
             if len(inp.shape) > 2:
                 inp = inp.reshape(-1, inp.shape[-1])
             inp = inp.t()
+            if token_weight is not None:
+                flat_weight = token_weight.reshape(-1).to(
+                    device=inp.device,
+                    dtype=self.inp_dtype,
+                )
+                if flat_weight.numel() != inp.shape[1]:
+                    raise RuntimeError(
+                        "Linear token_weight has incompatible flattened size: "
+                        f"got {flat_weight.numel()}, expected {inp.shape[1]}."
+                    )
+                flat_weight = torch.nan_to_num(
+                    flat_weight,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                ).clamp_min(0.0)
+                linear_token_scale = flat_weight.sqrt().unsqueeze(0)
+                inp = inp * linear_token_scale
 
         elif isinstance(self.layer, nn.Conv2d):
             padding = _normalize_2d_padding(self.layer.padding)
@@ -413,6 +449,14 @@ class GPTQ:
                 if len(native_inp.shape) > 2:
                     native_inp = native_inp.reshape(-1, native_inp.shape[-1])
                 native_inp = native_inp.t()
+                if linear_token_scale is not None:
+                    if native_inp.shape[1] != linear_token_scale.shape[1]:
+                        raise RuntimeError(
+                            "GPTQv2 native Linear input and token weights have "
+                            "different flattened token counts: "
+                            f"{native_inp.shape[1]} vs {linear_token_scale.shape[1]}."
+                        )
+                    native_inp = native_inp * linear_token_scale
 
             elif isinstance(self.layer, nn.Conv2d):
                 padding = _normalize_2d_padding(self.layer.padding)
@@ -714,5 +758,6 @@ class GPTQ:
         self.Trace = None
         self.dXXT = None
         self.native_inp = None
+        self.token_weights = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
