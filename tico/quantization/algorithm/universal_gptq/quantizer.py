@@ -868,17 +868,18 @@ def run_model(
             for m in model.modules():
                 gptq_data = get_gptq_data(m)
 
-                # For cacheable modules check that all cached outputs for this batch were actually acquired
-                if gptq_data.state == GPTQ_STATE.CACHE:
-                    cached_output = get_cached_output(gptq_data, replay_mode)
-                    assert gptq_data.batch_idx == len(
-                        cached_output
-                    ) or gptq_data.invocation_idx == len(
-                        cached_output[gptq_data.batch_idx]
-                    ), "Not all cached invocations were acquired for this batch"
-
-                # Increment batch counter for modules that were invoked at least once
+                # For modules that were invoked at least once
                 if gptq_data.invocation_idx > 0:
+                    # For cacheable modules check that all cached outputs for this batch were actually acquired
+                    if gptq_data.state == GPTQ_STATE.CACHE:
+                        cached_output = get_cached_output(gptq_data, replay_mode)
+                        assert gptq_data.batch_idx == len(
+                            cached_output
+                        ) or gptq_data.invocation_idx == len(
+                            cached_output[gptq_data.batch_idx]
+                        ), "Not all cached invocations were acquired for this batch"
+
+                    # Increment batch counter
                     gptq_data.batch_idx += 1
                     # Reset invocation counter
                     gptq_data.invocation_idx = 0

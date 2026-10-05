@@ -1779,6 +1779,155 @@ class TestGPTAQNativeIORegression(unittest.TestCase):
         # Verify Liear2's cached native outputs match Linear2's FP outputs
         verify_layer_native_outputs(layer2_gptq_data, fp_layer2_outputs)
 
+    @torch.inference_mode()
+    def test_leading_skip_batch(self):
+        """
+        Test GPTAQ handling of leading skipped batches.
+
+        Regression test for bug where modules that are skipped in the first batch
+        but invoked in subsequent batches would have incorrect batch tracking,
+        causing assertion failures during calibration.
+
+        Model: BranchingModel with conditional execution
+            - Module 'a': Only executed when all inputs > 0
+            - Module 'b': Always executed
+
+        Calibration sequence:
+            Batch 0: use_a=False (module 'a' skipped)
+            Batch 1: use_a=True  (module 'a' invoked)
+
+        This verifies that:
+            1. Module 'a' correctly handles being skipped in the leading batch
+            2. Batch counter is only incremented for actually invoked modules
+            3. Native outputs are correctly cached for invoked batches only
+        """
+        input_dim = 3
+        samples_per_batch = 2
+
+        class BranchingModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.a = nn.Linear(dim, dim, bias=False)
+                self.b = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.a.weight.fill_(1.0 / dim)
+                    self.b.weight.fill_(2.0 / dim)
+
+            def forward(self, x):
+                use_a = torch.all(x > 0).item()
+                if use_a:
+                    x = self.a(x)
+                return self.b(x)
+
+        torch.manual_seed(42)
+        model = BranchingModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.zeros([samples_per_batch, input_dim]),),  # use_a=False
+            (torch.ones([samples_per_batch, input_dim]),),  # use_a=True
+        ]
+
+        # Prepare with GPTAQ
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=True,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            allow_calls_between_cacheable_modules=True,
+            debug_mode=True,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model: BranchingModel = quantizer.prepare(model)
+
+        # Run calibration
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        # Quantize - should not raise assertion errors
+        quantized_model: BranchingModel = quantizer.convert(prepared_model)
+
+    @torch.inference_mode()
+    def test_intermediate_skip_batch(self):
+        """
+        Test GPTAQ handling of intermediate skipped batches.
+
+        Regression test for bug where modules that are skipped in intermediate
+        batches would have incorrect batch tracking, causing misalignment between
+        batch indices and cached outputs.
+
+        Model: BranchingModel with conditional execution
+            - Module 'a': Only executed when all inputs > 0
+            - Module 'b': Always executed
+
+        Calibration sequence:
+            Batch 0: use_a=True  (module 'a' invoked)
+            Batch 1: use_a=False (module 'a' skipped)
+            Batch 2: use_a=True  (module 'a' invoked)
+
+        This verifies that:
+            1. Module 'a' correctly handles being skipped in intermediate batch
+            2. Batch counter synchronization is maintained across skips
+            3. Native outputs are correctly cached only for invoked batches
+            4. No assertion errors during calibration or conversion
+        """
+        input_dim = 3
+        samples_per_batch = 2
+
+        class BranchingModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.a = nn.Linear(dim, dim, bias=False)
+                self.b = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.a.weight.fill_(1.0 / dim)
+                    self.b.weight.fill_(2.0 / dim)
+
+            def forward(self, x):
+                use_a = torch.all(x > 0).item()
+                if use_a:
+                    x = self.a(x)
+                return self.b(x)
+
+        torch.manual_seed(42)
+        model = BranchingModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.ones([samples_per_batch, input_dim]),),  # use_a=True
+            (torch.zeros([samples_per_batch, input_dim]),),  # use_a=False
+            (torch.ones([samples_per_batch, input_dim]),),  # use_a=True
+        ]
+
+        # Prepare with GPTAQ
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=True,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            allow_calls_between_cacheable_modules=True,
+            debug_mode=True,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model: BranchingModel = quantizer.prepare(model)
+
+        # Run calibration
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        # Quantize - should not raise assertion errors
+        quantized_model: BranchingModel = quantizer.convert(prepared_model)
+
 
 if __name__ == "__main__":
     unittest.main()
