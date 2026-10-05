@@ -1332,6 +1332,28 @@ def find_caller_and_callee_modules(
     return result
 
 
+def reset_collection(gptq_data: GPTQ_Data) -> None:
+    """
+    Discard an unfinished collection attempt before the next replay.
+
+    Native outputs belong to the discarded attempt and must be cleared
+    together with the collected inputs.
+
+    Do not use this for successful collection completion: native outputs
+    must remain available after the module's weights are quantized.
+    """
+    assert (
+        gptq_data.state == GPTQ_STATE.COLLECT
+    ), "Only an unfinished COLLECT attempt can be reset"
+    assert gptq_data.batch_idx == 0
+    assert gptq_data.invocation_idx == 0
+    assert gptq_data.gptq is None, "Cannot reset after Hessian accumulation has started"
+
+    gptq_data.collected_inputs.clear()
+    gptq_data.collected_native_inputs.clear()
+    gptq_data.cached_native_output.clear()
+
+
 def gptq_quantize(
     model: nn.Module,
     gptq_config: UniversalGPTQConfig,
@@ -1542,8 +1564,7 @@ def gptq_quantize(
                     # 2.3. Reset modules that haven't collected all required inputs (they will start over at the next model replay)
                     for module_not_ready_to_quantize in modules_not_ready_to_quantize:
                         gptq_data = get_gptq_data(module_not_ready_to_quantize)
-                        gptq_data.collected_inputs.clear()
-                        gptq_data.collected_native_inputs.clear()
+                        reset_collection(gptq_data)
 
                 # 3. No cacheable modules were hit
                 else:
@@ -1564,8 +1585,7 @@ def gptq_quantize(
                             module_not_ready_to_quantize
                         ) in modules_not_ready_to_quantize:
                             gptq_data = get_gptq_data(module_not_ready_to_quantize)
-                            gptq_data.collected_inputs.clear()
-                            gptq_data.collected_native_inputs.clear()
+                            reset_collection(gptq_data)
 
                     # 3.2. No modules ready to be quantized
                     else:
@@ -1603,16 +1623,14 @@ def gptq_quantize(
                                     prev_gptq_data: GPTQ_Data = get_gptq_data(
                                         best_module_to_quantize
                                     )
-                                    prev_gptq_data.collected_inputs.clear()
-                                    prev_gptq_data.collected_native_inputs.clear()
+                                    reset_collection(prev_gptq_data)
 
                                 best_module_to_quantize = module_not_ready_to_quantize
                                 max_collected_inputs_percentage = (
                                     collected_inputs_percentage
                                 )
                             else:
-                                gptq_data.collected_inputs.clear()
-                                gptq_data.collected_native_inputs.clear()
+                                reset_collection(gptq_data)
 
                         assert best_module_to_quantize is not None
                         finish_collection(
