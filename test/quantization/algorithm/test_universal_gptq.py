@@ -1660,5 +1660,125 @@ class TestGPTQFactoryResolution(unittest.TestCase):
         self.assertIsNotNone(factory)
 
 
+class TestGPTAQNativeIORegression(unittest.TestCase):
+    """
+    Regression tests for GPTAQ native I/O caching.
+    """
+
+    @torch.inference_mode()
+    def test_native_io_chain_three_modules(self):
+        """
+        Test native I/O collection in a chain of three modules.
+
+        For Linear1 -> ReLU -> Linear2:
+        - Linear1's cached native outputs should match Linear1's FP outputs
+        - ReLU's cached native outputs should match ReLU's FP outputs
+
+        This tests that the fix works correctly through multiple layers.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class ThreeLayerModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.layer1 = nn.Linear(dim, dim, bias=False)
+                self.relu = nn.ReLU()
+                self.layer2 = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.layer1.weight.fill_(1.0 / dim)
+                    self.layer2.weight.fill_(2.0 / dim)
+
+            def forward(self, x):
+                x = self.layer1(x)
+                x = self.relu(x)
+                return self.layer2(x)
+
+        torch.manual_seed(42)
+        model = ThreeLayerModel(dim=input_dim)
+        model.eval()
+
+        # Create FP reference
+        fp_reference = ThreeLayerModel(dim=input_dim)
+        with torch.no_grad():
+            fp_reference.layer1.weight.copy_(model.layer1.weight)
+            fp_reference.layer2.weight.copy_(model.layer2.weight)
+        fp_reference.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        # Collect FP reference outputs
+        fp_layer1_outputs = []
+        fp_relu_outputs = []
+        fp_layer2_outputs = []
+        for batch in calibration_data:
+            with torch.no_grad():
+                layer1_out = fp_reference.layer1(batch[0])
+                relu_out = fp_reference.relu(layer1_out)
+                layer2_out = fp_reference.layer2(relu_out)
+            fp_layer1_outputs.append(layer1_out.clone().cpu())
+            fp_relu_outputs.append(relu_out.clone().cpu())
+            fp_layer2_outputs.append(layer2_out.clone().cpu())
+
+        # Prepare with GPTAQ
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            allow_calls_between_cacheable_modules=True,
+            debug_mode=True,
+            cacheable_modules=[".*"],
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model: ThreeLayerModel = quantizer.prepare(model)
+
+        # Run calibration
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model: ThreeLayerModel = quantizer.convert(prepared_model)
+
+        from tico.quantization.algorithm.universal_gptq.quantizer import get_gptq_data
+
+        layer1_gptq_data = get_gptq_data(quantized_model.layer1)
+        relu_gptq_data = get_gptq_data(quantized_model.relu)
+        layer2_gptq_data = get_gptq_data(quantized_model.layer2)
+
+        def verify_layer_native_outputs(
+            gptq_data,
+            fp_outputs,
+        ):
+            self.assertEqual(
+                len(gptq_data.cached_native_output),
+                num_batches,
+            )
+            for i in range(num_batches):
+                torch.testing.assert_close(
+                    gptq_data.cached_native_output[i][0],
+                    fp_outputs[i],
+                    rtol=1e-5,
+                    atol=1e-7,
+                    msg=f"Batch {i}: {gptq_data.full_module_name} native output doesn't match its FP output",
+                )
+
+        # Verify Liear1's cached native outputs match Linear1's FP outputs
+        verify_layer_native_outputs(layer1_gptq_data, fp_layer1_outputs)
+
+        # Verify ReLU's cached native outputs match ReLU's FP outputs
+        verify_layer_native_outputs(relu_gptq_data, fp_relu_outputs)
+
+        # Verify Liear2's cached native outputs match Linear2's FP outputs
+        verify_layer_native_outputs(layer2_gptq_data, fp_layer2_outputs)
+
+
 if __name__ == "__main__":
     unittest.main()
