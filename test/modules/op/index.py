@@ -135,3 +135,52 @@ class IndexTensorWithSlice(TestModuleBase):
             torch.randn(3, 3, 6, 6),
             torch.randn(3, 3, 6, 6),
         ), {}
+
+
+class IndexTensorTwoIndices(TestModuleBase):
+    """Two index tensors of the same shape select individual elements."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("rows", torch.tensor([0, 2, 1, 2, 0]))
+        self.register_buffer("cols", torch.tensor([3, 0, 1, 2, 3]))
+
+    def forward(self, x):
+        return x[self.rows, self.cols]
+
+    def get_example_inputs(self):
+        return (torch.randn(3, 4),), {}
+
+
+class IndexTensorTwoBroadcastIndices(TestModuleBase):
+    """
+    Two broadcast index tensors, as emitted by transformers' padding mask
+    (`mask[batch_idx, kv_idx]` with shapes [1, 1, 1, 1] and [1, 1, 1, L]).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("batch_idx", torch.zeros(1, 1, 1, 1, dtype=torch.int64))
+        self.register_buffer("kv_idx", torch.arange(16).reshape(1, 1, 1, 16))
+
+    def forward(self, mask):
+        return mask[self.batch_idx, self.kv_idx]
+
+    def get_example_inputs(self):
+        return (torch.randint(0, 2, (1, 16), dtype=torch.int32),), {}
+
+
+class IndexTensorThreeIndicesTrailingDims(TestModuleBase):
+    """Three broadcast index tensors on a rank-4 input keep the last dimension."""
+
+    def __init__(self):
+        super().__init__()
+        self.register_buffer("i0", torch.tensor([[1], [0]]))
+        self.register_buffer("i1", torch.tensor([[0, 2, 1]]))
+        self.register_buffer("i2", torch.tensor([[3, 0, 1], [2, 2, 0]]))
+
+    def forward(self, x):
+        return x[self.i0, self.i1, self.i2]
+
+    def get_example_inputs(self):
+        return (torch.randn(2, 3, 4, 5),), {}

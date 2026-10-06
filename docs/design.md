@@ -203,6 +203,7 @@ ExtractDtypeKwargsPass
 RemoveNop
 LowerCopy
 ConvertGatherToGatherNd
+LowerMultiIndexToGatherNd
 ConvertSymSizeToCircleShape
 ConvertLayoutOpToReshape
 RestoreLinear

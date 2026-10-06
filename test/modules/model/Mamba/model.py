@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import torch
-from transformers import AutoTokenizer, MambaConfig, MambaForCausalLM
+from transformers import AutoTokenizer, MambaForCausalLM
 
 from test.modules.base import TestModuleBase
 
@@ -26,9 +26,11 @@ class Mamba(TestModuleBase):
         # WARNING This removes non-determinism only partially.
         torch.use_deterministic_algorithms(True)
 
-        config = MambaConfig(use_cache=False)
+        # Keep the checkpoint configuration (24 layers). A default `MambaConfig`
+        # has 32 layers, so the last 8 would be randomly initialized and the
+        # torch/circle comparison would depend on the random seed.
         self.model = MambaForCausalLM.from_pretrained(
-            "state-spaces/mamba-130m-hf", config=config
+            "state-spaces/mamba-130m-hf", use_cache=False
         ).to("cpu")
 
         self.rtol = 1e-3

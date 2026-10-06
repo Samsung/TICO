@@ -16,7 +16,8 @@ import unittest
 
 import tico
 import torch
-from tico.utils.signature import ModelInputSpec
+from tico.utils.installed_packages import is_transformers_installed
+from tico.utils.signature import flatten_dynamic_cache, ModelInputSpec
 
 
 class SimpleModule(torch.nn.Module):
@@ -184,3 +185,68 @@ class UtilsSignatureTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "arguments are not the same"):
             spec.bind(args, kwargs, check=True)
+
+
+@unittest.skipIf(not is_transformers_installed(), "transformers is not installed")
+class DynamicCacheSignatureTest(unittest.TestCase):
+    """
+    `DynamicCache` inputs are flattened into one Circle input per cache tensor.
+    The binding must follow the pytree flatten order and placeholder names used
+    by `torch.export`, for both the layer-based and the legacy cache layout.
+    """
+
+    class CacheModule(torch.nn.Module):
+        def forward(self, x, past_key_values):
+            keys, values = past_key_values.update(x, x * 2, 0)
+            return keys + values
+
+    def setUp(self):
+        from tico.utils.pytree_utils import (
+            register_dynamic_cache,
+            register_dynamic_layer,
+        )
+        from transformers.cache_utils import DynamicCache
+
+        register_dynamic_cache()
+        register_dynamic_layer()
+
+        torch.manual_seed(0)
+        self.x = torch.randn(1, 2, 3, 4)
+        self.cache = DynamicCache()
+        self.cache.update(torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4), 0)
+        self.cache.update(torch.randn(1, 2, 3, 4), torch.randn(1, 2, 3, 4), 1)
+        self.cache_tensors = [t for _, t in flatten_dynamic_cache(self.cache)]
+        self.assertEqual(len(self.cache_tensors), 4)
+
+        m = self.CacheModule().eval()
+        self.circle_model = tico.convert(m, (self.x,), {"past_key_values": self.cache})
+
+    def test_names_follow_export_flatten_order(self):
+        spec = ModelInputSpec(self.circle_model.circle_binary)
+        expected = ["x"] + [
+            f"past_key_values_{suffix}"
+            for suffix, _ in flatten_dynamic_cache(self.cache)
+        ]
+        self.assertEqual(spec.names, expected)
+
+    def test_bind_cache_kwarg(self):
+        spec = ModelInputSpec(self.circle_model.circle_binary)
+        inputs = spec.bind((self.x,), {"past_key_values": self.cache}, check=True)
+
+        self.assertEqual(len(inputs), 5)
+        self.assertTrue(torch.equal(inputs[0], self.x))
+        for bound, expected in zip(inputs[1:], self.cache_tensors):
+            self.assertTrue(torch.equal(bound, expected))
+
+    def test_bind_cache_positional(self):
+        spec = ModelInputSpec(self.circle_model.circle_binary)
+        inputs = spec.bind((self.x, self.cache), {}, check=True)
+
+        self.assertEqual(len(inputs), 5)
+        for bound, expected in zip(inputs[1:], self.cache_tensors):
+            self.assertTrue(torch.equal(bound, expected))
+
+    def test_bound_inputs_run(self):
+        out = self.circle_model(self.x, past_key_values=self.cache)
+        expected = self.CacheModule()(self.x, self.cache)
+        torch.testing.assert_close(torch.from_numpy(out), expected)

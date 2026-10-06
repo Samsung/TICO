@@ -13,11 +13,11 @@
 # limitations under the License.
 
 import torch
-from torch.export.graph_signature import InputKind
 from tico.passes import ops
 from tico.passes.remove_empty_cat_inputs import RemoveEmptyCatInputs
 from tico.utils.convert import traced_run_decompositions
 from tico.utils.validate_args_kwargs import CatArgs
+from torch.export.graph_signature import InputKind
 
 from test.support.helper import num_of_ops
 from test.support.pass_value_test import SinglePassValueTest

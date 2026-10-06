@@ -52,6 +52,7 @@ from tico.passes.legalize_predefined_layout_operators import (
     LegalizePreDefinedLayoutOperators,
 )
 from tico.passes.lower_copy import LowerCopy
+from tico.passes.lower_multi_index_to_gather_nd import LowerMultiIndexToGatherNd
 from tico.passes.lower_pow2_to_mul import LowerPow2ToMul
 from tico.passes.lower_to_resize_nearest_neighbor import LowerToResizeNearestNeighbor
 from tico.passes.lower_to_slice import passes as LowerToSlicePasses
@@ -255,6 +256,7 @@ def convert_exported_module_to_circle(
             RemoveNop(),
             LowerCopy(),
             ConvertGatherToGatherNd(),
+            LowerMultiIndexToGatherNd(),
             ConvertSymSizeToCircleShape(),
             ConvertLayoutOpToReshape(),
             RestoreLinear(),
