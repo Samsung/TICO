@@ -16,11 +16,15 @@ from dataclasses import dataclass, field
 from typing import Callable, TYPE_CHECKING, Union
 
 import torch
+import torch.nn as nn
 
 from tico.quantization.config.base import BaseConfig
 
 if TYPE_CHECKING:
-    from tico.quantization.algorithm.universal_gptq.quantizer import GPTQFactory
+    from tico.quantization.algorithm.universal_gptq.quantizer import (
+        GPTQFactory,
+        GPTQProtocol,
+    )
 
 
 GPTQFactoryArg = Union["GPTQFactory", str, None]
@@ -202,28 +206,43 @@ class UniversalGPTQConfig(GPTQConfig):
             )
 
         # gptq_factory is optional - if provided, it must be str or callable
-        if self.gptq_factory is not None and not isinstance(
-            self.gptq_factory, (str, Callable)  # type: ignore[arg-type]
-        ):
-            raise TypeError(
-                f"gptq_factory must be str, callable, or None. got {type(self.gptq_factory)}"
-            )
-        if isinstance(self.gptq_factory, str) and not self.gptq_factory.strip():
-            raise ValueError("gptq_factory string cannot be empty")
+        if self.gptq_factory is not None:
+            if not isinstance(
+                self.gptq_factory, (str, Callable)  # type: ignore[arg-type]
+            ):
+                raise TypeError(
+                    f"gptq_factory must be str, callable, or None. got {type(self.gptq_factory)}"
+                )
 
-        if self.collect_native_inputs and self.gptq_factory is None:
-            raise ValueError(
-                "collect_native_inputs=True requires a GPTQ factory that supports native inputs. "
-                "Please provide gptq_factory parameter."
-            )
+            if isinstance(self.gptq_factory, str) and not self.gptq_factory.strip():
+                raise ValueError("gptq_factory string cannot be empty")
 
-        if (
-            self.collect_native_inputs
-            and not self.allow_calls_between_cacheable_modules
-        ):
-            raise ValueError(
-                "collect_native_inputs=True requires allow_calls_between_cacheable_modules to also be True."
+        # collect_native_inputs=True requires allow_calls_between_cacheable_modules=True
+        # collect_native_inputs=True requires using GPTAQ (GPTQ v2) compatible gptq_factory,
+        # specifically, GPTQ instances created with such factory must have 'native_inp' attribute.
+        if self.collect_native_inputs:
+            if not self.allow_calls_between_cacheable_modules:
+                raise ValueError(
+                    "collect_native_inputs=True requires allow_calls_between_cacheable_modules to also be True."
+                )
+
+            gptq_factory: "GPTQFactory | None" = self.resolve_gptq_factory()
+            if gptq_factory is None:
+                raise ValueError(
+                    "collect_native_inputs=True requires a GPTQ factory that supports native inputs. "
+                    "Please provide gptq_factory parameter."
+                )
+
+            gptq: "GPTQProtocol" = gptq_factory(
+                nn.Linear(1, 1, bias=False, device="cpu")
             )
+            if gptq is None:
+                raise ValueError(
+                    "could not create a GPTQ instance using specified gptq_factory."
+                )
+
+            if not hasattr(gptq, "native_inp"):
+                raise ValueError(f"{type(gptq)} does not have 'native_inp' attribute.")
 
         # use_orig_model_inference is incompatible with frontier-based execution
         if self.use_orig_model_inference:

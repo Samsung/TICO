@@ -1641,23 +1641,27 @@ class TestGPTQFactoryResolution(unittest.TestCase):
         with self.assertRaises(ValueError):
             config.validate()
 
-        # This should pass - factory provided as string
+        # This should fail - GPTQ instance doesn't have 'native_inp' attribute
         config = UniversalGPTQConfig(
             collect_native_inputs=True,
             gptq_factory="tico.quantization.algorithm.gptq.gptq.GPTQ",
         )
-        config.validate()
-        factory = config.resolve_gptq_factory()
-        self.assertIsNotNone(factory)
+        with self.assertRaises(ValueError):
+            config.validate()
 
-        # This should pass - factory provided as callable
+        # This should fail - GPTQ instance doesn't have 'native_inp' attribute
         config = UniversalGPTQConfig(
             collect_native_inputs=True,
             gptq_factory=lambda layer: GPTQ(layer),  # type: ignore[arg-type, return-value]
         )
+        with self.assertRaises(ValueError):
+            config.validate()
+
+        # This should pass - GPTQ instance has 'native_inp' attribute
+        config = UniversalGPTQConfig(
+            collect_native_inputs=True, gptq_factory=gptaQ_factory_with_native_inputs
+        )
         config.validate()
-        factory = config.resolve_gptq_factory()
-        self.assertIsNotNone(factory)
 
 
 class TestGPTAQNativeIORegression(unittest.TestCase):
