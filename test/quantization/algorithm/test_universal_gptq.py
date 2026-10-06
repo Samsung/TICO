@@ -24,11 +24,24 @@ import unittest
 import torch
 import torch.nn as nn
 
+from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.universal_gptq.quantizer import (
     find_multicall_modules,
     UniversalGPTQQuantizer,
 )
 from tico.quantization.config.gptq import UniversalGPTQConfig
+
+
+def gptaQ_factory_with_native_inputs(layer):
+    """
+    Mock GPTQ factory that supports native inputs (for GPTAQ testing).
+
+    This factory creates a standard GPTQ instance but adds the native_inp
+    attribute expected by GPTAQ implementations.
+    """
+    gptq = GPTQ(layer)
+    gptq.native_inp = None  # type: ignore[attr-defined]
+    return gptq
 
 
 class FiveLinearModel(nn.Module):
@@ -1421,6 +1434,503 @@ class TestUniversalGPTQ(unittest.TestCase):
             multiply_invoked,
             "shared module should be detected as multi-call",
         )
+
+    @torch.inference_mode()
+    def test_universal_gptq_v2_collect_native_inputs_config(self):
+        """
+        Test that collect_native_inputs config option is properly validated.
+        """
+        # Test 1: Default value is False (GPTQ v1)
+        config1 = UniversalGPTQConfig()
+        self.assertFalse(config1.collect_native_inputs)
+
+        # Test 2: Can be set to True (GPTQ v2/GPTAQ)
+        config2 = UniversalGPTQConfig(collect_native_inputs=True)
+        self.assertTrue(config2.collect_native_inputs)
+
+        # Test 3: Validation rejects non-bool values
+        with self.assertRaises(TypeError):
+            config3 = UniversalGPTQConfig(collect_native_inputs="yes")  # type: ignore[arg-type]
+            config3.validate()
+
+        with self.assertRaises(TypeError):
+            config4 = UniversalGPTQConfig(collect_native_inputs=1)  # type: ignore[arg-type]
+            config4.validate()
+
+    @torch.inference_mode()
+    def test_universal_gptq_v2_native_inputs_collected(self):
+        """
+        Test that native inputs are collected when collect_native_inputs=True.
+        """
+        input_dim = 32
+        samples_per_batch = 2
+        num_batches = 2
+
+        class TwoLayerModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.layer1 = nn.Linear(dim, dim, bias=False)
+                self.layer2 = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.layer1.weight.fill_(1.0 / dim)
+                    self.layer2.weight.fill_(1.0 / dim)
+
+            def forward(self, x):
+                x = self.layer1(x)
+                return self.layer2(x)
+
+        torch.manual_seed(42)
+        model = TwoLayerModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite",
+        )
+
+    @torch.inference_mode()
+    def test_universal_gptq_v2_dual_replay_execution(self):
+        """
+        Test that dual replay (NATIVE + QUANT) executes correctly.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class ThreeLayerModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.layers = nn.Sequential(
+                    nn.Linear(dim, dim, bias=False),
+                    nn.ReLU(),
+                    nn.Linear(dim, dim, bias=False),
+                )
+                with torch.no_grad():
+                    for m in self.layers.modules():
+                        if isinstance(m, nn.Linear):
+                            m.weight.fill_(1.0 / dim)
+
+            def forward(self, x):
+                return self.layers(x)
+
+        torch.manual_seed(42)
+        model = ThreeLayerModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            cacheable_modules=[],
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        test_input = torch.randn(2, input_dim)
+        with torch.no_grad():
+            output = quantized_model(test_input)
+
+        self.assertTrue(
+            torch.isfinite(output).all(),
+            "Quantized model output should be finite",
+        )
+
+
+class TestGPTQFactoryResolution(unittest.TestCase):
+    """Tests for gptq_factory string resolution in UniversalGPTQConfig."""
+
+    def test_gptq_factory_none(self):
+        """Test that None factory resolves to None."""
+        config = UniversalGPTQConfig()
+        factory = config.resolve_gptq_factory()
+        self.assertIsNone(factory)
+
+    def test_gptq_factory_string_valid(self):
+        """Test that valid string path resolves to callable factory."""
+        config = UniversalGPTQConfig(
+            gptq_factory="tico.quantization.algorithm.gptq.gptq.GPTQ"
+        )
+        factory = config.resolve_gptq_factory()
+        self.assertIsNotNone(factory)
+        self.assertTrue(callable(factory))
+
+        # Test that the factory creates GPTQ instances
+        layer = nn.Linear(10, 10)
+        gptq = factory(layer)  # type: ignore[misc]
+        self.assertEqual(gptq.layer, layer)
+        self.assertTrue(hasattr(gptq, "H"))
+        self.assertTrue(hasattr(gptq, "add_batch"))
+
+    def test_gptq_factory_callable(self):
+        """Test that callable factory is returned as-is."""
+        custom_factory = lambda layer: type("MockGPTQ", (), {"layer": layer})()
+        config = UniversalGPTQConfig(gptq_factory=custom_factory)
+        factory = config.resolve_gptq_factory()
+        self.assertIs(factory, custom_factory)
+
+    def test_gptq_factory_string_invalid_module(self):
+        """Test that invalid module path raises ImportError."""
+        config = UniversalGPTQConfig(gptq_factory="nonexistent.module.path.GPTQ")
+        config.validate()
+        with self.assertRaises((ImportError, ModuleNotFoundError)):
+            config.resolve_gptq_factory()
+
+    def test_gptq_factory_string_invalid_class(self):
+        """Test that invalid class name raises AttributeError."""
+        config = UniversalGPTQConfig(gptq_factory="torch.nn.NonExistentClass")
+        config.validate()
+        with self.assertRaises(AttributeError):
+            config.resolve_gptq_factory()
+
+    def test_gptq_factory_empty_string(self):
+        """Test that empty string raises ValueError during validation."""
+        config = UniversalGPTQConfig(gptq_factory="")
+        with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_gptq_factory_invalid_type(self):
+        """Test that invalid type raises TypeError during validation."""
+        config = UniversalGPTQConfig(gptq_factory=123)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            config.validate()
+
+    def test_gptq_factory_with_collect_native_inputs(self):
+        """Test that collect_native_inputs=True requires gptq_factory."""
+        # This should fail - no factory provided
+        config = UniversalGPTQConfig(collect_native_inputs=True)
+        with self.assertRaises(ValueError):
+            config.validate()
+
+        # This should fail - GPTQ instance doesn't have 'native_inp' attribute
+        config = UniversalGPTQConfig(
+            collect_native_inputs=True,
+            gptq_factory="tico.quantization.algorithm.gptq.gptq.GPTQ",
+        )
+        with self.assertRaises(ValueError):
+            config.validate()
+
+        # This should fail - GPTQ instance doesn't have 'native_inp' attribute
+        config = UniversalGPTQConfig(
+            collect_native_inputs=True,
+            gptq_factory=lambda layer: GPTQ(layer),  # type: ignore[arg-type, return-value]
+        )
+        with self.assertRaises(ValueError):
+            config.validate()
+
+        # This should pass - GPTQ instance has 'native_inp' attribute
+        config = UniversalGPTQConfig(
+            collect_native_inputs=True, gptq_factory=gptaQ_factory_with_native_inputs
+        )
+        config.validate()
+
+
+class TestGPTAQNativeIORegression(unittest.TestCase):
+    """
+    Regression tests for GPTAQ native I/O caching.
+    """
+
+    @torch.inference_mode()
+    def test_native_io_chain_three_modules(self):
+        """
+        Test native I/O collection in a chain of three modules.
+
+        For Linear1 -> ReLU -> Linear2:
+        - Linear1's cached native outputs should match Linear1's FP outputs
+        - ReLU's cached native outputs should match ReLU's FP outputs
+
+        This tests that the fix works correctly through multiple layers.
+        """
+        input_dim = 16
+        samples_per_batch = 2
+        num_batches = 2
+
+        class ThreeLayerModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.layer1 = nn.Linear(dim, dim, bias=False)
+                self.relu = nn.ReLU()
+                self.layer2 = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.layer1.weight.fill_(1.0 / dim)
+                    self.layer2.weight.fill_(2.0 / dim)
+
+            def forward(self, x):
+                x = self.layer1(x)
+                x = self.relu(x)
+                return self.layer2(x)
+
+        torch.manual_seed(42)
+        model = ThreeLayerModel(dim=input_dim)
+        model.eval()
+
+        # Create FP reference
+        fp_reference = ThreeLayerModel(dim=input_dim)
+        with torch.no_grad():
+            fp_reference.layer1.weight.copy_(model.layer1.weight)
+            fp_reference.layer2.weight.copy_(model.layer2.weight)
+        fp_reference.eval()
+
+        calibration_data = [
+            (torch.randn(samples_per_batch, input_dim),) for _ in range(num_batches)
+        ]
+
+        # Collect FP reference outputs
+        fp_layer1_outputs = []
+        fp_relu_outputs = []
+        fp_layer2_outputs = []
+        for batch in calibration_data:
+            with torch.no_grad():
+                layer1_out = fp_reference.layer1(batch[0])
+                relu_out = fp_reference.relu(layer1_out)
+                layer2_out = fp_reference.layer2(relu_out)
+            fp_layer1_outputs.append(layer1_out.clone().cpu())
+            fp_relu_outputs.append(relu_out.clone().cpu())
+            fp_layer2_outputs.append(layer2_out.clone().cpu())
+
+        # Prepare with GPTAQ
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            allow_calls_between_cacheable_modules=True,
+            debug_mode=True,
+            cacheable_modules=[".*"],
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model: ThreeLayerModel = quantizer.prepare(model)
+
+        # Run calibration
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        quantized_model: ThreeLayerModel = quantizer.convert(prepared_model)
+
+        from tico.quantization.algorithm.universal_gptq.quantizer import get_gptq_data
+
+        layer1_gptq_data = get_gptq_data(quantized_model.layer1)
+        relu_gptq_data = get_gptq_data(quantized_model.relu)
+        layer2_gptq_data = get_gptq_data(quantized_model.layer2)
+
+        def verify_layer_native_outputs(
+            gptq_data,
+            fp_outputs,
+        ):
+            self.assertEqual(
+                len(gptq_data.cached_native_output),
+                num_batches,
+            )
+            for i in range(num_batches):
+                torch.testing.assert_close(
+                    gptq_data.cached_native_output[i][0],
+                    fp_outputs[i],
+                    rtol=1e-5,
+                    atol=1e-7,
+                    msg=f"Batch {i}: {gptq_data.full_module_name} native output doesn't match its FP output",
+                )
+
+        # Verify Liear1's cached native outputs match Linear1's FP outputs
+        verify_layer_native_outputs(layer1_gptq_data, fp_layer1_outputs)
+
+        # Verify ReLU's cached native outputs match ReLU's FP outputs
+        verify_layer_native_outputs(relu_gptq_data, fp_relu_outputs)
+
+        # Verify Liear2's cached native outputs match Linear2's FP outputs
+        verify_layer_native_outputs(layer2_gptq_data, fp_layer2_outputs)
+
+    @torch.inference_mode()
+    def test_leading_skip_batch(self):
+        """
+        Test GPTAQ handling of leading skipped batches.
+
+        Regression test for bug where modules that are skipped in the first batch
+        but invoked in subsequent batches would have incorrect batch tracking,
+        causing assertion failures during calibration.
+
+        Model: BranchingModel with conditional execution
+            - Module 'a': Only executed when all inputs > 0
+            - Module 'b': Always executed
+
+        Calibration sequence:
+            Batch 0: use_a=False (module 'a' skipped)
+            Batch 1: use_a=True  (module 'a' invoked)
+
+        This verifies that:
+            1. Module 'a' correctly handles being skipped in the leading batch
+            2. Batch counter is only incremented for actually invoked modules
+            3. Native outputs are correctly cached for invoked batches only
+        """
+        input_dim = 3
+        samples_per_batch = 2
+
+        class BranchingModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.a = nn.Linear(dim, dim, bias=False)
+                self.b = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.a.weight.fill_(1.0 / dim)
+                    self.b.weight.fill_(2.0 / dim)
+
+            def forward(self, x):
+                use_a = torch.all(x > 0).item()
+                if use_a:
+                    x = self.a(x)
+                return self.b(x)
+
+        torch.manual_seed(42)
+        model = BranchingModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.zeros([samples_per_batch, input_dim]),),  # use_a=False
+            (torch.ones([samples_per_batch, input_dim]),),  # use_a=True
+        ]
+
+        # Prepare with GPTAQ
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=True,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            allow_calls_between_cacheable_modules=True,
+            debug_mode=True,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model: BranchingModel = quantizer.prepare(model)
+
+        # Run calibration
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        # Quantize - should not raise assertion errors
+        quantized_model: BranchingModel = quantizer.convert(prepared_model)
+
+    @torch.inference_mode()
+    def test_intermediate_skip_batch(self):
+        """
+        Test GPTAQ handling of intermediate skipped batches.
+
+        Regression test for bug where modules that are skipped in intermediate
+        batches would have incorrect batch tracking, causing misalignment between
+        batch indices and cached outputs.
+
+        Model: BranchingModel with conditional execution
+            - Module 'a': Only executed when all inputs > 0
+            - Module 'b': Always executed
+
+        Calibration sequence:
+            Batch 0: use_a=True  (module 'a' invoked)
+            Batch 1: use_a=False (module 'a' skipped)
+            Batch 2: use_a=True  (module 'a' invoked)
+
+        This verifies that:
+            1. Module 'a' correctly handles being skipped in intermediate batch
+            2. Batch counter synchronization is maintained across skips
+            3. Native outputs are correctly cached only for invoked batches
+            4. No assertion errors during calibration or conversion
+        """
+        input_dim = 3
+        samples_per_batch = 2
+
+        class BranchingModel(nn.Module):
+            def __init__(self, dim: int):
+                super().__init__()
+                self.a = nn.Linear(dim, dim, bias=False)
+                self.b = nn.Linear(dim, dim, bias=False)
+                with torch.no_grad():
+                    self.a.weight.fill_(1.0 / dim)
+                    self.b.weight.fill_(2.0 / dim)
+
+            def forward(self, x):
+                use_a = torch.all(x > 0).item()
+                if use_a:
+                    x = self.a(x)
+                return self.b(x)
+
+        torch.manual_seed(42)
+        model = BranchingModel(dim=input_dim)
+        model.eval()
+
+        calibration_data = [
+            (torch.ones([samples_per_batch, input_dim]),),  # use_a=True
+            (torch.zeros([samples_per_batch, input_dim]),),  # use_a=False
+            (torch.ones([samples_per_batch, input_dim]),),  # use_a=True
+        ]
+
+        # Prepare with GPTAQ
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=True,
+            collect_native_inputs=True,
+            gptq_factory=gptaQ_factory_with_native_inputs,
+            allow_calls_between_cacheable_modules=True,
+            debug_mode=True,
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model: BranchingModel = quantizer.prepare(model)
+
+        # Run calibration
+        for batch in calibration_data:
+            prepared_model(*batch)
+
+        # Quantize - should not raise assertion errors
+        quantized_model: BranchingModel = quantizer.convert(prepared_model)
 
 
 if __name__ == "__main__":
