@@ -56,6 +56,7 @@ from tico.passes.lower_pow2_to_mul import LowerPow2ToMul
 from tico.passes.lower_to_resize_nearest_neighbor import LowerToResizeNearestNeighbor
 from tico.passes.lower_to_slice import passes as LowerToSlicePasses
 from tico.passes.merge_consecutive_cat import MergeConsecutiveCat
+from tico.passes.remove_empty_cat_inputs import RemoveEmptyCatInputs
 from tico.passes.remove_nop import RemoveNop
 from tico.passes.remove_redundant_assert_nodes import RemoveRedundantAssertionNodes
 from tico.passes.remove_redundant_expand import RemoveRedundantExpand
@@ -272,6 +273,7 @@ def convert_exported_module_to_circle(
             FuseRedundantReshapeToMean(),
             *RemoveRedundantViewPasses(),
             RemoveRedundantToCopy(),
+            RemoveEmptyCatInputs(),
             MergeConsecutiveCat(),
             CastMixedTypeArgs(preserve_ep_invariant=True),
             ConstPropPass(),

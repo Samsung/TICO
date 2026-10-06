@@ -57,3 +57,21 @@ class SimpleCatThreeTensors(TestModuleBase):
                 torch.ones(3, 3, 1),
             ),
         ), {}
+
+
+class CatWithLegacyEmptyTensor(TestModuleBase):
+    """
+    `torch.cat` ignores a 1-D empty tensor even when the other input has a different
+    rank. Hugging Face `DynamicCache` emits this pattern on its first update.
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        empty = torch.tensor([], dtype=x.dtype)
+        return torch.cat([empty, x], dim=-2)
+
+    def get_example_inputs(self):
+        torch.manual_seed(0)
+        return (torch.randn(1, 2, 3, 4),), {}

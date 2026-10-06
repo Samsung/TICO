@@ -221,6 +221,7 @@ RemoveRedundantSlice
 FuseRedundantReshapeToMean
 RemoveRedundantViewPasses
 RemoveRedundantToCopy
+RemoveEmptyCatInputs
 MergeConsecutiveCat
 CastMixedTypeArgs(preserve_ep_invariant=True)
 ConstPropPass

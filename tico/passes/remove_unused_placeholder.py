@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+from typing import Iterable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.fx
@@ -75,6 +75,71 @@ def _remove_constant_placeholder(
     exported_program.graph.erase_node(node)
 
 
+def remove_unused_constant_placeholders(
+    exported_program: ExportedProgram,
+    candidates: Optional[Iterable["torch.fx.Node"]] = None,
+) -> List[str]:
+    """
+    Remove unused constant placeholders and update the graph signature.
+
+    FX dead-code elimination does not remove placeholder nodes even when they have
+    no users. This helper removes placeholders that correspond to parameters,
+    buffers, or lifted tensor constants and have no users, then rebuilds the
+    ExportedProgram input specs so that they match the remaining placeholders.
+
+    Parameters
+    ----------
+    exported_program
+        The program whose graph and signature are updated in place.
+    candidates
+        Placeholder nodes to consider. When ``None``, every placeholder of the graph
+        is considered. Nodes that are not constant placeholders or that still have
+        users are ignored.
+
+    Returns
+    -------
+    List[str]
+        Names of the removed placeholders, in graph order. Empty when nothing was
+        removed; the graph is left untouched in that case.
+
+    Runtime user input placeholders are never removed.
+    """
+
+    graph_module = exported_program.graph_module
+    graph: torch.fx.Graph = graph_module.graph
+
+    candidate_set = None if candidates is None else set(candidates)
+    unused_placeholders = [
+        node
+        for node in graph.nodes
+        if (candidate_set is None or node in candidate_set)
+        and _is_constant_placeholder(exported_program, node)
+        and len(node.users) == 0
+    ]
+
+    if not unused_placeholders:
+        return []
+
+    removed_names = [node.name for node in unused_placeholders]
+
+    for node in unused_placeholders:
+        _remove_constant_placeholder(exported_program, node)
+
+    existing_name_to_spec = {
+        spec.arg.name: spec for spec in exported_program.graph_signature.input_specs
+    }
+    exported_program.graph_signature.input_specs = [
+        existing_name_to_spec[node.name]
+        for node in graph.nodes
+        if node.op == "placeholder"
+    ]
+
+    graph.lint()
+    graph_module.recompile()
+
+    return removed_names
+
+
 @trace_graph_diff_on_pass
 @trace_const_diff_on_pass
 class RemoveUnusedPlaceholder(PassBase):
@@ -95,36 +160,10 @@ class RemoveUnusedPlaceholder(PassBase):
     def call(self, exported_program: ExportedProgram) -> PassResult:
         logger = logging.getLogger(__name__)
 
-        graph_module = exported_program.graph_module
-        graph: torch.fx.Graph = graph_module.graph
+        removed_names = remove_unused_constant_placeholders(exported_program)
 
-        unused_placeholders = [
-            node
-            for node in graph.nodes
-            if _is_constant_placeholder(exported_program, node) and len(node.users) == 0
-        ]
-
-        if not unused_placeholders:
-            return PassResult(False)
-
-        removed_names = [node.name for node in unused_placeholders]
-
-        for node in unused_placeholders:
-            _remove_constant_placeholder(exported_program, node)
-
-        existing_name_to_spec = {
-            spec.arg.name: spec for spec in exported_program.graph_signature.input_specs
-        }
-        exported_program.graph_signature.input_specs = [
-            existing_name_to_spec[node.name]
-            for node in graph.nodes
-            if node.op == "placeholder"
-        ]
-
-        graph.lint()
-        graph_module.recompile()
-
-        logger.debug(f"Unused constant placeholders are removed: {removed_names}")
+        if removed_names:
+            logger.debug(f"Unused constant placeholders are removed: {removed_names}")
 
         # Run only once.
         return PassResult(False)
