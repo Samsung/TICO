@@ -77,7 +77,9 @@ class _FakeAutoClass:
 class _FakeModel:
     """Minimal HF-like model exposing the config fields the adapters touch."""
 
-    def __init__(self, events: list[str], eval_error=None, max_position_embeddings=4096):
+    def __init__(
+        self, events: list[str], eval_error=None, max_position_embeddings=4096
+    ):
         self.events = events
         self.eval_error = eval_error
         text_config = SimpleNamespace(
@@ -511,7 +513,11 @@ class TestGemma4AdapterModelLoading(_ModelLoadingContractMixin, unittest.TestCas
                 expected_events = ["processor", "primary", "eval", "no_moe"]
                 if fuse_enabled:
                     expected_events.append("ple_fusion")
-                expected_events += ["canonicalize", "build_profile", "validate_processor"]
+                expected_events += [
+                    "canonicalize",
+                    "build_profile",
+                    "validate_processor",
+                ]
                 self.assertEqual(events, expected_events)
                 self.assertEqual(len(primary.calls), 1)
 

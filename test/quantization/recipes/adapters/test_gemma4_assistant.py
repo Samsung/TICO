@@ -424,7 +424,9 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["static_shape"]["full_kv_length"], 16)
             self.assertEqual(manifest["static_shape"]["sliding_kv_length"], 8)
-            self.assertEqual(manifest["core_artifact"], "gemma4_assistant_core.q.circle")
+            self.assertEqual(
+                manifest["core_artifact"], "gemma4_assistant_core.q.circle"
+            )
 
             # I/O contracts are read back from the exported Circle graph. Inputs
             # keep the ABI names given to the example tensors; outputs follow
