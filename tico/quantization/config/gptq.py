@@ -12,13 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 from dataclasses import dataclass, field
-from typing import Callable, TYPE_CHECKING, Union
+from typing import Any, Callable, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
 
 from tico.quantization.config.base import BaseConfig
+from tico.quantization.config.utils import torch_dtype_from_name
 
 if TYPE_CHECKING:
     from tico.quantization.algorithm.universal_gptq.quantizer import (
@@ -174,6 +176,34 @@ class UniversalGPTQConfig(GPTQConfig):
     # Note that in this case you should also use the appropriate gptq_factory supporting GPTAQ.
     collect_native_inputs: bool = False
 
+    # Dtype used for Hessian (H) and dXXT accumulation.
+    # Defaults to FP32 for speed and lower memory. Set to torch.float64
+    # for higher-precision accumulation.
+    hessian_dtype: torch.dtype = torch.float32
+
+    # Dtype of the input Gram matrices (inp @ inp.T) and the GPTQv2 dXXT
+    # cross-term (dX @ inp.T). Hessian storage and factorization follow
+    # hessian_dtype. Defaults to torch.float32, it is faster and uses
+    # less memory.
+    inp_dtype: torch.dtype = torch.float32
+
+    # GPTQv2: scaling factor for the asymmetric correction (P matrix)
+    # `alpha` is the correction strength for GPTQv2's input-error compensation.
+    # It scales the `P` matrix that adjusts weight updates to account for upstream quantization error in the activations.
+    # A value of `0` disables the correction (standard GPTQ), while values around `0.25` provide the best empirical results.
+    gptq_v2_alpha: float = 0.25
+
+    # Use running average for Hessian accumulation.
+    # When False, uses summation.
+    normalize_H: bool = True
+
+    def __post_init__(self) -> None:
+        """Convert string dtype options (from YAML) to torch.dtype."""
+        if isinstance(self.hessian_dtype, str):
+            self.hessian_dtype = torch_dtype_from_name(self.hessian_dtype)
+        if isinstance(self.inp_dtype, str):
+            self.inp_dtype = torch_dtype_from_name(self.inp_dtype)
+
     @property
     def name(self) -> str:
         return "universal_gptq"
@@ -182,28 +212,24 @@ class UniversalGPTQConfig(GPTQConfig):
         # First validate parent class
         super().validate()
 
-        if not isinstance(self.debug_mode, bool):
-            raise TypeError(f"debug_mode must be bool. got {type(self.debug_mode)}")
-
-        if not isinstance(self.ignore_multi_call_modules, bool):
+        if not isinstance(self.gptq_v2_alpha, (int, float)):
             raise TypeError(
-                f"ignore_multi_call_modules must be bool. got {type(self.ignore_multi_call_modules)}"
+                f"gptq_v2_alpha must be a number (int or float). "
+                f"got {type(self.gptq_v2_alpha)}"
             )
 
-        if not isinstance(self.cacheable_modules, list):
-            raise TypeError(
-                f"cacheable_modules must be list. got {type(self.cacheable_modules)}"
-            )
-
-        if not isinstance(self.allow_calls_between_cacheable_modules, bool):
-            raise TypeError(
-                f"allow_calls_between_cacheable_modules must be bool. got {type(self.allow_calls_between_cacheable_modules)}"
-            )
-
-        if not isinstance(self.collect_native_inputs, bool):
-            raise TypeError(
-                f"collect_native_inputs must be bool. got {type(self.collect_native_inputs)}"
-            )
+        self._validate_type(self.normalize_H, "normalize_H", bool)
+        self._validate_type(self.debug_mode, "debug_mode", bool)
+        self._validate_type(
+            self.ignore_multi_call_modules, "ignore_multi_call_modules", bool
+        )
+        self._validate_type(self.cacheable_modules, "cacheable_modules", list)
+        self._validate_type(
+            self.allow_calls_between_cacheable_modules,
+            "allow_calls_between_cacheable_modules",
+            bool,
+        )
+        self._validate_type(self.collect_native_inputs, "collect_native_inputs", bool)
 
         # gptq_factory is optional - if provided, it must be str or callable
         if self.gptq_factory is not None:
@@ -244,6 +270,18 @@ class UniversalGPTQConfig(GPTQConfig):
             if not hasattr(gptq, "native_inp"):
                 raise ValueError(f"{type(gptq)} does not have 'native_inp' attribute.")
 
+        for dtype_field in ("hessian_dtype", "inp_dtype"):
+            dtype_value = getattr(self, dtype_field)
+            if not isinstance(dtype_value, torch.dtype):
+                raise TypeError(
+                    f"{dtype_field} must be a torch.dtype. got {type(dtype_value)}"
+                )
+            if dtype_value not in (torch.float32, torch.float64):
+                raise ValueError(
+                    f"{dtype_field} must be torch.float32 or torch.float64. "
+                    f"got {dtype_value}"
+                )
+
         # use_orig_model_inference is incompatible with frontier-based execution
         if self.use_orig_model_inference:
             raise ValueError(
@@ -272,7 +310,7 @@ class UniversalGPTQConfig(GPTQConfig):
             return self.gptq_factory
 
         if isinstance(self.gptq_factory, str):
-            return _create_factory_from_class_path(self.gptq_factory)
+            return self._create_factory_from_class_path(self.gptq_factory)
 
         # Should never reach here due to validation
         raise TypeError(
@@ -280,32 +318,62 @@ class UniversalGPTQConfig(GPTQConfig):
             f"got {type(self.gptq_factory)}"
         )
 
+    @staticmethod
+    def _validate_type(val: Any, name: str, expected_type: type) -> None:
+        if not isinstance(val, expected_type):
+            if isinstance(expected_type, tuple):
+                expected_str = " or ".join(t.__name__ for t in expected_type)
+            else:
+                expected_str = expected_type.__name__
+            raise TypeError(f"{name} must be {expected_str}. got {type(val).__name__}")
 
-def _create_factory_from_class_path(class_path: str) -> "GPTQFactory":
-    """
-    Create a GPTQ factory from a fully-qualified class path.
+    def _create_factory_from_class_path(self, class_path: str) -> "GPTQFactory":
+        """
+        Create a GPTQ factory from a fully-qualified class path.
 
-    Example:
-        >>> factory = _create_factory_from_class_path(
-        ...     "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
-        ... )
-        >>> gptq = factory(nn.Linear(10, 10))
+        The factory inspects the target class's ``__init__`` signature and
+        forwards only the keyword arguments that the class accepts.  This keeps
+        the generic config decoupled from any specific GPTQ implementation:
+        any class whose constructor accepts ``normalize_H``, ``hessian_dtype``,
+        ``inp_dtype``, or ``gptq_v2_alpha`` will receive the corresponding
+        config values automatically, while classes that do not accept them
+        are simply called with ``layer`` alone.
 
-    Args:
-        class_path: Fully-qualified Python class path, e.g.,
-            "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
+        Example:
+            >>> factory = self._create_factory_from_class_path(
+            ...     "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
+            ... )
+            >>> gptq = factory(nn.Linear(10, 10))
 
-    Returns:
-        A factory function that takes a layer module and returns a GPTQ instance.
+        Args:
+            class_path: Fully-qualified Python class path, e.g.,
+                "tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ"
 
-    Raises:
-        ImportError: If the module cannot be imported.
-        AttributeError: If the class does not exist in the module.
-    """
-    import importlib
+        Returns:
+            A factory function that takes a layer module and returns a GPTQ instance.
 
-    module_path, class_name = class_path.rsplit(".", 1)
-    module = importlib.import_module(module_path)
-    gptq_class = getattr(module, class_name)
+        Raises:
+            ImportError: If the module cannot be imported.
+            AttributeError: If the class does not exist in the module.
+        """
+        import importlib
 
-    return lambda layer: gptq_class(layer)
+        module_path, class_name = class_path.rsplit(".", 1)
+        module = importlib.import_module(module_path)
+        gptq_class = getattr(module, class_name)
+
+        # Inspect the constructor signature and forward only the keyword
+        # arguments that the target class accepts.  This avoids hard-coding a
+        # specific class path and keeps the config generic.
+        sig = inspect.signature(gptq_class)
+        kwarg_names = (
+            "normalize_H",
+            "hessian_dtype",
+            "inp_dtype",
+            "gptq_v2_alpha",
+        )
+        kwargs = {
+            name: getattr(self, name) for name in kwarg_names if name in sig.parameters
+        }
+
+        return lambda layer: gptq_class(layer, **kwargs)
