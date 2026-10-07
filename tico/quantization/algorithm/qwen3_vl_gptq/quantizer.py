@@ -1684,6 +1684,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 normalize_H=gptq_conf.normalize_H,
                 hessian_dtype=gptq_conf.hessian_dtype,
                 inp_dtype=gptq_conf.inp_dtype,
+                gptq_v2_alpha=gptq_conf.gptq_v2_alpha,
             )
 
             full_name = module_name.get(submodule, local_name)
@@ -1781,7 +1782,6 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 actorder=gptq_conf.actorder,
                 static_groups=gptq_conf.static_groups,
                 verbose=gptq_conf.verbose,
-                alpha=gptq_conf.gptq_v2_alpha,
             )
 
             full_name = module_name.get(submodule, local_name)

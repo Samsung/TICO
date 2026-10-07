@@ -780,11 +780,11 @@ class TestGPTQPCorrection(unittest.TestCase):
       5. The P matrix is computed as ``alpha * triu(dXXT @ hinv^T, k=1) @ hinv``.
     """
 
-    def _make_gptq(self, rows=8, cols=8):
+    def _make_gptq(self, rows=8, cols=8, gptq_v2_alpha=0.25):
         """Create a GPTQ object with a small Linear layer and a configured quantizer."""
         torch.manual_seed(42)
         layer = nn.Linear(cols, rows, bias=False)
-        gptq = GPTQ(layer)
+        gptq = GPTQ(layer, gptq_v2_alpha=gptq_v2_alpha)
         gptq.quantizer.configure(bits=8, perchannel=True, sym=True)
         return gptq
 
@@ -847,19 +847,19 @@ class TestGPTQPCorrection(unittest.TestCase):
         rows, cols = 8, 8
 
         # --- run A: dXXT=None (GPTQv1) ---
-        gptq_a = self._make_gptq(rows, cols)
+        gptq_a = self._make_gptq(rows, cols, gptq_v2_alpha=0.0)
         self._add_random_batch(gptq_a, batch=16, cols=cols)
         w_before_a = gptq_a.layer.weight.data.clone()
-        gptq_a.fasterquant(blocksize=128, percdamp=0.01, alpha=0.0)
+        gptq_a.fasterquant(blocksize=128, percdamp=0.01)
         w_after_a = gptq_a.layer.weight.data.clone()
 
         # --- run B: dXXT set but alpha=0 ---
-        gptq_b = self._make_gptq(rows, cols)
+        gptq_b = self._make_gptq(rows, cols, gptq_v2_alpha=0.0)
         # Copy same weights and H so the two runs are comparable
         gptq_b.layer.weight.data = w_before_a.clone()
         self._add_random_batch(gptq_b, batch=16, cols=cols)
         gptq_b.dXXT = torch.randn(cols, cols)  # non-zero dXXT
-        gptq_b.fasterquant(blocksize=128, percdamp=0.01, alpha=0.0)
+        gptq_b.fasterquant(blocksize=128, percdamp=0.01)
         w_after_b = gptq_b.layer.weight.data.clone()
 
         self.assertTrue(torch.allclose(w_after_a, w_after_b, atol=1e-6))
@@ -875,19 +875,19 @@ class TestGPTQPCorrection(unittest.TestCase):
         rows, cols = 8, 8
 
         # --- baseline: alpha=0 ---
-        gptq_base = self._make_gptq(rows, cols)
+        gptq_base = self._make_gptq(rows, cols, gptq_v2_alpha=0.0)
         self._add_random_batch(gptq_base, batch=16, cols=cols)
         w_orig = gptq_base.layer.weight.data.clone()
         gptq_base.dXXT = torch.randn(cols, cols)
-        gptq_base.fasterquant(blocksize=128, percdamp=0.01, alpha=0.0)
+        gptq_base.fasterquant(blocksize=128, percdamp=0.01)
         w_base = gptq_base.layer.weight.data.clone()
 
         # --- with P-correction: alpha=0.5 ---
-        gptq_p = self._make_gptq(rows, cols)
+        gptq_p = self._make_gptq(rows, cols, gptq_v2_alpha=0.5)
         gptq_p.layer.weight.data = w_orig.clone()
         self._add_random_batch(gptq_p, batch=16, cols=cols)
         gptq_p.dXXT = gptq_base.dXXT.clone()  # same dXXT
-        gptq_p.fasterquant(blocksize=128, percdamp=0.01, alpha=0.5)
+        gptq_p.fasterquant(blocksize=128, percdamp=0.01)
         w_p = gptq_p.layer.weight.data.clone()
 
         self.assertFalse(torch.allclose(w_base, w_p, atol=1e-6))
@@ -902,14 +902,14 @@ class TestGPTQPCorrection(unittest.TestCase):
         in-block P-correction matches ``w_col @ P1[i, i:]``."""
         rows, cols = 6, 6
 
-        gptq = self._make_gptq(rows, cols)
+        alpha = 0.25
+        gptq = self._make_gptq(rows, cols, gptq_v2_alpha=alpha)
         self._add_random_batch(gptq, batch=32, cols=cols)
 
         # Set a known dXXT
         torch.manual_seed(99)
         dXXT = torch.randn(cols, cols)
         gptq.dXXT = dXXT.clone()
-        alpha = 0.25
 
         # Reproduce the hinv computation from fasterquant
         h = gptq.H.clone()
@@ -936,7 +936,7 @@ class TestGPTQPCorrection(unittest.TestCase):
         self.assertTrue(torch.allclose(torch.diag(P_ref), torch.zeros(cols), atol=1e-6))
 
         # Run fasterquant and verify it completes without error
-        gptq.fasterquant(blocksize=128, percdamp=0.01, alpha=alpha)
+        gptq.fasterquant(blocksize=128, percdamp=0.01)
         # After fasterquant, the layer weight should have been updated
         self.assertIsNotNone(gptq.layer.weight.data)
 
@@ -1136,7 +1136,14 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
     """
 
     def _make_gptq_with_state(
-        self, rows, cols, batch=32, seed_w=42, seed_inp=123, bits=8
+        self,
+        rows,
+        cols,
+        batch=32,
+        seed_w=42,
+        seed_inp=123,
+        bits=8,
+        gptq_v2_alpha=0.25,
     ):
         """
         Create a GPTQ object, add a batch, and return:
@@ -1144,7 +1151,7 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         """
         torch.manual_seed(seed_w)
         layer = nn.Linear(cols, rows, bias=False)
-        gptq = GPTQ(layer)
+        gptq = GPTQ(layer, gptq_v2_alpha=gptq_v2_alpha)
         gptq.quantizer.configure(bits=bits, perchannel=True, sym=False)
 
         torch.manual_seed(seed_inp)
@@ -1163,8 +1170,8 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         alpha = 0.50
 
         # Create two identical GPTQ objects
-        gptq_actual = self._make_gptq_with_state(rows, cols)
-        gptq_ref = self._make_gptq_with_state(rows, cols)
+        gptq_actual = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
+        gptq_ref = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
 
         # Verify they have identical state
         self.assertTrue(
@@ -1189,7 +1196,6 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
             percdamp=0.01,
             groupsize=-1,
             actorder=True,
-            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1221,8 +1227,8 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         alpha = 0.25
         blocksize = 4  # 3 blocks
 
-        gptq_actual = self._make_gptq_with_state(rows, cols)
-        gptq_ref = self._make_gptq_with_state(rows, cols)
+        gptq_actual = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
+        gptq_ref = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
 
         torch.manual_seed(99)
         dXXT = torch.randn(cols, cols)
@@ -1238,7 +1244,6 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
             percdamp=0.01,
             groupsize=-1,
             actorder=True,
-            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1269,8 +1274,8 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         alpha = 0.25
         blocksize = 4
 
-        gptq_actual = self._make_gptq_with_state(rows, cols)
-        gptq_ref = self._make_gptq_with_state(rows, cols)
+        gptq_actual = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
+        gptq_ref = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
 
         torch.manual_seed(99)
         dXXT = torch.randn(cols, cols)
@@ -1286,7 +1291,6 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
             percdamp=0.01,
             groupsize=-1,
             actorder=True,
-            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1317,8 +1321,8 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         alpha = 0.0
         blocksize = 4
 
-        gptq_actual = self._make_gptq_with_state(rows, cols)
-        gptq_ref = self._make_gptq_with_state(rows, cols)
+        gptq_actual = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
+        gptq_ref = self._make_gptq_with_state(rows, cols, gptq_v2_alpha=alpha)
 
         torch.manual_seed(99)
         dXXT = torch.randn(cols, cols)
@@ -1334,7 +1338,6 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
             percdamp=0.01,
             groupsize=-1,
             actorder=False,
-            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 
@@ -1364,8 +1367,10 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
         alpha = 0.5
         blocksize = 5  # 2 blocks
 
-        gptq_actual = self._make_gptq_with_state(rows, cols, batch=48)
-        gptq_ref = self._make_gptq_with_state(rows, cols, batch=48)
+        gptq_actual = self._make_gptq_with_state(
+            rows, cols, batch=48, gptq_v2_alpha=alpha
+        )
+        gptq_ref = self._make_gptq_with_state(rows, cols, batch=48, gptq_v2_alpha=alpha)
 
         torch.manual_seed(77)
         dXXT = torch.randn(cols, cols)
@@ -1381,7 +1386,6 @@ class TestGPTQv2FinalWeightReference(unittest.TestCase):
             percdamp=0.01,
             groupsize=-1,
             actorder=True,
-            alpha=alpha,
         )
         w_actual = gptq_actual.layer.weight.data.clone().float()
 

@@ -27,6 +27,7 @@ import torch.nn as nn
 from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.universal_gptq.quantizer import (
     find_multicall_modules,
+    GPTQFactory,
     UniversalGPTQQuantizer,
 )
 from tico.quantization.config.gptq import UniversalGPTQConfig
@@ -1662,6 +1663,28 @@ class TestGPTQFactoryResolution(unittest.TestCase):
             collect_native_inputs=True, gptq_factory=gptaQ_factory_with_native_inputs
         )
         config.validate()
+
+    def test_string_factory_forwards_config_kwargs_to_gptq(self):
+        """Factory created from a string path must forward config kwargs to GPTQ."""
+        cfg = UniversalGPTQConfig(
+            gptq_factory="tico.quantization.algorithm.qwen3_vl_gptq.gptq.GPTQ",
+            hessian_dtype=torch.float64,
+            inp_dtype=torch.float64,
+            gptq_v2_alpha=0.5,
+            normalize_H=False,
+        )
+
+        factory = cfg.resolve_gptq_factory()
+        self.assertIsNotNone(factory)
+        assert callable(factory)
+
+        layer = nn.Linear(10, 10, bias=False)
+        gptq = factory(layer)
+
+        self.assertEqual(getattr(gptq, "hessian_dtype"), torch.float64)
+        self.assertEqual(getattr(gptq, "inp_dtype"), torch.float64)
+        self.assertEqual(getattr(gptq, "gptq_v2_alpha"), 0.5)
+        self.assertEqual(getattr(gptq, "normalize_H"), False)
 
 
 class TestGPTAQNativeIORegression(unittest.TestCase):

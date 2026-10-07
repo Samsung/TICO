@@ -274,6 +274,7 @@ class GPTQ:
         normalize_H: bool = True,
         hessian_dtype: torch.dtype = torch.float32,
         inp_dtype: torch.dtype = torch.float32,
+        gptq_v2_alpha: float = 0.25,
     ):
         """
         Initialize GPTQ state for a single layer.
@@ -291,12 +292,16 @@ class GPTQ:
                 the GPTQv2 dXXT cross-term (dX @ inp.T). Hessian storage and
                 factorization follow hessian_dtype. Defaults to torch.float32
                 it is faster and uses less memory.
+            gptq_v2_alpha: Scaling factor for the GPTQv2 P-correction matrix.
+                A value of 0 disables the correction (standard GPTQ). Values
+                around 0.25 provide the best empirical results.
         """
         self.layer = layer
         self.dev = self.layer.weight.device
         self.normalize_H = normalize_H
         self.hessian_dtype = hessian_dtype
         self.inp_dtype = inp_dtype
+        self.gptq_v2_alpha = gptq_v2_alpha
 
         w = layer.weight.data.clone()
         if isinstance(layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
@@ -495,7 +500,6 @@ class GPTQ:
         actorder: bool = False,
         static_groups: bool = False,
         verbose: bool = False,
-        alpha: float = 0.25,
     ) -> None:
         """
         Run blockwise GPTQ quantization on the layer weights.
@@ -584,7 +588,7 @@ class GPTQ:
         P = None
         if self.dXXT is not None:
             dXXT = self.dXXT.to(hinv.dtype)
-            P = alpha * ((dXXT @ hinv.T).triu(diagonal=1)) @ hinv
+            P = self.gptq_v2_alpha * ((dXXT @ hinv.T).triu(diagonal=1)) @ hinv
 
         # Downcast to float32 for the weight-update loop (w is float32);
         # the hessian_dtype precision of H/dXXT and of the Cholesky
