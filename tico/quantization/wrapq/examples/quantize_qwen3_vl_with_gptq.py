@@ -1539,28 +1539,18 @@ def main() -> None:
 
     dev_map = "auto" if args.device != "cpu" else "cpu"
 
-    try:
-        from transformers import AutoModelForImageTextToText
+    # Every Transformers release that ships Qwen3-VL also exports this auto
+    # class, so load with it directly and let any failure propagate as-is.
+    from transformers import AutoModelForImageTextToText
 
-        model = AutoModelForImageTextToText.from_pretrained(
-            args.model,
-            dtype=dtype,
-            trust_remote_code=args.trust_remote_code,
-            token=args.hf_token,
-            cache_dir=args.cache_dir,
-            device_map=dev_map,
-        )
-    except Exception:
-        from transformers import AutoModelForVision2Seq
-
-        model = AutoModelForVision2Seq.from_pretrained(
-            args.model,
-            dtype=dtype,
-            trust_remote_code=args.trust_remote_code,
-            token=args.hf_token,
-            cache_dir=args.cache_dir,
-            device_map=dev_map,
-        )
+    model = AutoModelForImageTextToText.from_pretrained(
+        args.model,
+        dtype=dtype,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
+        cache_dir=args.cache_dir,
+        device_map=dev_map,
+    )
 
     model.eval()
 

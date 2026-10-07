@@ -30,9 +30,8 @@ def load_model_and_processor(model_id: str, torch_dtype: torch.dtype):
     """
     Load a vision-language model and its processor.
 
-    The loader first tries the newer Hugging Face auto class for image-text
-    generation models and falls back to the older vision-to-sequence class for
-    compatibility with older `transformers` versions.
+    The model is loaded with ``AutoModelForImageTextToText``; a loading
+    failure propagates unchanged instead of being retried with another class.
 
     Args:
         model_id: Hugging Face model ID or local model path.
@@ -47,22 +46,13 @@ def load_model_and_processor(model_id: str, torch_dtype: torch.dtype):
 
     processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
 
-    try:
-        from transformers import AutoModelForImageTextToText
+    from transformers import AutoModelForImageTextToText
 
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_id,
-            dtype=torch_dtype,
-            trust_remote_code=True,
-        )
-    except ImportError:
-        from transformers import AutoModelForVision2Seq
-
-        model = AutoModelForVision2Seq.from_pretrained(
-            model_id,
-            dtype=torch_dtype,
-            trust_remote_code=True,
-        )
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_id,
+        dtype=torch_dtype,
+        trust_remote_code=True,
+    )
 
     return processor, model
 

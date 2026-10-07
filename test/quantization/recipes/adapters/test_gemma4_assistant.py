@@ -30,16 +30,22 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
+import transformers
 
 from tico.quantization import convert, prepare
 from tico.quantization.recipes.adapters import get_adapter
 from tico.quantization.recipes.adapters.gemma4_assistant import (
+    _load_causal_lm,
     Gemma4AssistantAdapter,
     TARGET_MODEL_ENV_VAR,
 )
 from tico.quantization.recipes.config import load_recipe_config
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.wrappers.gemma4_assistant.static_inputs import (
+    GEMMA4_ASSISTANT_CORE_INPUT_NAMES,
+    GEMMA4_ASSISTANT_CORE_OUTPUT_NAMES,
+)
 from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     assistant_layer_type_head_dim,
 )
@@ -86,6 +92,79 @@ def _make_sample(model: torch.nn.Module, kv_len: int = 10) -> dict:
         },
         "use_cache": False,
     }
+
+
+class _RecordingAutoClass:
+    """Record ``from_pretrained`` calls and return a result or raise an error."""
+
+    def __init__(self, result=None, error=None):
+        self.result = result
+        self.error = error
+        self.calls: list[tuple[str, dict]] = []
+
+    def from_pretrained(self, name, **kwargs):
+        self.calls.append((name, kwargs))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class TestGemma4AssistantCausalLMLoader(unittest.TestCase):
+    """``_load_causal_lm`` uses one auto class and never retries another."""
+
+    def test_loader_failure_propagates_without_image_text_retry(self):
+        for error in (
+            ValueError("synthetic unrecognized config"),
+            OSError("synthetic missing repository"),
+            RuntimeError("synthetic loader failure"),
+        ):
+            with self.subTest(error=type(error).__name__):
+                causal = _RecordingAutoClass(error=error)
+                image_text = _RecordingAutoClass(result=object())
+                with patch.object(
+                    transformers, "AutoModelForCausalLM", causal
+                ), patch.object(
+                    transformers, "AutoModelForImageTextToText", image_text
+                ):
+                    with self.assertRaises(type(error)) as raised:
+                        _load_causal_lm("org/fake-target", dtype=torch.float32)
+
+                self.assertIs(raised.exception, error)
+                self.assertIsNone(raised.exception.__context__)
+                self.assertEqual(len(causal.calls), 1)
+                self.assertEqual(image_text.calls, [])
+
+    def test_successful_load_forwards_arguments_once(self):
+        model = object()
+        causal = _RecordingAutoClass(result=model)
+        image_text = _RecordingAutoClass(result=object())
+        with patch.object(transformers, "AutoModelForCausalLM", causal), patch.object(
+            transformers, "AutoModelForImageTextToText", image_text
+        ):
+            result = _load_causal_lm(
+                "org/fake-target",
+                dtype=torch.float32,
+                trust_remote_code=True,
+                token="hf_fake",
+                cache_dir="fake-cache-dir",
+            )
+
+        self.assertIs(result, model)
+        self.assertEqual(
+            causal.calls,
+            [
+                (
+                    "org/fake-target",
+                    {
+                        "dtype": torch.float32,
+                        "trust_remote_code": True,
+                        "token": "hf_fake",
+                        "cache_dir": "fake-cache-dir",
+                    },
+                )
+            ],
+        )
+        self.assertEqual(image_text.calls, [])
 
 
 class TestGemma4AssistantAdapterRegistry(unittest.TestCase):
@@ -249,7 +328,9 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
 
         class _FakeTarget:
             def generate(self, *, input_ids, attention_mask, assistant_model, **kw):
-                generate_calls.append(kw)
+                generate_calls.append(
+                    {"input_ids": input_ids, "attention_mask": attention_mask, **kw}
+                )
                 # Mimic the MTP candidate generator: call the assistant with
                 # the exact draft kwargs twice per prompt.
                 for _ in range(2):
@@ -266,18 +347,26 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
         )
         ctx.tokenizer = type("Tok", (), {"pad_token_id": 0, "eos_token_id": 1})()
 
+        # Calibration prompts follow the build_calibration_inputs contract: a
+        # dict carrying input_ids and an explicit (possibly left-padded) mask.
+        prompt = {
+            "input_ids": torch.tensor([[0, 0, 5, 6]], dtype=torch.long),
+            "attention_mask": torch.tensor([[0, 0, 1, 1]], dtype=torch.long),
+        }
         with patch.object(
             Gemma4AssistantAdapter, "_load_target_model", return_value=_FakeTarget()
         ):
-            self.adapter.forward_calibration(
-                ctx,
-                prepared,
-                [torch.ones(1, 4, dtype=torch.long)],
-                desc="test",
-            )
+            self.adapter.forward_calibration(ctx, prepared, [prompt], desc="test")
 
         self.assertEqual(len(generate_calls), 1)
         self.assertEqual(generate_calls[0]["max_new_tokens"], 4)
+        self.assertEqual(generate_calls[0]["pad_token_id"], 0)
+        self.assertTrue(
+            torch.equal(generate_calls[0]["input_ids"], prompt["input_ids"])
+        )
+        self.assertTrue(
+            torch.equal(generate_calls[0]["attention_mask"], prompt["attention_mask"])
+        )
         converted = convert(prepared)
         missing = [
             name
@@ -312,6 +401,7 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
                 "enabled": True,
                 "artifacts": [
                     "ptq_checkpoint",
+                    "assistant_core_circle",
                     "assistant_sparse_head",
                     "assistant_manifest",
                 ],
@@ -325,6 +415,7 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
 
             output_dir = Path(tmpdir)
             self.assertTrue((output_dir / "quantized_model.pt").exists())
+            self.assertTrue((output_dir / "gemma4_assistant_core.q.circle").exists())
             artifact_path = output_dir / "gemma4_assistant_sparse_head.pt"
             manifest_path = output_dir / "gemma4_assistant_manifest.json"
             self.assertTrue(artifact_path.exists())
@@ -334,8 +425,27 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
             self.assertEqual(manifest["static_shape"]["full_kv_length"], 16)
             self.assertEqual(manifest["static_shape"]["sliding_kv_length"], 8)
             self.assertEqual(
-                [entry["name"] for entry in manifest["outputs"]],
-                ["projected_state", "assistant_hidden", "centroid_logits"],
+                manifest["core_artifact"], "gemma4_assistant_core.q.circle"
+            )
+
+            # I/O contracts are read back from the exported Circle graph. Inputs
+            # keep the ABI names given to the example tensors; outputs follow
+            # the positional ABI order with their actual quantized shapes.
+            self.assertEqual(
+                [entry["name"].split("::")[-1] for entry in manifest["inputs"]],
+                list(GEMMA4_ASSISTANT_CORE_INPUT_NAMES),
+            )
+            assistant = ctx.model.wrapped
+            self.assertEqual(
+                [(entry["dtype"], entry["shape"]) for entry in manifest["outputs"]],
+                [
+                    ("int16", [1, 1, int(assistant.backbone_hidden_size)]),
+                    ("int16", [1, 1, int(assistant.hidden_size)]),
+                    ("int16", [1, 1, int(assistant.masked_embedding.num_centroids)]),
+                ],
+            )
+            self.assertEqual(
+                len(manifest["outputs"]), len(GEMMA4_ASSISTANT_CORE_OUTPUT_NAMES)
             )
             self.assertEqual(manifest["sparse_head"]["execution_location"], "host")
             self.assertTrue(manifest["sparse_head"]["token_ordering_sha256"])
@@ -352,11 +462,34 @@ class TestGemma4AssistantAdapterWithTinyModel(unittest.TestCase):
                 Gemma4AssistantSparseHead,
             )
 
+            # The artifact stores the integer weight; the host head dequantizes
+            # it lazily, so compare the dequantized view.
             head = Gemma4AssistantSparseHead.from_artifact(artifact)
             expected = ctx.model.wrapped._lm_head_weight()
             torch.testing.assert_close(
-                head.lm_head_weight, expected, atol=1e-6, rtol=1e-6
+                head._get_dequantized_weight(), expected, atol=1e-6, rtol=1e-6
             )
+
+    def test_export_manifest_requires_core_circle_artifact(self):
+        """The manifest reads I/O contracts from the Circle graph, so it must
+        not be written when assistant_core_circle is not exported."""
+        cfg: dict = {
+            "model": {"family": "gemma4_assistant", "name_or_path": "tiny"},
+            "model_args": {"assistant": {"full_kv_length": 16, "sliding_kv_length": 8}},
+            "pipeline": [
+                {"name": "ptq", "activation": "int16", "linear_weight": "uint8"}
+            ],
+            "export": {
+                "enabled": True,
+                "artifacts": ["assistant_sparse_head", "assistant_manifest"],
+            },
+        }
+        ctx = self._converted_ctx(cfg)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg["export"]["output_dir"] = tmpdir
+            with self.assertRaisesRegex(RuntimeError, "assistant_core_circle"):
+                self.adapter.export(ctx)
+            self.assertFalse((Path(tmpdir) / "gemma4_assistant_manifest.json").exists())
 
     def test_export_core_circle_requires_converted_model(self):
         """Floating-point models must be rejected by artifact export."""
