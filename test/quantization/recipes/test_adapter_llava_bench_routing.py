@@ -85,9 +85,7 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
             evaluate_llava_bench=DEFAULT,
             print_coco_score_results=DEFAULT,
         ) as mocks:
-            mocks["evaluate_and_print_llava_bench_judge"].return_value = {
-                "count": 1
-            }
+            mocks["evaluate_and_print_llava_bench_judge"].return_value = {"count": 1}
             mocks["evaluate_llava_bench"].return_value = {
                 "CIDEr": 0.5,
                 "total_count": 1,
@@ -429,9 +427,7 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                     },
                 )
                 self.assertIs(ctx.model.config.use_cache, expected[family])
-                self.assertIs(
-                    ctx.model.config.text_config.use_cache, expected[family]
-                )
+                self.assertIs(ctx.model.config.text_config.use_cache, expected[family])
 
     def test_llava_runs_between_coco_and_mapping_targets(self):
         """LLaVA keeps its position after COCO and before Video-MME/MMMU/PPL."""
