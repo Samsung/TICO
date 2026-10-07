@@ -27,9 +27,7 @@ from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
-from tico.quantization.recipes.evaluation.llava_bench_judge import (
-    evaluate_and_print_llava_bench_judge,
-)
+from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
 from tico.quantization.recipes.evaluation.selection import (
@@ -40,7 +38,6 @@ from tico.quantization.recipes.evaluation.selection import (
 from tico.quantization.recipes.evaluation.video_mme import evaluate_and_print_video_mme
 from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
-    evaluate_llava_bench,
     evaluate_vlm_text_ppl,
     evaluate_vlm_text_ppl_chat_prefix,
     evaluate_vqa_tasks,
@@ -428,84 +425,16 @@ class Gemma4Adapter(ModelAdapter):
             )
             print_coco_score_results("\n=== COCO Evaluation ===", coco_results)
 
-        raw_llava_cfg = eval_cfg.get("llava_bench")
-        llava_default_enabled = (
-            bool(raw_llava_cfg.get("enabled", False))
-            if isinstance(raw_llava_cfg, Mapping)
-            else bool(raw_llava_cfg)
+        run_llava_bench_evaluation(
+            eval_cfg=eval_cfg,
+            model=ctx.model,
+            processor=ctx.processor,
+            device=str(ctx.device),
+            model_cfg=ctx.cfg.get("model", {}),
+            runtime_cfg=ctx.cfg.get("runtime", {}),
+            default_n_samples=n_samples,
+            default_max_seq_len=max_seq_len,
         )
-        if should_run_evaluation(
-            eval_cfg,
-            "llava_bench",
-            default_enabled=llava_default_enabled,
-        ):
-            if isinstance(raw_llava_cfg, Mapping):
-                llava_cfg = raw_llava_cfg
-                mode = str(llava_cfg.get("mode", "judge")).lower()
-                if mode in {"judge", "llm_judge"}:
-                    evaluate_and_print_llava_bench_judge(
-                        model=ctx.model,
-                        processor=ctx.processor,
-                        device=str(ctx.device),
-                        llava_cfg=llava_cfg,
-                        model_cfg=ctx.cfg.get("model", {}),
-                        runtime_cfg=ctx.cfg.get("runtime", {}),
-                        default_n_samples=n_samples,
-                        default_max_seq_len=max_seq_len,
-                    )
-                elif mode in {"legacy", "coco", "caption"}:
-                    llava_results = evaluate_llava_bench(
-                        model=ctx.model,
-                        processor=ctx.processor,
-                        device=str(ctx.device),
-                        n_samples=int(llava_cfg.get("n_samples", n_samples)),
-                        max_seq_len=llava_cfg.get(
-                            "max_seq_len",
-                            max_seq_len,
-                        ),
-                    )
-                    print_coco_score_results(
-                        "\n=== LLaVA Bench Legacy COCO-style Evaluation ===",
-                        llava_results,
-                    )
-                else:
-                    raise ValueError(
-                        "evaluation.llava_bench.mode must be one of "
-                        "{'judge', 'llm_judge', 'legacy', 'coco', 'caption'}, "
-                        f"got {mode!r}."
-                    )
-            elif raw_llava_cfg is None or raw_llava_cfg is False:
-                evaluate_and_print_llava_bench_judge(
-                    model=ctx.model,
-                    processor=ctx.processor,
-                    device=str(ctx.device),
-                    llava_cfg={},
-                    model_cfg=ctx.cfg.get("model", {}),
-                    runtime_cfg=ctx.cfg.get("runtime", {}),
-                    default_n_samples=n_samples,
-                    default_max_seq_len=max_seq_len,
-                )
-            elif raw_llava_cfg is True:
-                print(
-                    "[WARNING] evaluation.llava_bench=true uses the legacy "
-                    "COCO-style CIDEr/BLEU path. Prefer the nested judge config: "
-                    "evaluation.llava_bench.enabled=true, mode=judge."
-                )
-                llava_results = evaluate_llava_bench(
-                    model=ctx.model,
-                    processor=ctx.processor,
-                    device=str(ctx.device),
-                    n_samples=n_samples,
-                    max_seq_len=max_seq_len,
-                )
-                print_coco_score_results(
-                    "\n=== Llava Bench Evaluation ===",
-                    llava_results,
-                )
-            else:
-                raise TypeError(
-                    "evaluation.llava_bench must be a mapping, boolean, or null."
-                )
 
         if should_run_mapping_evaluation(eval_cfg, "videomme"):
             videomme = get_mapping_evaluation_config(eval_cfg, "videomme")
