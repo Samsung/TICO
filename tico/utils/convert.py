@@ -52,10 +52,12 @@ from tico.passes.legalize_predefined_layout_operators import (
     LegalizePreDefinedLayoutOperators,
 )
 from tico.passes.lower_copy import LowerCopy
+from tico.passes.lower_multi_index_to_gather_nd import LowerMultiIndexToGatherNd
 from tico.passes.lower_pow2_to_mul import LowerPow2ToMul
 from tico.passes.lower_to_resize_nearest_neighbor import LowerToResizeNearestNeighbor
 from tico.passes.lower_to_slice import passes as LowerToSlicePasses
 from tico.passes.merge_consecutive_cat import MergeConsecutiveCat
+from tico.passes.remove_empty_cat_inputs import RemoveEmptyCatInputs
 from tico.passes.remove_nop import RemoveNop
 from tico.passes.remove_redundant_assert_nodes import RemoveRedundantAssertionNodes
 from tico.passes.remove_redundant_expand import RemoveRedundantExpand
@@ -254,6 +256,7 @@ def convert_exported_module_to_circle(
             RemoveNop(),
             LowerCopy(),
             ConvertGatherToGatherNd(),
+            LowerMultiIndexToGatherNd(),
             ConvertSymSizeToCircleShape(),
             ConvertLayoutOpToReshape(),
             RestoreLinear(),
@@ -272,6 +275,7 @@ def convert_exported_module_to_circle(
             FuseRedundantReshapeToMean(),
             *RemoveRedundantViewPasses(),
             RemoveRedundantToCopy(),
+            RemoveEmptyCatInputs(),
             MergeConsecutiveCat(),
             CastMixedTypeArgs(preserve_ep_invariant=True),
             ConstPropPass(),

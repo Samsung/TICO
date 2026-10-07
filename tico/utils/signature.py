@@ -32,6 +32,52 @@ def is_dynamic_cache_instance(value):
         return False
 
 
+def _uses_layer_based_cache() -> bool:
+    """
+    Return whether the installed transformers stores ``DynamicCache`` tensors in
+    ``cache.layers`` (``DynamicLayer`` objects) instead of the legacy
+    ``key_cache`` / ``value_cache`` lists.
+
+    This mirrors the feature detection of ``tico.utils.pytree_utils``, which owns
+    the pytree flattening used at export time.
+    """
+    try:
+        from transformers.cache_utils import DynamicLayer  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def flatten_dynamic_cache(cache) -> list[tuple[str, torch.Tensor]]:
+    """
+    Return ``(suffix, tensor)`` pairs of a ``DynamicCache`` in the order in which
+    ``torch.export`` flattens the cache (see ``tico.utils.pytree_utils``).
+
+    The suffix matches the placeholder name that ``torch.export`` derives from the
+    pytree key path, so ``f"{kwarg_name}_{suffix}"`` is the Circle input name.
+
+    * Layer-based cache: ``layers_<i>_keys``, ``layers_<i>_values`` per layer.
+    * Legacy cache: every ``key_cache_<i>`` followed by every ``value_cache_<i>``.
+    """
+    if _uses_layer_based_cache():
+        pairs: list[tuple[str, torch.Tensor]] = []
+        for idx, layer in enumerate(cache.layers):
+            pairs.append((f"layers_{idx}_keys", layer.keys))
+            pairs.append((f"layers_{idx}_values", layer.values))
+        return pairs
+
+    # NOTE The legacy tensor order is: key_in → key_out → value_in → value_out
+    #
+    # Refer to https://github.com/huggingface/transformers/blob/3457e8e73e4f5532cc69059682b1ba4484d7e7e8/src/transformers/cache_utils.py#L557
+    # ```
+    # self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
+    # self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
+    # ```
+    pairs = [(f"key_cache_{idx}", t) for idx, t in enumerate(cache.key_cache)]
+    pairs += [(f"value_cache_{idx}", t) for idx, t in enumerate(cache.value_cache)]
+    return pairs
+
+
 def flatten_and_convert_kwargs(kwargs: dict) -> dict[str, torch.Tensor]:
     result = {}  # type: ignore[var-annotated]
     for k, v in kwargs.items():
@@ -56,11 +102,8 @@ def flatten_and_convert_kwargs(kwargs: dict) -> dict[str, torch.Tensor]:
             unpack_recursive(k, v, result)
         elif is_dynamic_cache_instance(v):
             # 2. handle DynamicCache
-            for idx, cache_val in enumerate(v.key_cache):
-                result[f"{k}_key_cache_{idx}"] = cache_val
-
-            for idx, cache_val in enumerate(v.value_cache):
-                result[f"{k}_value_cache_{idx}"] = cache_val
+            for suffix, cache_val in flatten_dynamic_cache(v):
+                result[f"{k}_{suffix}"] = cache_val
         else:
             result[k] = v
 
@@ -83,20 +126,9 @@ def flatten_and_convert_args(args: Sequence) -> tuple:
             continue
 
         # 2. handle DynamicCache
-        if is_dynamic_cache_available():
-            from transformers.cache_utils import DynamicCache
-
-            if isinstance(item, DynamicCache):
-                # NOTE The tensor order is: key_in → key_out → value_in → value_out
-                #
-                # Refer to https://github.com/huggingface/transformers/blob/3457e8e73e4f5532cc69059682b1ba4484d7e7e8/src/transformers/cache_utils.py#L557
-                # ```
-                # self.key_cache[layer_idx] = torch.cat([self.key_cache[layer_idx], key_states], dim=-2)
-                # self.value_cache[layer_idx] = torch.cat([self.value_cache[layer_idx], value_states], dim=-2)
-                # ```
-                result.extend(item.key_cache)
-                result.extend(item.value_cache)
-                continue
+        if is_dynamic_cache_instance(item):
+            result.extend(tensor for _, tensor in flatten_dynamic_cache(item))
+            continue
 
         # 3. Convert to tensors
         result.append(item if isinstance(item, torch.Tensor) else torch.tensor(item))

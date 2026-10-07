@@ -203,6 +203,7 @@ ExtractDtypeKwargsPass
 RemoveNop
 LowerCopy
 ConvertGatherToGatherNd
+LowerMultiIndexToGatherNd
 ConvertSymSizeToCircleShape
 ConvertLayoutOpToReshape
 RestoreLinear
@@ -221,6 +222,7 @@ RemoveRedundantSlice
 FuseRedundantReshapeToMean
 RemoveRedundantViewPasses
 RemoveRedundantToCopy
+RemoveEmptyCatInputs
 MergeConsecutiveCat
 CastMixedTypeArgs(preserve_ep_invariant=True)
 ConstPropPass
