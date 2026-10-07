@@ -191,12 +191,13 @@ class Qwen3VLAdapter(ModelAdapter):
         num_text_layers = self.get_num_text_layers(ctx.model)
         num_deepstack_mergers = self.get_num_deepstack_mergers(ctx.model)
 
+        # Copy the mappings that are written below so grid_thw normalization
+        # lands only in the builder arguments, never in the recipe cfg.
         model_args = dict(ctx.cfg.get("model_args", {}))
-        if "vision" not in model_args:
-            model_args["vision"] = {}
-        vision_args = model_args["vision"]
+        vision_args = dict(model_args.get("vision", {}))
         if "grid_thw" in vision_args:
             vision_args["grid_thw"] = tuple(vision_args["grid_thw"])
+        model_args["vision"] = vision_args
 
         return build_qwen3_vl_ptq_config(
             num_vision_blocks=num_vision_blocks,

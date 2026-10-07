@@ -22,6 +22,7 @@ except ModuleNotFoundError:
 install_optional_dependency_stubs()
 
 import contextlib
+import copy
 import io
 import unittest
 from types import SimpleNamespace
@@ -33,6 +34,7 @@ import tico.quantization.recipes.data.vlm as vlm_data
 import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
 
 import torch
+from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.wrapq.dtypes import DType
@@ -60,7 +62,55 @@ def _fake_qwen_model():
     )
 
 
+def _ptq_stage_cfg() -> dict[str, Any]:
+    """Return a small PTQ stage config shared by the build_ptq_config tests."""
+    return {
+        "activation": "int16",
+        "linear_weight": 4,
+        "vision_patch_embed_weight": 8,
+        "embedding_weight": 8,
+        "lm_head_weight": 4,
+        "spin_rotation_weight": "int16",
+        "norm": "int16",
+        "norm_weight": "int16",
+        "quantize_vision": True,
+        "quantize_text": False,
+        "quantize_lm_head": True,
+        "strict_wrap": False,
+    }
+
+
+def _vision_recipe_cfg() -> dict[str, Any]:
+    """Return a recipe cfg whose vision.grid_thw is a YAML-style list."""
+    return {
+        "model_args": {
+            "profile": "npu_export",
+            "vision": {
+                "grid_thw": [1, 8, 8],
+                "visual_start_idx": 0,
+                "spatial_merge_size": 2,
+            },
+        }
+    }
+
+
 class TestQwen3VLAdapter(unittest.TestCase):
+    def assert_recipe_cfg_untouched(
+        self,
+        cfg: dict[str, Any],
+        snapshot: dict[str, Any],
+        model_args: Any,
+        vision_args: Any,
+        grid_thw: Any,
+    ) -> None:
+        """Assert cfg still holds the same nested objects and values as before."""
+        self.assertEqual(cfg, snapshot)
+        self.assertIs(cfg["model_args"], model_args)
+        self.assertIs(cfg["model_args"]["vision"], vision_args)
+        self.assertIs(cfg["model_args"]["vision"]["grid_thw"], grid_thw)
+        self.assertIs(type(grid_thw), list)
+        self.assertEqual(grid_thw, [1, 8, 8])
+
     def test_build_ptq_config_uses_architecture_counts_and_model_args(self):
         """Qwen3VLAdapter should infer architecture counts before building PTQ config."""
         captured: dict[str, Any] = {}
@@ -69,51 +119,164 @@ class TestQwen3VLAdapter(unittest.TestCase):
             captured.update(kwargs)
             return {"ptq": "qwen"}
 
-        ctx = RecipeContext(
-            cfg={
-                "model_args": {
-                    "vision": {
-                        "grid_thw": [1, 8, 8],
-                        "visual_start_idx": 0,
-                        "spatial_merge_size": 2,
-                    }
-                }
-            },
-            adapter=Qwen3VLAdapter(),
-            model=_fake_qwen_model(),
-        )
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        stage_cfg = _ptq_stage_cfg()
+        stage_snapshot = copy.deepcopy(stage_cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
 
         with patch.object(
             qwen_mod, "build_qwen3_vl_ptq_config", fake_build_qwen3_vl_ptq_config
         ):
-            result = Qwen3VLAdapter().build_ptq_config(
-                ctx,
-                {
-                    "activation": "int16",
-                    "linear_weight": 4,
-                    "vision_patch_embed_weight": 8,
-                    "embedding_weight": 8,
-                    "lm_head_weight": 4,
-                    "spin_rotation_weight": "int16",
-                    "norm": "int16",
-                    "norm_weight": "int16",
-                    "quantize_vision": True,
-                    "quantize_text": False,
-                    "quantize_lm_head": True,
-                    "strict_wrap": False,
-                },
-            )
+            result = Qwen3VLAdapter().build_ptq_config(ctx, stage_cfg)
 
         self.assertEqual(result, {"ptq": "qwen"})
         self.assertEqual(captured["num_vision_blocks"], 3)
         self.assertEqual(captured["num_text_layers"], 4)
         self.assertEqual(captured["num_deepstack_mergers"], 2)
         self.assertEqual(captured["model_args"]["vision"]["grid_thw"], (1, 8, 8))
+        self.assertIs(type(captured["model_args"]["vision"]["grid_thw"]), tuple)
+        self.assertEqual(captured["model_args"]["profile"], "npu_export")
+        self.assertEqual(captured["model_args"]["vision"]["visual_start_idx"], 0)
+        self.assertEqual(captured["model_args"]["vision"]["spatial_merge_size"], 2)
         self.assertEqual(captured["linear_weight"].dtype, DType.uint(4))
         self.assertEqual(captured["vision_patch_embed_weight"].dtype, DType.uint(8))
         self.assertEqual(captured["lm_head_weight"].dtype, DType.uint(4))
         self.assertEqual(captured["spin_rotation_weight"].dtype, DType.int(16))
         self.assertFalse(captured["strict_wrap"])
+
+        # Preparing the builder arguments must not write into the recipe cfg.
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+        self.assertEqual(stage_cfg, stage_snapshot)
+
+    def test_build_ptq_config_returns_real_config_and_preserves_recipe_cfg(self):
+        """The real builder path should normalize grid_thw only in the returned config."""
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+
+        result = Qwen3VLAdapter().build_ptq_config(ctx, _ptq_stage_cfg())
+
+        self.assertIsInstance(result, PTQConfig)
+        self.assertEqual(result.model_args["vision"]["grid_thw"], (1, 8, 8))
+        self.assertIs(type(result.model_args["vision"]["grid_thw"]), tuple)
+        self.assertEqual(result.model_args["profile"], "npu_export")
+        self.assertEqual(result.model_args["vision"]["visual_start_idx"], 0)
+        self.assertEqual(result.activation.dtype, DType.int(16))
+        self.assertFalse(result.strict_wrap)
+        self.assertEqual(
+            result.overrides["model"]["visual"]["patch_embed"]["proj"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(8),
+        )
+        text_layers = result.overrides["model"]["language_model"]["layers"]  # type: ignore[index]
+        self.assertEqual(
+            text_layers["3"]["self_attn"]["q_proj"]["weight"]["dtype"], DType.uint(4)
+        )
+        self.assertEqual(
+            result.overrides["lm_head"]["weight"]["dtype"],  # type: ignore[index]
+            DType.uint(4),
+        )
+
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+
+    def test_build_ptq_config_builder_failure_propagates_without_mutating_cfg(self):
+        """A failing builder must propagate and leave the recipe cfg untouched."""
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+
+        def failing_builder(**kwargs):
+            raise RuntimeError("builder boom")
+
+        with patch.object(qwen_mod, "build_qwen3_vl_ptq_config", failing_builder):
+            with self.assertRaisesRegex(RuntimeError, "builder boom"):
+                Qwen3VLAdapter().build_ptq_config(ctx, _ptq_stage_cfg())
+
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+
+    def test_build_ptq_config_handles_missing_keys_and_tuple_grid(self):
+        """Missing keys get defaults in the returned config only; tuples pass through."""
+        cases: dict[str, dict[str, Any]] = {
+            "tuple_grid": {"model_args": {"vision": {"grid_thw": (1, 4, 4)}}},
+            "vision_without_grid": {"model_args": {"vision": {"visual_start_idx": 0}}},
+            "no_vision": {"model_args": {"profile": "npu_export"}},
+            "no_model_args": {},
+        }
+        for name, cfg in cases.items():
+            with self.subTest(case=name):
+                cfg_snapshot = copy.deepcopy(cfg)
+                original_model_args = cfg.get("model_args")
+                original_vision = (
+                    original_model_args.get("vision")
+                    if original_model_args is not None
+                    else None
+                )
+                ctx = RecipeContext(
+                    cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model()
+                )
+
+                result = Qwen3VLAdapter().build_ptq_config(ctx, _ptq_stage_cfg())
+
+                self.assertIsInstance(result, PTQConfig)
+                self.assertIsInstance(result.model_args["vision"], dict)
+                if name == "tuple_grid":
+                    self.assertEqual(result.model_args["vision"]["grid_thw"], (1, 4, 4))
+                    self.assertIs(type(result.model_args["vision"]["grid_thw"]), tuple)
+                else:
+                    self.assertNotIn("grid_thw", result.model_args["vision"])
+                if name == "no_vision":
+                    self.assertEqual(result.model_args["profile"], "npu_export")
+
+                # The recipe cfg keeps its original keys, values, and objects.
+                self.assertEqual(cfg, cfg_snapshot)
+                self.assertIs(cfg.get("model_args"), original_model_args)
+                if original_model_args is not None:
+                    self.assertIs(original_model_args.get("vision"), original_vision)
+
+    def test_build_ptq_config_repeated_calls_are_stable(self):
+        """Repeated calls with the same ctx and stage_cfg must agree and not mutate cfg."""
+        cfg = _vision_recipe_cfg()
+        model_args = cfg["model_args"]
+        vision_args = model_args["vision"]
+        grid_thw = vision_args["grid_thw"]
+        cfg_snapshot = copy.deepcopy(cfg)
+        stage_cfg = _ptq_stage_cfg()
+        stage_snapshot = copy.deepcopy(stage_cfg)
+        ctx = RecipeContext(cfg=cfg, adapter=Qwen3VLAdapter(), model=_fake_qwen_model())
+        adapter = Qwen3VLAdapter()
+
+        first = adapter.build_ptq_config(ctx, stage_cfg)
+        second = adapter.build_ptq_config(ctx, stage_cfg)
+
+        for result in (first, second):
+            self.assertIsInstance(result, PTQConfig)
+            self.assertEqual(result.model_args["vision"]["grid_thw"], (1, 8, 8))
+            self.assertIs(type(result.model_args["vision"]["grid_thw"]), tuple)
+        self.assertEqual(first.model_args, second.model_args)
+        self.assertEqual(first.activation, second.activation)
+        self.assertEqual(first.weight, second.weight)
+        self.assertEqual(first.strict_wrap, second.strict_wrap)
+        self.assertEqual(first.overrides, second.overrides)
+
+        self.assert_recipe_cfg_untouched(
+            cfg, cfg_snapshot, model_args, vision_args, grid_thw
+        )
+        self.assertEqual(stage_cfg, stage_snapshot)
 
     def test_apply_spinquant_passes_enable_vision_options_to_config(self):
         """Qwen3VLAdapter should pass enable-based SpinQuant options to the config."""
