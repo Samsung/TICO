@@ -21,9 +21,7 @@ import torch
 from tico.quantization import convert, prepare
 from tico.quantization.algorithm.gptq.utils import SensitivityCalibrator
 from tico.quantization.config.base import BaseConfig
-from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.config.gptq import GPTQConfig, UniversalGPTQConfig
-from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.dataset_config import (
     DEFAULT_CALIBRATION_DATASET,
@@ -244,18 +242,20 @@ class GPTQStage(Stage):
                     runtime_cfg if isinstance(runtime_cfg, Mapping) else None,
                 )
 
-        # Map model family to the appropriate GPTQ config class.
-        # Families with a dedicated multimodal GPTQ config (vision + text
-        # stagewise quantization) get their own class; everything else falls
-        # back to the generic GPTQConfig (single decoder stack).
-        _FAMILY_CONFIG_MAP: dict[str, type[BaseConfig]] = {
-            "qwen3_vl": Qwen3VLGPTQConfig,
-            "gemma4": Gemma4GPTQConfig,
-        }
+        # Select the GPTQ config class. The default variant asks the adapter
+        # layer for a model-family-specific class (adapters own that choice;
+        # see ``resolve_gptq_config_class``) and falls back to the generic
+        # GPTQConfig (single decoder stack). The payload is filtered against
+        # the selected class so dedicated fields of family-specific or
+        # out-of-tree configs survive. The adapters package is imported here
+        # rather than at module level so this stage stays importable without
+        # the model-family dependencies the built-in adapters pull in.
         if variant == "universal":
             config_cls: type[BaseConfig] = UniversalGPTQConfig
         else:
-            config_cls = _FAMILY_CONFIG_MAP.get(ctx.adapter.family, GPTQConfig)
+            from tico.quantization.recipes.adapters import resolve_gptq_config_class
+
+            config_cls = resolve_gptq_config_class(ctx.adapter) or GPTQConfig
         gptq_config = config_cls(**filter_dataclass_kwargs(config_cls, payload))
 
         print(f"Applying {gptq_config.name} …")

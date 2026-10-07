@@ -14,6 +14,7 @@
 
 from typing import Any, Mapping
 
+from tico.quantization.config.base import BaseConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.adapters.gemma4_assistant import Gemma4AssistantAdapter
@@ -120,3 +121,45 @@ def resolve_adapter(cfg: Mapping[str, Any]) -> ModelAdapter:
             "adapter family; use model.adapter only to pick an adapter variant."
         )
     return adapter
+
+
+def _declared_gptq_config_class(adapter: Any) -> type[BaseConfig] | None:
+    """Return the config class ``adapter`` selects through its GPTQ hook.
+
+    Adapters without the hook (duck-typed objects predating it) and adapters
+    whose hook returns ``None`` make no selection. Hook errors propagate, and a
+    return value that is not a ``BaseConfig`` subclass is rejected instead of
+    being replaced by the generic config.
+    """
+    hook = getattr(adapter, "get_gptq_config_class", None)
+    if hook is None:
+        return None
+    selected = hook()
+    if selected is None:
+        return None
+    if not (isinstance(selected, type) and issubclass(selected, BaseConfig)):
+        raise TypeError(
+            f"{type(adapter).__name__}.get_gptq_config_class() must return a "
+            f"BaseConfig subclass or None. got {selected!r}"
+        )
+    return selected
+
+
+def resolve_gptq_config_class(adapter: Any) -> type[BaseConfig] | None:
+    """Select the default-variant GPTQ config class for ``adapter``.
+
+    The adapter's own ``get_gptq_config_class()`` selection wins. Without one,
+    the adapter registered under ``adapter.family`` (the family default, looked
+    up like ``get_adapter``) is asked, so an out-of-tree adapter serving a
+    built-in family keeps that family's config without implementing the hook.
+    The family adapter is skipped when it is the selected adapter itself, so a
+    hook is never consulted twice. Returns ``None`` when neither makes a
+    selection; the GPTQ stage then uses the generic ``GPTQConfig``.
+    """
+    selected = _declared_gptq_config_class(adapter)
+    if selected is not None:
+        return selected
+    family_adapter = _ADAPTERS.get(_normalize_key(adapter.family))
+    if family_adapter is None or family_adapter is adapter:
+        return None
+    return _declared_gptq_config_class(family_adapter)
