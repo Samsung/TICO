@@ -180,7 +180,7 @@ class TestGPTQConfigSelectionCharacterization(unittest.TestCase):
 
     def test_qwen3_vl_selects_qwen3_vl_gptq_config_with_its_fields(self):
         """Qwen3-VL uses Qwen3VLGPTQConfig and keeps its dedicated fields."""
-        cfg = {
+        cfg: dict[str, dict[str, Any]] = {
             "calibration": {"dataset": "vqav2", "n_samples": 4, "seq_len": 64},
             "runtime": {"seed": 7},
         }
@@ -282,15 +282,21 @@ class TestGPTQConfigSelectionCharacterization(unittest.TestCase):
         register_adapter("qwen_variant", _QwenVariant())
         register_adapter("gemma4_variant", _Gemma4Variant())
 
-        qwen = resolve_adapter({"model": {"family": "qwen3_vl", "adapter": "qwen_variant"}})
+        qwen = resolve_adapter(
+            {"model": {"family": "qwen3_vl", "adapter": "qwen_variant"}}
+        )
         self.assertIsInstance(qwen, _QwenVariant)
-        self.assertIs(type(_run_gptq_stage(qwen, {"name": "gptq"}).config), Qwen3VLGPTQConfig)
+        self.assertIs(
+            type(_run_gptq_stage(qwen, {"name": "gptq"}).config), Qwen3VLGPTQConfig
+        )
 
         gemma4 = resolve_adapter(
             {"model": {"family": "gemma4", "adapter": "gemma4_variant"}}
         )
         self.assertIsInstance(gemma4, _Gemma4Variant)
-        self.assertIs(type(_run_gptq_stage(gemma4, {"name": "gptq"}).config), Gemma4GPTQConfig)
+        self.assertIs(
+            type(_run_gptq_stage(gemma4, {"name": "gptq"}).config), Gemma4GPTQConfig
+        )
 
     def test_external_direct_adapter_with_builtin_family_keeps_family_selection(self):
         """A direct ModelAdapter subclass serving a built-in family keeps that family's config."""
@@ -332,12 +338,17 @@ class TestGPTQConfigSelectionCharacterization(unittest.TestCase):
             "unknown_key": {"nested": [1, 2]},
         }
         snapshot = copy.deepcopy(stage_cfg)
-        cfg = {"calibration": {"dataset": "vqav2"}, "runtime": {"seed": 3}}
+        cfg: dict[str, dict[str, Any]] = {
+            "calibration": {"dataset": "vqav2"},
+            "runtime": {"seed": 3},
+        }
         cfg_snapshot = copy.deepcopy(cfg)
 
         run = _run_gptq_stage(Qwen3VLAdapter(), stage_cfg, cfg=cfg)
 
-        self.assertEqual([call[0] for call in run.calls], ["prepare", "calibrate", "convert"])
+        self.assertEqual(
+            [call[0] for call in run.calls], ["prepare", "calibrate", "convert"]
+        )
         prepare, calibrate, convert = run.calls
         self.assertIs(prepare[1], run.source_model)
         self.assertIs(prepare[2], run.config)
@@ -450,7 +461,10 @@ class TestAdapterGPTQConfigHook(unittest.TestCase):
         )
         self.assertIsInstance(adapter, _ExternalQwenAdapter)
 
-        cfg = {"calibration": {"dataset": "vqav2", "n_samples": 2}, "runtime": {"seed": 5}}
+        cfg: dict[str, dict[str, Any]] = {
+            "calibration": {"dataset": "vqav2", "n_samples": 2},
+            "runtime": {"seed": 5},
+        }
         run = _run_gptq_stage(
             adapter,
             {
@@ -471,7 +485,9 @@ class TestAdapterGPTQConfigHook(unittest.TestCase):
             GPTQStage._calibration_dataset_spec(cfg["calibration"], cfg["runtime"]),
         )
         self.assertFalse(hasattr(run.config, "unknown_key"))
-        self.assertEqual([call[0] for call in run.calls], ["prepare", "calibrate", "convert"])
+        self.assertEqual(
+            [call[0] for call in run.calls], ["prepare", "calibrate", "convert"]
+        )
         self.assertIs(run.calls[0][2], run.config)
 
     def test_external_override_on_direct_adapter_wins_over_family_default(self):
