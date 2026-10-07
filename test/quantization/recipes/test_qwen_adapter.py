@@ -30,6 +30,7 @@ from unittest.mock import patch
 
 import tico.quantization.recipes.adapters.qwen3_vl as qwen_mod
 import tico.quantization.recipes.data.vlm as vlm_data
+import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
 
 import torch
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
@@ -325,14 +326,21 @@ class TestQwen3VLAdapter(unittest.TestCase):
         def fake_print_coco_score_results(title, results):
             calls.append(("print", {"title": title, "results": results}))
 
+        # COCO prints from the adapter module; LLaVA routing prints from the
+        # shared llava_bench module, so both print symbols are patched.
         with patch.object(qwen_mod, "evaluate_coco", fake_evaluate_coco), patch.object(
-            qwen_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
         ), patch.object(
             qwen_mod, "print_coco_score_results", fake_print_coco_score_results
+        ), patch.object(
+            llava_bench_mod,
+            "print_coco_score_results",
+            fake_print_coco_score_results,
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.evaluate(ctx)
 
+        self.assertEqual(len(calls), 4)
         self.assertEqual(calls[0][0], "coco")
         self.assertEqual(calls[0][1]["n_samples"], 2)
         self.assertEqual(calls[0][1]["max_seq_len"], 128)

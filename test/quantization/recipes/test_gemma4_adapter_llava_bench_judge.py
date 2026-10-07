@@ -27,7 +27,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import tico.quantization.recipes.adapters.gemma4 as gemma4_mod
+import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
 
 import torch
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
@@ -73,7 +73,7 @@ class TestGemma4AdapterLlavaBenchJudge(unittest.TestCase):
             return {"count": 2}
 
         with patch.object(
-            gemma4_mod,
+            llava_bench_mod,
             "evaluate_and_print_llava_bench_judge",
             fake_evaluate_and_print_llava_bench_judge,
         ):
@@ -118,9 +118,11 @@ class TestGemma4AdapterLlavaBenchJudge(unittest.TestCase):
             calls.append(("print", {"title": title, "results": results}))
 
         with patch.object(
-            gemma4_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
         ), patch.object(
-            gemma4_mod, "print_coco_score_results", fake_print_coco_score_results
+            llava_bench_mod,
+            "print_coco_score_results",
+            fake_print_coco_score_results,
         ):
             with contextlib.redirect_stdout(io.StringIO()) as buffer:
                 adapter.evaluate(ctx)
@@ -161,9 +163,11 @@ class TestGemma4AdapterLlavaBenchJudge(unittest.TestCase):
             return {"CIDEr": 0.5, "total_count": 4, "skipped_count": 0}
 
         with patch.object(
-            gemma4_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
         ), patch.object(
-            gemma4_mod, "print_coco_score_results", lambda *args, **kwargs: None
+            llava_bench_mod,
+            "print_coco_score_results",
+            lambda *args, **kwargs: None,
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.evaluate(ctx)

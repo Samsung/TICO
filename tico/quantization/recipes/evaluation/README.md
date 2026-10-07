@@ -58,13 +58,21 @@ or legacy spellings.
 ```text
 recipes/evaluation/
 ├── README.md
-├── selection.py # top-level target parsing and allow-list helpers
-├── llm.py       # perplexity and text-only LM benchmark helpers
-├── vlm.py       # VQA / COCO-style VLM benchmark helpers
-└── mmlu.py      # MMLU wrapper helpers
+├── selection.py         # top-level target parsing and allow-list helpers
+├── llm.py               # perplexity and text-only LM benchmark helpers
+├── vlm.py               # VQA / COCO-style VLM benchmark helpers
+├── llava_bench_judge.py # judge-based LLaVA-Bench evaluator wrapper
+├── llava_bench.py       # shared llava_bench target selection and mode routing
+└── mmlu.py              # MMLU wrapper helpers
 ```
 
 The split is by benchmark/input type, not by model name.
+
+`llava_bench.py` is the one exception to "the adapter decides which helper to
+call": `evaluation.llava_bench` accepts a mapping, boolean, or null and routes
+to either the judge evaluator or the legacy COCO-style evaluator. VLM adapters
+call `run_llava_bench_evaluation()` at their LLaVA-Bench position so that this
+policy is edited once rather than once per model family.
 
 ## Result conventions
 
