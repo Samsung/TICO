@@ -123,6 +123,7 @@ class ModelAdapter(ABC):
     evaluation_target_requirements: Mapping[str, str]
 
     def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None: ...
+    def get_gptq_config_class(self) -> type[BaseConfig] | None: ...  # optional hook
     def load_model(self, ctx: RecipeContext) -> RecipeContext: ...
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[Any]: ...
     def forward_calibration(self, ctx, model, calibration_inputs, *, desc: str) -> None: ...
@@ -133,6 +134,13 @@ class ModelAdapter(ABC):
 ```
 
 Adapters should be deterministic with respect to `runtime.seed` when possible.
+
+Adapters may also select the GPTQ config class for the default `gptq` variant
+through the optional `get_gptq_config_class()` hook; the stage resolves it with
+`resolve_gptq_config_class()` from `recipes/adapters/__init__.py` and falls
+back to the registered family adapter, then the generic `GPTQConfig`. See
+"GPTQ config class selection" in
+[`adapters/README.md`](adapters/README.md).
 
 Adapters also declare canonical top-level evaluation target names. When
 `evaluation.selected_tasks` is present, the common adapter validation treats it
@@ -160,8 +168,8 @@ Registry rules:
   Built-in keys are therefore never replaced; pick a distinct key.
 - `resolve_adapter(cfg)` selects `model.adapter` when set, otherwise
   `model.family`, and requires the selected adapter's `family` to equal
-  `model.family` so family-keyed helpers (dataset defaults, GPTQ/PTQ config
-  maps, export) keep working.
+  `model.family` so family-keyed helpers (dataset defaults, the GPTQ config
+  family fallback, export) keep working.
 
 #### Extension loading
 

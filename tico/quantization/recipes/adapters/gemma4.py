@@ -22,6 +22,7 @@ from transformers import AutoProcessor
 
 from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
+from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
@@ -79,6 +80,10 @@ class Gemma4Adapter(ModelAdapter):
         }
     )
     evaluation_target_requirements = {"vqa": "vlm_tasks"}
+
+    def get_gptq_config_class(self) -> type[Gemma4GPTQConfig]:
+        """Select the stagewise vision + text GPTQ config for Gemma4."""
+        return Gemma4GPTQConfig
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         """Load the Gemma4 E2B model and processor."""

@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+try:
+    from quantization.recipes.optional_dependency_stubs import (
+        install_optional_dependency_stubs,
+    )
+except ModuleNotFoundError:
+    from optional_dependency_stubs import install_optional_dependency_stubs
+
+install_optional_dependency_stubs()
+
 import contextlib
 import io
 import tempfile

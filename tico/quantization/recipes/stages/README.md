@@ -167,6 +167,13 @@ adapter hook. Example:
 ctx.adapter.get_awq_target_modules(ctx, stage_cfg)
 ```
 
+The `gptq` stage follows this pattern for its config class: it calls
+`resolve_gptq_config_class(ctx.adapter)` from `recipes/adapters`, which
+consults the adapter's `get_gptq_config_class()` hook and the registered
+family adapter, and falls back to the generic `GPTQConfig`. The stage keeps
+no family-to-config table of its own. See "GPTQ config class selection" in
+[`../adapters/README.md`](../adapters/README.md).
+
 ## Config handling
 
 Use `stage_payload(stage_cfg)` to remove generic keys such as `name` and

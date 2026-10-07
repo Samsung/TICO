@@ -21,6 +21,7 @@ from transformers import AutoProcessor
 
 from tico.quantization import convert, prepare
 from tico.quantization.config.builders import build_qwen3_vl_ptq_config
+from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
 from tico.quantization.recipes.config import get_by_path
@@ -68,6 +69,10 @@ class Qwen3VLAdapter(ModelAdapter):
         }
     )
     evaluation_target_requirements = {"vqa": "vlm_tasks"}
+
+    def get_gptq_config_class(self) -> type[Qwen3VLGPTQConfig]:
+        """Select the stagewise vision + text GPTQ config for Qwen3-VL."""
+        return Qwen3VLGPTQConfig
 
     def load_model(self, ctx: RecipeContext) -> RecipeContext:
         cfg = ctx.cfg

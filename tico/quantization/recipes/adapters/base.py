@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 
 import torch
 
+from tico.quantization.config.base import BaseConfig
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.evaluation.selection import (
     get_selected_evaluation_targets,
@@ -69,6 +70,21 @@ class ModelAdapter(ABC):
     def requires_calibration_inputs(self, cfg: Mapping[str, Any]) -> bool:
         """Return whether adapter operations outside pipeline stages need inputs."""
         return False
+
+    def get_gptq_config_class(self) -> type[BaseConfig] | None:
+        """Return the GPTQ config class for the default GPTQ variant.
+
+        Return a ``BaseConfig`` subclass to select a dedicated GPTQ config for
+        this adapter, or ``None`` (the default) to make no selection. Without a
+        selection the GPTQ stage uses the family default resolved by
+        ``recipes.adapters.resolve_gptq_config_class`` and finally the generic
+        ``GPTQConfig``. ``variant: universal`` never consults this hook.
+
+        This hook only names the class. The stage filters the stage payload
+        against that class and instantiates it, so do not build config
+        instances, load models, or run prepare/calibration/convert here.
+        """
+        return None
 
     @abstractmethod
     def load_model(self, ctx: RecipeContext) -> RecipeContext:

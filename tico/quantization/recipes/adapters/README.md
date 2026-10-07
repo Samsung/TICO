@@ -27,6 +27,7 @@ class ModelAdapter(ABC):
     evaluation_target_requirements: Mapping[str, str]
 
     def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None: ...
+    def get_gptq_config_class(self) -> type[BaseConfig] | None: ...  # optional hook
     def load_model(self, ctx: RecipeContext) -> RecipeContext: ...
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[Any]: ...
     def forward_calibration(self, ctx, model, calibration_inputs, *, desc: str) -> None: ...
@@ -278,6 +279,61 @@ def build_ptq_config(self, ctx, stage_cfg):
         strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
     )
 ```
+
+## GPTQ config class selection
+
+The generic `gptq` stage does not know model families. For the default GPTQ
+variant it asks the adapter layer which config class to instantiate:
+
+1. the selected adapter's `get_gptq_config_class()` result, when not `None`;
+2. otherwise the result of the adapter registered under `adapter.family`
+   (the family default), so an out-of-tree adapter that subclasses
+   `ModelAdapter` directly and serves a built-in family keeps that family's
+   config without implementing the hook;
+3. otherwise the generic `GPTQConfig`.
+
+`variant: universal` always uses `UniversalGPTQConfig` and never consults the
+hook. `Qwen3VLAdapter` and `Gemma4Adapter` select `Qwen3VLGPTQConfig` and
+`Gemma4GPTQConfig`; `LlamaAdapter` makes no selection. The resolver is
+`resolve_gptq_config_class()` in `recipes/adapters/__init__.py`.
+
+The hook only names the class. The stage filters the stage payload against
+that class with `filter_dataclass_kwargs` and instantiates it, so fields that
+exist only on the selected class are kept and unknown keys are dropped as
+before. Do not build config instances, load models, or run
+prepare/calibration/convert in the hook. A hook that raises, or returns
+something other than a `BaseConfig` subclass or `None`, fails the stage; it is
+never replaced by the generic config.
+
+Connecting a dedicated GPTQ config to a new or out-of-tree adapter therefore
+needs no change to the stage:
+
+```python
+from dataclasses import dataclass
+
+from tico.quantization.config.gptq import GPTQConfig
+from tico.quantization.recipes.adapters.base import ModelAdapter
+
+
+@dataclass
+class MyFamilyGPTQConfig(GPTQConfig):
+    my_knob: int = 1
+
+    @property
+    def name(self) -> str:
+        return "my_family_gptq"
+
+
+class MyFamilyAdapter(ModelAdapter):
+    family = "my_family"
+
+    def get_gptq_config_class(self):
+        return MyFamilyGPTQConfig
+```
+
+The config type still has to map to a quantizer through the quantizer registry
+(`register_quantizer`); selecting a config class is not by itself GPTQ support
+for that family.
 
 ## Evaluation and export
 
