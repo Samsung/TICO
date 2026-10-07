@@ -99,28 +99,18 @@ class Qwen3VLAdapter(ModelAdapter):
             cache_dir=cache_dir,
         )
 
-        try:
-            from transformers import AutoModelForImageTextToText
+        # Every Transformers release that ships Qwen3-VL also exports this auto
+        # class, so load with it directly and let any failure propagate as-is.
+        from transformers import AutoModelForImageTextToText
 
-            ctx.model = AutoModelForImageTextToText.from_pretrained(
-                name,
-                dtype=ctx.dtype,
-                trust_remote_code=trust_remote_code,
-                token=hf_token,
-                cache_dir=cache_dir,
-                device_map=device_map,
-            )
-        except Exception:
-            from transformers import AutoModelForVision2Seq
-
-            ctx.model = AutoModelForVision2Seq.from_pretrained(
-                name,
-                dtype=ctx.dtype,
-                trust_remote_code=trust_remote_code,
-                token=hf_token,
-                cache_dir=cache_dir,
-                device_map=device_map,
-            )
+        ctx.model = AutoModelForImageTextToText.from_pretrained(
+            name,
+            dtype=ctx.dtype,
+            trust_remote_code=trust_remote_code,
+            token=hf_token,
+            cache_dir=cache_dir,
+            device_map=device_map,
+        )
 
         ctx.model.eval()
         self._disable_cache(ctx.model)

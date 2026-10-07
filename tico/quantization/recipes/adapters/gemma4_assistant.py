@@ -54,15 +54,14 @@ ASSISTANT_MODEL_ENV_VAR = "GEMMA4_ASSISTANT_PATH"
 
 
 def _load_causal_lm(name: str, **kwargs: Any) -> torch.nn.Module:
-    """Load a HF causal LM, falling back to the image-text auto class."""
+    """Load a HF causal LM; any loading failure propagates unchanged.
+
+    Transformers maps both the assistant and the multimodal Gemma4 target
+    checkpoints to ``AutoModelForCausalLM``, so no second auto class is tried.
+    """
     from transformers import AutoModelForCausalLM
 
-    try:
-        return AutoModelForCausalLM.from_pretrained(name, **kwargs)
-    except (ValueError, OSError):
-        from transformers import AutoModelForImageTextToText
-
-        return AutoModelForImageTextToText.from_pretrained(name, **kwargs)
+    return AutoModelForCausalLM.from_pretrained(name, **kwargs)
 
 
 class _AssistantCallRecorder:
