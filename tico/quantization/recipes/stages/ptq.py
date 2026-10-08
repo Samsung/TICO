@@ -17,13 +17,7 @@ from typing import Any, Mapping
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.recipes.context import RecipeContext
-from tico.quantization.recipes.override_policies import (
-    apply_ptq_override_policies,
-    build_quant_target_resolver_context,
-    compile_override_policies,
-    compile_raw_overrides,
-    parse_named_specs,
-)
+from tico.quantization.recipes.override_policies import apply_ptq_override_policies
 from tico.quantization.recipes.qparams import (
     clear_gptq_quantizers,
     find_gptq_quantizers,
@@ -84,42 +78,6 @@ def _reuse_gptq_qparams(stage_cfg: Mapping[str, Any]) -> bool:
             "ptq.reuse_gptq_qparams must be a boolean. " f"got {type(value).__name__}"
         )
     return value
-
-
-def _resolve_configured_override_paths(
-    stage_cfg: Mapping[str, Any],
-    *,
-    family: str,
-    model: Any,
-) -> tuple[tuple[str, ...], ...]:
-    """Resolve exact observer paths targeted by selector and raw overrides."""
-    policies = stage_cfg.get("override_policies")
-    raw_overrides = stage_cfg.get("raw_overrides")
-    if not policies and not raw_overrides:
-        return ()
-
-    specs = parse_named_specs(stage_cfg.get("specs", {}))
-    paths: set[tuple[str, ...]] = set()
-
-    if policies:
-        context = build_quant_target_resolver_context(family=family, model=model)
-        paths.update(
-            override.path
-            for override in compile_override_policies(
-                policies,
-                specs=specs,
-                context=context,
-            )
-        )
-
-    paths.update(
-        path
-        for path, _ in compile_raw_overrides(
-            raw_overrides,
-            specs=specs,
-        )
-    )
-    return tuple(sorted(paths))
 
 
 def _get_effective_override_fields(
@@ -188,20 +146,25 @@ class PTQStage(Stage):
         print("Wrapping model with PTQ wrappers …")
         reuse_gptq_qparams = _reuse_gptq_qparams(stage_cfg)
         ptq_config = ctx.adapter.build_ptq_config(ctx, stage_cfg)
+        # Collect the exact paths applied by recipe overrides only when they
+        # will be printed, so the diagnostic reuses the single policy
+        # resolution instead of re-interpreting the stage configuration.
+        applied_override_paths: set[tuple[str, ...]] | None = (
+            set() if bool(stage_cfg.get("print_overrides", False)) else None
+        )
         ptq_config = apply_ptq_override_policies(
             ptq_config,
             stage_cfg,
             family=ctx.adapter.family,
             model=ctx.require_model(),
+            applied_paths=applied_override_paths,
         )
 
-        if bool(stage_cfg.get("print_overrides", False)):
-            override_paths = _resolve_configured_override_paths(
-                stage_cfg,
-                family=ctx.adapter.family,
-                model=ctx.require_model(),
+        if applied_override_paths is not None:
+            _print_effective_overrides(
+                ptq_config,
+                tuple(sorted(applied_override_paths)),
             )
-            _print_effective_overrides(ptq_config, override_paths)
 
         q_model = prepare(ctx.require_model(), ptq_config)
 

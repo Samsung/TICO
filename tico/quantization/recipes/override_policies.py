@@ -89,6 +89,7 @@ def apply_ptq_override_policies(
     *,
     family: str,
     model: Any,
+    applied_paths: set[tuple[str, ...]] | None = None,
 ) -> PTQConfig:
     """Apply recipe-level PTQ override policies to an existing PTQConfig.
 
@@ -97,6 +98,11 @@ def apply_ptq_override_policies(
         stage_cfg: PTQ stage YAML payload.
         family: Registered recipe adapter family.
         model: Loaded model instance used to infer component metadata.
+        applied_paths: Optional set that receives the exact override path of
+            every selector or raw override applied to ``qcfg``. Paths are added
+            as each override is applied; existing entries are never removed,
+            so pass a fresh empty set to observe one call in isolation. When
+            ``None``, no paths are collected.
 
     Returns:
         The same PTQConfig instance with selector and raw overrides applied.
@@ -105,15 +111,27 @@ def apply_ptq_override_policies(
         return qcfg
 
     context = build_quant_target_resolver_context(family=family, model=model)
-    return apply_ptq_override_policies_to_config(qcfg, stage_cfg, context)
+    return apply_ptq_override_policies_to_config(
+        qcfg,
+        stage_cfg,
+        context,
+        applied_paths=applied_paths,
+    )
 
 
 def apply_ptq_override_policies_to_config(
     qcfg: PTQConfig,
     stage_cfg: Mapping[str, Any],
     context: QuantTargetResolverContext,
+    *,
+    applied_paths: set[tuple[str, ...]] | None = None,
 ) -> PTQConfig:
-    """Apply PTQ override policies using an already-built resolver context."""
+    """Apply PTQ override policies using an already-built resolver context.
+
+    ``applied_paths`` follows the same contract as in
+    :func:`apply_ptq_override_policies`: applied override paths are added to
+    the given set in application order and existing entries are preserved.
+    """
     specs = parse_named_specs(stage_cfg.get("specs", {}))
     resolved = compile_override_policies(
         stage_cfg.get("override_policies", []),
@@ -122,12 +140,16 @@ def apply_ptq_override_policies_to_config(
     )
     for override in resolved:
         qcfg.set_override(override.path, override.value)
+        if applied_paths is not None:
+            applied_paths.add(override.path)
 
     for path, value in compile_raw_overrides(
         stage_cfg.get("raw_overrides", {}),
         specs=specs,
     ):
         qcfg.set_override(path, value)
+        if applied_paths is not None:
+            applied_paths.add(path)
 
     return qcfg
 

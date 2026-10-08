@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+import tico.quantization.recipes.override_policies as override_policies_mod
 import tico.quantization.recipes.stages.gptq as gptq_mod
 import tico.quantization.recipes.stages.ptq as ptq_mod
 
@@ -66,7 +67,77 @@ class DummyAdapter:
         self.forwarded = (ctx, model, calibration_inputs, desc)
 
 
+class RealPTQConfigAdapter(DummyAdapter):
+    """Adapter fake that returns a real PTQ config with an unrelated override."""
+
+    def build_ptq_config(self, ctx, stage_cfg):
+        """Return a PTQ config containing an adapter default the recipe never targets."""
+        config = PTQConfig()
+        config.set_override(
+            ("model", "layers", "0", "self_attn", "q_proj", "weight"),
+            affine(DType.uint(4)),
+        )
+        return config
+
+
+def _two_layer_llama_model() -> SimpleNamespace:
+    """Return a model stub with two text layers for the llama target resolver."""
+    return SimpleNamespace(model=SimpleNamespace(layers=[object(), object()]))
+
+
+def _down_proj_out_policy(name: str, layers, spec) -> dict:
+    """Return a selector policy targeting ``mlp.down_proj.act_out``."""
+    return {
+        "name": name,
+        "target": {
+            "component": "text",
+            "layers": layers,
+            "module": "mlp.down_proj",
+            "observers": ["act_out"],
+        },
+        "spec": spec,
+    }
+
+
+def _effective_override_lines(output: str) -> list[str]:
+    """Return the path lines printed inside the effective override section."""
+    lines = output.splitlines()
+    start = lines.index("=== Effective PTQ overrides ===") + 1
+    collected: list[str] = []
+    for line in lines[start:]:
+        if not line.strip():
+            break
+        collected.append(line.strip())
+    return collected
+
+
 class TestRecipeStages(unittest.TestCase):
+    def _run_real_ptq_stage(
+        self,
+        stage_cfg: dict,
+        *,
+        prepare=None,
+    ) -> tuple[RecipeContext, str, dict[str, Any]]:
+        """Run PTQStage with a real PTQConfig and patched prepare/convert boundaries."""
+        ctx = RecipeContext(
+            cfg={},
+            adapter=RealPTQConfigAdapter(),
+            model=_two_layer_llama_model(),
+        )
+        calls: dict[str, Any] = {}
+
+        def default_prepare(model, config):
+            calls["prepare"] = (model, config)
+            return SimpleNamespace(name="prepared")
+
+        stdout = io.StringIO()
+        with patch.object(ptq_mod, "prepare", prepare or default_prepare), patch.object(
+            ptq_mod, "convert", lambda model: model
+        ), patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)):
+            with contextlib.redirect_stdout(stdout):
+                result = PTQStage().run(ctx, stage_cfg)
+        return result, stdout.getvalue(), calls
+
     def test_ptq_stage_prepares_calibrates_injects_and_converts(self):
         """PTQStage should run prepare, qparam injection, calibration, and convert."""
         adapter = DummyAdapter()
@@ -209,6 +280,169 @@ class TestRecipeStages(unittest.TestCase):
             output.index("=== Effective PTQ overrides ==="),
             output.index("=== Model after PTQ ==="),
         )
+
+    def test_ptq_stage_resolves_override_policies_once_when_printing(self):
+        """print_overrides must reuse the applied paths instead of re-resolving policies."""
+        resolver_names = (
+            "build_quant_target_resolver_context",
+            "parse_named_specs",
+            "compile_override_policies",
+            "compile_raw_overrides",
+        )
+        # The stage must not keep private aliases to the resolution helpers;
+        # otherwise a second resolution path could bypass the spies below.
+        for name in resolver_names:
+            self.assertFalse(hasattr(ptq_mod, name), name)
+
+        def make_stage_cfg(print_overrides: bool) -> dict:
+            return {
+                "name": "ptq",
+                "print_overrides": print_overrides,
+                "specs": {"mx_int8": {"kind": "mx", "elem_format": "int8", "axis": -1}},
+                "override_policies": [
+                    _down_proj_out_policy("down_proj_outputs_mx", "all", "mx_int8")
+                ],
+                "raw_overrides": {"model.layers.0.mlp.down_proj.act_out": "int16"},
+            }
+
+        with contextlib.ExitStack() as stack:
+            spies = {
+                name: stack.enter_context(
+                    patch.object(
+                        override_policies_mod,
+                        name,
+                        wraps=getattr(override_policies_mod, name),
+                    )
+                )
+                for name in resolver_names
+            }
+            _, output, calls = self._run_real_ptq_stage(make_stage_cfg(True))
+
+        for name, spy in spies.items():
+            self.assertEqual(spy.call_count, 1, name)
+
+        printed_config = calls["prepare"][1]
+        self.assertIsInstance(printed_config, PTQConfig)
+        layer0 = printed_config.overrides["model"]["layers"]["0"]["mlp"]["down_proj"]["act_out"]  # type: ignore[index]
+        layer1 = printed_config.overrides["model"]["layers"]["1"]["mlp"]["down_proj"]["act_out"]  # type: ignore[index]
+        self.assertEqual(layer0["dtype"], DType.int(16))
+        self.assertEqual(layer1["elem_format"], "int8")
+
+        lines = _effective_override_lines(output)
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("model.layers.0.mlp.down_proj.act_out: "))
+        self.assertIn("observer=MinMaxObserver", lines[0])
+        self.assertIn("dtype=int16", lines[0])
+        self.assertNotIn("elem_format", lines[0])
+        self.assertTrue(lines[1].startswith("model.layers.1.mlp.down_proj.act_out: "))
+        self.assertIn("observer=MXObserver", lines[1])
+        self.assertIn("elem_format=int8", lines[1])
+        self.assertNotIn("model.layers.0.self_attn.q_proj.weight", output)
+        self.assertNotIn("__quant_spec_replace_role__", output)
+
+        _, silent_output, silent_calls = self._run_real_ptq_stage(make_stage_cfg(False))
+        self.assertNotIn("=== Effective PTQ overrides ===", silent_output)
+        self.assertEqual(
+            silent_calls["prepare"][1].overrides,
+            printed_config.overrides,
+        )
+
+    def test_ptq_stage_prints_deduplicated_sorted_paths_without_accumulation(self):
+        """Printed paths should be unique, sorted, and scoped to the current run."""
+        first_cfg = {
+            "name": "ptq",
+            "print_overrides": True,
+            "override_policies": [
+                _down_proj_out_policy("specific", [1], "int8"),
+                _down_proj_out_policy("broad", [1, 0], "int16"),
+            ],
+            "raw_overrides": {"model.layers.1.mlp.down_proj.act_out": "int16"},
+        }
+        _, first_output, _ = self._run_real_ptq_stage(first_cfg)
+        first_lines = _effective_override_lines(first_output)
+        self.assertEqual(
+            [line.split(":")[0] for line in first_lines],
+            [
+                "model.layers.0.mlp.down_proj.act_out",
+                "model.layers.1.mlp.down_proj.act_out",
+            ],
+        )
+        self.assertIn("dtype=int16", first_lines[0])
+        self.assertIn("dtype=int16", first_lines[1])
+
+        second_cfg = {
+            "name": "ptq",
+            "print_overrides": True,
+            "override_policies": [_down_proj_out_policy("only_layer_1", [1], "int8")],
+        }
+        _, second_output, _ = self._run_real_ptq_stage(second_cfg)
+        second_lines = _effective_override_lines(second_output)
+        self.assertEqual(len(second_lines), 1)
+        self.assertTrue(
+            second_lines[0].startswith("model.layers.1.mlp.down_proj.act_out: ")
+        )
+        self.assertIn("dtype=int8", second_lines[0])
+        self.assertNotIn("model.layers.0.", second_output)
+
+        with self.subTest("no_payload_prints_none"):
+            _, output, _ = self._run_real_ptq_stage(
+                {"name": "ptq", "print_overrides": True}
+            )
+            self.assertEqual(_effective_override_lines(output), ["<none>"])
+
+        with self.subTest("disabled_policy_prints_none"):
+            _, output, _ = self._run_real_ptq_stage(
+                {
+                    "name": "ptq",
+                    "print_overrides": True,
+                    "override_policies": [
+                        {**_down_proj_out_policy("off", [0], "int16"), "enabled": False}
+                    ],
+                }
+            )
+            self.assertEqual(_effective_override_lines(output), ["<none>"])
+
+    def test_ptq_stage_override_failure_stops_before_prepare(self):
+        """Override resolution errors must propagate without reaching prepare."""
+
+        def failing_prepare(model, config):
+            raise AssertionError("prepare must not run after an override failure")
+
+        cases: list[tuple[str, dict[str, Any], type[Exception], str]] = [
+            (
+                "bad_spec",
+                {
+                    "specs": {"bad": None},
+                    "override_policies": [_down_proj_out_policy("p", [0], "bad")],
+                },
+                ValueError,
+                "ptq.specs.bad must not resolve to None",
+            ),
+            (
+                "bad_selector",
+                {"override_policies": [_down_proj_out_policy("p", [7], "int16")]},
+                ValueError,
+                "out of range",
+            ),
+            (
+                "bad_raw",
+                {"raw_overrides": ["model.layers.0.mlp.down_proj.act_out"]},
+                TypeError,
+                "ptq.raw_overrides must be a mapping",
+            ),
+        ]
+
+        for label, payload, exc_type, fragment in cases:
+            for print_overrides in (False, True):
+                with self.subTest(label, print_overrides=print_overrides):
+                    stage_cfg = {
+                        "name": "ptq",
+                        "print_overrides": print_overrides,
+                        **payload,
+                    }
+                    with self.assertRaises(exc_type) as cm:
+                        self._run_real_ptq_stage(stage_cfg, prepare=failing_prepare)
+                    self.assertIn(fragment, str(cm.exception))
 
     def test_ptq_stage_allows_missing_gptq_quantizers(self):
         """PTQStage should continue when no GPTQ quantizers are attached."""
