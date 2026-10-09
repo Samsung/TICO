@@ -242,6 +242,20 @@ pipeline:
     linear_weight: uint4
 ```
 
+Qwen3-VL GPTQ can optionally weight Linear-layer Hessian samples by
+gradient-times-activation token saliency. This runs an extra gradient replay for
+each quantized stage and is intended for representative calibration experiments,
+not smoke configs:
+
+```yaml
+pipeline:
+  - name: gptq
+    enabled: true
+    weight_bits: 4
+    token_weighting: grad_act
+    token_weight_loss: output_l2
+```
+
 PTQ-only smoke:
 
 ```yaml

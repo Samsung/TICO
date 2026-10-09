@@ -44,6 +44,7 @@ from tico.quantization.algorithm.qwen3_vl_gptq.utils import (
     resolve_qwen3_vl_components,
     should_quantize_text_stage,
     should_quantize_vision_stage,
+    tree_map_tensors,
 )
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
@@ -1302,6 +1303,290 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
     # Generic stage quantization helpers
     # ------------------------------------------------------------------
 
+    def _token_weighting_enabled(self) -> bool:
+        """Return whether gradient token weighting is enabled for this run."""
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        return self.config.token_weighting == "grad_act"
+
+    @staticmethod
+    def _token_weight_targets(subset: dict[str, nn.Module]) -> dict[str, nn.Linear]:
+        """Return Linear submodules that can consume token weights."""
+        return {
+            name: module
+            for name, module in subset.items()
+            if isinstance(module, nn.Linear)
+        }
+
+    def _token_weight_loss(self, output: Any) -> torch.Tensor:
+        """Build the scalar objective used for gradient token saliency."""
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        if self.config.token_weight_loss != "output_l2":
+            raise AssertionError(
+                f"Unhandled token_weight_loss: {self.config.token_weight_loss!r}"
+            )
+
+        logits = getattr(output, "logits", None)
+        if isinstance(logits, torch.Tensor):
+            target = logits
+        else:
+            target = extract_primary_output(output)
+
+        if not isinstance(target, torch.Tensor):
+            raise RuntimeError(
+                "Gradient token weighting requires the replayed module to return "
+                "a Tensor or an object with a Tensor `.logits` attribute."
+            )
+
+        return target.float().pow(2).mean()
+
+    def _normalize_token_weight(self, raw_weight: torch.Tensor) -> torch.Tensor:
+        """
+        Normalize a raw token saliency tensor so each sample has mean weight 1.
+
+        The last dimension is treated as the token dimension after saliency has
+        reduced the hidden/channel dimension.
+        """
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        weight = torch.nan_to_num(
+            raw_weight.detach().float(),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        ).clamp_min(0.0)
+
+        if weight.ndim == 0:
+            weight = weight.reshape(1)
+
+        token_count = weight.shape[-1]
+        denom = weight.sum(dim=-1, keepdim=True)
+        scaled = weight / denom.clamp_min(float(self.config.token_weight_eps))
+        scaled = scaled * float(token_count)
+        ones = torch.ones_like(weight)
+        scaled = torch.where(
+            denom > float(self.config.token_weight_eps),
+            scaled,
+            ones,
+        )
+        return scaled.clamp(
+            min=float(self.config.token_weight_min),
+            max=float(self.config.token_weight_max),
+        ).cpu()
+
+    def _token_weight_from_activation(self, activation: torch.Tensor) -> torch.Tensor:
+        """Compute normalized grad * activation token weights for one hook input."""
+        grad = activation.grad
+        if grad is None:
+            raw = torch.ones(
+                activation.shape[:-1],
+                device=activation.device,
+                dtype=torch.float32,
+            )
+        else:
+            raw = (activation.detach().float() * grad.detach().float()).abs()
+            raw = raw.mean(dim=-1)
+        return self._normalize_token_weight(raw)
+
+    @staticmethod
+    def _set_requires_grad_for_saliency(
+        module: nn.Module,
+    ) -> list[tuple[nn.Parameter, bool]]:
+        """Temporarily enable parameter gradients so activation grads are tracked."""
+        states: list[tuple[nn.Parameter, bool]] = []
+        for param in module.parameters():
+            states.append((param, param.requires_grad))
+            if not param.requires_grad:
+                param.requires_grad_(True)
+        return states
+
+    @staticmethod
+    def _restore_requires_grad(states: list[tuple[nn.Parameter, bool]]) -> None:
+        """Restore parameter requires_grad states saved by saliency collection."""
+        for param, requires_grad in states:
+            param.requires_grad_(requires_grad)
+
+    @staticmethod
+    def _clear_parameter_grads(module: nn.Module) -> None:
+        """Release parameter gradients allocated by a saliency backward pass."""
+        module.zero_grad(set_to_none=True)
+
+    @staticmethod
+    def _enable_input_grads_for_saliency(value: Any) -> Any:
+        """Make floating replay inputs differentiable for boundary-layer saliency."""
+
+        def _enable(tensor: torch.Tensor) -> torch.Tensor:
+            if not torch.is_floating_point(tensor):
+                return tensor
+            if tensor.requires_grad:
+                return tensor
+            return tensor.detach().requires_grad_(True)
+
+        return tree_map_tensors(value, _enable)
+
+    def _make_token_capture_hook(
+        self,
+        captured: dict[str, list[torch.Tensor]],
+        name: str,
+    ) -> Callable[[nn.Module, tuple[Any, ...], Any], None]:
+        """Create a hook that retains Linear input gradients for saliency."""
+
+        def _hook(_module: nn.Module, inp: tuple[Any, ...], _out: Any) -> None:
+            if not inp:
+                return
+            first_inp = inp[0]
+            if not isinstance(first_inp, torch.Tensor):
+                return
+            if not torch.is_floating_point(first_inp):
+                return
+            if not first_inp.requires_grad:
+                return
+
+            first_inp.retain_grad()
+            captured.setdefault(name, []).append(first_inp)
+
+        return _hook
+
+    def _collect_token_weights_from_raw_replay(
+        self,
+        model: nn.Module,
+        stage_module: nn.Module,
+        subset: dict[str, nn.Module],
+        cache_args: list[list[Any]],
+        cache_kwargs: dict[str, list[Any]],
+        num_batches: int,
+        stage_desc: str,
+    ) -> dict[str, list[torch.Tensor]]:
+        """Collect grad * activation token weights by replaying raw model inputs."""
+        if not self._token_weighting_enabled():
+            return {}
+
+        targets = self._token_weight_targets(subset)
+        if not targets:
+            return {}
+
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        token_weights: dict[str, list[torch.Tensor]] = {
+            name: [] for name in targets
+        }
+        captured: dict[str, list[torch.Tensor]] = {}
+        handles = [
+            module.register_forward_hook(
+                self._make_token_capture_hook(captured, name)
+            )
+            for name, module in targets.items()
+        ]
+        requires_grad_states = self._set_requires_grad_for_saliency(model)
+
+        def boundary_hook(_module: nn.Module, _inp: tuple[Any, ...], output: Any):
+            loss = self._token_weight_loss(output)
+            loss.backward()
+            raise StopReplay
+
+        boundary_handle = stage_module.register_forward_hook(boundary_hook)
+
+        try:
+            for batch_idx in tqdm(
+                range(num_batches),
+                desc=f"[{stage_desc}] token saliency",
+                leave=False,
+                unit="batch",
+                disable=not self.config.show_progress,
+            ):
+                captured.clear()
+                self._clear_parameter_grads(model)
+                args_batch = gather_single_batch_from_list(cache_args, batch_idx)
+                kwargs_batch = gather_single_batch_from_dict(cache_kwargs, batch_idx)
+                args_batch = self._move_batch_to_model_device(model, args_batch)
+                kwargs_batch = self._move_batch_to_model_device(model, kwargs_batch)
+                args_batch = self._enable_input_grads_for_saliency(args_batch)
+                kwargs_batch = self._enable_input_grads_for_saliency(kwargs_batch)
+
+                with torch.enable_grad():
+                    try:
+                        model(*args_batch, **kwargs_batch)
+                    except StopReplay:
+                        pass
+
+                for name, activations in captured.items():
+                    for activation in activations:
+                        token_weights[name].append(
+                            self._token_weight_from_activation(activation)
+                        )
+                self._clear_parameter_grads(model)
+        finally:
+            self._restore_requires_grad(requires_grad_states)
+            self._clear_parameter_grads(model)
+            boundary_handle.remove()
+            for handle in handles:
+                handle.remove()
+
+        return token_weights
+
+    def _collect_token_weights_from_stage_cache(
+        self,
+        stage_module: nn.Module,
+        subset: dict[str, nn.Module],
+        cached_args: list[list[Any]],
+        cached_kwargs: dict[str, list[Any]],
+        stage_desc: str,
+        num_batches: int,
+    ) -> dict[str, list[torch.Tensor]]:
+        """Collect grad * activation token weights by replaying stage inputs."""
+        if not self._token_weighting_enabled():
+            return {}
+
+        targets = self._token_weight_targets(subset)
+        if not targets:
+            return {}
+
+        assert isinstance(self.config, Qwen3VLGPTQConfig)
+        token_weights: dict[str, list[torch.Tensor]] = {
+            name: [] for name in targets
+        }
+        captured: dict[str, list[torch.Tensor]] = {}
+        handles = [
+            module.register_forward_hook(
+                self._make_token_capture_hook(captured, name)
+            )
+            for name, module in targets.items()
+        ]
+        requires_grad_states = self._set_requires_grad_for_saliency(stage_module)
+
+        try:
+            for args_batch, kwargs_batch in tqdm(
+                iter_cached_batches(cached_args, cached_kwargs, num_batches),
+                desc=f"[{stage_desc}] token saliency",
+                leave=False,
+                unit="batch",
+                disable=not self.config.show_progress,
+            ):
+                captured.clear()
+                self._clear_parameter_grads(stage_module)
+                args_batch = self._move_batch_to_stage_device(stage_module, args_batch)
+                kwargs_batch = self._move_batch_to_stage_device(
+                    stage_module, kwargs_batch
+                )
+                args_batch = self._enable_input_grads_for_saliency(args_batch)
+                kwargs_batch = self._enable_input_grads_for_saliency(kwargs_batch)
+
+                with torch.enable_grad():
+                    output = stage_module(*args_batch, **kwargs_batch)
+                    loss = self._token_weight_loss(output)
+                    loss.backward()
+
+                for name, activations in captured.items():
+                    for activation in activations:
+                        token_weights[name].append(
+                            self._token_weight_from_activation(activation)
+                        )
+                self._clear_parameter_grads(stage_module)
+        finally:
+            self._restore_requires_grad(requires_grad_states)
+            self._clear_parameter_grads(stage_module)
+            for handle in handles:
+                handle.remove()
+
+        return token_weights
+
     @torch.no_grad()
     def _collect_native_inputs_from_raw_replay(
         self,
@@ -1524,6 +1809,17 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             )
             self._assign_native_inputs(gptq_objs, native_inputs)
 
+        token_weights = self._collect_token_weights_from_raw_replay(
+            model=model,
+            stage_module=stage_module,
+            subset=subset,
+            cache_args=cache_args,
+            cache_kwargs=cache_kwargs,
+            num_batches=num_batches,
+            stage_desc=stage_desc,
+        )
+        self._assign_token_weights(gptq_objs, token_weights)
+
         handles = []
         for local_name, submodule in subset.items():
             handles.append(
@@ -1635,6 +1931,16 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             )
             self._assign_native_inputs(gptq_objs, native_inputs)
 
+        token_weights = self._collect_token_weights_from_stage_cache(
+            stage_module=stage_module,
+            subset=subset,
+            cached_args=cached_args,
+            cached_kwargs=cached_kwargs,
+            stage_desc=stage_desc,
+            num_batches=num_batches,
+        )
+        self._assign_token_weights(gptq_objs, token_weights)
+
         handles = []
         for local_name, submodule in subset.items():
             handles.append(
@@ -1715,6 +2021,11 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             if gptq_conf.gptq_v2:
                 gptq_obj.native_inp = []
 
+            if gptq_conf.token_weighting == "grad_act" and isinstance(
+                submodule, nn.Linear
+            ):
+                gptq_obj.token_weights = []
+
             gptq_objs[local_name] = gptq_obj
 
         return gptq_objs
@@ -1730,6 +2041,16 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         for local_name, gptq_obj in gptq_objs.items():
             if local_name in native_inputs:
                 gptq_obj.native_inp = list(native_inputs[local_name])
+
+    def _assign_token_weights(
+        self,
+        gptq_objs: dict[str, GPTQ],
+        token_weights: dict[str, list[torch.Tensor]],
+    ) -> None:
+        """Assign collected token weights to GPTQ objects."""
+        for local_name, gptq_obj in gptq_objs.items():
+            if local_name in token_weights:
+                gptq_obj.token_weights = list(token_weights[local_name])
 
     def _make_add_batch_hook(
         self,
@@ -1752,7 +2073,21 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             if not isinstance(out_main, torch.Tensor):
                 return
 
-            gptq_objs[name].add_batch(first_inp.data, out_main.data)
+            token_weight = None
+            if gptq_objs[name].token_weights is not None:
+                if not gptq_objs[name].token_weights:
+                    raise RuntimeError(
+                        f"Token weights for GPTQ layer {name!r} were exhausted. "
+                        "The saliency replay and calibration replay called the "
+                        "layer a different number of times."
+                    )
+                token_weight = gptq_objs[name].token_weights.pop(0)
+
+            gptq_objs[name].add_batch(
+                first_inp.data,
+                out_main.data,
+                token_weight=token_weight,
+            )
 
         return _hook
 
@@ -1776,6 +2111,12 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 print(f"[{stage_desc}] {local_name} -> Quantizing ...")
 
             gptq_obj = gptq_objs[local_name]
+            if gptq_obj.token_weights:
+                raise RuntimeError(
+                    f"Unused token weights remain for GPTQ layer {local_name!r}. "
+                    "The saliency replay and calibration replay called the layer "
+                    "a different number of times."
+                )
             gptq_obj.fasterquant(
                 percdamp=gptq_conf.percdamp,
                 groupsize=gptq_conf.groupsize,
