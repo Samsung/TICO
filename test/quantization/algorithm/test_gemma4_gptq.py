@@ -457,8 +457,8 @@ class TestResolveWeightBits(unittest.TestCase):
             local_module_name="other.proj",
         )
         # "other.proj" is a more specific suffix, but both match.
-        # The last match in iteration order is returned.
-        self.assertIn(result, (5, 7))
+        # The last match in mapping iteration order is returned.
+        self.assertEqual(result, 7)
 
 
 # ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ GPTQ quantizer.
 | Field | Default | Description |
 |---|---|---|
 | `weight_bits` | `8` | Default weight bit-width. |
-| `weight_bits_overrides` | `{}` | Per-module bit-width overrides. Keys are matched in order: (1) full module name (`model.layers.0.self_attn.o_proj`), (2) layer-local name (`self_attn.o_proj`), (3) full-name suffix (`down_proj`). |
+| `weight_bits_overrides` | `{}` | Per-module bit-width overrides. Keys are matched in order: (1) full module name (`model.layers.0.self_attn.o_proj`), (2) layer-local name (`self_attn.o_proj`), (3) full-name `.`-delimited suffix (`down_proj`); when several suffix keys match, the last one in mapping order wins. |
 | `perchannel` | `True` | Per-channel (vs. per-tensor) weight quantization. |
 | `symmetric` | `False` | Symmetric quantization grid. |
 | `mse` | `None` | MSE-based quantizer tuning; one of `"mse"`, `"smse"`, `"mse_for_gptq"`, `"smse_for_gptq"` (see [MSE](#mse) below). |

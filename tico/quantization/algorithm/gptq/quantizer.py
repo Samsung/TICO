@@ -25,6 +25,7 @@ from tico.quantization.algorithm.gptq.utils import (
     find_layers,
     gather_single_batch_from_dict,
     gather_single_batch_from_list,
+    resolve_weight_bits,
 )
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
@@ -73,23 +74,18 @@ class GPTQQuantizer(BaseQuantizer):
         full_module_name: str,
         local_module_name: str,
     ) -> int:
-        """Resolve the effective bit-width for a quantized submodule."""
-        if full_module_name in gptq_conf.weight_bits_overrides:
-            return gptq_conf.weight_bits_overrides[full_module_name]
+        """
+        Resolve the effective bit-width for a quantized submodule.
 
-        if local_module_name in gptq_conf.weight_bits_overrides:
-            return gptq_conf.weight_bits_overrides[local_module_name]
-
-        suffix_matches = [
-            bits
-            for pattern, bits in gptq_conf.weight_bits_overrides.items()
-            if full_module_name.endswith(f".{pattern}")
-        ]
-
-        if suffix_matches:
-            return suffix_matches[-1]
-
-        return gptq_conf.weight_bits
+        Delegates to :func:`resolve_weight_bits`, which documents the
+        full name -> local name -> suffix (last match) -> default policy.
+        """
+        return resolve_weight_bits(
+            default_bits=gptq_conf.weight_bits,
+            weight_bits_overrides=gptq_conf.weight_bits_overrides,
+            full_module_name=full_module_name,
+            local_module_name=local_module_name,
+        )
 
     @torch.no_grad()
     def prepare(
