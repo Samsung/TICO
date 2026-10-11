@@ -22,10 +22,11 @@ against the same table so that the policy cannot drift between them.
 """
 
 import copy
+import inspect
 import types
 import unittest
 import unittest.mock
-from typing import Callable, Dict, List, NamedTuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Protocol, Tuple
 
 import torch
 
@@ -221,6 +222,22 @@ def _gemma4_resolver(default_bits, overrides, full_module_name, local_module_nam
     )
 
 
+class _ResolvesWeightBits(Protocol):
+    def _resolve_weight_bits(
+        self, gptq_conf: Any, *, full_module_name: str, local_module_name: str
+    ) -> int:
+        ...
+
+
+class _BuildsGPTQObjects(Protocol):
+    def _build_gptq_objects(
+        self,
+        subset: Dict[str, torch.nn.Module],
+        module_name: Dict[torch.nn.Module, str],
+    ) -> Mapping[str, Any]:
+        ...
+
+
 RESOLVERS: Dict[str, Resolver] = {
     "resolve_weight_bits": _shared_resolver,
     "GPTQQuantizer": _gptq_resolver,
@@ -264,7 +281,9 @@ class TestResolveWeightBitsPolicy(unittest.TestCase):
                 first = resolver(
                     6, overrides, "model.layers.0.self_attn.q_proj", "self_attn.q_proj"
                 )
-                second = resolver(6, overrides, "model.layers.0.mlp.up_proj", "mlp.up_proj")
+                second = resolver(
+                    6, overrides, "model.layers.0.mlp.up_proj", "mlp.up_proj"
+                )
                 third = resolver(
                     6, overrides, "model.layers.0.self_attn.q_proj", "self_attn.q_proj"
                 )
@@ -325,19 +344,16 @@ class TestQuantizerMethodContract(unittest.TestCase):
 
     def test_repeated_calls_on_one_quantizer_leave_config_untouched(self):
         overrides = {"q_proj": 4, "layers.0.self_attn.q_proj": 8}
-        quantizers = [
-            GPTQQuantizer(GPTQConfig(weight_bits=6, weight_bits_overrides=overrides)),
-            Qwen3VLGPTQQuantizer(
-                Qwen3VLGPTQConfig(weight_bits=6, weight_bits_overrides=overrides)
-            ),
-            Gemma4GPTQQuantizer(
-                Gemma4GPTQConfig(weight_bits=6, weight_bits_overrides=overrides)
-            ),
+        gptq_conf = GPTQConfig(weight_bits=6, weight_bits_overrides=overrides)
+        qwen_conf = Qwen3VLGPTQConfig(weight_bits=6, weight_bits_overrides=overrides)
+        gemma_conf = Gemma4GPTQConfig(weight_bits=6, weight_bits_overrides=overrides)
+        quantizers: List[Tuple[_ResolvesWeightBits, GPTQConfig]] = [
+            (GPTQQuantizer(gptq_conf), gptq_conf),
+            (Qwen3VLGPTQQuantizer(qwen_conf), qwen_conf),
+            (Gemma4GPTQQuantizer(gemma_conf), gemma_conf),
         ]
-        for quantizer in quantizers:
+        for quantizer, conf in quantizers:
             with self.subTest(quantizer=type(quantizer).__name__):
-                conf = quantizer.config
-                assert isinstance(conf, GPTQConfig)
                 before = copy.deepcopy(conf.weight_bits_overrides)
                 results = [
                     quantizer._resolve_weight_bits(
@@ -360,13 +376,22 @@ class TestQuantizerMethodContract(unittest.TestCase):
                     6,
                 )
 
-    def test_keyword_only_name_arguments(self):
-        quantizer = GPTQQuantizer(GPTQConfig(weight_bits=4))
-        assert isinstance(quantizer.config, GPTQConfig)
-        with self.assertRaises(TypeError):
-            quantizer._resolve_weight_bits(  # type: ignore[misc]
-                quantizer.config, "model.layers.0.self_attn.q_proj", "self_attn.q_proj"
-            )
+    def test_name_arguments_are_keyword_only(self):
+        methods: Tuple[Callable[..., int], ...] = (
+            GPTQQuantizer._resolve_weight_bits,
+            Qwen3VLGPTQQuantizer._resolve_weight_bits,
+            Gemma4GPTQQuantizer._resolve_weight_bits,
+            resolve_weight_bits,
+        )
+        for method in methods:
+            with self.subTest(method=method.__qualname__):
+                signature = inspect.signature(method)
+                for name in ("full_module_name", "local_module_name"):
+                    self.assertIs(
+                        signature.parameters[name].kind,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                self.assertIs(signature.return_annotation, int)
 
 
 class TestSelectedBitsReachGPTQConfigure(unittest.TestCase):
@@ -374,7 +399,7 @@ class TestSelectedBitsReachGPTQConfigure(unittest.TestCase):
 
     def test_build_gptq_objects_uses_suffix_last_match(self):
         overrides = {"layers.0.self_attn.q_proj": 8, "q_proj": 4}
-        builders = [
+        builders: List[Tuple[str, _BuildsGPTQObjects]] = [
             (
                 "Qwen3VLGPTQQuantizer",
                 Qwen3VLGPTQQuantizer(
@@ -393,8 +418,11 @@ class TestSelectedBitsReachGPTQConfigure(unittest.TestCase):
                 torch.manual_seed(0)
                 q_proj = torch.nn.Linear(4, 4)
                 k_proj = torch.nn.Linear(4, 4)
-                subset = {"self_attn.q_proj": q_proj, "self_attn.k_proj": k_proj}
-                module_name = {
+                subset: Dict[str, torch.nn.Module] = {
+                    "self_attn.q_proj": q_proj,
+                    "self_attn.k_proj": k_proj,
+                }
+                module_name: Dict[torch.nn.Module, str] = {
                     q_proj: "model.layers.0.self_attn.q_proj",
                     k_proj: "model.layers.0.self_attn.k_proj",
                 }
