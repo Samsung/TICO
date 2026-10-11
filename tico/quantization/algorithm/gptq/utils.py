@@ -13,8 +13,52 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Mapping
+
 import torch
 import tqdm
+
+
+def resolve_weight_bits(
+    *,
+    default_bits: int,
+    weight_bits_overrides: Mapping[str, int],
+    full_module_name: str,
+    local_module_name: str,
+) -> int:
+    """
+    Resolve the effective weight bit-width for one quantized submodule.
+
+    This is the single implementation of the ``weight_bits_overrides`` key
+    matching policy shared by the GPTQ-family quantizers. Keys are matched in
+    the following order and the first branch that yields a match wins:
+
+        1) ``full_module_name`` is a key (exact match).
+        2) ``local_module_name`` is a key (exact match).
+        3) ``full_module_name`` ends with ``"." + key`` (dot-delimited suffix).
+           When several keys match, the one iterated last in
+           ``weight_bits_overrides`` order wins; pattern length is irrelevant.
+        4) Otherwise ``default_bits``.
+
+    Names and keys are compared as given; no normalization is applied and the
+    selected override value is returned unchanged. The mapping is not modified.
+    """
+    if full_module_name in weight_bits_overrides:
+        return weight_bits_overrides[full_module_name]
+
+    if local_module_name in weight_bits_overrides:
+        return weight_bits_overrides[local_module_name]
+
+    suffix_matches = [
+        bits
+        for pattern, bits in weight_bits_overrides.items()
+        if full_module_name.endswith(f".{pattern}")
+    ]
+
+    if suffix_matches:
+        return suffix_matches[-1]
+
+    return default_bits
 
 
 def find_layers(module, layers=[torch.nn.Linear], name=""):

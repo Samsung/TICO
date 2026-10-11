@@ -35,6 +35,7 @@ from tico.quantization.algorithm.gemma4_gptq.utils import (
     should_quantize_text_stage,
     should_quantize_vision_stage,
 )
+from tico.quantization.algorithm.gptq.utils import resolve_weight_bits
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
@@ -104,27 +105,15 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
         """
         Resolve the effective bit-width for a quantized submodule.
 
-        Override keys are matched in the following order:
-            1) Full module name.
-            2) Stage-local module name.
-            3) Full-name suffix.
+        Delegates to :func:`resolve_weight_bits`, which documents the
+        full name -> stage-local name -> suffix (last match) -> default policy.
         """
-        if full_module_name in gptq_conf.weight_bits_overrides:
-            return gptq_conf.weight_bits_overrides[full_module_name]
-
-        if local_module_name in gptq_conf.weight_bits_overrides:
-            return gptq_conf.weight_bits_overrides[local_module_name]
-
-        suffix_matches = [
-            bits
-            for pattern, bits in gptq_conf.weight_bits_overrides.items()
-            if full_module_name.endswith(f".{pattern}")
-        ]
-
-        if suffix_matches:
-            return suffix_matches[-1]
-
-        return gptq_conf.weight_bits
+        return resolve_weight_bits(
+            default_bits=gptq_conf.weight_bits,
+            weight_bits_overrides=gptq_conf.weight_bits_overrides,
+            full_module_name=full_module_name,
+            local_module_name=local_module_name,
+        )
 
     @torch.no_grad()
     def prepare(
