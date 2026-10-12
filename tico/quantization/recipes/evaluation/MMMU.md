@@ -6,27 +6,75 @@ change quantization algorithms or run an additional quantization stage.
 
 ## Defaults and migration
 
-For `dataset: MMMU/MMMU_Pro`, `subjects: [vision]`, the default prompt is
-`official_direct`, with 256 generated tokens when `max_new_tokens` is omitted or
-null. An explicitly configured token count wins. Non-vision subjects retain the
-16-token default and their existing few-shot prompt path.
+For `dataset: MMMU/MMMU_Pro`, `subjects: [vision]`, the default prompt mode is
+`strict_single_letter` with 16 generated tokens when `max_new_tokens` is
+omitted or null. Non-vision subjects retain the 16-token default and their
+existing few-shot prompt path.
 
-The shipped Qwen3-VL/Gemma4 evaluation presets explicitly set direct mode, 256
-output tokens, and zero shots for vision (the image-only path ignores shots).
-The old strict-single-letter prompt is replaced, so do not compare an old
-baseline score directly against a newly evaluated quantized model. Re-evaluate
-both models under the same settings.
+Per-mode defaults live in one place, `MMMU_PRO_VISION_DEFAULT_MAX_NEW_TOKENS`
+in `tico/quantization/evaluation/mmmu_eval_utils.py`; the adapters only forward
+the YAML values and never substitute their own budget:
+
+| `prompt_mode` | Prompt | Default `max_new_tokens` |
+|---|---|---|
+| `strict_single_letter` (default) | `You are a strict single-letter answering machine. Answer the multiple-choice question shown in the image. Return only one letter from A to <last label>.` | 16 |
+| `official_direct` | MMMU-Pro direct prompt (unchanged text) | 256 |
+| `official_cot` | MMMU-Pro CoT prompt (unchanged text) | none; an explicit value is required |
+
+An explicitly configured `max_new_tokens` always wins over the mode default.
+Invalid values (booleans, fractions, strings, zero, negative numbers) are
+rejected rather than converted. The shipped Qwen3-VL/Gemma4 evaluation presets
+set `prompt_mode: strict_single_letter`, `max_new_tokens: 16` and zero shots for
+vision (the image-only path ignores shots).
+
+**Changing only `prompt_mode` in a preset that states `max_new_tokens: 16`
+keeps the 16-token budget.** To evaluate the direct prompt with its own
+default, change both values:
+
+```bash
+# official_direct with its 256-token default
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks mmmu \
+  --set evaluation.mmmu.prompt_mode=official_direct \
+  --set evaluation.mmmu.max_new_tokens=256
+
+# equivalently, null selects the mode default
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks mmmu \
+  --set evaluation.mmmu.prompt_mode=official_direct \
+  --set evaluation.mmmu.max_new_tokens=null
+```
 
 `official_cot` uses the corresponding MMMU prompt but requires a non-null,
 positive `max_new_tokens`. It does **not** automatically allocate 16,384 output
 tokens. Choose a budget that fits the profile and specify it when changing
-modes. Changing only `prompt_mode` in a YAML file with `max_new_tokens: 256`
-retains that explicit 256-token value; it does not select a long CoT preset.
+modes.
 
-The prompt strings are from `MMMU-Benchmark/MMMU`, `mmmu-pro/prompts.yaml`.
-The word `official` describes the prompt, not equivalence of preprocessing,
-model implementation, generation configuration, sample selection, or scoring to
-an external benchmark. The parser version is `tico-mmmu-v2`.
+The official prompt strings are from `MMMU-Benchmark/MMMU`,
+`mmmu-pro/prompts.yaml` and are not modified. The word `official` describes the
+prompt only; it does not claim equivalence of preprocessing, model
+implementation, generation configuration, sample selection or scoring to an
+external benchmark, and using it is not a reproduction of the official
+benchmark. The strict prompt is the historical TICO protocol restored as the
+default; the measurements behind that choice cover two models and do not show
+that strict/16 is optimal for every model.
+
+### Choice-count correction versus the historical prompt
+
+The strict prompt derives its last allowed label from the sample's actual
+number of options. Ten options reproduce the historical `Return only one letter
+from A to J.` wording exactly; four options give `A to D`, twelve options give
+`A to L`, and one option gives `Return only the letter A.`. Earlier TICO
+versions always wrote `A to J`, so scores on samples with a different option
+count are not a bit-exact reproduction of the old default: the change is
+"strict protocol restored plus allowed-label range corrected", not "old default
+reproduced". Reproduce the exact historical prompt from the older revision when
+that is required.
+
+Only the prompt and the parser depend on the option count. The question,
+option text and gold answer are never injected into the image-only prompt.
 
 ## Configuration
 
@@ -39,8 +87,8 @@ evaluation:
     subjects: [vision]
     n_shots: 0
     n_samples: 1000
-    prompt_mode: official_direct
-    max_new_tokens: 256
+    prompt_mode: strict_single_letter
+    max_new_tokens: 16
     input_max_seq_len: null
     output_jsonl: null
     temperature: 0.0
@@ -49,8 +97,8 @@ evaluation:
 
 | Option | Meaning |
 |---|---|
-| `prompt_mode` | `official_direct` or `official_cot`, for MMMU-Pro vision only. |
-| `max_new_tokens` | Positive integer; explicit values override defaults. |
+| `prompt_mode` | `strict_single_letter` (default), `official_direct` or `official_cot`, for MMMU-Pro vision only. |
+| `max_new_tokens` | Positive integer; explicit values override the mode default. `null` selects the mode default. |
 | `input_max_seq_len` | Optional positive, fixed input cap, including text and image tokens. |
 | `output_jsonl` | Optional new output file. Existing files raise `FileExistsError`. |
 
@@ -72,7 +120,8 @@ still respect the model/runtime's actual context limit.
 Run from the repository root. Use the same model, processor, dataset revision,
 sample selection, prompt, seed, dtype and image settings for both runs. For a
 2048-token profile, a 1536-token input cap accommodates both 256 and 512 output
-tokens.
+tokens. The example sweeps the direct prompt, so `prompt_mode` is set
+explicitly; without it the default strict prompt would be used.
 
 ```bash
 python -m tico.quantization.examples.evaluate \
@@ -80,6 +129,7 @@ python -m tico.quantization.examples.evaluate \
   --tasks mmmu \
   --set evaluation.mmmu.n_samples=50 \
   --set evaluation.max_seq_len=2048 \
+  --set evaluation.mmmu.prompt_mode=official_direct \
   --set evaluation.mmmu.input_max_seq_len=1536 \
   --set evaluation.mmmu.max_new_tokens=256 \
   --set evaluation.mmmu.output_jsonl=./out/mmmu_fp_256.jsonl
@@ -89,6 +139,7 @@ python -m tico.quantization.examples.evaluate \
   --tasks mmmu \
   --set evaluation.mmmu.n_samples=50 \
   --set evaluation.max_seq_len=2048 \
+  --set evaluation.mmmu.prompt_mode=official_direct \
   --set evaluation.mmmu.input_max_seq_len=1536 \
   --set evaluation.mmmu.max_new_tokens=512 \
   --set evaluation.mmmu.output_jsonl=./out/mmmu_fp_512.jsonl
@@ -100,19 +151,59 @@ control, not by itself proof that inputs match: compare per-sample tensor hashes
 in the JSONL output. Preserve the resolved recipe configuration alongside logs;
 logs do not embed model weights or a complete environment manifest.
 
+## Supported option counts
+
+Options are labelled `A`, `B`, ... in order. Samples with 1 to 26 options are
+supported; the evaluator validates every sample's option list and gold answer
+**before generation** and raises a `ValueError` naming the sample ID for an
+empty option list, more than 26 options, a non-list option structure, or a gold
+answer outside the valid labels. Such samples are neither skipped nor clamped
+to a supported count, and the run ends with a `run_error` record. The
+`mmmu_choice_labels(num_choices)` helper is the single source of the label set
+for prompts, parsing and logging.
+
 ## Answer extraction
 
-The last explicit answer declaration (`Answer: C`, `The answer is C`, etc.)
-outranks general option mentions. Markdown such as `**Answer:** C` is accepted.
-Otherwise the parser accepts a bare answer on the final non-empty line, an
-unambiguous choice-only final line, or a leading capitalized option with
-answer-like punctuation. Prose such as `I think ...`, `To answer a question ...`
-and a trailing `Option A is incorrect.` is not treated as a final answer.
+The parser version is `tico-mmmu-v3`. It is a versioned TICO heuristic, not a
+claim of official scoring parity. Supported grammar, in priority order:
 
-Candidates are restricted to the actual number of choices, up to A-J. Explicitly
-ambiguous or unparseable output returns `None`. It counts as an incorrect answer,
-not a skipped sample. Parsing remains heuristic; inspect saved outputs when
-changing parsing policy and re-score both compared models consistently. There
+1. The last explicit declaration `[final|correct] answer (:|=|is) X` outranks
+   every other option mention. `X` is either a parenthesised label whose
+   closing parenthesis ends the label (`Answer: (H)HENRI DE TOULOUSE-LAUTREC`
+   gives `H`) or a bare letter followed by end of text, whitespace or
+   punctuation (`Answer: HENRI` gives nothing). Markdown such as
+   `**Answer:** C` is accepted.
+2. A bare `X`, `(X)` or `X.` on the last non-empty line.
+3. An unambiguous choice-only last line such as `I would choose B.`.
+4. A leading `(X)` followed by anything (`(B)Yes.` gives `B`) or a leading
+   `X.`/`X)`/`X:` followed by a space.
+
+Rules:
+
+- Candidates are restricted to the sample's actual option count. A label
+  outside it (`J` with nine options, `Answer: Z` with twelve options) returns
+  `None` with method `out_of_range`.
+- A candidate followed by `or`, `and`, `/` or `-` (`Answer: C or D`,
+  `Answer: (C)/(D)`, `(C) or (D)`) is ambiguous and returns `None`. When the
+  last declaration is ambiguous or out of range, the parser does not fall back
+  to an earlier declaration (`Answer: A` then `Answer: Z` with twelve options is
+  `None`).
+- Prose is not guessed from: `I think this is ambiguous.`,
+  `To answer a question ...`, `The answer is a circle.`, `Option A is
+  incorrect.` all return `None`.
+- A parenthesised label in the middle of the text is never taken as the answer;
+  only the explicit-declaration, last-line and leading contexts apply.
+- `None` is counted as an incorrect answer, not a skipped sample. The record
+  distinguishes a response that never produced a final answer (for example a
+  `length`-limited chain of thought, `parse_method: unparsed`) from a response
+  whose final answer was rejected (`ambiguous_declaration`, `ambiguous_leading`,
+  `out_of_range`).
+
+Callers of `extract_answer(text)` that omit `num_choices` get the historical
+ten-label default; the evaluator always passes the real count. Inspect saved
+outputs when changing parsing policy and re-score both compared models with the
+same parser version and the same prompt mode. Comparing an FP model and a
+quantized model requires identical protocol settings and parser version; there
 is no automatic official-score claim or random-guess fallback.
 
 ## Diagnostic record contract
@@ -128,10 +219,14 @@ An interrupted or failed file can be inspected but is not automatically resumed.
 A file without `run_summary` must not be treated as a completed run. Choose a
 fresh path for each run; existing files are not overwritten or appended to.
 
-A successfully evaluated sample records:
+`run_start` records the `parser_version`, prompt mode and budgets;
+`subject_start` records the resolved budget, input cap, effective prompt mode
+and `parser_version`. A successfully evaluated sample records:
 
-- Sample ID, dataset/subject/split/index, prompt and raw generated answer.
-- Gold, predicted answer, correctness, parser method and parse-failure status.
+- Sample ID, dataset/subject/split/index, prompt mode, the rendered prompt and
+  the raw generated answer.
+- `num_choices` and `valid_labels` (for example `ABCDEFGHIJKL`), gold,
+  predicted answer, correctness, `parse_method` and `parse_failed`.
 - Processed input length/cap, image/video grid when provided, per-tensor shape,
   dtype and SHA-256, and a combined `tensor_inputs_sha256` fingerprint.
 - Generated token IDs/count, configured EOS IDs, observed EOS, budget-limit hit,

@@ -536,6 +536,48 @@ Rules:
   runtime baseline. If `baseline_answers` is unset, the dataset reference answer
   is used as the baseline.
 
+## `evaluation.mmmu` for MMMU / MMMU-Pro vision
+
+The Qwen3-VL and Gemma4 evaluation presets share this schema:
+
+```yaml
+evaluation:
+  max_seq_len: 2048
+  mmmu:
+    enabled: true
+    dataset: MMMU/MMMU_Pro
+    subjects: [vision]
+    n_shots: 0
+    prompt_mode: strict_single_letter
+    max_new_tokens: 16
+    input_max_seq_len: null
+    output_jsonl: null
+    temperature: 0.0
+```
+
+Rules:
+
+- `strict_single_letter` is the default MMMU-Pro vision protocol; its default
+  budget is 16 tokens. `official_direct` (default 256 tokens) and
+  `official_cot` (explicit `max_new_tokens` required) stay available as
+  explicit experiment options. The per-mode defaults are defined once in the
+  evaluator, not in the adapters or presets.
+- An explicit `max_new_tokens` always wins. Switching a preset that states
+  `max_new_tokens: 16` to `prompt_mode: official_direct` keeps 16 tokens; set
+  `max_new_tokens` to `256` or `null` as well when the mode default is wanted.
+- The strict prompt's allowed range follows the sample's actual option count
+  (ten options reproduce the historical `A to J` text; other counts differ from
+  older TICO versions). Samples with 1-26 options are supported; others fail
+  before generation with the sample ID.
+- Answer parsing uses parser version `tico-mmmu-v3`. Compare FP and quantized
+  models only under the same `prompt_mode`, `max_new_tokens` and parser version.
+- Using an official prompt string does not reproduce the official benchmark
+  protocol, and the strict default is not a claim that it is optimal for every
+  model.
+
+See the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md) for the parser
+grammar, the diagnostic JSONL contract and fixed-input comparisons.
+
 ## `export`
 
 ```yaml

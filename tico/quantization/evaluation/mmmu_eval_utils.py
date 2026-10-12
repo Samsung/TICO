@@ -16,6 +16,7 @@ import ast
 import json
 import math
 import re
+import string
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -97,26 +98,53 @@ MMMU_PRO_VISION_PROMPTS: dict[str, str] = {
         "Think step by step before answering."
     ),
 }
-DEFAULT_MMMU_PRO_VISION_PROMPT_MODE = "official_direct"
+STRICT_SINGLE_LETTER_PROMPT_MODE = "strict_single_letter"
+MMMU_PRO_VISION_PROMPT_MODES: tuple[str, ...] = (
+    STRICT_SINGLE_LETTER_PROMPT_MODE,
+    "official_direct",
+    "official_cot",
+)
+DEFAULT_MMMU_PRO_VISION_PROMPT_MODE = STRICT_SINGLE_LETTER_PROMPT_MODE
 DEFAULT_MMMU_MAX_NEW_TOKENS = 16
-DEFAULT_MMMU_PRO_VISION_MAX_NEW_TOKENS = 256
-MMMU_ANSWER_PARSER_VERSION = "tico-mmmu-v2"
+# Per-mode default generation budgets for MMMU-Pro vision when
+# ``max_new_tokens`` is None. ``None`` means the mode has no implicit budget
+# and an explicit value is required. Non-vision subjects always use
+# ``DEFAULT_MMMU_MAX_NEW_TOKENS``.
+MMMU_PRO_VISION_DEFAULT_MAX_NEW_TOKENS: dict[str, int | None] = {
+    STRICT_SINGLE_LETTER_PROMPT_MODE: 16,
+    "official_direct": 256,
+    "official_cot": None,
+}
+# Single-letter option labels; the actual choice count of each sample selects
+# the valid prefix of this alphabet for both the prompt and the parser.
+MMMU_MAX_CHOICES = 26
+MMMU_ANSWER_PARSER_VERSION = "tico-mmmu-v3"
+
+_STRICT_SINGLE_LETTER_PROMPT_PREFIX = (
+    "You are a strict single-letter answering machine. "
+    "Answer the multiple-choice question shown in the image. "
+)
 
 # Require a declaration separator, rather than matching the verb in
-# "To answer a question ...". Labels are case-insensitive; article-like
-# lowercase letters followed by prose are rejected below.
+# "To answer a question ...". A parenthesised label ends at its closing
+# parenthesis (``Answer: (H)HENRI`` -> H); a bare label needs a boundary so
+# that ``Answer: HENRI`` yields nothing. Labels are case-insensitive;
+# article-like lowercase letters followed by prose are rejected below.
 _EXPLICIT_ANSWER_PATTERN = re.compile(
     r"\b(?i:(?:(?:final|correct)\s+)?answer)\s*"
     r"(?i::|=|\bis\b)\s*(?i:option\s+)?"
-    r"\(?([A-Ja-j])\)?(?=$|[\s.,;:!?])"
+    r"(?:\(([A-Za-z])\)|([A-Za-z])(?=$|[\s.,;:!?)/]))"
 )
-_BARE_ANSWER_PATTERN = re.compile(r"\s*\(?([A-Ja-j])\)?[.):]?\s*")
-_LEADING_ANSWER_PATTERN = re.compile(r"^\s*(?:\(([A-J])\)|([A-J])[.):])(?=\s|$)")
+_BARE_ANSWER_PATTERN = re.compile(r"\s*\(?([A-Za-z])\)?[.):]?\s*")
+# ``(B)Yes.`` is a leading answer; ``B. text`` still needs a space after the
+# punctuation so that abbreviations are not read as labels.
+_LEADING_ANSWER_PATTERN = re.compile(r"^\s*(?:\(([A-Z])\)|([A-Z])[.):](?=\s|$))")
 _CHOICE_LINE_PATTERN = re.compile(
     r"(?i:(?:I\s+(?:would\s+)?(?:choose|select)\s+(?:option\s+)?|"
     r"(?:the\s+)?(?:correct\s+)?(?:option|choice)\s*(?::|=|is)?\s*))"
-    r"\(?([A-Ja-j])\)?[.!]?"
+    r"\(?([A-Za-z])\)?[.!]?"
 )
+_AMBIGUOUS_TAIL_PATTERN = re.compile(r"(?i)^(?:or|and)\b|^[/-]")
 
 
 def generate_answer(*args: Any, **kwargs: Any) -> str:
@@ -135,12 +163,56 @@ def generate_image_only_answer(*args: Any, **kwargs: Any) -> str:
     return impl(*args, **kwargs)
 
 
-def get_mmmu_pro_vision_prompt(prompt_mode: str) -> str:
-    if not isinstance(prompt_mode, str) or prompt_mode not in MMMU_PRO_VISION_PROMPTS:
+def mmmu_choice_labels(num_choices: int) -> str:
+    """Return the valid single-letter labels ``A..`` for ``num_choices`` (1-26).
+
+    Rejects booleans, fractions, zero, negative values and counts above
+    ``MMMU_MAX_CHOICES`` instead of clamping them.
+    """
+    count = positive_int(num_choices, "num_choices")
+    if count > MMMU_MAX_CHOICES:
+        raise ValueError(
+            f"num_choices must be between 1 and {MMMU_MAX_CHOICES}, got {count}."
+        )
+    return string.ascii_uppercase[:count]
+
+
+def validate_mmmu_pro_vision_prompt_mode(prompt_mode: Any) -> str:
+    if (
+        not isinstance(prompt_mode, str)
+        or prompt_mode not in MMMU_PRO_VISION_PROMPT_MODES
+    ):
         raise ValueError(
             f"Invalid MMMU-Pro vision prompt_mode {prompt_mode!r}; "
-            f"expected one of {sorted(MMMU_PRO_VISION_PROMPTS)}."
+            f"expected one of {sorted(MMMU_PRO_VISION_PROMPT_MODES)}."
         )
+    return prompt_mode
+
+
+def get_mmmu_pro_vision_prompt(prompt_mode: str, num_choices: int | None = None) -> str:
+    """Return the image-only prompt for a mode.
+
+    ``strict_single_letter`` requires the sample's actual ``num_choices``; only
+    the last allowed label is derived from it (ten choices reproduce the
+    historical ``A to J`` wording exactly). Official prompts are fixed strings
+    and never mention the choice count. No question, option text or gold
+    answer is injected on this path.
+    """
+    validate_mmmu_pro_vision_prompt_mode(prompt_mode)
+    if prompt_mode == STRICT_SINGLE_LETTER_PROMPT_MODE:
+        if num_choices is None:
+            raise ValueError(
+                "strict_single_letter requires the sample's actual num_choices."
+            )
+        labels = mmmu_choice_labels(num_choices)
+        if len(labels) == 1:
+            return _STRICT_SINGLE_LETTER_PROMPT_PREFIX + "Return only the letter A."
+        return (
+            _STRICT_SINGLE_LETTER_PROMPT_PREFIX
+            + f"Return only one letter from A to {labels[-1]}."
+        )
+    if num_choices is not None:
+        mmmu_choice_labels(num_choices)
     return MMMU_PRO_VISION_PROMPTS[prompt_mode]
 
 
@@ -151,31 +223,61 @@ def resolve_mmmu_max_new_tokens(
     subject: str,
     prompt_mode: str = DEFAULT_MMMU_PRO_VISION_PROMPT_MODE,
 ) -> int:
-    """Keep non-vision's 16-token default; use 256 for vision direct mode.
+    """Resolve the generation budget; an explicit value always wins.
 
-    CoT has no implicit budget. In particular, do not insert a 16K budget
-    into a profile whose entire input-plus-output capacity is only 2048.
+    ``None`` selects the per-mode default from
+    ``MMMU_PRO_VISION_DEFAULT_MAX_NEW_TOKENS`` for MMMU-Pro vision and the
+    16-token default elsewhere. CoT has no implicit budget. In particular, do
+    not insert a 16K budget into a profile whose entire input-plus-output
+    capacity is only 2048.
     """
     vision_only = is_mmmu_pro_vision(dataset, subject)
     if vision_only:
-        get_mmmu_pro_vision_prompt(prompt_mode)
-        if prompt_mode == "official_cot" and max_new_tokens is None:
-            raise ValueError(
-                "official_cot requires an explicit max_new_tokens budget "
-                "compatible with max_seq_len."
-            )
-    if max_new_tokens is None:
-        return (
-            DEFAULT_MMMU_PRO_VISION_MAX_NEW_TOKENS
-            if vision_only
-            else DEFAULT_MMMU_MAX_NEW_TOKENS
+        validate_mmmu_pro_vision_prompt_mode(prompt_mode)
+    if max_new_tokens is not None:
+        return positive_int(max_new_tokens, "max_new_tokens")
+    if not vision_only:
+        return DEFAULT_MMMU_MAX_NEW_TOKENS
+    default = MMMU_PRO_VISION_DEFAULT_MAX_NEW_TOKENS[prompt_mode]
+    if default is None:
+        raise ValueError(
+            f"{prompt_mode} requires an explicit max_new_tokens budget "
+            "compatible with max_seq_len."
         )
-    return positive_int(max_new_tokens, "max_new_tokens")
+    return default
+
+
+def _is_ambiguous_candidate(candidate: str, parenthesised: bool, tail: str) -> bool:
+    # ``Answer: C or D`` / ``(C)/(D)`` are not a single choice. A bare
+    # lowercase letter followed by prose is an article, not a label.
+    if _AMBIGUOUS_TAIL_PATTERN.match(tail):
+        return True
+    return (
+        not parenthesised
+        and candidate.islower()
+        and bool(tail)
+        and tail[0] not in ".,;:!?"
+    )
 
 
 def _parse_answer(generated_text: str, num_choices: int = 10) -> tuple[str | None, str]:
-    if not 1 <= positive_int(num_choices, "num_choices") <= 10:
-        raise ValueError("num_choices must be between 1 and 10.")
+    """Parse one answer label from generated text.
+
+    Supported grammar, in priority order:
+
+    1. the last explicit declaration ``[final|correct] answer (:|=|is) X``
+       where ``X`` is ``(X)`` followed by anything or a bare letter followed by
+       end, whitespace or punctuation;
+    2. a bare ``X`` / ``(X)`` / ``X.`` on the last non-empty line;
+    3. an unambiguous choice-only last line (``I would choose B.``);
+    4. a leading ``(X)`` followed by anything, or ``X.`` followed by a space.
+
+    A candidate followed by ``or``/``and``/``/``/``-`` is ambiguous and yields
+    ``None`` without falling back to an earlier mention. A label outside the
+    sample's ``num_choices`` yields ``None`` (``out_of_range``). Callers that
+    omit ``num_choices`` get the historical ten-label default.
+    """
+    labels = mmmu_choice_labels(num_choices)
     # Markdown emphasis and code fences do not change the answer's meaning.
     text = generated_text.translate(str.maketrans("", "", "*_`")).strip()
     if not text:
@@ -187,13 +289,9 @@ def _parse_answer(generated_text: str, num_choices: int = 10) -> tuple[str | Non
     declarations = list(_EXPLICIT_ANSWER_PATTERN.finditer(text))
     if declarations:
         match = declarations[-1]
-        candidate = match.group(1)
+        candidate = match.group(1) or match.group(2)
         tail = text[match.end() :].split("\n", 1)[0].strip()
-        # A lowercase article followed by prose is not a declared option.
-        # Also avoid treating an explicitly ambiguous answer as a single choice.
-        if (candidate.islower() and tail and tail[0] not in ".,;:!?") or re.match(
-            r"(?i)^(?:or|and)\b|^[/-]", tail
-        ):
+        if _is_ambiguous_candidate(candidate, match.group(1) is not None, tail):
             return None, "ambiguous_declaration"
         answer, method = candidate.upper(), "explicit"
     else:
@@ -208,16 +306,23 @@ def _parse_answer(generated_text: str, num_choices: int = 10) -> tuple[str | Non
             else:
                 match = _LEADING_ANSWER_PATTERN.match(text)
                 if match:
-                    answer = (match.group(1) or match.group(2)).upper()
-                    method = "leading"
-    if answer is not None and answer not in "ABCDEFGHIJ"[:num_choices]:
+                    candidate = match.group(1) or match.group(2)
+                    tail = text[match.end() :].split("\n", 1)[0].strip()
+                    if _is_ambiguous_candidate(
+                        candidate, match.group(1) is not None, tail
+                    ):
+                        return None, "ambiguous_leading"
+                    answer, method = candidate.upper(), "leading"
+    if answer is not None and answer not in labels:
         return None, "out_of_range"
     return answer, method
 
 
 def extract_answer(generated_text: str, num_choices: int = 10) -> str | None:
-    """Extract an A-J answer or None; explicit answers outrank option mentions.
+    """Extract an answer label or None; explicit answers outrank option mentions.
 
+    ``num_choices`` (1-26) bounds the valid labels; omitting it keeps the
+    historical ten-label default, so evaluators must pass the real count.
     This is a versioned TICO parser, not a claim of official scoring parity.
     An unparseable or out-of-range answer is counted as wrong, not skipped.
     """
@@ -403,6 +508,33 @@ def is_mmmu_pro_vision(dataset: str, subject: str) -> bool:
     return dataset == "MMMU/MMMU_Pro" and subject == "vision"
 
 
+def validate_sample_choices(sample_id: str, choices: Any, gold: Any) -> str:
+    """Return the valid labels of one sample, or fail before any generation.
+
+    Unsupported inputs (no options, more than ``MMMU_MAX_CHOICES`` options, a
+    non-list option structure, or a gold answer outside the labels) raise a
+    ``ValueError`` naming the sample. They are neither skipped nor clamped.
+    """
+    if not isinstance(choices, (list, tuple)):
+        raise ValueError(
+            f"Sample {sample_id!r}: options must be a list, "
+            f"got {type(choices).__name__}."
+        )
+    try:
+        labels = mmmu_choice_labels(len(choices))
+    except ValueError as error:
+        raise ValueError(
+            f"Sample {sample_id!r}: unsupported number of choices "
+            f"({len(choices)}): {error}"
+        ) from error
+    if not isinstance(gold, str) or gold.strip().upper() not in labels:
+        raise ValueError(
+            f"Sample {sample_id!r}: gold answer {gold!r} is not one of the "
+            f"valid labels {labels!r}."
+        )
+    return labels
+
+
 def _validate_subject_options(
     *,
     dataset: str,
@@ -497,6 +629,7 @@ def evaluate_subject(
                 "prompt_mode": effective_mode,
                 "max_new_tokens": budget,
                 "input_max_seq_len": input_budget,
+                "parser_version": MMMU_ANSWER_PARSER_VERSION,
             }
         )
 
@@ -520,8 +653,12 @@ def evaluate_subject(
             continue
 
         item = get_item_mmmu(ex)
+        # Unsupported option structures fail here, before generation, with
+        # the sample ID; they are not skipped and the count is not clamped.
+        labels = validate_sample_choices(record["id"], item["choices"], item["answer"])
+        num_choices = len(labels)
         if vision_only:
-            prompt = get_mmmu_pro_vision_prompt(prompt_mode)
+            prompt = get_mmmu_pro_vision_prompt(prompt_mode, num_choices)
         else:
             prompt = build_few_shot_prompt(
                 question=item["question"],
@@ -536,7 +673,12 @@ def evaluate_subject(
             generation_kwargs["input_max_seq_len"] = input_max_seq_len
         if generation is not None:
             generation_kwargs["diagnostics"] = generation
-        record.update(prompt=prompt, gold=item["answer"].upper())
+        record.update(
+            prompt=prompt,
+            gold=item["answer"].upper(),
+            num_choices=num_choices,
+            valid_labels=labels,
+        )
         try:
             generate = generate_image_only_answer if vision_only else generate_answer
             generated = generate(
@@ -577,7 +719,7 @@ def evaluate_subject(
                 print(f"[WARNING] Skipped {record['id']}: {error}")
             continue
 
-        predicted, parse_method = _parse_answer(generated, len(item["choices"]))
+        predicted, parse_method = _parse_answer(generated, num_choices)
         gold = item["answer"].upper()
         is_correct = predicted == gold
         correct += int(is_correct)
@@ -592,7 +734,6 @@ def evaluate_subject(
             generated=generated,
             predicted=predicted,
             correct=is_correct,
-            num_choices=len(item["choices"]),
             parse_method=parse_method,
             parse_failed=predicted is None,
             generation=generation,
