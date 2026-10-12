@@ -108,7 +108,8 @@ class TestMmmuBudgetDefaults(unittest.TestCase):
                     )
 
     def test_invalid_prompt_mode_is_rejected_even_with_explicit_budget(self):
-        for mode in ("strict", "direct", "", None, []):
+        invalid_modes: tuple[object, ...] = ("strict", "direct", "", None, [])
+        for mode in invalid_modes:
             with self.subTest(mode=mode), self.assertRaisesRegex(
                 ValueError, "prompt_mode"
             ):
@@ -145,7 +146,9 @@ class TestMmmuPrompts(unittest.TestCase):
             mmmu.get_mmmu_pro_vision_prompt("strict_single_letter")
         for count in (0, 27, True, 2.5):
             with self.subTest(count=count), self.assertRaises(ValueError):
-                mmmu.get_mmmu_pro_vision_prompt("strict_single_letter", count)
+                mmmu.get_mmmu_pro_vision_prompt(
+                    "strict_single_letter", count  # type: ignore[arg-type]
+                )
 
     def test_official_prompts_are_unchanged_and_ignore_the_choice_count(self):
         direct = (
