@@ -16,6 +16,7 @@ import contextlib
 import io
 import unittest
 from types import SimpleNamespace
+from typing import Optional, Tuple
 from unittest.mock import patch
 
 import tico.quantization.recipes.qparams as qparams
@@ -29,7 +30,7 @@ class FakeObserver:
     """Fake affine observer that records loaded quantization parameters."""
 
     def __init__(self, dtype=UINT8):
-        self.loaded = None
+        self.loaded: Optional[Tuple[torch.Tensor, torch.Tensor, bool]] = None
         self.dtype = dtype
 
     def load_qparams(self, scale, zero, lock):
@@ -63,7 +64,7 @@ class TestRecipeQParams(unittest.TestCase):
         owner = SimpleNamespace(quantizers={"linear": object()})
         root = SimpleNamespace(wrapped=SimpleNamespace(module=owner))
 
-        found_owner, quantizers = qparams.find_gptq_quantizers(root)
+        found_owner, quantizers = qparams.find_gptq_quantizers(root)  # type: ignore[arg-type]
 
         self.assertIs(found_owner, owner)
         self.assertEqual(quantizers, owner.quantizers)
@@ -74,7 +75,7 @@ class TestRecipeQParams(unittest.TestCase):
         root.wrapped = SimpleNamespace(quantizers={"wrapped": object()})
         root.wrapped.module = SimpleNamespace(quantizers={"module": object()})
 
-        qparams.clear_gptq_quantizers(root)
+        qparams.clear_gptq_quantizers(root)  # type: ignore[arg-type]
 
         self.assertFalse(hasattr(root, "quantizers"))
         self.assertFalse(hasattr(root.wrapped, "quantizers"))
@@ -123,6 +124,7 @@ class TestRecipeQParams(unittest.TestCase):
             stats = qparams.inject_gptq_qparams(root, quantizers)
 
         self.assertEqual(stats, {"matched": 1, "missed": 0, "unused": 0})
+        assert observer.loaded is not None
         loaded_scale, loaded_zero, locked = observer.loaded
         torch.testing.assert_close(loaded_scale, torch.tensor([0.25, 0.5]))
         torch.testing.assert_close(loaded_zero, torch.tensor([0.0, 0.0]))
