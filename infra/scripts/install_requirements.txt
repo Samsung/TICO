@@ -2,6 +2,9 @@ wheel==0.46.2
 
 circle_schema
 
-packaging==25.0
+# Lower bound only: an exact pin downgrades the packaging that other tools
+# (e.g. virtualenv>=21.14.6 needs packaging>=26.3) already installed and makes
+# `pip check` in `./ccex configure test` fail.
+packaging>=25.0
 pyyaml==6.0.2
 tqdm
