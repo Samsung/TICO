@@ -85,10 +85,14 @@ class TestQuantGemma4ClippableLinear(unittest.TestCase):
         scale = torch.tensor([0.25, 0.5, 0.75])
         zero = torch.zeros(3, dtype=torch.int)
         inner_name = f"{self._FP_NAME}.linear"
+        # The GPTQ grid must have the same level count as the observer dtype.
+        self.assertEqual(inner.obs_weight.dtype, DType.uint(8))
         stats = inject_gptq_qparams(
             quant,
             {
-                inner_name: SimpleNamespace(scale=scale, zero=zero),
+                inner_name: SimpleNamespace(
+                    scale=scale, zero=zero, maxq=torch.tensor(255)
+                ),
             },
         )
 
