@@ -42,6 +42,39 @@ def find_gptq_quantizers(
     return None, None
 
 
+def gptq_zero_point_for_observer(
+    quantizer: Any,
+    observer: Any,
+    *,
+    module_name: str,
+) -> torch.Tensor:
+    """Map a GPTQ zero point into the integer domain of a PTQ weight observer.
+
+    The GPTQ solver quantizes on the unsigned grid ``[0, maxq]`` with
+    ``maxq = 2**bits - 1`` and keeps its zero point in that domain. Affine
+    observers quantize on ``[dtype.qmin, dtype.qmax]``. Both grids describe
+    the same values when they have the same number of levels, and the
+    observer zero point is then ``zero + dtype.qmin`` (a no-op for unsigned
+    dtypes). A level-count mismatch means the GPTQ weights were rounded on a
+    different grid than the observer will use, so it is rejected instead of
+    being silently loaded.
+    """
+    maxq = int(quantizer.maxq)
+    dtype = observer.dtype
+    levels = int(dtype.qmax) - int(dtype.qmin)
+    if maxq != levels:
+        raise RuntimeError(
+            f"GPTQ quantizer for {module_name!r} uses {maxq + 1} integer levels "
+            f"but the PTQ weight observer dtype {dtype} has {levels + 1}. The GPTQ "
+            "bit width and the PTQ weight dtype must agree; adjust weight_bits / "
+            "weight_bits_overrides or the PTQ weight spec."
+        )
+    zero = quantizer.zero
+    if int(dtype.qmin) != 0:
+        zero = zero + int(dtype.qmin)
+    return zero
+
+
 def inject_gptq_qparams(
     root: torch.nn.Module,
     gptq_quantizers: dict[str, Any],
@@ -49,7 +82,12 @@ def inject_gptq_qparams(
     *,
     verbose: bool = False,
 ) -> dict[str, int]:
-    """Inject compatible GPTQ scale and zero-point values into PTQ observers."""
+    """Inject compatible GPTQ scale and zero-point values into PTQ observers.
+
+    A matched quantizer must quantize on a grid with the same number of
+    integer levels as the observer dtype (see ``gptq_zero_point_for_observer``);
+    the zero point is mapped into the observer dtype domain before loading.
+    """
     seen: set[str] = set()
     missed: list[str] = []
 
@@ -74,7 +112,8 @@ def inject_gptq_qparams(
             scale = scale * scale_multiplier
 
         assert isinstance(obs, AffineObserverBase)
-        obs.load_qparams(scale, quantizer.zero, lock=True)
+        zero = gptq_zero_point_for_observer(quantizer, obs, module_name=module.fp_name)
+        obs.load_qparams(scale, zero, lock=True)
         seen.add(module.fp_name)
 
     unused = set(gptq_quantizers.keys()) - seen

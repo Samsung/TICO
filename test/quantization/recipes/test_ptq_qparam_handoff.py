@@ -25,6 +25,7 @@ import torch
 
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.stages.ptq import PTQStage
+from tico.quantization.wrapq.dtypes import UINT8
 
 
 class FakeObserver:
@@ -32,6 +33,7 @@ class FakeObserver:
 
     def __init__(self):
         self.loaded = None
+        self.dtype = UINT8
 
     def load_qparams(self, scale, zero, lock):
         """Record the qparams passed by the injection helper."""
@@ -81,7 +83,9 @@ class TestPTQQParamHandoff(unittest.TestCase):
         scale = torch.tensor([0.5])
         zero = torch.tensor([1])
         quantizers = {
-            quantizer_name: SimpleNamespace(scale=scale, zero=zero),
+            quantizer_name: SimpleNamespace(
+                scale=scale, zero=zero, maxq=torch.tensor(255)
+            ),
         }
 
         source_model = torch.nn.Module()

@@ -53,6 +53,10 @@ class GPTQQuantizer(BaseQuantizer):
         3) convert(model) to consume the collected data and apply GPTQ.
     """
 
+    # The catcher forward and the first-layer forward are bound to the
+    # prepared model instance; a deep copy cannot be converted.
+    requires_inplace_convert = True
+
     def __init__(self, config: GPTQConfig):
         super().__init__(config)
 

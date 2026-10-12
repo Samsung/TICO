@@ -324,7 +324,11 @@ pipeline:
 Keep the GPTQ and PTQ weight policies compatible for every reused module,
 including bit-width, signedness, qscheme, and channel granularity. The example
 uses 8-bit asymmetric per-channel quantization for the Qwen3-VL vision patch
-projection in both stages.
+projection in both stages. The hand-off checks that the GPTQ grid has the same
+number of integer levels as the PTQ weight dtype (`weight_bits` 4 with `uint4`,
+8 with `uint8` or `int8`, ...) and fails with the module name otherwise; a
+signed PTQ dtype receives the GPTQ zero point shifted into its domain, so
+symmetric GPTQ (`symmetric: true`) pairs with `int8`/`int16` weights exactly.
 
 Set `reuse_gptq_qparams: false` to let PTQ weight observers compute qparams
 from the current model weights. If GPTQ already ran, these are the GPTQ-updated

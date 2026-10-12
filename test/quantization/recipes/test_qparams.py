@@ -22,16 +22,24 @@ import tico.quantization.recipes.qparams as qparams
 
 import torch
 
+from tico.quantization.wrapq.dtypes import DType, UINT8
+
 
 class FakeObserver:
     """Fake affine observer that records loaded quantization parameters."""
 
-    def __init__(self):
+    def __init__(self, dtype=UINT8):
         self.loaded = None
+        self.dtype = dtype
 
     def load_qparams(self, scale, zero, lock):
         """Record the qparams passed by the injection helper."""
         self.loaded = (scale, zero, lock)
+
+
+def _fake_quantizer(scale, zero, bits=8):
+    """Return a GPTQ-quantizer-like record on the unsigned ``[0, 2**bits - 1]`` grid."""
+    return SimpleNamespace(scale=scale, zero=zero, maxq=torch.tensor(2**bits - 1))
 
 
 class FakeQuantModule(torch.nn.Module):
@@ -83,10 +91,8 @@ class TestRecipeQParams(unittest.TestCase):
         scale = torch.tensor([0.5])
         zero = torch.tensor([1])
         quantizers = {
-            "matched": SimpleNamespace(scale=scale, zero=zero),
-            "unused": SimpleNamespace(
-                scale=torch.tensor([1.0]), zero=torch.tensor([0])
-            ),
+            "matched": _fake_quantizer(scale, zero),
+            "unused": _fake_quantizer(torch.tensor([1.0]), torch.tensor([0])),
         }
 
         with patch.object(qparams, "QuantModuleBase", FakeQuantModule), patch.object(
@@ -98,3 +104,53 @@ class TestRecipeQParams(unittest.TestCase):
         self.assertEqual(stats, {"matched": 1, "missed": 1, "unused": 1})
         self.assertEqual(matched_observer.loaded, (scale, zero, True))
         self.assertIsNone(missed_observer.loaded)
+
+    def test_inject_gptq_qparams_maps_zero_point_into_signed_observer_domain(self):
+        """A signed observer dtype receives the GPTQ zero point shifted by qmin."""
+        observer = FakeObserver(dtype=DType.int(4))
+        root = torch.nn.Sequential(FakeQuantModule("linear", observer))
+        # Symmetric 4-bit GPTQ keeps zero = (maxq + 1) / 2 = 8 on [0, 15];
+        # the same grid on int4 [-8, 7] has zero point 0.
+        quantizers = {
+            "linear": _fake_quantizer(
+                torch.tensor([0.25, 0.5]), torch.tensor([8.0, 8.0]), bits=4
+            )
+        }
+
+        with patch.object(qparams, "QuantModuleBase", FakeQuantModule), patch.object(
+            qparams, "AffineObserverBase", FakeObserver
+        ):
+            stats = qparams.inject_gptq_qparams(root, quantizers)
+
+        self.assertEqual(stats, {"matched": 1, "missed": 0, "unused": 0})
+        loaded_scale, loaded_zero, locked = observer.loaded
+        torch.testing.assert_close(loaded_scale, torch.tensor([0.25, 0.5]))
+        torch.testing.assert_close(loaded_zero, torch.tensor([0.0, 0.0]))
+        self.assertTrue(locked)
+
+    def test_inject_gptq_qparams_rejects_level_count_mismatch(self):
+        """A GPTQ grid with a different number of levels than the observer fails."""
+        observer = FakeObserver(dtype=DType.uint(8))
+        root = torch.nn.Sequential(FakeQuantModule("model.layers.0.q", observer))
+        quantizers = {
+            "model.layers.0.q": _fake_quantizer(
+                torch.tensor([0.5]), torch.tensor([3.0]), bits=4
+            )
+        }
+
+        with patch.object(qparams, "QuantModuleBase", FakeQuantModule), patch.object(
+            qparams, "AffineObserverBase", FakeObserver
+        ):
+            with self.assertRaisesRegex(RuntimeError, "model.layers.0.q.*16 integer"):
+                qparams.inject_gptq_qparams(root, quantizers)
+        self.assertIsNone(observer.loaded)
+
+    def test_gptq_zero_point_for_observer_is_identity_for_unsigned_dtypes(self):
+        """Unsigned observer dtypes keep the GPTQ zero point unchanged."""
+        zero = torch.tensor([[3.0], [15.0]])
+        mapped = qparams.gptq_zero_point_for_observer(
+            _fake_quantizer(torch.tensor([[1.0], [1.0]]), zero, bits=4),
+            FakeObserver(dtype=DType.uint(4)),
+            module_name="linear",
+        )
+        self.assertIs(mapped, zero)

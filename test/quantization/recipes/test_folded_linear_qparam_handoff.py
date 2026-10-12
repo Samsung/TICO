@@ -23,6 +23,7 @@ import tico.quantization.recipes.qparams as qparams
 
 import torch
 import torch.nn as nn
+from tico.quantization.wrapq.dtypes import UINT8
 from tico.quantization.wrapq.utils.linear_folding import fold_input_affine_into_linear
 
 
@@ -31,6 +32,7 @@ class _FakeObserver:
 
     def __init__(self) -> None:
         self.loaded: Optional[Tuple[Any, Any, Any]] = None
+        self.dtype = UINT8
 
     def load_qparams(self, scale, zero, lock) -> None:
         """Store one qparam handoff for later assertions."""
@@ -62,6 +64,7 @@ class FoldedLinearQParamHandoffTest(unittest.TestCase):
         quantizer = SimpleNamespace(
             scale=torch.tensor([0.25, 0.5]),
             zero=torch.tensor([3, 4]),
+            maxq=torch.tensor(255),
         )
 
         with patch.object(qparams, "QuantModuleBase", _FakeQuantModule), patch.object(
