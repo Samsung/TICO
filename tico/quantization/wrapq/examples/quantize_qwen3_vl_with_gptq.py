@@ -54,9 +54,10 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_mixed_calib_inputs,
 )
 from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
+from tico.quantization.recipes.qparams import (
+    inject_gptq_qparams as _inject_gptq_qparams,
+)
 from tico.quantization.wrapq.dtypes import DType
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
-from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -821,6 +822,11 @@ def build_qwen3_vl_gptq_config(
     """
     weight_bits_overrides: dict[str, int] = {}
 
+    if args.gptq_vision:
+        weight_bits_overrides[
+            "model.visual.patch_embed.proj"
+        ] = args.vision_patch_embed_weight_bits
+
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits
 
@@ -855,26 +861,8 @@ def inject_gptq_qparams(
     gptq_quantizers: dict[str, Any],  # {fp_name: quantizer}
     weight_obs_name: str = "weight",
 ):
-    """
-    For every `QuantModuleBase` whose `fp_name` matches a GPTQ key,
-    locate the observer called `weight_obs_name` and overwrite its
-    (scale, zero-point), then lock them against further updates.
-    """
-    for m in root.modules():
-        if not isinstance(m, QuantModuleBase):
-            continue
-        if m.fp_name is None:
-            continue
-
-        quantizer = gptq_quantizers.get(m.fp_name)
-        if quantizer is None:
-            continue
-        obs = m.get_observer(weight_obs_name)
-        if obs is None:
-            continue
-        assert isinstance(obs, AffineObserverBase)
-        # GPTQ quantizer attributes
-        obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
+    """Validate and lock GPTQ qparams with the shared recipe handoff."""
+    _inject_gptq_qparams(root, gptq_quantizers, weight_obs_name)
 
 
 def quantize_using_PTQ(

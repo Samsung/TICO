@@ -326,6 +326,24 @@ including bit-width, signedness, qscheme, and channel granularity. The example
 uses 8-bit asymmetric per-channel quantization for the Qwen3-VL vision patch
 projection in both stages.
 
+The handoff validates the actual attached GPTQ quantizer against each prepared
+PTQ weight observer, after PTQ overrides have been applied. Its unsigned integer
+range must match exactly: GPTQ 4-bit to PTQ `uint8`, GPTQ 8-bit to PTQ `uint4`,
+and an unsigned GPTQ grid to a signed PTQ dtype all raise `ValueError` with the
+module name and both quantization settings. The handoff does not change either
+stage's bit-width or translate signed and unsigned grids automatically.
+
+Scale and zero-point values must be valid for the target weight layout. Scales
+must be finite and positive; zero-points must be finite integers in range.
+Per-channel observers require float32 scales. Attached GPTQ metadata must retain
+the original `maxq` and `perchannel` flag; scale and zero-point alone are not
+enough to establish compatibility.
+Channel axes and qparam shapes are checked against the wrapped weight. A
+per-channel mapping can be collapsed to a per-tensor observer only when all
+channel qparams are identical. All matched modules are checked before any
+observer is loaded or locked, so an invalid module leaves the other observers
+unchanged. Compatible qparams remain locked throughout PTQ calibration.
+
 Set `reuse_gptq_qparams: false` to let PTQ weight observers compute qparams
 from the current model weights. If GPTQ already ran, these are the GPTQ-updated
 weights, not the original pre-GPTQ floating-point weights.

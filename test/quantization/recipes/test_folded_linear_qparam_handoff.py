@@ -15,106 +15,116 @@
 """Unit tests for GPTQ qparam handoff to folded linear layers."""
 
 import unittest
-from types import SimpleNamespace
-from typing import Any, Optional, Tuple
-from unittest.mock import patch
-
-import tico.quantization.recipes.qparams as qparams
 
 import torch
 import torch.nn as nn
+from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
+from tico.quantization.config import affine, PTQConfig
+from tico.quantization.recipes.qparams import inject_gptq_qparams
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.utils.linear_folding import fold_input_affine_into_linear
-
-
-class _FakeObserver:
-    """Record qparams loaded by the handoff helper."""
-
-    def __init__(self) -> None:
-        self.loaded: Optional[Tuple[Any, Any, Any]] = None
-
-    def load_qparams(self, scale, zero, lock) -> None:
-        """Store one qparam handoff for later assertions."""
-        self.loaded = (scale, zero, lock)
-
-
-class _FakeQuantModule(nn.Module):
-    """Expose a folded linear layer through a PTQ-like module interface."""
-
-    def __init__(self, linear: nn.Linear, observer: _FakeObserver) -> None:
-        super().__init__()
-        self.fp_name = "vision_tower.patch_embedder.input_proj"
-        self.module = linear
-        self._observer = observer
-
-    def get_observer(self, name: str):
-        """Return the fake weight observer for the requested role."""
-        return self._observer if name == "weight" else None
+from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
 
 class FoldedLinearQParamHandoffTest(unittest.TestCase):
     """Validate scale adjustment and conservative rejection behavior."""
 
-    def _inject(self, linear: nn.Linear):
-        """Inject one synthetic GPTQ record into a fake PTQ module."""
-        observer = _FakeObserver()
-        root = nn.Module()
-        root.linear = _FakeQuantModule(linear, observer)
-        quantizer = SimpleNamespace(
-            scale=torch.tensor([0.25, 0.5]),
-            zero=torch.tensor([3, 4]),
-        )
-
-        with patch.object(qparams, "QuantModuleBase", _FakeQuantModule), patch.object(
-            qparams,
-            "AffineObserverBase",
-            _FakeObserver,
-        ):
-            result = qparams.inject_gptq_qparams(
-                root,
-                {root.linear.fp_name: quantizer},
+    @staticmethod
+    def _source():
+        """Build deterministic GPTQ-grid weights and their real quantizer."""
+        source = nn.Linear(3, 2, bias=False)
+        with torch.no_grad():
+            source.weight.copy_(torch.tensor([[-1.0, 0.0, 2.0], [-0.5, 0.5, 1.0]]))
+        quantizer = Quantizer()
+        quantizer.configure(4, perchannel=True, sym=False)
+        quantizer.find_params(source.weight, weight=True)
+        with torch.no_grad():
+            source.weight.copy_(
+                quantize(source.weight, quantizer.scale, quantizer.zero, quantizer.maxq)
             )
-        return observer, quantizer, result
+        return source, quantizer
 
-    def test_positive_uniform_fold_scales_reused_weight_qparams(self) -> None:
-        """Multiply GPTQ weight scales by the folded input scale."""
-        source = nn.Linear(3, 2, bias=False)
-        folded = fold_input_affine_into_linear(
-            source,
-            scale=2.0,
-            shift=-1.0,
+    @staticmethod
+    def _wrapper(linear, name="vision_tower.patch_embedder.input_proj"):
+        """Prepare a real weight observer for the post-fold linear layer."""
+        wrapper = QuantLinear(
+            linear, qcfg=PTQConfig(weight=affine(DType.uint(4))), fp_name=name
         )
+        wrapper.enable_calibration()
+        return wrapper
 
-        observer, quantizer, result = self._inject(folded)
+    def test_positive_uniform_fold_scales_reused_weight_qparams(self):
+        """Multiply GPTQ scales by the fold while preserving quantized weights."""
+        source, quantizer = self._source()
+        folded = fold_input_affine_into_linear(source, scale=2.0, shift=-1.0)
+        wrapper = self._wrapper(folded)
 
-        loaded_scale, loaded_zero, locked = observer.loaded
-        torch.testing.assert_close(loaded_scale, quantizer.scale * 2.0)
-        self.assertIs(loaded_zero, quantizer.zero)
-        self.assertTrue(locked)
+        result = inject_gptq_qparams(wrapper, {wrapper.fp_name: quantizer})
+
+        observer = wrapper.obs_weight
+        torch.testing.assert_close(
+            observer._cached_scale, quantizer.scale.flatten() * 2.0, rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            observer._cached_zp, quantizer.zero.flatten().to(torch.int), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            observer.fake_quant(folded.weight), folded.weight, rtol=0, atol=0
+        )
+        self.assertTrue(observer._qparams_locked)
         self.assertEqual(result, {"matched": 1, "missed": 0, "unused": 0})
 
-    def test_unfolded_linear_keeps_reused_weight_qparams(self) -> None:
-        """Keep GPTQ qparams unchanged for a linear layer without fold metadata."""
-        linear = nn.Linear(3, 2, bias=False)
+    def test_unfolded_linear_keeps_reused_weight_qparams(self):
+        """Preserve GPTQ scales and zero-points without folding metadata."""
+        linear, quantizer = self._source()
+        wrapper = self._wrapper(linear)
 
-        observer, quantizer, result = self._inject(linear)
+        result = inject_gptq_qparams(wrapper, {wrapper.fp_name: quantizer})
 
-        loaded_scale, loaded_zero, locked = observer.loaded
-        self.assertIs(loaded_scale, quantizer.scale)
-        self.assertIs(loaded_zero, quantizer.zero)
-        self.assertTrue(locked)
+        torch.testing.assert_close(
+            wrapper.obs_weight._cached_scale, quantizer.scale.flatten(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            wrapper.obs_weight.fake_quant(linear.weight), linear.weight, rtol=0, atol=0
+        )
+        self.assertTrue(wrapper.obs_weight._qparams_locked)
         self.assertEqual(result, {"matched": 1, "missed": 0, "unused": 0})
 
-    def test_nonuniform_fold_requires_weight_qparam_recomputation(self) -> None:
-        """Reject GPTQ qparam reuse when one scalar multiplier is insufficient."""
-        source = nn.Linear(3, 2, bias=False)
+    def test_nonuniform_fold_requires_weight_qparam_recomputation(self):
+        """Reject reuse when one scalar multiplier cannot describe the fold."""
+        source, quantizer = self._source()
         folded = fold_input_affine_into_linear(
-            source,
-            scale=torch.tensor([1.0, 2.0, 3.0]),
-            shift=0.0,
+            source, scale=torch.tensor([1.0, 2.0, 3.0]), shift=0.0
         )
+        wrapper = self._wrapper(folded)
 
-        with self.assertRaisesRegex(RuntimeError, "Recompute"):
-            self._inject(folded)
+        with self.assertRaisesRegex(ValueError, "Recompute"):
+            inject_gptq_qparams(wrapper, {wrapper.fp_name: quantizer})
+        self.assertFalse(wrapper.obs_weight.has_qparams)
+        self.assertTrue(wrapper.obs_weight.enabled)
+
+    def test_late_invalid_fold_does_not_partially_inject_qparams(self):
+        """A later folding error must leave earlier weight observers untouched."""
+        source, quantizer = self._source()
+        first = self._wrapper(source, "first")
+        folded = fold_input_affine_into_linear(
+            source, scale=torch.tensor([1.0, 2.0, 3.0]), shift=0.0
+        )
+        last = self._wrapper(folded, "last")
+        first.obs_weight.compute_qparams()
+        previous_scale = first.obs_weight._cached_scale
+        previous_zero = first.obs_weight._cached_zp
+
+        with self.assertRaisesRegex(ValueError, "last"):
+            inject_gptq_qparams(
+                nn.Sequential(first, last), {"first": quantizer, "last": quantizer}
+            )
+
+        self.assertIs(first.obs_weight._cached_scale, previous_scale)
+        self.assertIs(first.obs_weight._cached_zp, previous_zero)
+        self.assertFalse(first.obs_weight._qparams_locked)
+        self.assertTrue(first.obs_weight.enabled)
+        self.assertFalse(last.obs_weight.has_qparams)
 
 
 if __name__ == "__main__":
