@@ -88,7 +88,12 @@ class TestQuantGemma4ClippableLinear(unittest.TestCase):
         stats = inject_gptq_qparams(
             quant,
             {
-                inner_name: SimpleNamespace(scale=scale, zero=zero),
+                inner_name: SimpleNamespace(
+                    scale=scale,
+                    zero=zero,
+                    maxq=torch.tensor(255),
+                    perchannel=True,
+                ),
             },
         )
 
