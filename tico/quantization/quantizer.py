@@ -25,6 +25,13 @@ class BaseQuantizer(ABC):
     Abstract base class for quantizers that apply a quantization algorithm to a target model.
     """
 
+    # Quantizers that keep calibration state bound to the prepared model
+    # instance (replaced forwards, hooks, input caches) cannot convert a
+    # deep copy of that model. Set this to True so that ``convert(model,
+    # inplace=False)`` is rejected with a clear error instead of restoring
+    # the instrumentation on the wrong object.
+    requires_inplace_convert: bool = False
+
     def __init__(self, config: BaseConfig):
         """
         Initialize the quantizer with the given configuration.

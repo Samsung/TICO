@@ -17,7 +17,9 @@ from typing import Any, Dict, Optional
 
 import torch
 
-from tico.quantization.algorithm.gptq.quantizer import GPTQQuantizer
+# Imported for its registration side effect: the built-in GPTQ quantizer is
+# registered for GPTQConfig as soon as the public interface is imported.
+from tico.quantization.algorithm.gptq.quantizer import GPTQQuantizer  # noqa: F401
 from tico.quantization.config.base import BaseConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import get_quantizer
@@ -84,16 +86,17 @@ def convert(model, inplace: Optional[bool] = True):
     else:
         raise RuntimeError("Call prepare() function first.")
 
+    assert isinstance(quantizer, BaseQuantizer)
     # deepcopy prevents the quantizer from restoring the catcher used for calibration.
     # TODO Revisit `inplace` policy.
-    if isinstance(quantizer, GPTQQuantizer) and not inplace:
+    if quantizer.requires_inplace_convert and not inplace:
         raise RuntimeError(
-            "GPTQ quantization only supports `in-place=True`. Please set 'inplace=True' to proceed."
+            f"{type(quantizer).__name__} quantization only supports `in-place=True`. "
+            "Please set 'inplace=True' to proceed."
         )
 
     model = model if inplace else copy.deepcopy(model)
 
-    assert isinstance(quantizer, BaseQuantizer)
     model = quantizer.convert(model)
 
     return model

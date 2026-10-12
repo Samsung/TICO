@@ -90,7 +90,10 @@ convert(model, inplace=True)
 print(model.quantizers.keys())
 ```
 
-> **Note** GPTQ only supports `inplace=True` in `convert()`.
+> **Note** GPTQ only supports `inplace=True` in `convert()`. Quantizers that
+> bind calibration state to the prepared model instance declare this with the
+> `BaseQuantizer.requires_inplace_convert` class attribute; `convert()` then
+> rejects `inplace=False` instead of converting a deep copy.
 
 Mixed precision via overrides:
 
