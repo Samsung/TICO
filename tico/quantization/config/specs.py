@@ -18,10 +18,41 @@ from typing import Any, Mapping, Optional, Type
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
+
+#: String-to-class registry for affine observer selection from YAML configs.
+AFFINE_OBSERVER_REGISTRY: dict[str, type[ObserverBase]] = {
+    "minmax": MinMaxObserver,
+    "ema": EMAObserver,
+    "percentile": PercentileObserver,
+}
+
+
+def resolve_observer(name: str) -> type[ObserverBase]:
+    """Resolve an observer name to its class.
+
+    Args:
+        name: Observer name such as ``"minmax"``, ``"ema"``, or
+            ``"percentile"`` (case-insensitive).
+
+    Returns:
+        The observer class registered under *name*.
+
+    Raises:
+        ValueError: If *name* is not a registered observer name.
+    """
+    key = name.strip().lower()
+    if key not in AFFINE_OBSERVER_REGISTRY:
+        raise ValueError(
+            f"Unknown observer {name!r}. "
+            f"Available: {sorted(AFFINE_OBSERVER_REGISTRY)}."
+        )
+    return AFFINE_OBSERVER_REGISTRY[key]
 
 
 def _resolve_qscheme(

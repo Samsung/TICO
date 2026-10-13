@@ -40,7 +40,7 @@ _COMMON_OBSERVER_ALIASES = {
     "output_activation": ("act_out",),
 }
 _VALID_COMPONENTS = {"text", "vision", "all"}
-_SPEC_LIKE_KEYS = {"kind", "type", "dtype", "qscheme", "elem_format"}
+_SPEC_LIKE_KEYS = {"kind", "type", "dtype", "qscheme", "elem_format", "observer"}
 
 
 @dataclass(frozen=True)

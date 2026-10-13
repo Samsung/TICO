@@ -285,6 +285,37 @@ role. It does not choose the floating-point execution dtype; `runtime.dtype`
 does that. `activation: null` retains the normal default-resolution behavior and
 must not be used as an alias for disabling activation quantization.
 
+### Observer selection (`observer`)
+
+Affine specs accept an optional `observer` field that selects the calibration
+observer. The default is `minmax`.
+
+```yaml
+pipeline:
+  - name: ptq
+    enabled: true
+    activation:
+      kind: affine
+      dtype: int16
+      observer: ema
+      momentum: 0.95
+    linear_weight: uint4
+```
+
+Supported observer names (case-insensitive):
+
+| Name | Observer | Extra kwargs |
+|---|---|---|
+| `minmax` | `MinMaxObserver` (default) | — |
+| `ema` | `EMAObserver` | `momentum` (float, 0–1, default 0.9) |
+| `percentile` | `PercentileObserver` | `percentile` (float, default 99.99), `lower_percentile`, `upper_percentile`, `max_samples` (int, default 131072), `samples_per_batch` (int, default 4096), `seed` (int, default 0) |
+
+`PercentileObserver` supports per-tensor quantization only. When using
+explicit `lower_percentile`/`upper_percentile`, the qscheme must be asymmetric.
+
+The `observer` field is only valid for `kind: affine` specs. Using it with
+`kind: mx` or `kind: no_quant` raises `ValueError`.
+
 Preprocessing + GPTQ + PTQ:
 
 ```yaml
