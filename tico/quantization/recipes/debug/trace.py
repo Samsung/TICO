@@ -63,41 +63,49 @@ def collect_forward_outputs(
     print_trace: bool = True,
     skip_wrappers: bool = True,
 ) -> OrderedDict[str, Any]:
+    """
+    Run ``model`` once and collect each selected submodule's forward output.
+
+    Forward hooks registered by this call are removed before returning or
+    propagating an exception, including failures during hook registration,
+    the model forward, or the trace printing callback.
+    """
     outputs: OrderedDict[str, Any] = OrderedDict()
     interesting = set(interesting_modules)
 
-    hooks = []
-    for name, module in model.named_modules():
-        name = name.replace(".wrapped", "").replace("wrapped.", "")
-        if skip_wrappers and module.__class__.__name__.startswith("Quant"):
-            continue
-        if (
-            interesting
-            and name not in interesting
-            and not any(name.startswith(prefix) for prefix in interesting)
-        ):
-            continue
+    hooks: list[torch.utils.hooks.RemovableHandle] = []
+    try:
+        for name, module in model.named_modules():
+            name = name.replace(".wrapped", "").replace("wrapped.", "")
+            if skip_wrappers and module.__class__.__name__.startswith("Quant"):
+                continue
+            if (
+                interesting
+                and name not in interesting
+                and not any(name.startswith(prefix) for prefix in interesting)
+            ):
+                continue
 
-        def make_hook(module_name: str):
-            def hook(_module, args, out):
-                outputs[module_name] = out
-                if print_trace:
-                    print(f"[{module_name}] {_summarize(out)}")
+            def make_hook(module_name: str):
+                def hook(_module, args, out):
+                    outputs[module_name] = out
+                    if print_trace:
+                        print(f"[{module_name}] {_summarize(out)}")
 
-            return hook
+                return hook
 
-        hooks.append(module.register_forward_hook(make_hook(name)))
+            hooks.append(module.register_forward_hook(make_hook(name)))
 
-    with torch.no_grad():
-        if isinstance(inputs, Mapping):
-            model(**inputs)
-        elif isinstance(inputs, tuple):
-            model(*inputs)
-        else:
-            model(inputs)
-
-    for hook in hooks:
-        hook.remove()
+        with torch.no_grad():
+            if isinstance(inputs, Mapping):
+                model(**inputs)
+            elif isinstance(inputs, tuple):
+                model(*inputs)
+            else:
+                model(inputs)
+    finally:
+        for hook in hooks:
+            hook.remove()
 
     return outputs
 
