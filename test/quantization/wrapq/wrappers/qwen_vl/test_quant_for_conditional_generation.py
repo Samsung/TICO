@@ -394,6 +394,44 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
         batch_size, seq_len = input_ids.shape
         self.assertEqual(output.logits.shape, (batch_size, seq_len, self.vocab_size))
 
+    def test_prepare_position_ids_for_generation_returns_3d_layout(self):
+        """generate() must inject 3D mrope position ids, not 1D sequential ones.
+
+        ``GenerationMixin.generate`` auto-creates position ids through
+        ``self._prepare_position_ids_for_generation`` whenever the forward
+        signature declares ``position_ids``. The generic implementation
+        yields 1D sequential ids, which bypass the 3D mrope computation in
+        the vision-language wrapper and corrupt image-token RoPE. The
+        wrapper must delegate to the wrapped Qwen3-VL model, which returns
+        the [4, batch, seq] (text + 3 mrope) layout.
+        """
+        thw = (1, 8, 8)
+        ptq_config = self._make_ptq_config(grid_thw=thw)
+        q_model = QuantQwen3VLForConditionalGeneration(self.fp_model, qcfg=ptq_config)
+
+        (
+            input_ids,
+            attention_mask,
+            _pixel_values,
+            image_grid_thw,
+            _position_ids,
+        ) = self._create_image_input(thw=thw)
+
+        mm_token_type_ids = torch.zeros_like(input_ids)
+        mm_token_type_ids[input_ids == self.image_token_id] = 1
+        model_kwargs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "image_grid_thw": image_grid_thw,
+            "mm_token_type_ids": mm_token_type_ids,
+        }
+        position_ids = q_model._prepare_position_ids_for_generation(
+            input_ids, model_kwargs
+        )
+
+        batch_size, seq_len = input_ids.shape
+        self.assertEqual(position_ids.shape, (4, batch_size, seq_len))
+
     def test_forward_with_videos(self):
         """Test forward pass with video input."""
         thw = (1, 8, 8)
