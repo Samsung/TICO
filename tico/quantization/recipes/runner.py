@@ -274,6 +274,8 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     vision_patch_embed_weight = _stage_quant_spec(
         ptq_stage, "vision_patch_embed_weight", None
     )
+    text_linear_weight = _stage_quant_spec(ptq_stage, "text_linear_weight", None)
+    vision_linear_weight = _stage_quant_spec(ptq_stage, "vision_linear_weight", None)
     norm = _stage_quant_spec(ptq_stage, "norm", None)
     norm_weight = _stage_quant_spec(ptq_stage, "norm_weight", None)
     spin_rotation_weight = (
@@ -317,6 +319,10 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     _print_config_row("CLE enabled", _is_stage_enabled(cle_stage))
     _print_config_row("Activation", _stage_quant_spec(ptq_stage, "activation"))
     _print_config_row("Linear weight", linear_weight)
+    if text_linear_weight is not None:
+        _print_config_row("Text linear weight", text_linear_weight)
+    if vision_linear_weight is not None:
+        _print_config_row("Vision linear weight", vision_linear_weight)
     if vision_patch_embed_weight is not None:
         _print_config_row("Vision patch weight", vision_patch_embed_weight)
     _print_config_row(

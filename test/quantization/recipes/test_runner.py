@@ -197,6 +197,56 @@ class TestQuantizationRunner(unittest.TestCase):
         self.assertLess(output.index("Profile"), output.index(header))
         self.assertIn("Profile               : not set\n\n" + header, output)
 
+    def test_config_summary_prints_text_and_vision_linear_weight(self):
+        """Config summary should print text/vision linear weight specs when set."""
+        cfg = {
+            "model": {
+                "family": "qwen3_vl",
+                "name_or_path": "Qwen/Qwen3-VL-4B-Instruct",
+            },
+            "pipeline": [
+                {
+                    "name": "ptq",
+                    "enabled": True,
+                    "linear_weight": "uint4",
+                    "text_linear_weight": "uint8",
+                    "vision_linear_weight": "no_quant",
+                }
+            ],
+            "calibration": {"n_samples": 2, "seq_len": 128},
+        }
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            runner_mod._print_config_summary(cfg)
+
+        output = stdout.getvalue()
+        self.assertIn("Linear weight         : uint4", output)
+        self.assertIn("Text linear weight    : uint8", output)
+        self.assertIn("Vision linear weight  : no_quant", output)
+        self.assertLess(
+            output.index("Linear weight"), output.index("Text linear weight")
+        )
+        self.assertLess(
+            output.index("Text linear weight"),
+            output.index("Vision linear weight"),
+        )
+
+    def test_config_summary_omits_text_and_vision_linear_weight_when_unset(self):
+        """Config summary should omit text/vision linear weight rows when unset."""
+        cfg = {
+            "model": {"family": "dummy", "name_or_path": "model"},
+            "pipeline": [{"name": "ptq", "enabled": True, "linear_weight": "uint4"}],
+        }
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            runner_mod._print_config_summary(cfg)
+
+        output = stdout.getvalue()
+        self.assertNotIn("Text linear weight", output)
+        self.assertNotIn("Vision linear weight", output)
+
     def test_config_summary_omits_override_policy_section_without_policies(self):
         """Config summary should omit the policy section when no policies exist."""
         cfg = {
