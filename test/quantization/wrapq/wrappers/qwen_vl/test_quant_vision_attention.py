@@ -21,9 +21,13 @@ import unittest
 
 import torch
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.recipes.qparams import inject_gptq_qparams
 
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.utils.linear_folding import (
+    reused_weight_qparam_scale_multiplier,
+)
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_attention import (
@@ -54,7 +58,9 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         )
 
         cls.hidden_size = 16
-        cfg = Qwen3VLVisionConfig(hidden_size=cls.hidden_size, num_heads=2)
+        cfg = Qwen3VLVisionConfig(  # pylint: disable=unexpected-keyword-arg
+            hidden_size=cls.hidden_size, num_heads=2
+        )
 
         # Ensure eager attention implementation so outputs are deterministic
         # and do not require GPU flash attention kernels.
@@ -161,3 +167,45 @@ class TestQuantQwen3VLAttention(unittest.TestCase):
         self.assertIsInstance(q_lin, QuantLinear)
         self.assertEqual(q_lin.obs_act_in.dtype, DType.uint(4))
         self.assertEqual(q_lin.obs_act_out.dtype, DType.uint(4))
+
+    def test_k_fold_records_weight_qparam_multiplier(self):
+        qattn = QuantQwen3VLVisionAttention(self.fp_attn)
+        qkv_lin = qattn.qkv.wrapped.module
+        assert isinstance(qkv_lin, torch.nn.Linear)
+        mult = reused_weight_qparam_scale_multiplier(qattn.qkv.wrapped)
+        assert isinstance(mult, torch.Tensor)
+        n = qkv_lin.weight.shape[0] // 3
+        torch.testing.assert_close(mult[:n], torch.ones(n))
+        torch.testing.assert_close(
+            mult[n : 2 * n], torch.full((n,), self.head_dim**-0.5)
+        )
+        torch.testing.assert_close(mult[2 * n :], torch.ones(n))
+
+    def test_inject_gptq_qparams_rescales_folded_k_rows(self):
+        qattn = QuantQwen3VLVisionAttention(
+            self.fp_attn, qcfg=make_affine_ptq_config(dtype=DType.uint(4))
+        )
+        qkv_lin = qattn.qkv.wrapped.module
+        assert isinstance(qkv_lin, torch.nn.Linear)
+        n_rows = qkv_lin.weight.shape[0]
+        base_scale = torch.linspace(0.01, 0.02, n_rows).reshape(-1, 1)
+
+        class _Quantizer:
+            maxq = 15
+            perchannel = True
+            scale = base_scale
+            zero = torch.zeros(n_rows, 1)
+
+        stats = inject_gptq_qparams(qattn, {"qkv": _Quantizer()})
+        self.assertEqual(stats["matched"], 1)
+
+        obs = qattn.qkv.wrapped.get_observer("weight")
+        assert obs is not None
+        qparams = obs.compute_qparams()
+        assert qparams is not None
+        got_scale, _ = qparams
+        n = n_rows // 3
+        expected = base_scale.reshape(-1) * torch.cat(
+            [torch.ones(n), torch.full((n,), self.head_dim**-0.5), torch.ones(n)]
+        )
+        torch.testing.assert_close(got_scale, expected)

@@ -197,18 +197,35 @@ def _validated_gptq_qparams(
         scale_multiplier = reused_weight_qparam_scale_multiplier(module)
     except (RuntimeError, TypeError, ValueError) as exc:
         raise incompatible(str(exc)) from exc
-    if not math.isfinite(scale_multiplier) or scale_multiplier <= 0:
-        raise incompatible(
-            "Folded weight scale multiplier must be finite and positive."
-        )
-    if scale_multiplier != 1.0:
-        scale = scale * scale_multiplier
-        if not bool(torch.isfinite(scale).all().item()) or not bool(
-            (scale > 0).all().item()
+    if isinstance(scale_multiplier, torch.Tensor):
+        # Per-output-channel fold, e.g. Qwen3-VL vision fused QKV where only
+        # the K rows absorbed the attention-score scaling.
+        if scale_multiplier.numel() != scale.numel():
+            raise incompatible(
+                f"Folded weight scale multiplier has {scale_multiplier.numel()} "
+                f"entries, but the GPTQ scale has {scale.numel()}."
+            )
+        multiplier = scale_multiplier.to(device=scale.device, dtype=scale.dtype)
+        if not bool(torch.isfinite(multiplier).all().item()) or not bool(
+            (multiplier > 0).all().item()
         ):
             raise incompatible(
-                "Folded GPTQ scales must remain finite and strictly positive."
+                "Folded weight scale multiplier must be finite and positive."
             )
+        scale = (scale.reshape(-1) * multiplier.reshape(-1)).reshape(scale.shape)
+    else:
+        if not math.isfinite(scale_multiplier) or scale_multiplier <= 0:
+            raise incompatible(
+                "Folded weight scale multiplier must be finite and positive."
+            )
+        if scale_multiplier != 1.0:
+            scale = scale * scale_multiplier
+    if not bool(torch.isfinite(scale).all().item()) or not bool(
+        (scale > 0).all().item()
+    ):
+        raise incompatible(
+            "Folded GPTQ scales must remain finite and strictly positive."
+        )
     return obs, scale, zero
 
 

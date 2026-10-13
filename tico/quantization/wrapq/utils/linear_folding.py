@@ -104,11 +104,16 @@ def fold_input_affine_into_linear(
     return folded
 
 
-def reused_weight_qparam_scale_multiplier(module: nn.Module) -> float:
+def reused_weight_qparam_scale_multiplier(
+    module: nn.Module,
+) -> "float | torch.Tensor":
     """Return the weight-scale multiplier required by a folded linear layer.
 
     Modules without input-affine fold metadata return ``1.0``. A folded layer
     with positive uniform input scaling returns that scaling value. A folded
+    layer may instead record a per-output-channel vector of positive scaling
+    factors (e.g. fused QKV linears where only the K rows absorbed the
+    attention-score scaling); such vectors are returned as tensors. A folded
     layer whose scaling cannot safely reuse pre-fold weight qparams raises a
     ``RuntimeError`` so callers can recompute qparams instead.
     """
@@ -125,6 +130,13 @@ def reused_weight_qparam_scale_multiplier(module: nn.Module) -> float:
             "Pre-fold weight qparams cannot be reused after non-uniform or "
             "non-positive input-affine scaling. Recompute the weight qparams."
         )
+    if torch.is_tensor(multiplier):
+        if not bool((multiplier > 0).all()):
+            raise RuntimeError(
+                "Pre-fold weight qparams cannot be reused with non-positive "
+                "scaling factors. Recompute the weight qparams."
+            )
+        return multiplier
     return float(multiplier)
 
 
