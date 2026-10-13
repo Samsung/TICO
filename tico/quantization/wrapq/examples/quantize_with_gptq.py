@@ -36,11 +36,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tico.quantization import convert, prepare
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.recipes.qparams import (
+    inject_gptq_qparams as _inject_gptq_qparams,
+)
 from tico.quantization.wrapq.utils.introspection import build_fqn_map
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
-from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 # Token-budget presets for activation calibration
 TOKENS: dict[str, int] = {
@@ -74,25 +75,8 @@ def inject_gptq_qparams(
     gptq_quantizers: dict[str, Any],  # {fp_name: quantizer}
     weight_obs_name: str = "weight",
 ):
-    """
-    For every `QuantModuleBase` whose `fp_name` matches a GPTQ key,
-    locate the observer called `weight_obs_name` and overwrite its
-    (scale, zero-point), then lock them against further updates.
-    """
-    for m in root.modules():
-        if not isinstance(m, QuantModuleBase):
-            continue
-        if m.fp_name is None:
-            continue
-        quantizer = gptq_quantizers.get(m.fp_name)
-        if quantizer is None:
-            continue
-        obs = m.get_observer(weight_obs_name)
-        if obs is None:
-            continue
-        assert isinstance(obs, AffineObserverBase)
-        # GPTQ quantizer attributes
-        obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
+    """Validate and lock GPTQ qparams with the shared recipe handoff."""
+    _inject_gptq_qparams(root, gptq_quantizers, weight_obs_name)
 
 
 def main():

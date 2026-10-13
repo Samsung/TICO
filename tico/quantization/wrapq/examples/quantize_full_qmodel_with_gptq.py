@@ -65,8 +65,10 @@ from tico.quantization.config.llama_attention import (
 from tico.quantization.config.specs import affine
 from tico.quantization.config.spinquant import SpinQuantConfig
 from tico.quantization.evaluation.script.llm_tasks_eval import evaluate_llm_on_tasks
+from tico.quantization.recipes.qparams import (
+    inject_gptq_qparams as _inject_gptq_qparams,
+)
 from tico.quantization.wrapq.dtypes import DType
-from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.utils.metrics import perplexity
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
@@ -75,7 +77,6 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_example_input,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
-from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 from tico.utils.utils import SuppressWarning
 
@@ -354,56 +355,8 @@ def inject_gptq_qparams(
     *,
     verbose: bool = False,
 ):
-    """
-    Inject GPTQ (scale, zero-point) into PTQ observers.
-
-    When verbose=True, prints a summary of matched / missed / unused entries.
-    """
-    seen = set()
-    missed_modules = []
-
-    for m in root.modules():
-        if not isinstance(m, QuantModuleBase):
-            continue
-        if m.fp_name is None:
-            continue
-
-        quantizer = gptq_quantizers.get(m.fp_name)
-        obs = m.get_observer(weight_obs_name)
-
-        # Only care about modules that should have weight observers
-        if obs is None:
-            continue
-
-        if quantizer is None:
-            missed_modules.append(m.fp_name)
-            continue
-
-        assert isinstance(obs, AffineObserverBase)
-        obs.load_qparams(quantizer.scale, quantizer.zero, lock=True)
-        seen.add(m.fp_name)
-
-    unused = set(gptq_quantizers.keys()) - seen
-
-    if verbose:
-        print("\n[GPTQ → PTQ injection summary]")
-        print(f"  matched : {len(seen)}")
-        print(f"  missed  : {len(missed_modules)}")
-        print(f"  unused  : {len(unused)}")
-
-        # Print samples (not all, to avoid spam)
-        def _print_sample(title, items):
-            items = list(items)
-            if not items:
-                return
-            print(f"\n  {title}:")
-            for name in items[:10]:
-                print(f"    - {name}")
-            if len(items) > 10:
-                print(f"    ... and {len(items) - 10} more")
-
-        _print_sample("missed modules", missed_modules)
-        _print_sample("unused GPTQ entries", unused)
+    """Validate and lock GPTQ qparams with the shared recipe handoff."""
+    _inject_gptq_qparams(root, gptq_quantizers, weight_obs_name, verbose=verbose)
 
 
 # -------------------------------------------------------------------------
