@@ -58,7 +58,6 @@ from tico.quantization.quantizer_registry import register_quantizer
 from tico.utils.utils import move_to_device, print_gpu_memory, Stack
 from tqdm.auto import tqdm
 
-
 __all__ = [
     "GPTQProtocol",
     "GPTQFactory",
@@ -264,6 +263,31 @@ def infer_object_device(obj: Any) -> torch.device | None:
     return None
 
 
+@dataclass(frozen=True)
+class _ForwardState:
+    """Preserve the instance slot, not a bound copy of an inherited method."""
+
+    had_instance_forward: bool
+    captured_forward: Callable[..., Any]
+
+    @classmethod
+    def capture(cls, module: nn.Module) -> "_ForwardState":
+        assert module.forward is not None
+        return cls(
+            had_instance_forward="forward" in module.__dict__,
+            captured_forward=module.forward,
+        )
+
+    def restore(self, module: nn.Module) -> None:
+        if self.had_instance_forward:
+            module.forward = self.captured_forward
+        else:
+            module.__dict__.pop("forward", None)
+
+    def __call__(self, *args, **kwargs):
+        return self.captured_forward(*args, **kwargs)
+
+
 @register_quantizer(UniversalGPTQConfig)
 class UniversalGPTQQuantizer(BaseQuantizer):
     """
@@ -317,7 +341,7 @@ class UniversalGPTQQuantizer(BaseQuantizer):
         self._cache_kwargs: list[
             dict[str, Any]
         ] = []  # cache_kwargs[i] -> i-th batch of keyword arguments
-        self._orig_model_forward: Optional[Callable[..., Any]] = None
+        self._orig_model_forward: _ForwardState | None = None
 
     @torch.no_grad()
     def prepare(
@@ -344,7 +368,10 @@ class UniversalGPTQQuantizer(BaseQuantizer):
         Raises:
             AssertionError: If prepare() is called twice without convert().
         """
-        assert len(self._cache_args) == 0, "prepare() called twice without convert()"
+        assert (
+            self._orig_model_forward is None and len(self._cache_args) == 0
+        ), "prepare() called twice without convert()"
+
         # Substitute the model's forward method to cache model inputs
         def new_forward(model: nn.Module, *args, **kwargs) -> Any:
             """
@@ -354,7 +381,7 @@ class UniversalGPTQQuantizer(BaseQuantizer):
             self._cache_kwargs.append({k: move_to_cpu(v) for k, v in kwargs.items()})
             return None
 
-        self._orig_model_forward = model.forward
+        self._orig_model_forward = _ForwardState.capture(model)
         model.forward = types.MethodType(new_forward, model)
         return model
 
@@ -379,7 +406,8 @@ class UniversalGPTQQuantizer(BaseQuantizer):
         """
         assert self._orig_model_forward is not None, "convert() called before prepare()"
         assert len(self._cache_args) > 0, "convert() called before calibration"
-        model.forward = self._orig_model_forward
+        self._orig_model_forward.restore(model)
+        self._orig_model_forward = None
         assert type(self.config) is UniversalGPTQConfig
         gptq_quantize(
             model,
@@ -431,7 +459,7 @@ class GPTQ_Data:
     the quantization lifecycle and stores intermediate results.
 
     Attributes:
-        old_forward: The original forward method before wrapping.
+        old_forward: The original callable while wrapped; cleared when unwrapped.
         gptq: GPTQ instance for Hessian accumulation (None after quantization).
         quantizer: Quantizer with computed scale/zero-point (None before quantization).
         is_cacheable: Whether the module's outputs are cached during model replay.
@@ -448,7 +476,7 @@ class GPTQ_Data:
     """
 
     full_module_name: str
-    old_forward: Callable
+    old_forward: _ForwardState | None
     gptq: GPTQProtocol | None
     quantizer: Quantizer | None
     is_cacheable: bool
@@ -617,7 +645,9 @@ def wrap_model(
         args = move_to_device(args, gptq_data.weight_device)
         kwargs = move_to_device(kwargs, gptq_data.weight_device)
         assert type(kwargs) is dict
-        return gptq_data.old_forward(*args, **kwargs)
+        original_forward = gptq_data.old_forward
+        assert original_forward is not None, "Module is not wrapped"
+        return original_forward(*args, **kwargs)
 
     def new_forward(module: nn.Module, *args, **kwargs) -> Any:
         gptq_data: GPTQ_Data = get_gptq_data(module)
@@ -710,7 +740,7 @@ def wrap_model(
         "gptq_data",
         GPTQ_Data(
             full_module_name=full_model_name,
-            old_forward=model.forward,
+            old_forward=_ForwardState.capture(model),
             gptq=None,
             quantizer=None,
             is_cacheable=is_cacheable,
@@ -770,7 +800,9 @@ def unwrap_model(model: nn.Module, retain_gptq_data: bool = False) -> None:
     """
     for module in model.modules():
         gptq_data: GPTQ_Data = get_gptq_data(module)
-        module.forward = gptq_data.old_forward
+        if gptq_data.old_forward is not None:
+            gptq_data.old_forward.restore(module)
+            gptq_data.old_forward = None
         if not retain_gptq_data:
             gptq_data.cached_output.clear()
             gptq_data.cached_native_output.clear()
@@ -1195,7 +1227,7 @@ def find_multicall_modules(
         assert not hasattr(m, "per_batch_invocation_count")
         assert not hasattr(m, "total_invocations")
         assert not hasattr(m, "full_module_name")
-        setattr(m, "old_forward", m.forward)
+        setattr(m, "old_forward", _ForwardState.capture(m))
         setattr(m, "per_batch_invocation_count", 0)
         setattr(m, "total_invocations", 0)
         setattr(m, "full_module_name", name)
@@ -1221,12 +1253,12 @@ def find_multicall_modules(
                 setattr(m, "per_batch_invocation_count", 0)
     finally:
         for m in model.modules():
-            old_forward = getattr(m, "old_forward")
-            assert old_forward is not None
-            m.forward = old_forward
-            delattr(m, "per_batch_invocation_count")
+            old_forward: _ForwardState = getattr(m, "old_forward")
+            assert isinstance(old_forward, _ForwardState)
+            old_forward.restore(m)
             delattr(m, "old_forward")
             delattr(m, "full_module_name")
+            delattr(m, "per_batch_invocation_count")
 
     if verbose:
         print(f"[MULTI-CALL MODULE] {len(multicall_modules)} multi-call modules found")
@@ -1292,7 +1324,7 @@ def find_caller_and_callee_modules(
     for name, m in model.named_modules():
         assert not hasattr(m, "old_forward")
         assert not hasattr(m, "full_module_name")
-        setattr(m, "old_forward", m.forward)
+        setattr(m, "old_forward", _ForwardState.capture(m))
         setattr(m, "full_module_name", name)
         m.forward = types.MethodType(new_forward, m)
 
@@ -1324,9 +1356,9 @@ def find_caller_and_callee_modules(
                 print(f"[INFO] {caller_name} CALLS {', '.join(callee_names)}")
     finally:
         for m in model.modules():
-            old_forward = getattr(m, "old_forward")
-            assert old_forward is not None
-            m.forward = old_forward
+            old_forward: _ForwardState = getattr(m, "old_forward")
+            assert isinstance(old_forward, _ForwardState)
+            old_forward.restore(m)
             delattr(m, "old_forward")
             delattr(m, "full_module_name")
 

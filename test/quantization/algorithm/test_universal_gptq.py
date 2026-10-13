@@ -19,6 +19,7 @@ This module tests the UniversalGPTQQuantizer from universal_gptq_quantizer.py
 which implements a model-agnostic GPTQ quantization approach.
 """
 
+import types
 import unittest
 
 import torch
@@ -26,6 +27,7 @@ import torch.nn as nn
 
 from tico.quantization.algorithm.gptq.gptq import GPTQ
 from tico.quantization.algorithm.universal_gptq.quantizer import (
+    _ForwardState,
     find_multicall_modules,
     GPTQFactory,
     UniversalGPTQQuantizer,
@@ -1954,6 +1956,195 @@ class TestGPTAQNativeIORegression(unittest.TestCase):
 
         # Quantize - should not raise assertion errors
         quantized_model: BranchingModel = quantizer.convert(prepared_model)
+
+    # ------------------------------------------------------------------
+    # _ForwardState / forward-restore regression tests
+    # ------------------------------------------------------------------
+
+    def test_forward_state_inherited_forward_not_in_dict_after_restore(self):
+        """
+        _ForwardState must not leave a spurious instance-level ``forward``
+        in ``__dict__`` for modules that inherit ``forward`` from their class.
+
+        Modules like ``nn.ModuleList`` inherit ``_forward_unimplemented`` from
+        ``nn.Module``.  The old code unconditionally did
+        ``module.forward = captured_forward`` on restore, which wrote an
+        instance attribute that was never there before.  This polluted the
+        pickled state and caused ``AttributeError`` during unpickling.
+        """
+        module = nn.ModuleList([nn.Linear(4, 4)])
+        self.assertNotIn("forward", module.__dict__)
+
+        state = _ForwardState.capture(module)
+        # Simulate wrapping: set an instance forward
+        module.forward = lambda *a, **k: None  # type: ignore[method-assign]
+        self.assertIn("forward", module.__dict__)
+
+        # Restore should remove the instance forward, not keep it
+        state.restore(module)
+        self.assertNotIn(
+            "forward",
+            module.__dict__,
+            "Restore must not leave a spurious instance-level 'forward' "
+            "for modules that inherit forward from their class.",
+        )
+
+    def test_forward_state_instance_forward_preserved_after_restore(self):
+        """
+        _ForwardState must preserve a genuine instance-level ``forward``
+        that existed before wrapping.
+        """
+        module = nn.Linear(4, 4)
+        custom_forward = lambda self, *a, **k: None  # noqa: E731
+        module.forward = types.MethodType(custom_forward, module)  # type: ignore[method-assign]
+        self.assertIn("forward", module.__dict__)
+
+        state = _ForwardState.capture(module)
+        # Simulate wrapping
+        module.forward = lambda *a, **k: None  # type: ignore[method-assign]
+        state.restore(module)
+
+        self.assertIn("forward", module.__dict__)
+        # The restored forward should be the one we captured, not the wrapper
+        self.assertIs(module.__dict__["forward"], state.captured_forward)
+
+    def test_forward_state_callable(self):
+        """_ForwardState must be callable and delegate to the captured forward."""
+        module = nn.Linear(4, 4)
+        x = torch.randn(2, 4)
+        expected = module(x)
+
+        state = _ForwardState.capture(module)
+        result = state(x)
+        self.assertTrue(torch.allclose(result, expected))
+
+    @torch.inference_mode()
+    def test_prepare_convert_no_spurious_forward_in_dict(self):
+        """
+        After prepare→calibrate→convert, modules that inherit ``forward``
+        (e.g. ``nn.Sequential``, ``nn.ModuleList``) must NOT have a spurious
+        instance-level ``forward`` key in ``__dict__``.
+
+        This is the regression test for the unpickling ``AttributeError``.
+        """
+        input_dim = 16
+        model = FiveLinearModel(input_dim)
+        model.eval()
+
+        # Record which modules inherit forward (no instance-level forward)
+        inherited_forward_modules = [
+            m for m in model.modules() if "forward" not in m.__dict__
+        ]
+        self.assertGreater(
+            len(inherited_forward_modules),
+            0,
+            "Test model should have modules with inherited forward",
+        )
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            debug_mode=True,
+            cacheable_modules=["layers.[0-9]+"],
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+        for _ in range(4):
+            prepared_model(torch.randn(2, input_dim))
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        for module in quantized_model.modules():
+            self.assertNotIn(
+                "forward",
+                module.__dict__,
+                f"Module {type(module).__name__} has spurious instance-level "
+                "'forward' after convert. This causes AttributeError during "
+                "checkpoint unpickling.",
+            )
+
+    @torch.inference_mode()
+    def test_quantized_model_picklable_after_convert(self):
+        """
+        A model that went through prepare→calibrate→convert must be
+        picklable and unpicklable without ``AttributeError``.
+
+        This is the end-to-end manifestation of the bug: the spurious
+        instance-level ``forward`` attribute (a bound method referencing
+        ``_forward_unimplemented``) was pickled and could not be resolved
+        during unpickling, raising::
+
+            AttributeError: 'ModuleList' object has no attribute '_forward_unimplemented'
+        """
+        import io
+
+        input_dim = 16
+        model = FiveLinearModel(input_dim)
+        model.eval()
+
+        config = UniversalGPTQConfig(
+            weight_bits=8,
+            percdamp=0.01,
+            groupsize=-1,
+            actorder=False,
+            show_progress=False,
+            verbose=False,
+            debug_mode=True,
+            cacheable_modules=["layers.[0-9]+"],
+        )
+        quantizer = UniversalGPTQQuantizer(config)
+
+        prepared_model = quantizer.prepare(model)
+        for _ in range(4):
+            prepared_model(torch.randn(2, input_dim))
+
+        quantized_model = quantizer.convert(prepared_model)
+
+        # Must not raise
+        buffer = io.BytesIO()
+        torch.save(quantized_model, buffer)
+        buffer.seek(0)
+        loaded = torch.load(buffer, weights_only=False)
+        self.assertIsInstance(loaded, FiveLinearModel)
+
+        # Loaded model should produce the same output
+        test_input = torch.randn(2, input_dim)
+        with torch.inference_mode():
+            original_output = quantized_model(test_input)
+            loaded_output = loaded(test_input)
+        self.assertTrue(torch.allclose(original_output, loaded_output))
+
+    def test_find_multicall_modules_no_spurious_forward_in_dict(self):
+        """
+        After ``find_multicall_modules``, modules that inherit ``forward``
+        must NOT have a spurious instance-level ``forward`` in ``__dict__``.
+        """
+        input_dim = 16
+        model = FiveLinearModel(input_dim)
+        model.eval()
+
+        calibration_data = [(torch.randn(2, input_dim),) for _ in range(2)]
+
+        find_multicall_modules(
+            model,
+            args_dataset=calibration_data,
+            kwargs_dataset=[{} for _ in range(2)],
+            show_progress=False,
+            verbose=False,
+        )
+
+        for module in model.modules():
+            self.assertNotIn(
+                "forward",
+                module.__dict__,
+                f"Module {type(module).__name__} has spurious instance-level "
+                "'forward' after find_multicall_modules.",
+            )
 
 
 if __name__ == "__main__":
