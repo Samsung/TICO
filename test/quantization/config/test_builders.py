@@ -25,7 +25,7 @@ from tico.quantization.config.builders import (
 from tico.quantization.config.gemma4_builders import build_gemma4_e2b_ptq_config
 from tico.quantization.config.llama_attention import DEFAULT_EXECUTION_PROFILE
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.config.specs import affine, mx
+from tico.quantization.config.specs import affine, mx, no_quant
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.qscheme import QScheme
@@ -224,6 +224,88 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
             cfg.overrides["model"]["language_model"],  # type: ignore[index]
         )
         self.assertNotIn("rotate_lm_head", cfg.overrides)  # type: ignore[operator]
+
+    def test_build_qwen3_vl_ptq_config_vision_linear_weight_overrides_tower(self):
+        cfg = build_qwen3_vl_ptq_config(
+            num_vision_blocks=2,
+            num_text_layers=2,
+            num_deepstack_mergers=1,
+            model_args={"vision": {"grid_thw": (1, 1, 1)}},
+            linear_weight=affine(DType.uint(4)),
+            vision_linear_weight=no_quant(),
+        )
+
+        visual = cfg.overrides["model"]["visual"]  # type: ignore[index]
+        # Vision blocks, merger and deepstack mergers keep FP weights (no dtype).
+        block0_fc1 = visual["blocks"]["0"]["mlp"]["linear_fc1"]["weight"]
+        self.assertNotIn("dtype", block0_fc1)
+        block1_qkv = visual["blocks"]["1"]["attn"]["qkv"]["weight"]
+        self.assertNotIn("dtype", block1_qkv)
+        self.assertNotIn("dtype", visual["merger"]["linear_fc1"]["weight"])
+        self.assertNotIn(
+            "dtype",
+            visual["deepstack_merger_list"]["0"]["linear_fc2"]["weight"],
+        )
+
+        # Text tower still uses the shared linear weight spec.
+        q_proj = cfg.overrides["model"]["language_model"]["layers"]["1"][  # type: ignore[index]
+            "self_attn"
+        ][
+            "q_proj"
+        ][
+            "weight"
+        ]
+        self.assertEqual(q_proj["dtype"], DType.uint(4))
+
+    def test_build_qwen3_vl_ptq_config_vision_linear_weight_defaults_to_shared(self):
+        cfg = build_qwen3_vl_ptq_config(
+            num_vision_blocks=1,
+            num_text_layers=1,
+            num_deepstack_mergers=0,
+            model_args={"vision": {"grid_thw": (1, 1, 1)}},
+            linear_weight=affine(DType.uint(4)),
+        )
+        visual = cfg.overrides["model"]["visual"]  # type: ignore[index]
+        self.assertEqual(
+            visual["blocks"]["0"]["mlp"]["linear_fc1"]["weight"]["dtype"],
+            DType.uint(4),
+        )
+
+    def test_build_qwen3_vl_ptq_config_text_linear_weight_overrides_tower(self):
+        cfg = build_qwen3_vl_ptq_config(
+            num_vision_blocks=1,
+            num_text_layers=2,
+            num_deepstack_mergers=0,
+            model_args={"vision": {"grid_thw": (1, 1, 1)}},
+            linear_weight=affine(DType.uint(4)),
+            text_linear_weight=no_quant(),
+        )
+
+        # Text decoder layers keep FP weights (no dtype).
+        layers = cfg.overrides["model"]["language_model"]["layers"]  # type: ignore[index]
+        self.assertNotIn("dtype", layers["0"]["self_attn"]["q_proj"]["weight"])
+        self.assertNotIn("dtype", layers["1"]["mlp"]["down_proj"]["weight"])
+
+        # Vision tower still uses the shared linear weight spec.
+        visual = cfg.overrides["model"]["visual"]  # type: ignore[index]
+        self.assertEqual(
+            visual["blocks"]["0"]["mlp"]["linear_fc1"]["weight"]["dtype"],
+            DType.uint(4),
+        )
+
+    def test_build_qwen3_vl_ptq_config_text_linear_weight_defaults_to_shared(self):
+        cfg = build_qwen3_vl_ptq_config(
+            num_vision_blocks=1,
+            num_text_layers=1,
+            num_deepstack_mergers=0,
+            model_args={"vision": {"grid_thw": (1, 1, 1)}},
+            linear_weight=affine(DType.uint(4)),
+        )
+        layers = cfg.overrides["model"]["language_model"]["layers"]  # type: ignore[index]
+        self.assertEqual(
+            layers["0"]["self_attn"]["q_proj"]["weight"]["dtype"],
+            DType.uint(4),
+        )
 
 
 class TestBuildGemma4E2BPtqConfig(unittest.TestCase):

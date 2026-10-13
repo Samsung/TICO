@@ -196,6 +196,12 @@ class Qwen3VLAdapter(ModelAdapter):
             model_args=model_args,
             activation=quant_spec_from_config(stage_cfg.get("activation", "int16")),
             linear_weight=quant_spec_from_config(stage_cfg.get("linear_weight")),
+            text_linear_weight=quant_spec_from_config(
+                stage_cfg.get("text_linear_weight")
+            ),
+            vision_linear_weight=quant_spec_from_config(
+                stage_cfg.get("vision_linear_weight")
+            ),
             vision_patch_embed_weight=quant_spec_from_config(
                 stage_cfg.get("vision_patch_embed_weight")
             ),
