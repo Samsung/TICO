@@ -199,7 +199,10 @@ class TestChoiceLabels(unittest.TestCase):
 
 class TestMmmuParser(unittest.TestCase):
     def test_parser_version(self):
-        self.assertEqual(mmmu.MMMU_ANSWER_PARSER_VERSION, "tico-mmmu-v3")
+        self.assertEqual(mmmu.MMMU_ANSWER_PARSER_VERSION, "tico-mmmu-v4")
+        self.assertEqual(
+            mmmu.MMMU_LEGACY_OPEN_PARSER_VERSION, "tico-mmmu-legacy-open-v1"
+        )
 
     def test_answer_formats(self):
         cases = {
@@ -334,6 +337,70 @@ class TestMmmuParser(unittest.TestCase):
         )
         self.assertEqual(mmmu._parse_answer("J", 9), (None, "out_of_range"))
 
+    def test_last_hyphenated_declaration_is_ambiguous_not_skipped(self):
+        # v3 did not accept ``-`` as a bare-label boundary, so ``Answer: C-D``
+        # was never a candidate and the earlier ``Answer: B`` was returned.
+        ambiguous = (
+            "Answer: B\nAnswer: C-D",
+            "Answer: B\nAnswer: (C)-(D)",
+            "Answer: B\nAnswer: C/D",
+            "Answer: B\nAnswer: C or D",
+            "Answer: B\nAnswer: C - D",
+            "Answer: B\nAnswer: C-",
+        )
+        for text in ambiguous:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    mmmu._parse_answer(text, 12), (None, "ambiguous_declaration")
+                )
+                self.assertIsNone(mmmu.extract_answer(text, 12))
+        self.assertEqual(
+            mmmu._parse_answer("Answer: B\nAnswer: Z", 12), (None, "out_of_range")
+        )
+        self.assertEqual(
+            mmmu._parse_answer("Answer: B\nAnswer: C.", 12), ("C", "explicit")
+        )
+        # A hyphenated word after the declaration is not a label either.
+        self.assertIsNone(mmmu.extract_answer("Answer: X-ray", 26))
+        # Leading and bare contexts stay consistent with the declaration rule.
+        self.assertEqual(mmmu._parse_answer("(C)-(D)", 10), (None, "ambiguous_leading"))
+        self.assertEqual(mmmu._parse_answer("C-D", 10), (None, "unparsed"))
+
+    def test_v3_regression_cases_are_unchanged(self):
+        cases = {
+            "Answer: (H)HENRI DE TOULOUSE-LAUTREC": ("H", "explicit"),
+            "(B)Yes.": ("B", "leading"),
+            "**Answer:** C": ("C", "explicit"),
+            "Answer: HENRI": (None, "unparsed"),
+            "To answer a question, inspect the image.": (None, "unparsed"),
+            "Option A is incorrect.": (None, "unparsed"),
+            "Answer: C\nOption A is incorrect.": ("C", "explicit"),
+            "Answer: (C)/(D)": (None, "ambiguous_declaration"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mmmu._parse_answer(text, 26), expected)
+
+
+class TestLegacyOpenAnswer(unittest.TestCase):
+    def test_letter_extraction_and_raw_text_fallback(self):
+        cases = {
+            "42": ("42", "legacy_text"),
+            " 42 \n": ("42", "legacy_text"),
+            "Answer: 42": ("Answer: 42", "legacy_text"),
+            "x = 3": ("x = 3", "legacy_text"),
+            "k": ("k", "legacy_text"),
+            "a": ("A", "legacy_letter"),
+            "(b)": ("B", "legacy_letter"),
+            "A nucleus": ("A", "legacy_letter"),
+            "B. 42": ("B", "legacy_letter"),
+            "Option B": ("B", "legacy_letter"),
+            "The answer is (j)": ("J", "legacy_letter"),
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(mmmu.legacy_open_answer(text), expected)
+
     def test_invalid_choice_counts_raise(self):
         for count in (0, 27, True, -3, 1.5):
             with self.subTest(count=count), self.assertRaisesRegex(
@@ -367,6 +434,7 @@ class TestSampleValidation(unittest.TestCase):
         self.assertEqual(
             mmmu.validate_sample_choices("s", ["a"] * 12, "l"), "ABCDEFGHIJKL"
         )
+        self.assertEqual(mmmu.validate_sample_choices("s", ["a"] * 4, " c "), "ABCD")
         self.assertEqual(len(mmmu.validate_sample_choices("s", ["a"] * 26, "Z")), 26)
 
     def test_unsupported_structures_name_the_sample(self):
@@ -382,6 +450,79 @@ class TestSampleValidation(unittest.TestCase):
                 ValueError, f"(?s)Sample 'test_X_1'.*{fragment}"
             ):
                 mmmu.validate_sample_choices("test_X_1", choices, gold)
+
+    def test_gold_must_be_exactly_one_valid_label(self):
+        # ``in "ABCD"`` is a substring test; these all passed it before.
+        invalid: tuple[Any, ...] = ("", " ", "AB", "A,B", "ab", None, 1, True, 0.5)
+        for gold in invalid:
+            with self.subTest(gold=gold), self.assertRaisesRegex(
+                ValueError, "Sample 'test_X_1'.*gold answer"
+            ):
+                mmmu.validate_sample_choices("test_X_1", ["a"] * 4, gold)
+            with self.subTest(gold=gold, helper="normalize"), self.assertRaisesRegex(
+                ValueError, "Sample 'test_X_1'.*gold answer"
+            ):
+                mmmu.normalize_mmmu_gold_label("test_X_1", gold, "ABCD")
+
+    def test_gold_is_normalized_consistently(self):
+        for gold in ("C", "c", " C ", "\tc\n"):
+            with self.subTest(gold=gold):
+                self.assertEqual(mmmu.normalize_mmmu_gold_label("s", gold, "ABCD"), "C")
+        with self.assertRaisesRegex(ValueError, "gold answer 'E'"):
+            mmmu.normalize_mmmu_gold_label("s", "E", "ABCD")
+        self.assertEqual(mmmu.normalize_mmmu_gold_label("s", "l", "ABCDEFGHIJKL"), "L")
+
+
+class TestScoringPolicy(unittest.TestCase):
+    def test_missing_or_multiple_choice_type_selects_multiple_choice(self):
+        for question_type in (None, "multiple-choice"):
+            for vision_only in (True, False):
+                with self.subTest(question_type=question_type, vision=vision_only):
+                    self.assertEqual(
+                        mmmu.resolve_mmmu_scoring_policy(
+                            "s", question_type, ["a", "b"], vision_only=vision_only
+                        ),
+                        "multiple_choice",
+                    )
+        # Empty options are not reinterpreted as open-ended without the type.
+        self.assertEqual(
+            mmmu.resolve_mmmu_scoring_policy("s", None, [], vision_only=False),
+            "multiple_choice",
+        )
+        self.assertEqual(
+            mmmu.resolve_mmmu_scoring_policy(
+                "s", "multiple-choice", [], vision_only=False
+            ),
+            "multiple_choice",
+        )
+
+    def test_open_requires_a_non_vision_subject_and_no_options(self):
+        self.assertEqual(
+            mmmu.resolve_mmmu_scoring_policy("s", "open", [], vision_only=False),
+            "legacy_open",
+        )
+        cases = {
+            "vision": ("open", [], True, "vision"),
+            "with_options": ("open", ["a", "b"], False, "contradictory"),
+            "non_list": ("open", "[]", False, "contradictory"),
+            "unknown": ("fill-in", [], False, "unsupported question_type"),
+            "empty_type": ("", [], False, "unsupported question_type"),
+            "bool_type": (True, [], False, "unsupported question_type"),
+        }
+        for name, (question_type, choices, vision_only, fragment) in cases.items():
+            with self.subTest(case=name), self.assertRaisesRegex(
+                ValueError, f"(?s)Sample 'test_X_1'.*{fragment}"
+            ):
+                mmmu.resolve_mmmu_scoring_policy(
+                    "test_X_1", question_type, choices, vision_only=vision_only
+                )
+
+    def test_get_item_forwards_question_type(self):
+        row = {"id": "x", "image": None, "options": "[]", "answer": "42"}
+        self.assertIsNone(mmmu.get_item_mmmu(row)["question_type"])
+        self.assertEqual(mmmu.get_item_mmmu(row)["choices"], [])
+        row["question_type"] = "open"
+        self.assertEqual(mmmu.get_item_mmmu(row)["question_type"], "open")
 
 
 class TestMmmuEvaluationLogging(unittest.TestCase):
@@ -515,11 +656,15 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         self.assertTrue(by_id["four"]["parse_failed"])
         self.assertIsNone(by_id["four"]["predicted"])
         self.assertFalse(by_id["four"]["correct"])
+        self.assertEqual(by_id["twelve"]["scoring_policy"], "multiple_choice")
+        self.assertEqual(by_id["twelve"]["parser_version"], "tico-mmmu-v4")
+        self.assertIsNone(by_id["twelve"]["question_type"])
         start = next(r for r in records if r["record_type"] == "subject_start")
         self.assertEqual(start["max_new_tokens"], 16)
         self.assertEqual(start["prompt_mode"], "strict_single_letter")
-        self.assertEqual(start["parser_version"], "tico-mmmu-v3")
-        self.assertEqual(records[0]["parser_version"], "tico-mmmu-v3")
+        self.assertEqual(start["parser_version"], "tico-mmmu-v4")
+        self.assertEqual(records[0]["parser_version"], "tico-mmmu-v4")
+        self.assertEqual(records[0]["open_parser_version"], "tico-mmmu-legacy-open-v1")
         summary = next(r for r in records if r["record_type"] == "subject_summary")
         self.assertEqual(
             (summary["correct"], summary["total"], summary["skipped"]), (2, 3, 0)
@@ -554,6 +699,46 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
                 self.assertFalse(
                     any(r["record_type"] == "run_summary" for r in records)
                 )
+                self.assertFalse(any(r.get("status") == "skipped" for r in records))
+
+    def test_multiple_choice_gold_is_normalized_once_for_scoring_and_logging(self):
+        samples = [
+            self.sample("lower", answer="c"),
+            self.sample("padded", answer=" C "),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.jsonl"
+            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
+                mmmu, "generate_image_only_answer", return_value="C"
+            ):
+                result = mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
+            records = self.read(path)
+        self.assertEqual(result, {"vision": (2, 2, 0)})
+        by_id = {r["id"]: r for r in records if r["record_type"] == "sample"}
+        self.assertEqual(by_id["lower"]["gold"], "C")
+        self.assertEqual(by_id["lower"]["gold_raw"], "c")
+        self.assertEqual(by_id["padded"]["gold"], "C")
+        self.assertEqual(by_id["padded"]["gold_raw"], " C ")
+        self.assertTrue(by_id["padded"]["correct"])
+
+    def test_invalid_multiple_choice_golds_fail_before_generation(self):
+        invalid: tuple[Any, ...] = ("", " ", "AB", "A,B", None, 1, True)
+        for gold in invalid:
+            with self.subTest(gold=gold), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "run.jsonl"
+                samples = [self.sample("ok"), self.sample("bad_gold", answer=gold)]
+                with patch.object(
+                    mmmu, "load_data", return_value=samples
+                ), patch.object(
+                    mmmu, "generate_image_only_answer", return_value="C"
+                ) as generate:
+                    with self.assertRaisesRegex(
+                        ValueError, "Sample 'bad_gold'.*gold answer"
+                    ):
+                        mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
+                self.assertEqual(generate.call_count, 1)
+                records = self.read(path)
+                self.assertEqual(records[-1]["record_type"], "run_error")
                 self.assertFalse(any(r.get("status") == "skipped" for r in records))
 
     def test_jsonl_contains_raw_outputs_parse_failures_and_completion(self):
@@ -694,6 +879,276 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         self.assertIn("Which is correct?", question)
         self.assertIn("A. option 0", question)
         self.assertNotIn("strict single-letter", question)
+
+    # --- non-Pro MMMU open-ended compatibility -------------------------------
+
+    def open_sample(self, sample_id="open", answer="42", question="How many?"):
+        # Shaped like an MMMU/MMMU row: ``options`` is the string "[]" and the
+        # image lives in ``image_1``.
+        return {
+            "id": sample_id,
+            "image_1": object(),
+            "image_2": None,
+            "question": question,
+            "options": "[]",
+            "answer": answer,
+            "question_type": "open",
+        }
+
+    def mc_sample(self, sample_id="mc", answer="C", question="Which?"):
+        return self.sample(
+            sample_id,
+            answer=answer,
+            question=question,
+            question_type="multiple-choice",
+        )
+
+    def non_vision(self, **overrides):
+        return self.kwargs(dataset="MMMU/MMMU", subjects=["Accounting"], **overrides)
+
+    def test_open_question_is_evaluated_with_legacy_scoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.jsonl"
+            with patch.object(
+                mmmu, "load_data", return_value=[self.open_sample()]
+            ), patch.object(
+                mmmu, "generate_answer", return_value="42"
+            ) as generate, patch.object(
+                mmmu, "generate_image_only_answer"
+            ) as image_only:
+                result = mmmu.evaluate_mmmu(**self.non_vision(output_jsonl=path))
+            records = self.read(path)
+        self.assertEqual(result, {"Accounting": (1, 1, 0)})
+        image_only.assert_not_called()
+        self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 16)
+        prompt = generate.call_args.kwargs["question"]
+        self.assertIn("How many?", prompt)
+        self.assertTrue(prompt.endswith("\nAnswer:"))
+        self.assertNotIn("42", prompt)
+        record = next(r for r in records if r["record_type"] == "sample")
+        self.assertEqual(record["status"], "evaluated")
+        self.assertEqual(record["question_type"], "open")
+        self.assertEqual(record["scoring_policy"], "legacy_open")
+        self.assertEqual(record["parser_version"], "tico-mmmu-legacy-open-v1")
+        self.assertIsNone(record["num_choices"])
+        self.assertIsNone(record["valid_labels"])
+        self.assertEqual(record["gold"], "42")
+        self.assertEqual(record["predicted"], "42")
+        self.assertEqual(record["parse_method"], "legacy_text")
+        self.assertFalse(record["parse_failed"])
+        self.assertTrue(record["correct"])
+        start = next(r for r in records if r["record_type"] == "subject_start")
+        self.assertEqual(start["parser_version"], "tico-mmmu-v4")
+        self.assertEqual(start["open_parser_version"], "tico-mmmu-legacy-open-v1")
+
+    def test_wrong_open_answer_is_counted_not_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.jsonl"
+            with patch.object(
+                mmmu, "load_data", return_value=[self.open_sample()]
+            ), patch.object(mmmu, "generate_answer", return_value="41"):
+                result = mmmu.evaluate_mmmu(**self.non_vision(output_jsonl=path))
+            records = self.read(path)
+        self.assertEqual(result, {"Accounting": (0, 1, 0)})
+        record = next(r for r in records if r["record_type"] == "sample")
+        self.assertEqual(record["status"], "evaluated")
+        self.assertEqual(record["predicted"], "41")
+        self.assertFalse(record["correct"])
+        summary = next(r for r in records if r["record_type"] == "subject_summary")
+        self.assertEqual(summary["parse_failures"], 0)
+        self.assertEqual(records[-1]["record_type"], "run_summary")
+
+    def test_open_scoring_reproduces_the_pre_pr_behaviour(self):
+        # Expected values are derived by hand from the pre-PR evaluator: the
+        # legacy ``extract_answer`` (leading ``A``-``J`` label or
+        # ``answer/option/choice X`` mention -> letter, otherwise the stripped
+        # text) compared with ``answer.upper()``. Several entries are legacy
+        # quirks (``x`` vs ``X``, ``42.`` vs ``42``) that are preserved, not
+        # endorsed.
+        cases = (
+            # (generated, gold, predicted, correct)
+            ("42", "42", "42", True),
+            (" 42 \n", "42", "42", True),
+            ("41", "42", "41", False),
+            ("Answer: 42", "42", "Answer: 42", False),
+            ("42.", "42", "42.", False),
+            ("a", "a", "A", True),
+            ("(b)", "b", "B", True),
+            ("Option B", "B", "B", True),
+            ("A nucleus", "A nucleus", "A", False),
+            ("x", "x", "x", False),
+            ("x = 3", "x = 3", "x = 3", False),
+            ("['24/7', '3.429']", "['24/7', '3.429']", "['24/7', '3.429']", True),
+        )
+        samples = [
+            self.open_sample(f"open_{i}", answer=gold)
+            for i, (_, gold, _, _) in enumerate(cases)
+        ]
+        by_image = {s["image_1"]: cases[i][0] for i, s in enumerate(samples)}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.jsonl"
+            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
+                mmmu,
+                "generate_answer",
+                side_effect=lambda **kwargs: by_image[kwargs["image"]],
+            ):
+                result = mmmu.evaluate_mmmu(
+                    **self.non_vision(n_samples=len(cases), output_jsonl=path)
+                )
+            records = [r for r in self.read(path) if r["record_type"] == "sample"]
+        expected_correct = sum(int(c) for _, _, _, c in cases)
+        self.assertEqual(result, {"Accounting": (expected_correct, len(cases), 0)})
+        for record, (generated, gold, predicted, correct) in zip(records, cases):
+            with self.subTest(generated=generated, gold=gold):
+                self.assertEqual(record["gold"], gold.upper())
+                self.assertEqual(record["predicted"], predicted)
+                self.assertEqual(record["correct"], correct)
+                self.assertEqual(record["scoring_policy"], "legacy_open")
+
+    def test_open_gold_keeps_the_legacy_upper_only_comparison(self):
+        # Multiple-choice gold normalisation (strip, single label) does not
+        # apply: the legacy value is ``answer.upper()`` and nothing else.
+        with patch.object(
+            mmmu, "load_data", return_value=[self.open_sample(answer=" 42 ")]
+        ), patch.object(mmmu, "generate_answer", return_value="42"):
+            self.assertEqual(
+                mmmu.evaluate_mmmu(**self.non_vision()), {"Accounting": (0, 1, 0)}
+            )
+        with patch.object(
+            mmmu, "load_data", return_value=[self.open_sample(answer=42)]
+        ), patch.object(mmmu, "generate_answer") as generate:
+            with self.assertRaisesRegex(ValueError, "Sample 'open'.*must be a string"):
+                mmmu.evaluate_mmmu(**self.non_vision())
+        generate.assert_not_called()
+
+    def test_mixed_question_types_share_one_denominator(self):
+        samples = [
+            self.mc_sample("mc_right", answer="C"),
+            self.open_sample("open_wrong", answer="42"),
+            self.mc_sample("mc_unparsed", answer="B"),
+            self.open_sample("open_right", answer="7"),
+        ]
+        outputs = {
+            "mc_right": "C",
+            "open_wrong": "41",
+            "mc_unparsed": "I am unsure.",
+            "open_right": "7",
+        }
+        by_image = {s.get("image_1", s.get("image")): outputs[s["id"]] for s in samples}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.jsonl"
+            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
+                mmmu,
+                "generate_answer",
+                side_effect=lambda **kwargs: by_image[kwargs["image"]],
+            ):
+                result = mmmu.evaluate_mmmu(
+                    **self.non_vision(n_samples=4, output_jsonl=path)
+                )
+            records = self.read(path)
+        self.assertEqual(result, {"Accounting": (2, 4, 0)})
+        by_id = {r["id"]: r for r in records if r["record_type"] == "sample"}
+        self.assertEqual(
+            {k: v["scoring_policy"] for k, v in by_id.items()},
+            {
+                "mc_right": "multiple_choice",
+                "open_wrong": "legacy_open",
+                "mc_unparsed": "multiple_choice",
+                "open_right": "legacy_open",
+            },
+        )
+        self.assertEqual(by_id["mc_right"]["valid_labels"], "ABCD")
+        self.assertEqual(by_id["mc_right"]["parser_version"], "tico-mmmu-v4")
+        self.assertEqual(by_id["mc_unparsed"]["parse_method"], "unparsed")
+        self.assertTrue(by_id["mc_unparsed"]["parse_failed"])
+        self.assertFalse(by_id["open_wrong"]["parse_failed"])
+        summary = next(r for r in records if r["record_type"] == "subject_summary")
+        self.assertEqual((summary["correct"], summary["total"]), (2, 4))
+        # Only the multiple-choice parser has a failure notion.
+        self.assertEqual(summary["parse_failures"], 1)
+        self.assertEqual(summary["parse_failure_rate"], 0.25)
+        self.assertEqual(records[-1]["results"], {"Accounting": [2, 4, 0]})
+
+    def test_few_shot_examples_may_be_open_without_leaking_the_target_gold(self):
+        shots = [
+            self.open_sample("shot_open", answer="17", question="Shot one?"),
+            self.mc_sample("shot_mc", answer="B", question="Shot two?"),
+        ]
+        target = self.open_sample("target", answer="7391", question="Target?")
+
+        def load_data(**kwargs):
+            return (
+                list(shots[: kwargs["n_samples"]])
+                if kwargs["split"] == "test"
+                else [target]
+            )
+
+        for n_shots in (0, 2):
+            with self.subTest(n_shots=n_shots), patch.object(
+                mmmu, "load_data", side_effect=load_data
+            ), patch.object(mmmu, "generate_answer", return_value="7391") as generate:
+                result = mmmu.evaluate_mmmu(**self.non_vision(n_shots=n_shots))
+            self.assertEqual(result, {"Accounting": (1, 1, 0)})
+            prompt = generate.call_args.kwargs["question"]
+            self.assertIn("Target?", prompt)
+            self.assertTrue(prompt.endswith("Target?\nAnswer:"))
+            self.assertNotIn("7391", prompt)
+            if n_shots:
+                self.assertIn("Shot one?\nAnswer: 17", prompt)
+                self.assertIn("Shot two?\nA. option 0", prompt)
+                self.assertIn("Answer: B", prompt)
+            else:
+                self.assertNotIn("Shot", prompt)
+                self.assertNotIn("17", prompt)
+
+    def test_explicit_multiple_choice_with_empty_options_is_not_treated_as_open(self):
+        sample = self.mc_sample("mc_empty", answer="A")
+        sample["options"] = "[]"
+        with patch.object(mmmu, "load_data", return_value=[sample]), patch.object(
+            mmmu, "generate_answer"
+        ) as generate:
+            with self.assertRaisesRegex(
+                ValueError, "Sample 'mc_empty'.*unsupported number of choices"
+            ):
+                mmmu.evaluate_mmmu(**self.non_vision())
+        generate.assert_not_called()
+        # Without a question_type, an empty option list is still an error.
+        untyped = self.sample("untyped", num_choices=0, answer="A")
+        with patch.object(mmmu, "load_data", return_value=[untyped]), patch.object(
+            mmmu, "generate_answer"
+        ) as generate:
+            with self.assertRaisesRegex(ValueError, "Sample 'untyped'"):
+                mmmu.evaluate_mmmu(**self.non_vision())
+        generate.assert_not_called()
+
+    def test_contradictory_metadata_fails_before_generation_with_the_id(self):
+        open_with_options = self.open_sample("open_opts")
+        open_with_options["options"] = "['x', 'y']"
+        unknown = self.open_sample("unknown_type")
+        unknown["question_type"] = "fill-in"
+        vision_open = self.sample("vision_open", question_type="open")
+        cases = {
+            "open_opts": (self.non_vision(), open_with_options, "contradictory"),
+            "unknown_type": (self.non_vision(), unknown, "unsupported question_type"),
+            "vision_open": (self.kwargs(), vision_open, "vision"),
+        }
+        for sample_id, (kwargs, sample, fragment) in cases.items():
+            with self.subTest(sample=sample_id), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "run.jsonl"
+                with patch.object(
+                    mmmu, "load_data", return_value=[sample]
+                ), patch.object(mmmu, "generate_answer") as generate, patch.object(
+                    mmmu, "generate_image_only_answer"
+                ) as image_only:
+                    with self.assertRaisesRegex(
+                        ValueError, f"(?s)Sample '{sample_id}'.*{fragment}"
+                    ):
+                        mmmu.evaluate_mmmu(**dict(kwargs, output_jsonl=path))
+                generate.assert_not_called()
+                image_only.assert_not_called()
+                records = self.read(path)
+                self.assertEqual(records[-1]["record_type"], "run_error")
+                self.assertFalse(any(r.get("status") == "skipped" for r in records))
 
     def test_recipe_forwards_optional_settings(self):
         for prompt_mode, expected in (

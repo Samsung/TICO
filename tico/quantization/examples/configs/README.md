@@ -567,10 +567,14 @@ Rules:
   `max_new_tokens` to `256` or `null` as well when the mode default is wanted.
 - The strict prompt's allowed range follows the sample's actual option count
   (ten options reproduce the historical `A to J` text; other counts differ from
-  older TICO versions). Samples with 1-26 options are supported; others fail
-  before generation with the sample ID.
-- Answer parsing uses parser version `tico-mmmu-v3`. Compare FP and quantized
-  models only under the same `prompt_mode`, `max_new_tokens` and parser version.
+  older TICO versions). Multiple-choice samples with 1-26 options and exactly
+  one valid gold label are supported; others fail before generation with the
+  sample ID. MMMU/MMMU `open` questions (non-vision subjects) keep their
+  legacy text-comparison scoring and are recorded with
+  `scoring_policy: legacy_open`.
+- Multiple-choice answer parsing uses parser version `tico-mmmu-v4`. Compare
+  FP and quantized models only under the same `prompt_mode`, `max_new_tokens`
+  and parser version.
 - Using an official prompt string does not reproduce the official benchmark
   protocol, and the strict default is not a claim that it is optimal for every
   model.

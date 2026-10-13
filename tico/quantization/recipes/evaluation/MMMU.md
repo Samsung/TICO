@@ -151,28 +151,78 @@ control, not by itself proof that inputs match: compare per-sample tensor hashes
 in the JSONL output. Preserve the resolved recipe configuration alongside logs;
 logs do not embed model weights or a complete environment manifest.
 
-## Supported option counts
+## Question types and scoring policies
+
+Each sample is scored by exactly one policy, recorded per sample as
+`scoring_policy` together with the `question_type` read from the dataset row
+and the `parser_version` that was applied:
+
+| Dataset row | `scoring_policy` | Validation | Prediction |
+|---|---|---|---|
+| MMMU-Pro (no `question_type` field), MMMU/MMMU `multiple-choice`, or any row without `question_type` | `multiple_choice` | option list and gold label (below) | parser `tico-mmmu-v4` |
+| MMMU/MMMU `open` with an empty option list, non-vision subject | `legacy_open` | gold must be a string | legacy extraction `tico-mmmu-legacy-open-v1` |
+
+A missing `question_type` is multiple-choice: existing callers and synthetic
+fixtures keep their behaviour, and an empty option list without the `open`
+type is still an input error rather than an open-ended question. Contradictory
+or unsupported metadata (`open` with options, `open` on the image-only
+MMMU-Pro vision subset, any other `question_type` value) raises a `ValueError`
+naming the sample ID before generation and ends the run with `run_error`.
+
+### Multiple-choice validation
 
 Options are labelled `A`, `B`, ... in order. Samples with 1 to 26 options are
-supported; the evaluator validates every sample's option list and gold answer
-**before generation** and raises a `ValueError` naming the sample ID for an
-empty option list, more than 26 options, a non-list option structure, or a gold
-answer outside the valid labels. Such samples are neither skipped nor clamped
-to a supported count, and the run ends with a `run_error` record. The
+supported; the evaluator validates every multiple-choice sample's option list
+and gold answer **before generation** and raises a `ValueError` naming the
+sample ID for an empty option list, more than 26 options, a non-list option
+structure, or an invalid gold. Such samples are neither skipped nor clamped to
+a supported count, and the run ends with a `run_error` record. The
 `mmmu_choice_labels(num_choices)` helper is the single source of the label set
 for prompts, parsing and logging.
 
+The gold contract is a single label: the gold must be a string whose
+`strip().upper()` value is exactly one character inside the sample's labels.
+`"c"` and `" C "` are both `C`; `""`, `" "`, `"AB"`, `"A,B"`, labels outside
+the range, and non-string values (`None`, `1`, `True`) are rejected, never
+converted. Validation, scoring and the `gold` log field all use the same
+normalized value (`normalize_mmmu_gold_label`); the dataset string is kept
+separately as `gold_raw`.
+
+### Open-ended compatibility path (non-Pro MMMU)
+
+MMMU/MMMU `open` questions keep the execution and scoring that TICO applied
+before the parser was versioned: the few-shot prompt is built without option
+lines (few-shot examples may themselves be open and show their answer; the
+target's gold is never injected), the generation budget is the usual 16
+tokens, and the prediction is `legacy_open_answer(text)`: a leading `A`-`J`
+label (`A`, `(b)`, `A.`) or an `answer/option/choice X` mention yields the
+letter (`parse_method: legacy_letter`), otherwise the stripped raw text is the
+prediction (`legacy_text`). It is compared with the upper-cased gold string
+exactly as before, so `42` matches `42` but `42.` does not, `x` does not match
+gold `x` (upper-cased to `X`), and a list-valued gold such as
+`['24/7', '3.429']` only matches the identical string.
+
+This is a compatibility path, not MMMU open-ended scoring parity: there is no
+numeric tolerance, unit handling, list-valued gold support or LLM judge. Open
+samples stay in the denominator (they are not skipped), have no `num_choices`,
+`valid_labels` or `out_of_range` notion (`null` in the log), and never count as
+parse failures because the legacy extraction always yields a prediction. The
+run-level `parser_version` describes the multiple-choice parser only; use the
+per-sample `scoring_policy`/`parser_version` to tell the two paths apart in a
+mixed subject.
+
 ## Answer extraction
 
-The parser version is `tico-mmmu-v3`. It is a versioned TICO heuristic, not a
-claim of official scoring parity. Supported grammar, in priority order:
+The multiple-choice parser version is `tico-mmmu-v4`. It is a versioned TICO
+heuristic, not a claim of official scoring parity. Supported grammar, in
+priority order:
 
 1. The last explicit declaration `[final|correct] answer (:|=|is) X` outranks
    every other option mention. `X` is either a parenthesised label whose
    closing parenthesis ends the label (`Answer: (H)HENRI DE TOULOUSE-LAUTREC`
-   gives `H`) or a bare letter followed by end of text, whitespace or
-   punctuation (`Answer: HENRI` gives nothing). Markdown such as
-   `**Answer:** C` is accepted.
+   gives `H`) or a bare letter followed by end of text, whitespace,
+   punctuation, `)`, `/` or `-` (`Answer: HENRI` gives nothing). Markdown such
+   as `**Answer:** C` is accepted.
 2. A bare `X`, `(X)` or `X.` on the last non-empty line.
 3. An unambiguous choice-only last line such as `I would choose B.`.
 4. A leading `(X)` followed by anything (`(B)Yes.` gives `B`) or a leading
@@ -184,20 +234,27 @@ Rules:
   outside it (`J` with nine options, `Answer: Z` with twelve options) returns
   `None` with method `out_of_range`.
 - A candidate followed by `or`, `and`, `/` or `-` (`Answer: C or D`,
-  `Answer: (C)/(D)`, `(C) or (D)`) is ambiguous and returns `None`. When the
+  `Answer: (C)/(D)`, `Answer: C-D`, `(C) or (D)`) is ambiguous and returns
+  `None` with method `ambiguous_declaration` or `ambiguous_leading`. When the
   last declaration is ambiguous or out of range, the parser does not fall back
-  to an earlier declaration (`Answer: A` then `Answer: Z` with twelve options is
-  `None`).
+  to an earlier declaration or to a bare/leading candidate (`Answer: B` then
+  `Answer: C-D` is `None`; `Answer: A` then `Answer: Z` with twelve options is
+  `None`). In `tico-mmmu-v3` a bare label followed by `-` was not recognised as
+  a declaration at all, so `Answer: B` then `Answer: C-D` returned `B`; v4
+  closes that gap. Existing v3 result files keep their recorded version.
 - Prose is not guessed from: `I think this is ambiguous.`,
   `To answer a question ...`, `The answer is a circle.`, `Option A is
   incorrect.` all return `None`.
 - A parenthesised label in the middle of the text is never taken as the answer;
   only the explicit-declaration, last-line and leading contexts apply.
 - `None` is counted as an incorrect answer, not a skipped sample. The record
-  distinguishes a response that never produced a final answer (for example a
-  `length`-limited chain of thought, `parse_method: unparsed`) from a response
-  whose final answer was rejected (`ambiguous_declaration`, `ambiguous_leading`,
-  `out_of_range`).
+  distinguishes a response whose final answer was rejected
+  (`ambiguous_declaration`, `ambiguous_leading`, `out_of_range`) from a
+  response in which the parser found no candidate (`parse_method: unparsed`).
+  `unparsed` is not a verdict that no final answer exists: the response may
+  have been cut off before one (`stop_reason: length`), or it may state an
+  answer in a format the grammar does not support. Read it together with
+  `stop_reason` and the raw `generated` text before drawing conclusions.
 
 Callers of `extract_answer(text)` that omit `num_choices` get the historical
 ten-label default; the evaluator always passes the real count. Inspect saved
@@ -219,14 +276,20 @@ An interrupted or failed file can be inspected but is not automatically resumed.
 A file without `run_summary` must not be treated as a completed run. Choose a
 fresh path for each run; existing files are not overwritten or appended to.
 
-`run_start` records the `parser_version`, prompt mode and budgets;
+`run_start` records the multiple-choice `parser_version`, the
+`open_parser_version` of the legacy open-ended path, prompt mode and budgets;
 `subject_start` records the resolved budget, input cap, effective prompt mode
-and `parser_version`. A successfully evaluated sample records:
+and both parser versions. A successfully evaluated sample records:
 
 - Sample ID, dataset/subject/split/index, prompt mode, the rendered prompt and
   the raw generated answer.
-- `num_choices` and `valid_labels` (for example `ABCDEFGHIJKL`), gold,
-  predicted answer, correctness, `parse_method` and `parse_failed`.
+- `question_type` (as read from the row, `null` when absent), the applied
+  `scoring_policy` (`multiple_choice` or `legacy_open`) and the per-sample
+  `parser_version`.
+- `num_choices` and `valid_labels` (for example `ABCDEFGHIJKL`; `null` for
+  open-ended samples), the normalized `gold` used for scoring and the dataset
+  string as `gold_raw`, predicted answer, correctness, `parse_method` and
+  `parse_failed`.
 - Processed input length/cap, image/video grid when provided, per-tensor shape,
   dtype and SHA-256, and a combined `tensor_inputs_sha256` fingerprint.
 - Generated token IDs/count, configured EOS IDs, observed EOS, budget-limit hit,
