@@ -234,5 +234,32 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             **kwargs,
         )
 
+    def _prepare_position_ids_for_generation(self, inputs_tensor, model_kwargs):
+        """Delegate 3D mrope position-id preparation to the wrapped model.
+
+        ``GenerationMixin.generate`` calls this hook on ``self``. The generic
+        implementation returns 1D sequential ids which would bypass the 3D
+        mrope computation in the vision-language wrapper; the wrapped
+        Qwen3-VL model computes the proper [4, batch, seq] layout instead.
+        """
+        return self.module._prepare_position_ids_for_generation(  # type: ignore[operator]
+            inputs_tensor, model_kwargs
+        )
+
+    def _expand_inputs_for_generation(
+        self,
+        expand_size: int = 1,
+        is_encoder_decoder: bool = False,
+        input_ids=None,
+        **model_kwargs,
+    ):
+        """Use the expansion logic matching Qwen3-VL position preparation."""
+        return self.module._expand_inputs_for_generation(  # type: ignore[operator]
+            expand_size=expand_size,
+            is_encoder_decoder=is_encoder_decoder,
+            input_ids=input_ids,
+            **model_kwargs,
+        )
+
     def tie_weights(self):
         pass
