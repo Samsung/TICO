@@ -70,15 +70,26 @@ class MSEOCTAVObserver(AffineObserverBase):
         max_iters: int = 20,
         tol: float = 1e-10,
         max_merge: bool = True,
-        num_bins: int = 255,
+        num_bins: int | None = None,
         **kwargs,
     ):
         self.max_iters = max_iters
         self.tol = tol
         self.max_merge = max_merge
-        self.num_bins = num_bins
         super().__init__(**kwargs)
 
+        # Dtype-dependent default for the two-stage histogram resolution:
+        #   255 for 8-bit and below (uint4..uint8, int4..int8)
+        #   1023 for 16-bit (int16/uint16)
+        # Resolved after super().__init__ because self.dtype is set there.
+        if num_bins is None:
+            num_bins = 1023 if self.dtype.bits >= 16 else 255
+        self.num_bins = num_bins
+
+        import math
+        self.register_buffer("min_val_mm", torch.tensor(math.inf))
+        self.register_buffer("max_val_mm", torch.tensor(-math.inf))
+        
         # Two-stage (global) state — used when max_merge=False
         self._stage: int = 1
         self._hist_counts = None   # [B] or [C, B]
@@ -116,6 +127,8 @@ class MSEOCTAVObserver(AffineObserverBase):
         qmax = self.dtype.qmax
         gamma = 1.0 / (12.0 * qmax * qmax)  # = 4^(-B) / 3 for signed B-bit
 
+        # Iterations in double precision; cast back to float32 at the end.
+        x = x.double()
         abs_x = x.abs()
         # Exclude zeros (paper: zeros are representable, don't count them
         # toward discretization noise to avoid over-estimation for sparse tensors)
@@ -132,9 +145,9 @@ class MSEOCTAVObserver(AffineObserverBase):
             outside = nonzero & (~inside)
 
             # Sufficient statistics
-            num_in = inside.sum(dim=-1).float()  # N_in
-            num_out = outside.sum(dim=-1).float()  # N_out
-            sum_out = (abs_x * outside).sum(dim=-1).float()  # S_out
+            num_in = inside.sum(dim=-1).double()  # N_in
+            num_out = outside.sum(dim=-1).double()  # N_out
+            sum_out = (abs_x * outside).sum(dim=-1).double()  # S_out
 
             denom = gamma * num_in + num_out
             denom = torch.clamp(denom, min=1e-30)
@@ -146,7 +159,8 @@ class MSEOCTAVObserver(AffineObserverBase):
                 break
             s = s_new
 
-        return -s, s
+        # Back to float32 after the float64 iterations
+        return -s.float(), s.float()
 
     @torch.no_grad()
     def _octav_asymmetric(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -223,6 +237,9 @@ class MSEOCTAVObserver(AffineObserverBase):
         qmax = self.dtype.qmax
         gamma = 1.0 / (12.0 * (qmax - qmin) ** 2)
 
+        # Iterations in double precision; cast back to float32 at the end.
+        x = x.double()
+
         # Initial guess: percentiles that ensure some data inside and outside
         if x.dim() > 0:
             a = x.quantile(0.05, dim=-1)
@@ -243,11 +260,11 @@ class MSEOCTAVObserver(AffineObserverBase):
             mask_in = (~mask_lo) & (~mask_hi)
 
             # Sufficient statistics (see derivation in docstring above)
-            p = mask_in.sum(dim=-1).float()  # N_in
-            q = mask_lo.sum(dim=-1).float()  # N_lo
-            r = mask_hi.sum(dim=-1).float()  # N_hi
-            m_q = (x * mask_lo).sum(dim=-1).float()  # S_lo
-            m_r = (x * mask_hi).sum(dim=-1).float()  # S_hi
+            p = mask_in.sum(dim=-1).double()  # N_in
+            q = mask_lo.sum(dim=-1).double()  # N_lo
+            r = mask_hi.sum(dim=-1).double()  # N_hi
+            m_q = (x * mask_lo).sum(dim=-1).double()  # S_lo
+            m_r = (x * mask_hi).sum(dim=-1).double()  # S_hi
 
             # det = q*r + gamma*p*(q + r)  (Cramer's rule denominator)
             denom = gamma * p * (q + r) + q * r
@@ -266,7 +283,8 @@ class MSEOCTAVObserver(AffineObserverBase):
                 break
             a, b = a_new, b_new
 
-        return a, b
+        # Back to float32 after the float64 iterations
+        return a.float(), b.float()
 
     # ------------------------------------------------------------------
     # Per-tensor / per-channel dispatch
@@ -396,6 +414,11 @@ class MSEOCTAVObserver(AffineObserverBase):
         gamma = 1.0 / (12.0 * qmax * qmax)
         num_bins = self.num_bins
 
+        # Iterations in double precision; cast back to float32 at the end.
+        counts = counts.double()
+        sums = sums.double()
+        bin_width = bin_width.double()
+
         cumcount = counts.cumsum(dim=-1)
         cumsum = sums.cumsum(dim=-1)
         total_count = cumcount[..., -1]
@@ -437,7 +460,8 @@ class MSEOCTAVObserver(AffineObserverBase):
                 if not active.any():
                     break
 
-        return -s, s
+        # Back to float32 after the float64 iterations
+        return -s.float(), s.float()
 
     @torch.no_grad()
     def _octav_asymmetric_hist(
@@ -447,6 +471,12 @@ class MSEOCTAVObserver(AffineObserverBase):
         qmax = self.dtype.qmax
         gamma = 1.0 / (12.0 * (qmax - qmin) ** 2)
         num_bins = self.num_bins
+
+        # Iterations in double precision; cast back to float32 at the end.
+        counts = counts.double()
+        sums = sums.double()
+        hist_min = hist_min.double()
+        bin_width = bin_width.double()
 
         cumcount = counts.cumsum(dim=-1)
         cumsum = sums.cumsum(dim=-1)
@@ -503,7 +533,8 @@ class MSEOCTAVObserver(AffineObserverBase):
                 if not active.any():
                     break
 
-        return a, b
+        # Back to float32 after the float64 iterations
+        return a.float(), b.float()
 
     @staticmethod
     def _hist_percentile(cumcount, total_count, pct, hist_min, bin_width):
@@ -559,6 +590,15 @@ class MSEOCTAVObserver(AffineObserverBase):
             self._update_stats_global(x, **kwargs)
             return
 
+        if self.channel_axis is None:
+            curr_min_mm, curr_max_mm = x.min(), x.max()
+        else:
+            curr_min_mm, curr_max_mm = channelwise_minmax(x, self.channel_axis)
+
+        # Broadcasting handles scalar-vs-vector cases
+        self.min_val_mm = torch.minimum(self.min_val_mm, curr_min_mm)
+        self.max_val_mm = torch.maximum(self.max_val_mm, curr_max_mm)
+        
         # Also update raw min/max for edge-case fallback
         if self.channel_axis is None:
             curr_min, curr_max = x.min(), x.max()
@@ -567,7 +607,9 @@ class MSEOCTAVObserver(AffineObserverBase):
 
         # Run OCTAV
         octav_min, octav_max = self._compute_octav(x)
-
+        max_octav_abs = torch.max(torch.abs(octav_min), torch.abs(octav_max))
+        max_mm_abs = torch.max(torch.abs(curr_min), torch.abs(curr_max))
+        
         # Guard against degenerate OCTAV output (e.g. all-zero tensor)
         # by falling back to raw min/max
         if torch.any(torch.isnan(octav_min)) or torch.any(torch.isnan(octav_max)):

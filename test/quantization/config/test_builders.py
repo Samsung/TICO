@@ -27,9 +27,10 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine, mx
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.dtypes import MXDtype
-from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.observers.mse_octav import MSEOCTAVObserver
+from tico.quantization.wrapq.observers.mse_grad_octav import MSEGradOCTAVObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -378,6 +379,60 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
         )
         self.assertEqual(
             cfg.overrides["lm_head"]["weight"]["qscheme"], QScheme.PER_CHANNEL_ASYMM  # type: ignore[index]
+        )
+
+
+class TestMaskObserverDowngrade(unittest.TestCase):
+    """Mask observers must never use gradient-weighted observers.
+
+    Gradient-weighted observers collapse the quantization range on
+    (near-)constant mask tensors (e.g. a saturated causal mask ``{0, -120}``
+    where the task-loss gradient at masked positions is ~0), silently
+    disabling causal masking after ``convert()``.
+    """
+
+    def test_mask_observers_downgraded_to_minmax(self):
+        grad_spec = affine(DType.int(16), observer=MSEGradOCTAVObserver, max_merge=False)
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            linear=grad_spec,
+        )
+        layer0 = cfg.overrides["model"]["layers"]["0"]
+
+        # Mask observers are downgraded to MinMaxObserver ...
+        self.assertIs(layer0["attn_mask"]["observer"], MinMaxObserver)
+        self.assertIs(layer0["self_attn"]["attn_mask"]["observer"], MinMaxObserver)
+        self.assertIs(cfg.overrides["model"]["causal_mask"]["observer"], MinMaxObserver)
+
+        # ... while non-mask observers keep the gradient-weighted observer.
+        self.assertIs(
+            layer0["self_attn"]["hidden"]["observer"], MSEGradOCTAVObserver
+        )
+        self.assertIs(
+            layer0["self_attn"]["q_proj"]["act_in"]["observer"], MSEGradOCTAVObserver
+        )
+        self.assertIs(layer0["mlp"]["act_in"]["observer"], MSEGradOCTAVObserver)
+
+        # dtype / qscheme inference is preserved for the downgraded spec ...
+        self.assertEqual(layer0["attn_mask"]["dtype"], DType.int(16))
+        self.assertEqual(layer0["attn_mask"]["qscheme"], QScheme.PER_TENSOR_SYMM)
+        # ... and gradient-solver kwargs are dropped from the downgraded spec.
+        self.assertNotIn("max_merge", layer0["attn_mask"])
+
+    def test_mask_observers_keep_non_gradient_observers(self):
+        cfg = build_llm_ptq_config(
+            model_type="llama",
+            num_hidden_layers=1,
+            linear=affine(DType.int(16), observer=MSEOCTAVObserver),
+        )
+        layer0 = cfg.overrides["model"]["layers"]["0"]
+
+        # Non-gradient-weighted observers are safe on masks and pass through.
+        self.assertIs(layer0["attn_mask"]["observer"], MSEOCTAVObserver)
+        self.assertIs(layer0["self_attn"]["attn_mask"]["observer"], MSEOCTAVObserver)
+        self.assertIs(
+            cfg.overrides["model"]["causal_mask"]["observer"], MSEOCTAVObserver
         )
 
 

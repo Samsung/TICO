@@ -307,15 +307,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--kv_cache_key_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_batched_matmul"],
-        help="Observer type for KV cache key quantization (minmax/mse/mse_octav/mse_grad_octav/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_batched_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_batched_matmul_global"],
+        help="Observer type for KV cache key quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_value_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul"],
-        help="Observer type for KV cache value quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_matmul_global"],
+        help="Observer type for KV cache value quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_key_observer_per_channel",
@@ -337,52 +343,51 @@ def build_parser() -> argparse.ArgumentParser:
         "--linear_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for linear activation quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_matmul_global", "mse_batched_matmul_global"],
+        help="Observer type for linear activation quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--norm_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for norm activation quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_matmul_global", "mse_batched_matmul_global"],
+        help="Observer type for norm activation quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--softmax_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for softmax activation quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_matmul_global", "mse_batched_matmul_global"],
+        help="Observer type for softmax activation quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--spinquant_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for SpinQuant rotation I/O quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_matmul_global", "mse_batched_matmul_global"],
+        help="Observer type for SpinQuant rotation I/O quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--lm_head_io_observer",
         type=str,
         default="minmax",
-        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul"],
-        help="Observer type for output norm + lm_head I/O quantization (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul). Default: minmax.",
-    )
-    parser.add_argument(
-        "--kv_cache_key_global_calibration",
-        action="store_true",
-        default=False,
-        help="Use global two-stage calibration (max_merge=False) for KV cache key "
-        "observers. Collects global min/max in pass 1, builds a fixed grid, "
-        "then accumulates errors in pass 2. Default: False (max_merge=True).",
-    )
-    parser.add_argument(
-        "--kv_cache_value_global_calibration",
-        action="store_true",
-        default=False,
-        help="Use global two-stage calibration (max_merge=False) for KV cache value "
-        "observers. Collects global min/max in pass 1, builds a fixed grid, "
-        "then accumulates errors in pass 2. Default: False (max_merge=True).",
+        choices=["minmax", "mse", "mse_octav", "mse_grad_octav", "mse_matmul", "mse_batched_matmul",
+                 "mse_global", "mse_octav_global", "mse_grad_octav_global", "mse_matmul_global", "mse_batched_matmul_global"],
+        help="Observer type for output norm + lm_head I/O quantization. "
+        "MSE-family names may be suffixed with _global for two-stage "
+        "global calibration (max_merge=False). Default: minmax.",
     )
     parser.add_argument(
         "--kv_cache_key_layer_specs",
@@ -1592,32 +1597,40 @@ def _capture_batch_gradients(
     QuantRMSNorm.forward = _native_rmsnorm_forward
     clear_gradient_registry()
 
-    outputs = q_m(input_ids=inp, use_cache=False, return_dict=True)
-    logits = outputs.logits
-    shift_logits = logits[:, :-1].contiguous()
-    shift_labels = inp[:, 1:].contiguous()
-    loss = F.cross_entropy(
-        shift_logits.view(-1, shift_logits.size(-1)),
-        shift_labels.view(-1),
-    )
-    loss.backward()
+    try:
+        outputs = q_m(input_ids=inp, use_cache=False, return_dict=True)
+        logits = outputs.logits
+        shift_logits = logits[:, :-1].contiguous()
+        shift_labels = inp[:, 1:].contiguous()
+        loss = F.cross_entropy(
+            shift_logits.view(-1, shift_logits.size(-1)),
+            shift_labels.view(-1),
+        )
+        loss.backward()
 
-    for obs, x_req in captured:
-        if x_req.grad is not None:
-            register_gradient(obs, x_req, x_req.grad.abs().detach())
+        for obs, x_req in captured:
+            if x_req.grad is not None:
+                register_gradient(obs, x_req, x_req.grad.abs().detach())
+    except BaseException:
+        # Never leave stale/partial gradients behind for the CALIB pass.
+        clear_gradient_registry()
+        raise
+    finally:
+        # Eagerly free captured tensors and gradients so the memory is
+        # released before the (no_grad) calibration forward pass that
+        # follows.  The finally block also guarantees that the monkey-patches
+        # are restored and quant-module modes are reset even if the capture
+        # forward/backward raises.
+        del captured
+        q_m.zero_grad(set_to_none=True)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
-    # Eagerly free captured tensors and gradients so the memory is released
-    # before the (no_grad) calibration forward pass that follows.
-    del captured
-    q_m.zero_grad(set_to_none=True)
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    QuantModuleBase._fq = original_fq
-    QuantRMSNorm.forward = original_rmsnorm_forward
-    for m in q_m.modules():
-        if isinstance(m, QuantModuleBase):
-            m._mode = original_modes.get(id(m), m._mode)
+        QuantModuleBase._fq = original_fq
+        QuantRMSNorm.forward = original_rmsnorm_forward
+        for m in q_m.modules():
+            if isinstance(m, QuantModuleBase):
+                m._mode = original_modes.get(id(m), m._mode)
 
 
 def calibrate_ptq_observers(
@@ -3209,6 +3222,10 @@ def quant_spec_from_dtype_and_observer(
         observer_str: Observer type — ``"minmax"`` (default), ``"mse"``,
             ``"mse_octav"``, ``"mse_grad_octav"``, ``"mse_matmul"``, or
             ``"mse_batched_matmul"``.
+            Any MSE-family name may be suffixed with ``_global`` (e.g.
+            ``"mse_octav_global"``) to enable two-stage global calibration
+            (``max_merge=False``): collect global min/max in pass 1, build a
+            fixed grid, then accumulate errors in pass 2.
             Ignored for MX dtypes (MXObserver is always used).
         per_channel: If True, use a per-channel qscheme
             (``PER_CHANNEL_SYMM`` for signed dtypes, ``PER_CHANNEL_ASYMM`` for
@@ -3225,6 +3242,11 @@ def quant_spec_from_dtype_and_observer(
     if dtype_str in MX_DTYPE_TO_ELEM_FORMAT:
         # MX dtypes always use MXObserver; observer_str is ignored.
         return quant_spec_from_dtype_string(dtype_str)
+
+    # Parse _global suffix → forces max_merge=False (two-stage global calibration)
+    if observer_str.endswith("_global"):
+        observer_str = observer_str[: -len("_global")]
+        max_merge = False
 
     if dtype_str in AFFINE_DTYPE_TO_CONFIG:
         bits, signed = AFFINE_DTYPE_TO_CONFIG[dtype_str]
@@ -3311,7 +3333,6 @@ def quant_spec_from_dtype_and_observer(
 def parse_layer_wise_kv_cache_spec(
     spec_str: str,
     per_channel: bool,
-    max_merge: Optional[bool],
     num_hidden_layers: Optional[int] = None,
 ) -> Dict[int, "QuantSpec"]:
     """
@@ -3326,17 +3347,21 @@ def parse_layer_wise_kv_cache_spec(
     ``per_channel``, to enable per-channel qscheme for that segment only.
     If omitted, the global ``per_channel`` argument is used.
 
+    Any MSE-family observer name may be suffixed with ``_global`` (e.g.
+    ``mse_octav_global``) to enable two-stage global calibration
+    (``max_merge=False``).
+
     Examples::
 
         "0-15:uint8:minmax;16-29:uint4:mse"
         "0-15:uint8:minmax;16-...:uint4:mse"                    # requires num_hidden_layers
         "0-15:uint8:minmax;16-...:uint4:mse:per_channel"       # per-channel for 16+
+        "0-15:uint8:minmax;16-...:uint4:mse_octav_global"     # global calibration for 16+
 
     Args:
         spec_str: The spec string to parse.
         per_channel: Default per-channel qscheme flag. Used when a segment does
             not include the ``per_channel`` keyword.
-        max_merge: If not None, forwarded to MSE-family observers.
         num_hidden_layers: Total number of decoder layers. Required when ``...``
             is used as the end of a range.
 
@@ -3379,7 +3404,6 @@ def parse_layer_wise_kv_cache_spec(
             dtype_str,
             observer_str,
             per_channel=seg_per_channel,
-            max_merge=max_merge,
         )
         for idx in range(start, end + 1):
             result[idx] = spec
@@ -3392,7 +3416,9 @@ def build_activation_specs(args, num_hidden_layers: Optional[int] = None):
 
     Each activation category (linear / norm / softmax / SpinQuant I/O / lm_head I/O /
     KV cache key / KV cache value) gets its observer type from the corresponding
-    ``--*_observer`` CLI flag (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/mse_batched_matmul).
+    ``--*_observer`` CLI flag (minmax/mse/mse_octav/mse_grad_octav/mse_matmul/
+    mse_batched_matmul).  Any MSE-family name may be suffixed with ``_global``
+    to enable two-stage global calibration (``max_merge=False``).
 
     When a category's qdtype is not set (e.g. ``--spinquant_io_qdtype``), the dtype
     falls back to ``--linear_io_qdtype`` (same as before), but that category's own
@@ -3429,7 +3455,6 @@ def build_activation_specs(args, num_hidden_layers: Optional[int] = None):
         parse_layer_wise_kv_cache_spec(
             args.kv_cache_key_layer_specs,
             per_channel=args.kv_cache_key_observer_per_channel,
-            max_merge=False if args.kv_cache_key_global_calibration else None,
             num_hidden_layers=num_hidden_layers,
         )
         if args.kv_cache_key_layer_specs is not None
@@ -3438,14 +3463,12 @@ def build_activation_specs(args, num_hidden_layers: Optional[int] = None):
                 args.kv_cache_key_qdtype,
                 args.kv_cache_key_observer,
                 per_channel=args.kv_cache_key_observer_per_channel,
-                max_merge=False if args.kv_cache_key_global_calibration else None,
             )
             if args.kv_cache_key_qdtype is not None
             else quant_spec_from_dtype_and_observer(
                 args.linear_io_qdtype,
                 args.kv_cache_key_observer,
                 per_channel=args.kv_cache_key_observer_per_channel,
-                max_merge=False if args.kv_cache_key_global_calibration else None,
             )
         )
     )
@@ -3453,7 +3476,6 @@ def build_activation_specs(args, num_hidden_layers: Optional[int] = None):
         parse_layer_wise_kv_cache_spec(
             args.kv_cache_value_layer_specs,
             per_channel=args.kv_cache_value_observer_per_channel,
-            max_merge=False if args.kv_cache_value_global_calibration else None,
             num_hidden_layers=num_hidden_layers,
         )
         if args.kv_cache_value_layer_specs is not None
@@ -3462,14 +3484,12 @@ def build_activation_specs(args, num_hidden_layers: Optional[int] = None):
                 args.kv_cache_value_qdtype,
                 args.kv_cache_value_observer,
                 per_channel=args.kv_cache_value_observer_per_channel,
-                max_merge=False if args.kv_cache_value_global_calibration else None,
             )
             if args.kv_cache_value_qdtype is not None
             else quant_spec_from_dtype_and_observer(
                 args.linear_io_qdtype,
                 args.kv_cache_value_observer,
                 per_channel=args.kv_cache_value_observer_per_channel,
-                max_merge=False if args.kv_cache_value_global_calibration else None,
             )
         )
     )
@@ -3493,10 +3513,6 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
 
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
-    if args.kv_cache_key_global_calibration:
-        print("KV cache key: global calibration enabled (max_merge=False, two-stage)")
-    if args.kv_cache_value_global_calibration:
-        print("KV cache value: global calibration enabled (max_merge=False, two-stage)")
 
     
     (
@@ -3561,6 +3577,8 @@ def quantize_using_PTQ(q_m, calib_inputs, args):
     )
 
     q_m = convert(q_m)
+    print_minmax_values(q_m)
+    
     return q_m
 
 
@@ -3592,10 +3610,6 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
     # Step 1: PTQ prepare
     print("Wrapping layers with PTQWrapper …")
     print(f"Using PTQ execution profile: {args.profile}")
-    if args.kv_cache_key_global_calibration:
-        print("KV cache key: global calibration enabled (max_merge=False, two-stage)")
-    if args.kv_cache_value_global_calibration:
-        print("KV cache value: global calibration enabled (max_merge=False, two-stage)")
     assert args.norm_io_qdtype != "int16" #otherwise it is incorrect on layers joint
 
     (
@@ -3658,7 +3672,7 @@ def quantize_using_PTQ_and_LlamaGPTQ(model, calib_inputs, args, sample_weights=N
 
     # Step 3: LlamaGPTQ convert (includes freeze_qparams per layer)
     q_m = convert(q_m, inplace=True)
-    #print_minmax_values(q_m)
+    print_minmax_values(q_m)
     
     # Clean up GPTQ quantizers that are no longer needed
     clear_gptq_quantizers(q_m)

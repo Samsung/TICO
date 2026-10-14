@@ -25,6 +25,7 @@ from tico.quantization.config.specs import affine, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.observers.mse_grad_octav import MSEGradOCTAVObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 
@@ -60,6 +61,46 @@ _LAYERNORM_ACTIVATION_OBSERVERS = (
     "affine_add",
     "act_out",
 )
+
+_MASK_OBSERVER_NAMES = ("attn_mask", "causal_mask")
+"""Observer roles that observe additive attention masks.
+
+These tensors are (near-)constant two-valued buffers (e.g. ``{0, -120}`` for
+a saturated causal mask).  Gradient-weighted observers are degenerate on
+them: the task-loss gradient at the saturated mask value is ~0 (the softmax
+is already saturated there), so the gradient-weighted solver treats clipping
+the mask value as free and collapses the quantization range, silently
+disabling causal masking after ``convert()``.  Mask observers must therefore
+never use gradient-weighted observers.
+"""
+
+_GRADIENT_WEIGHTED_OBSERVERS = (MSEGradOCTAVObserver,)
+"""Observer classes whose statistics are weighted by captured task-loss
+gradients.  Mask observer roles (see ``_MASK_OBSERVER_NAMES``) must not use
+these observers."""
+
+
+def _mask_safe_spec(spec: QuantSpec) -> QuantSpec:
+    """Return a mask-safe spec for mask observer roles.
+
+    Gradient-weighted observers are downgraded to ``MinMaxObserver``: their
+    gradient-weighted range estimate is degenerate on (near-)constant mask
+    tensors (see ``_MASK_OBSERVER_NAMES``).  All other observers (minmax,
+    mse, mse_octav, ...) are safe on two-valued masks and are passed through
+    unchanged.
+
+    Observer-specific kwargs of the downgraded spec are dropped: they tune
+    the gradient-weighted solver and are not understood by
+    ``MinMaxObserver``.
+    """
+    if issubclass(spec.observer, _GRADIENT_WEIGHTED_OBSERVERS):
+        return QuantSpec(
+            observer=MinMaxObserver,
+            dtype=spec.dtype,
+            qscheme=spec.qscheme,
+        )
+    return spec
+
 
 def _weight_dtype_from_bits(bits: int) -> DType:
     """
@@ -179,17 +220,24 @@ def _build_activation_overrides(
     activation: Optional[QuantSpec],
     observer_names: tuple[str, ...],
 ) -> Dict[str, Any]:
-    """Build per-observer activation overrides from a role spec."""
+    """Build per-observer activation overrides from a role spec.
+
+    Mask observer roles (see ``_MASK_OBSERVER_NAMES``) never receive
+    gradient-weighted observers; they are downgraded via ``_mask_safe_spec``.
+    """
     if activation is None:
         return {}
-    return {
-        obs_name: activation.to_kwargs(
+    overrides: Dict[str, Any] = {}
+    for obs_name in observer_names:
+        spec = activation
+        if obs_name in _MASK_OBSERVER_NAMES:
+            spec = _mask_safe_spec(activation)
+        overrides[obs_name] = spec.to_kwargs(
             obs_name,
             context=obs_name,
             mark_replace=True,
         )
-        for obs_name in observer_names
-    }
+    return overrides
 
 
 def _build_linear_override(

@@ -85,21 +85,33 @@ chain.  The calibration pipeline runs a gradient pre-pass (forward + backward
 outside ``torch.no_grad()``) to capture ``|x.grad|`` per activation, then a
 CALIB pass that passes the captured gradients as ``grad=`` kwarg.
 
-A module-level registry (``_GRAD_REGISTRY``) maps ``id(observer)`` to their
-captured gradient tensors.  When ``grad`` is ``None`` (e.g. no gradient
-capture was run, or the observer is used in a unit test), the observer
-silently falls back to plain (unweighted) OCTAV.
+A module-level registry (``_GRAD_REGISTRY``) maps ``(id(observer), shape)``
+to the captured gradient tensor.  When no gradient is available for a call
+(e.g. no gradient capture was run, the observer is used in a unit test, or
+the call site/shape was never captured), the call is **skipped** — except in
+stage 1 of the two-stage strategy, where it still contributes to the plain
+global min/max grid via the parent class:
+
+- ``max_merge`` strategy: the call contributes nothing (no per-batch OCTAV
+  result, no min/max merge).
+- Two-stage strategy, stage 1: the call updates the global min/max grid
+  (parent behaviour).
+- Two-stage strategy, stage 2: the call contributes nothing — plain
+  element counts would mix units with the gradient masses already
+  accumulated.
 
 Limitations
 -----------
-- Decode-step calibration falls back to plain OCTAV (gradients are only
-  computed for the prefill pass).
+- Gradients are only captured for the prefill pass (the capture forward
+  runs with ``use_cache=False``), so decode-step and cache-finalization
+  calls are always skipped as described above.
 """
 
 from __future__ import annotations
 
 import torch
 
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.mse_octav import MSEOCTAVObserver
 from tico.quantization.wrapq.utils.reduce_utils import channelwise_minmax
 
@@ -153,8 +165,9 @@ class MSEGradOCTAVObserver(MSEOCTAVObserver):
     Identical to :class:`MSEOCTAVObserver` except that each element is
     weighted by ``g_i = |dL/dx_i|`` in the clipping MSE objective.
 
-    When no gradient is available (``grad=None``), falls back to plain
-    (unweighted) OCTAV -- i.e. behaves identically to the parent class.
+    When no gradient is available (``grad=None``), the call is skipped —
+    except in stage 1 of the two-stage strategy, where it still updates
+    the plain global min/max grid via the parent class.
 
     Parameters
     ----------
@@ -168,6 +181,12 @@ class MSEGradOCTAVObserver(MSEOCTAVObserver):
         histogram accumulation.
     num_bins : int
         Number of histogram bins for two-stage mode.  Default 255.
+    degenerate_range_ratio : float
+        Degeneracy-guard threshold.  If the gradient-weighted OCTAV solution
+        range is smaller than this fraction of the observed min/max range,
+        the solution is considered degenerate (the gradient signal is ~0 at
+        the values being clipped, e.g. a saturated causal mask) and the
+        observed range is used instead.  Default 0.01.  Set to 0 to disable.
     """
 
     def __init__(
@@ -176,9 +195,11 @@ class MSEGradOCTAVObserver(MSEOCTAVObserver):
         max_iters: int = 20,
         tol: float = 1e-10,
         max_merge: bool = True,
-        num_bins: int = 255,
+        num_bins: int | None = None,
+        degenerate_range_ratio: float = 0.01,
         **kwargs,
     ):
+        self.degenerate_range_ratio = degenerate_range_ratio
         super().__init__(
             max_iters=max_iters,
             tol=tol,
@@ -453,6 +474,66 @@ class MSEGradOCTAVObserver(MSEOCTAVObserver):
                     self._hist_sums[c].scatter_add_(0, bin_idx, x_c * g_c)
 
     # ------------------------------------------------------------------
+    # Degeneracy guard
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _degenerate_mask(
+        self,
+        sol_min: torch.Tensor,
+        sol_max: torch.Tensor,
+        ref_min: torch.Tensor,
+        ref_max: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Boolean mask of channels whose gradient-weighted OCTAV solution range
+        collapsed relative to a reference (observed) range.
+
+        The gradient is a *local* linearisation of the loss.  When it is ~0
+        at the values being clipped -- e.g. a saturated causal mask
+        ``{0, -120}`` where ``exp(-120) ~ 8e-53`` makes ``|dL/dx| ~ 0`` at
+        masked positions -- the gradient-weighted solver sees clipping those
+        values as *free* and collapses the quantization range, even though
+        clipping them is a huge non-local change (it disables the mask).
+        Such collapses are degenerate; the caller must fall back to the
+        observed min/max range.
+        """
+        ref_range = (ref_max - ref_min).clamp(min=0.0)
+        sol_range = sol_max - sol_min
+        return sol_range < self.degenerate_range_ratio * ref_range
+
+    @torch.no_grad()
+    def compute_qparams(self):
+        """
+        Compute qparams for the two-stage (global) strategy with a degeneracy
+        guard.
+
+        The parent's ``compute_qparams`` solves gradient-weighted OCTAV on the
+        accumulated histogram and overwrites ``min_val``/``max_val`` with the
+        solution.  If the solution's range collapsed relative to the observed
+        min/max range (see ``_degenerate_mask``), restore the observed range
+        for the affected channels before deriving the affine qparams.
+        """
+        if self.max_merge:
+            return super().compute_qparams()
+
+        # Preserve the raw observed data range: the parent's compute_qparams
+        # overwrites min_val/max_val with the gradient-weighted solution.
+        raw_min = self.min_val.clone()
+        raw_max = self.max_val.clone()
+
+        result = super().compute_qparams()
+
+        degenerate = self._degenerate_mask(
+            self.min_val, self.max_val, raw_min, raw_max
+        )
+        if bool(torch.any(degenerate)):
+            self.min_val = torch.where(degenerate, raw_min, self.min_val)
+            self.max_val = torch.where(degenerate, raw_max, self.max_val)
+            # Recompute affine qparams from the restored range
+            result = AffineObserverBase.compute_qparams(self)
+        return result
+
+    # ------------------------------------------------------------------
     # ObserverBase interface
     # ------------------------------------------------------------------
     @torch.no_grad()
@@ -504,6 +585,16 @@ class MSEGradOCTAVObserver(MSEOCTAVObserver):
         if torch.any(octav_min >= octav_max):
             octav_min = torch.minimum(octav_min, curr_min)
             octav_max = torch.maximum(octav_max, curr_max)
+
+        # Degeneracy guard: if this batch's gradient-weighted OCTAV range
+        # collapsed relative to the batch's observed range, the gradient
+        # signal is degenerate for this batch (see ``_degenerate_mask``);
+        # use the batch's min/max range instead so the running merge is not
+        # poisoned by a collapsed range.
+        degenerate = self._degenerate_mask(octav_min, octav_max, curr_min, curr_max)
+        if bool(torch.any(degenerate)):
+            octav_min = torch.where(degenerate, curr_min, octav_min)
+            octav_max = torch.where(degenerate, curr_max, octav_max)
 
         # Merge: min-merge for min, max-merge for max
         self.min_val = torch.minimum(self.min_val, octav_min)
