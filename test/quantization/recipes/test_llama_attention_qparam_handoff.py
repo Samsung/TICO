@@ -15,8 +15,8 @@
 """Regression tests for GPTQ grids after Llama projection scale folding."""
 
 import copy
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn as nn
@@ -70,9 +70,7 @@ class TestLlamaProjectionScaleMetadata(unittest.TestCase):
                 self.assertFalse(
                     hasattr(source, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR)
                 )
-                self.assertEqual(
-                    reused_weight_qparam_scale_multiplier(folded), 0.125
-                )
+                self.assertEqual(reused_weight_qparam_scale_multiplier(folded), 0.125)
 
     def test_multiplier_uses_the_effective_weight_dtype(self):
         scale = torch.tensor(0.1, dtype=torch.float64)
@@ -96,23 +94,15 @@ class TestLlamaProjectionScaleMetadata(unittest.TestCase):
         second = _clone_projection_with_scale(first, torch.tensor(0.125))
         self.assertEqual(reused_weight_qparam_scale_multiplier(first), 2.0)
         self.assertEqual(reused_weight_qparam_scale_multiplier(second), 0.25)
-        torch.testing.assert_close(
-            second.weight, source.weight * 0.25, rtol=0, atol=0
-        )
-        self.assertFalse(
-            hasattr(source, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR)
-        )
+        torch.testing.assert_close(second.weight, source.weight * 0.25, rtol=0, atol=0)
+        self.assertFalse(hasattr(source, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR))
 
     def test_unsupported_fold_marker_is_preserved(self):
         source = nn.Linear(4, 3, bias=False)
         setattr(source, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR, None)
         folded = _clone_projection_with_scale(source, torch.tensor(0.125))
-        self.assertIsNone(
-            getattr(source, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR)
-        )
-        self.assertIsNone(
-            getattr(folded, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR)
-        )
+        self.assertIsNone(getattr(source, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR))
+        self.assertIsNone(getattr(folded, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR))
         with self.assertRaisesRegex(RuntimeError, "Recompute"):
             reused_weight_qparam_scale_multiplier(folded)
 
@@ -120,9 +110,7 @@ class TestLlamaProjectionScaleMetadata(unittest.TestCase):
         source = nn.Identity()
         folded = _clone_projection_with_scale(source, torch.tensor(0.125))
         self.assertIsNot(folded, source)
-        self.assertFalse(
-            hasattr(folded, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR)
-        )
+        self.assertFalse(hasattr(folded, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR))
         self.assertEqual(reused_weight_qparam_scale_multiplier(folded), 1.0)
 
 
@@ -137,7 +125,7 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
         """Use a tiny GQA-shaped module whose weights lie on known U4 grids."""
         hidden_size = 2 * head_dim
         source = nn.Module()
-        source.config = SimpleNamespace(
+        source.config = SimpleNamespace(  # type: ignore[assignment]
             hidden_size=hidden_size,
             num_attention_heads=2,
             num_key_value_heads=1,
@@ -154,9 +142,7 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
             # Nonuniform per-output-channel scales and nonzero zero-points.
             scale = torch.pow(2.0, -(row % 3 + 4).float()).reshape(-1, 1)
             zero = (row % 5 + 4).float().reshape(-1, 1)
-            code = (torch.arange(linear.weight.numel()) % 16).reshape_as(
-                linear.weight
-            )
+            code = (torch.arange(linear.weight.numel()) % 16).reshape_as(linear.weight)
             with torch.no_grad():
                 linear.weight.copy_((code - zero) * scale)
                 if linear.bias is not None:
@@ -199,9 +185,7 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
                     )
                     self.assertEqual(qattn.attn_options.scale_fusion, fusion)
                     result = inject_gptq_qparams(qattn, quantizers)
-                    self.assertEqual(
-                        result, {"matched": 4, "missed": 0, "unused": 0}
-                    )
+                    self.assertEqual(result, {"matched": 4, "missed": 0, "unused": 0})
 
                     # Re-enter calibration: injected weight grids must stay locked.
                     qattn.enable_calibration()
@@ -216,9 +200,12 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
                         self.assertEqual(
                             reused_weight_qparam_scale_multiplier(projection), factor
                         )
-                        x = torch.arange(
-                            2 * fp.in_features, dtype=torch.float32
-                        ).reshape(2, fp.in_features) / 32
+                        x = (
+                            torch.arange(
+                                2 * fp.in_features, dtype=torch.float32
+                            ).reshape(2, fp.in_features)
+                            / 32
+                        )
                         projection(x)
                         projection.freeze_qparams()
                         self.assertTrue(projection.obs_act_in.has_qparams)
@@ -252,9 +239,7 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
                                 rtol=0,
                                 atol=0,
                             )
-                        got_codes = torch.round(
-                            weight / scale[:, None] + zero[:, None]
-                        )
+                        got_codes = torch.round(weight / scale[:, None] + zero[:, None])
                         torch.testing.assert_close(
                             got_codes.to(torch.int64), codes[name], rtol=0, atol=0
                         )
@@ -312,8 +297,9 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
         qcfg = PTQConfig(weight=affine(DType.uint(4)))
         qattn = QuantLlamaAttention(source, qcfg=qcfg, layer_idx=0)
         projection = qattn.k_proj.wrapped
-        self.assertIsInstance(projection, QuantLinear)
+        assert isinstance(projection, QuantLinear)
         reference_linear = copy.deepcopy(projection.module)
+        assert isinstance(reference_linear, nn.Linear)
         delattr(reference_linear, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR)
         reference = QuantLinear(reference_linear, qcfg=qcfg)
         # No inject_gptq_qparams call: emulate explicit reuse_gptq_qparams=false.
@@ -324,8 +310,8 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
             self.assertFalse(linear.obs_weight._qparams_locked)
         actual = projection.obs_weight.compute_qparams()
         expected = reference.obs_weight.compute_qparams()
-        self.assertIsNotNone(actual)
-        self.assertIsNotNone(expected)
+        assert actual is not None
+        assert expected is not None
         for got, want in zip(actual, expected):
             torch.testing.assert_close(got, want, rtol=0, atol=0)
 
