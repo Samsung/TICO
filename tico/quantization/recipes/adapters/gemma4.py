@@ -41,9 +41,8 @@ from tico.quantization.recipes.evaluation.vlm import (
     evaluate_coco,
     evaluate_vlm_text_ppl,
     evaluate_vlm_text_ppl_chat_prefix,
-    evaluate_vqa_tasks,
     print_coco_score_results,
-    print_vqa_results,
+    run_vqa_evaluation,
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.gemma4 import export_gemma4_per_layer
@@ -360,50 +359,19 @@ class Gemma4Adapter(ModelAdapter):
 
         max_seq_len = eval_cfg.get("max_seq_len")
         n_samples = int(eval_cfg.get("n_samples", 50))
-        raw_vqa_tasks = eval_cfg.get("vlm_tasks") or []
         verbose = bool(eval_cfg.get("verbose", False))
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
 
-        if should_run_evaluation(
-            eval_cfg,
-            "vqa",
-            default_enabled=bool(raw_vqa_tasks),
-        ):
-            if isinstance(raw_vqa_tasks, str):
-                vqa_tasks = [
-                    task.strip() for task in raw_vqa_tasks.split(",") if task.strip()
-                ]
-            elif isinstance(raw_vqa_tasks, Sequence):
-                vqa_tasks = []
-                for task in raw_vqa_tasks:
-                    if not isinstance(task, str):
-                        raise TypeError(
-                            "evaluation.vlm_tasks must contain only strings."
-                        )
-                    normalized_task = task.strip()
-                    if normalized_task:
-                        vqa_tasks.append(normalized_task)
-            else:
-                raise TypeError(
-                    "evaluation.vlm_tasks must be a sequence or "
-                    "comma-separated string."
-                )
-
-            if not vqa_tasks:
-                raise ValueError(
-                    "evaluation.vlm_tasks must be non-empty when vqa runs."
-                )
-            vqa_results = evaluate_vqa_tasks(
-                model=ctx.model,
-                processor=ctx.processor,
-                tasks=vqa_tasks,
-                device=str(ctx.device),
-                n_samples=n_samples,
-                max_seq_len=max_seq_len,
-                verbose=verbose,
-                show_progress=show_progress,
-            )
-            print_vqa_results("VQA evaluation", vqa_results)
+        run_vqa_evaluation(
+            eval_cfg=eval_cfg,
+            model=ctx.model,
+            processor=ctx.processor,
+            device=str(ctx.device),
+            n_samples=n_samples,
+            max_seq_len=max_seq_len,
+            verbose=verbose,
+            show_progress=show_progress,
+        )
 
         if should_run_evaluation(
             eval_cfg,

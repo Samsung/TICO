@@ -31,6 +31,7 @@ import tico.quantization.recipes.adapters.gemma4 as gemma4_mod
 import tico.quantization.recipes.adapters.llama as llama_mod
 import tico.quantization.recipes.adapters.qwen3_vl as qwen3_vl_mod
 import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
+import tico.quantization.recipes.evaluation.vlm as vlm_mod
 
 import torch
 from tico.quantization.recipes.context import RecipeContext
@@ -208,9 +209,10 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
         for module, adapter in cases:
             with self.subTest(family=adapter.family):
                 ctx = self._make_vlm_context(adapter)
+                # VQA routing lives in the shared vlm module, so its evaluator
+                # is patched there rather than on the adapter module.
                 with patch.multiple(
                     module,
-                    evaluate_vqa_tasks=DEFAULT,
                     evaluate_coco=DEFAULT,
                     evaluate_and_print_video_mme=DEFAULT,
                     evaluate_and_print_mmlu=DEFAULT,
@@ -218,10 +220,14 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
                     evaluate_and_print_mmmu=DEFAULT,
                     evaluate_vlm_text_ppl=DEFAULT,
                 ) as mocks, patch.multiple(
+                    vlm_mod,
+                    evaluate_vqa_tasks=DEFAULT,
+                ) as vqa_mocks, patch.multiple(
                     llava_bench_mod,
                     evaluate_and_print_llava_bench_judge=DEFAULT,
                     evaluate_llava_bench=DEFAULT,
                 ) as llava_mocks:
+                    mocks.update(vqa_mocks)
                     mocks.update(llava_mocks)
                     mocks["evaluate_vlm_text_ppl"].return_value = 2.0
                     with contextlib.redirect_stdout(io.StringIO()):

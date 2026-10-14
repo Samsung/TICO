@@ -14,7 +14,7 @@
 
 import contextlib
 import io
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import tqdm
 
@@ -26,6 +26,82 @@ from tico.quantization.evaluation.vlm_eval_utils import (
     get_dataset,
 )
 from tico.quantization.recipes.data.dataset_usage import EVALUATION_ROLE
+from tico.quantization.recipes.evaluation.selection import should_run_evaluation
+
+VQA_TARGET = "vqa"
+
+
+def run_vqa_evaluation(
+    *,
+    eval_cfg: Mapping[str, Any],
+    model: Any,
+    processor: Any,
+    device: str,
+    n_samples: int,
+    max_seq_len: int | None,
+    verbose: bool,
+    show_progress: bool,
+) -> dict[str, tuple[int, int]] | None:
+    """Select, normalize, run, and print the ``vqa`` evaluation target.
+
+    VLM adapters call this at their VQA position so that the selection and
+    ``evaluation.vlm_tasks`` interpretation policy is edited once instead of
+    once per model family. The evaluator itself stays in ``evaluate_vqa_tasks``.
+
+    Selection follows ``should_run_evaluation``: ``evaluation.selected_tasks``
+    is an exclusive allow-list when present; otherwise the truthiness of the
+    raw ``evaluation.vlm_tasks`` value decides. Normalization and validation
+    only happen when the target is selected:
+
+    - a string is split on commas and each entry is stripped;
+    - a sequence must contain only strings, each of which is stripped but
+      never re-split;
+    - empty entries are dropped while order and duplicates are preserved;
+    - a selected target whose normalized list is empty is an error.
+
+    The caller supplies the already-resolved evaluation arguments; this helper
+    does not read other config sections or substitute defaults for them.
+
+    Returns the evaluator result, or ``None`` when the target did not run.
+    """
+    raw_vqa_tasks = eval_cfg.get("vlm_tasks") or []
+    if not should_run_evaluation(
+        eval_cfg,
+        VQA_TARGET,
+        default_enabled=bool(raw_vqa_tasks),
+    ):
+        return None
+
+    if isinstance(raw_vqa_tasks, str):
+        vqa_tasks = [task.strip() for task in raw_vqa_tasks.split(",") if task.strip()]
+    elif isinstance(raw_vqa_tasks, Sequence):
+        vqa_tasks = []
+        for task in raw_vqa_tasks:
+            if not isinstance(task, str):
+                raise TypeError("evaluation.vlm_tasks must contain only strings.")
+            normalized_task = task.strip()
+            if normalized_task:
+                vqa_tasks.append(normalized_task)
+    else:
+        raise TypeError(
+            "evaluation.vlm_tasks must be a sequence or comma-separated string."
+        )
+
+    if not vqa_tasks:
+        raise ValueError("evaluation.vlm_tasks must be non-empty when vqa runs.")
+
+    vqa_results = evaluate_vqa_tasks(
+        model=model,
+        processor=processor,
+        tasks=vqa_tasks,
+        device=device,
+        n_samples=n_samples,
+        max_seq_len=max_seq_len,
+        verbose=verbose,
+        show_progress=show_progress,
+    )
+    print_vqa_results("VQA evaluation", vqa_results)
+    return vqa_results
 
 
 def evaluate_vqa_tasks(
