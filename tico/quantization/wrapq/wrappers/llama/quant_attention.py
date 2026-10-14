@@ -25,6 +25,9 @@ from tico.quantization.config.llama_attention import (
     is_npu_export_attention_options,
 )
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.utils.linear_folding import (
+    _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR,
+)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaAttentionDecodeExportAdapter,
@@ -41,16 +44,26 @@ LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
 def _clone_projection_with_scale(module: nn.Module, scale: torch.Tensor) -> nn.Module:
     """
-    Return a deep-copied projection module with its affine parameters scaled.
+    Return a deep-copied projection with its affine parameters scaled.
 
-    The helper is intentionally conservative and only touches `weight` and
-    `bias` attributes when they exist.
+    The attention scale is scalar. Record the weight multiplier so GPTQ qparams
+    computed before PTQ prepare can be reused in the folded weight domain.
+    Only existing `weight` and `bias` parameters are modified.
     """
     scaled = copy.deepcopy(module)
     with torch.no_grad():
         weight = getattr(scaled, "weight", None)
         if weight is not None:
-            weight.mul_(scale.to(device=weight.device, dtype=weight.dtype))
+            weight_scale = scale.to(device=weight.device, dtype=weight.dtype)
+            weight.mul_(weight_scale)
+
+            # Compose earlier folds without losing an unsupported-fold marker.
+            multiplier = getattr(
+                scaled, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR, 1.0
+            )
+            if multiplier is not None:
+                multiplier = multiplier * float(weight_scale.item())
+            setattr(scaled, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR, multiplier)
 
         bias = getattr(scaled, "bias", None)
         if bias is not None:
