@@ -13,15 +13,47 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Type
+from typing import Any, cast, Mapping, Optional, Type
 
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
+
+#: String-to-class registry for affine observer selection from YAML configs.
+_AFFINE_OBSERVER_REGISTRY = {
+    "minmax": MinMaxObserver,
+    "ema": EMAObserver,
+    "percentile": PercentileObserver,
+}
+
+
+def _resolve_affine_observer(name: str) -> type[ObserverBase]:
+    """Resolve an affine observer name to its class.
+
+    Args:
+        name: Observer name such as ``"minmax"``, ``"ema"``, or
+            ``"percentile"`` (case-insensitive).
+
+    Returns:
+        The observer class registered under *name*.
+
+    Raises:
+        ValueError: If *name* is not a registered affine observer name.
+    """
+    key = name.strip().lower()
+    try:
+        return cast(type[ObserverBase], _AFFINE_OBSERVER_REGISTRY[key])
+    except KeyError:
+        supported = ", ".join(sorted(_AFFINE_OBSERVER_REGISTRY))
+        raise ValueError(
+            f"Unknown affine observer {name!r}. " f"Supported observers: {supported}."
+        ) from None
 
 
 def _resolve_qscheme(

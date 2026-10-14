@@ -21,9 +21,11 @@ from tico.quantization.config.specs import affine, mx
 from tico.quantization.recipes.utils import quant_spec_from_config
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.observers.ema import EMAObserver
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
+from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
@@ -185,8 +187,9 @@ class TestNoQuantSpec(unittest.TestCase):
     def test_recipe_does_not_accept_ambiguous_aliases(self):
         """identity/none aliases are intentionally not part of the public schema."""
         for kind in ("identity", "none"):
-            with self.subTest(kind=kind), self.assertRaisesRegex(
-                ValueError, "Unsupported quant spec kind"
+            with (
+                self.subTest(kind=kind),
+                self.assertRaisesRegex(ValueError, "Unsupported quant spec kind"),
             ):
                 quant_spec_from_config({"kind": kind})
 
@@ -194,6 +197,114 @@ class TestNoQuantSpec(unittest.TestCase):
         """Python/YAML null must retain the existing default-resolution meaning."""
         default = affine(DType.int(16))
         self.assertIs(quant_spec_from_config(None, default=default), default)
+
+
+class TestObserverSelection(unittest.TestCase):
+    """Tests for observer type selection via the ``observer`` YAML field."""
+
+    def test_default_observer_is_minmax(self):
+        """Affine spec without observer defaults to MinMaxObserver."""
+        spec = quant_spec_from_config({"kind": "affine", "dtype": "int16"})
+        assert spec is not None
+        self.assertEqual(spec.observer, MinMaxObserver)
+
+    def test_explicit_minmax_observer(self):
+        spec = quant_spec_from_config(
+            {"kind": "affine", "dtype": "int16", "observer": "minmax"}
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, MinMaxObserver)
+
+    def test_ema_observer(self):
+        spec = quant_spec_from_config(
+            {"kind": "affine", "dtype": "int16", "observer": "ema"}
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, EMAObserver)
+
+    def test_percentile_observer(self):
+        spec = quant_spec_from_config(
+            {"kind": "affine", "dtype": "uint8", "observer": "percentile"}
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, PercentileObserver)
+
+    def test_observer_name_case_insensitive(self):
+        spec = quant_spec_from_config(
+            {"kind": "affine", "dtype": "int16", "observer": "EMA"}
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, EMAObserver)
+
+    def test_ema_kwargs_pass_through(self):
+        """Observer-specific kwargs like momentum flow into QuantSpec.kwargs."""
+        spec = quant_spec_from_config(
+            {
+                "kind": "affine",
+                "dtype": "int16",
+                "observer": "ema",
+                "momentum": 0.95,
+            }
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, EMAObserver)
+        self.assertEqual(spec.kwargs["momentum"], 0.95)
+
+    def test_percentile_kwargs_pass_through(self):
+        spec = quant_spec_from_config(
+            {
+                "kind": "affine",
+                "dtype": "uint8",
+                "observer": "percentile",
+                "percentile": 99.9,
+                "max_samples": 65536,
+            }
+        )
+        assert spec is not None
+        self.assertEqual(spec.observer, PercentileObserver)
+        self.assertEqual(spec.kwargs["percentile"], 99.9)
+        self.assertEqual(spec.kwargs["max_samples"], 65536)
+
+    def test_unknown_observer_raises(self):
+        with self.assertRaisesRegex(ValueError, "Unknown affine observer"):
+            quant_spec_from_config(
+                {"kind": "affine", "dtype": "int16", "observer": "bogus"}
+            )
+
+    def test_mx_rejects_observer(self):
+        with self.assertRaisesRegex(ValueError, "MX quant spec does not accept"):
+            quant_spec_from_config(
+                {"kind": "mx", "elem_format": "fp8_e4m3", "observer": "ema"}
+            )
+
+    def test_no_quant_rejects_observer(self):
+        """no_quant already rejects all extra fields including observer."""
+        with self.assertRaisesRegex(ValueError, "No-quant spec does not accept"):
+            quant_spec_from_config({"kind": "no_quant", "observer": "ema"})
+
+    def test_scalar_form_defaults_to_minmax(self):
+        """Scalar dtype shorthand (no mapping) still uses MinMaxObserver."""
+        spec = quant_spec_from_config("int16")
+        assert spec is not None
+        self.assertEqual(spec.observer, MinMaxObserver)
+
+    def test_ema_observer_end_to_end(self):
+        """EMA observer with momentum is constructed correctly in a wrapper."""
+        activation_spec = quant_spec_from_config(
+            {
+                "kind": "affine",
+                "dtype": "int16",
+                "observer": "ema",
+                "momentum": 0.95,
+            }
+        )
+        assert activation_spec is not None
+        cfg = PTQConfig(activation=activation_spec)
+        wrapper = DummyWrapper(cfg)
+        self.assertIsInstance(wrapper.obs_act_in, EMAObserver)
+        self.assertEqual(wrapper.obs_act_in.momentum, 0.95)
+        # Weight role still defaults to MinMaxObserver.
+        self.assertIsInstance(wrapper.obs_weight, MinMaxObserver)
 
 
 if __name__ == "__main__":

@@ -19,7 +19,13 @@ from typing import Any, Mapping
 
 import torch
 
-from tico.quantization.config.specs import affine, mx, no_quant, QuantSpec
+from tico.quantization.config.specs import (
+    _resolve_affine_observer,
+    affine,
+    mx,
+    no_quant,
+    QuantSpec,
+)
 from tico.quantization.config.utils import (  # noqa: F401  (re-export)
     torch_dtype_from_name,
     TORCH_DTYPE_MAP,
@@ -81,14 +87,16 @@ def quant_spec_from_config(
       - ``None``: returns ``default``.
       - ``QuantSpec``: returned as-is.
       - scalar dtype/bit-width: affine spec, e.g. ``"int16"`` or ``4``.
-      - mapping with ``kind: affine``: affine spec with ``dtype`` and optional
-        ``qscheme``.
+      - mapping with ``kind: affine``: affine spec with ``dtype``, optional
+        ``qscheme``, optional ``observer`` (``minmax`` | ``ema`` |
+        ``percentile``), and observer-specific keyword arguments.
       - mapping with ``kind: mx``: MX spec with ``elem_format`` and MX kwargs.
       - mapping with ``kind: no_quant``: disable quantization for the role.
 
     Examples:
         ``activation: int16``
         ``linear_weight: uint4``
+        ``activation: {kind: affine, dtype: int16, observer: ema, momentum: 0.95}``
         ``activation: {kind: mx, elem_format: fp8_e4m3, axis: -1}``
         ``activation: {kind: no_quant}``
     """
@@ -111,6 +119,11 @@ def quant_spec_from_config(
             return no_quant()
 
         if kind == "mx":
+            if "observer" in value:
+                raise ValueError(
+                    "MX quant spec does not accept an 'observer' field; "
+                    "MX always uses MXObserver."
+                )
             return mx(
                 str(value.get("elem_format", "fp8_e4m3")),
                 axis=int(value.get("axis", -1)),
@@ -126,9 +139,18 @@ def quant_spec_from_config(
                 if value.get("qscheme") is not None
                 else None
             )
+            observer_name = value.get("observer")
+            # Collect observer-specific kwargs (everything except known spec fields).
+            _known_keys = {"kind", "type", "dtype", "qscheme", "observer"}
+            observer_kwargs = {k: v for k, v in value.items() if k not in _known_keys}
+            if observer_name is not None:
+                observer_kwargs["observer"] = _resolve_affine_observer(
+                    str(observer_name)
+                )
             return affine(
                 wrapq_dtype_from_name(value["dtype"]),
                 qscheme=qscheme,
+                **observer_kwargs,
             )
 
         raise ValueError(f"Unsupported quant spec kind: {kind!r}")
