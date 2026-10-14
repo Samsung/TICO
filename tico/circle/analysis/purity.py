@@ -15,9 +15,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from numbers import Integral
-from typing import Any, Iterable
+from typing import Iterable
 
+from tico.circle.analysis.effects import _operator_references_subgraph
 from tico.circle.graph import as_indices, as_list, CircleGraph, OPTIONAL_TENSOR_INDEX
 
 
@@ -124,38 +124,3 @@ class OperatorPurityAnalysis:
         ):
             return False
         return True
-
-
-def _operator_references_subgraph(operator: Any) -> bool:
-    """Return whether builtin options contain an observable subgraph reference."""
-
-    for options_field in ("builtinOptions", "builtinOptions2"):
-        options = getattr(operator, options_field, None)
-        if options is None:
-            continue
-        for field_name in dir(options):
-            if field_name.startswith("_"):
-                continue
-            normalized = field_name.replace("_", "").lower()
-            if not (
-                normalized.endswith("subgraphindex")
-                or normalized.endswith("subgraphindices")
-                or normalized == "subgraph"
-            ):
-                continue
-            try:
-                value = getattr(options, field_name)
-            except Exception:
-                continue
-            if callable(value):
-                continue
-            if normalized.endswith("subgraphindices"):
-                try:
-                    if as_indices(value):
-                        return True
-                except TypeError:
-                    return True
-                continue
-            if isinstance(value, Integral):
-                return True
-    return False
