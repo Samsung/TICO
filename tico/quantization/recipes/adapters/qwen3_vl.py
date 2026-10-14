@@ -30,7 +30,10 @@ from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
-from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
+from tico.quantization.recipes.evaluation.mmmu import (
+    evaluate_and_print_mmmu,
+    validate_mmmu_recipe_config,
+)
 from tico.quantization.recipes.evaluation.selection import (
     get_mapping_evaluation_config,
     should_run_evaluation,
@@ -82,6 +85,10 @@ class Qwen3VLAdapter(ModelAdapter):
         }
     )
     evaluation_target_requirements = {"vqa": "vlm_tasks"}
+
+    def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None:
+        super().validate_evaluation_config(cfg)
+        validate_mmmu_recipe_config(cfg)
 
     def get_gptq_config_class(self) -> type[Qwen3VLGPTQConfig]:
         """Select the stagewise vision + text GPTQ config for Qwen3-VL."""

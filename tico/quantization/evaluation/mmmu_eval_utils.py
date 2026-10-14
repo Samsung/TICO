@@ -122,17 +122,12 @@ MMMU_MAX_CHOICES = 26
 # the last declaration so that ``Answer: C-D`` is rejected as ambiguous instead
 # of falling back to an earlier ``Answer: B``.
 MMMU_ANSWER_PARSER_VERSION = "tico-mmmu-v4"
-# Legacy compatibility scoring for open-ended (non-Pro) MMMU questions; see
-# ``legacy_open_answer``. It is versioned separately from the multiple-choice
-# parser and is not a claim of official MMMU open-ended scoring parity.
-MMMU_LEGACY_OPEN_PARSER_VERSION = "tico-mmmu-legacy-open-v1"
-# ``question_type`` values of the MMMU/MMMU dataset. MMMU-Pro rows carry no
-# ``question_type`` and are always multiple-choice.
+# ``question_type`` is absent in MMMU-Pro rows. Explicit multiple-choice
+# metadata is also accepted; open-ended scoring is not supported.
 MMMU_QUESTION_TYPE_MULTIPLE_CHOICE = "multiple-choice"
 MMMU_QUESTION_TYPE_OPEN = "open"
-# Per-sample scoring policies recorded in the diagnostic log.
 MMMU_SCORING_MULTIPLE_CHOICE = "multiple_choice"
-MMMU_SCORING_LEGACY_OPEN = "legacy_open"
+MMMU_EVALUATION_DATASETS = ("MMMU/MMMU_Pro",)
 
 _STRICT_SINGLE_LETTER_PROMPT_PREFIX = (
     "You are a strict single-letter answering machine. "
@@ -163,15 +158,6 @@ _CHOICE_LINE_PATTERN = re.compile(
     r"\(?([A-Za-z])\)?[.!]?"
 )
 _AMBIGUOUS_TAIL_PATTERN = re.compile(r"(?i)^(?:or|and)\b|^[/-]")
-# Pre-``tico-mmmu-v2`` TICO extraction, kept only for open-ended (non-Pro)
-# questions. The historical ten-label alphabet and the raw-text fallback are
-# part of the preserved behaviour; do not widen or "fix" them here.
-_LEGACY_LEADING_LETTER_PATTERN = re.compile(
-    r"^\s*\(?([A-J])\)?(?:[.)\s]|$)", re.IGNORECASE
-)
-_LEGACY_VERBOSE_LETTER_PATTERN = re.compile(
-    r"\b(?:answer|option|choice)\s*(?:is|:)?\s*\(?([A-J])\)?\b", re.IGNORECASE
-)
 
 
 def generate_answer(*args: Any, **kwargs: Any) -> str:
@@ -358,31 +344,6 @@ def extract_answer(generated_text: str, num_choices: int = 10) -> str | None:
     return _parse_answer(generated_text, num_choices)[0]
 
 
-def legacy_open_answer(generated_text: str) -> tuple[str, str]:
-    """Return the legacy prediction for an open-ended question and its method.
-
-    This reproduces the answer extraction that TICO applied to every MMMU
-    sample before the multiple-choice parser became versioned: a leading
-    ``A``-``J`` label (``A``, ``(b)``, ``A.``) or a ``answer/option/choice X``
-    mention yields the upper-cased letter (``legacy_letter``); otherwise the
-    stripped raw text is the prediction (``legacy_text``). The evaluator
-    compares that prediction with the upper-cased gold string.
-
-    It exists only so that open-ended (non-Pro) questions keep their
-    historical execution and scoring; it is not official MMMU open-ended
-    scoring (no numeric tolerance, unit handling or list-valued gold support)
-    and must not be used for multiple-choice samples.
-    """
-    text = generated_text.strip()
-    match = _LEGACY_LEADING_LETTER_PATTERN.match(text)
-    if match:
-        return match.group(1).upper(), "legacy_letter"
-    match = _LEGACY_VERBOSE_LETTER_PATTERN.search(text)
-    if match:
-        return match.group(1).upper(), "legacy_letter"
-    return text, "legacy_text"
-
-
 def take_from_dataset(ds, start: int, n: int) -> Iterable[dict[str, Any]]:
     assert start >= 0
     i = 0
@@ -558,7 +519,13 @@ def load_few_shot_examples(
         streaming=True,
     )
 
-    return [get_item_mmmu(ex) for ex in ds]
+    examples: list[dict[str, Any]] = []
+    for ex in ds:
+        item = get_item_mmmu(ex)
+        validate_mmmu_question_type(str(item["id"]), item["question_type"])
+        validate_sample_choices(str(item["id"]), item["choices"], item["answer"])
+        examples.append(item)
+    return examples
 
 
 def is_mmmu_pro_vision(dataset: str, subject: str) -> bool:
@@ -596,7 +563,7 @@ def validate_sample_choices(sample_id: str, choices: Any, gold: Any) -> str:
     non-list option structure, or a gold answer that is not exactly one of the
     labels, see ``normalize_mmmu_gold_label``) raise a ``ValueError`` naming
     the sample before any generation. They are neither skipped nor clamped.
-    Open-ended questions never reach this check.
+    Question-type validation rejects open-ended questions before this check.
     """
     if not isinstance(choices, (list, tuple)):
         raise ValueError(
@@ -614,51 +581,38 @@ def validate_sample_choices(sample_id: str, choices: Any, gold: Any) -> str:
     return labels
 
 
-def resolve_mmmu_scoring_policy(
-    sample_id: str, question_type: Any, choices: Any, *, vision_only: bool
-) -> str:
-    """Select ``multiple_choice`` or ``legacy_open`` scoring for one sample.
+def validate_mmmu_evaluation_dataset(dataset: str) -> None:
+    """Reject mixed/open-ended evaluation before loading data or generating.
 
-    A missing ``question_type`` (MMMU-Pro rows, older callers, synthetic
-    fixtures) and ``multiple-choice`` select the multiple-choice path, whose
-    option and gold validation then applies; an empty option list is therefore
-    still an error there. ``open`` selects the legacy open-ended path only for
-    non-vision subjects and only when the option list is empty. Any other
-    value, an ``open`` MMMU-Pro vision sample, or an ``open`` sample that
-    carries options is contradictory metadata and raises a ``ValueError``
-    naming the sample.
+    Data-loading helpers still recognize the original MMMU for other callers;
+    evaluation supports the three multiple-choice MMMU-Pro configurations only.
+    No automatic filtering or benchmark substitution is performed.
     """
+    if dataset == "MMMU/MMMU":
+        raise ValueError(
+            "MMMU/MMMU mixes multiple-choice and open-ended questions. "
+            "Open-ended MMMU scoring is not supported by this evaluator. "
+            "Use dataset='MMMU/MMMU_Pro' with an explicit subject "
+            "('vision', 'standard (4 options)', or 'standard (10 options)'). "
+            "No questions were filtered and no benchmark was substituted."
+        )
+    if dataset not in MMMU_EVALUATION_DATASETS:
+        raise ValueError(f"Invalid MMMU evaluation dataset {dataset!r}.")
+
+
+def validate_mmmu_question_type(sample_id: str, question_type: Any) -> None:
+    """Require multiple-choice metadata; never reinterpret or skip open rows."""
     if question_type is None or question_type == MMMU_QUESTION_TYPE_MULTIPLE_CHOICE:
-        return MMMU_SCORING_MULTIPLE_CHOICE
-    if question_type != MMMU_QUESTION_TYPE_OPEN:
+        return
+    if question_type == MMMU_QUESTION_TYPE_OPEN:
         raise ValueError(
-            f"Sample {sample_id!r}: unsupported question_type {question_type!r}; "
-            f"expected {MMMU_QUESTION_TYPE_MULTIPLE_CHOICE!r} or "
-            f"{MMMU_QUESTION_TYPE_OPEN!r}."
+            f"Sample {sample_id!r}: open-ended MMMU scoring is not supported. "
+            "Only multiple-choice samples are supported; this sample was not skipped."
         )
-    if vision_only:
-        raise ValueError(
-            f"Sample {sample_id!r}: question_type 'open' is not supported for "
-            "the image-only MMMU-Pro vision subset."
-        )
-    if not isinstance(choices, (list, tuple)) or len(choices) > 0:
-        raise ValueError(
-            f"Sample {sample_id!r}: question_type 'open' with options "
-            f"{choices!r} is contradictory; open-ended questions have no options."
-        )
-    return MMMU_SCORING_LEGACY_OPEN
-
-
-def _legacy_open_gold(sample_id: str, gold: Any) -> str:
-    # The historical comparison value: ``answer.upper()`` without stripping or
-    # any other normalisation. Non-string golds were an attribute error before;
-    # they are rejected explicitly with the sample ID.
-    if not isinstance(gold, str):
-        raise ValueError(
-            f"Sample {sample_id!r}: open-ended gold answer must be a string, "
-            f"got {type(gold).__name__}."
-        )
-    return gold.upper()
+    raise ValueError(
+        f"Sample {sample_id!r}: unsupported question_type {question_type!r}; "
+        f"expected {MMMU_QUESTION_TYPE_MULTIPLE_CHOICE!r} or missing metadata."
+    )
 
 
 def _validate_subject_options(
@@ -671,8 +625,7 @@ def _validate_subject_options(
     prompt_mode: str,
     temperature: float,
 ) -> tuple[int, int | None]:
-    if dataset not in MMMU_DATASETS:
-        raise ValueError(f"Invalid dataset '{dataset}'")
+    validate_mmmu_evaluation_dataset(dataset)
     if subject not in MMMU_SUBJECTS[dataset]:
         raise ValueError(f"Invalid subject '{subject}'")
     if not math.isfinite(temperature) or temperature < 0:
@@ -756,7 +709,6 @@ def evaluate_subject(
                 "max_new_tokens": budget,
                 "input_max_seq_len": input_budget,
                 "parser_version": MMMU_ANSWER_PARSER_VERSION,
-                "open_parser_version": MMMU_LEGACY_OPEN_PARSER_VERSION,
             }
         )
 
@@ -770,6 +722,7 @@ def evaluate_subject(
             "id": str(ex["id"]),
             "prompt_mode": effective_mode,
         }
+        validate_mmmu_question_type(record["id"], ex.get("question_type"))
         if "image_2" in ex and ex["image_2"] is not None:
             skipped += 1
             record.update(status="skipped", skip_reason="multiple_images")
@@ -782,28 +735,10 @@ def evaluate_subject(
         item = get_item_mmmu(ex)
         # Unsupported metadata or option structures fail here, before
         # generation, with the sample ID; they are not skipped or clamped.
-        scoring_policy = resolve_mmmu_scoring_policy(
-            record["id"],
-            item["question_type"],
-            item["choices"],
-            vision_only=vision_only,
-        )
-        labels: str | None
-        num_choices: int | None
-        if scoring_policy == MMMU_SCORING_MULTIPLE_CHOICE:
-            labels = validate_sample_choices(
-                record["id"], item["choices"], item["answer"]
-            )
-            num_choices = len(labels)
-            gold = normalize_mmmu_gold_label(record["id"], item["answer"], labels)
-            parser_version = MMMU_ANSWER_PARSER_VERSION
-        else:
-            # Open-ended: no label set, historical ``answer.upper()`` gold.
-            labels = num_choices = None
-            gold = _legacy_open_gold(record["id"], item["answer"])
-            parser_version = MMMU_LEGACY_OPEN_PARSER_VERSION
+        labels = validate_sample_choices(record["id"], item["choices"], item["answer"])
+        num_choices = len(labels)
+        gold = normalize_mmmu_gold_label(record["id"], item["answer"], labels)
         if vision_only:
-            assert num_choices is not None  # vision is always multiple-choice
             prompt = get_mmmu_pro_vision_prompt(prompt_mode, num_choices)
         else:
             prompt = build_few_shot_prompt(
@@ -822,8 +757,8 @@ def evaluate_subject(
         record.update(
             prompt=prompt,
             question_type=item["question_type"],
-            scoring_policy=scoring_policy,
-            parser_version=parser_version,
+            scoring_policy=MMMU_SCORING_MULTIPLE_CHOICE,
+            parser_version=MMMU_ANSWER_PARSER_VERSION,
             gold=gold,
             gold_raw=item["answer"],
             num_choices=num_choices,
@@ -869,15 +804,8 @@ def evaluate_subject(
                 print(f"[WARNING] Skipped {record['id']}: {error}")
             continue
 
-        predicted: str | None
-        if num_choices is not None:
-            predicted, parse_method = _parse_answer(generated, num_choices)
-            parse_failed = predicted is None
-        else:
-            # The legacy extraction always yields a prediction (a letter or the
-            # raw text), so open-ended samples have no parse-failure notion.
-            predicted, parse_method = legacy_open_answer(generated)
-            parse_failed = False
+        predicted, parse_method = _parse_answer(generated, num_choices)
+        parse_failed = predicted is None
         is_correct = predicted == gold
         correct += int(is_correct)
         total += 1
@@ -946,14 +874,13 @@ def evaluate_mmmu(
     input_max_seq_len: int | None = None,
     output_jsonl: str | Path | None = None,
 ) -> dict[str, tuple[int, int, int]]:
-    """Evaluate MMMU with opt-in per-sample, append-free diagnostic records.
+    """Evaluate multiple-choice MMMU-Pro with opt-in diagnostic records.
 
     ``output_jsonl`` is created exclusively: existing logs are never overwritten
     or appended to. A successful run ends with a ``run_summary`` record. Failed
     runs retain the already flushed records for diagnosis, not resume.
     """
-    if dataset not in MMMU_DATASETS:
-        raise ValueError(f"Invalid dataset '{dataset}'")
+    validate_mmmu_evaluation_dataset(dataset)
     if subjects is None:
         subjects = MMMU_SUBJECTS[dataset]
     if not isinstance(subjects, list) or any(not isinstance(s, str) for s in subjects):
@@ -1000,9 +927,8 @@ def evaluate_mmmu(
             record_callback(
                 {
                     "record_type": "run_start",
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "parser_version": MMMU_ANSWER_PARSER_VERSION,
-                    "open_parser_version": MMMU_LEGACY_OPEN_PARSER_VERSION,
                     "dataset": dataset,
                     "subjects": subjects,
                     "n_samples": n_samples,

@@ -440,8 +440,10 @@ Qwen3-VL / Gemma4:
 ```
 
 `lm_eval` requires a non-empty `evaluation.lm_eval_tasks` value. `vqa`
-requires a non-empty `evaluation.vlm_tasks` value. Other selected targets may
-use their evaluator defaults when their detail mapping is omitted.
+requires a non-empty `evaluation.vlm_tasks` value. `mmmu` requires an explicit
+`evaluation.mmmu.dataset: MMMU/MMMU_Pro`; the original mixed MMMU evaluation
+is unsupported. Other selected targets may use their evaluator defaults when
+their detail mapping is omitted.
 
 CLI examples:
 
@@ -536,7 +538,7 @@ Rules:
   runtime baseline. If `baseline_answers` is unset, the dataset reference answer
   is used as the baseline.
 
-## `evaluation.mmmu` for MMMU / MMMU-Pro vision
+## `evaluation.mmmu` for MMMU-Pro multiple-choice evaluation
 
 The Qwen3-VL and Gemma4 evaluation presets share this schema:
 
@@ -569,9 +571,17 @@ Rules:
   (ten options reproduce the historical `A to J` text; other counts differ from
   older TICO versions). Multiple-choice samples with 1-26 options and exactly
   one valid gold label are supported; others fail before generation with the
-  sample ID. MMMU/MMMU `open` questions (non-vision subjects) keep their
-  legacy text-comparison scoring and are recorded with
-  `scoring_policy: legacy_open`.
+  sample ID. Open-ended scoring is not supported and has no legacy fallback.
+- Supported evaluation configurations are `MMMU/MMMU_Pro` / `vision`,
+  `standard (4 options)` and `standard (10 options)`. `MMMU/MMMU` is rejected
+  before loading data, creating a log or generating; Qwen3-VL/Gemma4 recipe
+  preflight rejects a selected mixed-dataset request before model loading.
+  No questions are silently filtered and no benchmark is substituted.
+- The existing vision presets need no changes. An unselected/disabled MMMU
+  target does not block LLaVA-Bench or other evaluation targets. Free-form
+  answer evaluation remains in the separate LLaVA-Bench path.
+- New logs use schema version 2 without `open_parser_version`; evaluated rows
+  always use `scoring_policy: multiple_choice`. Old result files are unchanged.
 - Multiple-choice answer parsing uses parser version `tico-mmmu-v4`. Compare
   FP and quantized models only under the same `prompt_mode`, `max_new_tokens`
   and parser version.

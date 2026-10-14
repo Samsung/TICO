@@ -4,12 +4,37 @@ The Qwen3-VL and Gemma4 recipe adapters share the MMMU evaluator. These options
 apply to both floating-point evaluation and checkpoint evaluation. They do not
 change quantization algorithms or run an additional quantization stage.
 
+## Supported evaluation scope
+
+This evaluator supports **MMMU-Pro multiple-choice evaluation only**:
+`dataset: MMMU/MMMU_Pro` with `vision`, `standard (4 options)`, or
+`standard (10 options)`. The current strict/16 vision protocol is unchanged.
+
+The original `MMMU/MMMU` mixes multiple-choice and open-ended questions and
+is no longer an evaluation target here. Its request is rejected before dataset
+loading, generation, or log creation. Qwen3-VL/Gemma4 recipe validation also
+rejects it before model loading when MMMU is enabled or explicitly selected.
+Set `evaluation.mmmu.dataset` explicitly; an omitted dataset is not silently
+changed to another benchmark. A disabled/unselected MMMU target does not block
+other evaluators.
+
+There is no legacy open-ended scoring, automatic filtering, or implicit
+multiple-choice subset. Open-ended rows in an otherwise supported configuration
+(including few-shot examples) fail with their sample ID before generation;
+they are not converted into wrong answers or skips. Low-level data-loading
+helpers are not an assertion of scoring support for a dataset.
+
+Use the separate LLaVA-Bench evaluation path for free-form descriptions or
+conversational answers. Removing MMMU compatibility does not change that path,
+VQAv2, COCO, Video-MME, or any quantization algorithm. It also does not add a
+new free-form judge or claim official MMMU open-ended scoring support.
+
 ## Defaults and migration
 
 For `dataset: MMMU/MMMU_Pro`, `subjects: [vision]`, the default prompt mode is
 `strict_single_letter` with 16 generated tokens when `max_new_tokens` is
-omitted or null. Non-vision subjects retain the 16-token default and their
-existing few-shot prompt path.
+omitted or null. The two MMMU-Pro standard configurations retain the 16-token
+default and their existing few-shot prompt path.
 
 Per-mode defaults live in one place, `MMMU_PRO_VISION_DEFAULT_MAX_NEW_TOKENS`
 in `tico/quantization/evaluation/mmmu_eval_utils.py`; the adapters only forward
@@ -151,23 +176,14 @@ control, not by itself proof that inputs match: compare per-sample tensor hashes
 in the JSONL output. Preserve the resolved recipe configuration alongside logs;
 logs do not embed model weights or a complete environment manifest.
 
-## Question types and scoring policies
+## Multiple-choice scoring
 
-Each sample is scored by exactly one policy, recorded per sample as
-`scoring_policy` together with the `question_type` read from the dataset row
-and the `parser_version` that was applied:
-
-| Dataset row | `scoring_policy` | Validation | Prediction |
-|---|---|---|---|
-| MMMU-Pro (no `question_type` field), MMMU/MMMU `multiple-choice`, or any row without `question_type` | `multiple_choice` | option list and gold label (below) | parser `tico-mmmu-v4` |
-| MMMU/MMMU `open` with an empty option list, non-vision subject | `legacy_open` | gold must be a string | legacy extraction `tico-mmmu-legacy-open-v1` |
-
-A missing `question_type` is multiple-choice: existing callers and synthetic
-fixtures keep their behaviour, and an empty option list without the `open`
-type is still an input error rather than an open-ended question. Contradictory
-or unsupported metadata (`open` with options, `open` on the image-only
-MMMU-Pro vision subset, any other `question_type` value) raises a `ValueError`
-naming the sample ID before generation and ends the run with `run_error`.
+Every evaluated sample has `scoring_policy: multiple_choice` and uses parser
+`tico-mmmu-v4`. The dataset row's `question_type` may be absent or
+`multiple-choice`. An explicit `open` or any unsupported type raises a
+`ValueError` naming the sample, including before the multi-image skip check.
+There is no fallback scorer. The multiple-choice parser grammar itself has not
+changed as part of removing open-ended compatibility.
 
 ### Multiple-choice validation
 
@@ -187,29 +203,6 @@ the range, and non-string values (`None`, `1`, `True`) are rejected, never
 converted. Validation, scoring and the `gold` log field all use the same
 normalized value (`normalize_mmmu_gold_label`); the dataset string is kept
 separately as `gold_raw`.
-
-### Open-ended compatibility path (non-Pro MMMU)
-
-MMMU/MMMU `open` questions keep the execution and scoring that TICO applied
-before the parser was versioned: the few-shot prompt is built without option
-lines (few-shot examples may themselves be open and show their answer; the
-target's gold is never injected), the generation budget is the usual 16
-tokens, and the prediction is `legacy_open_answer(text)`: a leading `A`-`J`
-label (`A`, `(b)`, `A.`) or an `answer/option/choice X` mention yields the
-letter (`parse_method: legacy_letter`), otherwise the stripped raw text is the
-prediction (`legacy_text`). It is compared with the upper-cased gold string
-exactly as before, so `42` matches `42` but `42.` does not, `x` does not match
-gold `x` (upper-cased to `X`), and a list-valued gold such as
-`['24/7', '3.429']` only matches the identical string.
-
-This is a compatibility path, not MMMU open-ended scoring parity: there is no
-numeric tolerance, unit handling, list-valued gold support or LLM judge. Open
-samples stay in the denominator (they are not skipped), have no `num_choices`,
-`valid_labels` or `out_of_range` notion (`null` in the log), and never count as
-parse failures because the legacy extraction always yields a prediction. The
-run-level `parser_version` describes the multiple-choice parser only; use the
-per-sample `scoring_policy`/`parser_version` to tell the two paths apart in a
-mixed subject.
 
 ## Answer extraction
 
@@ -276,20 +269,20 @@ An interrupted or failed file can be inspected but is not automatically resumed.
 A file without `run_summary` must not be treated as a completed run. Choose a
 fresh path for each run; existing files are not overwritten or appended to.
 
-`run_start` records the multiple-choice `parser_version`, the
-`open_parser_version` of the legacy open-ended path, prompt mode and budgets;
+New logs use `schema_version: 2`: the obsolete `open_parser_version` field
+has been removed. The multiple-choice parser version remains `tico-mmmu-v4`
+because its scoring rules are unchanged. Existing logs are not rewritten.
+`run_start` records the parser version, prompt mode and budgets;
 `subject_start` records the resolved budget, input cap, effective prompt mode
-and both parser versions. A successfully evaluated sample records:
+and parser version. A successfully evaluated sample records:
 
 - Sample ID, dataset/subject/split/index, prompt mode, the rendered prompt and
   the raw generated answer.
-- `question_type` (as read from the row, `null` when absent), the applied
-  `scoring_policy` (`multiple_choice` or `legacy_open`) and the per-sample
-  `parser_version`.
-- `num_choices` and `valid_labels` (for example `ABCDEFGHIJKL`; `null` for
-  open-ended samples), the normalized `gold` used for scoring and the dataset
-  string as `gold_raw`, predicted answer, correctness, `parse_method` and
-  `parse_failed`.
+- `question_type` (as read from the row, `null` when absent),
+  `scoring_policy: multiple_choice` and `parser_version`.
+- `num_choices` and `valid_labels` (for example `ABCDEFGHIJKL`), normalized
+  `gold`, original `gold_raw`, predicted answer, correctness, `parse_method`
+  and `parse_failed`.
 - Processed input length/cap, image/video grid when provided, per-tensor shape,
   dtype and SHA-256, and a combined `tensor_inputs_sha256` fingerprint.
 - Generated token IDs/count, configured EOS IDs, observed EOS, budget-limit hit,
@@ -309,7 +302,7 @@ a limit hit without EOS is reported as length-limited; this is an observation,
 not the generation engine's authoritative stopping-criteria trace. Custom stop
 rules can require further investigation.
 
-The evaluator preserves the previous skip policy: multi-image samples,
+For supported multiple-choice rows the previous skip policy is preserved: multi-image samples,
 image-token-count mismatch errors, and runtime errors are skipped. It does not
 silently convert other errors into skips. Each skip has an ID and reason in the
 log. Compare the evaluated ID sets before interpreting FP-versus-quantized
