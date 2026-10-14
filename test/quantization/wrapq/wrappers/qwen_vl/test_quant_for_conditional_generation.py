@@ -394,6 +394,14 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
         batch_size, seq_len = input_ids.shape
         self.assertEqual(output.logits.shape, (batch_size, seq_len, self.vocab_size))
 
+    def _require_position_id_generation_hook(self):
+        if not callable(
+            getattr(self.fp_model, "_prepare_position_ids_for_generation", None)
+        ):
+            self.skipTest(
+                "This Transformers version does not use the position-ID generation hook"
+            )
+
     def test_prepare_position_ids_for_generation_returns_3d_layout(self):
         """generate() must inject 3D mrope position ids, not 1D sequential ones.
 
@@ -405,6 +413,7 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
         wrapper must delegate to the wrapped Qwen3-VL model, which returns
         the [4, batch, seq] (text + 3 mrope) layout.
         """
+        self._require_position_id_generation_hook()
         thw = (1, 8, 8)
         ptq_config = self._make_ptq_config(grid_thw=thw)
         q_model = QuantQwen3VLForConditionalGeneration(self.fp_model, qcfg=ptq_config)
@@ -431,6 +440,78 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
 
         batch_size, seq_len = input_ids.shape
         self.assertEqual(position_ids.shape, (4, batch_size, seq_len))
+
+    def test_generation_position_ids_expand_along_batch_axis(self):
+        """Input expansion during generate() must preserve the 3D mrope layout.
+
+        Beam search and multi-sample decoding expand the batch through
+        ``_expand_inputs_for_generation``. Position ids prepared for
+        generation use the [4, batch, seq] mrope layout, where the batch
+        lives on axis 1 -- unlike ordinary tensors, whose batch is axis 0.
+        The generic ``GenerationMixin`` expansion (``repeat_interleave`` on
+        dim=0) would interleave the four rope rows with batch copies and
+        silently corrupt positions; the wrapped Qwen3-VL model expands them
+        along dim=1 instead. The wrapper must delegate to it so that
+        expanded position ids stay aligned with the expanded batch for any
+        ``expand_size`` (including the no-op case ``expand_size=1``).
+
+        A text-only batch is sufficient: the mis-expansion is a pure
+        layout/batching bug and does not require vision inputs. The FP
+        model is deep-copied so that rope-delta state mutated during the
+        hook call does not leak into other tests via the shared fixture.
+        """
+        self._require_position_id_generation_hook()
+
+        # Avoid changing the class-level FP model's mutable generation state.
+        fp_model = copy.deepcopy(self.fp_model).eval()
+        q_model = QuantQwen3VLForConditionalGeneration(
+            fp_model,
+            qcfg=self._make_ptq_config(grid_thw=(1, 8, 8)),
+        ).eval()
+
+        # Text-only input is enough to expose the position-layout regression.
+        input_ids = torch.tensor([[0, 11, 12, 13], [20, 21, 22, 23]], dtype=torch.long)
+        attention_mask = torch.tensor([[0, 1, 1, 1], [1, 1, 1, 1]], dtype=torch.long)
+        batch_size, seq_len = input_ids.shape
+
+        position_ids = q_model._prepare_position_ids_for_generation(
+            input_ids,
+            {"attention_mask": attention_mask},
+        )
+        self.assertEqual(position_ids.shape, (4, batch_size, seq_len))
+
+        for expand_size in (1, 2, 3):
+            with self.subTest(expand_size=expand_size):
+                expanded_ids, expanded_kwargs = q_model._expand_inputs_for_generation(
+                    expand_size=expand_size,
+                    is_encoder_decoder=False,
+                    input_ids=input_ids.clone(),
+                    attention_mask=attention_mask.clone(),
+                    position_ids=position_ids.clone(),
+                )
+
+                self.assertEqual(
+                    expanded_kwargs["position_ids"].shape,
+                    (4, batch_size * expand_size, seq_len),
+                )
+                torch.testing.assert_close(
+                    expanded_kwargs["position_ids"],
+                    position_ids.repeat_interleave(expand_size, dim=1),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    expanded_ids,
+                    input_ids.repeat_interleave(expand_size, dim=0),
+                    rtol=0,
+                    atol=0,
+                )
+                torch.testing.assert_close(
+                    expanded_kwargs["attention_mask"],
+                    attention_mask.repeat_interleave(expand_size, dim=0),
+                    rtol=0,
+                    atol=0,
+                )
 
     def test_forward_with_videos(self):
         """Test forward pass with video input."""

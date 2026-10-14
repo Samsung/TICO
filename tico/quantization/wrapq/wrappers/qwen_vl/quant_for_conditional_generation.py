@@ -246,5 +246,20 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             inputs_tensor, model_kwargs
         )
 
+    def _expand_inputs_for_generation(
+        self,
+        expand_size: int = 1,
+        is_encoder_decoder: bool = False,
+        input_ids=None,
+        **model_kwargs,
+    ):
+        """Use the expansion logic matching Qwen3-VL position preparation."""
+        return self.module._expand_inputs_for_generation(  # type: ignore[operator]
+            expand_size=expand_size,
+            is_encoder_decoder=is_encoder_decoder,
+            input_ids=input_ids,
+            **model_kwargs,
+        )
+
     def tie_weights(self):
         pass
