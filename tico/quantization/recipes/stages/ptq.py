@@ -158,6 +158,7 @@ class PTQStage(Stage):
             family=ctx.adapter.family,
             model=ctx.require_model(),
             applied_paths=applied_override_paths,
+            adapter=ctx.adapter,
         )
 
         if applied_override_paths is not None:

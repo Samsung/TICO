@@ -79,6 +79,13 @@ of `observers` or `observer_role` in each policy.
 `component: vision` is available for supported multimodal models. Use
 `component: all` to apply the same selector to every available component.
 
+The components, layer paths, layer counts, and `op_type` aliases of a model
+family are declared by its recipe adapter through
+`build_quant_target_context()`; see "PTQ selector override structure" in
+[`../../recipes/adapters/README.md`](../../recipes/adapters/README.md). Built-in
+declarations exist for `llama`, `qwen3_vl`, and `gemma4`; a family without a
+declaration rejects `override_policies` and `raw_overrides` with an error.
+
 ## Precedence
 
 Policies are resolved deterministically:

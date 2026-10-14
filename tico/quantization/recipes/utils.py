@@ -164,6 +164,22 @@ def move_to_device(value: Any, device: str | torch.device) -> Any:
     return value
 
 
+def get_attr_path(obj: Any, path: tuple[str, ...], *, context: str) -> Any:
+    """Walk ``path`` attribute by attribute and fail clearly on the first gap.
+
+    ``context`` names what the caller is trying to determine; it is embedded in
+    the ``ValueError`` so that structure lookups on unexpected models explain
+    which attribute chain was missing.
+    """
+    current = obj
+    for attr in path:
+        if not hasattr(current, attr):
+            dotted = ".".join(path)
+            raise ValueError(f"Cannot determine {context}; missing attribute {dotted}.")
+        current = getattr(current, attr)
+    return current
+
+
 def filter_dataclass_kwargs(
     cls: type[Any], mapping: Mapping[str, Any]
 ) -> dict[str, Any]:

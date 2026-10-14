@@ -32,7 +32,13 @@ from tico.quantization.recipes.evaluation.selection import should_run_evaluation
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.circle import export_full_circle
 from tico.quantization.recipes.export.llama import export_llama_per_layer
+from tico.quantization.recipes.override_policies import (
+    COMMON_LINEAR_MODULES,
+    ComponentQuantTargetInfo,
+    QuantTargetResolverContext,
+)
 from tico.quantization.recipes.utils import (
+    get_attr_path,
     quant_spec_from_config,
     quant_specs_equivalent,
     torch_dtype_from_name,
@@ -320,6 +326,22 @@ class LlamaAdapter(ModelAdapter):
             norm_weight=quant_spec_from_config(stage_cfg.get("norm_weight")),
             strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
             profile=profile,
+        )
+
+    def build_quant_target_context(self, model: Any) -> QuantTargetResolverContext:
+        """Declare the ``model.layers`` text component for selector overrides."""
+        num_layers = len(
+            get_attr_path(model, ("model", "layers"), context="llama layers")
+        )
+        return QuantTargetResolverContext(
+            components={
+                "text": ComponentQuantTargetInfo(
+                    name="text",
+                    layer_path_prefixes=(("model", "layers"),),
+                    num_layers=num_layers,
+                    op_aliases={"linear": COMMON_LINEAR_MODULES},
+                )
+            }
         )
 
     def evaluate(self, ctx: RecipeContext) -> None:

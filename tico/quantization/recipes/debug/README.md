@@ -29,8 +29,9 @@ It performs this flow:
 5. Build the PTQ config from the recipe's `ptq` stage through the adapter.
 6. Apply the stage's `specs` / `override_policies` / `raw_overrides` with the same
    `apply_ptq_override_policies()` helper that `PTQStage` uses, resolving model
-   structure from the copied model. Invalid overrides raise here, before
-   `prepare()`.
+   structure from the copied model through the selected adapter's
+   `build_quant_target_context()` (see "PTQ selector override structure" in
+   `../adapters/README.md`). Invalid overrides raise here, before `prepare()`.
 7. Prepare and calibrate the copied model.
 8. Call `convert()` only when `--enable-quantization` is set.
 9. Run the first calibration sample through the FP model and collect module

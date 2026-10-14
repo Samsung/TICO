@@ -20,6 +20,7 @@ from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.adapters.gemma4_assistant import Gemma4AssistantAdapter
 from tico.quantization.recipes.adapters.llama import LlamaAdapter
 from tico.quantization.recipes.adapters.qwen3_vl import Qwen3VLAdapter
+from tico.quantization.recipes.override_policies import QuantTargetResolverContext
 
 _ADAPTERS: dict[str, ModelAdapter] = {
     "llama": LlamaAdapter(),
@@ -163,3 +164,80 @@ def resolve_gptq_config_class(adapter: Any) -> type[BaseConfig] | None:
     if family_adapter is None or family_adapter is adapter:
         return None
     return _declared_gptq_config_class(family_adapter)
+
+
+def _declared_quant_target_context(
+    adapter: Any, model: Any
+) -> QuantTargetResolverContext | None:
+    """Return the selector context ``adapter`` declares for ``model``.
+
+    Adapters without the hook (duck-typed objects predating it) and adapters
+    whose hook returns ``None`` make no declaration. Hook errors propagate, and
+    a return value that is not a ``QuantTargetResolverContext`` is rejected
+    instead of being replaced by a family default.
+    """
+    hook = getattr(adapter, "build_quant_target_context", None)
+    if hook is None:
+        return None
+    context = hook(model)
+    if context is None:
+        return None
+    if not isinstance(context, QuantTargetResolverContext):
+        raise TypeError(
+            f"{type(adapter).__name__}.build_quant_target_context() must return a "
+            f"QuantTargetResolverContext or None. got {context!r}"
+        )
+    return context
+
+
+def _canonical_family_adapter(family: str) -> ModelAdapter | None:
+    """Return the adapter registered under the canonical key ``family``.
+
+    Only a registry entry whose own ``family`` equals the normalized key
+    counts; alias keys such as ``qwen3-vl`` resolve to ``None`` so that the
+    family-only override API keeps rejecting the strings it rejected before.
+    """
+    key = family.strip().lower()
+    adapter = _ADAPTERS.get(key)
+    if adapter is None or _normalize_key(adapter.family) != key:
+        return None
+    return adapter
+
+
+def resolve_quant_target_context(
+    model: Any,
+    *,
+    family: str,
+    adapter: Any | None = None,
+) -> QuantTargetResolverContext | None:
+    """Select the PTQ selector-override context for ``model``.
+
+    The explicitly selected ``adapter`` is asked first through
+    ``build_quant_target_context(model)``. Without a declaration the adapter
+    registered under the canonical ``family`` key is asked, so an out-of-tree
+    adapter serving a built-in family keeps that family's structure without
+    implementing the hook. The family adapter is skipped when it is the
+    selected adapter itself, so a hook is never consulted twice. Returns
+    ``None`` when neither makes a declaration.
+
+    Raises:
+        ValueError: If ``adapter`` is given and its ``family`` differs from
+            ``family``; mismatched selections are never resolved silently.
+    """
+    if adapter is not None:
+        adapter_family = getattr(adapter, "family", None)
+        if not isinstance(adapter_family, str) or _normalize_key(
+            adapter_family
+        ) != _normalize_key(family):
+            raise ValueError(
+                f"Adapter {type(adapter).__name__} serves family "
+                f"{adapter_family!r}, but PTQ override resolution was requested "
+                f"for family {family!r}."
+            )
+        context = _declared_quant_target_context(adapter, model)
+        if context is not None:
+            return context
+    family_adapter = _canonical_family_adapter(family)
+    if family_adapter is None or family_adapter is adapter:
+        return None
+    return _declared_quant_target_context(family_adapter, model)

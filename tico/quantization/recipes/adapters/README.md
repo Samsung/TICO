@@ -28,6 +28,7 @@ class ModelAdapter(ABC):
 
     def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None: ...
     def get_gptq_config_class(self) -> type[BaseConfig] | None: ...  # optional hook
+    def build_quant_target_context(self, model) -> QuantTargetResolverContext | None: ...  # optional hook
     def load_model(self, ctx: RecipeContext) -> RecipeContext: ...
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[Any]: ...
     def forward_calibration(self, ctx, model, calibration_inputs, *, desc: str) -> None: ...
@@ -334,6 +335,78 @@ class MyFamilyAdapter(ModelAdapter):
 The config type still has to map to a quantizer through the quantizer registry
 (`register_quantizer`); selecting a config class is not by itself GPTQ support
 for that family.
+
+## PTQ selector override structure
+
+Selector-based `override_policies` (see
+[`../../examples/configs/PTQ_OVERRIDE_POLICIES.md`](../../examples/configs/PTQ_OVERRIDE_POLICIES.md))
+need to know, per logical component, where a model keeps its layers, how many
+there are, and which modules an `op_type` alias expands to. That structure is
+declared by the adapter through `build_quant_target_context(model)`, which
+returns a `QuantTargetResolverContext` from `recipes/override_policies.py`:
+
+```python
+from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.override_policies import (
+    COMMON_LINEAR_MODULES,
+    ComponentQuantTargetInfo,
+    QuantTargetResolverContext,
+)
+
+
+class MyFamilyAdapter(ModelAdapter):
+    family = "my_family"
+
+    def build_quant_target_context(self, model):
+        return QuantTargetResolverContext(
+            components={
+                "text": ComponentQuantTargetInfo(
+                    name="text",
+                    layer_path_prefixes=(("model", "layers"),),
+                    num_layers=len(model.model.layers),
+                    op_aliases={"linear": COMMON_LINEAR_MODULES},
+                ),
+            }
+        )
+```
+
+Component names are limited to `text` and `vision` (`component: all` in a
+policy expands to every declared component). Each `layer_path_prefixes` entry
+is combined with every selected layer index, module path, and observer name to
+form exact override paths, so a component may list several prefixes when the
+same layers can live under different parents. `COMMON_LINEAR_MODULES` is the
+shared Hugging Face decoder-layer alias; extend or replace it per component.
+
+`PTQStage` and the inspector trace resolve the structure once per run, before
+`prepare()`, from the exact model instance `prepare()` receives (the stage
+model, or the deep-copied model in trace mode) and the adapter that
+`resolve_adapter()` selected:
+
+1. the selected adapter's `build_quant_target_context(model)` result, when not
+   `None`;
+2. otherwise the result of the adapter registered under the canonical
+   `adapter.family` key, so an out-of-tree adapter that subclasses
+   `ModelAdapter` directly and serves a built-in family keeps that family's
+   structure without implementing the hook;
+3. otherwise `ValueError("PTQ override policies are not supported for model
+   family ...")`.
+
+`None` means "no declaration"; a valid context with no components is a
+declaration and is used as-is. A hook that raises, or returns something other
+than a `QuantTargetResolverContext` or `None`, fails the stage before
+`prepare()` instead of falling back. The hook must only read `model.config`
+and the submodule tree: do not load models, run prepare/calibration/convert,
+touch tensors, or cache the model or context on the adapter. Nothing is
+resolved when the stage has neither `override_policies` nor `raw_overrides`.
+
+`LlamaAdapter`, `Qwen3VLAdapter`, and `Gemma4Adapter` declare their text and
+vision components; `Gemma4AssistantAdapter` makes no declaration. The legacy
+family-only helpers `build_quant_target_resolver_context(family=, model=)` and
+`apply_ptq_override_policies(..., family=, model=)` resolve the same adapter
+declarations through the registry; they accept the stripped, lower-cased
+canonical family key only, so registry aliases such as `qwen3-vl` are still
+rejected there. Declaring a context is not by itself PTQ support for the
+family: wrappers and the PTQ config builder must still handle the model.
 
 ## Evaluation and export
 

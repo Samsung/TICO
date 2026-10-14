@@ -45,11 +45,25 @@ from tico.quantization.recipes.evaluation.vlm import (
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.qwen3_vl import export_qwen3_vl_per_layer
+from tico.quantization.recipes.override_policies import (
+    COMMON_LINEAR_MODULES,
+    ComponentQuantTargetInfo,
+    QuantTargetResolverContext,
+)
 from tico.quantization.recipes.utils import (
+    get_attr_path,
     move_to_device,
     quant_spec_from_config,
     quant_specs_equivalent,
     torch_dtype_from_name,
+)
+
+
+_VISION_LINEAR_MODULES = (
+    "attn.qkv",
+    "attn.proj",
+    "mlp.linear_fc1",
+    "mlp.linear_fc2",
 )
 
 
@@ -231,6 +245,31 @@ class Qwen3VLAdapter(ModelAdapter):
         vision_config = getattr(model.config, "vision_config", None)
         indexes = getattr(vision_config, "deepstack_visual_indexes", None)
         return 0 if indexes is None else len(indexes)
+
+    def build_quant_target_context(self, model: Any) -> QuantTargetResolverContext:
+        """Declare the text decoder and vision block components for selectors.
+
+        Layer counts are read with a wider fallback chain than
+        ``get_num_text_layers``/``get_num_vision_blocks`` (config fields first,
+        then the actual module lists), so selector resolution keeps accepting
+        the model shapes it accepted before.
+        """
+        return QuantTargetResolverContext(
+            components={
+                "text": ComponentQuantTargetInfo(
+                    name="text",
+                    layer_path_prefixes=(("model", "language_model", "layers"),),
+                    num_layers=_quant_target_text_layers(model),
+                    op_aliases={"linear": COMMON_LINEAR_MODULES},
+                ),
+                "vision": ComponentQuantTargetInfo(
+                    name="vision",
+                    layer_path_prefixes=(("model", "visual", "blocks"),),
+                    num_layers=_quant_target_vision_blocks(model),
+                    op_aliases={"linear": _VISION_LINEAR_MODULES},
+                ),
+            }
+        )
 
     def apply_spinquant(
         self,
@@ -545,6 +584,37 @@ class Qwen3VLAdapter(ModelAdapter):
                 prefill_decode=bool(export_cfg.get("prefill_decode", True)),
                 strict=bool(export_cfg.get("strict", False)),
             )
+
+
+def _quant_target_text_layers(model: Any) -> int:
+    """Text layer count for selector overrides: text_config, config, then modules."""
+    config = getattr(model, "config", None)
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None and hasattr(text_config, "num_hidden_layers"):
+        return int(text_config.num_hidden_layers)
+    if config is not None and hasattr(config, "num_hidden_layers"):
+        return int(config.num_hidden_layers)
+    layers = get_attr_path(
+        model,
+        ("model", "language_model", "layers"),
+        context="Qwen3-VL text layers",
+    )
+    return len(layers)
+
+
+def _quant_target_vision_blocks(model: Any) -> int:
+    """Vision block count for selector overrides: config fields, then modules."""
+    config = getattr(model, "config", None)
+    vision_config = getattr(config, "vision_config", None)
+    for attr in ("num_hidden_layers", "num_layers", "depth"):
+        if vision_config is not None and hasattr(vision_config, attr):
+            return int(getattr(vision_config, attr))
+    blocks = get_attr_path(
+        model,
+        ("model", "visual", "blocks"),
+        context="Qwen3-VL vision blocks",
+    )
+    return len(blocks)
 
 
 def _load_torch_object(path: str | None) -> Any:

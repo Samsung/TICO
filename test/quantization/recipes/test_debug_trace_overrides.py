@@ -275,6 +275,8 @@ class TestTracePtqParityOverrides(unittest.TestCase):
         self.assertIs(resolver_spy.call_args.kwargs["model"], prepared_model)
         self.assertIsNot(prepared_model, ctx.model)
         self.assertEqual(resolver_spy.call_args.kwargs["family"], "llama")
+        # The selected adapter is handed over so its own declaration is used.
+        self.assertIs(resolver_spy.call_args.kwargs["adapter"], adapter)
 
     # ------------------------------------------------------------------ #
     # B. policy combinations
