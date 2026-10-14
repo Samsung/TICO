@@ -20,7 +20,11 @@ from tico.quantization.config.specs import QuantSpec
 from tico.quantization.recipes.utils import quant_spec_from_config
 
 
-_COMMON_LINEAR_MODULES = (
+# ``op_type: linear`` alias shared by adapters whose decoder layers follow the
+# Hugging Face ``self_attn.{q,k,v,o}_proj`` / ``mlp.{gate,up,down}_proj``
+# naming. Adapters extend or replace it in their own
+# ``build_quant_target_context`` hook; the selector engine never consults it.
+COMMON_LINEAR_MODULES = (
     "self_attn.q_proj",
     "self_attn.k_proj",
     "self_attn.v_proj",
@@ -28,16 +32,6 @@ _COMMON_LINEAR_MODULES = (
     "mlp.gate_proj",
     "mlp.up_proj",
     "mlp.down_proj",
-)
-_GEMMA4_TEXT_LINEAR_MODULES = _COMMON_LINEAR_MODULES + (
-    "per_layer_input_gate",
-    "per_layer_projection",
-)
-_QWEN3_VL_VISION_LINEAR_MODULES = (
-    "attn.qkv",
-    "attn.proj",
-    "mlp.linear_fc1",
-    "mlp.linear_fc2",
 )
 _COMMON_OBSERVER_ALIASES = {
     "activation": ("act_in", "act_out"),
@@ -90,6 +84,7 @@ def apply_ptq_override_policies(
     family: str,
     model: Any,
     applied_paths: set[tuple[str, ...]] | None = None,
+    adapter: Any | None = None,
 ) -> PTQConfig:
     """Apply recipe-level PTQ override policies to an existing PTQConfig.
 
@@ -103,6 +98,9 @@ def apply_ptq_override_policies(
             as each override is applied; existing entries are never removed,
             so pass a fresh empty set to observe one call in isolation. When
             ``None``, no paths are collected.
+        adapter: Optional selected adapter whose ``build_quant_target_context``
+            hook is consulted before the registered family default. See
+            :func:`build_quant_target_resolver_context`.
 
     Returns:
         The same PTQConfig instance with selector and raw overrides applied.
@@ -110,7 +108,9 @@ def apply_ptq_override_policies(
     if not _has_override_payload(stage_cfg):
         return qcfg
 
-    context = build_quant_target_resolver_context(family=family, model=model)
+    context = build_quant_target_resolver_context(
+        family=family, model=model, adapter=adapter
+    )
     return apply_ptq_override_policies_to_config(
         qcfg,
         stage_cfg,
@@ -248,138 +248,41 @@ def build_quant_target_resolver_context(
     *,
     family: str,
     model: Any,
+    adapter: Any | None = None,
 ) -> QuantTargetResolverContext:
-    """Build selector resolver metadata for a registered recipe model family."""
-    family_key = family.strip().lower()
-    if family_key == "llama":
-        return _build_llama_context(model)
-    if family_key == "qwen3_vl":
-        return _build_qwen3_vl_context(model)
-    if family_key == "gemma4":
-        return _build_gemma4_context(model)
-    raise ValueError(
-        f"PTQ override policies are not supported for model family {family!r}."
-    )
+    """Build selector resolver metadata for a recipe model family.
+
+    The structure declaration is owned by the model adapters: this helper only
+    selects which adapter is asked. The explicitly selected ``adapter`` (the
+    one ``resolve_adapter`` picked for the recipe) is consulted first through
+    its ``build_quant_target_context(model)`` hook. When no adapter is given,
+    the adapter lacks the hook, or the hook returns ``None``, the adapter
+    registered under ``family`` is asked instead. ``family`` is stripped and
+    lower-cased and must be the canonical family key, so registry aliases such
+    as ``qwen3-vl`` are rejected exactly as before. Hook errors and invalid
+    return values propagate; a valid empty context is returned as-is.
+
+    Raises:
+        ValueError: If neither the selected adapter nor the family default
+            declares selector metadata, or if ``adapter`` serves a different
+            family than ``family``.
+    """
+    # Imported lazily so that importing the selector engine never loads every
+    # built-in adapter module.
+    from tico.quantization.recipes.adapters import resolve_quant_target_context
+
+    context = resolve_quant_target_context(model, family=family, adapter=adapter)
+    if context is None:
+        raise ValueError(
+            f"PTQ override policies are not supported for model family {family!r}."
+        )
+    return context
 
 
 def _has_override_payload(stage_cfg: Mapping[str, Any]) -> bool:
     return bool(stage_cfg.get("override_policies")) or bool(
         stage_cfg.get("raw_overrides")
     )
-
-
-def _build_llama_context(model: Any) -> QuantTargetResolverContext:
-    num_layers = len(_get_attr_path(model, ("model", "layers"), context="llama layers"))
-    return QuantTargetResolverContext(
-        components={
-            "text": ComponentQuantTargetInfo(
-                name="text",
-                layer_path_prefixes=(("model", "layers"),),
-                num_layers=num_layers,
-                op_aliases={"linear": _COMMON_LINEAR_MODULES},
-            )
-        }
-    )
-
-
-def _build_qwen3_vl_context(model: Any) -> QuantTargetResolverContext:
-    return QuantTargetResolverContext(
-        components={
-            "text": ComponentQuantTargetInfo(
-                name="text",
-                layer_path_prefixes=(("model", "language_model", "layers"),),
-                num_layers=_get_qwen3_vl_text_layers(model),
-                op_aliases={"linear": _COMMON_LINEAR_MODULES},
-            ),
-            "vision": ComponentQuantTargetInfo(
-                name="vision",
-                layer_path_prefixes=(("model", "visual", "blocks"),),
-                num_layers=_get_qwen3_vl_vision_blocks(model),
-                op_aliases={"linear": _QWEN3_VL_VISION_LINEAR_MODULES},
-            ),
-        }
-    )
-
-
-def _build_gemma4_context(model: Any) -> QuantTargetResolverContext:
-    config = getattr(model, "config", None)
-    text_config = None
-    if config is not None and hasattr(config, "get_text_config"):
-        text_config = config.get_text_config()
-    elif config is not None and hasattr(config, "text_config"):
-        text_config = config.text_config
-    if text_config is None or not hasattr(text_config, "num_hidden_layers"):
-        raise ValueError("Cannot determine Gemma4 text layer count.")
-
-    vision_config = getattr(config, "vision_config", None)
-    if vision_config is None or not hasattr(vision_config, "num_hidden_layers"):
-        raise ValueError("Cannot determine Gemma4 vision layer count.")
-
-    text_prefixes = (
-        ("layers",),
-        ("model", "layers"),
-        ("language_model", "layers"),
-        ("model", "language_model", "layers"),
-    )
-    vision_prefixes = (
-        ("vision_tower", "encoder", "layers"),
-        ("model", "vision_tower", "encoder", "layers"),
-    )
-    return QuantTargetResolverContext(
-        components={
-            "text": ComponentQuantTargetInfo(
-                name="text",
-                layer_path_prefixes=text_prefixes,
-                num_layers=int(text_config.num_hidden_layers),
-                op_aliases={"linear": _GEMMA4_TEXT_LINEAR_MODULES},
-            ),
-            "vision": ComponentQuantTargetInfo(
-                name="vision",
-                layer_path_prefixes=vision_prefixes,
-                num_layers=int(vision_config.num_hidden_layers),
-                op_aliases={"linear": _COMMON_LINEAR_MODULES},
-            ),
-        }
-    )
-
-
-def _get_qwen3_vl_text_layers(model: Any) -> int:
-    config = getattr(model, "config", None)
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None and hasattr(text_config, "num_hidden_layers"):
-        return int(text_config.num_hidden_layers)
-    if config is not None and hasattr(config, "num_hidden_layers"):
-        return int(config.num_hidden_layers)
-    layers = _get_attr_path(
-        model,
-        ("model", "language_model", "layers"),
-        context="Qwen3-VL text layers",
-    )
-    return len(layers)
-
-
-def _get_qwen3_vl_vision_blocks(model: Any) -> int:
-    config = getattr(model, "config", None)
-    vision_config = getattr(config, "vision_config", None)
-    for attr in ("num_hidden_layers", "num_layers", "depth"):
-        if vision_config is not None and hasattr(vision_config, attr):
-            return int(getattr(vision_config, attr))
-    blocks = _get_attr_path(
-        model,
-        ("model", "visual", "blocks"),
-        context="Qwen3-VL vision blocks",
-    )
-    return len(blocks)
-
-
-def _get_attr_path(obj: Any, path: tuple[str, ...], *, context: str) -> Any:
-    current = obj
-    for attr in path:
-        if not hasattr(current, attr):
-            dotted = ".".join(path)
-            raise ValueError(f"Cannot determine {context}; missing attribute {dotted}.")
-        current = getattr(current, attr)
-    return current
 
 
 def _compile_target(
@@ -698,6 +601,7 @@ def _parse_dot_path(value: str, *, context: str) -> tuple[str, ...]:
 
 
 __all__ = [
+    "COMMON_LINEAR_MODULES",
     "ComponentQuantTargetInfo",
     "QuantTargetResolverContext",
     "ResolvedOverride",

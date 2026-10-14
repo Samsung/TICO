@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TYPE_CHECKING
 
 import torch
 
@@ -22,6 +22,9 @@ from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.evaluation.selection import (
     get_selected_evaluation_targets,
 )
+
+if TYPE_CHECKING:
+    from tico.quantization.recipes.override_policies import QuantTargetResolverContext
 
 
 class ModelAdapter(ABC):
@@ -83,6 +86,26 @@ class ModelAdapter(ABC):
         This hook only names the class. The stage filters the stage payload
         against that class and instantiates it, so do not build config
         instances, load models, or run prepare/calibration/convert here.
+        """
+        return None
+
+    def build_quant_target_context(
+        self, model: Any
+    ) -> "QuantTargetResolverContext | None":
+        """Describe the model structure used by PTQ selector override policies.
+
+        Return a ``QuantTargetResolverContext`` naming each logical component
+        (``text``, ``vision``) with its layer-path prefixes, layer count, and
+        ``op_type`` aliases, or ``None`` (the default) to make no declaration.
+        Without a declaration the override helpers ask the adapter registered
+        under ``self.family`` (the family default) and finally reject the
+        family as unsupported for selector overrides.
+
+        ``model`` is the exact module instance that ``prepare()`` will receive,
+        so read its structure (``config`` and submodule tree) only. Do not load
+        models, run prepare/calibration/convert, touch tensors, or cache the
+        model or the returned context on the adapter instance: adapters in the
+        registry are shared across recipes and processes.
         """
         return None
 

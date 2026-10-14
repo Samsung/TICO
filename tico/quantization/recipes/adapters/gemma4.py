@@ -46,6 +46,11 @@ from tico.quantization.recipes.evaluation.vlm import (
 )
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.gemma4 import export_gemma4_per_layer
+from tico.quantization.recipes.override_policies import (
+    COMMON_LINEAR_MODULES,
+    ComponentQuantTargetInfo,
+    QuantTargetResolverContext,
+)
 from tico.quantization.recipes.utils import (
     move_to_device,
     quant_spec_from_config,
@@ -60,6 +65,25 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     canonicalize_gemma4_static_vision_model_args,
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
+
+
+_TEXT_LINEAR_MODULES = COMMON_LINEAR_MODULES + (
+    "per_layer_input_gate",
+    "per_layer_projection",
+)
+# Selector overrides target every known placement of the Gemma4 text decoder
+# and vision encoder layers; prefixes that a given checkpoint does not contain
+# simply produce unused override paths.
+_TEXT_LAYER_PREFIXES = (
+    ("layers",),
+    ("model", "layers"),
+    ("language_model", "layers"),
+    ("model", "language_model", "layers"),
+)
+_VISION_LAYER_PREFIXES = (
+    ("vision_tower", "encoder", "layers"),
+    ("model", "vision_tower", "encoder", "layers"),
+)
 
 
 class Gemma4Adapter(ModelAdapter):
@@ -331,6 +355,43 @@ class Gemma4Adapter(ModelAdapter):
             ),
             norm_weight=quant_spec_from_config(stage_cfg.get("norm_weight")),
             strict_wrap=bool(stage_cfg.get("strict_wrap", True)),
+        )
+
+    def build_quant_target_context(self, model: Any) -> QuantTargetResolverContext:
+        """Declare Gemma4 text and vision components for selector overrides.
+
+        Layer counts come from ``config.get_text_config()`` (falling back to
+        ``config.text_config``) and ``config.vision_config``; both must expose
+        ``num_hidden_layers``.
+        """
+        config = getattr(model, "config", None)
+        text_config = None
+        if config is not None and hasattr(config, "get_text_config"):
+            text_config = config.get_text_config()
+        elif config is not None and hasattr(config, "text_config"):
+            text_config = config.text_config
+        if text_config is None or not hasattr(text_config, "num_hidden_layers"):
+            raise ValueError("Cannot determine Gemma4 text layer count.")
+
+        vision_config = getattr(config, "vision_config", None)
+        if vision_config is None or not hasattr(vision_config, "num_hidden_layers"):
+            raise ValueError("Cannot determine Gemma4 vision layer count.")
+
+        return QuantTargetResolverContext(
+            components={
+                "text": ComponentQuantTargetInfo(
+                    name="text",
+                    layer_path_prefixes=_TEXT_LAYER_PREFIXES,
+                    num_layers=int(text_config.num_hidden_layers),
+                    op_aliases={"linear": _TEXT_LINEAR_MODULES},
+                ),
+                "vision": ComponentQuantTargetInfo(
+                    name="vision",
+                    layer_path_prefixes=_VISION_LAYER_PREFIXES,
+                    num_layers=int(vision_config.num_hidden_layers),
+                    op_aliases={"linear": COMMON_LINEAR_MODULES},
+                ),
+            }
         )
 
     def apply_ptq(

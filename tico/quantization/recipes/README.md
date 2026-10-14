@@ -169,7 +169,11 @@ Registry rules:
 - `resolve_adapter(cfg)` selects `model.adapter` when set, otherwise
   `model.family`, and requires the selected adapter's `family` to equal
   `model.family` so family-keyed helpers (dataset defaults, the GPTQ config
-  family fallback, export) keep working.
+  family fallback, the PTQ selector structure fallback, export) keep working.
+- PTQ selector `override_policies` resolve model structure through the selected
+  adapter's `build_quant_target_context()` hook, falling back to the registered
+  family adapter; see "PTQ selector override structure" in
+  [`adapters/README.md`](adapters/README.md).
 
 #### Extension loading
 

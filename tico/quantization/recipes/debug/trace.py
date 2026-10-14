@@ -170,12 +170,14 @@ def trace_ptq_parity(
     qcfg = ctx.adapter.build_ptq_config(ctx, ptq_stage_cfg)
     # Apply the recipe's selector/raw overrides through the same helper as
     # PTQStage so the traced copy is prepared with the effective PTQ policy.
-    # The copy is both the structure source and the prepare target.
+    # The copy is both the structure source and the prepare target, and the
+    # selected adapter declares that structure exactly as in PTQStage.
     qcfg = apply_ptq_override_policies(
         qcfg,
         ptq_stage_cfg,
         family=ctx.adapter.family,
         model=q_model,
+        adapter=ctx.adapter,
     )
     q_model = prepare(q_model, qcfg)
     ctx.adapter.calibrate_prepared_model(ctx, q_model, ptq_stage_cfg)
