@@ -20,11 +20,11 @@ from typing import Any, Mapping
 import torch
 
 from tico.quantization.config.specs import (
+    _resolve_affine_observer,
     affine,
     mx,
     no_quant,
     QuantSpec,
-    resolve_observer,
 )
 from tico.quantization.config.utils import (  # noqa: F401  (re-export)
     torch_dtype_from_name,
@@ -144,7 +144,9 @@ def quant_spec_from_config(
             _known_keys = {"kind", "type", "dtype", "qscheme", "observer"}
             observer_kwargs = {k: v for k, v in value.items() if k not in _known_keys}
             if observer_name is not None:
-                observer_kwargs["observer"] = resolve_observer(str(observer_name))
+                observer_kwargs["observer"] = _resolve_affine_observer(
+                    str(observer_name)
+                )
             return affine(
                 wrapq_dtype_from_name(value["dtype"]),
                 qscheme=qscheme,

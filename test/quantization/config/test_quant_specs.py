@@ -259,7 +259,7 @@ class TestObserverSelection(unittest.TestCase):
         self.assertEqual(spec.kwargs["max_samples"], 65536)
 
     def test_unknown_observer_raises(self):
-        with self.assertRaisesRegex(ValueError, "Unknown observer"):
+        with self.assertRaisesRegex(ValueError, "Unknown affine observer"):
             quant_spec_from_config(
                 {"kind": "affine", "dtype": "int16", "observer": "bogus"}
             )

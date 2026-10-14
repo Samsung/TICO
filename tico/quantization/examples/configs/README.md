@@ -316,6 +316,30 @@ explicit `lower_percentile`/`upper_percentile`, the qscheme must be asymmetric.
 The `observer` field is only valid for `kind: affine` specs. Using it with
 `kind: mx` or `kind: no_quant` raises `ValueError`.
 
+Quantization-spec overrides use **replacement semantics, not partial-update
+semantics.** An override defines a new quantization spec and does not inherit
+omitted fields or observer-specific options from the role-level spec. For an
+affine override, omitting `observer` selects the default `minmax` observer, and
+`dtype` must be specified. To preserve a non-default observer and its settings,
+repeat them explicitly in the override or reference a named spec containing
+those settings.
+
+```yaml
+# Role-level: EMA observer with momentum.
+activation:
+  kind: affine
+  dtype: int16
+  observer: ema
+  momentum: 0.95
+
+# Override: change dtype to int8 but keep EMA — must repeat observer settings.
+raw_overrides:
+  model.layers.0.self_attn.q_proj.act_out:
+    dtype: int8
+    observer: ema
+    momentum: 0.95
+```
+
 Preprocessing + GPTQ + PTQ:
 
 ```yaml
