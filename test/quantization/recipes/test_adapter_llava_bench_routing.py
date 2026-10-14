@@ -320,7 +320,11 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                             "enabled": True,
                             "selected_tasks": selected,
                             "llava_bench": {"enabled": True, "mode": "judge"},
-                            "mmmu": {"enabled": False},
+                            "mmmu": {
+                                "enabled": False,
+                                "dataset": "MMMU/MMMU_Pro",
+                                "subjects": ["vision"],
+                            },
                         },
                     )
                     with patch.object(
@@ -452,7 +456,11 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                         "coco": True,
                         "llava_bench": {"enabled": True, "mode": "judge"},
                         "videomme": {"enabled": True},
-                        "mmmu": {"enabled": True},
+                        "mmmu": {
+                            "enabled": True,
+                            "dataset": "MMMU/MMMU_Pro",
+                            "subjects": ["vision"],
+                        },
                         "ppl": {"enabled": True},
                     },
                 )
