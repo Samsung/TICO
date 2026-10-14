@@ -7,6 +7,9 @@ workflow is implemented**.
 
 Most new examples should be added as config files in this directory.
 
+For MMMU-Pro vision prompt modes, fixed-input generation comparisons and
+per-sample JSONL diagnostics, see the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md).
+
 ## File naming
 
 Use:
@@ -437,8 +440,10 @@ Qwen3-VL / Gemma4:
 ```
 
 `lm_eval` requires a non-empty `evaluation.lm_eval_tasks` value. `vqa`
-requires a non-empty `evaluation.vlm_tasks` value. Other selected targets may
-use their evaluator defaults when their detail mapping is omitted.
+requires a non-empty `evaluation.vlm_tasks` value. `mmmu` requires an explicit
+`evaluation.mmmu.dataset: MMMU/MMMU_Pro`; the original mixed MMMU evaluation
+is unsupported. Other selected targets may use their evaluator defaults when
+their detail mapping is omitted.
 
 CLI examples:
 
@@ -532,6 +537,60 @@ Rules:
 - Set `baseline_answers` when comparing a candidate answer file against an FP or
   runtime baseline. If `baseline_answers` is unset, the dataset reference answer
   is used as the baseline.
+
+## `evaluation.mmmu` for MMMU-Pro multiple-choice evaluation
+
+The Qwen3-VL and Gemma4 evaluation presets share this schema:
+
+```yaml
+evaluation:
+  max_seq_len: 2048
+  mmmu:
+    enabled: true
+    dataset: MMMU/MMMU_Pro
+    subjects: [vision]
+    n_shots: 0
+    prompt_mode: strict_single_letter
+    max_new_tokens: 16
+    input_max_seq_len: null
+    output_jsonl: null
+    temperature: 0.0
+```
+
+Rules:
+
+- `strict_single_letter` is the default MMMU-Pro vision protocol; its default
+  budget is 16 tokens. `official_direct` (default 256 tokens) and
+  `official_cot` (explicit `max_new_tokens` required) stay available as
+  explicit experiment options. The per-mode defaults are defined once in the
+  evaluator, not in the adapters or presets.
+- An explicit `max_new_tokens` always wins. Switching a preset that states
+  `max_new_tokens: 16` to `prompt_mode: official_direct` keeps 16 tokens; set
+  `max_new_tokens` to `256` or `null` as well when the mode default is wanted.
+- The strict prompt's allowed range follows the sample's actual option count
+  (ten options reproduce the historical `A to J` text; other counts differ from
+  older TICO versions). Multiple-choice samples with 1-26 options and exactly
+  one valid gold label are supported; others fail before generation with the
+  sample ID. Open-ended scoring is not supported and has no legacy fallback.
+- Supported evaluation configurations are `MMMU/MMMU_Pro` / `vision`,
+  `standard (4 options)` and `standard (10 options)`. `MMMU/MMMU` is rejected
+  before loading data, creating a log or generating; Qwen3-VL/Gemma4 recipe
+  preflight rejects a selected mixed-dataset request before model loading.
+  No questions are silently filtered and no benchmark is substituted.
+- The existing vision presets need no changes. An unselected/disabled MMMU
+  target does not block LLaVA-Bench or other evaluation targets. Free-form
+  answer evaluation remains in the separate LLaVA-Bench path.
+- New logs use schema version 2 without `open_parser_version`; evaluated rows
+  always use `scoring_policy: multiple_choice`. Old result files are unchanged.
+- Multiple-choice answer parsing uses parser version `tico-mmmu-v4`. Compare
+  FP and quantized models only under the same `prompt_mode`, `max_new_tokens`
+  and parser version.
+- Using an official prompt string does not reproduce the official benchmark
+  protocol, and the strict default is not a claim that it is optimal for every
+  model.
+
+See the [MMMU evaluation guide](../../recipes/evaluation/MMMU.md) for the parser
+grammar, the diagnostic JSONL contract and fixed-input comparisons.
 
 ## `export`
 

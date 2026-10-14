@@ -527,7 +527,8 @@ class TestQwen3VLAdapter(unittest.TestCase):
                     "max_seq_len": 128,
                     "mmmu": {
                         "enabled": True,
-                        "subjects": ["Accounting"],
+                        "dataset": "MMMU/MMMU_Pro",
+                        "subjects": ["standard (4 options)"],
                         "n_samples": 1,
                     },
                     "ppl": {
@@ -561,8 +562,8 @@ class TestQwen3VLAdapter(unittest.TestCase):
                 adapter.evaluate(ctx)
 
         self.assertEqual(calls[0][0], "mmmu")
-        self.assertEqual(calls[0][1]["dataset"], "MMMU/MMMU")
-        self.assertEqual(calls[0][1]["subjects"], ["Accounting"])
+        self.assertEqual(calls[0][1]["dataset"], "MMMU/MMMU_Pro")
+        self.assertEqual(calls[0][1]["subjects"], ["standard (4 options)"])
         self.assertEqual(calls[1][0], "ppl")
         self.assertEqual(calls[1][1]["stride"], 32)
 

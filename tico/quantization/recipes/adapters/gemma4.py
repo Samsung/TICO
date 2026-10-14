@@ -30,7 +30,10 @@ from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
-from tico.quantization.recipes.evaluation.mmmu import evaluate_and_print_mmmu
+from tico.quantization.recipes.evaluation.mmmu import (
+    evaluate_and_print_mmmu,
+    validate_mmmu_recipe_config,
+)
 from tico.quantization.recipes.evaluation.selection import (
     get_mapping_evaluation_config,
     should_run_evaluation,
@@ -103,6 +106,10 @@ class Gemma4Adapter(ModelAdapter):
         }
     )
     evaluation_target_requirements = {"vqa": "vlm_tasks"}
+
+    def validate_evaluation_config(self, cfg: Mapping[str, Any]) -> None:
+        super().validate_evaluation_config(cfg)
+        validate_mmmu_recipe_config(cfg)
 
     def get_gptq_config_class(self) -> type[Gemma4GPTQConfig]:
         """Select the stagewise vision + text GPTQ config for Gemma4."""
@@ -524,10 +531,13 @@ class Gemma4Adapter(ModelAdapter):
                 device=str(ctx.device),
                 n_shots=int(mmmu.get("n_shots", 5)),
                 n_samples=int(mmmu.get("n_samples", -1)),
-                max_new_tokens=int(mmmu.get("max_new_tokens", 16)),
+                max_new_tokens=mmmu.get("max_new_tokens"),
                 max_seq_len=max_seq_len,
                 temperature=float(mmmu.get("temperature", 0.0)),
                 verbose=bool(mmmu.get("verbose", verbose)),
+                prompt_mode=mmmu.get("prompt_mode"),
+                input_max_seq_len=mmmu.get("input_max_seq_len"),
+                output_jsonl=mmmu.get("output_jsonl"),
             )
 
         if should_run_mapping_evaluation(eval_cfg, "ppl"):

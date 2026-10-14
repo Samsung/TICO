@@ -12,12 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any
+from typing import Any, Mapping
 
 from tico.quantization.evaluation.mmmu_eval_utils import (
+    DEFAULT_MMMU_PRO_VISION_PROMPT_MODE,
     evaluate_mmmu,
     print_mmmu_results,
+    validate_mmmu_evaluation_dataset,
 )
+from tico.quantization.recipes.evaluation.selection import (
+    get_mapping_evaluation_config,
+    should_run_mapping_evaluation,
+)
+
+
+def validate_mmmu_recipe_config(cfg: Mapping[str, Any]) -> None:
+    """Fail unsupported selected MMMU requests before model/calibration loading."""
+    eval_cfg = cfg.get("evaluation")
+    if not isinstance(eval_cfg, Mapping) or not eval_cfg.get("enabled", False):
+        return
+    if not should_run_mapping_evaluation(eval_cfg, "mmmu"):
+        return
+    mmmu = get_mapping_evaluation_config(eval_cfg, "mmmu")
+    # Match the adapters' existing dataset default; never silently switch it.
+    validate_mmmu_evaluation_dataset(mmmu.get("dataset") or "MMMU/MMMU")
 
 
 def evaluate_and_print_mmmu(
@@ -29,10 +47,13 @@ def evaluate_and_print_mmmu(
     device: str,
     n_shots: int,
     n_samples: int,
-    max_new_tokens: int,
+    max_new_tokens: int | None,
     max_seq_len: int | None,
     temperature: float,
     verbose: bool,
+    prompt_mode: str | None = None,
+    input_max_seq_len: int | None = None,
+    output_jsonl: str | None = None,
 ):
     results = evaluate_mmmu(
         model=model,
@@ -46,6 +67,11 @@ def evaluate_and_print_mmmu(
         max_seq_len=max_seq_len,
         temperature=temperature,
         verbose=verbose,
+        prompt_mode=(
+            DEFAULT_MMMU_PRO_VISION_PROMPT_MODE if prompt_mode is None else prompt_mode
+        ),
+        input_max_seq_len=input_max_seq_len,
+        output_jsonl=output_jsonl,
     )
     print_mmmu_results(results)
     return results
