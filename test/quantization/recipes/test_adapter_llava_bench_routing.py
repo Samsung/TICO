@@ -32,6 +32,7 @@ from unittest.mock import DEFAULT, patch
 import tico.quantization.recipes.adapters.gemma4 as gemma4_mod
 import tico.quantization.recipes.adapters.qwen3_vl as qwen3_vl_mod
 import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
+import tico.quantization.recipes.evaluation.vlm as vlm_mod
 
 import torch
 from tico.quantization.recipes.context import RecipeContext
@@ -457,14 +458,18 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                 )
                 with patch.multiple(
                     module,
-                    evaluate_vqa_tasks=DEFAULT,
                     evaluate_coco=DEFAULT,
                     evaluate_and_print_video_mme=DEFAULT,
                     evaluate_and_print_mmlu=DEFAULT,
                     evaluate_and_print_hellaswag=DEFAULT,
                     evaluate_and_print_mmmu=DEFAULT,
                     evaluate_vlm_text_ppl=DEFAULT,
-                ) as mocks, self._patched_llava_evaluators() as (llava_mocks, _):
+                ) as mocks, patch.object(
+                    vlm_mod, "evaluate_vqa_tasks"
+                ) as evaluate_vqa_tasks, self._patched_llava_evaluators() as (
+                    llava_mocks,
+                    _,
+                ):
                     mocks["evaluate_coco"].side_effect = record("coco")
                     mocks["evaluate_and_print_video_mme"].side_effect = record(
                         "videomme"
@@ -479,7 +484,7 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                 self.assertEqual(
                     order, ["coco", "llava_judge", "videomme", "mmmu", "ppl"]
                 )
-                mocks["evaluate_vqa_tasks"].assert_not_called()
+                evaluate_vqa_tasks.assert_not_called()
                 mocks["evaluate_and_print_mmlu"].assert_not_called()
                 mocks["evaluate_and_print_hellaswag"].assert_not_called()
                 llava_mocks["evaluate_llava_bench"].assert_not_called()

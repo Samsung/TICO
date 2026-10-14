@@ -68,11 +68,18 @@ recipes/evaluation/
 
 The split is by benchmark/input type, not by model name.
 
-`llava_bench.py` is the one exception to "the adapter decides which helper to
-call": `evaluation.llava_bench` accepts a mapping, boolean, or null and routes
-to either the judge evaluator or the legacy COCO-style evaluator. VLM adapters
-call `run_llava_bench_evaluation()` at their LLaVA-Bench position so that this
-policy is edited once rather than once per model family.
+Two target-level entry points are exceptions to "the adapter decides which
+helper to call", so that a shared selection policy is edited once rather than
+once per model family:
+
+- `llava_bench.py`: `evaluation.llava_bench` accepts a mapping, boolean, or
+  null and routes to either the judge evaluator or the legacy COCO-style
+  evaluator. VLM adapters call `run_llava_bench_evaluation()` at their
+  LLaVA-Bench position.
+- `vlm.py`: `run_vqa_evaluation()` decides whether the `vqa` target runs,
+  normalizes and validates `evaluation.vlm_tasks`, and calls
+  `evaluate_vqa_tasks()` plus `print_vqa_results()`. VLM adapters call it at
+  their VQA position with the already-resolved evaluation arguments.
 
 ## Result conventions
 
