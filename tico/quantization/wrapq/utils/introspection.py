@@ -352,7 +352,8 @@ def module_hook(
         hook: Callback function to be called for each module's forward pass.
 
     Yields:
-        None. The hook is automatically removed when exiting the context.
+        None. The hook registered by this context is removed when exiting the
+        context, whether the body completes normally or raises.
     """
     handle: torch.utils.hooks.RemovableHandle
     if package_version_is_at_least(package_name="torch", required_version="2.6"):
@@ -372,8 +373,10 @@ def module_hook(
             fallback_hook, always_call=True
         )
 
-    yield
-    handle.remove()
+    try:
+        yield
+    finally:
+        handle.remove()
 
 
 @contextmanager

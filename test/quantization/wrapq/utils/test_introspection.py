@@ -14,9 +14,11 @@
 
 import os
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn as nn
+import torch.nn.modules.module as torch_module_api
 
 from tico.quantization import convert, prepare
 from tico.quantization.config.ptq import PTQConfig
@@ -57,6 +59,68 @@ class DummyModel(nn.Module):
             nn.Conv2d(3, 8, kernel_size=3, padding=1),
             nn.ReLU(),
         )
+
+
+class _Boom(nn.Module):
+    """Submodule that always fails in forward."""
+
+    def forward(self, x):
+        raise RuntimeError("boom")
+
+
+class _SyntheticInterrupt(BaseException):
+    """BaseException subclass used instead of sending a real KeyboardInterrupt."""
+
+
+class GlobalHookScopeTestCase(unittest.TestCase):
+    """
+    Shared fixture for tests that must prove a global forward hook scope was closed.
+
+    A sentinel global hook is registered before the spy so it is never recorded; the
+    spy wraps the real registration API and records every handle created under test.
+    Recorded handles are removed in cleanup so a failing test cannot leak hooks.
+    """
+
+    def setUp(self):
+        self.sentinel_calls: list[str] = []
+        sentinel = torch_module_api.register_module_forward_hook(
+            lambda m, i, o: self.sentinel_calls.append(type(m).__name__)
+        )
+        self.addCleanup(sentinel.remove)
+
+        self.recorded: list[torch.utils.hooks.RemovableHandle] = []
+        original = torch_module_api.register_module_forward_hook
+
+        def spy(*args, **kwargs):
+            handle = original(*args, **kwargs)
+            self.recorded.append(handle)
+            return handle
+
+        patcher = patch.object(torch_module_api, "register_module_forward_hook", spy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        def remove_recorded_handles():
+            for handle in self.recorded:
+                handle.remove()
+
+        self.addCleanup(remove_recorded_handles)
+
+        self.probe = nn.Linear(2, 2)
+        self.probe_input = torch.ones(1, 2)
+
+    def assert_scope_closed(self, *finished_call_logs: list):
+        """Run a fresh module: only the sentinel may fire, and recorded handles are gone."""
+        self.assertGreater(len(self.recorded), 0, "spy did not observe registration")
+        for handle in self.recorded:
+            self.assertNotIn(handle.id, torch_module_api._global_forward_hooks)
+
+        counts_before = [len(log) for log in finished_call_logs]
+        sentinel_before = len(self.sentinel_calls)
+        with torch.no_grad():
+            self.probe(self.probe_input)
+        self.assertEqual([len(log) for log in finished_call_logs], counts_before)
+        self.assertEqual(len(self.sentinel_calls), sentinel_before + 1)
 
 
 class TestBuildFqnMap(unittest.TestCase):
@@ -989,6 +1053,95 @@ class TestModuleHook(unittest.TestCase):
         self.assertEqual(len(calls_b), count_b)
 
 
+class TestModuleHookCleanup(GlobalHookScopeTestCase):
+    """module_hook must remove its own global hook on every scope exit."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls: list[str] = []
+
+    def _callback(self, module, inputs, kwargs, output):
+        self.calls.append(type(module).__name__)
+
+    def test_normal_exit(self):
+        from tico.quantization.wrapq.utils.introspection import module_hook
+
+        with module_hook(self._callback):
+            with torch.no_grad():
+                self.probe(self.probe_input)
+
+        self.assertEqual(self.calls, ["Linear"])
+        self.assertEqual(self.sentinel_calls, ["Linear"])
+        self.assert_scope_closed(self.calls)
+
+    def test_exception_raised_in_with_body(self):
+        from tico.quantization.wrapq.utils.introspection import module_hook
+
+        for exc_type in (ValueError, _SyntheticInterrupt):
+            with self.subTest(exc_type=exc_type.__name__):
+                with self.assertRaises(exc_type):
+                    with module_hook(self._callback):
+                        raise exc_type("body boom")
+                self.assert_scope_closed(self.calls)
+
+    def test_model_forward_exception(self):
+        from tico.quantization.wrapq.utils.introspection import module_hook
+
+        model = nn.Sequential(nn.Linear(2, 2), _Boom())
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            with module_hook(self._callback):
+                with torch.no_grad():
+                    model(self.probe_input)
+
+        self.assertIn("Linear", self.calls)
+        self.assert_scope_closed(self.calls)
+
+    def test_user_callback_exception(self):
+        from tico.quantization.wrapq.utils.introspection import module_hook
+
+        def failing_callback(module, inputs, kwargs, output):
+            self.calls.append(type(module).__name__)
+            raise ValueError("callback boom")
+
+        with self.assertRaisesRegex(ValueError, "callback boom"):
+            with module_hook(failing_callback):
+                with torch.no_grad():
+                    self.probe(self.probe_input)
+
+        self.assertEqual(self.calls, ["Linear"])
+        self.assert_scope_closed(self.calls)
+
+    def test_nested_inner_failure_keeps_outer_hook(self):
+        from tico.quantization.wrapq.utils.introspection import module_hook
+
+        outer_calls: list[str] = []
+        inner_calls: list[str] = []
+
+        def outer(module, inputs, kwargs, output):
+            outer_calls.append(type(module).__name__)
+
+        def inner(module, inputs, kwargs, output):
+            inner_calls.append(type(module).__name__)
+
+        with module_hook(outer):
+            with self.assertRaisesRegex(ValueError, "inner boom"):
+                with module_hook(inner):
+                    raise ValueError("inner boom")
+
+            # Inner hook is gone; outer hook and the sentinel still fire.
+            with torch.no_grad():
+                self.probe(self.probe_input)
+            self.assertEqual(outer_calls, ["Linear"])
+            self.assertEqual(inner_calls, [])
+            self.assertEqual(self.sentinel_calls, ["Linear"])
+            self.assertNotIn(
+                self.recorded[1].id, torch_module_api._global_forward_hooks
+            )
+            self.assertIn(self.recorded[0].id, torch_module_api._global_forward_hooks)
+
+        self.assert_scope_closed(outer_calls, inner_calls)
+
+
 class TestFullTensorPrinting(unittest.TestCase):
     """Unit tests for full_tensor_printing context manager."""
 
@@ -1299,6 +1452,28 @@ class TestTraceModelInputOutput(unittest.TestCase):
         self.assertIsInstance(name_to_module["0"], nn.Linear)
         self.assertIsInstance(name_to_module["1"], nn.ReLU)
         self.assertIsInstance(name_to_module["2"], nn.Linear)
+
+
+class TestTraceModelInputOutputCleanup(GlobalHookScopeTestCase):
+    """trace_model_input_output must not leave its global hook behind on failure."""
+
+    def test_forward_failure_removes_global_hook(self):
+        from tico.quantization.wrapq.utils.introspection import (
+            ModuleInputOutput,
+            trace_model_input_output,
+        )
+
+        captured: list[ModuleInputOutput] = []
+
+        def hook(data: ModuleInputOutput):
+            captured.append(data)
+
+        model = nn.Sequential(nn.Linear(2, 2), _Boom())
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            trace_model_input_output(model, {"input": self.probe_input}, hook=hook)
+
+        self.assertIn("0", [d.module_name for d in captured])
+        self.assert_scope_closed(captured)
 
 
 class TestCompareOutputs(unittest.TestCase):
