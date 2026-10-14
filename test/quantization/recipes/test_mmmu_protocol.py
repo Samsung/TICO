@@ -817,7 +817,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
             mmmu, "generate_answer", return_value="C"
         ) as generate, patch.object(mmmu, "generate_image_only_answer") as image_only:
             result = mmmu.evaluate_mmmu(
-                **self.kwargs(dataset="MMMU/MMMU_Pro", subjects=["standard (4 options)"])
+                **self.kwargs(
+                    dataset="MMMU/MMMU_Pro", subjects=["standard (4 options)"]
+                )
             )
         self.assertEqual(result, {"standard (4 options)": (1, 1, 0)})
         image_only.assert_not_called()
@@ -864,8 +866,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         load.assert_not_called()
 
     def test_open_rows_in_supported_configs_fail_not_skip_or_score(self):
+        extras: tuple[dict[str, Any], ...] = ({}, {"image_2": object()})
         for subject in mmmu.MMMU_SUBJECTS["MMMU/MMMU_Pro"]:
-            for extra in ({}, {"image_2": object()}):
+            for extra in extras:
                 with self.subTest(subject=subject, multi_image=bool(extra)):
                     sample = self.sample(
                         "open_row",
@@ -887,17 +890,13 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
                                 ValueError, "Sample 'open_row'.*open-ended"
                             ):
                                 mmmu.evaluate_mmmu(
-                                    **self.kwargs(
-                                        subjects=[subject], output_jsonl=path
-                                    )
+                                    **self.kwargs(subjects=[subject], output_jsonl=path)
                                 )
                         generate.assert_not_called()
                         vision.assert_not_called()
                         records = self.read(path)
                     self.assertEqual(records[-1]["record_type"], "run_error")
-                    self.assertFalse(
-                        any(r.get("status") == "skipped" for r in records)
-                    )
+                    self.assertFalse(any(r.get("status") == "skipped" for r in records))
                     self.assertFalse(
                         any(r["record_type"] == "run_summary" for r in records)
                     )
@@ -906,9 +905,7 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         sample = self.sample(
             "open_shot", num_choices=0, answer="42", question_type="open"
         )
-        with patch.object(
-            mmmu, "load_data", return_value=[sample]
-        ), patch.object(
+        with patch.object(mmmu, "load_data", return_value=[sample]), patch.object(
             mmmu, "generate_answer"
         ) as generate, self.assertRaisesRegex(
             ValueError, "Sample 'open_shot'.*open-ended"
@@ -1085,7 +1082,7 @@ class TestMmmuRecipePreflight(unittest.TestCase):
             )
 
     def test_disabled_and_unselected_mmmu_do_not_block_other_tasks(self):
-        configs = [
+        configs: list[dict[str, Any]] = [
             {},
             {"evaluation": {"enabled": False, "mmmu": {"enabled": True}}},
             {"evaluation": {"enabled": True, "mmmu": {"enabled": False}}},
@@ -1153,7 +1150,7 @@ class TestMmmuRecipePreflight(unittest.TestCase):
             module = ast.fix_missing_locations(
                 ast.Module(body=[isolated], type_ignores=[])
             )
-            namespace = {
+            namespace: dict[str, Any] = {
                 "Base": Base,
                 "Mapping": dict,
                 "Any": Any,

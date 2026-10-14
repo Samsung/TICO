@@ -372,13 +372,13 @@ class TestMmmuGenerationIntegration(unittest.TestCase):
             result = mmmu.evaluate_mmmu(
                 object(),
                 object(),
-                "MMMU/MMMU",
-                subjects=["Accounting"],
+                "MMMU/MMMU_Pro",
+                subjects=["standard (4 options)"],
                 n_shots=0,
                 max_seq_len=2048,
                 verbose=False,
             )
-        self.assertEqual(result, {"Accounting": (1, 1, 0)})
+        self.assertEqual(result, {"standard (4 options)": (1, 1, 0)})
         self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 16)
         self.assertIn("Which is correct?", generate.call_args.kwargs["question"])
         self.assertNotIn("diagnostics", generate.call_args.kwargs)

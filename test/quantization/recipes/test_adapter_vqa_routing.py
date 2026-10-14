@@ -264,7 +264,11 @@ class TestAdapterVqaRouting(unittest.TestCase):
                             "enabled": True,
                             "selected_tasks": selected,
                             "vlm_tasks": ["vqav2"],
-                            "mmmu": {"enabled": False},
+                            "mmmu": {
+                                "enabled": False,
+                                "dataset": "MMMU/MMMU_Pro",
+                                "subjects": ["vision"],
+                            },
                         },
                     )
                     with patch.object(
@@ -307,7 +311,11 @@ class TestAdapterVqaRouting(unittest.TestCase):
                             "enabled": True,
                             "selected_tasks": selected,
                             "vlm_tasks": raw_tasks,
-                            "mmmu": {"enabled": False},
+                            "mmmu": {
+                                "enabled": False,
+                                "dataset": "MMMU/MMMU_Pro",
+                                "subjects": ["vision"],
+                            },
                         },
                     )
                     with patch.object(
@@ -399,7 +407,11 @@ class TestAdapterVqaRouting(unittest.TestCase):
                         "vlm_tasks": ["vqav2"],
                         "coco": True,
                         "llava_bench": {"enabled": True, "mode": "judge"},
-                        "mmmu": {"enabled": True},
+                        "mmmu": {
+                            "enabled": True,
+                            "dataset": "MMMU/MMMU_Pro",
+                            "subjects": ["vision"],
+                        },
                     },
                 )
                 with patch.multiple(
