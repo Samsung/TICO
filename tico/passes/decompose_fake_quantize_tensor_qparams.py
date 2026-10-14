@@ -28,6 +28,7 @@ from torch._export.utils import (
 # To import torch.ops.quantized_decomposed related operator
 from torch.export import ExportedProgram
 
+from tico.passes.decompose_fake_quantize import get_quant_type
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import (
@@ -35,21 +36,6 @@ from tico.utils.trace_decorators import (
     trace_graph_diff_on_pass,
 )
 from tico.utils.validate_args_kwargs import FakeQuantizePerTensorTQParamArgs
-
-
-def get_quant_type(min: int, max: int) -> torch.dtype:
-    if min == 0 and max == 15:
-        # torch can't represent "uint4".
-        # Let's set torch.uint8 and infer dtype with quant_min/quant_max instead.
-        return torch.uint8
-    if min == 0 and max == 255:
-        return torch.uint8
-    if min == -32768 and max == 32767:
-        return torch.int16
-    if min == -32767 and max == 32767:
-        return torch.int16
-
-    raise RuntimeError(f"Not supported min/max values: {min}/{max}")
 
 
 def get_constant_from_tensor(
