@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Type
+from typing import Any, cast, Mapping, Optional, Type
 
 from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
@@ -26,7 +26,7 @@ from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
 #: String-to-class registry for affine observer selection from YAML configs.
-_AFFINE_OBSERVER_REGISTRY: dict[str, type[ObserverBase]] = {
+_AFFINE_OBSERVER_REGISTRY = {
     "minmax": MinMaxObserver,
     "ema": EMAObserver,
     "percentile": PercentileObserver,
@@ -48,7 +48,7 @@ def _resolve_affine_observer(name: str) -> type[ObserverBase]:
     """
     key = name.strip().lower()
     try:
-        return _AFFINE_OBSERVER_REGISTRY[key]
+        return cast(type[ObserverBase], _AFFINE_OBSERVER_REGISTRY[key])
     except KeyError:
         supported = ", ".join(sorted(_AFFINE_OBSERVER_REGISTRY))
         raise ValueError(

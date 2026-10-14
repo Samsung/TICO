@@ -19,7 +19,6 @@ from tico.quantization.config.ptq import OverrideValue, PTQConfig
 from tico.quantization.config.specs import QuantSpec
 from tico.quantization.recipes.utils import quant_spec_from_config
 
-
 # ``op_type: linear`` alias shared by adapters whose decoder layers follow the
 # Hugging Face ``self_attn.{q,k,v,o}_proj`` / ``mlp.{gate,up,down}_proj``
 # naming. Adapters extend or replace it in their own

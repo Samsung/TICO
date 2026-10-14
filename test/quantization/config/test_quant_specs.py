@@ -205,30 +205,35 @@ class TestObserverSelection(unittest.TestCase):
     def test_default_observer_is_minmax(self):
         """Affine spec without observer defaults to MinMaxObserver."""
         spec = quant_spec_from_config({"kind": "affine", "dtype": "int16"})
+        assert spec is not None
         self.assertEqual(spec.observer, MinMaxObserver)
 
     def test_explicit_minmax_observer(self):
         spec = quant_spec_from_config(
             {"kind": "affine", "dtype": "int16", "observer": "minmax"}
         )
+        assert spec is not None
         self.assertEqual(spec.observer, MinMaxObserver)
 
     def test_ema_observer(self):
         spec = quant_spec_from_config(
             {"kind": "affine", "dtype": "int16", "observer": "ema"}
         )
+        assert spec is not None
         self.assertEqual(spec.observer, EMAObserver)
 
     def test_percentile_observer(self):
         spec = quant_spec_from_config(
             {"kind": "affine", "dtype": "uint8", "observer": "percentile"}
         )
+        assert spec is not None
         self.assertEqual(spec.observer, PercentileObserver)
 
     def test_observer_name_case_insensitive(self):
         spec = quant_spec_from_config(
             {"kind": "affine", "dtype": "int16", "observer": "EMA"}
         )
+        assert spec is not None
         self.assertEqual(spec.observer, EMAObserver)
 
     def test_ema_kwargs_pass_through(self):
@@ -241,6 +246,7 @@ class TestObserverSelection(unittest.TestCase):
                 "momentum": 0.95,
             }
         )
+        assert spec is not None
         self.assertEqual(spec.observer, EMAObserver)
         self.assertEqual(spec.kwargs["momentum"], 0.95)
 
@@ -254,6 +260,7 @@ class TestObserverSelection(unittest.TestCase):
                 "max_samples": 65536,
             }
         )
+        assert spec is not None
         self.assertEqual(spec.observer, PercentileObserver)
         self.assertEqual(spec.kwargs["percentile"], 99.9)
         self.assertEqual(spec.kwargs["max_samples"], 65536)
@@ -278,20 +285,21 @@ class TestObserverSelection(unittest.TestCase):
     def test_scalar_form_defaults_to_minmax(self):
         """Scalar dtype shorthand (no mapping) still uses MinMaxObserver."""
         spec = quant_spec_from_config("int16")
+        assert spec is not None
         self.assertEqual(spec.observer, MinMaxObserver)
 
     def test_ema_observer_end_to_end(self):
         """EMA observer with momentum is constructed correctly in a wrapper."""
-        cfg = PTQConfig(
-            activation=quant_spec_from_config(
-                {
-                    "kind": "affine",
-                    "dtype": "int16",
-                    "observer": "ema",
-                    "momentum": 0.95,
-                }
-            ),
+        activation_spec = quant_spec_from_config(
+            {
+                "kind": "affine",
+                "dtype": "int16",
+                "observer": "ema",
+                "momentum": 0.95,
+            }
         )
+        assert activation_spec is not None
+        cfg = PTQConfig(activation=activation_spec)
         wrapper = DummyWrapper(cfg)
         self.assertIsInstance(wrapper.obs_act_in, EMAObserver)
         self.assertEqual(wrapper.obs_act_in.momentum, 0.95)
