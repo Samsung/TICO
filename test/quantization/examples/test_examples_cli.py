@@ -21,18 +21,35 @@ except ModuleNotFoundError:
 
 install_optional_dependency_stubs()
 
+import contextlib
+import io
 import sys
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
+import tico.quantization.examples.compare_side_by_side as side_by_side_cli
 import tico.quantization.examples.evaluate as evaluate_cli
 import tico.quantization.examples.inspector as inspect_cli
 import tico.quantization.examples.quantize as quantize_cli
+import tico.quantization.recipes.debug.trace as trace_mod
 
 import torch
 from tico.quantization.recipes.adapters.base import ModelAdapter
+from tico.quantization.recipes.context import RecipeContext
+
+
+class _Scale(torch.nn.Module):
+    """Multiply by a constant so FP (x) and quantized (2x) outputs differ."""
+
+    def __init__(self, factor: float):
+        super().__init__()
+        self.first = torch.nn.Identity()
+        self.factor = factor
+
+    def forward(self, x):
+        return self.first(x) * self.factor
 
 
 class TestQuantizationExamplesCLI(unittest.TestCase):
@@ -401,3 +418,125 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
 
         self.assertTrue(calls["trace"][1])
         self.assertEqual(calls["trace"][2], ["model.layers.0"])
+
+    def test_compare_side_by_side_cli_prepares_models_and_runs_real_comparison(self):
+        """compare_side_by_side.py should prepare both contexts, then run the real comparison."""
+        events: list[str] = []
+        calls: dict[str, Any] = {}
+        fp_model = _Scale(1.0).train()
+        q_model = _Scale(2.0).train()
+
+        def fake_load_recipe_config(path, overrides):
+            calls["load"] = (path, overrides)
+            events.append("load_config")
+            return {
+                "model": {"family": "fake"},
+                "evaluation": {"enabled": True},
+                "export": {"enabled": True},
+            }
+
+        class FakeRunner:
+            """Fake runner that returns a context holding the quantized model."""
+
+            def run(self, cfg):
+                """Record the stage flags seen by the runner and attach q_model."""
+                events.append("runner.run")
+                calls["runner_flags"] = (
+                    cfg["evaluation"]["enabled"],
+                    cfg["export"]["enabled"],
+                )
+                return RecipeContext(cfg=cfg, adapter=None, model=q_model)
+
+        class FakeAdapter:
+            """Fake adapter that loads the FP model and builds two calibration batches."""
+
+            def load_model(self, ctx):
+                """Attach the FP model to the context."""
+                events.append("load_model")
+                ctx.model = fp_model
+                return ctx
+
+            def build_calibration_inputs(self, ctx):
+                """Return two batches with different element counts."""
+                events.append("build_calibration_inputs")
+                calls["calibration_ctx"] = ctx
+                return [torch.tensor([0.0, 2.0]), torch.tensor([0.0, 0.0, 0.0, 8.0])]
+
+        def fake_resolve_adapter(cfg):
+            events.append("resolve_adapter")
+            return FakeAdapter()
+
+        def fake_print_gpu_memory(label):
+            events.append(f"mem:{label}")
+
+        argv = [
+            "compare_side_by_side.py",
+            "--config",
+            "recipe.yaml",
+            "--set",
+            "pipeline.1.gptq.weight_bits=8",
+            "--set",
+            "calibration.n_samples=2",
+        ]
+
+        stdout = io.StringIO()
+        with patch.object(
+            side_by_side_cli, "load_recipe_config", fake_load_recipe_config
+        ), patch.object(
+            side_by_side_cli,
+            "load_recipe_extensions",
+            lambda cfg: events.append("load_extensions"),
+        ), patch.object(
+            side_by_side_cli, "QuantizationRunner", FakeRunner
+        ), patch.object(
+            side_by_side_cli, "resolve_adapter", fake_resolve_adapter
+        ), patch.object(
+            side_by_side_cli, "print_gpu_memory", fake_print_gpu_memory
+        ), patch.object(
+            trace_mod, "print_gpu_memory", fake_print_gpu_memory
+        ), patch.object(
+            sys, "argv", argv
+        ), contextlib.redirect_stdout(
+            stdout
+        ):
+            side_by_side_cli.main()
+
+        self.assertEqual(
+            calls["load"],
+            (
+                "recipe.yaml",
+                ["pipeline.1.gptq.weight_bits=8", "calibration.n_samples=2"],
+            ),
+        )
+        self.assertEqual(calls["runner_flags"], (False, False))
+        self.assertEqual(
+            events,
+            [
+                "load_config",
+                "load_extensions",
+                "mem:Init",
+                "runner.run",
+                "mem:After get_quanized_model_context",
+                "resolve_adapter",
+                "load_model",
+                "mem:After get_fp_model_context",
+                "resolve_adapter",
+                "build_calibration_inputs",
+                "mem:Before trace_parity",
+                "mem:Batch 0",
+                "mem:Batch 1",
+            ],
+        )
+        self.assertFalse(fp_model.training)
+        self.assertFalse(q_model.training)
+        # Calibration inputs are built from the FP context, not the quantized one.
+        self.assertIs(calls["calibration_ctx"].model, fp_model)
+        # The CLI reaches the debug-owned comparison, which prints real statistics.
+        self.assertIs(side_by_side_cli.trace_parity, trace_mod.trace_parity)
+        self.assertEqual(
+            [line for line in stdout.getvalue().splitlines() if "mean|diff|" in line],
+            [
+                "first: mean|diff|=0.00000000, max|diff|=0.00000000, peir=0.000000%",
+                ": mean|diff|=1.50000000, max|diff|=8.00000000, peir=100.000000%",
+            ],
+        )

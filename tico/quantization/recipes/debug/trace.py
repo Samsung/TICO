@@ -13,11 +13,15 @@
 # limitations under the License.
 
 import copy
+import gc
+import math
 from collections import OrderedDict
 from typing import Any, Iterable, Mapping
 
 import torch
 import torch.nn as nn
+
+from tqdm import tqdm
 
 from tico.quantization import convert, prepare
 from tico.quantization.evaluation.metric import compute_peir
@@ -28,6 +32,7 @@ from tico.quantization.wrapq.utils.introspection import (
     get_tensor_statistics,
     TensorStatistics,
 )
+from tico.utils.utils import print_gpu_memory
 
 
 def _summarize(value: Any) -> str:
@@ -203,3 +208,109 @@ def trace_ptq_parity(
     )
 
     compare_outputs(fp_outputs, q_outputs)
+
+
+def merge_diff_stats(
+    accumulated_diff: DifferenceStatistics,
+    new_diff: DifferenceStatistics,
+    n: int,
+) -> DifferenceStatistics:
+    """
+    Fold the ``n``-th batch summary into the running per-batch aggregate.
+
+    ``min``/``max`` take the extreme of the two summaries; ``mean``, ``peir``,
+    and the squared ``stddev`` are running averages over batch summaries, so
+    every batch has equal weight regardless of its element count. This is an
+    aggregate of per-batch statistics, not a pooled statistic over all elements.
+    """
+    assert n > 1
+    squared_stddev = accumulated_diff.stddev**2
+    return DifferenceStatistics(
+        min=min(accumulated_diff.min, new_diff.min),
+        max=max(accumulated_diff.max, new_diff.max),
+        mean=accumulated_diff.mean + (new_diff.mean - accumulated_diff.mean) / n,
+        stddev=math.sqrt(squared_stddev + (new_diff.stddev**2 - squared_stddev) / n),
+        peir=accumulated_diff.peir + (new_diff.peir - accumulated_diff.peir) / n,
+    )
+
+
+def trace_parity(
+    fp_model: nn.Module,
+    q_model: nn.Module,
+    ctx: RecipeContext,
+) -> None:
+    """
+    Compare intermediate outputs between two already prepared models.
+
+    Unlike :func:`trace_ptq_parity`, this does not load, prepare, calibrate, or
+    convert anything. Both models are run on every calibration input in
+    ``ctx.calibration_inputs`` (FP model first, then ``q_model``), each
+    submodule's output is collected with forward hooks, and the per-batch
+    difference summaries are accumulated with :func:`merge_diff_stats` before
+    the final PEIR (Percentage Error in Range) summary is printed.
+
+    Parameters:
+        fp_model: The original floating-point model.
+        q_model: The quantized model to compare against.
+        ctx: Recipe context containing calibration inputs and device info.
+
+    Raises:
+        RuntimeError: If no calibration inputs are available in the context.
+    """
+    if not ctx.calibration_inputs:
+        raise RuntimeError("Trace requires at least one calibration input.")
+
+    accumulated_diff_stats: dict[str, DifferenceStatistics] = {}
+
+    i = 0
+    for sample in tqdm(
+        ctx.calibration_inputs, unit="batch", desc="side-by-side difference"
+    ):
+        sample = (
+            sample if not isinstance(sample, torch.Tensor) else sample.to(ctx.device)
+        )
+        if isinstance(sample, Mapping):
+            sample = {
+                k: v.to(ctx.device) if isinstance(v, torch.Tensor) else v
+                for k, v in sample.items()
+            }
+
+        fp_outputs = collect_forward_outputs(
+            fp_model,
+            sample,
+            print_trace=False,
+            skip_wrappers=False,
+        )
+
+        q_outputs = collect_forward_outputs(
+            q_model,
+            sample,
+            print_trace=False,
+            skip_wrappers=False,
+        )
+
+        new_diff: dict[str, DifferenceStatistics] = compare_outputs(
+            fp_outputs, q_outputs, verbose=False
+        )
+
+        if i == 0:
+            accumulated_diff_stats = new_diff
+        else:
+            for layer_name, accumulated_diff in accumulated_diff_stats.items():
+                accumulated_diff_stats[layer_name] = merge_diff_stats(
+                    accumulated_diff=accumulated_diff,
+                    new_diff=new_diff[layer_name],
+                    n=i + 1,
+                )
+
+        fp_outputs.clear()
+        q_outputs.clear()
+        gc.collect()
+        print_gpu_memory(f"Batch {i}")
+
+        i += 1
+
+    for layer_name, delta_stats in accumulated_diff_stats.items():
+        print(
+            f"{layer_name}: mean|diff|={delta_stats.mean:.8f}, max|diff|={delta_stats.max:.8f}, peir={delta_stats.peir * 100:.6f}%"
+        )
