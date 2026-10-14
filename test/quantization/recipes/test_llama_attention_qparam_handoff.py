@@ -184,11 +184,24 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
                         layer_idx=0,
                     )
                     self.assertEqual(qattn.attn_options.scale_fusion, fusion)
+                    # Starting calibration resets observers, so do it before
+                    # injecting the GPTQ grids, as the PTQ prepare path does.
+                    qattn.enable_calibration()
                     result = inject_gptq_qparams(qattn, quantizers)
                     self.assertEqual(result, {"matched": 4, "missed": 0, "unused": 0})
 
-                    # Re-enter calibration: injected weight grids must stay locked.
-                    qattn.enable_calibration()
+                    # Weight observers are locked; activation observers must
+                    # remain enabled for the current calibration cycle.
+                    for name in self._PROJECTIONS:
+                        projection = getattr(qattn, name).wrapped
+                        self.assertIsInstance(projection, QuantLinear)
+                        self.assertTrue(projection.obs_weight._qparams_locked)
+                        self.assertFalse(projection.obs_weight.enabled)
+                        self.assertTrue(projection.obs_act_in.enabled)
+                        self.assertTrue(projection.obs_act_out.enabled)
+
+                    # Collect and freeze without restarting calibration: another
+                    # enable_calibration() call would reset the injected grids.
                     for name in self._PROJECTIONS:
                         projection = getattr(qattn, name).wrapped
                         self.assertIsInstance(projection, QuantLinear)
@@ -207,6 +220,8 @@ class TestLlamaAttentionQParamHandoff(unittest.TestCase):
                             / 32
                         )
                         projection(x)
+                        self.assertTrue(projection.obs_weight._qparams_locked)
+                        self.assertFalse(projection.obs_weight.enabled)
                         projection.freeze_qparams()
                         self.assertTrue(projection.obs_act_in.has_qparams)
                         self.assertTrue(projection.obs_act_out.has_qparams)
