@@ -25,14 +25,24 @@ It performs this flow:
 1. Load the recipe config.
 2. Load the model through the registered adapter.
 3. Build calibration inputs through the adapter.
-4. Run the first calibration sample through the FP model and collect module
-   outputs with forward hooks.
-5. Deep-copy the FP model.
-6. Build the PTQ config from the recipe's `ptq` stage.
+4. Deep-copy the FP model.
+5. Build the PTQ config from the recipe's `ptq` stage through the adapter.
+6. Apply the stage's `specs` / `override_policies` / `raw_overrides` with the same
+   `apply_ptq_override_policies()` helper that `PTQStage` uses, resolving model
+   structure from the copied model. Invalid overrides raise here, before
+   `prepare()`.
 7. Prepare and calibrate the copied model.
-8. Optionally call `convert()` when `--enable-quantization` is set.
-9. Run the same sample through the PTQ/converted model.
-10. Print per-module `mean|diff|` and `max|diff|`.
+8. Call `convert()` only when `--enable-quantization` is set.
+9. Run the first calibration sample through the FP model and collect module
+   outputs with forward hooks.
+10. Run the same sample through the PTQ/converted model.
+11. Print per-module `mean|diff|` and `max|diff|`.
+
+Trace mode reflects the selected PTQ stage's selector/raw overrides, so its
+prepared copy uses the same effective PTQ policy as a regular `ptq` stage run.
+It does not re-run the full recipe pipeline: GPTQ, SpinQuant, SmoothQuant, and
+GPTQ-to-PTQ qparam reuse are not executed. `--enable-quantization` only decides
+whether `convert()` runs after calibration.
 
 Typical command:
 

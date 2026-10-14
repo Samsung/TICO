@@ -22,6 +22,7 @@ import torch.nn as nn
 from tico.quantization import convert, prepare
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.override_policies import apply_ptq_override_policies
 from tico.quantization.wrapq.utils.introspection import (
     DifferenceStatistics,
     get_tensor_statistics,
@@ -167,6 +168,15 @@ def trace_ptq_parity(
         raise RuntimeError("Trace mode requires a PTQ stage in the recipe config.")
 
     qcfg = ctx.adapter.build_ptq_config(ctx, ptq_stage_cfg)
+    # Apply the recipe's selector/raw overrides through the same helper as
+    # PTQStage so the traced copy is prepared with the effective PTQ policy.
+    # The copy is both the structure source and the prepare target.
+    qcfg = apply_ptq_override_policies(
+        qcfg,
+        ptq_stage_cfg,
+        family=ctx.adapter.family,
+        model=q_model,
+    )
     q_model = prepare(q_model, qcfg)
     ctx.adapter.calibrate_prepared_model(ctx, q_model, ptq_stage_cfg)
     if enable_quantization:
