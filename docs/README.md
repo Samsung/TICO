@@ -12,6 +12,7 @@ workflows, supported behavior, and the test strategy.
 | [System Design](./design.md) | Contributors | Understand the actual `main`-branch conversion pipeline, package boundaries, pass execution, serialization, runtime behavior, and extension points. |
 | [Development Guide](./development.md) | Contributors | Set up a source checkout, select a Torch build, run tests and model tests, format code, collect coverage, and understand PR CI. |
 | [PyTorch Version Policy](./torch_version_policy.md) | Users and contributors | Understand package installation, legacy installable families, the qualified stable window, candidates, CI tiers, and promotion rules. |
+| [Quantization Guide](./quantization_guide.md) | Users and contributors | Op-level sensitivity guidance, safe PTQ precision defaults, and recommended LLM presets. |
 | [Requirements](./requirements.md) | Users and contributors | Define the currently supported contract, constraints, quality expectations, benchmark targets, and non-goals. |
 | [System Test Guide](./system_test.md) | Contributors | Explain test layers, end-to-end validation, test commands, CI coverage, performance tests, and maintenance rules. |
 
