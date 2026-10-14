@@ -357,6 +357,8 @@ def _build_qwen3_vl_overrides(
     num_text_layers: int,
     num_deepstack_mergers: int,
     linear_weight: Optional[QuantSpec],
+    text_linear_weight: Optional[QuantSpec],
+    vision_linear_weight: Optional[QuantSpec],
     vision_patch_embed_weight: Optional[QuantSpec],
     embedding_weight: Optional[QuantSpec],
     lm_head_weight: Optional[QuantSpec],
@@ -368,6 +370,12 @@ def _build_qwen3_vl_overrides(
     overrides: Dict[str, Any] = {"model": {}}
 
     vision_overrides: Dict[str, Any] = {}
+
+    # Vision towers fall back to the shared linear weight spec unless a
+    # dedicated vision spec is provided (e.g. no_quant to keep vision in FP).
+    eff_vision_weight = (
+        vision_linear_weight if vision_linear_weight is not None else linear_weight
+    )
 
     patch_embed_override = _build_weight_override(vision_patch_embed_weight)
     if patch_embed_override:
@@ -382,13 +390,13 @@ def _build_qwen3_vl_overrides(
         vision_overrides["blocks"][
             str(block_idx)
         ] = _build_qwen3_vl_vision_block_overrides(
-            linear_weight=linear_weight,
+            linear_weight=eff_vision_weight,
             norm=norm,
             norm_weight=norm_weight,
         )
 
     merger_override = _build_qwen3_vl_vision_merger_overrides(
-        linear_weight=linear_weight,
+        linear_weight=eff_vision_weight,
         norm=norm,
         norm_weight=norm_weight,
     )
@@ -398,7 +406,7 @@ def _build_qwen3_vl_overrides(
     if num_deepstack_mergers > 0:
         vision_overrides["deepstack_merger_list"] = {}
         deepstack_override = _build_qwen3_vl_vision_merger_overrides(
-            linear_weight=linear_weight,
+            linear_weight=eff_vision_weight,
             norm=norm,
             norm_weight=norm_weight,
         )
@@ -424,10 +432,16 @@ def _build_qwen3_vl_overrides(
         )
         _set_nested_override(overrides, ("rotate_lm_head",), spin_rotation_override)
 
+    # Text tower falls back to the shared linear weight spec unless a
+    # dedicated text spec is provided (e.g. no_quant to keep the LM in FP).
+    eff_text_weight = (
+        text_linear_weight if text_linear_weight is not None else linear_weight
+    )
+
     text_overrides["layers"] = {}
     for layer_idx in range(num_text_layers):
         text_overrides["layers"][str(layer_idx)] = _build_qwen3_vl_text_layer_overrides(
-            linear_weight=linear_weight,
+            linear_weight=eff_text_weight,
             norm=norm,
             norm_weight=norm_weight,
         )
@@ -457,6 +471,8 @@ def build_qwen3_vl_ptq_config(
     activation: Optional[QuantSpec] = None,
     weight: Optional[QuantSpec] = None,
     linear_weight: Optional[QuantSpec] = None,
+    text_linear_weight: Optional[QuantSpec] = None,
+    vision_linear_weight: Optional[QuantSpec] = None,
     vision_patch_embed_weight: Optional[QuantSpec] = None,
     embedding_weight: Optional[QuantSpec] = None,
     lm_head_weight: Optional[QuantSpec] = None,
@@ -475,6 +491,11 @@ def build_qwen3_vl_ptq_config(
         activation: Default spec for activation-like observers.
         weight: Default spec for parameter-like observers.
         linear_weight: Weight spec for linear projections.
+        text_linear_weight: Optional weight spec for the text decoder layers.
+            When None, text linears use ``linear_weight``.
+        vision_linear_weight: Optional weight spec for the vision tower
+            (blocks, merger, deepstack mergers). When None, vision linears
+            use ``linear_weight``.
         vision_patch_embed_weight: Weight spec for vision patch embedding.
         embedding_weight: Weight spec for token embeddings.
         lm_head_weight: Weight spec for the language modeling head.
@@ -494,6 +515,8 @@ def build_qwen3_vl_ptq_config(
         num_text_layers=num_text_layers,
         num_deepstack_mergers=num_deepstack_mergers,
         linear_weight=linear_weight,
+        text_linear_weight=text_linear_weight,
+        vision_linear_weight=vision_linear_weight,
         vision_patch_embed_weight=vision_patch_embed_weight,
         embedding_weight=embedding_weight,
         lm_head_weight=lm_head_weight,
