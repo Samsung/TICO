@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import torch
 import torch.nn as nn
 
+from tico.quantization.algorithm.gptq.utils import find_layers as _find_layers
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 
 
@@ -209,14 +210,7 @@ def find_layers(
     if layers is None:
         layers = _QUANTIZABLE_LAYER_TYPES
 
-    if type(module) in layers:
-        return {name: module}
-
-    result: dict[str, nn.Module] = {}
-    for child_name, child in module.named_children():
-        qualified_name = f"{name}.{child_name}" if name else child_name
-        result.update(find_layers(child, layers=layers, name=qualified_name))
-    return result
+    return _find_layers(module, layers=layers, name=name)
 
 
 def get_quantizable_layers(module: nn.Module) -> dict[str, nn.Module]:
