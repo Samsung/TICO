@@ -77,6 +77,41 @@ pipeline:
     linear_weight: uint8
 ```
 
+## Multi-batch side-by-side comparison
+
+`tico.quantization.recipes.debug.trace` also owns `trace_parity()` and
+`merge_diff_stats()` for comparing two models that are already prepared:
+
+```python
+from tico.quantization.recipes.debug.trace import merge_diff_stats, trace_parity
+
+trace_parity(fp_model=fp_model, q_model=q_model, ctx=fp_ctx)
+```
+
+How it differs from the inspector's trace mode:
+
+- `trace_ptq_parity()` copies the FP model, prepares and calibrates the copy with
+  the recipe's PTQ policy, and compares the first calibration sample only.
+- `trace_parity()` does not load, quantize, or export anything. It takes two
+  prepared models and iterates over every input in `ctx.calibration_inputs`,
+  running the FP model and then the quantized model on each batch.
+
+The printed `mean|diff|`, `max|diff|`, and `peir` values are aggregates of the
+per-batch summaries: `min`/`max` are the extremes across batches, and `mean`,
+`peir`, and squared `stddev` are running averages that give every batch equal
+weight regardless of its element count. They are not pooled statistics over all
+elements.
+
+The existing CLI is unchanged. `examples/compare_side_by_side.py` still owns
+config loading, extension loading, adapter selection, model preparation, and
+calibration-input preparation, then calls the debug-owned `trace_parity()`:
+
+```bash
+python -m tico.quantization.examples.compare_side_by_side \
+  --config tico/quantization/examples/configs/llama_universal_gptq_quantize.yaml \
+  --set "pipeline.1.gptq.weight_bits=8"
+```
+
 ## When to add a debug mode
 
 Add a debug mode when the workflow is for developers rather than normal users:
