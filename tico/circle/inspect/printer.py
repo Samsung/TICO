@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import Any
 
 from tico.circle._schema import decode_text, enum_name
+from tico.circle.analysis import effective_builtin_code
 from tico.circle.document import CircleDocument
 from tico.circle.graph import as_indices, as_list, is_constant_tensor
 from tico.circle.inspect.summary import CircleModelSummary, summarize_document
@@ -29,7 +30,8 @@ def _enum_name_or_value(enum_type: str, value: int) -> str:
         return str(value)
 
 
-def _operator_code_name(model: Any, opcode_index: int) -> str:
+def _operator_code_name(model: Any, operator: Any) -> str:
+    opcode_index = int(getattr(operator, "opcodeIndex", -1))
     operator_codes = as_list(model.operatorCodes)
     if opcode_index < 0 or opcode_index >= len(operator_codes):
         return f"<invalid:{opcode_index}>"
@@ -37,7 +39,7 @@ def _operator_code_name(model: Any, opcode_index: int) -> str:
     custom_code = decode_text(getattr(code, "customCode", ""))
     if custom_code:
         return custom_code
-    builtin_code = int(getattr(code, "builtinCode", -1))
+    builtin_code = effective_builtin_code(model, operator)
     return _enum_name_or_value("BuiltinOperator", builtin_code)
 
 
@@ -114,7 +116,7 @@ def format_document(
             lines.append("  Operators")
             for operator_index, operator in enumerate(as_list(subgraph.operators)):
                 opcode_index = int(getattr(operator, "opcodeIndex", -1))
-                operator_name = _operator_code_name(document.model, opcode_index)
+                operator_name = _operator_code_name(document.model, operator)
                 inputs = as_indices(getattr(operator, "inputs", None))
                 outputs = as_indices(getattr(operator, "outputs", None))
                 lines.append(
