@@ -353,23 +353,25 @@ def _requires_calibration_inputs(
     cfg: Mapping[str, Any],
     adapter: Any,
 ) -> bool:
-    """Return whether any enabled operation consumes calibration inputs."""
+    """Validate stage entries and resolve whether calibration inputs are needed."""
     adapter_requirement = getattr(adapter, "requires_calibration_inputs", None)
-    if callable(adapter_requirement) and bool(adapter_requirement(cfg)):
-        return True
+    needs_calibration = callable(adapter_requirement) and bool(adapter_requirement(cfg))
 
     for stage_cfg in cfg.get("pipeline", []):
         if not isinstance(stage_cfg, Mapping):
             raise TypeError("Each pipeline stage must be a mapping.")
         if not stage_cfg.get("enabled", True):
             continue
+        # Resolve every enabled stage before model loading, even after an earlier
+        # operation has established that calibration is needed.
         stage = get_stage(stage_cfg["name"])
         # Legacy stages and test doubles may predate this metadata.
         # Preserve the previous runner behavior by conservatively treating
         # an unannotated enabled stage as a calibration consumer.
-        if getattr(stage, "requires_calibration_inputs", True):
-            return True
-    return False
+        needs_calibration = needs_calibration or bool(
+            getattr(stage, "requires_calibration_inputs", True)
+        )
+    return needs_calibration
 
 
 class QuantizationRunner:

@@ -73,6 +73,7 @@ examples/quantize.py
        ├─ load_recipe_extensions(cfg)        # only when cfg["extensions"] is set
        ├─ resolve_adapter(cfg)               # model.adapter or model.family
        ├─ validate_adapter_evaluation_config(adapter, cfg)
+       ├─ validate pipeline stages and determine calibration requirements
        ├─ adapter.load_model(ctx)
        ├─ adapter.build_calibration_inputs(ctx)
        ├─ for each enabled pipeline stage:
@@ -81,6 +82,12 @@ examples/quantize.py
        ├─ adapter.export(ctx)
        └─ save effective_config.yaml
 ```
+
+Before loading the model, the runner checks every pipeline entry and resolves
+every enabled stage name, even when calibration is already required by an earlier
+stage or the adapter. Invalid entries and unknown enabled stages therefore fail
+before model loading or calibration. Disabled stage names are not resolved, and
+legacy stages without calibration metadata still require calibration inputs.
 
 `evaluate.py` and `inspector.py` reuse the same adapters and config format, but do
 not run the full quantization pipeline unless the debug mode explicitly needs a
