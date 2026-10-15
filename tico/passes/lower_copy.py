@@ -20,11 +20,12 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.passes import ops
-from tico.serialize.circle_mapping import extract_shape
+from tico.serialize.circle_mapping import extract_shape, extract_torch_dtype
 from tico.utils import logging
 from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
+from tico.utils.utils import set_new_meta_val
 from tico.utils.validate_args_kwargs import CopyArgs
 
 
@@ -33,8 +34,9 @@ class LowerCopy(PassBase):
     """
     This pass lowers `aten.copy.default` to simpler broadcast operations.
 
-    - If src and dst shapes are the same, the copy is redundant and folded away.
-    - If src and dst shapes differ, it's replaced with expand (broadcast).
+    - Cast src to dst's dtype when they differ, preserving copy's conversion.
+    - If src and dst shapes are the same, use the dtype-correct source directly.
+    - If src and dst shapes differ, expand the dtype-correct source (broadcast).
 
     This simplifies serialization by handling copy logic at the pass level.
     """
@@ -63,6 +65,18 @@ class LowerCopy(PassBase):
             dst_shape = list(extract_shape(dst))
             src_shape = list(extract_shape(src))
 
+            dst_dtype = extract_torch_dtype(dst)
+            if extract_torch_dtype(src) != dst_dtype:
+                with graph.inserting_before(node):
+                    src = create_node(
+                        graph,
+                        torch.ops.aten._to_copy.default,
+                        args=(src,),
+                        kwargs={"dtype": dst_dtype},
+                        origin=node,
+                    )
+                    set_new_meta_val(src)
+
             # Case 1: Same shape - copy is redundant, just use src
             if dst_shape == src_shape:
                 logger.debug(
@@ -86,6 +100,8 @@ class LowerCopy(PassBase):
                 )
 
             node.replace_all_uses_with(expand_node, propagate_meta=True)
+            expand_node.meta.pop("tensor_meta", None)
+            set_new_meta_val(expand_node)
             modified = True
 
         graph.eliminate_dead_code()
