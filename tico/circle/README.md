@@ -314,6 +314,9 @@ tico-circle inspect model.circle \
 tico-circle inspect model.circle --json
 ```
 
+Operator names shown by `--operators` use the same builtin-code resolution as the
+reference runtime, including legacy `deprecatedBuiltinCode` records.
+
 ### Verify
 
 ```bash
