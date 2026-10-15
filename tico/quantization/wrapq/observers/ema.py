@@ -45,7 +45,7 @@ class EMAObserver(AffineObserverBase):
         self.momentum = momentum
 
     @torch.no_grad()
-    def _update_stats(self, x: torch.Tensor):
+    def _update_stats(self, x: torch.Tensor, **kwargs):
         if self.channel_axis is None:
             curr_min, curr_max = x.min(), x.max()
         else:

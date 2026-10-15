@@ -53,7 +53,7 @@ class IdentityObserver(AffineObserverBase):
         """No internal state to reset."""
         pass
 
-    def _update_stats(self, x: torch.Tensor) -> None:
+    def _update_stats(self, x: torch.Tensor, **kwargs) -> None:
         """Skip statistic collection entirely."""
         return
 

@@ -42,7 +42,7 @@ class MXObserver(ObserverBase):
         return
 
     @torch.no_grad()
-    def _update_stats(self, x: torch.Tensor) -> None:
+    def _update_stats(self, x: torch.Tensor, **kwargs) -> None:
         # No stats required
         return None
 
