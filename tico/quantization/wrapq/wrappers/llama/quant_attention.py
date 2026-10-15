@@ -1084,6 +1084,7 @@ class QuantLlamaAttention(QuantModuleBase):
         raise RuntimeError(f"Invalid attention layout: {self.attn_options.layout!r}")
 
     def _all_observers(self):
+        """Yield active observers while retaining dormant module attributes."""
         yield from (
             self.obs_hidden,
             self.obs_cos,
@@ -1102,8 +1103,11 @@ class QuantLlamaAttention(QuantModuleBase):
             self.obs_k_rot,
             self.obs_attn_mask,
             self.obs_logits,
-            self.obs_logits_raw,
-            self.obs_scale,
+        )
+        # Projection fusion removes runtime scaling and its quantization sites.
+        if self.attn_options.scale_fusion == "none":
+            yield from (self.obs_logits_raw, self.obs_scale)
+        yield from (
             self.obs_mask_add,
             self.obs_softmax,
             self.obs_attn_out,

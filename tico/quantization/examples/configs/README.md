@@ -316,6 +316,12 @@ Supported observer names (case-insensitive):
 `PercentileObserver` supports per-tensor quantization only. When using
 explicit `lower_percentile`/`upper_percentile`, the qscheme must be asymmetric.
 
+Llama excludes unused attention-scale observers from calibration and conversion
+when the scale is fused into a projection, including the default `npu_export`
+profile. With `scale_fusion: none`, those observers remain active. Percentile
+still requires calibration data for every active observer; include cached decode
+inputs when calibrating the KV-cache paths.
+
 The `observer` field is only valid for `kind: affine` specs. Using it with
 `kind: mx` or `kind: no_quant` raises `ValueError`.
 
