@@ -21,6 +21,7 @@ from typing import Any
 
 import numpy as np
 from circle_schema import circle
+from tico.circle.document import CircleDocument
 from tico.circle.runtime import (
     CircleReferenceRuntime,
     CircleRuntimeValidationError,
@@ -517,6 +518,123 @@ class ReductionTest(unittest.TestCase):
             "SOFTMAX", [fixture.x], [1, 2], options=_options("SoftmaxOptions", beta=2.0)
         )
         np.testing.assert_allclose(result, [[0.1, 0.9]], rtol=1e-6)
+
+
+class CumsumPrefixTest(unittest.TestCase):
+    def _assert_cumsum(
+        self, value, expected, *, axis=-1, exclusive=False, reverse=False
+    ):
+        builder = CircleModelBuilder()
+        x = builder.input("x", value.shape, dtype=value.dtype)
+        axis_tensor = builder.const_i32("axis", axis)
+        output = builder.activation("out", value.shape, dtype=value.dtype)
+        builder.operator(
+            "CUMSUM",
+            [x, axis_tensor],
+            [output],
+            options=_options("CumsumOptions", exclusive=exclusive, reverse=reverse),
+        )
+        builder.set_outputs(output)
+        document = CircleDocument.from_bytes(builder.build().to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        runtime = CircleReferenceRuntime(document)
+        original = value.copy()
+        for _ in range(2):
+            result = runtime.run((value,)).outputs[0]
+            np.testing.assert_array_equal(
+                result, np.asarray(expected, dtype=value.dtype)
+            )
+            self.assertEqual(result.dtype, value.dtype)
+            self.assertEqual(result.shape, value.shape)
+            self.assertTrue(result.flags.c_contiguous)
+            np.testing.assert_array_equal(value, original)
+
+    def test_exclusive_preserves_small_prefix_before_large_value(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                value: np.ndarray = np.array([1.0, 1e20], dtype=np.float32)
+                expected: np.ndarray = np.array([0.0, 1.0], dtype=np.float32)
+                if reverse:
+                    value, expected = value[::-1], expected[::-1]
+                self._assert_cumsum(value, expected, exclusive=True, reverse=reverse)
+
+    def test_exclusive_does_not_include_current_nonfinite_value(self):
+        for value, expected in (
+            ([np.inf, 1.0], [0.0, np.inf]),
+            ([-np.inf, 1.0], [0.0, -np.inf]),
+            ([1.0, np.inf], [0.0, 1.0]),
+            ([np.nan, 1.0], [0.0, np.nan]),
+            ([1.0, np.nan], [0.0, 1.0]),
+        ):
+            for reverse in (False, True):
+                with self.subTest(value=value, reverse=reverse):
+                    source: np.ndarray = np.array(value, dtype=np.float32)
+                    target: np.ndarray = np.array(expected, dtype=np.float32)
+                    if reverse:
+                        source, target = source[::-1], target[::-1]
+                    self._assert_cumsum(source, target, exclusive=True, reverse=reverse)
+
+    def test_all_options_on_noncontiguous_input_and_negative_axis(self):
+        for dtype in (np.float32, np.int32, np.int64):
+            value: np.ndarray = np.array([[1, 4], [2, 5], [3, 6]], dtype=dtype)
+            value = value.T
+            self.assertFalse(value.flags.c_contiguous)
+            for exclusive, reverse, expected in (
+                (False, False, [[1, 3, 6], [4, 9, 15]]),
+                (False, True, [[6, 5, 3], [15, 11, 6]]),
+                (True, False, [[0, 1, 3], [0, 4, 9]]),
+                (True, True, [[5, 3, 0], [11, 6, 0]]),
+            ):
+                for axis in (-1, -2):
+                    with self.subTest(
+                        dtype=dtype, exclusive=exclusive, reverse=reverse, axis=axis
+                    ):
+                        target: np.ndarray = np.asarray(expected, dtype=dtype)
+                        self._assert_cumsum(
+                            value if axis == -1 else value.T,
+                            target if axis == -1 else target.T,
+                            axis=axis,
+                            exclusive=exclusive,
+                            reverse=reverse,
+                        )
+
+    def test_empty_and_single_element_axes(self):
+        for exclusive in (False, True):
+            for reverse in (False, True):
+                for axis in (0, 1, -1):
+                    with self.subTest(exclusive=exclusive, reverse=reverse, axis=axis):
+                        value = np.empty((2, 0, 3), dtype=np.float32)
+                        self._assert_cumsum(
+                            value,
+                            value,
+                            axis=axis,
+                            exclusive=exclusive,
+                            reverse=reverse,
+                        )
+                with self.subTest(exclusive=exclusive, reverse=reverse, singleton=True):
+                    singleton = np.array([1e20], dtype=np.float32)
+                    self._assert_cumsum(
+                        singleton,
+                        [0] if exclusive else singleton,
+                        exclusive=exclusive,
+                        reverse=reverse,
+                    )
+
+    def test_integer_overflow_stays_in_input_dtype(self):
+        for bits, dtype in ((32, np.int32), (64, np.int64)):
+            maximum = (1 << (bits - 1)) - 1
+            minimum = -(1 << (bits - 1))
+            value = np.array([maximum, 1, 1], dtype=dtype)
+            for exclusive, reverse, expected in (
+                (False, False, [maximum, minimum, minimum + 1]),
+                (False, True, [minimum + 1, 2, 1]),
+                (True, False, [0, maximum, minimum]),
+                (True, True, [2, 1, 0]),
+            ):
+                with self.subTest(dtype=dtype, exclusive=exclusive, reverse=reverse):
+                    self._assert_cumsum(
+                        value, expected, exclusive=exclusive, reverse=reverse
+                    )
 
 
 def math_log(value: float) -> float:
