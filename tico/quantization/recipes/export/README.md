@@ -32,7 +32,7 @@ decides **how** to write an artifact.
 recipes/export/
 ├── README.md
 ├── checkpoint.py     # torch checkpoint saving
-├── circle.py         # full-model Circle export helpers
+├── circle.py         # full-model and shared single-stage Circle export helpers
 ├── gemma4.py         # static Gemma4 vision/text staged Circle export
 ├── llama.py          # staged LLaMA Circle export
 └── qwen3_vl.py       # fixed-grid Qwen3-VL staged Circle export
@@ -40,6 +40,11 @@ recipes/export/
 
 Additional files can be added for per-layer export, ONNX-like formats, debug
 dump formats, or hardware-specific artifacts.
+
+`convert_and_save_circle()` is the shared single-stage writer used by the
+LLaMA, Qwen3-VL, and Gemma4 exporters. It puts the supplied module in eval mode,
+converts and saves it, and returns `None`. Callers own input preparation,
+device placement, output-directory creation, and staged I/O contracts.
 
 ## Artifact naming
 

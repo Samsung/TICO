@@ -21,6 +21,28 @@ import tico
 from tico.utils.utils import SuppressWarning
 
 
+def convert_and_save_circle(
+    module: torch.nn.Module,
+    example_inputs: tuple[Any, ...],
+    save_path: Path,
+    *,
+    kwargs: dict[str, Any] | None = None,
+    dynamic_shapes: Any | None = None,
+    strict: bool = False,
+) -> None:
+    """Convert one prepared export stage to Circle and save it."""
+    print(f"Saving {save_path.name} to {save_path.resolve()}")
+    with torch.no_grad(), SuppressWarning(UserWarning, ".*"):
+        circle_model = tico.convert(
+            module.eval(),
+            example_inputs,
+            kwargs=kwargs,
+            dynamic_shapes=dynamic_shapes,
+            strict=strict,
+        )
+    circle_model.save(save_path)
+
+
 def export_full_circle(
     *,
     model: Any,

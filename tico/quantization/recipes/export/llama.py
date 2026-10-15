@@ -17,8 +17,10 @@ from typing import Any, Sequence
 
 import torch
 
-import tico
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.recipes.export.circle import (
+    convert_and_save_circle as _convert_and_save,
+)
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
@@ -27,28 +29,6 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_example_input,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
-from tico.utils.utils import SuppressWarning
-
-
-def _convert_and_save(
-    module: torch.nn.Module,
-    example_inputs: tuple[Any, ...],
-    save_path: Path,
-    *,
-    kwargs: dict[str, Any] | None = None,
-    dynamic_shapes: Any | None = None,
-    strict: bool = False,
-) -> None:
-    print(f"Saving {save_path.name} to {save_path.resolve()}")
-    with torch.no_grad(), SuppressWarning(UserWarning, ".*"):
-        cm = tico.convert(
-            module.eval(),
-            example_inputs,
-            kwargs=kwargs,
-            dynamic_shapes=dynamic_shapes,
-            strict=strict,
-        )
-    cm.save(save_path)
 
 
 def _make_random_position_embeddings(

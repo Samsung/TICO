@@ -22,8 +22,10 @@ from typing import Any, Mapping
 
 import torch
 
-import tico
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.recipes.export.circle import (
+    convert_and_save_circle as _convert_and_save,
+)
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
@@ -52,33 +54,10 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
-from tico.utils.utils import SuppressWarning
 
 
 _VISION_EXPORT_GRANULARITIES = frozenset({"monolithic", "layer", "both"})
 _PLE_EMBEDDING_FORMATS = frozenset({"auto", "circle", "pt"})
-
-
-def _convert_and_save(
-    module: torch.nn.Module,
-    example_inputs: tuple[Any, ...],
-    save_path: Path,
-    *,
-    kwargs: dict[str, Any] | None = None,
-    dynamic_shapes: Any | None = None,
-    strict: bool = False,
-) -> None:
-    """Convert one Gemma4 export stage to Circle and save it."""
-    print(f"Saving {save_path.name} to {save_path.resolve()}")
-    with torch.no_grad(), SuppressWarning(UserWarning, ".*"):
-        circle_model = tico.convert(
-            module.eval(),
-            example_inputs,
-            kwargs=kwargs,
-            dynamic_shapes=dynamic_shapes,
-            strict=strict,
-        )
-    circle_model.save(save_path)
 
 
 def _is_wrapped_export_model(model: torch.nn.Module) -> bool:
