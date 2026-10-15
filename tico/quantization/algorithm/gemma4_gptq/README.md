@@ -48,6 +48,11 @@ layer. Gemma4 breaks those assumptions:
 
    If no vision batch was cached, vision stages are skipped with a warning.
 
+Conversion temporarily disables the model's `use_cache` flags and restores their
+original values on both success and failure. If conversion fails, the exception
+propagates and recorded calibration inputs remain available. Weights already
+quantized before the failure remain modified.
+
 As with the generic implementation, GPTQ performs **fake quantization** (weights
 stay float, snapped to the grid), and the per-module `Quantizer` objects are
 attached as `model.quantizers` (keyed by fully qualified module name) for reuse

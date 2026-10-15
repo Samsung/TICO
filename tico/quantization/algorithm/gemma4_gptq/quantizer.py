@@ -199,59 +199,60 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
         gptq_conf.validate()
 
         orig_use_cache = self._disable_model_cache(model)
-        components = resolve_gemma4_components(model, gptq_conf)
-        module_name = build_module_name_map(model)
+        try:
+            components = resolve_gemma4_components(model, gptq_conf)
+            module_name = build_module_name_map(model)
 
-        if should_quantize_vision_stage(gptq_conf, stage="patch_embed"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.vision_patch_embed,
-                module_name=module_name,
-                stage_desc="vision.patch_embed",
-                vision_only=True,  # Only use vision inputs for vision stages
-            )
+            if should_quantize_vision_stage(gptq_conf, stage="patch_embed"):
+                self._quantize_stage_from_raw_replay(
+                    model=model,
+                    stage_module=components.vision_patch_embed,
+                    module_name=module_name,
+                    stage_desc="vision.patch_embed",
+                    vision_only=True,  # Only use vision inputs for vision stages
+                )
 
-        if should_quantize_vision_stage(gptq_conf, stage="blocks"):
-            self._quantize_vision_blocks(
-                model=model,
-                components=components,
-                module_name=module_name,
-            )
+            if should_quantize_vision_stage(gptq_conf, stage="blocks"):
+                self._quantize_vision_blocks(
+                    model=model,
+                    components=components,
+                    module_name=module_name,
+                )
 
-        if should_quantize_vision_stage(gptq_conf, stage="pooler"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.vision_pooler,
-                module_name=module_name,
-                stage_desc="vision.pooler",
-                vision_only=True,
-            )
+            if should_quantize_vision_stage(gptq_conf, stage="pooler"):
+                self._quantize_stage_from_raw_replay(
+                    model=model,
+                    stage_module=components.vision_pooler,
+                    module_name=module_name,
+                    stage_desc="vision.pooler",
+                    vision_only=True,
+                )
 
-        if should_quantize_vision_stage(gptq_conf, stage="multimodal_embedder"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.multimodal_embedder,
-                module_name=module_name,
-                stage_desc="vision.multimodal_embedder",
-                vision_only=True,
-            )
+            if should_quantize_vision_stage(gptq_conf, stage="multimodal_embedder"):
+                self._quantize_stage_from_raw_replay(
+                    model=model,
+                    stage_module=components.multimodal_embedder,
+                    module_name=module_name,
+                    stage_desc="vision.multimodal_embedder",
+                    vision_only=True,
+                )
 
-        if should_quantize_text_stage(gptq_conf, stage="layers"):
-            self._quantize_text_layers(
-                model=model,
-                components=components,
-                module_name=module_name,
-            )
+            if should_quantize_text_stage(gptq_conf, stage="layers"):
+                self._quantize_text_layers(
+                    model=model,
+                    components=components,
+                    module_name=module_name,
+                )
 
-        if should_quantize_text_stage(gptq_conf, stage="lm_head"):
-            self._quantize_stage_from_raw_replay(
-                model=model,
-                stage_module=components.lm_head,
-                module_name=module_name,
-                stage_desc="lm_head",
-            )
-
-        self._restore_model_cache(model, orig_use_cache)
+            if should_quantize_text_stage(gptq_conf, stage="lm_head"):
+                self._quantize_stage_from_raw_replay(
+                    model=model,
+                    stage_module=components.lm_head,
+                    module_name=module_name,
+                    stage_desc="lm_head",
+                )
+        finally:
+            self._restore_model_cache(model, orig_use_cache)
 
         self.cache_args.clear()
         self.cache_kwargs.clear()
