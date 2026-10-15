@@ -16,6 +16,10 @@ import unittest
 
 import numpy as np
 
+from tico.circle.analysis import TensorContract
+from tico.circle.errors import CircleValueError
+from tico.circle.value import TensorQuantization, TensorValue
+
 from test.unit_test.circle.infrastructure_fixture import (
     fake_object_factory,
     FakeDetails,
@@ -23,10 +27,6 @@ from test.unit_test.circle.infrastructure_fixture import (
     FLOAT32,
     INT8,
 )
-
-from tico.circle.analysis import TensorContract
-from tico.circle.errors import CircleValueError
-from tico.circle.value import TensorQuantization, TensorValue
 
 
 class TensorContractTest(unittest.TestCase):

@@ -18,6 +18,8 @@ import unittest
 
 from dataclasses import dataclass
 
+from tico.circle.analysis import OperatorPurityAnalysis
+
 from test.unit_test.circle.infrastructure_fixture import (
     add_runtime_tensor,
     make_empty_document,
@@ -29,8 +31,6 @@ from test.unit_test.circle.passes.optimization._fixture import (
     static_contract,
 )
 from test.unit_test.circle.passes.optimization._operator_rewrite_fixture import CUSTOM
-
-from tico.circle.analysis import OperatorPurityAnalysis
 
 
 @dataclass
