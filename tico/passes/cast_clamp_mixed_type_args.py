@@ -37,6 +37,9 @@ class CastClampMixedTypeArgs(PassBase):
     1. Converting min/max arguments to match output dtype when provided
     2. Inserting cast operations when input dtype differs from output dtype
 
+    Arguments are updated by schema position or keyword, including equal scalar
+    bounds and shared tensor inputs.
+
     Behavior Examples:
     - When input dtype differs from output:
         Inserts _to_copy operation to convert input
@@ -110,11 +113,15 @@ class CastClampMixedTypeArgs(PassBase):
         input_dtype = extract_torch_dtype(input)
         output_dtype = extract_torch_dtype(node)
 
-        def _convert_arg(arg, arg_name: str):
+        def _update_arg(arg, arg_idx: int, arg_name: str):
+            if arg_idx < len(node.args):
+                node.update_arg(arg_idx, arg)
+            else:
+                node.update_kwarg(arg_name, arg)
+
+        def _convert_arg(arg, arg_idx: int, arg_name: str):
             if arg is None:
                 return False
-
-            arg_idx = node.args.index(arg)
 
             if isinstance(arg, torch.fx.Node):
                 arg_dtype = extract_torch_dtype(arg)
@@ -130,7 +137,7 @@ class CastClampMixedTypeArgs(PassBase):
                         origin=arg,
                     )
                     set_new_meta_val(to_copy)
-                    node.update_arg(arg_idx, to_copy)
+                    _update_arg(to_copy, arg_idx, arg_name)
 
                 logger.debug(
                     f"Inserting cast for {arg_name} from {arg_dtype} to "
@@ -144,15 +151,15 @@ class CastClampMixedTypeArgs(PassBase):
 
             assert output_dtype in [torch.float, torch.int]
             converted_arg = float(arg) if output_dtype == torch.float else int(arg)
-            node.update_arg(arg_idx, converted_arg)
+            _update_arg(converted_arg, arg_idx, arg_name)
             logger.debug(
                 f"Casting {arg_name} value from {arg_dtype} to {output_dtype} "
                 f"for clamp operation at {node.name}"
             )
             return True
 
-        modified |= _convert_arg(min, "min")
-        modified |= _convert_arg(max, "max")
+        modified |= _convert_arg(min, 1, "min")
+        modified |= _convert_arg(max, 2, "max")
 
         if input_dtype != output_dtype:
             logger.debug(
@@ -167,7 +174,7 @@ class CastClampMixedTypeArgs(PassBase):
                     origin=input,
                 )
                 set_new_meta_val(to_copy)
-                node.update_arg(node.args.index(input), to_copy)
+                node.update_arg(0, to_copy)
 
             modified = True
 
