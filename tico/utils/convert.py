@@ -165,6 +165,7 @@ def traced_run_decompositions(exported_program: ExportedProgram):
         or torch.__version__.startswith("2.13")
         or torch.__version__.startswith("2.14")
         or torch.__version__.startswith("2.15")
+        or torch.__version__.startswith("2.16")
     ):
         return run_decompositions(exported_program)
     else:

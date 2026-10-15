@@ -60,7 +60,7 @@ LATEST_STABLE_VERSION: Final[dict[str, str]] = {
     "2.11": "2.11.0",
     "2.12": "2.12.1",
     "2.13": "2.13.0",
-    "2.14": "2.14.0",
+    "2.14": "2.14.1",
 }
 
 # Values are ordered from newest to oldest. The installer selects the newest
