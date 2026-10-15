@@ -25,6 +25,7 @@ from circle_schema import circle
 from tico.circle.runtime import (
     CircleReferenceRuntime,
     CircleRuntimeValidationError,
+    ExecutionMode,
     UnsupportedCircleOperatorError,
 )
 
@@ -207,6 +208,203 @@ class ComparisonAndLogicalKernelTest(unittest.TestCase):
         np.testing.assert_array_equal(
             result.outputs[0], [[1.0, 1.0, 1.0], [7.0, 8.0, 9.0]]
         )
+
+
+class SelectKernelTest(unittest.TestCase):
+    def _runtime(
+        self,
+        condition,
+        on_true,
+        on_false,
+        *,
+        builtin="SELECT",
+        output_shape=None,
+        quantized=False,
+    ):
+        builder = CircleModelBuilder()
+        inputs = [
+            builder.input(name, value.shape, dtype=value.dtype)
+            for name, value in zip(
+                ("condition", "on_true", "on_false"), (condition, on_true, on_false)
+            )
+        ]
+        out = builder.activation(
+            "out",
+            on_true.shape if output_shape is None else output_shape,
+            dtype=on_true.dtype,
+        )
+        if quantized:
+            for index in (*inputs[1:], out):
+                builder.subgraph.tensors[index].quantization = builder.quantization(
+                    [0.5], [0]
+                )
+        options = "SelectOptions" if builtin == "SELECT" else "SelectV2Options"
+        builder.operator(builtin, inputs, [out], options=_options(options))
+        builder.set_outputs(out)
+        # Exercise the serialized schema and verifier, not just Object API fixtures.
+        return CircleReferenceRuntime(builder.build().to_bytes(), verify=True)
+
+    def test_rank_one_condition_selects_rows_and_preserves_inputs(self):
+        for dtype in (np.int8, np.int32, np.int64, np.float32):
+            with self.subTest(dtype=dtype):
+                inputs: tuple[np.ndarray, ...] = (
+                    np.array([True, False]),
+                    np.array([[1, 2], [3, 4]], dtype=dtype),
+                    np.array([[10, 20], [30, 40]], dtype=dtype),
+                )
+                originals = tuple(value.copy() for value in inputs)
+                runtime = self._runtime(*inputs)
+                for _ in range(2):
+                    result = runtime.run(inputs).outputs[0]
+                    np.testing.assert_array_equal(result, [[1, 2], [30, 40]])
+                    self.assertEqual(result.dtype, dtype)
+                    for value, original in zip(inputs, originals):
+                        np.testing.assert_array_equal(value, original)
+                        self.assertTrue(value.flags.writeable)
+                        self.assertFalse(np.shares_memory(result, value))
+
+    def test_rank_one_condition_selects_rectangular_and_higher_rank_slices(self):
+        for shape in ((2, 3), (2, 1, 3)):
+            with self.subTest(shape=shape):
+                inputs = (
+                    np.array([True, False]),
+                    np.reshape(np.array([[1, 2, 3], [4, 5, 6]], np.float32), shape),
+                    np.reshape(
+                        np.array([[10, 20, 30], [40, 50, 60]], np.float32), shape
+                    ),
+                )
+                result = self._runtime(*inputs).run(inputs).outputs[0]
+                expected = np.reshape(np.array([[1, 2, 3], [40, 50, 60]]), shape)
+                np.testing.assert_array_equal(result, expected)
+
+    def test_scalar_and_equal_shape_conditions(self):
+        on_true = np.array([[1, 2], [3, 4]], np.float32)
+        on_false = np.array([[10, 20], [30, 40]], np.float32)
+        for condition, expected in (
+            (np.array(True), on_true),
+            (np.array(False), on_false),
+            (np.array([[True, False], [False, True]]), [[1, 20], [30, 4]]),
+        ):
+            with self.subTest(condition=condition):
+                inputs = (condition, on_true, on_false)
+                np.testing.assert_array_equal(
+                    self._runtime(*inputs).run(inputs).outputs[0], expected
+                )
+        inputs = (np.array(False), np.array(True), np.array(False))
+        result = self._runtime(*inputs).run(inputs).outputs[0]
+        self.assertEqual(result.shape, ())
+        self.assertEqual(result.dtype, np.bool_)
+        np.testing.assert_array_equal(result, False)
+
+    def test_mixed_single_element_shapes_keep_declared_output_shape(self):
+        # TFLite SelectPrepare/Select explicitly allow mixed scalar representations.
+        for condition in (True, False):
+            for shape in ((), (1,), (1, 1)):
+                with self.subTest(condition=condition, shape=shape):
+                    inputs = (
+                        np.array([condition]),
+                        np.array(7, np.int32),
+                        np.array([[9]], np.int32),
+                    )
+                    result = self._runtime(*inputs, output_shape=shape).run(inputs)
+                    np.testing.assert_array_equal(
+                        result.outputs[0], np.full(shape, 7 if condition else 9)
+                    )
+
+    def test_general_broadcasting_is_rejected_by_legacy_select(self):
+        for condition_shape, true_shape, false_shape in (
+            ((2, 1), (2, 3), (2, 3)),
+            ((3,), (2, 3), (2, 3)),
+            ((1, 2), (2, 2), (2, 2)),
+            ((), (2, 3), (3,)),
+        ):
+            with self.subTest(shapes=(condition_shape, true_shape, false_shape)):
+                inputs = (
+                    np.ones(condition_shape, np.bool_),
+                    np.ones(true_shape, np.float32),
+                    np.zeros(false_shape, np.float32),
+                )
+                with self.assertRaisesRegex(
+                    CircleRuntimeValidationError, "SELECT.*shape"
+                ):
+                    self._runtime(*inputs).run(inputs)
+
+    def test_empty_slices_keep_the_data_shape(self):
+        for condition, shape in (
+            (np.array([], np.bool_), (0, 3)),
+            (np.array([True, False]), (2, 0, 3)),
+            (np.empty((0, 3), np.bool_), (0, 3)),
+            (np.array(True), (0, 3)),
+        ):
+            with self.subTest(condition_shape=condition.shape, shape=shape):
+                inputs = (
+                    condition,
+                    np.empty(shape, np.int32),
+                    np.empty(shape, np.int32),
+                )
+                result = self._runtime(*inputs).run(inputs).outputs[0]
+                self.assertEqual(result.shape, shape)
+                self.assertEqual(result.dtype, np.int32)
+                self.assertEqual(result.size, 0)
+
+    def test_quantized_rows_preserve_values_and_qparams_in_both_modes(self):
+        inputs = (
+            np.array([True, False]),
+            np.array([[2, 4], [6, 8]], np.int8),
+            np.array([[10, 12], [14, 16]], np.int8),
+        )
+        runtime = self._runtime(*inputs, quantized=True)
+        qparams = tuple(runtime.program.tensor(i).quantization for i in (1, 2, 3))
+        for mode in (ExecutionMode.NATIVE, ExecutionMode.FAKE_QUANTIZE):
+            with self.subTest(mode=mode):
+                native = mode is ExecutionMode.NATIVE
+                values = (
+                    inputs
+                    if native
+                    else (
+                        inputs[0],
+                        *(value.astype(np.float32) * 0.5 for value in inputs[1:]),
+                    )
+                )
+                result = runtime.run(values, mode=mode).outputs[0]
+                np.testing.assert_array_equal(
+                    result, [[2, 4], [14, 16]] if native else [[1, 2], [7, 8]]
+                )
+                self.assertEqual(result.dtype, np.int8 if native else np.float32)
+                self.assertEqual(
+                    tuple(runtime.program.tensor(i).quantization for i in (1, 2, 3)),
+                    qparams,
+                )
+
+    def test_select_v2_keeps_trailing_dimension_broadcasting(self):
+        inputs = (
+            np.array([True, False]),
+            np.array([[1, 2], [3, 4]], np.float32),
+            np.array([[10, 20], [30, 40]], np.float32),
+        )
+        result = self._runtime(*inputs, builtin="SELECT_V2").run(inputs).outputs[0]
+        np.testing.assert_array_equal(result, [[1, 20], [3, 40]])
+
+    def test_dtype_validation_is_preserved(self):
+        for builtin in ("SELECT", "SELECT_V2"):
+            for inputs, message in (
+                ((np.array([1]), np.array([1]), np.array([2])), "must be a BOOL"),
+                ((np.array([True]), np.array([1]), np.array([2.0])), "share one dtype"),
+            ):
+                with self.subTest(builtin=builtin, message=message):
+                    with self.assertRaisesRegex(
+                        UnsupportedCircleOperatorError, message
+                    ):
+                        self._runtime(*inputs, builtin=builtin).run(inputs)
+
+    def test_incorrect_output_shape_is_not_repaired(self):
+        inputs = (
+            np.array(True),
+            np.ones((2, 2), np.float32),
+            np.zeros((2, 2), np.float32),
+        )
+        with self.assertRaisesRegex(CircleRuntimeValidationError, "shape"):
+            self._runtime(*inputs, output_shape=(4,)).run(inputs)
 
 
 class UnaryKernelTest(unittest.TestCase):

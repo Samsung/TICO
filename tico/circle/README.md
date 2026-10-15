@@ -714,6 +714,11 @@ FLOAT32 activations are supported for every operator below; integer dtypes are
 supported where TFLite defines integer semantics and the operator is not a quantized
 arithmetic operator (see the next section).
 
+Legacy `SELECT` requires equal data shapes and accepts a scalar condition, an
+element-wise condition with the same shape, or a rank-1 condition selecting slices
+along the first dimension. Mixed scalar representations with one element in every
+input and output retain the declared output shape. `SELECT_V2` uses broadcasting.
+
 | Group | Builtin operators |
 |---|---|
 | Arithmetic | `ADD`, `SUB`, `MUL`, `DIV`, `POW`, `MAXIMUM`, `MINIMUM` (broadcasting, fused activation) |

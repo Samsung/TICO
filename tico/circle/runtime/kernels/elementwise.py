@@ -197,6 +197,46 @@ def _prelu(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     return (_same_dtype(result, dtype),)
 
 
+def _select(ctx: KernelContext) -> tuple[np.ndarray, ...]:
+    """Apply legacy SELECT's scalar, element-wise, or first-dimension selection."""
+
+    ctx.require_inputs(3)
+    condition = ctx.input(0)
+    if condition.dtype != np.dtype(np.bool_):
+        raise ctx.fail(
+            f"{ctx.name} condition must be a BOOL tensor, found {condition.dtype}."
+        )
+    dtype = ctx.require_same_dtype(1, 2)
+    on_true = ctx.input(1)
+    on_false = ctx.input(2)
+    output_shape = ctx.output_tensor().shape
+    if (
+        condition.size == on_true.size == on_false.size == 1
+        and math.prod(output_shape) == 1
+    ):
+        # TFLite SelectPrepare preserves mixed one-element scalar representations.
+        selected = on_true if condition.item() else on_false
+        return (selected.reshape(output_shape).copy(),)
+    if on_true.shape != on_false.shape:
+        raise ctx.invalid(
+            f"SELECT data inputs must have the same shape, found "
+            f"{on_true.shape} and {on_false.shape}."
+        )
+    if condition.ndim != 0 and condition.shape != on_true.shape:
+        if (
+            condition.ndim == 1
+            and on_true.ndim > 0
+            and condition.size == on_true.shape[0]
+        ):
+            condition = condition.reshape((condition.size,) + (1,) * (on_true.ndim - 1))
+        else:
+            raise ctx.invalid(
+                f"SELECT condition shape {condition.shape} must be scalar, match "
+                f"data shape {on_true.shape}, or be rank 1 matching its first dimension."
+            )
+    return (_same_dtype(np.where(condition, on_true, on_false), dtype),)
+
+
 def _select_v2(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     ctx.require_inputs(3)
     condition = ctx.input(0)
@@ -257,7 +297,7 @@ def register_elementwise_kernels(registry: KernelRegistry) -> None:
     registry.register_named("GELU", _gelu)
     registry.register_named("PRELU", _prelu)
     registry.register_named("SELECT_V2", _select_v2)
-    registry.register_named("SELECT", _select_v2)
+    registry.register_named("SELECT", _select)
 
 
 __all__ = ["register_elementwise_kernels"]
