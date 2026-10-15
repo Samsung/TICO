@@ -530,6 +530,7 @@ class FullLikeArgs:
     fill_value: Union[int, float, bool]
     pin_memory: Optional[bool] = None
     memory_format: Optional[torch.memory_format] = None
+    dtype: Optional[torch.dtype] = None
 
 
 @enforce_type

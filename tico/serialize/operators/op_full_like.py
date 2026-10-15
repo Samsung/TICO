@@ -40,12 +40,13 @@ class FullLikeVisitor(NodeVisitor):
         args = FullLikeArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         input = args.input
         fill_value = args.fill_value
+        dtype = args.dtype if args.dtype is not None else input.meta["val"].dtype
 
         # can calculate full_like tensor before inference.
         output_data = torch.full(
             size=input.meta["val"].size(),
             fill_value=fill_value,
-            dtype=input.meta["val"].dtype,
+            dtype=dtype,
         )
 
         self.graph.update_tensor_buffer(output_data, node.name)
