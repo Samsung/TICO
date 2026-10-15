@@ -175,6 +175,30 @@ class MockGemma4Model(nn.Module):
         return x
 
 
+class _CacheStateGemma4Model(MockGemma4Model):
+    """Tiny real replay model that records the cache flags used by conversion."""
+
+    def __init__(self):
+        super().__init__(dim=4, num_vision_layers=0, num_text_layers=0)
+        self.replay_error: RuntimeError | None = None
+        self.replay_cache_states: list[tuple[bool, bool | None]] = []
+        patch_embed = cast(
+            nn.Linear,
+            self.get_submodule("model.vision_tower.patch_embedder.input_proj"),
+        )
+        with torch.no_grad():
+            patch_embed.weight.copy_(torch.eye(4))
+
+    def forward(self, *args, **kwargs):
+        text_config = getattr(self.config, "text_config", None)
+        self.replay_cache_states.append(
+            (self.config.use_cache, getattr(text_config, "use_cache", None))
+        )
+        if self.replay_error is not None:
+            raise self.replay_error
+        return super().forward(*args, **kwargs)
+
+
 def _make_quantizer(**overrides) -> Gemma4GPTQQuantizer:
     """Create a Gemma4GPTQQuantizer with sensible test defaults."""
     defaults: dict[str, Any] = dict(
@@ -570,6 +594,139 @@ class TestCacheControl(unittest.TestCase):
         self.assertIn("model.config.use_cache", saved)
         self.assertNotIn("model.config.text_config.use_cache", saved)
         quantizer._restore_model_cache(model, saved)
+
+
+class TestConvertCacheRestoration(unittest.TestCase):
+    _CACHE_FLAGS = (
+        (True, True),
+        (True, False),
+        (False, True),
+        (False, False),
+        (True, None),
+    )
+
+    def setUp(self):
+        rng_state = torch.random.get_rng_state()
+        self.addCleanup(torch.random.set_rng_state, rng_state)
+        torch.manual_seed(0)
+
+    def _prepare(self, use_cache, text_use_cache, *, stage="patch_embed", **overrides):
+        model = _CacheStateGemma4Model()
+        model.config.use_cache = use_cache
+        if text_use_cache is None:
+            del model.config.text_config
+        else:
+            model.config.text_config.use_cache = text_use_cache
+        quantizer = _make_quantizer(
+            quantize_vision=stage == "patch_embed",
+            quantize_vision_patch_embed=stage == "patch_embed",
+            quantize_vision_blocks=False,
+            quantize_vision_pooler=False,
+            quantize_multimodal_embedder=False,
+            quantize_text=False,
+            quantize_text_layers=False,
+            quantize_lm_head=stage == "lm_head",
+            **overrides,
+        )
+        prepared = quantizer.prepare(model)
+        inputs = torch.eye(4).unsqueeze(0)
+        self.assertIs(prepared, model)
+        self.assertIsNone(prepared(inputs, pixel_values=inputs))
+        self.assertEqual(model.replay_cache_states, [])
+        return model, quantizer
+
+    def _assert_cache_flags(self, model, use_cache, text_use_cache):
+        self.assertIs(model.config.use_cache, use_cache)
+        if text_use_cache is None:
+            self.assertFalse(hasattr(model.config, "text_config"))
+        else:
+            self.assertIs(model.config.text_config.use_cache, text_use_cache)
+
+    def _cached_tensors(self, quantizer):
+        return (
+            quantizer.cache_args[0][0],
+            quantizer.cache_kwargs["pixel_values"][0],
+            quantizer._vision_cache_args[0][0],
+            quantizer._vision_cache_kwargs["pixel_values"][0],
+        )
+
+    def _assert_failed_conversion(self, model, quantizer, cached_tensors):
+        self.assertEqual(model.forward, quantizer._orig_model_forward)
+        self.assertEqual(quantizer.num_batches, 1)
+        self.assertEqual(quantizer._num_vision_batches, 1)
+        for actual, original in zip(self._cached_tensors(quantizer), cached_tensors):
+            self.assertIs(actual, original)
+            self.assertTrue(torch.equal(actual, torch.eye(4).unsqueeze(0)))
+        self.assertFalse(hasattr(model, "quantizers"))
+        for module in model.modules():
+            self.assertEqual(len(module._forward_hooks), 0)
+
+    def test_component_resolution_failure_restores_cache_flags(self):
+        for use_cache, text_use_cache in self._CACHE_FLAGS:
+            with self.subTest(use_cache=use_cache, text_use_cache=text_use_cache):
+                model, quantizer = self._prepare(
+                    use_cache,
+                    text_use_cache,
+                    vision_tower_attr="model.missing_vision_tower",
+                )
+                cached_tensors = self._cached_tensors(quantizer)
+                with self.assertRaisesRegex(
+                    AttributeError, "Missing attribute 'missing_vision_tower'"
+                ):
+                    quantizer.convert(model)
+                self.assertEqual(model.replay_cache_states, [])
+                self._assert_failed_conversion(model, quantizer, cached_tensors)
+                self._assert_cache_flags(model, use_cache, text_use_cache)
+
+    def test_replay_failure_restores_cache_flags(self):
+        for stage in ("patch_embed", "lm_head"):
+            for use_cache, text_use_cache in self._CACHE_FLAGS:
+                with self.subTest(
+                    stage=stage, use_cache=use_cache, text_use_cache=text_use_cache
+                ):
+                    model, quantizer = self._prepare(
+                        use_cache, text_use_cache, stage=stage
+                    )
+                    error = RuntimeError("synthetic replay failure")
+                    model.replay_error = error
+                    cached_tensors = self._cached_tensors(quantizer)
+                    with self.assertRaisesRegex(RuntimeError, str(error)) as raised:
+                        quantizer.convert(model)
+                    self.assertIs(raised.exception, error)
+                    self.assertEqual(
+                        model.replay_cache_states,
+                        [(False, None if text_use_cache is None else False)],
+                    )
+                    self._assert_failed_conversion(model, quantizer, cached_tensors)
+                    self._assert_cache_flags(model, use_cache, text_use_cache)
+
+    def test_success_restores_cache_flags_and_clears_calibration(self):
+        for use_cache, text_use_cache in self._CACHE_FLAGS:
+            with self.subTest(use_cache=use_cache, text_use_cache=text_use_cache):
+                model, quantizer = self._prepare(use_cache, text_use_cache)
+                result = quantizer.convert(model)
+                self.assertIs(result, model)
+                self.assertEqual(model.forward, quantizer._orig_model_forward)
+                self.assertEqual(
+                    model.replay_cache_states,
+                    [(False, None if text_use_cache is None else False)],
+                )
+                self._assert_cache_flags(model, use_cache, text_use_cache)
+                self.assertEqual(quantizer.cache_args, [])
+                self.assertEqual(quantizer.cache_kwargs, {})
+                self.assertEqual(quantizer._vision_cache_args, [])
+                self.assertEqual(quantizer._vision_cache_kwargs, {})
+                self.assertEqual(quantizer.num_batches, 0)
+                self.assertEqual(quantizer._num_vision_batches, 0)
+                self.assertIs(model.quantizers, quantizer._quantizers)
+                self.assertEqual(
+                    list(model.quantizers),
+                    ["model.vision_tower.patch_embedder.input_proj"],
+                )
+                patch_embed = model.model.vision_tower.patch_embedder.input_proj
+                self.assertTrue(torch.equal(patch_embed.weight, torch.eye(4)))
+                for module in model.modules():
+                    self.assertEqual(len(module._forward_hooks), 0)
 
 
 # ---------------------------------------------------------------------------
