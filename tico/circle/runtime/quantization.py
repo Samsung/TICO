@@ -53,7 +53,11 @@ def quantized_range(tensor_type: int) -> tuple[int, int]:
 def round_half_away_from_zero(value: np.ndarray) -> np.ndarray:
     """Round like C ``std::round``: ties move away from zero."""
 
-    return np.where(value >= 0, np.floor(value + 0.5), np.ceil(value - 0.5))
+    # Adding 0.5 can round a value below a tie up to it, or change a large integer.
+    parts: tuple[np.ndarray | np.floating, np.ndarray | np.floating] = np.modf(value)
+    fraction, integral = parts
+    increment = np.copysign(np.abs(fraction) >= 0.5, value)
+    return np.asarray(integral + increment)
 
 
 def _broadcast_parameters(

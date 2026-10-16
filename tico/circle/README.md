@@ -736,6 +736,9 @@ padded cells, `ROUND` rounds half to even, `QUANTIZE` rounds half away from zero
 resize follows `ComputeInterpolationValues`/`GetNearestNeighbor`, and `TRANSPOSE_CONV`
 derives its implicit padding from the declared output shape.
 
+For quantization, exact halfway values round away from zero; immediately adjacent
+values round to the nearer integer, and integral values stay unchanged.
+
 `CUMSUM` accumulates in the input dtype. With `exclusive=True`, each result is the
 sum before the current element in the selected direction, starting with zero even
 when that element is infinite or NaN.
