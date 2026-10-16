@@ -245,6 +245,10 @@ This list intentionally mixes legalization and optimization today; the implement
 contains a TODO to separate those concerns more explicitly. Adding a pass class does
 not automatically schedule it. It must be inserted into this explicit pipeline.
 
+`LowerCopy` preserves `aten.copy`'s destination dtype by casting the source when
+needed before either reusing it for equal shapes or expanding it to the destination
+shape. The cast does not change other users of the source tensor.
+
 ### 5.5 Relaxed-invariant cleanup
 
 After the main bundle, TICO runs:
