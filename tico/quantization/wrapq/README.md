@@ -35,6 +35,10 @@ Modules are replaced with quantized wrappers that simulate quantization behavior
 
 Run representative data through the model to estimate dynamic ranges for activations.
 
+`EMAObserver` owns independent min/max buffers, including for one-dimensional
+per-channel inputs and parameters. Mutating an input after collection does not
+change saved statistics; resetting the observer does not modify the observed tensor.
+
 3. **Convert**
 
 Replace wrapped modules with their quantized counterparts using fixed quantization parameters.
