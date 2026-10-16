@@ -62,6 +62,11 @@ class CircleDocument:
         self._model = model
         self._source = Path(source) if source is not None else None
         self._payload_mapping = payload_mapping
+        # Retain only file identity after release; live payload views may outlast
+        # their mapping owner. Borrowed extractions inherit this record, not ownership.
+        self._payload_source = (
+            payload_mapping._source if payload_mapping is not None else None
+        )
 
     @property
     def model(self) -> Any:
@@ -139,16 +144,16 @@ class CircleDocument:
         keeps a mapped source readable until the replacement is complete.
         """
 
-        mapping = self._payload_mapping
+        source = self._payload_source
         if (
-            mapping is not None
+            source is not None
             and not atomic
             and isinstance(destination, (str, os.PathLike))
             and os.fspath(destination) != "-"
-            and mapping.same_file(destination)
+            and source.same_file(destination)
         ):
             raise CircleIOError(
-                f"Refusing to overwrite the mapped source {mapping.path} in place; "
+                f"Refusing to overwrite the mapped source {source.path} in place; "
                 "use an atomic save so its payloads stay readable."
             )
         save_model(self._model, destination, atomic=atomic)

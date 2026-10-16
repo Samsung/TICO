@@ -183,6 +183,8 @@ def extract_by_operator_indices(
         # Only buffers that survived compaction are still present, so this copies
         # exactly the retained payloads and releases the source's backing storage.
         detach_borrowed_payloads(result.model, borrowed)
+    else:
+        result._payload_source = document._payload_source
 
     final_subgraph = result.subgraph(target_index_after_rewrite)
     final_boundary = GraphBoundary(

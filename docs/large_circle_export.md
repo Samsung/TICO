@@ -189,7 +189,12 @@ complete output is written and synced; on POSIX the replaced inode stays readabl
 through the existing mapping, so payloads are read from the old file while the
 new one is written. Symlink or hard-link aliases of the input behave the same way.
 Non-atomic saves onto a mapped source are refused, because truncating the mapped
-file would invalidate the pages still being read. Windows does not allow replacing
+file would invalidate the pages still being read. This protection also applies to
+borrowed extraction results and documents whose mapping ownership has been released
+while payload views remain alive. File identity is retained without holding the
+mapping open, so hard-link aliases of an old inode remain protected after an atomic
+replacement; clones and detached results carry no such source dependency.
+Windows does not allow replacing
 a mapped file, so the CLI falls back to the eager loader when the output names the
 input; that branch is selected by platform and was not exercised on Windows here.
 
