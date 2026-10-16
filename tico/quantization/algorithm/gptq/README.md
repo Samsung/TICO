@@ -31,6 +31,10 @@ the public interface:
    If `quantize_lm_head=True`, the output head is quantized last using the final
    hidden states (after `model.norm`).
 
+Statistics hooks installed by GPTQ are removed even if registration, device movement,
+or replay fails. Existing caller-owned hooks remain installed and the original error
+propagates. This cleanup does not roll back weights or device placement.
+
 After `convert()`, the per-module `Quantizer` objects (holding scale/zero-point)
 are attached to the model as `model.quantizers` (a `dict[str, Quantizer]` keyed by
 full module name), so downstream tooling can reuse the exact quantization grid.

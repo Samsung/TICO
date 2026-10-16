@@ -291,34 +291,36 @@ class GPTQQuantizer(BaseQuantizer):
                     return _hook
 
                 handles = []
-                for name in subset:
-                    handles.append(subset[name].register_forward_hook(add_batch(name)))
+                try:
+                    for name in subset:
+                        handles.append(
+                            subset[name].register_forward_hook(add_batch(name))
+                        )
 
-                # Run layer forward over all cached batches to build Hessian/statistics
-                batch_num = self.num_batches
-                device = next(model.parameters()).device
-                for batch_idx in tqdm(
-                    range(batch_num),
-                    desc=f"[L{l_idx}] collecting",
-                    leave=False,
-                    unit="batch",
-                    disable=not gptq_conf.show_progress,
-                ):
-                    cache_args_batch = gather_single_batch_from_list(
-                        self.cache_args, batch_idx
-                    )
-                    cache_args_batch = move_to_device(cache_args_batch, device)
+                    # Run layer forward over all cached batches to build Hessian/statistics
+                    batch_num = self.num_batches
+                    device = next(model.parameters()).device
+                    for batch_idx in tqdm(
+                        range(batch_num),
+                        desc=f"[L{l_idx}] collecting",
+                        leave=False,
+                        unit="batch",
+                        disable=not gptq_conf.show_progress,
+                    ):
+                        cache_args_batch = gather_single_batch_from_list(
+                            self.cache_args, batch_idx
+                        )
+                        cache_args_batch = move_to_device(cache_args_batch, device)
 
-                    cache_kwargs_batch = gather_single_batch_from_dict(
-                        self.cache_kwargs, batch_idx
-                    )
-                    cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
+                        cache_kwargs_batch = gather_single_batch_from_dict(
+                            self.cache_kwargs, batch_idx
+                        )
+                        cache_kwargs_batch = move_to_device(cache_kwargs_batch, device)
 
-                    layer(*cache_args_batch, **cache_kwargs_batch)
-
-                # Remove handles
-                for h in handles:
-                    h.remove()
+                        layer(*cache_args_batch, **cache_kwargs_batch)
+                finally:
+                    for h in handles:
+                        h.remove()
 
                 # 3) Quantize each submodule
                 for name in subset:
@@ -466,31 +468,36 @@ class GPTQQuantizer(BaseQuantizer):
 
             return _hook
 
-        handles = [layer.register_forward_hook(add_batch())]
+        handles = []
+        try:
+            handles.append(layer.register_forward_hook(add_batch()))
 
-        # Run layer forward over all cached batches to build Hessian/statistics
-        old_device = device
-        model = model.to("cpu")
-        model.lm_head = model.lm_head.to(old_device)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Run layer forward over all cached batches to build Hessian/statistics
+            old_device = device
+            model = model.to("cpu")
+            model.lm_head = model.lm_head.to(old_device)
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-        device = next(layer.parameters()).device  # in case lm_head is located on cpu
-        for batch_idx in tqdm(
-            range(batch_num),
-            desc=f"[lm_head] collecting",
-            leave=False,
-            unit="batch",
-            disable=not gptq_conf.show_progress,
-        ):
-            hidden_states = gather_single_batch_from_list(self.cache_args, batch_idx)[0]
-            hidden_states = move_to_device(hidden_states, device)
+            device = next(
+                layer.parameters()
+            ).device  # in case lm_head is located on cpu
+            for batch_idx in tqdm(
+                range(batch_num),
+                desc=f"[lm_head] collecting",
+                leave=False,
+                unit="batch",
+                disable=not gptq_conf.show_progress,
+            ):
+                hidden_states = gather_single_batch_from_list(
+                    self.cache_args, batch_idx
+                )[0]
+                hidden_states = move_to_device(hidden_states, device)
 
-            layer(hidden_states)
-
-        # Remove handles
-        for h in handles:
-            h.remove()
+                layer(hidden_states)
+        finally:
+            for h in handles:
+                h.remove()
 
         # Quantize
         if gptq_conf.verbose:
