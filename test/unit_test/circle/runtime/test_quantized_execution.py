@@ -21,12 +21,14 @@ from typing import Any
 
 import numpy as np
 from circle_schema import circle
+from tico.circle.document import CircleDocument
 from tico.circle.runtime import (
     CircleReferenceRuntime,
     CircleRuntimeValidationError,
     ExecutionMode,
     UnsupportedCircleOperatorError,
 )
+from tico.circle.runtime.quantization import round_half_away_from_zero
 
 from test.support.circle.builder import CircleModelBuilder
 
@@ -43,6 +45,136 @@ def _options(name: str, **fields: Any) -> Any:
     for key, value in fields.items():
         setattr(options, key, value)
     return options
+
+
+class QuantizationRoundingTest(unittest.TestCase):
+    def _assert_rounded(self, value, expected):
+        original = value.copy()
+        value.setflags(write=False)
+        expected = np.asarray(expected, dtype=value.dtype)
+
+        result = round_half_away_from_zero(value)
+
+        self.assertIsInstance(result, np.ndarray)
+        self.assertEqual(result.dtype, value.dtype)
+        self.assertEqual(result.shape, value.shape)
+        np.testing.assert_array_equal(result, expected)
+        zeros = expected == 0
+        np.testing.assert_array_equal(
+            np.signbit(result[zeros]), np.signbit(expected[zeros])
+        )
+        np.testing.assert_array_equal(value, original)
+        self.assertFalse(value.flags.writeable)
+        self.assertFalse(np.shares_memory(result, value))
+
+    def test_values_adjacent_to_half_integers(self):
+        for dtype in (np.dtype("float16"), np.dtype("float32"), np.dtype("float64")):
+            for integer in (0, 1, 2):
+                with self.subTest(dtype=dtype, integer=integer):
+                    tie = dtype.type(integer + 0.5)
+                    below = np.nextafter(tie, dtype.type(0))
+                    above = np.nextafter(tie, dtype.type(np.inf))
+                    value = np.array(
+                        [below, tie, above, -below, -tie, -above], dtype=dtype
+                    )
+                    self._assert_rounded(
+                        value,
+                        [
+                            integer,
+                            integer + 1,
+                            integer + 1,
+                            -float(integer),
+                            -(integer + 1),
+                            -(integer + 1),
+                        ],
+                    )
+
+    def test_large_representable_integers_remain_unchanged(self):
+        for dtype, integer in (
+            (np.float16, 1025),
+            (np.float32, 8388609),
+            (np.float64, 4503599627370497),
+        ):
+            with self.subTest(dtype=dtype):
+                value = np.array([integer, -integer], dtype=dtype)
+                self._assert_rounded(value, value)
+
+    def test_special_values_scalar_empty_and_noncontiguous_inputs(self):
+        for dtype in (np.float16, np.float32, np.float64):
+            with self.subTest(dtype=dtype):
+                value: np.ndarray = np.array(
+                    [[-0.0, -0.25, -np.inf, np.nan], [0.0, 0.25, np.inf, 1.0]],
+                    dtype=dtype,
+                )
+                expected: np.ndarray = np.array(
+                    [[-0.0, -0.0, -np.inf, np.nan], [0.0, 0.0, np.inf, 1.0]],
+                    dtype=dtype,
+                )
+                self._assert_rounded(value.T, expected.T)
+                self._assert_rounded(np.array(-0.0, dtype=dtype), -0.0)
+                self._assert_rounded(
+                    np.empty((0, 2), dtype=dtype), np.empty((0, 2), dtype=dtype)
+                )
+
+    def _assert_quantize_roundtrip(
+        self, value, expected, *, scales, zero_points, dtype=np.int8, axis=0
+    ):
+        builder = CircleModelBuilder()
+        x = builder.input("x", value.shape)
+        qparams = builder.quantization(scales, zero_points, quantized_dimension=axis)
+        output = builder.activation("q", value.shape, dtype=dtype, quantization=qparams)
+        builder.operator("QUANTIZE", [x], [output], options=_options("QuantizeOptions"))
+        builder.set_outputs(output)
+        document = CircleDocument.from_bytes(builder.build().to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        runtime = CircleReferenceRuntime(document)
+        original = value.copy()
+        expected = np.asarray(expected, dtype=dtype)
+        broadcast_shape = [1] * value.ndim
+        broadcast_shape[axis] = len(scales)
+        scale = np.asarray(scales, dtype=np.float32).reshape(broadcast_shape)
+        zero_point = np.asarray(zero_points, dtype=np.float32).reshape(broadcast_shape)
+        expected_fake = (expected.astype(np.float32) - zero_point) * scale
+        for mode, target in (
+            (ExecutionMode.NATIVE, expected),
+            (ExecutionMode.FAKE_QUANTIZE, expected_fake),
+        ):
+            with self.subTest(mode=mode):
+                for _ in range(2):
+                    result = runtime.run((value,), mode=mode).outputs[0]
+                    np.testing.assert_array_equal(result, target)
+                    self.assertEqual(result.dtype, target.dtype)
+                    self.assertEqual(result.shape, value.shape)
+                    np.testing.assert_array_equal(value, original)
+
+    def test_per_tensor_quantize_distinguishes_neighbors_from_ties(self):
+        below = np.nextafter(np.float32(0.5), np.float32(0))
+        above = np.nextafter(np.float32(0.5), np.float32(np.inf))
+        value = np.array([below, -below, 0.5, -0.5, above, -above], dtype=np.float32)
+        self._assert_quantize_roundtrip(
+            value, [0, 0, 1, -1, 1, -1], scales=[1.0], zero_points=[0]
+        )
+
+    def test_per_channel_quantize_with_nonunit_scales_and_zero_points(self):
+        below = np.nextafter(np.float32(0.5), np.float32(0))
+        above = np.nextafter(np.float32(0.5), np.float32(np.inf))
+        value: np.ndarray = np.array(
+            [[below, -below], [0.5, -0.5], [above, -above]], dtype=np.float32
+        )
+        value *= np.array([0.5, 2.0], dtype=np.float32)
+        self._assert_quantize_roundtrip(
+            value,
+            [[3, -4], [4, -5], [4, -5]],
+            scales=[0.5, 2.0],
+            zero_points=[3, -4],
+            axis=1,
+        )
+
+    def test_quantize_preserves_large_integral_float32_values(self):
+        value = np.array([8388609, -8388609], dtype=np.float32)
+        self._assert_quantize_roundtrip(
+            value, [8388609, -8388609], scales=[1.0], zero_points=[0], dtype=np.int32
+        )
 
 
 class QuantizeDequantizeKernelTest(unittest.TestCase):
