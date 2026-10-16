@@ -138,9 +138,14 @@ def _cumsum(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     exclusive = bool(ctx.option("exclusive", False))
     reverse = bool(ctx.option("reverse", False))
     source = np.flip(value, axis=axis) if reverse else value
-    result = np.cumsum(source, axis=axis, dtype=value.dtype)
+    result: np.ndarray = np.cumsum(source, axis=axis, dtype=value.dtype)
     if exclusive:
-        result = result - source
+        # Shift prefixes instead of subtracting: subtraction loses small sums
+        # and incorrectly includes the current NaN or infinity in the result.
+        result = np.roll(result, 1, axis=axis)
+        first = [slice(None)] * value.ndim
+        first[axis] = slice(0, 1)
+        result[tuple(first)] = 0
     if reverse:
         result = np.flip(result, axis=axis)
     return (np.ascontiguousarray(result).astype(value.dtype, copy=False),)
