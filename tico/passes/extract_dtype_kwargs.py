@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import TYPE_CHECKING
+from typing import Callable, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import torch._ops
     import torch.fx
 import torch
 from torch.export import ExportedProgram
@@ -79,29 +80,21 @@ def _extract_to_output(node: torch.fx.Node, graph: torch.fx.Graph) -> bool:
 @trace_graph_diff_on_pass
 class ExtractDtypeKwargsPass(PassBase):
     """
-    This pass extracts "dtype" keyword argument from nodes.
+    Extract dtype kwargs only for operators with a semantics-preserving handler.
 
-    Sometimes, torch api receives "dtype" keyword argument.
+    Creation operators such as full_like must retain their dtype: filling in the
+    input dtype and casting afterwards can lose values. Their serializers own
+    construction in the requested dtype.
 
-    E.g. x_bool = torch.full_like(x, 0, dtype=torch.bool)
-
-    But, this argument makes circle build logic complicated because many operators has
-      same type with their inputs'.
-
-    So, this pass changes `op(dtype)` to `op + to(dtype)`.
-
-    NOTE
-
-    [1] There are some ops that are natural to have "dtype" kwargs. The pass is not applied to those ops.
-    [2] If node.kwargs["dtype"] is redundant `op(dtype).dtype == op().dtype`, the pass is not applied.
-
+    There are currently no built-in targets. The pass and target_ops mapping remain
+    available for callers that register their own supported handlers.
     """
 
     def __init__(self):
         super().__init__()
-        # List of Ops whose "dtype" kwargs is extracted
-        self.target_ops = dict()
-        self.target_ops[torch.ops.aten.full_like.default] = _extract_to_output
+        self.target_ops: Dict[
+            torch._ops.OpOverload, Callable[[torch.fx.Node, torch.fx.Graph], bool]
+        ] = {}
 
     def call(self, exported_program: ExportedProgram) -> PassResult:
         graph_module = exported_program.graph_module

@@ -298,6 +298,11 @@ Before serialization, TICO:
 2. Rejects training operators such as `aten.dropout` and `aten.native_dropout`.
 3. Calls `build_circle()` to produce a `CIR0` FlatBuffer.
 
+`full_like` retains its `dtype` through legalization. Its serializer creates the
+fill values directly in that dtype, or in the input dtype when it is omitted or
+`None`. This preserves fractional and large integer fill values without casting
+the input tensor's data.
+
 ## 6. Pass manager and graph invariants
 
 ### Pass interface
