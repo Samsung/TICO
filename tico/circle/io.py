@@ -19,6 +19,7 @@ import os
 import sys
 import tempfile
 import weakref
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, TypeAlias
 
@@ -67,6 +68,24 @@ def read_circle_bytes(source: BinarySource) -> bytes:
     return result
 
 
+@dataclass(frozen=True)
+class _MappedFileSource:
+    """Identify a mapped file without retaining its descriptor or payload storage."""
+
+    path: Path
+    stat: os.stat_result | None = None
+
+    def same_file(self, path: PathLike) -> bool:
+        """Recognize aliases even after the original pathname has been replaced."""
+
+        try:
+            if self.stat is not None:
+                return os.path.samestat(self.stat, os.stat(path))
+            return os.path.samefile(self.path, path)
+        except OSError:
+            return False
+
+
 class CirclePayloadMapping:
     """Own one read-only mapping of a Circle file that payload views borrow from.
 
@@ -80,6 +99,7 @@ class CirclePayloadMapping:
 
     def __init__(self, path: Path, mapping: mmap.mmap):
         self._path = path
+        self._source = _MappedFileSource(path)
         self._mapping: mmap.mmap | None = mapping
         # Observe the mapping after release without keeping it alive.
         self._mapping_ref = weakref.ref(mapping)
@@ -125,10 +145,7 @@ class CirclePayloadMapping:
     def same_file(self, path: PathLike) -> bool:
         """Return whether ``path`` currently names the mapped file."""
 
-        try:
-            return os.path.samefile(self._path, path)
-        except OSError:
-            return False
+        return self._source.same_file(path)
 
     def release(self) -> None:
         """Release this owner's reference; unmap now if no view remains."""
@@ -160,13 +177,16 @@ def map_circle_file(path: PathLike) -> CirclePayloadMapping:
     file_path = Path(path)
     try:
         with file_path.open("rb") as stream:
-            size = os.fstat(stream.fileno()).st_size
+            source_stat = os.fstat(stream.fileno())
+            size = source_stat.st_size
             if size == 0:
                 raise CircleIOError("Circle input is empty.")
             mapping = mmap.mmap(stream.fileno(), size, access=mmap.ACCESS_READ)
     except OSError as error:
         raise CircleIOError(f"Failed to map Circle model {file_path}.") from error
-    return CirclePayloadMapping(file_path, mapping)
+    owner = CirclePayloadMapping(file_path, mapping)
+    owner._source = _MappedFileSource(file_path, source_stat)
+    return owner
 
 
 def write_circle_bytes(
