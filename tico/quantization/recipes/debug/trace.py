@@ -88,7 +88,10 @@ def collect_forward_outputs(
             if (
                 interesting
                 and name not in interesting
-                and not any(name.startswith(prefix) for prefix in interesting)
+                and not any(
+                    prefix == "" or name.startswith(prefix + ".")
+                    for prefix in interesting
+                )
             ):
                 continue
 

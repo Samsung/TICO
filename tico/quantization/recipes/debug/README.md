@@ -60,7 +60,9 @@ Use it with `--enable-quantization` when debugging fake-quantization error.
 
 `--interesting-modules` accepts exact module names and parent module prefixes.
 For example, `--interesting-modules model.visual` traces `model.visual` and its
-descendant modules. When the option is omitted, all named modules are traced.
+descendant modules. Prefixes match dot-separated path components, so
+`model.layers.1` does not select `model.layers.10`. When the option is omitted
+or an empty prefix is supplied, all named modules are traced.
 
 Trace mode intentionally reads model, calibration, and PTQ behavior from the
 recipe config instead of hard-coding model-specific setup in the debug utility.

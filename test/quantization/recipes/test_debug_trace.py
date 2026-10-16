@@ -17,6 +17,7 @@
 import contextlib
 import io
 import unittest
+from collections import OrderedDict
 from unittest.mock import patch
 
 import tico.quantization.recipes.debug.trace as trace_mod
@@ -247,6 +248,74 @@ class TestCollectForwardOutputsHookLifetime(unittest.TestCase):
 
         self._assert_tracing_hooks_removed()
         self._assert_plain_forward_is_clean()
+
+
+class TestCollectForwardOutputsModuleSelection(unittest.TestCase):
+    def _assert_selection(self, model, interesting, expected, *, skip_wrappers=True):
+        value = torch.tensor([-1.0, 2.0])
+        before = value.clone()
+        outputs = collect_forward_outputs(
+            model,
+            value,
+            interesting_modules=interesting,
+            print_trace=False,
+            skip_wrappers=skip_wrappers,
+        )
+        self.assertEqual(list(outputs), expected)
+        self.assertTrue(torch.equal(value, before))
+        for output in outputs.values():
+            self.assertIs(output, value)
+        self.assertTrue(all(not module._forward_hooks for module in model.modules()))
+
+    def test_numeric_component_selects_only_itself_and_descendants(self):
+        model = nn.Sequential(
+            OrderedDict(
+                layers=nn.Sequential(*(nn.Sequential(nn.Identity()) for _ in range(12)))
+            )
+        )
+        self._assert_selection(model, ("layers.1",), ["layers.1.0", "layers.1"])
+        self._assert_selection(model, ("layers.1.0",), ["layers.1.0"])
+
+    def test_named_component_excludes_siblings_with_a_shared_prefix(self):
+        model = nn.Sequential(
+            OrderedDict(
+                block=nn.Sequential(nn.Identity()),
+                block_extra=nn.Sequential(nn.Identity()),
+                blocker=nn.Identity(),
+            )
+        )
+        for interesting, expected in (
+            (("block",), ["block.0", "block"]),
+            (
+                ("block_extra", "block"),
+                ["block.0", "block", "block_extra.0", "block_extra"],
+            ),
+            (("missing",), []),
+        ):
+            with self.subTest(interesting=interesting):
+                self._assert_selection(model, interesting, expected)
+
+    def test_empty_filter_and_empty_prefix_keep_all_modules(self):
+        model = nn.Sequential(
+            OrderedDict(block=nn.Sequential(nn.Identity()), block_extra=nn.Identity())
+        )
+        expected = ["block.0", "block", "block_extra", ""]
+        for interesting in ((), ("",), ("block", "")):
+            with self.subTest(interesting=interesting):
+                self._assert_selection(model, interesting, expected)
+
+    def test_boundary_matching_uses_normalized_wrapper_paths(self):
+        model = nn.Sequential(
+            OrderedDict(
+                block=nn.Sequential(OrderedDict(wrapped=QuantPassthrough())),
+                block_extra=nn.Identity(),
+            )
+        )
+        for skip_wrappers in (True, False):
+            with self.subTest(skip_wrappers=skip_wrappers):
+                self._assert_selection(
+                    model, ("block",), ["block"], skip_wrappers=skip_wrappers
+                )
 
 
 if __name__ == "__main__":
