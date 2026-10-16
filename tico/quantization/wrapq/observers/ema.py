@@ -54,7 +54,9 @@ class EMAObserver(AffineObserverBase):
         if (
             torch.isinf(self.min_val).any() and torch.isinf(self.max_val).any()
         ):  # first batch → hard init
-            self.min_val, self.max_val = curr_min, curr_max
+            # A rank-one per-channel reduction may return the input itself.
+            # Keep independent buffers even when the input is a Parameter.
+            self.min_val, self.max_val = curr_min.clone(), curr_max.clone()
             return
 
         m = self.momentum
