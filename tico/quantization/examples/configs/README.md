@@ -672,6 +672,13 @@ Rules:
 - Export implementation belongs in `recipes/export/` and adapter orchestration.
 - `circle_per_layer` is a generic artifact key; the selected model adapter
   chooses the model-family-specific stage layout.
+- LLaMA `circle_bundle` opts in to paired prefill/decode Circle stages with a
+  versioned manifest, frozen host context, and optional local tokenizer files
+  under `output_dir`. It always exports paired stages regardless of
+  `export.prefill_decode`, requires float32 model export or a supported
+  quantized checkpoint, and needs `export.max_seq_len >= 2`.
+  See the [bundle contract](../../recipes/export/README.md#llama-circle-bundles)
+  and [generation CLI](../README.md#generate-from-a-llama-circle-bundle).
 - Qwen3-VL Circle export requires `model_args.profile: npu_export`, and its
   fixed vision grid/start/merge values must match the wrapped checkpoint.
 

@@ -528,6 +528,15 @@ cleanup, and dtype-bridge insertion.
 These graph passes do not perform calibration and do not select a quantization
 algorithm.
 
+Embedding output quantization remains an explicit `QUANTIZE` after a FLOAT32
+`GATHER`, with table dequantization retained on that edge. Folding an independent
+activation grid into value-preserving `GATHER` would lose the required precision
+conversion. Other consumers of a shared quantized table retain their own lowering.
+Quantization on one branch of a shared floating-point producer also stays
+explicit, so its other consumers retain the original values. Protected float
+producers keep weight dequantization and receive explicit affine dequantization
+bridges from quantized activation inputs.
+
 ### 10.3 Recipe architecture
 
 The recipe layer keeps end-to-end model workflows separate by responsibility:
@@ -537,6 +546,7 @@ The recipe layer keeps end-to-end model workflows separate by responsibility:
 - calibration data: `recipes/data/`
 - evaluation: `recipes/evaluation/`
 - artifact export: `recipes/export/`
+- saved Circle bundle execution and host KV-cache composition: `recipes/runtime/`
 - debugging and parity: `recipes/debug/`
 - user-selectable workflows: YAML presets under `examples/configs/`
 

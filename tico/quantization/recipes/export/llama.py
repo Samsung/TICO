@@ -287,12 +287,37 @@ def export_llama_per_layer(
         artifact_tag,
         register_fake_quant_kernels,
     ) = _prepare_llama_export_model(q_model)
+    _export_prepared_llama_per_layer(
+        export_model=export_model,
+        artifact_tag=artifact_tag,
+        register_fake_quant_kernels=register_fake_quant_kernels,
+        max_seq_len=max_seq_len,
+        output_dir=output_dir,
+        prefill_decode=prefill_decode,
+        append_prefill_buckets=append_prefill_buckets,
+    )
+
+
+def _export_prepared_llama_per_layer(
+    *,
+    export_model: torch.nn.Module,
+    artifact_tag: str,
+    register_fake_quant_kernels: bool,
+    max_seq_len: int,
+    output_dir: Path,
+    prefill_decode: bool,
+    append_prefill_buckets: Sequence[int] | None,
+) -> None:
+    """Write stages without preparing the model a second time."""
     qmodel = cast(QuantLlamaForCausalLM, cast(PTQWrapper, export_model).wrapped)
     layers = cast(QuantLlamaModel, qmodel.model.wrapped).layers
     config = qmodel.config
     append_buckets = _normalize_append_prefill_buckets(
         append_prefill_buckets, max_seq_len
     )
+    # Both export modes share stage filenames. Invalidate an older bundle before
+    # overwriting any stage so failed or legacy exports cannot advertise stale I/O.
+    (output_dir / "llama_manifest.json").unlink(missing_ok=True)
 
     export_token_embedding(
         qmodel,
@@ -369,3 +394,61 @@ def export_llama_per_layer(
             )
 
     export_lm_head(qmodel, output_dir, artifact_tag=artifact_tag)
+
+
+def export_llama_bundle(
+    *,
+    q_model: torch.nn.Module,
+    max_seq_len: int,
+    output_dir: str | Path,
+    tokenizer: Any = None,
+    append_prefill_buckets: Sequence[int] | None = None,
+) -> Path:
+    """Export paired Circle stages and their self-contained host contracts.
+
+    Bundle generation always includes prefill and single-token decode. The host
+    context stores the prepared layers' actual RoPE templates and mask values;
+    loading the bundle does not require the original model or its configuration.
+    """
+    from tico.quantization.recipes.export.llama_bundle import (
+        build_llama_bundle_context,
+        write_llama_bundle,
+    )
+
+    if isinstance(max_seq_len, bool) or not isinstance(max_seq_len, int):
+        raise TypeError("LLaMA Circle bundle max_seq_len must be an integer.")
+    if max_seq_len < 2:
+        raise ValueError("LLaMA Circle bundle max_seq_len must be at least 2.")
+
+    (
+        export_model,
+        artifact_tag,
+        register_fake_quant_kernels,
+    ) = _prepare_llama_export_model(q_model)
+    metadata, host_context = build_llama_bundle_context(
+        qmodel=export_model.wrapped,
+        max_seq_len=max_seq_len,
+        artifact_tag=artifact_tag,
+        tokenizer=tokenizer,
+    )
+    append_buckets = _normalize_append_prefill_buckets(
+        append_prefill_buckets, max_seq_len
+    )
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _export_prepared_llama_per_layer(
+        export_model=export_model,
+        artifact_tag=artifact_tag,
+        register_fake_quant_kernels=register_fake_quant_kernels,
+        max_seq_len=max_seq_len,
+        output_dir=output_dir,
+        prefill_decode=True,
+        append_prefill_buckets=append_buckets,
+    )
+    return write_llama_bundle(
+        metadata=metadata,
+        host_context=host_context,
+        output_dir=output_dir,
+        artifact_tag=artifact_tag,
+        tokenizer=tokenizer,
+    )

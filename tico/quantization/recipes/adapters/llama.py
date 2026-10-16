@@ -31,7 +31,10 @@ from tico.quantization.recipes.evaluation.llm import (
 from tico.quantization.recipes.evaluation.selection import should_run_evaluation
 from tico.quantization.recipes.export.checkpoint import save_checkpoint
 from tico.quantization.recipes.export.circle import export_full_circle
-from tico.quantization.recipes.export.llama import export_llama_per_layer
+from tico.quantization.recipes.export.llama import (
+    export_llama_bundle,
+    export_llama_per_layer,
+)
 from tico.quantization.recipes.override_policies import (
     COMMON_LINEAR_MODULES,
     ComponentQuantTargetInfo,
@@ -419,7 +422,9 @@ class LlamaAdapter(ModelAdapter):
         if "ptq_checkpoint" in artifacts or "checkpoint" in artifacts:
             save_checkpoint(ctx.model, output_dir)
 
-        if not artifacts.intersection({"circle_full", "circle_per_layer"}):
+        if not artifacts.intersection(
+            {"circle_full", "circle_per_layer", "circle_bundle"}
+        ):
             return
 
         profile = _find_ptq_profile(ctx.cfg)
@@ -448,7 +453,15 @@ class LlamaAdapter(ModelAdapter):
                 strict=bool(export_cfg.get("strict", False)),
             )
 
-        if "circle_per_layer" in artifacts:
+        if "circle_bundle" in artifacts:
+            ctx.artifacts["circle_bundle"] = export_llama_bundle(
+                q_model=ctx.model,
+                max_seq_len=max_seq_len,
+                output_dir=output_dir,
+                tokenizer=ctx.tokenizer,
+                append_prefill_buckets=export_cfg.get("append_prefill_buckets"),
+            )
+        elif "circle_per_layer" in artifacts:
             export_llama_per_layer(
                 q_model=ctx.model,
                 max_seq_len=max_seq_len,

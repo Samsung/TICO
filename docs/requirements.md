@@ -151,6 +151,15 @@ and coverage workflows through `./ccex`.
 Documented commands shall match the actual options accepted by the corresponding
 scripts under `infra/`.
 
+### FR-12: Execute saved LLaMA Circle bundles
+
+The LLaMA recipe shall provide opt-in `circle_bundle` export with paired Circle
+stages, a versioned manifest, frozen host context, and optional local tokenizer
+files. The reference consumer shall support batch-one greedy generation without
+loading the source model, reject incompatible contracts and context overflow,
+and select explicit fake-quantize semantics for quantized artifacts. See the
+[bundle contract](../tico/quantization/recipes/export/README.md#llama-circle-bundles).
+
 ## 3. Quality requirements
 
 ### QR-1: Numerical parity is test-specific and explicit
@@ -337,6 +346,7 @@ TICO does not currently promise:
 | Core quantization graph passes | `test/quantization/passes/`, `test/unit_test/quantization/` |
 | Quantization algorithms and WrapQ | `test/quantization/algorithm/`, `test/quantization/wrapq/` |
 | Quantization recipes/export/evaluation | `test/quantization/recipes/`, `test/quantization/examples/`, related smoke tests |
+| Saved LLaMA bundle generation | `test/quantization/recipes/test_llama_circle_runtime.py`, `test_export_llama_bundle.py`, `test/quantization/examples/test_generate_cli.py` |
 | Circle artifact verification/extraction/passes | `test/unit_test/circle/` |
 | CLI and configuration | `test/pt2_to_circle_test/`, config tests, quantization example/config tests |
 | Performance thresholds | `test/performance/benchmark_perf.py`, invoked by `./ccex test -p` |

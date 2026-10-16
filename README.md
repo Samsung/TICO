@@ -14,6 +14,7 @@ representation in ONE designed for optimized on-device neural network inference.
 - **One-call conversion** — `tico.convert()` turns an `nn.Module` into a ready-to-deploy `.circle` binary.
 - **`.pt2` support** — convert saved `torch.export` programs via the Python API or the `pt2-to-circle` command-line tool.
 - **Run Circle models in Python** — execute converted models directly for quick parity checks against PyTorch.
+- **Generate from LLaMA Circle bundles** — reload exported stages and host context for greedy generation without the original checkpoint. See the [generation guide](./tico/quantization/examples/README.md#generate-from-a-llama-circle-bundle).
 - **Circle artifact tools** — inspect, verify, extract, optimize, and clean up exported `.circle` graphs with the `tico.circle` API or `tico-circle` CLI.
 - **Quantization toolkit** — a unified `prepare`/`convert` API with GPTQ, PTQ (WrapQ), SmoothQuant, SpinQuant, and CLE, plus config-driven CLI recipes for LLMs and VLMs.
 

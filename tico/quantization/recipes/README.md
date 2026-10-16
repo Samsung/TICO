@@ -11,7 +11,8 @@ evaluation tasks, and export targets.
 
 1. **Examples are thin entrypoints.**
    `tico/quantization/examples/*.py` should parse CLI arguments, load a
-   config, and call recipe code. They should not own quantization logic.
+   config where needed, and call recipe code. They should not own quantization
+   or artifact-execution logic.
 
 2. **Configurations describe workflows.**
    A new LLaMA quantization preset, a Qwen3-VL PTQ-only preset, or a small
@@ -59,6 +60,7 @@ tico/quantization/recipes/
 ├── data/                  # Calibration data builders
 ├── evaluation/            # Reusable evaluation helpers
 ├── export/                # Checkpoint / Circle / other export helpers
+├── runtime/               # Generation and cache composition from saved Circle bundles
 └── debug/                 # Trace, parity, and inspection helpers
 ```
 
@@ -95,6 +97,13 @@ prepared/converted model. `export.py` also reuses adapters and config format, bu
 loads a saved checkpoint and calls the adapter export path without building
 calibration inputs or running quantization stages.
 
+`generate.py` consumes a saved bundle through `recipes/runtime/`; it does not
+load a recipe config, adapter, source model, or checkpoint. The LLaMA runtime
+executes staged Circle artifacts and owns mask, RoPE, and KV-cache composition.
+See the [bundle contract](export/README.md#llama-circle-bundles) for the reusable
+API and the [generation CLI](../examples/README.md#generate-from-a-llama-circle-bundle)
+for prompt and numeric-input examples.
+
 ## Responsibility boundaries
 
 | Need | Add or modify |
@@ -104,6 +113,7 @@ calibration inputs or running quantization stages.
 | New calibration dataset or synthetic data generator | `recipes/data/*.py` |
 | New benchmark or metric | `recipes/evaluation/*.py` |
 | New checkpoint, Circle, or artifact output | `recipes/export/*.py` |
+| Generation and cache composition from saved model-family artifacts | `recipes/runtime/<family>.py` |
 | New tensor trace, parity, or inspection mode | `recipes/debug/*.py` and `examples/inspector.py` |
 | New common command-line workflow | Usually a config file under `examples/configs/` |
 | New public top-level user action not covered by quantize/evaluate/inspector | A new script under `examples/`, only after design review |
