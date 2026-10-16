@@ -36,6 +36,7 @@ class DecomposeSliceScatter(PassBase):
 
     slice_scatter with step=1 embeds src tensor to input tensor
     We can replace it with (1) slicing input tensors and (2) concatenating all tensors
+    Bounds are normalized against the input axis, including negative and empty slices.
 
     [1] When step = 1,
 
@@ -120,12 +121,11 @@ class DecomposeSliceScatter(PassBase):
                     f"slice_scatter with step > 1 is not yet supported. Node: {node}"
                 )
 
-            start: int = 0 if s is None else s
-            end: int = (
-                extract_shape(src)[dim]
-                if e is None
-                else min(extract_shape(src)[dim], e)
-            )
+            size = extract_shape(input)[dim]
+            start = 0 if s is None else max(0, min(s + size if s < 0 else s, size))
+            end = size if e is None else max(0, min(e + size if e < 0 else e, size))
+            # A reversed slice is empty: retain the suffix from start, not end.
+            end = max(start, end)
 
             with graph.inserting_before(node):
                 slices = []
@@ -141,15 +141,15 @@ class DecomposeSliceScatter(PassBase):
 
                 slices.append(src)
 
-                if start + end < extract_shape(input)[dim]:
+                if end < size:
                     slice_1 = create_node(
                         graph,
                         torch.ops.aten.slice_copy.Tensor,
                         args=(
                             input,
                             dim,
-                            start + end,
-                            extract_shape(input)[dim],
+                            end,
+                            size,
                             1,
                         ),
                         origin=node,

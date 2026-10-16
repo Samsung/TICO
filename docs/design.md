@@ -249,6 +249,11 @@ not automatically schedule it. It must be inserted into this explicit pipeline.
 needed before either reusing it for equal shapes or expanding it to the destination
 shape. The cast does not change other users of the source tensor.
 
+`DecomposeSliceScatter` normalizes unit-step slice bounds against the input axis
+length before constructing the retained prefix and suffix. Negative and clipped
+bounds follow ATen slicing semantics; reversed bounds describe an empty replacement.
+Steps greater than one remain unsupported.
+
 ### 5.5 Relaxed-invariant cleanup
 
 After the main bundle, TICO runs:
