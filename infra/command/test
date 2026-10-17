@@ -9,4 +9,4 @@
 
 CCEX_SCRIPTS_PATH="${CCEX_PROJECT_PATH}/infra/scripts"
 
-python3 ${CCEX_SCRIPTS_PATH}/test_run.py "$@"
+python3 "${CCEX_SCRIPTS_PATH}/test_run.py" "$@"

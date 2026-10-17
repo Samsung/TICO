@@ -140,6 +140,7 @@ pt2-to-circle -h
 
 With no filter, `ccex` runs `unittest` discovery under `test/`. Large model tests are
 selected separately with `-m` and are not part of the normal model-independent suite.
+`./ccex test` supports repository paths containing spaces.
 
 ### Keyword filtering
 
@@ -148,6 +149,8 @@ selected separately with `-m` and are not part of the normal model-independent s
 ./ccex test -k ConvertMatmulToLinear
 ./ccex test -k quantization
 ```
+
+Quote keyword patterns containing spaces to pass them to `unittest` as one argument.
 
 The shorthand keywords `op` and `net` are expanded to the corresponding generated
 module-test namespaces:
