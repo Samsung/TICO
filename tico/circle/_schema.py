@@ -73,6 +73,32 @@ def accessor_api_type(name: str) -> type[Any]:
     raise RuntimeError(f"Circle schema does not provide accessor type {name}.")
 
 
+def schema_enum_value(enum_name: str, member_name: str) -> int:
+    """Return one generated Circle enum member by symbolic name."""
+
+    schema = circle_schema()
+    module = getattr(schema, enum_name, None)
+    enum_type = getattr(module, enum_name, None) if module is not None else None
+    if enum_type is None:
+        enum_type = module
+    if enum_type is None or not hasattr(enum_type, member_name):
+        raise RuntimeError(f"Circle schema does not provide {enum_name}.{member_name}.")
+    return int(getattr(enum_type, member_name))
+
+
+def maybe_schema_enum_value(
+    enum_name: str,
+    member_name: str,
+    fallback: int,
+) -> int:
+    """Return a generated enum value or a stable legacy fallback."""
+
+    try:
+        return schema_enum_value(enum_name, member_name)
+    except (AttributeError, ImportError, RuntimeError):
+        return int(fallback)
+
+
 def enum_name(enum_name: str, value: int) -> str:
     """Return a stable symbolic name for a generated Circle enum value."""
 

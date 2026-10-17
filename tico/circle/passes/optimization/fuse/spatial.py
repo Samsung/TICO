@@ -20,7 +20,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from tico.circle._object import clone_object, ObjectFactory
-from tico.circle._schema import circle_schema
+from tico.circle._schema import (
+    maybe_schema_enum_value as _maybe_schema_enum_value,
+    schema_enum_value as _schema_enum_value,
+)
 from tico.circle.analysis import TensorContract
 from tico.circle.builder import CircleBuilder
 from tico.circle.document import CircleDocument
@@ -509,32 +512,6 @@ def _derived_name(graph: CircleGraph, tensor_index: int, suffix: str) -> str:
     else:
         name = str(raw_name or f"tensor_{tensor_index}")
     return f"{name}/{suffix}"
-
-
-def _schema_enum_value(enum_name: str, member_name: str) -> int:
-    """Return one generated Circle enum member by symbolic name."""
-
-    schema = circle_schema()
-    module = getattr(schema, enum_name, None)
-    enum_type = getattr(module, enum_name, None) if module is not None else None
-    if enum_type is None:
-        enum_type = module
-    if enum_type is None or not hasattr(enum_type, member_name):
-        raise RuntimeError(f"Circle schema does not provide {enum_name}.{member_name}.")
-    return int(getattr(enum_type, member_name))
-
-
-def _maybe_schema_enum_value(
-    enum_name: str,
-    member_name: str,
-    fallback: int,
-) -> int:
-    """Return a generated enum value or a stable legacy fallback."""
-
-    try:
-        return _schema_enum_value(enum_name, member_name)
-    except (AttributeError, ImportError, RuntimeError):
-        return int(fallback)
 
 
 __all__ = [
