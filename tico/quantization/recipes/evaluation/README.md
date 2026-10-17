@@ -68,7 +68,7 @@ recipes/evaluation/
 
 The split is by benchmark/input type, not by model name.
 
-Two target-level entry points are exceptions to "the adapter decides which
+These target-level entry points are exceptions to "the adapter decides which
 helper to call", so that a shared selection policy is edited once rather than
 once per model family:
 
@@ -80,6 +80,10 @@ once per model family:
   normalizes and validates `evaluation.vlm_tasks`, and calls
   `evaluate_vqa_tasks()` plus `print_vqa_results()`. VLM adapters call it at
   their VQA position with the already-resolved evaluation arguments.
+- `mmmu.py`: `run_mmmu_evaluation()` selects the `mmmu` target, normalizes its
+  subject sentinel, and translates recipe settings into evaluator arguments.
+  VLM adapters call it at their MMMU position; adapter preflight still validates
+  the selected dataset before evaluation.
 
 ## Result conventions
 

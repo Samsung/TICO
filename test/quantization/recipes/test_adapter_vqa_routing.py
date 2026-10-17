@@ -32,6 +32,7 @@ from unittest.mock import DEFAULT, patch
 import tico.quantization.recipes.adapters.gemma4 as gemma4_mod
 import tico.quantization.recipes.adapters.qwen3_vl as qwen3_vl_mod
 import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
+import tico.quantization.recipes.evaluation.mmmu as mmmu_mod
 import tico.quantization.recipes.evaluation.vlm as vlm_mod
 
 import torch
@@ -272,7 +273,7 @@ class TestAdapterVqaRouting(unittest.TestCase):
                         },
                     )
                     with patch.object(
-                        module, "evaluate_and_print_mmmu"
+                        mmmu_mod, "evaluate_and_print_mmmu"
                     ) as mmmu, self._patched_vqa_evaluator(owner) as (mocks, _):
                         ctx.adapter.evaluate(ctx)
                     self._assert_vqa_not_run(mocks)
@@ -319,7 +320,7 @@ class TestAdapterVqaRouting(unittest.TestCase):
                         },
                     )
                     with patch.object(
-                        module, "evaluate_and_print_mmmu"
+                        mmmu_mod, "evaluate_and_print_mmmu"
                     ), self._patched_vqa_evaluator(owner) as (mocks, _):
                         ctx.adapter.evaluate(ctx)
                     self._assert_vqa_not_run(mocks)
@@ -415,8 +416,10 @@ class TestAdapterVqaRouting(unittest.TestCase):
                     },
                 )
                 with patch.multiple(
-                    module, evaluate_coco=DEFAULT, evaluate_and_print_mmmu=DEFAULT
+                    module, evaluate_coco=DEFAULT
                 ) as later, patch.object(
+                    mmmu_mod, "evaluate_and_print_mmmu"
+                ) as mmmu, patch.object(
                     llava_bench_mod, "evaluate_and_print_llava_bench_judge"
                 ) as llava, self._patched_vqa_evaluator(
                     owner
@@ -430,7 +433,7 @@ class TestAdapterVqaRouting(unittest.TestCase):
                 mocks["evaluate_vqa_tasks"].assert_called_once()
                 mocks["print_vqa_results"].assert_not_called()
                 later["evaluate_coco"].assert_not_called()
-                later["evaluate_and_print_mmmu"].assert_not_called()
+                mmmu.assert_not_called()
                 llava.assert_not_called()
 
     # --- state and ordering --------------------------------------------

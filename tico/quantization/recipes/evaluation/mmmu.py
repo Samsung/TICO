@@ -34,8 +34,43 @@ def validate_mmmu_recipe_config(cfg: Mapping[str, Any]) -> None:
     if not should_run_mapping_evaluation(eval_cfg, "mmmu"):
         return
     mmmu = get_mapping_evaluation_config(eval_cfg, "mmmu")
-    # Match the adapters' existing dataset default; never silently switch it.
+    # Match run_mmmu_evaluation's dataset default; never silently switch it.
     validate_mmmu_evaluation_dataset(mmmu.get("dataset") or "MMMU/MMMU")
+
+
+def run_mmmu_evaluation(
+    *,
+    eval_cfg: Mapping[str, Any],
+    model: Any,
+    processor: Any,
+    device: str,
+    max_seq_len: int | None,
+    verbose: bool,
+):
+    """Select MMMU and translate recipe settings into evaluator arguments."""
+    if not should_run_mapping_evaluation(eval_cfg, "mmmu"):
+        return None
+
+    mmmu = get_mapping_evaluation_config(eval_cfg, "mmmu")
+    subjects = mmmu.get("subjects")
+    if subjects == ["mmmu"] or subjects == "mmmu":
+        subjects = None
+    return evaluate_and_print_mmmu(
+        model=model,
+        processor=processor,
+        dataset=mmmu.get("dataset") or "MMMU/MMMU",
+        subjects=subjects,
+        device=device,
+        n_shots=int(mmmu.get("n_shots", 5)),
+        n_samples=int(mmmu.get("n_samples", -1)),
+        max_new_tokens=mmmu.get("max_new_tokens"),
+        max_seq_len=max_seq_len,
+        temperature=float(mmmu.get("temperature", 0.0)),
+        verbose=bool(mmmu.get("verbose", verbose)),
+        prompt_mode=mmmu.get("prompt_mode"),
+        input_max_seq_len=mmmu.get("input_max_seq_len"),
+        output_jsonl=mmmu.get("output_jsonl"),
+    )
 
 
 def evaluate_and_print_mmmu(

@@ -989,7 +989,7 @@ class TestMmmuAdapterWiring(unittest.TestCase):
                 for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Name)
-                and node.func.id == "evaluate_and_print_mmmu"
+                and node.func.id == "run_mmmu_evaluation"
             ]
             self.assertEqual(len(calls), 1)
             configs: tuple[dict[str, Any], ...] = (
@@ -1005,16 +1005,18 @@ class TestMmmuAdapterWiring(unittest.TestCase):
             for config in configs:
                 capture = Mock()
                 namespace = dict(
-                    evaluate_and_print_mmmu=capture,
+                    run_mmmu_evaluation=recipe.run_mmmu_evaluation,
                     ctx=SimpleNamespace(
                         model=object(), processor=object(), device="cpu"
                     ),
-                    mmmu=config,
-                    subjects=["vision"],
+                    eval_cfg={"selected_tasks": ["mmmu"], "mmmu": config},
                     max_seq_len=2048,
                     verbose=False,
                 )
-                eval(compile(ast.Expression(calls[0]), str(path), "eval"), namespace)
+                with patch.object(recipe, "evaluate_and_print_mmmu", capture):
+                    eval(
+                        compile(ast.Expression(calls[0]), str(path), "eval"), namespace
+                    )
                 kwargs = capture.call_args.kwargs
                 # Mode defaults are resolved by the evaluator, never by adapters.
                 self.assertEqual(kwargs["max_new_tokens"], config.get("max_new_tokens"))
