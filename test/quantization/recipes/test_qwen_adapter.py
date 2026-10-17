@@ -32,6 +32,7 @@ from unittest.mock import patch
 import tico.quantization.recipes.adapters.qwen3_vl as qwen_mod
 import tico.quantization.recipes.data.vlm as vlm_data
 import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
+import tico.quantization.recipes.evaluation.mmmu as mmmu_mod
 
 import torch
 from tico.quantization.config.ptq import PTQConfig
@@ -550,7 +551,7 @@ class TestQwen3VLAdapter(unittest.TestCase):
             return 12.5
 
         with patch.object(
-            qwen_mod,
+            mmmu_mod,
             "evaluate_and_print_mmmu",
             lambda **kwargs: calls.append(("mmmu", kwargs)),
         ), patch.object(

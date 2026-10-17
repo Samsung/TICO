@@ -32,6 +32,7 @@ from unittest.mock import DEFAULT, patch
 import tico.quantization.recipes.adapters.gemma4 as gemma4_mod
 import tico.quantization.recipes.adapters.qwen3_vl as qwen3_vl_mod
 import tico.quantization.recipes.evaluation.llava_bench as llava_bench_mod
+import tico.quantization.recipes.evaluation.mmmu as mmmu_mod
 import tico.quantization.recipes.evaluation.vlm as vlm_mod
 
 import torch
@@ -328,7 +329,7 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                         },
                     )
                     with patch.object(
-                        module, "evaluate_and_print_mmmu"
+                        mmmu_mod, "evaluate_and_print_mmmu"
                     ) as mmmu, self._patched_llava_evaluators() as (mocks, _):
                         ctx.adapter.evaluate(ctx)
                     self._assert_none_called(mocks)
@@ -470,9 +471,10 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                     evaluate_and_print_video_mme=DEFAULT,
                     evaluate_and_print_mmlu=DEFAULT,
                     evaluate_and_print_hellaswag=DEFAULT,
-                    evaluate_and_print_mmmu=DEFAULT,
                     evaluate_vlm_text_ppl=DEFAULT,
                 ) as mocks, patch.object(
+                    mmmu_mod, "evaluate_and_print_mmmu"
+                ) as evaluate_mmmu, patch.object(
                     vlm_mod, "evaluate_vqa_tasks"
                 ) as evaluate_vqa_tasks, self._patched_llava_evaluators() as (
                     llava_mocks,
@@ -482,7 +484,7 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                     mocks["evaluate_and_print_video_mme"].side_effect = record(
                         "videomme"
                     )
-                    mocks["evaluate_and_print_mmmu"].side_effect = record("mmmu")
+                    evaluate_mmmu.side_effect = record("mmmu")
                     mocks["evaluate_vlm_text_ppl"].side_effect = record("ppl")
                     llava_mocks[
                         "evaluate_and_print_llava_bench_judge"

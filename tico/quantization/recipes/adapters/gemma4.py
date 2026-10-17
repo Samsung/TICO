@@ -31,7 +31,7 @@ from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_he
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
 from tico.quantization.recipes.evaluation.mmmu import (
-    evaluate_and_print_mmmu,
+    run_mmmu_evaluation,
     validate_mmmu_recipe_config,
 )
 from tico.quantization.recipes.evaluation.selection import (
@@ -518,27 +518,14 @@ class Gemma4Adapter(ModelAdapter):
                 ),
             )
 
-        if should_run_mapping_evaluation(eval_cfg, "mmmu"):
-            mmmu = get_mapping_evaluation_config(eval_cfg, "mmmu")
-            subjects = mmmu.get("subjects")
-            if subjects == ["mmmu"] or subjects == "mmmu":
-                subjects = None
-            evaluate_and_print_mmmu(
-                model=ctx.model,
-                processor=ctx.processor,
-                dataset=mmmu.get("dataset") or "MMMU/MMMU",
-                subjects=subjects,
-                device=str(ctx.device),
-                n_shots=int(mmmu.get("n_shots", 5)),
-                n_samples=int(mmmu.get("n_samples", -1)),
-                max_new_tokens=mmmu.get("max_new_tokens"),
-                max_seq_len=max_seq_len,
-                temperature=float(mmmu.get("temperature", 0.0)),
-                verbose=bool(mmmu.get("verbose", verbose)),
-                prompt_mode=mmmu.get("prompt_mode"),
-                input_max_seq_len=mmmu.get("input_max_seq_len"),
-                output_jsonl=mmmu.get("output_jsonl"),
-            )
+        run_mmmu_evaluation(
+            eval_cfg=eval_cfg,
+            model=ctx.model,
+            processor=ctx.processor,
+            device=str(ctx.device),
+            max_seq_len=max_seq_len,
+            verbose=verbose,
+        )
 
         if should_run_mapping_evaluation(eval_cfg, "ppl"):
             ppl_cfg = get_mapping_evaluation_config(eval_cfg, "ppl")
