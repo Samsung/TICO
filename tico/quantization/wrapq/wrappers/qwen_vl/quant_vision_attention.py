@@ -19,6 +19,9 @@ import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.utils.linear_folding import (
+    _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR,
+)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -69,6 +72,14 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
             lin.weight[k_offset : k_offset + k_size, :].mul_(scale_t)
             if lin.bias is not None:
                 lin.bias[k_offset : k_offset + k_size].mul_(scale_t)
+
+        # Record the fold so GPTQ -> PTQ weight-qparam reuse can rescale
+        # pre-fold weight qparams into the folded domain (see
+        # inject_gptq_qparams). Only the K rows absorbed the attention-score
+        # scaling; Q and V rows keep factor 1.
+        multiplier = torch.ones(lin.weight.shape[0])
+        multiplier[k_offset : k_offset + k_size] = float(scale_t)
+        setattr(lin, _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR, multiplier)
 
         mk = self._make_obs
         self.obs_hidden = mk("hidden")
