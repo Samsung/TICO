@@ -283,6 +283,12 @@ class CircleProgram:
                 f"{path} uses Circle tensor type {contract.tensor_type}, which has "
                 "no value codec in the reference runtime."
             ) from error
+        if spec.name == "BFLOAT16":
+            raise UnsupportedCircleOperatorError(
+                f"{path} uses BFLOAT16, which is not supported for execution by "
+                "the reference runtime. Its uint16 value codec preserves raw "
+                "storage bits only."
+            )
         name = decode_text(getattr(tensor, "name", ""))
 
         constant: np.ndarray | None = None
