@@ -194,14 +194,7 @@ def try_register(
             try:
                 mod = importlib.import_module(module_name)
                 fp_cls = getattr(mod, cls_name)
-                existing = _WRAPPERS.get(fp_cls)
-                if existing is not None and existing is not quant_cls:
-                    raise ValueError(
-                        "A quant wrapper is already registered for "
-                        f"{fp_cls.__module__}.{fp_cls.__name__}: "
-                        f"{existing.__module__}.{existing.__name__}."
-                    )
-                _WRAPPERS[fp_cls] = quant_cls
+                register(fp_cls)(quant_cls)
             except (ModuleNotFoundError, AttributeError):
                 # optional dep missing or class renamed – skip silently
                 pass

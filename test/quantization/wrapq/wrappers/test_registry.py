@@ -46,6 +46,11 @@ class TestRegistry(unittest.TestCase):
     def setUp(self):
         self._wrappers_backup = dict(registry._WRAPPERS)
         self._import_once_backup = registry._IMPORT_ONCE
+        self._modules_backup = {
+            name: sys.modules[name]
+            for name in ("tmp_mod", "tmp_mod2", "tmp_mod3")
+            if name in sys.modules
+        }
 
         registry._WRAPPERS.clear()
         registry._IMPORT_ONCE = True
@@ -57,6 +62,7 @@ class TestRegistry(unittest.TestCase):
 
         for mod_name in ("tmp_mod", "tmp_mod2", "tmp_mod3"):
             sys.modules.pop(mod_name, None)
+        sys.modules.update(self._modules_backup)
 
     def test_register_and_lookup(self):
         class DummyFP(nn.Linear):
@@ -154,6 +160,85 @@ class TestRegistry(unittest.TestCase):
             pass
 
         self.assertIs(registry.lookup(TmpFP3), TmpQuant3)
+
+    def test_same_wrapper_registration_is_idempotent_across_aliases(self):
+        class TmpFP(nn.Module):
+            pass
+
+        mod = types.ModuleType("tmp_mod")
+        mod.TmpFP = TmpFP  # type: ignore[attr-defined]
+        mod.Alias = TmpFP  # type: ignore[attr-defined]
+        sys.modules["tmp_mod"] = mod
+
+        self.assertIs(registry.register(TmpFP)(DummyQuant), DummyQuant)
+        self.assertIs(registry.register(TmpFP)(DummyQuant), DummyQuant)
+        for _ in range(2):
+            self.assertIs(
+                registry.try_register("tmp_mod.TmpFP", "tmp_mod.Alias")(DummyQuant),
+                DummyQuant,
+            )
+        self.assertIs(registry.lookup(TmpFP), DummyQuant)
+
+        class ChildFP(TmpFP):
+            pass
+
+        self.assertIsNone(registry.lookup(ChildFP))
+
+    def test_direct_and_optional_registration_share_collision_policy(self):
+        class TmpFP(nn.Module):
+            pass
+
+        class OtherQuant(DummyQuant):
+            pass
+
+        mod = types.ModuleType("tmp_mod")
+        mod.TmpFP = TmpFP  # type: ignore[attr-defined]
+        sys.modules["tmp_mod"] = mod
+        direct = registry.register(TmpFP)
+        optional = registry.try_register("tmp_mod.TmpFP")
+        expected = (
+            "A quant wrapper is already registered for "
+            f"{TmpFP.__module__}.{TmpFP.__name__}: "
+            f"{DummyQuant.__module__}.{DummyQuant.__name__}."
+        )
+
+        for first, second in ((direct, optional), (optional, direct)):
+            with self.subTest(first=first, second=second):
+                registry._WRAPPERS.clear()
+                self.assertIs(first(DummyQuant), DummyQuant)
+                with self.assertRaises(ValueError) as raised:
+                    second(OtherQuant)
+                self.assertEqual(str(raised.exception), expected)
+                self.assertIs(registry.lookup(TmpFP), DummyQuant)
+
+    def test_try_register_keeps_earlier_registration_on_later_collision(self):
+        class FirstFP(nn.Module):
+            pass
+
+        class OccupiedFP(nn.Module):
+            pass
+
+        class LastFP(nn.Module):
+            pass
+
+        class OtherQuant(DummyQuant):
+            pass
+
+        mod = types.ModuleType("tmp_mod")
+        mod.FirstFP = FirstFP  # type: ignore[attr-defined]
+        mod.OccupiedFP = OccupiedFP  # type: ignore[attr-defined]
+        mod.LastFP = LastFP  # type: ignore[attr-defined]
+        sys.modules["tmp_mod"] = mod
+        registry.register(OccupiedFP)(DummyQuant)
+
+        with self.assertRaises(ValueError):
+            registry.try_register(
+                "tmp_mod.FirstFP", "tmp_mod.OccupiedFP", "tmp_mod.LastFP"
+            )(OtherQuant)
+
+        self.assertIs(registry.lookup(FirstFP), OtherQuant)
+        self.assertIs(registry.lookup(OccupiedFP), DummyQuant)
+        self.assertIsNone(registry.lookup(LastFP))
 
 
 if __name__ == "__main__":
