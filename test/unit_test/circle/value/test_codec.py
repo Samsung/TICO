@@ -143,6 +143,20 @@ class TensorValueCodecTest(unittest.TestCase):
                 np.testing.assert_array_equal(restored.data, data)
                 self.assertEqual(restored.data.dtype, data.dtype)
 
+    def test_bfloat16_round_trip_preserves_raw_bits(self):
+        """Keep BFLOAT16 artifact storage independent of runtime dtype support."""
+
+        tensor_type = default_tensor_type_registry().by_name("BFLOAT16").tensor_type
+        codec = TensorValueCodec()
+        data = np.array([0x0000, 0x3F80, 0xC020, 0x7F80, 0x7FC1, 0x8000], np.uint16)
+        payload = b"\x00\x00\x80\x3f\x20\xc0\x80\x7f\xc1\x7f\x00\x80"
+
+        self.assertEqual(codec.encode(TensorValue(tensor_type, (6,), data)), payload)
+        restored = codec.decode(payload, tensor_type=tensor_type, shape=(6,))
+        self.assertEqual(restored.data.dtype, np.uint16)
+        np.testing.assert_array_equal(restored.data, data)
+        self.assertEqual(codec.encode(restored), payload)
+
     def test_encoding_rejects_implicit_dtype_conversion(self):
         """Require the logical NumPy dtype to match the Circle tensor type exactly."""
 

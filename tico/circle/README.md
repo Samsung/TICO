@@ -701,6 +701,9 @@ package. The selection never changes based on which packages are installed.
   mismatch raises `CircleRuntimeValidationError` naming the operator.
 - Constants are decoded with `TensorValueCodec` (little-endian, packed INT4/UINT4,
   zero-sized tensors, scalars). External buffers (`offset`/`size`) are rejected.
+- BFLOAT16 tensors are rejected during runtime preparation with
+  `UnsupportedCircleOperatorError`. The artifact value codec preserves their raw
+  bits as `uint16`; this storage representation does not provide BFLOAT16 arithmetic.
 - Absent optional operands are encoded as tensor index `-1`; kernels that require the
   operand report it. A graph input that is also a graph output is returned as a copy.
 - Inputs are never modified. Repeated `run()` calls share decoded constants and hold no

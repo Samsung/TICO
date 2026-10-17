@@ -32,6 +32,7 @@ from tico.circle.runtime import (
     run_circle,
     UnsupportedCircleOperatorError,
 )
+from tico.utils.model import CircleModel
 
 from test.support.circle.builder import CircleModelBuilder
 
@@ -255,6 +256,83 @@ class DynamicShapeTest(unittest.TestCase):
 
 
 class PrepareValidationTest(unittest.TestCase):
+    def test_bfloat16_activations_are_rejected_before_execution(self):
+        """Raw BFLOAT16 storage must not be admitted as UINT16 arithmetic."""
+
+        builder = CircleModelBuilder()
+        x = builder.input("x", [1], dtype=np.uint16)
+        out = builder.add(x, x, name="out")
+        builder.set_outputs(out)
+        for tensor in builder.subgraph.tensors:
+            tensor.type = circle.TensorType.TensorType.BFLOAT16
+        binary = builder.build().to_bytes()
+
+        # 0x3F80 encodes BFLOAT16 1.0. Integer ADD would return 0x7F00,
+        # whereas BFLOAT16 2.0 is 0x4000; execution must be rejected instead.
+        value = np.array([0x3F80], dtype=np.uint16)
+        for verify in (True, False):
+            with self.subTest(verify=verify):
+                with self.assertRaisesRegex(
+                    UnsupportedCircleOperatorError,
+                    r"subgraphs\[0\]\.tensors\[0\].*BFLOAT16.*not supported",
+                ):
+                    CircleReferenceRuntime(binary, verify=verify)
+        with self.assertRaisesRegex(UnsupportedCircleOperatorError, "BFLOAT16"):
+            run_circle(binary, (value,))
+        np.testing.assert_array_equal(value, [0x3F80])
+
+    def test_bfloat16_output_is_rejected_before_execution(self):
+        """A BFLOAT16 output is unsupported even when all inputs are FLOAT32."""
+
+        builder = CircleModelBuilder()
+        x = builder.input("x", [1])
+        out = builder.activation("out", [1], dtype=np.uint16)
+        builder.subgraph.tensors[out].type = circle.TensorType.TensorType.BFLOAT16
+        options = circle.CastOptions.CastOptionsT()
+        options.inDataType = circle.TensorType.TensorType.FLOAT32
+        options.outDataType = circle.TensorType.TensorType.BFLOAT16
+        builder.operator("CAST", [x], [out], options=options)
+        builder.set_outputs(out)
+
+        with self.assertRaisesRegex(
+            UnsupportedCircleOperatorError,
+            r"subgraphs\[0\]\.tensors\[1\].*BFLOAT16.*not supported",
+        ):
+            CircleReferenceRuntime(builder.build().to_bytes())
+
+    def test_bfloat16_constants_are_rejected_by_public_runtime_apis(self):
+        """Constant outputs retain storage support without runtime dtype support."""
+
+        builder = CircleModelBuilder()
+        const = builder.constant("one", [0x3F80], dtype=np.uint16)
+        builder.subgraph.tensors[const].type = circle.TensorType.TensorType.BFLOAT16
+        builder.set_outputs(const)
+        binary = builder.build().to_bytes()
+
+        with self.assertRaisesRegex(
+            UnsupportedCircleOperatorError,
+            r"subgraphs\[0\]\.tensors\[0\].*BFLOAT16.*not supported",
+        ):
+            CircleReferenceRuntime(binary)
+        with self.assertRaisesRegex(UnsupportedCircleOperatorError, "BFLOAT16"):
+            CircleModel(binary, runtime="reference")()
+
+    def test_uint16_arithmetic_remains_supported(self):
+        """UINT16 values use integer semantics, independently of BFLOAT16 storage."""
+
+        builder = CircleModelBuilder()
+        x = builder.input("x", [1], dtype=np.uint16)
+        out = builder.add(x, x, name="out")
+        builder.set_outputs(out)
+        runtime = CircleReferenceRuntime(builder.build().to_bytes())
+
+        value = np.array([0x3F80], dtype=np.uint16)
+        for _ in range(2):
+            result = runtime.run((value,)).outputs[0]
+            self.assertEqual(result.dtype, np.uint16)
+            np.testing.assert_array_equal(result, [0x7F00])
+        np.testing.assert_array_equal(value, [0x3F80])
+
     def test_unsupported_operator_reports_opcode_version_and_operands(self):
         builder = CircleModelBuilder()
         x = builder.input("x", [3])
