@@ -20,7 +20,10 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from tico.circle._schema import circle_schema
+from tico.circle._schema import (
+    maybe_schema_enum_value as _maybe_schema_enum_value,
+    schema_enum_value as _schema_enum_value,
+)
 from tico.circle.graph import as_list, OPTIONAL_TENSOR_INDEX
 from tico.circle.passes.optimization.fold.evaluators.base import (
     ConstantEvaluation,
@@ -851,32 +854,6 @@ def _union_vector(value: Any) -> tuple[Any, ...]:
         if callable(method):
             return _vector(method())
     return _vector(value)
-
-
-def _schema_enum_value(enum_name: str, member_name: str) -> int:
-    """Return one generated Circle enum member by symbolic name."""
-
-    schema = circle_schema()
-    module = getattr(schema, enum_name, None)
-    enum_type = getattr(module, enum_name, None) if module is not None else None
-    if enum_type is None:
-        enum_type = module
-    if enum_type is None or not hasattr(enum_type, member_name):
-        raise RuntimeError(f"Circle schema does not provide {enum_name}.{member_name}.")
-    return int(getattr(enum_type, member_name))
-
-
-def _maybe_schema_enum_value(
-    enum_name: str,
-    member_name: str,
-    fallback: int,
-) -> int:
-    """Return a generated enum value or a stable legacy fallback."""
-
-    try:
-        return _schema_enum_value(enum_name, member_name)
-    except (AttributeError, ImportError, RuntimeError):
-        return int(fallback)
 
 
 __all__ = [

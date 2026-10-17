@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 
 from tico.circle._object import ObjectFactory
-from tico.circle._schema import circle_schema
+from tico.circle._schema import schema_enum_value as _schema_enum_value
 from tico.circle.analysis import TensorContract
 from tico.circle.builder import CircleBuilder
 from tico.circle.document import CircleDocument
@@ -627,19 +627,6 @@ def _dense_static(contract: TensorContract) -> bool:
         and contract.sparsity is None
         and contract.variant_tensors is None
     )
-
-
-def _schema_enum_value(enum_name: str, member_name: str) -> int:
-    """Return one generated Circle enum member by symbolic name."""
-
-    schema = circle_schema()
-    module = getattr(schema, enum_name, None)
-    enum_type = getattr(module, enum_name, None) if module is not None else None
-    if enum_type is None:
-        enum_type = module
-    if enum_type is None or not hasattr(enum_type, member_name):
-        raise RuntimeError(f"Circle schema does not provide {enum_name}.{member_name}.")
-    return int(getattr(enum_type, member_name))
 
 
 __all__ = [
