@@ -249,6 +249,10 @@ not automatically schedule it. It must be inserted into this explicit pipeline.
 needed before either reusing it for equal shapes or expanding it to the destination
 shape. The cast does not change other users of the source tensor.
 
+`LowerSelectCopyToSlice` retains relative negative slice bounds and uses an open
+end for `index=-1`. This preserves one-element selection without specializing a
+symbolic input axis length.
+
 `DecomposeSliceScatter` normalizes unit-step slice bounds against the input axis
 length before constructing the retained prefix and suffix. Negative and clipped
 bounds follow ATen slicing semantics; reversed bounds describe an empty replacement.

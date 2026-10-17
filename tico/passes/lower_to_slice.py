@@ -56,6 +56,10 @@ def passes():
 @trace_const_diff_on_pass
 class LowerSelectCopyToSlice(PassBase):
     """
+    Negative indices retain relative slice bounds so symbolic axis lengths are not
+    specialized. The last element (index=-1) needs an open end, since end=0 would
+    produce an empty slice.
+
     [before]
             input
                 |
@@ -97,7 +101,7 @@ class LowerSelectCopyToSlice(PassBase):
                 dim = dim % len(input_shape)
 
             start = index
-            end = index + 1
+            end = None if index == -1 else index + 1
             step = 1
             slice_copy_args = (input, dim, start, end, step)
 

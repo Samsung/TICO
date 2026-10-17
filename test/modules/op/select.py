@@ -58,3 +58,11 @@ class SimpleConstIndex(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.rand(1, 32, 6, 16),), {}
+
+
+class NegativeLastSelect(TestModuleBase):
+    def forward(self, x: torch.Tensor):
+        return torch.select(x, dim=-1, index=-1)
+
+    def get_example_inputs(self):
+        return (torch.arange(6, dtype=torch.float32).reshape(2, 3),), {}
