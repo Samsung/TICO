@@ -35,6 +35,10 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 class DummyQuant(QuantModuleBase):
+    # Keep mypy's constructor type concrete when torch is unavailable.
+    def __init__(self) -> None:
+        super().__init__()
+
     def forward(self, x):
         return x
 
