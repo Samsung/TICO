@@ -137,12 +137,39 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     # When False, uses summation.
     normalize_H: bool = True
 
+    # ------------------------------------------------------------------
+    # Token weighting options
+    # ------------------------------------------------------------------
+    # Optional gradient * activation token saliency weighting for Linear-layer
+    # GPTQ Hessian accumulation. Disabled by default to preserve historical
+    # GPTQ behavior.
+    token_weighting: str = "none"
+
+    # Loss used to collect token saliency during the extra gradient replay.
+    # ``output_l2`` is architecture-agnostic and works for both whole-model
+    # replays and individual stage replays.
+    token_weight_loss: str = "output_l2"
+
+    # Clamp normalized token weights to avoid singular calibration batches
+    # dominating or disappearing from the Hessian estimate.
+    token_weight_min: float = 0.05
+    token_weight_max: float = 8.0
+    token_weight_eps: float = 1e-6
+
     def __post_init__(self) -> None:
         """Convert string dtype options (from YAML) to torch.dtype."""
         if isinstance(self.hessian_dtype, str):
             self.hessian_dtype = torch_dtype_from_name(self.hessian_dtype)
         if isinstance(self.inp_dtype, str):
             self.inp_dtype = torch_dtype_from_name(self.inp_dtype)
+        if self.token_weighting is None:
+            # ``--set ...token_weighting=none`` is parsed as CLI null (None).
+            # For this field None can only mean "disabled", same as "none".
+            self.token_weighting = "none"
+        if isinstance(self.token_weighting, str):
+            self.token_weighting = self.token_weighting.strip().lower()
+        if isinstance(self.token_weight_loss, str):
+            self.token_weight_loss = self.token_weight_loss.strip().lower()
 
     @property
     def name(self) -> str:
@@ -219,6 +246,31 @@ class Qwen3VLGPTQConfig(GPTQConfig):
             raise TypeError(
                 "calibration_dataset_spec must be str or None. "
                 f"got {type(self.calibration_dataset_spec)}"
+            )
+
+        if self.token_weighting not in {"none", "grad_act"}:
+            raise ValueError(
+                "token_weighting must be 'none' or 'grad_act'. "
+                f"got {self.token_weighting!r}"
+            )
+
+        if self.token_weight_loss not in {"output_l2"}:
+            raise ValueError(
+                "token_weight_loss must be 'output_l2'. "
+                f"got {self.token_weight_loss!r}"
+            )
+
+        for field_name in ("token_weight_min", "token_weight_max", "token_weight_eps"):
+            value = getattr(self, field_name)
+            if not isinstance(value, (float, int)):
+                raise TypeError(f"{field_name} must be numeric. got {type(value)}")
+            if float(value) <= 0:
+                raise ValueError(f"{field_name} must be positive. got {value}")
+
+        if float(self.token_weight_min) > float(self.token_weight_max):
+            raise ValueError(
+                "token_weight_min must be <= token_weight_max. "
+                f"got {self.token_weight_min} > {self.token_weight_max}"
             )
 
         attr_fields = {
