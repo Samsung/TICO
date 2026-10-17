@@ -22,6 +22,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tico.quantization import prepare
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.evaluation.metric import compute_peir
+from tico.quantization.recipes.debug.token_mask import (
+    build_position_ids_from_valid_token_mask as _build_position_ids_from_valid_token_mask,
+    last_valid_token_indices as _last_valid_token_indices,
+    normalize_valid_token_mask as _normalize_valid_token_mask,
+    validate_padding_layout as _validate_padding_layout,
+)
 from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
 )
@@ -89,69 +95,6 @@ def _build_rope_templates_from_config(
     sin[..., :half_dim] = -sin[..., :half_dim]
 
     return cos.unsqueeze(0).to(dtype=dtype), sin.unsqueeze(0).to(dtype=dtype)
-
-
-def _normalize_valid_token_mask(
-    input_ids: torch.LongTensor,
-    attention_mask: Optional[torch.Tensor],
-    *,
-    pad_token_id: Optional[int],
-    device: torch.device,
-) -> torch.Tensor:
-    if attention_mask is None:
-        if pad_token_id is None:
-            valid = torch.ones(input_ids.shape, device=device, dtype=torch.bool)
-        else:
-            valid = input_ids.to(device).ne(int(pad_token_id))
-    else:
-        if tuple(attention_mask.shape) != tuple(input_ids.shape):
-            raise ValueError(
-                "attention_mask must have the same shape as input_ids. "
-                f"Got attention_mask={tuple(attention_mask.shape)}, "
-                f"input_ids={tuple(input_ids.shape)}."
-            )
-        valid = attention_mask.to(device=device).bool()
-
-    if torch.any(valid.sum(dim=1) == 0):
-        raise ValueError("Each batch row must contain at least one real token.")
-    return valid
-
-
-def _validate_padding_layout(valid_token_mask: torch.Tensor, padding_side: str) -> None:
-    batch_size, seq_len = valid_token_mask.shape
-    valid_lengths = valid_token_mask.sum(dim=1)
-    positions = torch.arange(seq_len, device=valid_token_mask.device).unsqueeze(0)
-
-    if padding_side == "right":
-        expected = positions < valid_lengths.unsqueeze(1)
-    elif padding_side == "left":
-        expected = positions >= (seq_len - valid_lengths).unsqueeze(1)
-    else:
-        raise ValueError(
-            f"padding_side must be 'left' or 'right'. got {padding_side!r}"
-        )
-
-    if not torch.equal(valid_token_mask, expected):
-        raise ValueError(
-            "Input padding layout does not match padding_side. "
-            f"Expected contiguous {padding_side} padding for shape "
-            f"(B={batch_size}, S={seq_len})."
-        )
-
-
-def _build_position_ids_from_valid_token_mask(
-    valid_token_mask: torch.Tensor,
-) -> torch.LongTensor:
-    position_ids = valid_token_mask.to(torch.long).cumsum(dim=1) - 1
-    position_ids = torch.clamp(position_ids, min=0)
-    return position_ids.masked_fill(~valid_token_mask, 0)
-
-
-def _last_valid_token_indices(valid_token_mask: torch.Tensor) -> torch.LongTensor:
-    batch_size, seq_len = valid_token_mask.shape
-    positions = torch.arange(seq_len, device=valid_token_mask.device)
-    positions = positions.unsqueeze(0).expand(batch_size, -1)
-    return positions.masked_fill(~valid_token_mask, 0).max(dim=1).values
 
 
 def _gather_last_valid_token(

@@ -114,6 +114,12 @@ python -m tico.quantization.examples.compare_side_by_side \
   --set "pipeline.1.gptq.weight_bits=8"
 ```
 
+## Static runtime token helpers
+
+`token_mask.py` owns the shared padded-text mask, padding-layout, position-ID,
+and last-token-index calculations used by the LLaMA and Qwen3-VL debug runtimes.
+The runtime modules retain their existing private helper names as import aliases.
+
 ## When to add a debug mode
 
 Add a debug mode when the workflow is for developers rather than normal users:
