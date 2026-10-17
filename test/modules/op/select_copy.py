@@ -45,3 +45,11 @@ class SimpleSelectCopy2(TestModuleBase):
 
     def get_example_inputs(self):
         return (torch.randn(2, 3, 4),), {}
+
+
+class NegativeFirstSelectCopy(TestModuleBase):
+    def forward(self, x: torch.Tensor):
+        return torch.select_copy(x, dim=-1, index=-3)
+
+    def get_example_inputs(self):
+        return (torch.arange(6, dtype=torch.int32).reshape(2, 3),), {}
