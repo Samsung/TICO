@@ -63,6 +63,53 @@ def get_permute_weight_input(
     return getattr(dq_args, "input", weight)
 
 
+def _permute_conv_weight(
+    graph: torch.fx.Graph,
+    node: torch.fx.Node,
+    conv_args: Conv2DArgs | ConvTranspose2DArgs,
+    perm: list[int],
+) -> None:
+    """Permute stored weights, preserving the existing dequantize node and qparams.
+
+    A per-channel axis follows the weight permutation. Its stale value metadata
+    is removed for FillMetaVal to refresh; other users retain the same node.
+    """
+    weight = get_permute_weight_input(conv_args)
+    with graph.inserting_after(weight):
+        weight_permute = create_node(
+            graph,
+            torch.ops.aten.permute.default,
+            args=(weight, perm),
+            origin=weight,
+        )
+        if conv_args.weight.target in [
+            torch.ops.quantized_decomposed.dequantize_per_channel.default,
+            torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+        ]:
+            dq = conv_args.weight
+            if (
+                dq.target
+                == torch.ops.quantized_decomposed.dequantize_per_channel.default
+            ):
+                dq_args = DequantizePerChannelArgs(
+                    *dq.args, **dq.kwargs  # type: ignore[arg-type]
+                )
+                old_axis = dq_args.axis
+                if old_axis < 0:
+                    old_axis += len(perm)
+                if old_axis not in perm:
+                    raise NotYetSupportedError(
+                        f"Invalid per-channel axis {dq_args.axis} for "
+                        f"weight permutation {perm}."
+                    )
+                dq.update_arg(3, perm.index(old_axis))
+            dq.update_arg(dq.args.index(weight), weight_permute)
+            # Need to update dq.meta["val"] in FillMetaVal pass.
+            del dq.meta["val"]
+        else:
+            node.update_arg(node.args.index(weight), weight_permute)
+
+
 @trace_graph_diff_on_pass
 class LegalizePreDefinedLayoutOperators(PassBase):
     """
@@ -240,49 +287,15 @@ class LegalizePreDefinedLayoutOperators(PassBase):
             node.update_arg(node.args.index(input), input_permute)
 
         # weight permute
-        weight = get_permute_weight_input(args)
-        with graph.inserting_after(weight):
-            if groups == 1:
-                # circle_custom.conv2d
-                perm = [0, 2, 3, 1]  # OIHW_to_OHWI
-            elif groups == input_shape[1]:
-                # circle_custom.depthwise_conv2d
-                perm = [1, 2, 3, 0]  # O1HW_to_1HWO
-            else:
-                assert groups == 1 or groups == input_shape[1]  # Cannot reach here
-
-            weight_permute = create_node(
-                graph,
-                torch.ops.aten.permute.default,
-                args=(weight, perm),
-                origin=weight,
-            )
-            if args.weight.target in [
-                torch.ops.quantized_decomposed.dequantize_per_channel.default,
-                torch.ops.quantized_decomposed.dequantize_per_tensor.default,
-            ]:
-                dq = args.weight
-                if (
-                    dq.target
-                    == torch.ops.quantized_decomposed.dequantize_per_channel.default
-                ):
-                    dq_args = DequantizePerChannelArgs(
-                        *dq.args, **dq.kwargs  # type: ignore[arg-type]
-                    )
-                    old_axis = dq_args.axis
-                    if old_axis < 0:
-                        old_axis += len(perm)
-                    if old_axis not in perm:
-                        raise NotYetSupportedError(
-                            f"Invalid per-channel axis {dq_args.axis} for "
-                            f"weight permutation {perm}."
-                        )
-                    dq.update_arg(3, perm.index(old_axis))
-                dq.update_arg(dq.args.index(weight), weight_permute)
-                # Need to update dq.meta["val"] in FillMetaVal pass.
-                del dq.meta["val"]
-            else:
-                node.update_arg(node.args.index(weight), weight_permute)
+        if groups == 1:
+            # circle_custom.conv2d
+            perm = [0, 2, 3, 1]  # OIHW_to_OHWI
+        elif groups == input_shape[1]:
+            # circle_custom.depthwise_conv2d
+            perm = [1, 2, 3, 0]  # O1HW_to_1HWO
+        else:
+            assert groups == 1 or groups == input_shape[1]  # Cannot reach here
+        _permute_conv_weight(graph, node, args, perm)
 
         with graph.inserting_before(node):
             legalized_op = None
@@ -356,41 +369,8 @@ class LegalizePreDefinedLayoutOperators(PassBase):
             node.update_arg(node.args.index(input), input_permute)
 
         # weight permute
-        weight = get_permute_weight_input(args)
-        with graph.inserting_after(weight):
-            perm = [1, 2, 3, 0]  # IOHW_to_OHWI
-            weight_permute = create_node(
-                graph,
-                torch.ops.aten.permute.default,
-                args=(weight, perm),
-                origin=weight,
-            )
-            if args.weight.target in [
-                torch.ops.quantized_decomposed.dequantize_per_channel.default,
-                torch.ops.quantized_decomposed.dequantize_per_tensor.default,
-            ]:
-                dq = args.weight
-                if (
-                    dq.target
-                    == torch.ops.quantized_decomposed.dequantize_per_channel.default
-                ):
-                    dq_args = DequantizePerChannelArgs(
-                        *dq.args, **dq.kwargs  # type: ignore[arg-type]
-                    )
-                    old_axis = dq_args.axis
-                    if old_axis < 0:
-                        old_axis += len(perm)
-                    if old_axis not in perm:
-                        raise NotYetSupportedError(
-                            f"Invalid per-channel axis {dq_args.axis} for "
-                            f"weight permutation {perm}."
-                        )
-                    dq.update_arg(3, perm.index(old_axis))
-                dq.update_arg(dq.args.index(weight), weight_permute)
-                # Need to update dq.meta["val"] in FillMetaVal pass.
-                del dq.meta["val"]
-            else:
-                node.update_arg(node.args.index(weight), weight_permute)
+        perm = [1, 2, 3, 0]  # IOHW_to_OHWI
+        _permute_conv_weight(graph, node, args, perm)
 
         with graph.inserting_before(node):
             legalized_op = torch.ops.circle_custom.transpose_conv
