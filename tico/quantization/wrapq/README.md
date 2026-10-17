@@ -91,6 +91,11 @@ dtype, scheme, or per-module granularity.
 **Ready-to-run examples** for PTQ and wrapper usage can be found in the `examples/` folder,
 including quantization flows for nn.Linear, LLaMA MLPs, and full decoder layers.
 
+For output debugging, `utils.introspection.compare_outputs(..., full_tensor_diff=True)`
+returns signed float32 tensor differences at every depth, including tensors in lists,
+tuples, dictionaries, and object fields. The default returns tensor difference
+statistics. `compare_side_by_side()` uses full differences for `interesting_modules`.
+
 ---
 
 ## 5. Extensibility

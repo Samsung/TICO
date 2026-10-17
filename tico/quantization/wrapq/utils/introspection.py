@@ -625,7 +625,8 @@ def compare_outputs(
     Args:
         lhs: Left-hand side output (from unquantized model).
         rhs: Right-hand side output (from quantized model).
-        full_tensor_diff: If True, return full tensor difference instead of statistics.
+        full_tensor_diff: If True, return full tensor differences instead of statistics,
+            including tensors nested in containers or object fields.
 
     Returns:
         The difference between outputs. For tensors, returns statistics or full tensor.
@@ -666,7 +667,9 @@ def compare_outputs(
             raise DataMismatchError(f"Length mismatch: {len(lhs)} != {len(rhs)}")
         for i, (lhs_val, rhs_val) in enumerate(zip(lhs, rhs, strict=True)):
             try:
-                diff[str(i)] = compare_outputs(lhs_val, rhs_val)
+                diff[str(i)] = compare_outputs(
+                    lhs_val, rhs_val, full_tensor_diff=full_tensor_diff
+                )
             except Exception as ex:
                 diff[str(i)] = ex
         return diff
@@ -687,7 +690,9 @@ def compare_outputs(
             lhs_val = lhs[key]
             rhs_val = rhs[key]
             try:
-                diff[key] = compare_outputs(lhs_val, rhs_val)
+                diff[key] = compare_outputs(
+                    lhs_val, rhs_val, full_tensor_diff=full_tensor_diff
+                )
             except Exception as ex:
                 diff[key] = ex
         return diff
@@ -698,7 +703,9 @@ def compare_outputs(
         lhs_val = lhs.__dict__[attr_name]
         rhs_val = rhs.__dict__[attr_name]
         try:
-            diff[attr_name] = compare_outputs(lhs_val, rhs_val)
+            diff[attr_name] = compare_outputs(
+                lhs_val, rhs_val, full_tensor_diff=full_tensor_diff
+            )
         except Exception as ex:
             diff[attr_name] = ex
     return diff

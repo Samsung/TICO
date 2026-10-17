@@ -1562,6 +1562,61 @@ class TestCompareOutputs(unittest.TestCase):
         expected = lhs.to(torch.float) - rhs.to(torch.float)
         self.assertTrue(torch.allclose(result, expected))
 
+    def test_nested_tensor_full_diff(self):
+        from types import SimpleNamespace
+
+        from tico.quantization.wrapq.utils.introspection import (
+            compare_outputs,
+            DifferenceStatistics,
+        )
+
+        lhs = torch.tensor([1.0, 2.0], dtype=torch.float64)
+        rhs = torch.tensor([0.0, 4.0], dtype=torch.float64)
+        lhs_before = lhs.clone()
+        rhs_before = rhs.clone()
+        cases = (
+            ("list", [lhs], [rhs], ("0",)),
+            ("tuple", (lhs,), (rhs,), ("0",)),
+            ("dict", {"hidden": lhs}, {"hidden": rhs}, ("hidden",)),
+            (
+                "object",
+                SimpleNamespace(hidden=lhs),
+                SimpleNamespace(hidden=rhs),
+                ("hidden",),
+            ),
+            (
+                "mixed",
+                {"output": [SimpleNamespace(hidden=(lhs,))]},
+                {"output": [SimpleNamespace(hidden=(rhs,))]},
+                ("output", "0", "hidden", "0"),
+            ),
+        )
+        for name, lhs_output, rhs_output, path in cases:
+            for full_tensor_diff in (False, True):
+                with self.subTest(structure=name, full_tensor_diff=full_tensor_diff):
+                    if full_tensor_diff:
+                        result = compare_outputs(
+                            lhs_output, rhs_output, full_tensor_diff=True
+                        )
+                    else:
+                        result = compare_outputs(lhs_output, rhs_output)
+                    for key in path:
+                        assert isinstance(result, dict)
+                        result = result[key]
+                    if full_tensor_diff:
+                        assert isinstance(result, torch.Tensor)
+                        self.assertEqual(result.dtype, torch.float32)
+                        self.assertTrue(torch.equal(result, torch.tensor([1.0, -2.0])))
+                    else:
+                        assert isinstance(result, DifferenceStatistics)
+                        self.assertEqual(result.mean, 1.5)
+                        self.assertEqual(result.min, 1.0)
+                        self.assertEqual(result.max, 2.0)
+                        self.assertEqual(result.peir, 2.0)
+
+        self.assertTrue(torch.equal(lhs, lhs_before))
+        self.assertTrue(torch.equal(rhs, rhs_before))
+
     def test_identical_tensors(self):
         """Test that comparing identical tensors returns zero difference."""
         from tico.quantization.wrapq.utils.introspection import (
@@ -1777,6 +1832,29 @@ class TestCompareSideBySide(unittest.TestCase):
 
         output = captured.getvalue()
         self.assertIn("target", output)
+
+    def test_interesting_module_nested_tensor_diff(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from tico.quantization.wrapq.utils.introspection import compare_side_by_side
+
+        lhs = {"hidden": (torch.tensor([1.0, 2.0]),)}
+        rhs = {"hidden": (torch.tensor([0.0, 4.0]),)}
+        captured = StringIO()
+        with redirect_stdout(captured):
+            compare_side_by_side(
+                {"target": lhs, "other": lhs},
+                {"target": rhs, "other": rhs},
+                interesting_modules=["target"],
+            )
+
+        lines = captured.getvalue().splitlines()
+        target_line = next(line for line in lines if line.startswith("target"))
+        other_line = next(line for line in lines if line.startswith("other"))
+        self.assertIn("'value': [1.0, -2.0]", target_line)
+        self.assertIn("'mean': 1.5", other_line)
+        self.assertNotIn("'value'", other_line)
 
     def test_empty_outputs(self):
         """Test that compare_side_by_side handles empty output dicts."""
