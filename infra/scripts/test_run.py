@@ -91,7 +91,7 @@ def main():
     elif args.all or (not args.keyword and not args.model):
         print("RUN ALL unit tests ...")
 
-        cmd = f"python3 -m unittest discover -s {test_dir} -v".split(" ")
+        cmd = ["python3", "-m", "unittest", "discover", "-s", test_dir, "-v"]
 
         subprocess.run(cmd, check=True)
     elif args.keyword:
@@ -100,9 +100,17 @@ def main():
 
         print(f"RUN unit tests with -k {args.keyword} ...")
 
-        cmd = f"python3 -m unittest discover -s {test_dir} -k {args.keyword} -v".split(
-            " "
-        )
+        cmd = [
+            "python3",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            test_dir,
+            "-k",
+            args.keyword,
+            "-v",
+        ]
         subprocess.run(cmd, check=True)
     elif args.model:
         print(f"RUN unit tests for model {args.model} ...")
