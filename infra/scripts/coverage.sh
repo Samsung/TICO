@@ -35,6 +35,7 @@ if [ -z "${COVERAGE_EXIST}" ] > /dev/null; then
 fi
 
 coverage run -m unittest discover -s ${TEST_DIR} -v 2>&1
+COVERAGE_TEST_STATUS=$?
 
 if [ $# -eq 0 ]; then
   coverage report -i -m
@@ -58,3 +59,9 @@ else
     fi
   fi
 fi
+COVERAGE_REPORT_STATUS=$?
+
+if [ ${COVERAGE_TEST_STATUS} -ne 0 ]; then
+  exit ${COVERAGE_TEST_STATUS}
+fi
+exit ${COVERAGE_REPORT_STATUS}
