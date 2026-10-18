@@ -144,6 +144,8 @@ def run_wrapper_smoke(
         result.add_failure(
             "UNAVAILABLE", availability.reason or "case is not available"
         )
+        _write_report(result, report_json)
+        print(result.format_text())
         if strict:
             result.raise_if_failed()
         return result

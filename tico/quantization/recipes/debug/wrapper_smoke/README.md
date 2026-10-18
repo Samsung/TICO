@@ -380,6 +380,10 @@ Failure kinds: `UNAVAILABLE` (case cannot run in this environment), `CONFIG`
 (NaN/Inf in an output), `ACCURACY` (parity threshold exceeded), `EXPORT`
 (Circle export unsupported or failed).
 
+Unavailable cases print the failure summary and write the requested JSON report
+without constructing a model. With `--strict`, these diagnostics are emitted
+before the failure is raised.
+
 ## Adding a New Case
 
 Add a new file or registration entry under:
