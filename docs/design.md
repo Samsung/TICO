@@ -257,6 +257,10 @@ symbolic input axis length.
 It restores `addmm` only when both `alpha` and `beta` are one; other coefficients
 remain available to `DecomposeAddmm`, which preserves their scaling.
 
+`DecomposeAddmm` creates zero-coefficient constants in the corresponding input or
+matrix-product dtype, independently of the process default floating dtype. A zero
+`beta` still discards the bias rather than multiplying it, so a NaN bias is ignored.
+
 `DecomposeSliceScatter` normalizes unit-step slice bounds against the input axis
 length before constructing the retained prefix and suffix. Negative and clipped
 bounds follow ATen slicing semantics; reversed bounds describe an empty replacement.
