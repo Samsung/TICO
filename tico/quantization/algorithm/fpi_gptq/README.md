@@ -38,6 +38,10 @@ Everything else mirrors the GPTQ implementation:
 - Per-module `Quantizer` objects are attached as `model.quantizers` after
   `convert()`.
 
+Statistics hooks installed by FPI-GPTQ are removed even if registration or cached
+replay fails. Caller-owned hooks remain installed and the original error propagates.
+This cleanup does not roll back quantized weights or make a failed conversion retryable.
+
 ### Role inside this library
 
 Besides being usable as a standalone quantizer, FPI-GPTQ serves as the fast inner
