@@ -22,11 +22,13 @@ import numpy as np
 
 from tico.circle.runtime.kernels.base import (
     apply_fused_activation,
+    ExecutionMode,
     KernelContext,
     KernelRegistry,
     normalize_axis,
 )
 from tico.circle.runtime.program import tensor_type_spec
+from tico.circle.runtime.quantization import quantize_array
 
 
 def _resolve_reshape(
@@ -299,7 +301,7 @@ def _strided_slice(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     return (np.array(value[tuple(index)], copy=True),)
 
 
-def _pad_common(ctx: KernelContext, constant: np.ndarray) -> np.ndarray:
+def _pad_width(ctx: KernelContext) -> list[tuple[int, int]]:
     value = ctx.input(0)
     paddings = ctx.input(1)
     if paddings.dtype.kind not in {"i", "u"} or paddings.shape != (value.ndim, 2):
@@ -310,13 +312,47 @@ def _pad_common(ctx: KernelContext, constant: np.ndarray) -> np.ndarray:
     pad_width = [(int(before), int(after)) for before, after in paddings.tolist()]
     if any(before < 0 or after < 0 for before, after in pad_width):
         raise ctx.invalid(f"{ctx.name} paddings {pad_width} must not be negative.")
+    return pad_width
+
+
+def _pad_common(ctx: KernelContext, constant: np.ndarray) -> np.ndarray:
+    value = ctx.input(0)
+    pad_width = _pad_width(ctx)
     return np.pad(value, pad_width, mode="constant", constant_values=constant)
 
 
 def _pad(ctx: KernelContext) -> tuple[np.ndarray, ...]:
     ctx.require_inputs(2)
     value = ctx.input(0)
-    return (_pad_common(ctx, np.zeros((), dtype=value.dtype)),)
+    output = ctx.output_tensor()
+    if (
+        ctx.mode != ExecutionMode.NATIVE
+        or not output.is_quantized_integer
+        or value.ndim == 0
+    ):
+        return (_pad_common(ctx, np.zeros((), dtype=value.dtype)),)
+
+    pad_width = _pad_width(ctx)
+    output_shape = tuple(
+        size + before + after for size, (before, after) in zip(value.shape, pad_width)
+    )
+    quantization = output.quantization
+    assert quantization is not None
+    # Encode real zero with the shared qparam rules, using a broadcast template
+    # rather than an output-sized FLOAT32 temporary.
+    zero_shape = [1] * value.ndim
+    axis = quantization.quantized_dimension
+    if len(quantization.scale) > 1 and 0 <= axis < value.ndim:
+        zero_shape[axis] = output_shape[axis]
+    zero_codes = quantize_array(np.zeros(zero_shape, dtype=np.float32), output)
+    result = np.empty(output_shape, dtype=value.dtype)
+    result[...] = zero_codes
+    interior = tuple(
+        slice(before, before + size)
+        for size, (before, _) in zip(value.shape, pad_width)
+    )
+    result[interior] = value
+    return (result,)
 
 
 def _pad_v2(ctx: KernelContext) -> tuple[np.ndarray, ...]:

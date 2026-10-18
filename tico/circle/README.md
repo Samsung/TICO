@@ -762,6 +762,9 @@ execution mode instead of by guessing backend arithmetic:
   arithmetic) use ordinary integer arithmetic. Quantized integer tensors may flow
   through value-preserving operators (`RESHAPE`, `TRANSPOSE`, `GATHER`, `CONCATENATION`,
   `SLICE`, `PAD`, ...), `QUANTIZE`, `DEQUANTIZE`, `ARG_MAX`, and `SHAPE` exactly.
+  `PAD` inserts the output tensor's integer encoding of real zero, including
+  per-channel zero points, while retaining the input's raw integer values.
+  `PADV2` retains its explicit padding constant.
   Arithmetic operators on quantized integer tensors (`FULLY_CONNECTED`, `CONV_2D`,
   `ADD`, ...) are rejected, because their integer requantization arithmetic is defined
   per backend and no bit-exact reference is claimed.
