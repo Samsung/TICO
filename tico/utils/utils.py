@@ -240,7 +240,7 @@ def enforce_type(callable):
         return wrapper
 
     if inspect.isclass(callable):
-        callable.__init__ = decorate(callable.__init__)
+        setattr(callable, "__init__", decorate(callable.__init__))
         return callable
 
     return decorate(callable)

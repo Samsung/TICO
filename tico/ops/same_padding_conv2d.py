@@ -36,6 +36,9 @@ class SamePaddingConv2d(nn.Conv2d):
     Circle custom operators so the serialized graph contract is unchanged.
     """
 
+    stride: tuple[int, int]
+    dilation: tuple[int, int]
+
     def __init__(
         self,
         in_channels: int,

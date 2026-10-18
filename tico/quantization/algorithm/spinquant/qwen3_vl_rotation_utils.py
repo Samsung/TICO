@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import math
-from typing import Optional
+from typing import cast, Optional
 
 import torch
 import torch.nn as nn
@@ -60,7 +60,7 @@ def get_qwen3_vl_text_hidden_size(model: nn.Module) -> int:
     """
     if not hasattr(model, "config") or not hasattr(model.config, "text_config"):
         raise AttributeError("Expected `model.config.text_config` to exist.")
-    return int(model.config.text_config.hidden_size)
+    return int(getattr(getattr(model.config, "text_config"), "hidden_size"))
 
 
 def get_qwen3_vl_head_dim(model: nn.Module) -> int:
@@ -80,7 +80,7 @@ def get_qwen3_vl_head_dim(model: nn.Module) -> int:
     if not hasattr(model, "config") or not hasattr(model.config, "text_config"):
         raise AttributeError("Expected `model.config.text_config` to exist.")
 
-    text_config = model.config.text_config
+    text_config = getattr(model.config, "text_config")
     if hasattr(text_config, "head_dim") and text_config.head_dim is not None:
         return int(text_config.head_dim)
 
@@ -109,7 +109,7 @@ def get_qwen3_vl_vision_hidden_size(model: nn.Module) -> int:
     """
     if not hasattr(model, "config") or not hasattr(model.config, "vision_config"):
         raise AttributeError("Expected `model.config.vision_config` to exist.")
-    return int(model.config.vision_config.hidden_size)
+    return int(getattr(getattr(model.config, "vision_config"), "hidden_size"))
 
 
 def get_qwen3_vl_vision_head_dim(model: nn.Module) -> int:
@@ -129,7 +129,7 @@ def get_qwen3_vl_vision_head_dim(model: nn.Module) -> int:
     if not hasattr(model, "config") or not hasattr(model.config, "vision_config"):
         raise AttributeError("Expected `model.config.vision_config` to exist.")
 
-    vision_config = model.config.vision_config
+    vision_config = getattr(model.config, "vision_config")
     hidden_size = int(vision_config.hidden_size)
     num_heads = int(vision_config.num_heads)
     if hidden_size % num_heads != 0:
@@ -522,7 +522,7 @@ def _fuse_repeated_norm_into_linear(
             f"Normalization module `{type(norm).__name__}` must expose `weight`."
         )
 
-    gamma = norm.weight.data.to(torch.float64)
+    gamma = cast(torch.Tensor, norm.weight).data.to(torch.float64)
     if gamma.numel() != repeated_dim:
         raise ValueError(f"Expected norm size {repeated_dim}, got {gamma.numel()}.")
 
@@ -539,7 +539,7 @@ def _fuse_repeated_norm_into_linear(
     w64_chunks = w64.reshape(weight.shape[0], num_repeats, repeated_dim)
 
     if hasattr(norm, "bias") and norm.bias is not None:
-        beta = norm.bias.data.to(torch.float64)
+        beta = cast(torch.Tensor, norm.bias).data.to(torch.float64)
         if linear.bias is None:
             linear.bias = nn.Parameter(
                 torch.zeros(linear.out_features, device=device, dtype=dtype)
@@ -567,13 +567,13 @@ def _fuse_vision_merger_norm_into_fc1(
     if not hasattr(merger, "norm"):
         raise AttributeError("Expected vision merger to expose `norm`.")
 
-    norm = merger.norm
+    norm = cast(nn.Module, merger.norm)
     linear_fc1 = require_linear_attr(merger, "linear_fc1")
 
     if not hasattr(norm, "weight") or norm.weight is None:
         raise AttributeError("Expected vision merger norm to expose `weight`.")
 
-    norm_dim = int(norm.weight.numel())
+    norm_dim = int(cast(torch.Tensor, norm.weight).numel())
     if norm_dim == linear_fc1.in_features:
         fuse_norm_into_linears(norm, [linear_fc1])
     elif norm_dim == vision_hidden_size and linear_fc1.in_features % norm_dim == 0:
@@ -622,7 +622,7 @@ def fuse_qwen3_vl_vision_layer_norms(
 
     if hasattr(components.visual_model, "merger"):
         _fuse_vision_merger_norm_into_fc1(
-            components.visual_model.merger,
+            cast(nn.Module, components.visual_model.merger),
             vision_hidden_size,
         )
 
@@ -652,14 +652,15 @@ def extract_and_reset_qwen3_vl_final_norm_scale(
         AttributeError: If the final norm does not expose a weight.
     """
     components = resolve_qwen3_vl_spinquant_components(model, config)
-    final_norm = components.language_model.norm
+    final_norm = cast(nn.Module, components.language_model.norm)
 
     if not hasattr(final_norm, "weight") or final_norm.weight is None:
         raise AttributeError("Expected final text norm to expose `weight`.")
 
     gamma = (
-        final_norm.weight.data.detach()
-        .to(device=final_norm.weight.device, dtype=torch.float64)
+        cast(torch.Tensor, final_norm.weight)
+        .data.detach()
+        .to(device=cast(torch.Tensor, final_norm.weight).device, dtype=torch.float64)
         .clone()
     )
 
@@ -760,7 +761,7 @@ def rotate_qwen3_vl_ov_r2(
     rotate_ov_proj(layer, r2, head_dim)
 
 
-def _require_conv3d_attr(module: nn.Module, attr_name: str) -> nn.Conv3d:
+def _require_conv3d_attr(module: object, attr_name: str) -> nn.Conv3d:
     """
     Return a required Conv3d attribute from a module.
 
@@ -1033,7 +1034,7 @@ def rotate_qwen3_vl_vision_ov_r2(
     proj = require_linear_attr(layer.attn, "proj")
 
     if hasattr(layer.attn, "dim"):
-        vision_hidden_size = int(layer.attn.dim)
+        vision_hidden_size = int(getattr(layer.attn, "dim"))
     else:
         if qkv.out_features % 3 != 0:
             raise ValueError(

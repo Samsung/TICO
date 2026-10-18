@@ -21,7 +21,7 @@ import math
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Mapping, Sequence
+from typing import Callable, cast, Mapping, Sequence
 
 import torch
 from torch import nn
@@ -569,7 +569,8 @@ def reconstruction_loss_terms(
         )
     else:
         raise ValueError(f"Unsupported reconstruction loss: {loss!r}")
-    return numerator, denominator
+    # tree_tensor_pairs rejects empty trees, so neither sum can retain its integer start.
+    return cast(tuple[torch.Tensor, torch.Tensor], (numerator, denominator))
 
 
 def _candidate_is_better(

@@ -33,6 +33,9 @@ class SimpleMatmul(TestModuleBase):
 
 
 class SimpleMatmulConstRhs(TestModuleBase):
+
+    weight: torch.Tensor
+
     def __init__(self):
         super().__init__()
         weight = torch.randn(4, 5)
@@ -48,6 +51,9 @@ class SimpleMatmulConstRhs(TestModuleBase):
 
 @use_onert
 class SimpleMatmulConstRhsOnert(TestModuleBase):
+
+    weight: torch.Tensor
+
     def __init__(self):
         super().__init__()
         weight = torch.randn(4, 5)
@@ -80,6 +86,9 @@ class SimpleMatmulConstLhsOnert(TestModuleBase):
 
 @use_onert
 class SimpleMatmulConstLhsOnertWithLinearConversion(TestModuleBase):
+
+    weight: torch.Tensor
+
     def __init__(self):
         super().__init__()
         weight = torch.randn(3, 4)

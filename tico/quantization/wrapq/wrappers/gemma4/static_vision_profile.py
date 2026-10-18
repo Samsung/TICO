@@ -251,7 +251,7 @@ class Gemma4StaticVisionProfile:
         self,
         *,
         device: torch.device | str = "cpu",
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """Build the canonical row-major patch coordinates and padding suffix."""
         self.validate()
         coords = torch.arange(

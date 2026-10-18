@@ -36,7 +36,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, cast, Iterable
 
 import torch
 from datasets import load_dataset
@@ -402,7 +402,7 @@ def _resize_image_if_needed(
     try:
         from PIL import Image
 
-        resample = Image.Resampling.BICUBIC
+        resample: int = Image.Resampling.BICUBIC
     except Exception:
         resample = 3
     return image.resize((new_width, new_height), resample=resample)
@@ -646,7 +646,10 @@ def load_judge(config: LlavaBenchJudgeConfig) -> tuple[Any, Any]:
     }
     if config.judge_device == "auto":
         load_kwargs["device_map"] = "auto"
-    model = AutoModelForCausalLM.from_pretrained(config.judge_model_id, **load_kwargs)
+    model = cast(
+        torch.nn.Module,
+        AutoModelForCausalLM.from_pretrained(config.judge_model_id, **load_kwargs),
+    )
     if config.judge_device != "auto":
         model = model.to(config.judge_device)
     model.eval()

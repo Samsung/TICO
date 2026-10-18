@@ -62,7 +62,7 @@ def _make_vision_config(**overrides):
         standardize=True,
     )
     kwargs.update(overrides)
-    cfg = Gemma4VisionConfig(**kwargs)
+    cfg = Gemma4VisionConfig.from_dict(kwargs)
     if hasattr(cfg, "_attn_implementation"):
         cfg._attn_implementation = "eager"
     else:
@@ -95,7 +95,7 @@ def _make_text_config(**overrides):
         enable_moe_block=False,
     )
     kwargs.update(overrides)
-    cfg = Gemma4TextConfig(**kwargs)
+    cfg = Gemma4TextConfig.from_dict(kwargs)
     if hasattr(cfg, "_attn_implementation"):
         cfg._attn_implementation = "eager"
     else:

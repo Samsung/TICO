@@ -1105,7 +1105,7 @@ def CircleAttention():
         past_value: torch.Tensor,
         cache_position: torch.Tensor,
     ) -> torch.Tensor:
-        return None
+        raise NotImplementedError("Circle attention only supports fake tensor tracing.")
 
     @register_fake("circle_custom::attention")
     def _(

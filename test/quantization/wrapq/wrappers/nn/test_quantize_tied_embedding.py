@@ -25,6 +25,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
@@ -49,9 +50,12 @@ class TiedEmbeddingLM(nn.Module):
 
 def _unwrap_weight(module: nn.Module) -> torch.Tensor:
     """Return the underlying floating-point weight through a WrapQ boundary."""
-    if hasattr(module, "wrapped") and hasattr(module.wrapped, "module"):
-        return module.wrapped.module.weight
-    return module.weight  # type: ignore[attr-defined]
+    if isinstance(module, PTQWrapper):
+        wrapped = module.wrapped
+        assert isinstance(wrapped, (QuantEmbedding, QuantLinear))
+        return wrapped.module.weight
+    assert isinstance(module, (nn.Embedding, nn.Linear))
+    return module.weight
 
 
 class TestNNTiedEmbeddingExample(unittest.TestCase):

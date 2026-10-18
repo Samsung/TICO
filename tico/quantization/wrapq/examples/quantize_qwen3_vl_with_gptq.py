@@ -1557,10 +1557,10 @@ def main() -> None:
 
     calib_inputs = load_calib_inputs(processor, args)
 
-    model = apply_spinquant_if_enabled(model, args)
-    apply_smoothquant_if_requested(model, calib_inputs, args)
+    spun_model = apply_spinquant_if_enabled(model, args)
+    apply_smoothquant_if_requested(spun_model, calib_inputs, args)
 
-    q_m = model
+    q_m = spun_model
     q_m = quantize_using_GPTQ(q_m, calib_inputs, args)
 
     if not args.no_PTQ:

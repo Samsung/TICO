@@ -23,14 +23,18 @@ from circle_schema import circle
 from tico.serialize.circle_graph import CircleSubgraph, is_const
 from tico.serialize.circle_mapping import circle_legalize_dtype_to
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.validate_args_kwargs import ViewArgs
 
 
 @register_node_visitor
 class ViewVisitor(NodeVisitor):
-    target: List[torch._ops.OpOverload] = [
+    target: List[TorchOperator] = [
         torch.ops.aten.view,
         torch.ops.aten.view.default,
         torch.ops.aten.view_copy.default,

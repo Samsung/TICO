@@ -14,6 +14,11 @@
 
 import copy
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
+
 from typing import Tuple
 
 import torch
@@ -23,6 +28,9 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_model import QuantQwen3VLModel
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
+    QuantQwen3VLTextModel,
+)
 
 
 skip_msg = "transformers not installed — skipping Qwen3VLModel tests"
@@ -30,7 +38,7 @@ skip_msg = "transformers not installed — skipping Qwen3VLModel tests"
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLModel(unittest.TestCase):
-    fp_model: torch.nn.Module
+    fp_model: "Qwen3VLModel"
     hidden_size: int
     vocab_size: int
     patch_size: int
@@ -42,7 +50,11 @@ class TestQuantQwen3VLModel(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+            Qwen3VLConfig,
+            Qwen3VLTextConfig,
+            Qwen3VLVisionConfig,
+        )
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
         # Use smaller sizes for testing
@@ -74,12 +86,16 @@ class TestQuantQwen3VLModel(unittest.TestCase):
             video_token_id=999,
         )
 
+        assert isinstance(cfg.text_config, Qwen3VLTextConfig)
+        assert isinstance(cfg.vision_config, Qwen3VLVisionConfig)
         assert cfg.image_token_id < cfg.text_config.vocab_size
         assert cfg.video_token_id < cfg.text_config.vocab_size
         assert cfg.vision_config.out_hidden_size == cfg.text_config.hidden_size
 
         cls.fp_model = Qwen3VLModel(cfg)
+        assert isinstance(cfg.vision_config.patch_size, int)
         cls.patch_size = cfg.vision_config.patch_size
+        assert isinstance(cfg.vision_config.temporal_patch_size, int)
         cls.temporal_patch_size = cfg.vision_config.temporal_patch_size
         cls.hidden_size = cfg.text_config.hidden_size
         cls.vocab_size = cfg.text_config.vocab_size
@@ -122,14 +138,14 @@ class TestQuantQwen3VLModel(unittest.TestCase):
             image_mask = input_ids[i] == image_token_id
             image_positions = torch.nonzero(image_mask, as_tuple=True)[0]
 
-            llm_pos_ids_list: list[torch.tensor] = []
+            llm_pos_ids_list: list[torch.Tensor] = []
             st = 0
 
             # Process visual tokens
             if len(image_positions) > 0:
                 # Group consecutive placeholder tokens into a single visual object
                 # All consecutive image tokens represent ONE image/video
-                start_pos = image_positions[0].item()
+                start_pos = int(image_positions[0].item())
 
                 # Text position IDs (before first visual token)
                 text_len = start_pos - st
@@ -216,8 +232,15 @@ class TestQuantQwen3VLModel(unittest.TestCase):
             raise ValueError(
                 "Synthetic Qwen3-VL visual tests support batch size 1 only."
             )
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+            Qwen3VLVisionConfig,
+        )
+
         vision_cfg = self.fp_model.config.vision_config
+        assert isinstance(vision_cfg, Qwen3VLVisionConfig)
         num_patches = thw[0] * thw[1] * thw[2]
+        assert isinstance(vision_cfg.patch_size, int)
+        assert isinstance(vision_cfg.temporal_patch_size, int)
         patch_dim = (
             vision_cfg.in_channels
             * vision_cfg.temporal_patch_size
@@ -591,7 +614,9 @@ class TestQuantQwen3VLModel(unittest.TestCase):
 
         # Replace first tokens with video placeholder tokens
         # This marks where the video features should be inserted
-        embedder = q_model.language_model.wrapped.embed_tokens
+        embedder = cast(
+            QuantQwen3VLTextModel, q_model.language_model.wrapped
+        ).embed_tokens
         img_tkn = torch.tensor(
             self.image_token_id,
             dtype=torch.long,
@@ -979,7 +1004,7 @@ class TestQuantQwen3VLModel(unittest.TestCase):
 
     def test_graph_tracing_behavior_with_images(self):
         """Test that QuantQwen3VLModel behavior in graph tracing mode."""
-        import tico
+        import tico.quantization
 
         thw = (1, 8, 8)
         ptq_config = self._make_ptq_config(grid_thw=thw)
@@ -1056,7 +1081,7 @@ class TestQuantQwen3VLModel(unittest.TestCase):
 
     def test_graph_tracing_behavior_with_videos(self):
         """Test that QuantQwen3VLModel behavior in graph tracing mode."""
-        import tico
+        import tico.quantization
 
         thw = (1, 8, 8)
         ptq_config = self._make_ptq_config(grid_thw=thw)

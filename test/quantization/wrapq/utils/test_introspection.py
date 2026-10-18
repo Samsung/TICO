@@ -14,6 +14,7 @@
 
 import os
 import unittest
+from typing import cast
 from unittest.mock import patch
 
 import torch
@@ -186,11 +187,11 @@ class TestSmoothQuantPTQDiff(unittest.TestCase):
 
         # tiny model + tokenizer
         tokenizer = AutoTokenizer.from_pretrained(cls.model_name)
-        fp_model = (
-            AutoModelForCausalLM.from_pretrained(cls.model_name, dtype=torch.float32)
-            .to(cls.device)
-            .eval()
+        fp_model = AutoModelForCausalLM.from_pretrained(
+            cls.model_name, dtype=torch.float32
         )
+        cast(nn.Module, fp_model).to(cls.device)
+        fp_model.eval()
         # Make sure pad token exists (Llama often uses eos as pad)
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -548,7 +549,7 @@ class TestDetachTensors(unittest.TestCase):
         from transformers.modeling_outputs import BaseModelOutput
 
         t = torch.tensor([1.0, 2.0, 3.0], requires_grad=True)
-        output = BaseModelOutput(last_hidden_state=t)
+        output = BaseModelOutput(last_hidden_state=cast(torch.FloatTensor, t))
 
         result = detach_tensors(output)
 
@@ -703,7 +704,7 @@ class TestModelOutputToSerializable(unittest.TestCase):
         from transformers.modeling_outputs import BaseModelOutput
 
         t = torch.tensor([1.0, 2.0, 3.0])
-        output = BaseModelOutput(last_hidden_state=t)
+        output = BaseModelOutput(last_hidden_state=cast(torch.FloatTensor, t))
         result = model_output_to_serializable(output)
 
         assert isinstance(result, dict)  # for mypy type narrowing
@@ -1558,7 +1559,7 @@ class TestCompareOutputs(unittest.TestCase):
 
         result = compare_outputs(lhs, rhs, full_tensor_diff=True)
 
-        self.assertIsInstance(result, torch.Tensor)
+        assert isinstance(result, torch.Tensor)
         expected = lhs.to(torch.float) - rhs.to(torch.float)
         self.assertTrue(torch.allclose(result, expected))
 

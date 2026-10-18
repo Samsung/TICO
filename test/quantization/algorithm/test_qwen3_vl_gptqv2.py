@@ -25,6 +25,7 @@ import copy
 import json
 import os
 import unittest
+from typing import cast
 from unittest.mock import MagicMock
 
 import torch
@@ -177,14 +178,25 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
         quantizer = Qwen3VLGPTQQuantizer(Qwen3VLGPTQConfig())
         model = torch.nn.Sequential(torch.nn.Linear(4, 3))
         orig_model = quantizer._copy_original_model(model)
+        assert isinstance(orig_model, torch.nn.Sequential)
 
         # Should be a different object
         self.assertIsNot(orig_model, model)
         # Weights should match
-        self.assertTrue(torch.allclose(orig_model[0].weight, model[0].weight))  # type: ignore[index]
+        self.assertTrue(
+            torch.allclose(
+                cast(torch.nn.Linear, orig_model[0]).weight,
+                cast(torch.nn.Linear, model[0]).weight,
+            )
+        )
         # Modifying one should not affect the other
-        model[0].weight.data.fill_(0.0)
-        self.assertFalse(torch.allclose(orig_model[0].weight, model[0].weight))  # type: ignore[index]
+        cast(torch.nn.Linear, model[0]).weight.data.fill_(0.0)
+        self.assertFalse(
+            torch.allclose(
+                cast(torch.nn.Linear, orig_model[0]).weight,
+                cast(torch.nn.Linear, model[0]).weight,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1490,20 +1502,23 @@ class TestGPTQInpAndHessianDtype(unittest.TestCase):
         cfg.validate()
 
     def test_config_string_conversion(self):
-        cfg = Qwen3VLGPTQConfig(hessian_dtype="double", inp_dtype="fp32")
+        cfg = Qwen3VLGPTQConfig(
+            hessian_dtype=cast(torch.dtype, "double"),
+            inp_dtype=cast(torch.dtype, "fp32"),
+        )
         self.assertEqual(cfg.hessian_dtype, torch.float64)
         self.assertEqual(cfg.inp_dtype, torch.float32)
         cfg.validate()
 
     def test_config_validate_rejects_bad_dtypes(self):
         with self.assertRaises(TypeError):
-            Qwen3VLGPTQConfig(inp_dtype=123).validate()
+            Qwen3VLGPTQConfig(inp_dtype=cast(torch.dtype, 123)).validate()
         with self.assertRaises(ValueError):
             Qwen3VLGPTQConfig(inp_dtype=torch.float16).validate()
         with self.assertRaises(ValueError):
             Qwen3VLGPTQConfig(hessian_dtype=torch.float16).validate()
         with self.assertRaises(ValueError):
-            Qwen3VLGPTQConfig(inp_dtype="float128")
+            Qwen3VLGPTQConfig(inp_dtype=cast(torch.dtype, "float128"))
 
 
 # ---------------------------------------------------------------------------
@@ -1823,7 +1838,7 @@ class TestModelStateFingerprint(unittest.TestCase):
         model = nn.Sequential(nn.Linear(4, 4), nn.Linear(4, 2))
         clone = copy.deepcopy(model)
         with torch.no_grad():
-            clone[0].weight[0, 0] += 1.0
+            cast(torch.nn.Linear, clone[0]).weight[0, 0] += 1.0
         self.assertNotEqual(
             Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
             Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
@@ -1836,7 +1851,9 @@ class TestModelStateFingerprint(unittest.TestCase):
         quantizer = _make_quantizer()
         pre_mutation = quantizer._fp_model_state(model)
         with torch.no_grad():
-            model[0].weight.add_(torch.randn_like(model[0].weight))
+            cast(torch.nn.Linear, model[0]).weight.add_(
+                torch.randn_like(cast(torch.nn.Linear, model[0]).weight)
+            )
         fingerprint = quantizer._compute_fp_inputs_fingerprint(model)
         self.assertEqual(fingerprint["model_state"], pre_mutation)
         # A fresh quantizer sees the mutated model as a different state.
@@ -1878,7 +1895,7 @@ class TestModelStateFingerprint(unittest.TestCase):
             Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),
         )
         with torch.no_grad():
-            clone[0].weight[0, 0] += 1.0
+            cast(torch.nn.Linear, clone[0]).weight[0, 0] += 1.0
         self.assertNotEqual(
             Qwen3VLGPTQQuantizer._model_state_fingerprint(model),
             Qwen3VLGPTQQuantizer._model_state_fingerprint(clone),

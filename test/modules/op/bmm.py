@@ -33,6 +33,9 @@ class SimpleBatchMatMul(TestModuleBase):
 
 @use_onert
 class SimpleSingleBatchLhsConstBmm(TestModuleBase):
+
+    const_lhs: torch.Tensor
+
     def __init__(self):
         super().__init__()
         const_lhs = torch.randn(1, 4, 5)

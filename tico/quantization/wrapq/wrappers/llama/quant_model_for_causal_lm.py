@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import cast, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -20,6 +20,10 @@ import torch.nn as nn
 from transformers.cache_utils import Cache
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaForCausalLM
+
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -48,6 +52,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        model_fp = cast("LlamaForCausalLM", model_fp)
         super().__init__(qcfg, fp_name=fp_name)
         self.quantizers = getattr(model_fp, "quantizers", None)
 
@@ -86,7 +91,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
             )
 
         self.config = model_fp.config
-        self.generation_config = getattr(model_fp, "generation_config", None)
+        self.generation_config = model_fp.generation_config
         self.main_input_name = getattr(model_fp, "main_input_name", "input_ids")
         self.loss_function = model_fp.loss_function
         self.device = model_fp.device
@@ -114,12 +119,14 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
 
     def prepare_inputs_for_generation(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
+        next_sequence_length: int | None = None,
         past_key_values: Optional[Cache | LegacyCache] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        is_first_iteration: bool | None = False,
+        cache_position: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = True,
         **kwargs,
     ):
@@ -174,7 +181,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
     @staticmethod
     def _reorder_cache(
         past_key_values: Optional[Cache | LegacyCache],
-        beam_idx: torch.LongTensor,
+        beam_idx: torch.Tensor,
     ):
         if past_key_values is None:
             return past_key_values
@@ -183,7 +190,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
         # transformers version. Use it if present.
         if isinstance(past_key_values, Cache):
             if hasattr(past_key_values, "reorder_cache"):
-                return past_key_values.reorder_cache(beam_idx)
+                return past_key_values.reorder_cache(cast(torch.LongTensor, beam_idx))
             return past_key_values
 
         reordered = []
@@ -199,14 +206,14 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
 
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
+        input_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
+        position_ids: torch.Tensor | None = None,
         past_key_values: Cache | LegacyCache | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
-        labels: torch.LongTensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
         use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
+        cache_position: torch.Tensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
@@ -254,7 +261,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
 
         if isinstance(logits_to_keep, int):
             if logits_to_keep > 0:
-                slice_indices = slice(-logits_to_keep, None)
+                slice_indices: slice | torch.Tensor = slice(-logits_to_keep, None)
             else:
                 slice_indices = slice(None)
         else:

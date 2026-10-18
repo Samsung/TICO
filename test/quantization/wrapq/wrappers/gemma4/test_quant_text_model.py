@@ -90,7 +90,7 @@ def _make_text_config(**overrides):
         use_cache=False,
     )
     kwargs.update(overrides)
-    cfg = Gemma4TextConfig(**kwargs)
+    cfg = Gemma4TextConfig.from_dict(kwargs)
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
     else:

@@ -26,7 +26,7 @@ import torch
 
 from examples.hand_detector._support.tflite_flatbuffer import OperatorInfo, TFLiteModel
 
-from examples.hand_detector.hand_detector import HandDetector
+from examples.hand_detector.hand_detector import ConvNode, HandDetector
 
 
 PADDING_SAME = 0
@@ -316,16 +316,19 @@ def load_parameters(
             name = operation["name"]
             inputs = operation["inputs"]
             if name == "CONV_2D":
+                assert isinstance(layer, ConvNode)
                 weight = torch.from_numpy(constants[int(inputs[1])]).permute(0, 3, 1, 2)
                 layer.conv.weight.copy_(weight)
                 if layer.conv.bias is not None:
                     layer.conv.bias.copy_(torch.from_numpy(constants[int(inputs[2])]))
             elif name == "DEPTHWISE_CONV_2D":
+                assert isinstance(layer, ConvNode)
                 weight = torch.from_numpy(constants[int(inputs[1])]).permute(3, 0, 1, 2)
                 layer.conv.weight.copy_(weight)
                 if layer.conv.bias is not None:
                     layer.conv.bias.copy_(torch.from_numpy(constants[int(inputs[2])]))
             elif name == "PRELU":
+                assert isinstance(layer, torch.nn.PReLU)
                 alpha = torch.from_numpy(constants[int(inputs[1])]).reshape(-1)
                 layer.weight.copy_(alpha)
 

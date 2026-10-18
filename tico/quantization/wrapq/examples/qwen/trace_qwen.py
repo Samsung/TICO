@@ -116,7 +116,11 @@ import torch
 import torch.nn as nn
 
 from transformers import AutoProcessor
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+    Qwen3VLConfig,
+    Qwen3VLTextConfig,
+    Qwen3VLVisionConfig,
+)
 from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLForConditionalGeneration,
 )
@@ -334,6 +338,8 @@ def prepare_config() -> Qwen3VLConfig:
         video_token_id=vocab_size - 1,
         vision_start_token_id=vocab_size - 3,
     )
+    assert isinstance(cfg.vision_config, Qwen3VLVisionConfig)
+    assert isinstance(cfg.text_config, Qwen3VLTextConfig)
     assert cfg.image_token_id < cfg.text_config.vocab_size
     assert cfg.video_token_id < cfg.text_config.vocab_size
     assert cfg.vision_start_token_id < cfg.text_config.vocab_size
@@ -559,6 +565,7 @@ def main():
     torch.manual_seed(args.seed)
 
     cfg: Qwen3VLConfig = prepare_config()
+    assert isinstance(cfg.text_config, Qwen3VLTextConfig)
 
     # Generate model inputs
     model_inputs: dict[str, torch.Tensor] = prepare_inputs(

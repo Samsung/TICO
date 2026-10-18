@@ -41,12 +41,10 @@ def iterate_GPTQ(scale, zero, maxq, W, Hinv, max_num_of_iters=50):
         d_W = torch.mul((cur_weights - cur_Q), mults)
         cur_weights = init_weights - torch.matmul(d_W, Hinv_U)
         del d_W, cur_Q
-        d_W = cur_Q = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     del init_weights
-    init_weights = None
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

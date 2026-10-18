@@ -77,7 +77,7 @@ def _make_ple_text_config(**overrides):
         allow_global_per_layer_attribute_access=True,
     )
     kwargs.update(overrides)
-    cfg = Gemma4TextConfig(**kwargs)
+    cfg = Gemma4TextConfig.from_dict(kwargs)
     cfg._attn_implementation = "eager"
     return cfg
 

@@ -53,6 +53,8 @@ class QuantFairseqMultiheadAttention(QuantModuleBase):
         from boolean masks, reducing runtime overhead.
     """
 
+    scale_const: torch.Tensor
+
     def __init__(
         self,
         fp_attn: nn.Module,

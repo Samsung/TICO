@@ -34,6 +34,7 @@ from tico.quantization.algorithm.gemma4_gptq.utils import (
     should_quantize_text_stage,
     should_quantize_vision_stage,
 )
+from tico.quantization.algorithm.gptq.quant import Quantizer
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 
 
@@ -116,17 +117,29 @@ class MockVisionTower(nn.Module):
         return x
 
 
+class MockTextAttention(nn.Module):
+    q_proj: nn.Linear
+    k_proj: nn.Linear
+    v_proj: nn.Linear
+    o_proj: nn.Linear
+
+
+class MockTextMLP(nn.Module):
+    gate_proj: nn.Linear
+    down_proj: nn.Linear
+
+
 class MockTextLayer(nn.Module):
     """Mimics a Gemma4 text decoder layer with attention + MLP projections."""
 
     def __init__(self, dim: int = 64):
         super().__init__()
-        self.self_attn = nn.Module()
+        self.self_attn = MockTextAttention()
         self.self_attn.q_proj = nn.Linear(dim, dim)
         self.self_attn.k_proj = nn.Linear(dim, dim)
         self.self_attn.v_proj = nn.Linear(dim, dim)
         self.self_attn.o_proj = nn.Linear(dim, dim)
-        self.mlp = nn.Module()
+        self.mlp = MockTextMLP()
         self.mlp.gate_proj = nn.Linear(dim, dim * 4)
         self.mlp.down_proj = nn.Linear(dim * 4, dim)
 
@@ -150,21 +163,30 @@ class MockLanguageModel(nn.Module):
         return hidden_states
 
 
+class MockGemma4Backbone(nn.Module):
+    """Expose the three synthetic Gemma4 model stages."""
+
+    def __init__(self, dim: int, num_vision_layers: int, num_text_layers: int):
+        super().__init__()
+        self.vision_tower = MockVisionTower(dim, num_vision_layers)
+        self.embed_vision = MockMultimodalEmbedder(dim)
+        self.language_model = MockLanguageModel(dim, num_text_layers)
+
+
 class MockGemma4Model(nn.Module):
     """
     Minimal mock that mirrors the Gemma4ForConditionalGeneration structure
     expected by ``resolve_gemma4_components``.
     """
 
+    quantizers: dict[str, Quantizer]
+
     def __init__(
         self, dim: int = 64, num_vision_layers: int = 2, num_text_layers: int = 2
     ):
         super().__init__()
         self.config = _MockConfig()
-        self.model = nn.Module()
-        self.model.vision_tower = MockVisionTower(dim, num_vision_layers)
-        self.model.embed_vision = MockMultimodalEmbedder(dim)
-        self.model.language_model = MockLanguageModel(dim, num_text_layers)
+        self.model = MockGemma4Backbone(dim, num_vision_layers, num_text_layers)
         self.lm_head = nn.Linear(dim, dim)
 
     def forward(self, *args, **kwargs):
@@ -279,7 +301,7 @@ class TestGemma4GPTQConfigValidation(unittest.TestCase):
             conf.validate()
 
     def test_cache_dtype_must_be_torch_dtype(self):
-        conf = Gemma4GPTQConfig(weight_bits=4, cache_dtype="float32")
+        conf = Gemma4GPTQConfig(weight_bits=4, cache_dtype=cast(torch.dtype, "float32"))
         with self.assertRaises(TypeError):
             conf.validate()
 
@@ -400,8 +422,8 @@ class TestResolveGemma4Components(unittest.TestCase):
 
     def test_wrong_type_raises(self):
         model = MockGemma4Model(dim=64)
-        # Sabotage: replace ModuleList with a plain list
-        model.model.vision_tower.encoder.layers = nn.Identity()
+        # Sabotage: replace ModuleList with a different module type.
+        model.model.vision_tower.encoder.add_module("layers", nn.Identity())
         conf = Gemma4GPTQConfig(weight_bits=4)
         with self.assertRaises(TypeError):
             resolve_gemma4_components(model, conf)
@@ -744,7 +766,7 @@ class TestBuildGPTQObjects(unittest.TestCase):
         from tico.quantization.algorithm.gemma4_gptq.utils import build_module_name_map
 
         module_name = build_module_name_map(model)
-        layer = model.model.language_model.layers[0]
+        layer = cast(MockTextLayer, model.model.language_model.layers[0])
         from tico.quantization.algorithm.gemma4_gptq.utils import get_quantizable_layers
 
         subset = get_quantizable_layers(layer)
@@ -771,7 +793,7 @@ class TestBuildGPTQObjects(unittest.TestCase):
         )
 
         module_name = build_module_name_map(model)
-        layer = model.model.language_model.layers[0]
+        layer = cast(MockTextLayer, model.model.language_model.layers[0])
         subset = get_quantizable_layers(layer)
         gptq_objs = quantizer._build_gptq_objects(
             subset=subset, module_name=module_name
@@ -853,7 +875,7 @@ class TestQuantizeStageFromStageCache(unittest.TestCase):
         module_name = build_module_name_map(model)
 
         # Use a single text layer as the stage module
-        stage_module = model.model.language_model.layers[0]
+        stage_module = cast(MockTextLayer, model.model.language_model.layers[0])
 
         # Build cached inputs (simulating stage-entry inputs)
         # cache_args is indexed by arg position, then by batch:

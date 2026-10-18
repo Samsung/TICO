@@ -14,6 +14,11 @@
 
 import inspect
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention
+
 from unittest.mock import patch
 
 import torch
@@ -33,7 +38,7 @@ skip_msg = "required transformers not installed — skipping Qwen3VLTextAttentio
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLTextAttention(unittest.TestCase):
-    fp_attn: torch.nn.Module
+    fp_attn: "Qwen3VLTextAttention"
     head_dim: int
     hidden_size: int
     num_heads: int
@@ -65,9 +70,11 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
             cfg._attn_implementation = "eager"
 
         cls.fp_attn = Qwen3VLTextAttention(cfg, layer_idx=0)
+        assert cfg.head_dim is not None
         cls.head_dim = cfg.head_dim
         cls.hidden_size = cfg.hidden_size
         cls.num_heads = cfg.num_attention_heads
+        assert cfg.num_key_value_heads is not None
         cls.num_kv_heads = cfg.num_key_value_heads
 
     def _rand_rope(self, B: int, S: int):

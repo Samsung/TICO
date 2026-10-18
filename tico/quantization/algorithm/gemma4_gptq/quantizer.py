@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import types
-from typing import Any, Callable, Optional
+from typing import Any, Callable, cast, Optional, TypeVar
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,9 @@ from tico.quantization.algorithm.gptq.utils import resolve_weight_bits
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
+
+
+ModelT = TypeVar("ModelT", bound=nn.Module)
 
 
 class StopReplay(Exception):
@@ -118,10 +121,10 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
     @torch.no_grad()
     def prepare(
         self,
-        model: nn.Module,
+        model: ModelT,
         args: Optional[Any] = None,
         kwargs: Optional[dict[str, Any]] = None,
-    ) -> nn.Module:
+    ) -> ModelT:
         """
         Intercept model inputs and cache them without executing the real model.
 
@@ -181,7 +184,7 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
         return model
 
     @torch.no_grad()
-    def convert(self, model: nn.Module) -> nn.Module:
+    def convert(self, model: ModelT) -> ModelT:
         """
         Run stagewise GPTQ conversion for Gemma4.
 
@@ -261,7 +264,7 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
         self._vision_cache_args.clear()
         self._vision_cache_kwargs.clear()
         self._num_vision_batches = 0
-        model.quantizers = self._quantizers
+        setattr(model, "quantizers", self._quantizers)
         return model
 
     # ------------------------------------------------------------------
@@ -399,7 +402,7 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
             input_ids = kwargs.get("input_ids")
             inputs_embeds = kwargs.get("inputs_embeds")
             if input_ids is not None and inputs_embeds is None:
-                inputs_embeds = language_model.embed_tokens(input_ids)
+                inputs_embeds = cast(nn.Module, language_model.embed_tokens)(input_ids)
             if inputs_embeds is None:
                 raise StopReplay
 
@@ -422,12 +425,12 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
                 and language_model.hidden_size_per_layer_input
             ):
                 if per_layer_inputs is None:
-                    per_layer_inputs = language_model.get_per_layer_inputs(
-                        input_ids, inputs_embeds
-                    )
-                per_layer_inputs = language_model.project_per_layer_inputs(
-                    inputs_embeds, per_layer_inputs
-                )
+                    per_layer_inputs = cast(
+                        Callable[..., torch.Tensor], language_model.get_per_layer_inputs
+                    )(input_ids, inputs_embeds)
+                per_layer_inputs = cast(
+                    Callable[..., torch.Tensor], language_model.project_per_layer_inputs
+                )(inputs_embeds, per_layer_inputs)
 
             # Compute position_embeddings for each layer type.
 
@@ -436,8 +439,8 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
             # own rotary embeddings.
             position_embeddings: dict[str, Any] = {}
             hidden_states = inputs_embeds
-            for layer_type in language_model.unique_layer_types:
-                pos_emb = language_model.rotary_emb(
+            for layer_type in cast(list[str], language_model.unique_layer_types):
+                pos_emb = cast(nn.Module, language_model.rotary_emb)(
                     hidden_states, position_ids, layer_type
                 )
                 # rotary_emb may return a tuple (cos, sin) or a single tensor
@@ -1046,9 +1049,9 @@ class Gemma4GPTQQuantizer(BaseQuantizer):
         Restore cache-related flags saved by ``_disable_model_cache``.
         """
         if "model.config.use_cache" in saved:
-            model.config.use_cache = saved["model.config.use_cache"]
+            setattr(model.config, "use_cache", saved["model.config.use_cache"])
 
         if "model.config.text_config.use_cache" in saved:
-            model.config.text_config.use_cache = saved[
+            getattr(model.config, "text_config").use_cache = saved[
                 "model.config.text_config.use_cache"
             ]

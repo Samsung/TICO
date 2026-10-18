@@ -43,7 +43,7 @@ class SamePaddingConv2dAutogradTest(unittest.TestCase):
         torch.testing.assert_close(output, reference)
 
         output.square().mean().backward()
-        self.assertIsNotNone(input_.grad)
+        assert input_.grad is not None
         self.assertTrue(torch.isfinite(input_.grad).all())
         self.assertGreater(float(input_.grad.abs().sum()), 0.0)
 
@@ -64,7 +64,7 @@ class SamePaddingConv2dAutogradTest(unittest.TestCase):
         torch.testing.assert_close(output, reference)
 
         output.sum().backward()
-        self.assertIsNotNone(input_.grad)
+        assert input_.grad is not None
         self.assertTrue(torch.isfinite(input_.grad).all())
 
     def test_same_padding_uses_extra_cell_on_bottom_and_right(self) -> None:

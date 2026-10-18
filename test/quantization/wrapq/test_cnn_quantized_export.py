@@ -114,8 +114,8 @@ def _single_quant_conv(module: nn.Module):
 def _synchronize_head_ranges(model: nn.Module) -> None:
     """Assign one collected activation range to both concatenated heads."""
     observers = [
-        _single_quant_conv(model.head0).obs_act_out,
-        _single_quant_conv(model.head1).obs_act_out,
+        _single_quant_conv(model.get_submodule("head0")).obs_act_out,
+        _single_quant_conv(model.get_submodule("head1")).obs_act_out,
     ]
     common_min = torch.stack(
         [observer.min_val.reshape(()) for observer in observers]

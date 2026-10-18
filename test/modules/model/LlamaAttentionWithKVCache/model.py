@@ -35,6 +35,7 @@ class LlamaAttentionWithKVCache(TestModuleBase):
         seq_len = 1  # Assume token generation
         hidden_size = self.config.hidden_size
         head_dim = self.config.head_dim
+        assert head_dim is not None
         num_heads = self.config.num_attention_heads
 
         hidden_states = torch.randn(1, seq_len, hidden_size)

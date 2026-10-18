@@ -37,18 +37,20 @@ def _make_text_config():
     """Create a tiny Qwen3-VL text config for synthetic smoke tests."""
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextConfig
 
-    cfg = Qwen3VLTextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        head_dim=32,
-        max_position_embeddings=128,
-        attention_dropout=0.0,
-        use_cache=False,
-        rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
+    cfg = Qwen3VLTextConfig.from_dict(
+        {
+            "vocab_size": 256,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "max_position_embeddings": 128,
+            "attention_dropout": 0.0,
+            "use_cache": False,
+            "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
+        }
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -75,6 +77,7 @@ class TestQwenTextAttentionExample(unittest.TestCase):
 
     def _rope(self, batch_size: int, seq_len: int):
         """Create synthetic position embeddings for Qwen text attention."""
+        assert self.cfg.head_dim is not None
         emb = torch.randn(batch_size, seq_len, self.cfg.head_dim)
         return emb.cos(), emb.sin()
 

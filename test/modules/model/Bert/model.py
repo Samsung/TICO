@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import torch
 from transformers import BertConfig, BertModel
 
@@ -21,7 +23,8 @@ from test.modules.base import TestModuleBase
 class Bert(TestModuleBase):
     def __init__(self):
         super().__init__()
-        self.model = BertModel(config=BertConfig()).to("cpu")
+        self.model = BertModel(config=BertConfig())
+        cast(torch.nn.Module, self.model).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
 

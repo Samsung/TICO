@@ -37,6 +37,8 @@ from tico.quantization.algorithm.block_reconstruction import (
 )
 from tico.quantization.wrapq.control import iter_quantization_sites
 from tico.quantization.wrapq.dtypes import DType
+
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.nn.quant_conv2d import QuantConv2d
@@ -158,6 +160,7 @@ class AdaRoundTest(unittest.TestCase):
         sample = torch.ones(1, 1, 1, 1)
         wrapper(sample)
         wrapper.freeze_qparams()
+        assert isinstance(wrapper.obs_weight, AffineObserverBase)
         wrapper.obs_weight.load_qparams(
             torch.tensor([1.0]),
             torch.tensor([0], dtype=torch.int),

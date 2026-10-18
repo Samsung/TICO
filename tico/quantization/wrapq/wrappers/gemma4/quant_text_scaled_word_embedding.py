@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -26,6 +26,10 @@ from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import register, try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
 
 
 @register(FusedGemma4PLEEmbedding)
@@ -42,6 +46,7 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp = cast("Gemma4TextScaledWordEmbedding | FusedGemma4PLEEmbedding", fp)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
 
@@ -81,7 +86,7 @@ class QuantGemma4TextScaledWordEmbedding(QuantModuleBase):
         # The raw-model transform has already scaled the FP weight before any
         # observer is created. Do not export even a redundant MUL by one.
         if not isinstance(self.module, FusedGemma4PLEEmbedding):
-            scale = self.module.embed_scale
+            scale: torch.Tensor = self.module.embed_scale
             if self._mode is Mode.QUANT:
                 scale = self.obs_embed_scale.fake_quant(scale)
             hidden_states = hidden_states * scale.to(

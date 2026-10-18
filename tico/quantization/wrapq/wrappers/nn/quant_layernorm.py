@@ -41,6 +41,8 @@ class QuantLayerNorm(QuantModuleBase):
              • affine_add : (n * γ) + β
     """
 
+    eps: torch.Tensor
+
     def __init__(
         self,
         fp: nn.LayerNorm,

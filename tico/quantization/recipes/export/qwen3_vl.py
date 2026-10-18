@@ -14,7 +14,7 @@
 
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, cast, Mapping
 
 import torch
 
@@ -30,11 +30,28 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
     Qwen3VLDeepstackFusionExportAdapter,
     Qwen3VLLMHeadExportAdapter,
     Qwen3VLMultimodalEmbeddingExportAdapter,
     Qwen3VLTextEmbeddingExportAdapter,
+)
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_for_conditional_generation import (
+    QuantQwen3VLForConditionalGeneration,
+)
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_model import QuantQwen3VLModel
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer import (
+    QuantQwen3VLTextDecoderLayer,
+)
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
+    QuantQwen3VLTextModel,
+)
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
+    QuantQwen3VLVisionModel,
+)
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_patch_embed import (
+    QuantQwen3VLVisionPatchEmbed,
 )
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
@@ -142,17 +159,25 @@ def _circle_name(stem: str, artifact_tag: str) -> str:
 
 def _unwrap_qwen3_vl_components(
     export_model: torch.nn.Module,
-) -> tuple[torch.nn.Module, torch.nn.Module, torch.nn.Module, torch.nn.Module]:
+) -> tuple[
+    QuantQwen3VLForConditionalGeneration,
+    QuantQwen3VLModel,
+    QuantQwen3VLVisionModel,
+    QuantQwen3VLTextModel,
+]:
     """Return the top-level, multimodal, vision, and text quant wrappers."""
-    qmodel = export_model.wrapped
-    qwen_model = qmodel.model.wrapped
-    qvision = qwen_model.visual.wrapped
-    qtext = qwen_model.language_model.wrapped
+    qmodel = cast(
+        QuantQwen3VLForConditionalGeneration, cast(PTQWrapper, export_model).wrapped
+    )
+    qwen_model = cast(QuantQwen3VLModel, qmodel.model.wrapped)
+    qvision = cast(QuantQwen3VLVisionModel, qwen_model.visual.wrapped)
+    qtext = cast(QuantQwen3VLTextModel, qwen_model.language_model.wrapped)
     return qmodel, qwen_model, qvision, qtext
 
 
 def _validate_npu_export_attention(qtext: torch.nn.Module) -> None:
     """Reject wrapped attention layouts that are not NPU-export compatible."""
+    qtext = cast(QuantQwen3VLTextModel, qtext)
     for layer_idx, layer in enumerate(qtext.layers):
         self_attn = getattr(layer.wrapped, "self_attn", None)
         attention = getattr(self_attn, "wrapped", None)
@@ -210,7 +235,8 @@ def _make_vision_inputs(
     vision_profile: Qwen3VLVisionProfile,
 ) -> torch.Tensor:
     """Create flattened processor-style pixels for one fixed profile."""
-    patch_embed = qvision.patch_embed.wrapped
+    qvision = cast(QuantQwen3VLVisionModel, qvision)
+    patch_embed = cast(QuantQwen3VLVisionPatchEmbed, qvision.patch_embed.wrapped)
     patch_vector_size = (
         int(patch_embed.in_channels)
         * int(patch_embed.temporal_patch_size)
@@ -315,6 +341,7 @@ def export_qwen3_vl_per_layer(
         getattr(config, "head_dim", None)
         or hidden_size // int(config.num_attention_heads)
     )
+    assert config.num_key_value_heads is not None
     num_kv_heads = int(config.num_key_value_heads)
     vocab_size = int(config.vocab_size)
 
@@ -384,6 +411,7 @@ def export_qwen3_vl_per_layer(
             f"deepstack={deepstack_count}, text_layers={len(qtext.layers)}."
         )
 
+    qtext = cast(QuantQwen3VLTextModel, qtext)
     for layer_idx, layer in enumerate(qtext.layers):
         prefill_stem = (
             f"decoder_layer_prefill_{layer_idx}"
@@ -391,7 +419,7 @@ def export_qwen3_vl_per_layer(
             else f"decoder_layer_{layer_idx}"
         )
         _convert_and_save(
-            layer.wrapped.as_export_module(
+            cast(QuantQwen3VLTextDecoderLayer, layer.wrapped).as_export_module(
                 "prefill",
                 return_kv=prefill_decode,
             ),
@@ -439,7 +467,9 @@ def export_qwen3_vl_per_layer(
             )
             past_value = torch.randn_like(past_key)
             _convert_and_save(
-                layer.wrapped.as_export_module("decode", return_kv=True),
+                cast(QuantQwen3VLTextDecoderLayer, layer.wrapped).as_export_module(
+                    "decode", return_kv=True
+                ),
                 (decode_hidden,),
                 output_dir
                 / _circle_name(f"decoder_layer_decode_{layer_idx}", artifact_tag),

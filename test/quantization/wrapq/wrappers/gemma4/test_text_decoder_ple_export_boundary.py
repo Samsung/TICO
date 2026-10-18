@@ -22,6 +22,7 @@ from tico.passes.decompose_fake_quantize_tensor_qparams import (
 )
 from tico.quantization.passes.fold_quant_ops import FoldQuantOps
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4TextDecoderLayerDecodeExportAdapter,
     Gemma4TextDecoderLayerPrefillExportAdapter,
@@ -29,13 +30,27 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
 from tico.serialize.quant_param import QPARAM_KEY
 
 
-class _FrozenPLEObserver(torch.nn.Module):
+class _FrozenPLEObserver(ObserverBase):
     """Expose the frozen affine fake-quant operation used at the PLE boundary."""
 
+    _cached_scale: torch.Tensor
+    _cached_zp: torch.Tensor
+
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(name="per_layer_input")
         self.register_buffer("_cached_scale", torch.tensor(0.125))
         self.register_buffer("_cached_zp", torch.tensor(0, dtype=torch.int))
+
+    def reset(self) -> None:
+        """Keep the fixed qparams used by this synthetic boundary."""
+
+    def _update_stats(self, x: torch.Tensor) -> None:
+        """Reject calibration of this already-frozen observer."""
+        raise RuntimeError("The synthetic observer is already frozen.")
+
+    def compute_qparams(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the fixed affine domain used by the export fixture."""
+        return self._cached_scale, self._cached_zp
 
     def fake_quant(self, tensor: torch.Tensor) -> torch.Tensor:
         """Fake-quantize with a fixed signed 16-bit per-tensor domain."""
@@ -157,7 +172,7 @@ class TestGemma4TextPLEExportBoundary(unittest.TestCase):
     def test_no_quant_export_does_not_require_frozen_qparams(self) -> None:
         """Floating-point split export should bypass the boundary observer."""
 
-        class _FailIfCalledObserver(torch.nn.Module):
+        class _FailIfCalledObserver(_FrozenPLEObserver):
             def fake_quant(self, tensor: torch.Tensor) -> torch.Tensor:
                 del tensor
                 raise AssertionError("NO_QUANT export must not call fake_quant().")

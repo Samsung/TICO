@@ -95,7 +95,8 @@ class CircleModelBuilder:
         array = np.require(array.astype(storage_dtype, copy=False), requirements="C")
 
         buffer = circle.Buffer.BufferT()
-        buffer.data = array.reshape(-1).view(np.uint8)
+        # The generated object API accepts NumPy buffers despite list-only typing.
+        setattr(buffer, "data", array.reshape(-1).view(np.uint8))
         self.model.buffers.append(buffer)
         return self._add_tensor(
             name,
@@ -267,7 +268,8 @@ class CircleModelBuilder:
         storage = numpy_dtype_from_circle_tensor_type(tensor_type)
         array = np.require(np.asarray(value, dtype=storage), requirements="C")
         buffer = circle.Buffer.BufferT()
-        buffer.data = array.reshape(-1).view(np.uint8)  # type: ignore[assignment]
+        # The generated object API accepts NumPy buffers despite list-only typing.
+        setattr(buffer, "data", array.reshape(-1).view(np.uint8))
         self.model.buffers.append(buffer)
         tensor_index = self._add_tensor(
             name,
@@ -484,7 +486,7 @@ class CircleModelBuilder:
         operator_code.builtinCode = int(builtin_code)
         operator_code.deprecatedBuiltinCode = min(127, int(builtin_code))
         operator_code.version = int(version)
-        operator_code.customCode = None
+        setattr(operator_code, "customCode", None)
 
         index = len(self.model.operatorCodes)
         self.model.operatorCodes.append(operator_code)

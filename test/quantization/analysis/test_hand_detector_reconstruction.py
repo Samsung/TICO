@@ -47,6 +47,7 @@ class HandDetectorSegmentTest(unittest.TestCase):
         }
         model = HandDetector(specification)
         for layer in model.layers:
+            assert isinstance(layer, torch.nn.PReLU)
             layer.weight.data.fill_(1.0)
         return model
 

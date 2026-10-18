@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import torch.nn as nn
 
@@ -82,7 +82,7 @@ def get_module_by_path(root: nn.Module, path: str) -> Any:
     return current
 
 
-def require_linear_attr(module: nn.Module, attr_name: str) -> nn.Linear:
+def require_linear_attr(module: object, attr_name: str) -> nn.Linear:
     """
     Return a required Linear attribute from a module.
 

@@ -23,11 +23,20 @@ stage that produces the packed ``per_layer_inputs`` tensor.
 """
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, cast, NotRequired, Optional, TYPE_CHECKING, TypedDict
 
 import torch
 import torch.nn as nn
 from transformers import AutoProcessor
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
+    from transformers.models.gemma4.modeling_gemma4 import (
+        Gemma4ForConditionalGeneration,
+    )
+    from transformers.models.gemma4.processing_gemma4 import Gemma4Processor
+from transformers.feature_extraction_utils import BatchFeature
+from typing_extensions import NotRequired
 
 from tico.quantization.config.gemma4_attention import (
     get_gemma4_text_attention_options,
@@ -43,6 +52,16 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4PLEProjectionExportAdapter,
     Gemma4TokenEmbeddingExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+    QuantGemma4ForConditionalGeneration,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_model import QuantGemma4Model
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+    QuantGemma4TextDecoderLayer,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+    QuantGemma4TextModel,
+)
 from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     DEFAULT_GEMMA4_STATIC_VISION_PROFILE,
@@ -56,13 +75,33 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     StaticGemma4Layout,
 )
 
+
+class _RawGemma4Inputs(TypedDict):
+    """Unpadded processor tensors cached for numerical verification."""
+
+    input_ids: torch.Tensor
+    pixel_values: torch.Tensor
+    image_position_ids: torch.Tensor | None
+
+
+class Gemma4StaticBatch(TypedDict):
+    """Tensor inputs and optional reference inputs for a static Gemma4 prefill."""
+
+    llm_input_ids: torch.Tensor
+    pixel_values: torch.Tensor
+    image_position_ids: torch.Tensor
+    attention_mask: torch.Tensor
+    valid_length: torch.Tensor
+    _raw_inputs: NotRequired[_RawGemma4Inputs]
+
+
 # =============================================================================
 # CPU Helper Functions (pure Python, no model needed)
 # =============================================================================
 
 
 def _normalize_valid_token_mask(
-    input_ids: torch.LongTensor,
+    input_ids: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
     *,
     pad_token_id: Optional[int],
@@ -88,7 +127,7 @@ def _normalize_valid_token_mask(
 
 
 def _validate_padding_layout(
-    input_ids: torch.LongTensor,
+    input_ids: torch.Tensor,
     valid_token_mask: torch.Tensor,
     *,
     padding_side: str,
@@ -233,7 +272,7 @@ class StaticGemma4Runtime:
     def __init__(
         self,
         model: nn.Module,
-        processor: AutoProcessor,
+        processor: "Gemma4Processor",
         *,
         layout: StaticGemma4Layout,
         vision_profile: Optional[Gemma4StaticVisionProfile] = None,
@@ -244,6 +283,7 @@ class StaticGemma4Runtime:
         layout.validate()
         assert_gemma4_e2b_no_moe(model)
 
+        model = cast("Gemma4ForConditionalGeneration", model)
         self.model = model.eval().to(device)
         self.processor = processor
 
@@ -276,7 +316,9 @@ class StaticGemma4Runtime:
 
         qcfg = build_gemma4_e2b_ptq_config(
             num_text_layers=int(self.text_config.num_hidden_layers),
-            num_vision_layers=int(model.config.vision_config.num_hidden_layers),
+            num_vision_layers=int(
+                cast("Gemma4VisionConfig", model.config.vision_config).num_hidden_layers
+            ),
             model_args={
                 "vision": vision_profile.to_vision_model_args(),
                 "attention": {"rope": rope},
@@ -295,13 +337,16 @@ class StaticGemma4Runtime:
             .eval()
         )
 
-        wrapped_top = (
-            self.qmodel.wrapped if hasattr(self.qmodel, "wrapped") else self.qmodel
+        wrapped_top = cast(
+            QuantGemma4ForConditionalGeneration,
+            self.qmodel.wrapped if hasattr(self.qmodel, "wrapped") else self.qmodel,
         )
-        wrapped_model = wrapped_top.model.wrapped
+        wrapped_model = cast(QuantGemma4Model, wrapped_top.model.wrapped)
         self._wrapped_model = wrapped_model
 
-        self.text_model = wrapped_model.language_model.wrapped
+        self.text_model = cast(
+            QuantGemma4TextModel, wrapped_model.language_model.wrapped
+        )
         self.token_embedding = Gemma4TokenEmbeddingExportAdapter(self.text_model).to(
             self.device
         )
@@ -328,14 +373,18 @@ class StaticGemma4Runtime:
 
         self.prefill_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("prefill", return_kv=True)
-                for layer in wrapped_model.language_model.wrapped.layers
+                cast(QuantGemma4TextDecoderLayer, layer.wrapped).as_export_module(
+                    "prefill", return_kv=True
+                )
+                for layer in self.text_model.layers
             ]
         ).to(self.device)
         self.decode_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("decode", return_kv=True)
-                for layer in wrapped_model.language_model.wrapped.layers
+                cast(QuantGemma4TextDecoderLayer, layer.wrapped).as_export_module(
+                    "decode", return_kv=True
+                )
+                for layer in self.text_model.layers
             ]
         ).to(self.device)
 
@@ -441,7 +490,7 @@ class StaticGemma4Runtime:
             caches.append(LayerCache(past_k=past_k, past_v=torch.zeros_like(past_k)))
         return caches
 
-    def build_static_inputs(self, prompt: str, image) -> dict[str, Any]:
+    def build_static_inputs(self, prompt: str, image) -> Gemma4StaticBatch:
         """Build processor inputs padded to the fixed runtime sequence length.
 
         Processes the prompt and image through the HF processor, pads token
@@ -528,7 +577,7 @@ class StaticGemma4Runtime:
         # Cache raw (unpadded) processor output so that verification steps
         # (e.g. verify_step_prefill) can reuse it without re-running the
         # processor, which involves expensive image preprocessing.
-        raw_inputs = {
+        raw_inputs: _RawGemma4Inputs = {
             "input_ids": inputs["input_ids"],
             "pixel_values": inputs["pixel_values"],
             "image_position_ids": inputs.get("image_position_ids", None),
@@ -622,7 +671,7 @@ class StaticGemma4Runtime:
         return attention_masks, position_embeddings
 
     @torch.no_grad()
-    def prefill(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    def prefill(self, batch: Gemma4StaticBatch) -> torch.Tensor:
         """Run static prefill and return last-token logits."""
         llm_input_ids = batch["llm_input_ids"].to(self.device)
         pixel_values = batch["pixel_values"].to(self.device).to(self.model.dtype)
@@ -676,7 +725,7 @@ class StaticGemma4Runtime:
             )
 
             # Check if this layer is a shared-KV consumer
-            attn = layer.wrapped.self_attn.wrapped
+            attn = cast(QuantGemma4TextDecoderLayer, layer.wrapped).self_attn.wrapped
             is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
             shared_kv = shared_kv_states.get(layer_type, None) if is_shared else None
 
@@ -824,7 +873,7 @@ class StaticGemma4Runtime:
             )
 
             # Check if this layer is a shared-KV consumer
-            attn = layer.wrapped.self_attn.wrapped
+            attn = cast(QuantGemma4TextDecoderLayer, layer.wrapped).self_attn.wrapped
             is_shared = bool(getattr(attn, "is_kv_shared_layer", False))
             shared_kv = shared_kv_states.get(layer_type, None) if is_shared else None
             if is_shared and shared_kv is None:
@@ -871,10 +920,10 @@ class StaticGemma4Runtime:
     @torch.no_grad()
     def generate_greedy(
         self,
-        batch: dict[str, torch.Tensor],
+        batch: Gemma4StaticBatch,
         max_new_tokens: int,
         eos_token_id: Optional[int] = None,
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """Generate tokens greedily from a preprocessed static batch.
 
         Args:
@@ -893,7 +942,9 @@ class StaticGemma4Runtime:
         prompt_len = int(batch["valid_length"].item())
 
         # Extract valid input_ids from _raw_inputs (preserves image tokens)
-        raw_inputs = batch.get("_raw_inputs", None)
+        raw_inputs: _RawGemma4Inputs | BatchFeature | None = batch.get(
+            "_raw_inputs", None
+        )
         if raw_inputs is not None:
             input_ids = raw_inputs["input_ids"][0].clone()  # Original with image tokens
         else:
@@ -938,7 +989,7 @@ def verify_step_build_static_inputs(
     runtime: StaticGemma4Runtime,
     prompt: str,
     image,
-) -> dict[str, torch.Tensor]:
+) -> Gemma4StaticBatch:
     """Side-by-side validation of ``build_static_inputs`` against HF reference.
 
     This function re-derives each sub-step of ``build_static_inputs`` using the
@@ -1051,7 +1102,7 @@ def verify_step_build_static_inputs(
 @torch.no_grad()
 def verify_step_token_embedding(
     runtime: StaticGemma4Runtime,
-    batch: dict[str, torch.Tensor],
+    batch: Gemma4StaticBatch,
 ) -> torch.Tensor:
     """Side-by-side validation of ``token_embedding`` against HF reference.
 
@@ -1109,7 +1160,7 @@ def verify_step_token_embedding(
 @torch.no_grad()
 def verify_step_vision_prefill(
     runtime: StaticGemma4Runtime,
-    batch: dict[str, torch.Tensor],
+    batch: Gemma4StaticBatch,
 ) -> torch.Tensor:
     """Side-by-side validation of ``vision_prefill`` against references.
 
@@ -1184,10 +1235,15 @@ def verify_step_vision_prefill(
     # The runtime and floating-point Circle exporter both use a NO_QUANT
     # structural wrapper. Its eager path is the direct parity reference for
     # the static adapter.
-    wrapped_top = (
-        runtime.qmodel.wrapped if hasattr(runtime.qmodel, "wrapped") else runtime.qmodel
+    wrapped_top = cast(
+        QuantGemma4ForConditionalGeneration,
+        runtime.qmodel.wrapped
+        if hasattr(runtime.qmodel, "wrapped")
+        else runtime.qmodel,
     )
-    ref_visual_embeds = wrapped_top.model.wrapped.get_image_features(
+    ref_visual_embeds = cast(
+        QuantGemma4Model, wrapped_top.model.wrapped
+    ).get_image_features(
         pixel_values=pixel_values,
         image_position_ids=image_position_ids,
     )
@@ -1324,7 +1380,7 @@ def verify_step_mm_fusion(
 @torch.no_grad()
 def verify_step_masks_and_rope(
     runtime: StaticGemma4Runtime,
-    batch: dict[str, torch.Tensor],
+    batch: Gemma4StaticBatch,
 ) -> tuple[dict[str, torch.Tensor], dict[str, tuple[torch.Tensor, torch.Tensor]]]:
     """Side-by-side validation of ``build_prefill_masks_and_rope`` against HF.
 
@@ -1466,7 +1522,7 @@ def verify_step_masks_and_rope(
 @torch.no_grad()
 def verify_step_prefill(
     runtime: StaticGemma4Runtime,
-    batch: dict[str, torch.Tensor],
+    batch: Gemma4StaticBatch,
     prompt: str,
     image,
 ) -> torch.Tensor:
@@ -1506,7 +1562,7 @@ def verify_step_prefill(
     # Use cached raw processor output from build_static_inputs to avoid
     # re-running the processor (which involves expensive image preprocessing).
     # Fall back to re-running the processor if the cache is not available.
-    raw_inputs = batch.get("_raw_inputs", None)
+    raw_inputs: _RawGemma4Inputs | BatchFeature | None = batch.get("_raw_inputs", None)
     if raw_inputs is None:
         raw_inputs = runtime.processor(
             text=prompt, images=image, return_tensors="pt", padding=False
@@ -1568,7 +1624,7 @@ def verify_step_prefill(
 @torch.no_grad()
 def verify_step_decode(
     runtime: StaticGemma4Runtime,
-    batch: dict[str, torch.Tensor],
+    batch: Gemma4StaticBatch,
     prompt: str,
     image,
     prefill_logits: torch.Tensor,
@@ -1619,7 +1675,7 @@ def verify_step_decode(
 
     # --- HF reference: prefill ---
     # Use cached raw processor output
-    raw_inputs = batch.get("_raw_inputs", None)
+    raw_inputs: _RawGemma4Inputs | BatchFeature | None = batch.get("_raw_inputs", None)
     if raw_inputs is None:
         raw_inputs = runtime.processor(
             text=prompt, images=image, return_tensors="pt", padding=False
@@ -1753,11 +1809,11 @@ def verify_step_decode(
 @torch.no_grad()
 def verify_step_generation(
     runtime: StaticGemma4Runtime,
-    batch: dict[str, torch.Tensor],
+    batch: Gemma4StaticBatch,
     prompt: str,
     image,
     max_new_tokens: int = 16,
-) -> torch.LongTensor:
+) -> torch.Tensor:
     """Side-by-side validation of ``generate_greedy`` against HF reference.
 
     Runs greedy generation from the runtime and HF reference, comparing
@@ -1780,7 +1836,7 @@ def verify_step_generation(
     rt_generated = runtime.generate_greedy(batch, max_new_tokens, eos_token_id=None)
 
     # HF reference generation
-    raw_inputs = batch.get("_raw_inputs", None)
+    raw_inputs: _RawGemma4Inputs | BatchFeature | None = batch.get("_raw_inputs", None)
     if raw_inputs is None:
         raw_inputs = runtime.processor(
             text=prompt, images=image, return_tensors="pt", padding=False

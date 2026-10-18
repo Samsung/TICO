@@ -32,6 +32,8 @@ def _input_tensor(shape: tuple[int, ...]) -> torch.Tensor:
 class SimpleGatherDim0(TestModuleBase):
     """Gather along dimension 0 with a constant index tensor."""
 
+    index: torch.Tensor
+
     def __init__(self):
         super().__init__()
         index = torch.arange(2 * 4 * 5, dtype=torch.long).reshape(2, 4, 5) % 3
@@ -49,6 +51,8 @@ class SimpleGatherDim0(TestModuleBase):
 @skip(reason="No kernel exist")
 class SimpleGatherDim1(TestModuleBase):
     """Gather along dimension 1 with a constant index tensor."""
+
+    index: torch.Tensor
 
     def __init__(self):
         super().__init__()
@@ -68,6 +72,8 @@ class SimpleGatherDim1(TestModuleBase):
 class SimpleGatherDim2(TestModuleBase):
     """Gather along dimension 2 with a constant index tensor."""
 
+    index: torch.Tensor
+
     def __init__(self):
         super().__init__()
         index = torch.arange(3 * 4 * 2, dtype=torch.long).reshape(3, 4, 2) % 5
@@ -86,6 +92,8 @@ class SimpleGatherDim2(TestModuleBase):
 class SimpleGatherDim3(TestModuleBase):
     """Gather along dimension 3 for a rank-4 tensor."""
 
+    index: torch.Tensor
+
     def __init__(self):
         super().__init__()
         index = torch.arange(2 * 3 * 4 * 3, dtype=torch.long).reshape(2, 3, 4, 3) % 5
@@ -103,6 +111,8 @@ class SimpleGatherDim3(TestModuleBase):
 @skip(reason="No kernel exist")
 class SimpleGatherNegativeDim(TestModuleBase):
     """Gather along the last dimension using a negative dimension value."""
+
+    index: torch.Tensor
 
     def __init__(self):
         super().__init__()

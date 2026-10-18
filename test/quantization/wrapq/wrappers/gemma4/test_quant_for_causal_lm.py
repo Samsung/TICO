@@ -17,6 +17,7 @@
 import copy
 import os
 import unittest
+from unittest import mock
 
 import torch
 
@@ -48,27 +49,29 @@ def _make_text_config():
     """Create a tiny Gemma4 text config for synthetic smoke tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
-    cfg = Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_global_key_value_heads=2,
-        head_dim=32,
-        global_head_dim=32,
-        max_position_embeddings=128,
-        layer_types=["full_attention"],
-        rope_parameters={
-            "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
-        },
-        attention_bias=False,
-        attention_dropout=0.0,
-        use_cache=False,
-        enable_moe_block=False,
-        # Enable logit softcapping to exercise that code path.
-        final_logit_softcapping=30.0,
+    cfg = Gemma4TextConfig.from_dict(
+        dict(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=32,
+            global_head_dim=32,
+            max_position_embeddings=128,
+            layer_types=["full_attention"],
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
+            },
+            attention_bias=False,
+            attention_dropout=0.0,
+            use_cache=False,
+            enable_moe_block=False,
+            # Enable logit softcapping to exercise that code path.
+            final_logit_softcapping=30.0,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -304,6 +307,41 @@ class TestQuantGemma4ForCausalLMGeneration(unittest.TestCase):
             )
 
         self.assertEqual(out.shape[1], self.seq_len + max_new)
+
+
+@unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
+class TestQuantGemma4CausalLMGenerationContract(unittest.TestCase):
+    """Check delegation of the current Transformers generation interface."""
+
+    def setUp(self):
+        """Build a tiny floating-point model and its quantized wrapper."""
+        torch.manual_seed(2026)
+        self.fp_model = _make_gemma4_for_causal_lm()
+        self.wrapper = QuantGemma4ForCausalLM(self.fp_model, qcfg=PTQConfig())
+
+    def test_next_sequence_length_is_forwarded(self):
+        """Preserve the base generation method's second positional argument."""
+        input_ids = torch.tensor([[1, 2, 3]])
+        prepared_inputs = {"input_ids": input_ids}
+        with mock.patch.object(
+            self.fp_model,
+            "prepare_inputs_for_generation",
+            return_value=prepared_inputs,
+        ) as prepare_inputs:
+            result = self.wrapper.prepare_inputs_for_generation(input_ids, 2)
+
+        self.assertIs(result, prepared_inputs)
+        self.assertIs(prepare_inputs.call_args.args[0], input_ids)
+        self.assertEqual(prepare_inputs.call_args.kwargs["next_sequence_length"], 2)
+
+    def test_generation_config_assignment_updates_original_model(self):
+        """Keep writable generation state shared with the original model."""
+        from transformers.generation.configuration_utils import GenerationConfig
+
+        generation_config = GenerationConfig(max_new_tokens=3)
+        self.wrapper.generation_config = generation_config
+        self.assertIs(self.fp_model.generation_config, generation_config)
+        self.assertIs(self.wrapper.generation_config, generation_config)
 
 
 if __name__ == "__main__":

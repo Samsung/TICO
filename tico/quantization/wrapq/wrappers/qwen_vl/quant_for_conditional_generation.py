@@ -12,10 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional, Union
+from typing import cast, Iterable, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers._typing import GenerativePreTrainedModel
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLCausalLMOutputWithPast,
+        Qwen3VLForConditionalGeneration,
+    )
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -53,6 +62,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Qwen3VLForConditionalGeneration", fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
         self.config = fp_model.config
@@ -102,7 +112,7 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         logits_to_keep: int | torch.Tensor = 0,
         return_dict: bool | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple]:
+    ) -> Union["Qwen3VLCausalLMOutputWithPast", tuple]:
         """
         Forward pass with fake quantization.
 
@@ -168,7 +178,9 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             loss = self.module.loss_function(
                 logits=logits,
                 labels=labels,
-                vocab_size=self.module.config.text_config.vocab_size,
+                vocab_size=cast(
+                    "Qwen3VLTextConfig", self.module.config.text_config
+                ).vocab_size,
                 **kwargs,
             )
 
@@ -201,12 +213,19 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         """Return the generation config."""
         return self.module.generation_config
 
+    @generation_config.setter
+    def generation_config(self, value):
+        """Update the wrapped model's generation configuration."""
+        self.module.generation_config = value
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
+        next_sequence_length: int | None = None,
         past_key_values=None,
         attention_mask=None,
         inputs_embeds=None,
+        is_first_iteration: bool | None = False,
         cache_position=None,
         position_ids=None,
         use_cache=True,
@@ -218,11 +237,15 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         **kwargs,
     ):
         """Prepare inputs for generation step."""
-        return self.module.prepare_inputs_for_generation(
+        return cast(
+            "GenerativePreTrainedModel", self.module
+        ).prepare_inputs_for_generation(
             input_ids=input_ids,
+            next_sequence_length=next_sequence_length,
             past_key_values=past_key_values,
             attention_mask=attention_mask,
             inputs_embeds=inputs_embeds,
+            is_first_iteration=is_first_iteration,
             cache_position=cache_position,
             position_ids=position_ids,
             use_cache=use_cache,
@@ -254,7 +277,9 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
         **model_kwargs,
     ):
         """Use the expansion logic matching Qwen3-VL position preparation."""
-        return self.module._expand_inputs_for_generation(  # type: ignore[operator]
+        return cast(
+            "GenerativePreTrainedModel", self.module
+        )._expand_inputs_for_generation(
             expand_size=expand_size,
             is_encoder_decoder=is_encoder_decoder,
             input_ids=input_ids,

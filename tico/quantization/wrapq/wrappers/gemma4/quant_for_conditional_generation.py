@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional, Union
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -28,6 +28,13 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import (
+        Gemma4CausalLMOutputWithPast,
+        Gemma4ForConditionalGeneration,
+    )
+
+
 @try_register(
     "transformers.models.gemma4.modeling_gemma4.Gemma4ForConditionalGeneration"
 )
@@ -41,6 +48,7 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Gemma4ForConditionalGeneration", fp_model)
         assert_gemma4_e2b_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
@@ -81,7 +89,7 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
         logits_to_keep: int | torch.Tensor = 0,
         per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple]:
+    ) -> "Gemma4CausalLMOutputWithPast":
         """Run the wrapped conditional generation model.
 
         Mirrors ``Gemma4ForConditionalGeneration.forward`` including logit
@@ -116,6 +124,7 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
             if hasattr(outputs, "last_hidden_state")
             else outputs
         )
+        slice_indices: slice | torch.Tensor
         # Match the original's logits_to_keep handling: int → slice, tensor → index.
         if isinstance(logits_to_keep, int) and logits_to_keep:
             slice_indices = slice(-logits_to_keep, None)
@@ -141,7 +150,7 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
 
         return Gemma4CausalLMOutputWithPast(
             loss=loss,
-            logits=logits,
+            logits=cast(torch.FloatTensor, logits),
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
@@ -188,22 +197,29 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
         """Return the generation config."""
         return self.module.generation_config
 
+    @generation_config.setter
+    def generation_config(self, value):
+        """Set the generation config on the original model."""
+        self.module.generation_config = value
+
     def prepare_inputs_for_generation(
         self,
         input_ids,
+        next_sequence_length=None,
         past_key_values=None,
+        attention_mask=None,
         inputs_embeds=None,
+        is_first_iteration=False,
+        *,
         position_ids=None,
         pixel_values=None,
         pixel_values_videos=None,
         input_features=None,
-        attention_mask=None,
         input_features_mask=None,
         token_type_ids=None,
         use_cache=True,
         logits_to_keep=None,
         labels=None,
-        is_first_iteration=False,
         **kwargs,
     ):
         """Prepare inputs for generation step.
@@ -213,6 +229,7 @@ class QuantGemma4ForConditionalGeneration(QuantModuleBase, GenerationMixin):
         """
         return self.module.prepare_inputs_for_generation(
             input_ids,
+            next_sequence_length=next_sequence_length,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             position_ids=position_ids,

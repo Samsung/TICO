@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import re
+from collections.abc import Iterable
 from typing import Dict, List
 
 from circle_schema import circle
@@ -43,7 +44,7 @@ def get_op_index(opcode: int, opcode_map: Dict[OpCode, int]) -> int:
 
 # TODO Move this to CircleSubGraph
 def create_builtin_operator(
-    graph, op_index: int, inputs: List, outputs: List
+    graph, op_index: int, inputs: Iterable, outputs: Iterable
 ) -> circle.Operator.OperatorT:
     operator = circle.Operator.OperatorT()
     operator.opcodeIndex = op_index

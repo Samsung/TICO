@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib
+from collections.abc import Iterable
 from typing import Any, Dict, Tuple
 
 import torch
@@ -124,8 +125,8 @@ def _aux_from_dumpable(aux_data: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _flatten_static_cache(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    children = (cache.layers,)
+def _flatten_static_cache(cache) -> Tuple[list[Any], Dict[str, Any]]:
+    children = [cache.layers]
     aux_data = {
         "layer_class_to_replicate": getattr(cache, "layer_class_to_replicate", None),
         "offloading": getattr(cache, "offloading", False),
@@ -133,7 +134,7 @@ def _flatten_static_cache(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
     return children, aux_data
 
 
-def _unflatten_static_cache(children: Tuple[Any, ...], aux_data: Dict[str, Any]):
+def _unflatten_static_cache(children: Iterable[Any], aux_data: Dict[str, Any]):
     from transformers.cache_utils import StaticCache
 
     instance = StaticCache.__new__(StaticCache)
@@ -190,7 +191,7 @@ def register_static_cache():
 # ---------------------------------------------------------------------------
 
 
-def _flatten_static_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+def _flatten_static_layer(layer) -> Tuple[list[Any], Dict[str, Any]]:
     """Split a StaticLayer into (tensor children, static metadata)."""
     if not getattr(layer, "is_initialized", False):
         raise ValueError(
@@ -199,7 +200,7 @@ def _flatten_static_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
         )
 
     # 1. convert tracing tensors
-    children = (layer.keys, layer.values)
+    children = [layer.keys, layer.values]
 
     # 2. extract aux with compatibility
     aux_data: Dict[str, Any] = {
@@ -216,7 +217,7 @@ def _flatten_static_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
     return children, aux_data
 
 
-def _unflatten_static_layer(children: Tuple[Any, ...], aux_data: Dict[str, Any]):
+def _unflatten_static_layer(children: Iterable[Any], aux_data: Dict[str, Any]):
     """Reconstruct a StaticLayer from flattened data."""
     from transformers.cache_utils import StaticLayer
 
@@ -294,13 +295,13 @@ def register_static_layer():
 # ---------------------------------------------------------------------------
 
 
-def _flatten_dynamic_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+def _flatten_dynamic_layer(layer) -> Tuple[list[Any], Dict[str, Any]]:
     if not layer.is_initialized:
         raise ValueError(
             f"{layer} cannot be flattened. DynamicLayer must be initialized "
             "with tensors of a specific shape before use with torch.export."
         )
-    children = (layer.keys, layer.values)
+    children = [layer.keys, layer.values]
     aux_data: Dict[str, Any] = {
         "is_initialized": layer.is_initialized,
         "dtype": layer.keys.dtype,
@@ -309,7 +310,7 @@ def _flatten_dynamic_layer(layer) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
     return children, aux_data
 
 
-def _unflatten_dynamic_layer(children: Tuple[Any, ...], aux_data: Dict[str, Any]):
+def _unflatten_dynamic_layer(children: Iterable[Any], aux_data: Dict[str, Any]):
     from transformers.cache_utils import DynamicLayer
 
     keys, values = children
@@ -369,8 +370,8 @@ def register_dynamic_layer():
 # ---------------------------------------------------------------------------
 
 
-def _flatten_dynamic_cache(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    children = (cache.layers,)
+def _flatten_dynamic_cache(cache) -> Tuple[list[Any], Dict[str, Any]]:
+    children = [cache.layers]
     aux_data = {
         "layer_class_to_replicate": getattr(cache, "layer_class_to_replicate", None),
         "offloading": getattr(cache, "offloading", False),
@@ -378,7 +379,7 @@ def _flatten_dynamic_cache(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
     return children, aux_data
 
 
-def _unflatten_dynamic_cache(children: Tuple[Any, ...], aux_data: Dict[str, Any]):
+def _unflatten_dynamic_cache(children: Iterable[Any], aux_data: Dict[str, Any]):
     from transformers.cache_utils import DynamicCache
 
     instance = DynamicCache.__new__(DynamicCache)
@@ -401,21 +402,19 @@ def _flatten_dynamic_cache_for_fx(cache, spec):
 # Legacy flatten/unflatten for transformers versions that do not have
 # DynamicLayer (e.g. <= 4.52.x), which store tensors directly in
 # key_cache / value_cache instead of the Layer-based cache.layers structure.
-def _flatten_dynamic_cache_legacy(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    children = (cache.key_cache, cache.value_cache)
+def _flatten_dynamic_cache_legacy(cache) -> Tuple[list[Any], Dict[str, Any]]:
+    children = [cache.key_cache, cache.value_cache]
     aux_data: Dict[str, Any] = {}
     return children, aux_data
 
 
-def _unflatten_dynamic_cache_legacy(
-    children: Tuple[Any, ...], aux_data: Dict[str, Any]
-):
+def _unflatten_dynamic_cache_legacy(children: Iterable[Any], aux_data: Dict[str, Any]):
     from transformers.cache_utils import DynamicCache
 
     key_cache, value_cache = children
     cache = DynamicCache()
-    cache.key_cache = key_cache
-    cache.value_cache = value_cache
+    setattr(cache, "key_cache", key_cache)
+    setattr(cache, "value_cache", value_cache)
     return cache
 
 
@@ -507,15 +506,13 @@ def register_dynamic_cache():
 # ---------------------------------------------------------------------------
 
 
-def _flatten_encoder_decoder_cache(cache) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
-    children = (cache.self_attention_cache, cache.cross_attention_cache)
+def _flatten_encoder_decoder_cache(cache) -> Tuple[list[Any], Dict[str, Any]]:
+    children = [cache.self_attention_cache, cache.cross_attention_cache]
     aux_data: Dict[str, Any] = {}
     return children, aux_data
 
 
-def _unflatten_encoder_decoder_cache(
-    children: Tuple[Any, ...], aux_data: Dict[str, Any]
-):
+def _unflatten_encoder_decoder_cache(children: Iterable[Any], aux_data: Dict[str, Any]):
     from transformers.cache_utils import EncoderDecoderCache
 
     self_cache, cross_cache = children

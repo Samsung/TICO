@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextMLP
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -35,6 +39,7 @@ class QuantQwen3VLTextMLP(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        mlp_fp = cast("Qwen3VLTextMLP", mlp_fp)
         super().__init__(qcfg, fp_name=fp_name)
 
         # Configure child modules with specific quantization configs if provided

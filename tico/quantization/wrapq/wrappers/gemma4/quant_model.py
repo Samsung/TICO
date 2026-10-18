@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -31,10 +31,24 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
 
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import (
+        Gemma4Model,
+        Gemma4MultimodalEmbedder,
+    )
+
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+        QuantGemma4TextModel,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_scaled_word_embedding import (
+        QuantGemma4TextScaledWordEmbedding,
+    )
+
+
 def _get_placeholder_mask(
     input_ids: torch.Tensor,
     config: object,
-) -> tuple[torch.BoolTensor, torch.BoolTensor, torch.BoolTensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return boolean masks for image, video, and audio placeholder tokens.
 
     Mirrors ``Gemma4Model.get_placeholder_mask`` but works on raw tensors
@@ -86,6 +100,7 @@ class QuantGemma4Model(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Gemma4Model", fp_model)
         assert_gemma4_e2b_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.config = fp_model.config
@@ -104,7 +119,7 @@ class QuantGemma4Model(QuantModuleBase):
             fp_name=join_name(fp_name, "language_model"),
         )
         self.embed_vision = PTQWrapper(
-            fp_model.embed_vision,
+            cast("Gemma4MultimodalEmbedder", fp_model.embed_vision),
             qcfg=qcfg.child("embed_vision") if qcfg else None,
             fp_name=join_name(fp_name, "embed_vision"),
         )
@@ -266,10 +281,10 @@ class QuantGemma4Model(QuantModuleBase):
 
         # --- Token embedding with placeholder replacement -----------------
         # QuantGemma4TextModel is the concrete type behind the PTQWrapper.
-        text_model = self.language_model.wrapped  # QuantGemma4TextModel
+        text_model = cast("QuantGemma4TextModel", self.language_model.wrapped)
         llm_input_ids: Optional[torch.Tensor] = None
-        image_mask: Optional[torch.BoolTensor] = None
-        video_mask: Optional[torch.BoolTensor] = None
+        image_mask: Optional[torch.Tensor] = None
+        video_mask: Optional[torch.Tensor] = None
 
         if inputs_embeds is None:
             assert input_ids is not None  # guaranteed by validation above
@@ -290,7 +305,9 @@ class QuantGemma4Model(QuantModuleBase):
                 )
             multimodal_mask = image_mask | video_mask | audio_mask
             if multimodal_mask.any():
-                pad_token_id = self.config.text_config.pad_token_id
+                pad_token_id = self.config.get_text_config().pad_token_id
+                if pad_token_id is None:
+                    raise ValueError("Gemma4 multimodal inputs require a pad_token_id.")
                 llm_input_ids = torch.where(
                     multimodal_mask, pad_token_id, llm_input_ids
                 )
@@ -317,7 +334,9 @@ class QuantGemma4Model(QuantModuleBase):
                 )
             # Replace embeddings at multimodal positions with the pad embedding
             # before computing PLE, matching the original Gemma4Model.forward.
-            embed_tokens_fp = text_model.embed_tokens.wrapped.module
+            embed_tokens_fp = cast(
+                "QuantGemma4TextScaledWordEmbedding", text_model.embed_tokens.wrapped
+            ).module
             pad_embedding = embed_tokens_fp.weight[text_config.pad_token_id, :]
             image_mask_emb, video_mask_emb, audio_mask_emb = _get_placeholder_mask(
                 llm_input_ids, self.config
@@ -462,7 +481,7 @@ class QuantGemma4Model(QuantModuleBase):
                 "forward_export() requires as_export_module() to be called first."
             )
 
-        text_model = self.language_model.wrapped  # QuantGemma4TextModel
+        text_model = cast("QuantGemma4TextModel", self.language_model.wrapped)
         text_config = self.config.get_text_config()
 
         # mypy: attention_masks and position_embeddings are required when
@@ -530,21 +549,25 @@ class QuantGemma4Model(QuantModuleBase):
         for obs in self._all_observers():
             assert obs.has_qparams, f"Observer {obs.name} has not been calibrated"
 
-        text_model = self.language_model.wrapped  # QuantGemma4TextModel
+        text_model = cast("QuantGemma4TextModel", self.language_model.wrapped)
         text_config = self.config.get_text_config()
 
         # Create text decoder layer export adapters.
         if mode == "prefill":
             self.prefill_layers = nn.ModuleList(
                 [
-                    layer.wrapped.as_export_module(mode="prefill", return_kv=True)
+                    cast(PTQWrapper, layer).as_export_module(
+                        mode="prefill", return_kv=True
+                    )
                     for layer in text_model.layers
                 ]
             )
         elif mode == "decode":
             self.prefill_layers = nn.ModuleList(
                 [
-                    layer.wrapped.as_export_module(mode="decode", return_kv=True)
+                    cast(PTQWrapper, layer).as_export_module(
+                        mode="decode", return_kv=True
+                    )
                     for layer in text_model.layers
                 ]
             )

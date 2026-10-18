@@ -370,8 +370,8 @@ class CircleSchemaRoundTripTest(unittest.TestCase):
             circle.Buffer.BufferT(),
             circle.Buffer.BufferT(),
         ]
-        model.buffers[1].data = np.array([1], dtype=np.uint8)
-        model.buffers[2].data = np.array([2], dtype=np.uint8)
+        setattr(model.buffers[1], "data", np.array([1], dtype=np.uint8))
+        setattr(model.buffers[2], "data", np.array([2], dtype=np.uint8))
         model.operatorCodes = []
 
         tensor = circle.Tensor.TensorT()
@@ -415,8 +415,8 @@ class CircleSchemaRoundTripTest(unittest.TestCase):
             circle.Buffer.BufferT(),
             circle.Buffer.BufferT(),
         ]
-        model.buffers[1].data = np.array([0, 0, 128, 63], dtype=np.uint8)
-        model.buffers[2].data = np.array([0, 0, 0, 64], dtype=np.uint8)
+        setattr(model.buffers[1], "data", np.array([0, 0, 128, 63], dtype=np.uint8))
+        setattr(model.buffers[2], "data", np.array([0, 0, 0, 64], dtype=np.uint8))
 
         operator_code = circle.OperatorCode.OperatorCodeT()
         operator_code.builtinCode = circle.BuiltinOperator.BuiltinOperator.ADD

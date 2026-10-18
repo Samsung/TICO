@@ -28,7 +28,7 @@ from tico.serialize.circle_mapping import circle_legalize_dtype_to
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
-from tico.utils.validate_args_kwargs import ResizeBilinearArgs
+from tico.utils.validate_args_kwargs import parse_node_args, ResizeBilinearArgs
 
 
 @register_node_visitor
@@ -45,10 +45,7 @@ class ResizeBilinearVisitor(NodeVisitor):
 
     def define_node(self, node: torch.fx.Node) -> circle.Operator.OperatorT:
         """Create one Circle RESIZE_BILINEAR operator."""
-        args = ResizeBilinearArgs(
-            *node.args,
-            **node.kwargs,  # type: ignore[arg-type]
-        )
+        args = parse_node_args(ResizeBilinearArgs, node)
         size_i32 = circle_legalize_dtype_to(args.size, dtype=torch.int32)
         op_index = get_op_index(
             circle.BuiltinOperator.BuiltinOperator.RESIZE_BILINEAR,

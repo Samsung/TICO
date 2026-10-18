@@ -232,7 +232,7 @@ def get_example_inputs(model: nn.Module) -> tuple[torch.Tensor, ...]:
     """Return static example inputs exposed by a converted detector module."""
     if not hasattr(model, "get_example_inputs"):
         raise TypeError("The hand detector must expose get_example_inputs().")
-    inputs = model.get_example_inputs()  # type: ignore[attr-defined]
+    inputs = getattr(model, "get_example_inputs")()
     if not isinstance(inputs, tuple) or not inputs:
         raise TypeError("get_example_inputs() must return a non-empty tuple.")
     if not all(isinstance(value, torch.Tensor) for value in inputs):

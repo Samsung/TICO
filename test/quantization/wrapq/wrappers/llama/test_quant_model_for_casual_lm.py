@@ -18,6 +18,11 @@ The tests run only if *transformers* is available (they depend on the genuine
 """
 
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaForCausalLM
+
 
 import torch
 
@@ -39,7 +44,7 @@ skip_msg = "required transformers not installed — skipping LlamaForCausalLM te
 class TestQuantLlamaForCausalLM(unittest.TestCase):
     seq_len: int
     vocab_size: int
-    fp_model: torch.nn.Module
+    fp_model: "LlamaForCausalLM"
 
     @classmethod
     def setUpClass(cls):
@@ -51,22 +56,46 @@ class TestQuantLlamaForCausalLM(unittest.TestCase):
         cls.seq_len = 16
         cls.vocab_size = 10000
 
-        cfg = LlamaConfig(
-            hidden_size=8,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=4,
-            attention_bias=False,
-            attention_dropout=0.0,
-            attn_implementation="eager",
-            num_hidden_layers=2,
-            max_position_embeddings=cls.seq_len,
-            use_cache=False,
-            vocab_size=cls.vocab_size,
-            return_dict=True,
+        cfg = LlamaConfig.from_dict(
+            {
+                "hidden_size": 8,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "attn_implementation": "eager",
+                "num_hidden_layers": 2,
+                "max_position_embeddings": cls.seq_len,
+                "use_cache": False,
+                "vocab_size": cls.vocab_size,
+                "return_dict": True,
+            }
         )
 
         cls.fp_model = LlamaForCausalLM(cfg)
+
+    def test_generation_hook_accepts_current_transformers_positional_arguments(self):
+        """Keep the current generation hook's positional inputs aligned."""
+        qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())
+        input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        past = tuple(
+            (torch.zeros(1, 1, 2, 4), torch.zeros(1, 1, 2, 4)) for _ in range(2)
+        )
+
+        prepared = qmodel.prepare_inputs_for_generation(
+            input_ids, 1, past, attention_mask, None, False
+        )
+
+        self.assertIs(prepared["past_key_values"], past)
+        torch.testing.assert_close(prepared["input_ids"], input_ids[:, -1:])
+        torch.testing.assert_close(
+            prepared["position_ids"], torch.tensor([[2]], dtype=torch.long)
+        )
+        torch.testing.assert_close(
+            prepared["cache_position"], torch.tensor([2], dtype=torch.long)
+        )
 
     def test_mode_transitions(self):
         qmodel = QuantLlamaForCausalLM(self.fp_model, qcfg=PTQConfig())

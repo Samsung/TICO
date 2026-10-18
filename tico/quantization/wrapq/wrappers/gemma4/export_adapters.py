@@ -19,7 +19,7 @@ graphs. CPU runtime code owns dynamic orchestration, cache writes, sampling, and
 processor/tokenizer logic.
 """
 
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, cast, Iterable, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -33,6 +33,28 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     project_gemma4_per_layer_inputs,
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+        QuantGemma4ForConditionalGeneration,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_model import QuantGemma4Model
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+        QuantGemma4TextModel,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder import (
+        QuantGemma4VisionEncoder,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
+        QuantGemma4VisionModel,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_patch_embedder import (
+        QuantGemma4VisionPatchEmbedder,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler import (
+        QuantGemma4VisionPooler,
+    )
 
 
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
@@ -120,7 +142,9 @@ class Gemma4TokenEmbeddingExportAdapter(nn.Module):
 
     def __init__(self, wrapped_text_model: nn.Module):
         super().__init__()
-        self.embed_tokens = wrapped_text_model.embed_tokens
+        self.embed_tokens = cast(
+            "QuantGemma4TextModel", wrapped_text_model
+        ).embed_tokens
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Return token embeddings for static runtime execution."""
@@ -331,12 +355,15 @@ class Gemma4VisionPatchEmbedderPrefillExportAdapter(nn.Module):
     accepts only pixel values.
     """
 
+    position_embeddings_template: torch.Tensor
+
     def __init__(
         self,
         wrapped: nn.Module,
         *,
         position_embeddings: torch.Tensor,
     ) -> None:
+        wrapped = cast("QuantGemma4VisionPatchEmbedder", wrapped)
         super().__init__()
         self.wrapped = wrapped
         self.register_buffer(
@@ -502,6 +529,7 @@ class Gemma4VisionEncoderPrefillExportAdapter(nn.Module):
     """
 
     def __init__(self, wrapped_encoder: nn.Module):
+        wrapped_encoder = cast("QuantGemma4VisionEncoder", wrapped_encoder)
         super().__init__()
         self.wrapped = wrapped_encoder
 
@@ -737,6 +765,7 @@ class Gemma4VisionPoolerPrefillExportAdapter(nn.Module):
         self,
         wrapped_pooler: nn.Module,
     ):
+        wrapped_pooler = cast("QuantGemma4VisionPooler", wrapped_pooler)
         super().__init__()
         self.wrapped = wrapped_pooler
         self.num_valid_outputs = int(wrapped_pooler.num_valid_outputs)
@@ -752,9 +781,16 @@ class Gemma4LMHeadExportAdapter(nn.Module):
     """Export adapter for final normalization and LM head."""
 
     def __init__(self, wrapped_conditional_generation_model: nn.Module):
+        wrapped_conditional_generation_model = cast(
+            "QuantGemma4ForConditionalGeneration", wrapped_conditional_generation_model
+        )
         super().__init__()
-        wrapped_model = wrapped_conditional_generation_model.model.wrapped
-        self.norm = wrapped_model.language_model.wrapped.norm
+        wrapped_model = cast(
+            "QuantGemma4Model", wrapped_conditional_generation_model.model.wrapped
+        )
+        self.norm = cast(
+            "QuantGemma4TextModel", wrapped_model.language_model.wrapped
+        ).norm
         self.lm_head = wrapped_conditional_generation_model.lm_head
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -790,6 +826,7 @@ class Gemma4ModelPrefillExportAdapter(nn.Module):
     """
 
     def __init__(self, wrapped_model: nn.Module):
+        wrapped_model = cast("QuantGemma4Model", wrapped_model)
         super().__init__()
         self.wrapped_model = wrapped_model
 
@@ -828,6 +865,7 @@ class Gemma4VisionModelPrefillExportAdapter(nn.Module):
         self,
         wrapped_model: nn.Module,
     ):
+        wrapped_model = cast("QuantGemma4VisionModel", wrapped_model)
         super().__init__()
         self.wrapped_model = wrapped_model
 

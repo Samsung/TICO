@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Type, TYPE_CHECKING
+from typing import Dict, Type, TYPE_CHECKING, TypeAlias
 
 if TYPE_CHECKING:
     import torch.fx
@@ -42,8 +42,11 @@ class NodeVisitor:
         raise NotImplementedError("NodeVisitor must be extended.")
 
 
+TorchOperator: TypeAlias = torch._ops.OpOverload | torch._ops.OpOverloadPacket
+
+
 # container for all node visitors
-_node_visitor_dict: Dict[torch._ops.OpOverload, Type[NodeVisitor]] = {}
+_node_visitor_dict: Dict[TorchOperator, Type[NodeVisitor]] = {}
 
 
 # Decorator for each visitor
@@ -53,7 +56,7 @@ def register_node_visitor(visitor):
     return visitor
 
 
-def get_node_visitor(target: torch._ops.OpOverload) -> Type[NodeVisitor]:
+def get_node_visitor(target: TorchOperator) -> Type[NodeVisitor]:
     """
     Get a single node visitor (for unittest purpose)
     """
@@ -68,7 +71,7 @@ def get_node_visitor(target: torch._ops.OpOverload) -> Type[NodeVisitor]:
 # Get all node visitors
 def get_node_visitors(
     op_codes: Dict[OpCode, int], graph: CircleSubgraph
-) -> Dict[torch._ops.OpOverload, NodeVisitor]:
+) -> Dict[TorchOperator, NodeVisitor]:
     node_visitors = {}
     for target, visitor in _node_visitor_dict.items():
         node_visitors[target] = visitor(op_codes, graph)

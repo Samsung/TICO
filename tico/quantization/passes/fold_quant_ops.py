@@ -257,9 +257,10 @@ class FoldQuantOps(PassBase):
             if q.target != torch.ops.circle_custom.quantize_mx.default:
                 continue
 
-            op = q.args[0]
-            if not isinstance(op, torch.fx.Node):
+            source = q.args[0]
+            if not isinstance(source, torch.fx.Node):
                 continue
+            op = source
 
             if _mx_op_params(q) != _mx_op_params(dq):
                 continue

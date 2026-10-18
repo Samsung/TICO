@@ -16,6 +16,7 @@ import os
 import sys
 import types
 import unittest
+from typing import cast
 
 import numpy as np
 import torch
@@ -41,13 +42,15 @@ class SmoothQuantObserverLayoutTest(unittest.TestCase):
     def test_prepare_calibrates_noncontiguous_inputs_without_mutation(self):
         model = nn.Sequential(nn.Linear(4, 4, bias=False)).double().eval()
         with torch.no_grad():
-            model[0].weight.copy_(torch.eye(4, dtype=torch.float64))
+            cast(torch.nn.Linear, model[0]).weight.copy_(
+                torch.eye(4, dtype=torch.float64)
+            )
         x = -torch.arange(24, dtype=torch.float64).reshape(2, 3, 4).transpose(0, 1)
         self.assertFalse(x.is_contiguous())
         original_input = x.clone()
         original_stride = x.stride()
         original_pointer = x.data_ptr()
-        original_weight = model[0].weight.detach().clone()
+        original_weight = cast(torch.nn.Linear, model[0]).weight.detach().clone()
         expected_output = model(x)
 
         prepared = prepare(model, SmoothQuantConfig())
@@ -67,7 +70,9 @@ class SmoothQuantObserverLayoutTest(unittest.TestCase):
         self.assertFalse(maxima.requires_grad)
         torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
         torch.testing.assert_close(x, original_input, rtol=0, atol=0)
-        torch.testing.assert_close(model[0].weight, original_weight, rtol=0, atol=0)
+        torch.testing.assert_close(
+            cast(torch.nn.Linear, model[0]).weight, original_weight, rtol=0, atol=0
+        )
         self.assertEqual(x.stride(), original_stride)
         self.assertEqual(x.data_ptr(), original_pointer)
 
@@ -106,7 +111,7 @@ class SmoothQuantObserverLayoutTest(unittest.TestCase):
 
         model = nn.Sequential(TransposedLinear(4, 4, bias=False))
         with torch.no_grad():
-            model[0].weight.copy_(torch.eye(4))
+            cast(torch.nn.Linear, model[0]).weight.copy_(torch.eye(4))
         x = -torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
         expected_output = model(x)
         self.assertFalse(expected_output.is_contiguous())
@@ -364,7 +369,7 @@ class SmoothQuantOutputHookTest(unittest.TestCase):
 # ────────────────────────────────────────────────────────────
 
 # Store original classes for restoration
-_ORIGINAL_QWEN3VL_CLASSES = {}
+_ORIGINAL_QWEN3VL_CLASSES: dict[str, type[nn.Module]] = {}
 
 
 class FauxQwen3VLVisionAttention(nn.Module):

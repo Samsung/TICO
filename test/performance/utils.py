@@ -1,7 +1,8 @@
+import inspect
 import os
 import tempfile
 import time
-from typing import Any, List, Tuple
+from typing import Any, cast, List, Tuple, TYPE_CHECKING
 
 import torch
 
@@ -13,12 +14,20 @@ from transformers.models.llama.modeling_llama import (
 )
 
 
+if TYPE_CHECKING:
+    from transformers.cache_utils import CacheLayerMixin
+
+
 class Llama32LayerBase(torch.nn.Module):
     def __init__(self, seq_len):
         super().__init__()
         self.seq_len = seq_len
         self.config = self.get_config()
         self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
+        parameters = inspect.signature(self.model.forward).parameters
+        self._cache_keyword = (
+            "past_key_values" if "past_key_values" in parameters else "past_key_value"
+        )
 
         self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
         self.cache_position = torch.arange(self.seq_len)
@@ -52,16 +61,24 @@ class Llama32LayerBase(torch.nn.Module):
                 "position_ids": self.position_ids,
                 "cache_position": self.cache_position,
                 "attention_mask": causal_mask,
-                "past_key_value": past_key_values,
+                self._cache_keyword: past_key_values,
                 "use_cache": self.config.use_cache,
                 "position_embeddings": position_embeddings,
             },
         )
-        hidden_states = layer_outputs[0]
-        return (
-            hidden_states,
-            past_key_values.to_legacy_cache(),
+        hidden_states = (
+            layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
         )
+        to_legacy_cache = getattr(past_key_values, "to_legacy_cache", None)
+        if callable(to_legacy_cache):
+            legacy_cache = to_legacy_cache()
+        else:
+            # This Llama decoder uses attention KV layers, never linear-attention state.
+            layers = (
+                cast("CacheLayerMixin", layer) for layer in past_key_values.layers
+            )
+            legacy_cache = tuple((layer.keys, layer.values) for layer in layers)
+        return hidden_states, legacy_cache
 
     def get_example_inputs(self):
         hidden_states = torch.rand([1, self.seq_len, self.config.hidden_size])
@@ -73,38 +90,40 @@ class Llama32_1B(Llama32LayerBase):
         super().__init__(seq_len=seq_len)
 
     def get_config(self):
-        return LlamaConfig(
-            _attn_implementation_autoset=True,
-            architectures=["LlamaForCausalLM"],
-            attention_bias=False,
-            attention_dropout=0.0,
-            bos_token_id=128000,
-            eos_token_id=128001,
-            head_dim=64,
-            hidden_act="silu",
-            hidden_size=2048,
-            initializer_range=0.02,
-            intermediate_size=8192,
-            max_position_embeddings=131072,
-            mlp_bias=False,
-            model_type="llama",
-            num_attention_heads=32,
-            num_hidden_layers=16,
-            num_key_value_heads=8,
-            pretraining_tp=1,
-            rms_norm_eps=1e-05,
-            rope_scaling={
-                "factor": 32.0,
-                "high_freq_factor": 4.0,
-                "low_freq_factor": 1.0,
-                "original_max_position_embeddings": 8192,
-                "rope_type": "llama3",
-            },
-            rope_theta=500000.0,
-            tie_word_embeddings=True,
-            torch_dtype=torch.float16,
-            use_cache=True,
-            vocab_size=128256,
+        return LlamaConfig.from_dict(
+            dict(
+                _attn_implementation_autoset=True,
+                architectures=["LlamaForCausalLM"],
+                attention_bias=False,
+                attention_dropout=0.0,
+                bos_token_id=128000,
+                eos_token_id=128001,
+                head_dim=64,
+                hidden_act="silu",
+                hidden_size=2048,
+                initializer_range=0.02,
+                intermediate_size=8192,
+                max_position_embeddings=131072,
+                mlp_bias=False,
+                model_type="llama",
+                num_attention_heads=32,
+                num_hidden_layers=16,
+                num_key_value_heads=8,
+                pretraining_tp=1,
+                rms_norm_eps=1e-05,
+                rope_scaling={
+                    "factor": 32.0,
+                    "high_freq_factor": 4.0,
+                    "low_freq_factor": 1.0,
+                    "original_max_position_embeddings": 8192,
+                    "rope_type": "llama3",
+                },
+                rope_theta=500000.0,
+                tie_word_embeddings=True,
+                torch_dtype=torch.float16,
+                use_cache=True,
+                vocab_size=128256,
+            )
         )
 
 
@@ -113,38 +132,40 @@ class Llama32_3B(Llama32LayerBase):
         super().__init__(seq_len=seq_len)
 
     def get_config(self):
-        return LlamaConfig(
-            _attn_implementation_autoset=True,
-            architectures=["LlamaForCausalLM"],
-            attention_bias=False,
-            attention_dropout=0.0,
-            bos_token_id=128000,
-            eos_token_id=128001,
-            head_dim=128,
-            hidden_act="silu",
-            hidden_size=3072,
-            initializer_range=0.02,
-            intermediate_size=8192,
-            max_position_embeddings=131072,
-            mlp_bias=False,
-            model_type="llama",
-            num_attention_heads=24,
-            num_hidden_layers=28,
-            num_key_value_heads=8,
-            pretraining_tp=1,
-            rms_norm_eps=1e-05,
-            rope_scaling={
-                "factor": 32.0,
-                "high_freq_factor": 4.0,
-                "low_freq_factor": 1.0,
-                "original_max_position_embeddings": 8192,
-                "rope_type": "llama3",
-            },
-            rope_theta=500000.0,
-            tie_word_embeddings=True,
-            torch_dtype=torch.float16,
-            use_cache=True,
-            vocab_size=128256,
+        return LlamaConfig.from_dict(
+            dict(
+                _attn_implementation_autoset=True,
+                architectures=["LlamaForCausalLM"],
+                attention_bias=False,
+                attention_dropout=0.0,
+                bos_token_id=128000,
+                eos_token_id=128001,
+                head_dim=128,
+                hidden_act="silu",
+                hidden_size=3072,
+                initializer_range=0.02,
+                intermediate_size=8192,
+                max_position_embeddings=131072,
+                mlp_bias=False,
+                model_type="llama",
+                num_attention_heads=24,
+                num_hidden_layers=28,
+                num_key_value_heads=8,
+                pretraining_tp=1,
+                rms_norm_eps=1e-05,
+                rope_scaling={
+                    "factor": 32.0,
+                    "high_freq_factor": 4.0,
+                    "low_freq_factor": 1.0,
+                    "original_max_position_embeddings": 8192,
+                    "rope_type": "llama3",
+                },
+                rope_theta=500000.0,
+                tie_word_embeddings=True,
+                torch_dtype=torch.float16,
+                use_cache=True,
+                vocab_size=128256,
+            )
         )
 
 

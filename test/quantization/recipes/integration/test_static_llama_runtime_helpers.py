@@ -159,7 +159,7 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
         runtime = StaticLlamaLayerRuntime.__new__(StaticLlamaLayerRuntime)
         runtime.device = torch.device("cpu")
         runtime.padding_side = "right"
-        runtime.tokenizer = SimpleNamespace(pad_token_id=0)
+        setattr(runtime, "tokenizer", SimpleNamespace(pad_token_id=0))
         runtime.max_seq = 4
         runtime.num_hidden_layers = 1
         runtime.num_kv_heads = 1
@@ -240,7 +240,7 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
         runtime = StaticLlamaLayerRuntime.__new__(StaticLlamaLayerRuntime)
         runtime.device = torch.device("cpu")
         runtime.padding_side = "right"
-        runtime.tokenizer = SimpleNamespace(pad_token_id=0)
+        setattr(runtime, "tokenizer", SimpleNamespace(pad_token_id=0))
         runtime.max_seq = 8
         runtime.num_hidden_layers = 1
         runtime.past_len = 2
@@ -298,7 +298,7 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
         runtime = StaticLlamaLayerRuntime.__new__(StaticLlamaLayerRuntime)
         runtime.device = torch.device("cpu")
         runtime.padding_side = "right"
-        runtime.tokenizer = SimpleNamespace(pad_token_id=0)
+        setattr(runtime, "tokenizer", SimpleNamespace(pad_token_id=0))
 
         calls = []
 
@@ -311,7 +311,7 @@ class TestStaticLlamaRuntimeHelpers(unittest.TestCase):
             calls.append((input_ids.clone(), attention_mask.clone(), int(bucket_size)))
             return torch.tensor([[float(len(calls))]])
 
-        runtime.append_prefill = fake_append_prefill
+        setattr(runtime, "append_prefill", fake_append_prefill)
         logits = runtime.append_prefill_chunked(
             torch.tensor([[1, 2, 3, 4, 5]]),
             torch.ones(1, 5, dtype=torch.long),

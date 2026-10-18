@@ -14,10 +14,23 @@
 
 import inspect
 from collections import namedtuple
-from typing import Iterable, Optional, Union
+from typing import cast, Iterable, Optional, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
+        QuantQwen3VLTextModel,
+    )
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
+        QuantQwen3VLVisionModel,
+    )
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLModel,
+        Qwen3VLModelOutputWithPast,
+    )
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
@@ -53,6 +66,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Qwen3VLModel", fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
         self.config = fp_model.config
@@ -90,6 +104,16 @@ class QuantQwen3VLModel(QuantModuleBase):
         # Multimodal fusion observers (masked scatter results)
         self.obs_mm_fusion = self._make_obs("mm_fusion")
 
+    @property
+    def _vision_model(self) -> "QuantQwen3VLVisionModel":
+        """Return the model-family wrapper selected by the registry."""
+        return cast("QuantQwen3VLVisionModel", self.visual.wrapped)
+
+    @property
+    def _text_model(self) -> "QuantQwen3VLTextModel":
+        """Return the model-family wrapper selected by the registry."""
+        return cast("QuantQwen3VLTextModel", self.language_model.wrapped)
+
     def forward(
         self,
         input_ids: torch.Tensor | None = None,
@@ -105,7 +129,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         cache_position: torch.Tensor | None = None,
         return_dict: bool | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple]:
+    ) -> Union["Qwen3VLModelOutputWithPast", tuple]:
         """
         Forward pass with fake quantization.
 
@@ -142,10 +166,12 @@ class QuantQwen3VLModel(QuantModuleBase):
 
         # Generate input embeddings from token IDs
         if inputs_embeds is None:
-            assert hasattr(self.language_model.wrapped, "embed_tokens") and isinstance(
-                self.language_model.wrapped.embed_tokens, PTQWrapper
+            assert hasattr(self._text_model, "embed_tokens") and isinstance(
+                self._text_model.embed_tokens, PTQWrapper
             )
-            inputs_embeds = self.language_model.wrapped.embed_tokens(input_ids)
+            inputs_embeds = self._text_model.embed_tokens(input_ids)
+
+        assert inputs_embeds is not None
 
         deepstack_image_embeds: list = None  # type: ignore[assignment]
         deepstack_video_embeds: list = None  # type: ignore[assignment]
@@ -293,7 +319,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         output = Qwen3VLModelOutputWithPast(
             last_hidden_state=outputs.last_hidden_state,
             past_key_values=outputs.past_key_values,
-            rope_deltas=self.rope_deltas,
+            rope_deltas=cast(Optional[torch.LongTensor], self.rope_deltas),
         )
         return output if return_dict else output.to_tuple()
 
@@ -347,12 +373,15 @@ class QuantQwen3VLModel(QuantModuleBase):
     def _get_image_features(
         self,
         pixel_values: torch.Tensor,
-        image_grid_thw: torch.Tensor,
+        image_grid_thw: torch.Tensor | None,
         **kwargs,
     ):
         """Get image features from vision model."""
+        assert image_grid_thw is not None
         # Convert to vision model dtype
-        pixel_values = pixel_values.type(self.visual.wrapped.module.dtype)
+        pixel_values = pixel_values.type(
+            cast(torch.dtype, self._vision_model.module.dtype)
+        )
 
         # Process through vision model
         vision_output = self.visual(pixel_values, grid_thw=image_grid_thw, **kwargs)
@@ -360,12 +389,12 @@ class QuantQwen3VLModel(QuantModuleBase):
         # Get pooled output
         image_embeds, deepstack_features = (
             (vision_output.pooler_output, vision_output.deepstack_features)
-            if self.visual.wrapped.has_deepstack_model_output
+            if self._vision_model.has_deepstack_model_output
             else vision_output
         )
 
         # Split by image based on grid_thw
-        spatial_merge_size = self.visual.wrapped.module.spatial_merge_size
+        spatial_merge_size = self._vision_model.module.spatial_merge_size
         split_sizes = (image_grid_thw.prod(-1) // spatial_merge_size**2).tolist()
         image_embeds = torch.split(image_embeds, split_sizes)
 
@@ -398,7 +427,7 @@ class QuantQwen3VLModel(QuantModuleBase):
         """
         if input_ids is None:
             # Compare embeddings directly
-            embedder = self.language_model.wrapped.embed_tokens
+            embedder = self._text_model.embed_tokens
             img_tkn = torch.tensor(
                 self.image_token_id,
                 dtype=torch.long,
@@ -475,10 +504,10 @@ class QuantQwen3VLModel(QuantModuleBase):
                 and self._native_get_rope_index_has_mm_token_type_ids
             ):
                 position_ids, rope_deltas = self.module.get_rope_index(
-                    input_ids,
-                    mm_token_type_ids=mm_token_type_ids,
-                    image_grid_thw=image_grid_thw,
-                    video_grid_thw=video_grid_thw,
+                    cast(torch.LongTensor, input_ids),
+                    mm_token_type_ids=cast(torch.IntTensor, mm_token_type_ids),
+                    image_grid_thw=cast(Optional[torch.LongTensor], image_grid_thw),
+                    video_grid_thw=cast(Optional[torch.LongTensor], video_grid_thw),
                     attention_mask=attention_mask,
                 )
             else:
@@ -522,7 +551,7 @@ class QuantQwen3VLModel(QuantModuleBase):
             )
             video_grid_thw[:, 0] = 1
 
-        spatial_merge_size = self.visual.wrapped.module.spatial_merge_size
+        spatial_merge_size = self._vision_model.module.spatial_merge_size
         image_token_id = self.module.config.image_token_id
         video_token_id = self.module.config.video_token_id
         vision_start_token_id = self.module.config.vision_start_token_id
@@ -548,18 +577,18 @@ class QuantQwen3VLModel(QuantModuleBase):
             attention_mask = attention_mask.to(total_input_ids.device)
 
             for i, current_input_ids in enumerate(total_input_ids):
-                input_ids = current_input_ids[attention_mask[i] == 1]
+                current_tokens = current_input_ids[attention_mask[i] == 1]
 
                 # Count images and videos
                 image_nums, video_nums = 0, 0
                 vision_start_indices = torch.argwhere(
-                    input_ids == vision_start_token_id
+                    current_tokens == vision_start_token_id
                 ).squeeze(1)
-                vision_tokens = input_ids[vision_start_indices + 1]
-                image_nums = (vision_tokens == image_token_id).sum()
-                video_nums = (vision_tokens == video_token_id).sum()
+                vision_tokens = current_tokens[vision_start_indices + 1]
+                image_nums = int((vision_tokens == image_token_id).sum().item())
+                video_nums = int((vision_tokens == video_token_id).sum().item())
 
-                input_tokens = input_ids.tolist()
+                input_tokens = current_tokens.tolist()
                 llm_pos_ids_list: list = []
                 st = 0
                 remain_images, remain_videos = image_nums, video_nums
@@ -600,9 +629,9 @@ class QuantQwen3VLModel(QuantModuleBase):
                         ed = ed_video
 
                     llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t.item(),
-                        h.item() // spatial_merge_size,
-                        w.item() // spatial_merge_size,
+                        int(t.item()),
+                        int(h.item()) // spatial_merge_size,
+                        int(w.item()) // spatial_merge_size,
                     )
 
                     text_len = ed - st
@@ -670,10 +699,10 @@ class QuantQwen3VLModel(QuantModuleBase):
                     llm_positions.max() + 1 - len(total_input_ids[i])
                 )
 
-            mrope_position_deltas = torch.tensor(
+            mrope_deltas_tensor = torch.tensor(
                 mrope_position_deltas, device=input_ids.device
             ).unsqueeze(1)
-            return position_ids, mrope_position_deltas
+            return position_ids, mrope_deltas_tensor
         else:
             # Fallback for text-only input
             if attention_mask is not None:
@@ -687,7 +716,7 @@ class QuantQwen3VLModel(QuantModuleBase):
                 max_position_ids = position_ids.max(0, keepdim=False)[0].max(
                     -1, keepdim=True
                 )[0]
-                mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
+                mrope_deltas_tensor = max_position_ids + 1 - attention_mask.shape[-1]
             else:
                 if input_ids is not None:
                     batch_size, seq_len = input_ids.shape
@@ -704,13 +733,13 @@ class QuantQwen3VLModel(QuantModuleBase):
                     .view(1, 1, -1)
                     .expand(3, batch_size, -1)
                 )
-                mrope_position_deltas = torch.zeros(
+                mrope_deltas_tensor = torch.zeros(
                     [batch_size, 1],
                     device=device,
                     dtype=dtype,
                 )
 
-            return position_ids, mrope_position_deltas
+            return position_ids, mrope_deltas_tensor
 
     def _all_observers(self) -> Iterable:
         """Yield all observers from this module and wrapped submodules."""

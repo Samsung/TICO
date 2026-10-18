@@ -80,6 +80,7 @@ class TinyConvPair(nn.Module):
                     ]
                 )
             )
+            assert self.conv1.bias is not None
             self.conv1.bias.copy_(torch.tensor([0.5, -1.0, 2.0]))
             self.conv2.weight.copy_(
                 torch.tensor(
@@ -91,6 +92,7 @@ class TinyConvPair(nn.Module):
                     ]
                 )
             )
+            assert self.conv2.bias is not None
             self.conv2.bias.copy_(torch.tensor([0.0, 0.25, -0.5, 1.0]))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -118,6 +120,7 @@ class TinyStack(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run all stacked linear projection pairs."""
         for layer in self.layers:
+            assert isinstance(layer, nn.ModuleDict)
             x = layer["down_proj"](layer["up_proj"](x))
         return x
 
@@ -167,6 +170,7 @@ class CLETest(unittest.TestCase):
         base_out = model(x)
         base_conv1_weight = model.conv1.weight.detach().clone()
         base_conv2_weight = model.conv2.weight.detach().clone()
+        assert model.conv1.bias is not None
         base_conv1_bias = model.conv1.bias.detach().clone()
 
         scale = equalize_layer_pair(model.conv1, model.conv2)

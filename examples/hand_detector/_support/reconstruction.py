@@ -93,6 +93,8 @@ class ReconstructionWindow:
 class DetectorWindow(nn.Module):
     """Execute a selected static subgraph from cached live-in tensors."""
 
+    _detector: HandDetector
+
     def __init__(self, detector: HandDetector, window: ReconstructionWindow) -> None:
         super().__init__()
         # Keep the executable view from registering the full detector as a

@@ -55,7 +55,9 @@ class _Model(nn.Module):
 class HandDetectorAdaRoundTest(unittest.TestCase):
     def _model(self) -> _Model:
         model = _Model()
-        wrapper = model.detector.layers[0].conv
+        layer = model.detector.layers[0]
+        assert isinstance(layer, _Layer)
+        wrapper = layer.conv
         wrapper.enable_calibration()
         sample = torch.ones(1, 1, 1, 1)
         wrapper(sample)

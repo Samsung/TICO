@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from typing import cast, Sequence
 
 import torch
 
@@ -60,7 +61,7 @@ class TestQwen3VLVisionProfile(unittest.TestCase):
         for value in ((1.0, 4, 4), (True, 4, 4)):
             with self.subTest(value=value):
                 with self.assertRaises(TypeError):
-                    Qwen3VLVisionProfile.from_grid_thw(value)
+                    Qwen3VLVisionProfile.from_grid_thw(cast(Sequence[int], value))
 
         with self.assertRaises(ValueError):
             Qwen3VLVisionProfile.from_grid_thw((1, 0, 4))

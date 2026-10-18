@@ -71,6 +71,7 @@ def main():
         * vision_grid_thw.num_height_patches
         * vision_grid_thw.num_width_patches
     )
+    assert isinstance(cfg.patch_size, int)
     patch_dim = (
         cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
     )

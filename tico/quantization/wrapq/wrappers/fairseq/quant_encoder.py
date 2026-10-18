@@ -316,7 +316,8 @@ class QuantFairseqEncoder(QuantModuleBase):
         """
         for i, layer in enumerate(self.layers):
             if hasattr(layer, "upgrade_state_dict_named"):
-                layer.upgrade_state_dict_named(state_dict, f"{name}.layers.{i}")
+                upgrade = getattr(layer, "upgrade_state_dict_named")
+                upgrade(state_dict, f"{name}.layers.{i}")
 
         version_key = f"{name}.version"
         v = state_dict.get(version_key, torch.Tensor([1]))

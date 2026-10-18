@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import torch
 from transformers import AutoTokenizer, MambaForCausalLM
 
@@ -31,7 +33,8 @@ class Mamba(TestModuleBase):
         # torch/circle comparison would depend on the random seed.
         self.model = MambaForCausalLM.from_pretrained(
             "state-spaces/mamba-130m-hf", use_cache=False
-        ).to("cpu")
+        )
+        cast(torch.nn.Module, self.model).to("cpu")
 
         self.rtol = 1e-3
         self.atol = 1e-3

@@ -28,8 +28,8 @@ def llama_rmsnorm_forward_adapter(self: LlamaRMSNorm, hidden_states: torch.Tenso
 @contextmanager
 def patched_llama_rmsnorm():
     orig = LlamaRMSNorm.forward
-    LlamaRMSNorm.forward = llama_rmsnorm_forward_adapter
+    setattr(LlamaRMSNorm, "forward", llama_rmsnorm_forward_adapter)
     try:
         yield
     finally:
-        LlamaRMSNorm.forward = orig
+        setattr(LlamaRMSNorm, "forward", orig)

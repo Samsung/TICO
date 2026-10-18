@@ -70,7 +70,7 @@ class _FakeVisionModel(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.export_calls = 0
-        self.last_position_ids = None
+        self.last_position_ids: torch.Tensor | None = None
 
     def as_export_module(
         self,

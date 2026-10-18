@@ -20,6 +20,9 @@ import torch
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+    QuantGemma4TextAttention,
+)
 from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 
 
@@ -96,7 +99,7 @@ def _make_text_config(**overrides):
         allow_global_per_layer_attribute_access=True,
     )
     kwargs.update(overrides)
-    cfg = Gemma4TextConfig(**kwargs)
+    cfg = Gemma4TextConfig.from_dict(kwargs)
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
     else:
@@ -213,13 +216,12 @@ class TestQuantGemma4TextDecoderLayer(unittest.TestCase):
         qlayer.freeze_qparams()
 
         self.assertIs(qlayer._mode, Mode.QUANT)
-        self.assertIsInstance(qlayer.self_attn.wrapped.q_proj.wrapped, QuantLinear)
-        self.assertEqual(
-            qlayer.self_attn.wrapped.q_proj.wrapped.obs_act_in.dtype, DType.uint(4)
-        )
-        self.assertEqual(
-            qlayer.self_attn.wrapped.q_proj.wrapped.obs_act_out.dtype, DType.uint(4)
-        )
+        attention = qlayer.self_attn.wrapped
+        assert isinstance(attention, QuantGemma4TextAttention)
+        q_proj = attention.q_proj.wrapped
+        assert isinstance(q_proj, QuantLinear)
+        self.assertEqual(q_proj.obs_act_in.dtype, DType.uint(4))
+        self.assertEqual(q_proj.obs_act_out.dtype, DType.uint(4))
 
     def test_prefill_export_adapter_returns_flat_kv_delta(self):
         """Validate the static prefill export adapter output contract."""

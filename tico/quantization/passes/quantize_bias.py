@@ -25,7 +25,12 @@ from tico.utils import logging
 from tico.utils.graph import add_placeholder, get_torch_param_value, is_torch_param
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import Conv2DArgs, ConvTranspose2DArgs, LinearArgs
+from tico.utils.validate_args_kwargs import (
+    Conv2DArgs,
+    ConvTranspose2DArgs,
+    LinearArgs,
+    parse_node_args,
+)
 
 
 def _get_input_weight_bias_for_bias_quantization(
@@ -39,7 +44,7 @@ def _get_input_weight_bias_for_bias_quantization(
     """
 
     if node.target == torch.ops.aten.linear.default:
-        lin_args = LinearArgs(*node.args, **node.kwargs)
+        lin_args = parse_node_args(LinearArgs, node)
         if lin_args.bias is None:
             return None
         return lin_args.input, lin_args.weight, lin_args.bias
@@ -50,13 +55,13 @@ def _get_input_weight_bias_for_bias_quantization(
         torch.ops.circle_custom.depthwise_conv2d,
         torch.ops.circle_custom.depthwise_conv2d.padding,
     ]:
-        conv_args = Conv2DArgs(*node.args, **node.kwargs)
+        conv_args = parse_node_args(Conv2DArgs, node)
         if conv_args.bias is None:
             return None
         return conv_args.input, conv_args.weight, conv_args.bias
 
     if node.target == torch.ops.circle_custom.transpose_conv:
-        tconv_args = ConvTranspose2DArgs(*node.args, **node.kwargs)
+        tconv_args = parse_node_args(ConvTranspose2DArgs, node)
         if tconv_args.bias is None:
             return None
         return tconv_args.input, tconv_args.weight, tconv_args.bias

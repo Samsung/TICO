@@ -105,7 +105,7 @@ def _compute_3d_position_ids(
         st = 0
 
         if len(image_positions) > 0:
-            start_pos = image_positions[0].item()
+            start_pos = int(image_positions[0].item())
 
             text_len = start_pos - st
             if text_len > 0:
@@ -187,6 +187,8 @@ def _create_image_input(
     ] = 1  # text=0, image=1, video=2
 
     num_patches = thw[0] * thw[1] * thw[2]
+    assert isinstance(cfg.vision_config.patch_size, int)
+    assert isinstance(cfg.vision_config.temporal_patch_size, int)
     patch_dim = (
         cfg.vision_config.in_channels
         * cfg.vision_config.temporal_patch_size
@@ -202,7 +204,7 @@ def _create_image_input(
         image_token_id=cfg.image_token_id,
     )
 
-    example = {
+    example: dict[str, torch.Tensor | int | None] = {
         "input_ids": input_ids,
         "attention_mask": None,
         "position_ids": position_ids,

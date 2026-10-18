@@ -13,12 +13,19 @@
 # limitations under the License.
 
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchEmbed
+
 
 import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_patch_embed import (
     QuantQwen3VLVisionPatchEmbed,
 )
@@ -33,7 +40,7 @@ skip_msg = (
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
-    fp_patch_embed: torch.nn.Module
+    fp_patch_embed: "Qwen3VLVisionPatchEmbed"
     hidden_size: int
     patch_dim: int
 
@@ -46,14 +53,18 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
             Qwen3VLVisionPatchEmbed,
         )
 
-        cfg = Qwen3VLVisionConfig(
-            hidden_size=64,
-            spatial_merge_size=2,
-            temporal_merge_size=2,
+        cfg = Qwen3VLVisionConfig.from_dict(
+            {
+                "hidden_size": 64,
+                "spatial_merge_size": 2,
+                "temporal_merge_size": 2,
+            }
         )
 
         cls.fp_patch_embed = Qwen3VLVisionPatchEmbed(cfg)
         cls.hidden_size = cfg.hidden_size
+        assert isinstance(cfg.patch_size, int)
+        assert isinstance(cfg.temporal_patch_size, int)
         cls.patch_dim = (
             cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
         )
@@ -90,7 +101,7 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
     def test_projection_parameters_are_flattened_without_reordering(self):
         """Conv3d parameters must be copied to Linear in C-T-H-W order."""
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed)
-        q_linear = q_patch.proj.wrapped
+        q_linear = cast(QuantLinear, q_patch.proj.wrapped)
         linear = q_linear.module
         conv3d = self.fp_patch_embed.proj
 
@@ -140,7 +151,7 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
             },
         )
         q_patch = QuantQwen3VLVisionPatchEmbed(self.fp_patch_embed, qcfg=cfg)
-        q_linear = q_patch.proj.wrapped
+        q_linear = cast(QuantLinear, q_patch.proj.wrapped)
 
         self.assertEqual(type(q_linear).__name__, "QuantLinear")
         self.assertEqual(q_linear.obs_weight.dtype, DType.uint(4))
@@ -154,10 +165,16 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
 
         _ = q_patch(self._make_input())
 
-        q_linear = q_patch.proj.wrapped
-        self.assertTrue(q_linear.obs_act_in.min_val.numel() > 0)
-        self.assertTrue(q_linear.obs_act_out.min_val.numel() > 0)
-        self.assertTrue(q_linear.obs_weight.min_val.numel() > 0)
+        q_linear = cast(QuantLinear, q_patch.proj.wrapped)
+        self.assertTrue(
+            cast(AffineObserverBase, q_linear.obs_act_in).min_val.numel() > 0
+        )
+        self.assertTrue(
+            cast(AffineObserverBase, q_linear.obs_act_out).min_val.numel() > 0
+        )
+        self.assertTrue(
+            cast(AffineObserverBase, q_linear.obs_weight).min_val.numel() > 0
+        )
 
         q_patch.freeze_qparams()
         self.assertTrue(q_linear.obs_act_in.has_qparams)
@@ -212,7 +229,7 @@ class TestQuantQwen3VLVisionPatchEmbed(unittest.TestCase):
             _ = q_patch(self._make_input())
 
         q_patch.freeze_qparams()
-        q_linear = q_patch.proj.wrapped
+        q_linear = cast(QuantLinear, q_patch.proj.wrapped)
         self.assertTrue(q_linear.obs_act_in.has_qparams)
         self.assertTrue(q_linear.obs_act_out.has_qparams)
         self.assertTrue(q_linear.obs_weight.has_qparams)

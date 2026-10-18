@@ -14,10 +14,16 @@
 
 """PTQ wrapper for the Gemma4 assistant ordered sparse LM head."""
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantMaskedEmbedder,
+    )
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -53,6 +59,7 @@ class QuantGemma4AssistantMaskedEmbedder(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_embedder = cast("Gemma4AssistantMaskedEmbedder", fp_embedder)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_embedder
         self.num_centroids = int(fp_embedder.num_centroids)

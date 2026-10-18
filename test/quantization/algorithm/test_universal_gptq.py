@@ -1977,7 +1977,7 @@ class TestGPTAQNativeIORegression(unittest.TestCase):
 
         state = _ForwardState.capture(module)
         # Simulate wrapping: set an instance forward
-        module.forward = lambda *a, **k: None  # type: ignore[method-assign]
+        setattr(module, "forward", lambda *a, **k: None)
         self.assertIn("forward", module.__dict__)
 
         # Restore should remove the instance forward, not keep it
@@ -2001,7 +2001,7 @@ class TestGPTAQNativeIORegression(unittest.TestCase):
 
         state = _ForwardState.capture(module)
         # Simulate wrapping
-        module.forward = lambda *a, **k: None  # type: ignore[method-assign]
+        setattr(module, "forward", lambda *a, **k: None)
         state.restore(module)
 
         self.assertIn("forward", module.__dict__)

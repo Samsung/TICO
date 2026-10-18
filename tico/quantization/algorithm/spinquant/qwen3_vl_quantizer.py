@@ -12,11 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, cast, Dict, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from transformers import GenerationConfig
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+
 
 from tico.quantization.algorithm.spinquant.qwen3_vl_model_utils import (
     assert_tied_word_embedding,
@@ -277,7 +282,9 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
         target_dtype = infer_dtype(model)
 
         spin_model = SpinQwen3VLForConditionalGeneration(model.config)
-        spin_model.to(device=target_device, dtype=target_dtype)
+        cast(Callable[..., nn.Module], spin_model.to)(
+            device=target_device, dtype=target_dtype
+        )
 
         missing_keys, unexpected_keys = spin_model.load_state_dict(
             model.state_dict(),
@@ -317,7 +324,9 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
         """
         assert isinstance(self.config, Qwen3VLSpinQuantConfig)
         components = resolve_qwen3_vl_spinquant_components(model, self.config)
-        self._init_linear_as_identity(components.language_model.rotate_embedding)
+        self._init_linear_as_identity(
+            cast(nn.Linear, components.language_model.rotate_embedding)
+        )
         self._init_linear_as_identity(model.rotate_lm_head)
 
     @torch.no_grad()
@@ -351,7 +360,7 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
         if hasattr(model, "config"):
             model.config.tie_word_embeddings = True
             if hasattr(model.config, "text_config"):
-                model.config.text_config.tie_word_embeddings = True
+                getattr(model.config, "text_config").tie_word_embeddings = True
 
     @torch.no_grad()
     def _init_linear_as_identity(self, layer: nn.Linear) -> None:
@@ -428,16 +437,18 @@ class Qwen3VLSpinQuantQuantizer(BaseQuantizer):
             dst: Destination SpinQwen3VL model.
         """
         if hasattr(src, "generation_config"):
-            dst.generation_config = src.generation_config
+            dst.generation_config = cast("GenerationConfig", src.generation_config)
 
         if hasattr(src, "name_or_path"):
-            dst.name_or_path = src.name_or_path
+            dst.name_or_path = cast(Optional[str], src.name_or_path)
 
         if hasattr(src, "_keep_in_fp32_modules"):
-            dst._keep_in_fp32_modules = src._keep_in_fp32_modules
+            dst._keep_in_fp32_modules = cast(
+                set[str] | list[str] | None, src._keep_in_fp32_modules
+            )
 
         if hasattr(src, "hf_device_map"):
-            dst.hf_device_map = src.hf_device_map
+            setattr(dst, "hf_device_map", getattr(src, "hf_device_map"))
 
         if hasattr(src, "config"):
-            dst.config = src.config
+            dst.config = cast("Qwen3VLConfig", src.config)

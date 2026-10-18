@@ -22,16 +22,18 @@ from circle_schema import circle
 
 from tico.serialize.circle_mapping import circle_legalize_dtype_to
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.validate_args_kwargs import ResizeNearestNeighborArgs
 
 
 @register_node_visitor
 class ResizeNearestNeighborVisitor(NodeVisitor):
-    target: List[torch._ops.OpOverload] = [
-        torch.ops.circle_custom.resize_nearest_neighbor
-    ]
+    target: List[TorchOperator] = [torch.ops.circle_custom.resize_nearest_neighbor]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph):
         super().__init__(op_codes, graph)

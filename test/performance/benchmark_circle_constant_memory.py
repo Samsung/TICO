@@ -49,7 +49,13 @@ def main() -> None:
         parser.error("--payload-mib and --aliases must be positive")
 
     codec = TensorValueCodec(
-        TensorTypeRegistry([TensorTypeSpec("UINT8", 3, np.uint8, np.uint8, 8, False)])
+        TensorTypeRegistry(
+            [
+                TensorTypeSpec(
+                    "UINT8", 3, np.dtype(np.uint8), np.dtype(np.uint8), 8, False
+                )
+            ]
+        )
     )
     # Import session services before tracing; constructor work is measured below.
     from tico.circle.session import existing_optimization_session
@@ -107,8 +113,10 @@ def main() -> None:
         "scope": "incremental traced allocations; excludes input storage",
     }
     if args.mode == "pool":
+        assert isinstance(result, ConstantPool)
         report["pool_statistics"] = result.statistics
     else:
+        assert isinstance(result, dict)
         report["input_bytes"] = sum(len(value) for value in result.values())
     print(json.dumps(report, indent=2, sort_keys=True))
 

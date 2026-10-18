@@ -16,6 +16,11 @@ import importlib.util
 import pathlib
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionBlock
+
 import warnings
 
 import tico
@@ -36,7 +41,7 @@ skip_msg = "transformers not installed — skipping Qwen3VLVisionBlock tests"
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLVisionBlock(unittest.TestCase):
-    fp_block: torch.nn.Module
+    fp_block: "Qwen3VLVisionBlock"
     hidden_size: int
     num_heads: int
     head_dim: int

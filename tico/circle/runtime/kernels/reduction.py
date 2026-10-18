@@ -63,35 +63,47 @@ def _reducer(
 
 def _mean(value: np.ndarray, *, axis: tuple[int, ...], keepdims: bool) -> np.ndarray:
     # TFLite computes the float mean as sum / count in the input precision.
-    return np.mean(value, axis=axis, keepdims=keepdims, dtype=value.dtype)
+    if keepdims:
+        return np.mean(value, axis=axis, keepdims=True, dtype=value.dtype)
+    return np.asarray(np.mean(value, axis=axis, keepdims=False, dtype=value.dtype))
 
 
 def _sum(value: np.ndarray, *, axis: tuple[int, ...], keepdims: bool) -> np.ndarray:
-    return np.sum(value, axis=axis, keepdims=keepdims, dtype=value.dtype)
+    if keepdims:
+        return np.sum(value, axis=axis, keepdims=True, dtype=value.dtype)
+    return np.asarray(np.sum(value, axis=axis, keepdims=False, dtype=value.dtype))
 
 
 def _reduce_max(
     value: np.ndarray, *, axis: tuple[int, ...], keepdims: bool
 ) -> np.ndarray:
-    return np.max(value, axis=axis, keepdims=keepdims)
+    if keepdims:
+        return np.max(value, axis=axis, keepdims=True)
+    return np.asarray(np.max(value, axis=axis, keepdims=False))
 
 
 def _reduce_min(
     value: np.ndarray, *, axis: tuple[int, ...], keepdims: bool
 ) -> np.ndarray:
-    return np.min(value, axis=axis, keepdims=keepdims)
+    if keepdims:
+        return np.min(value, axis=axis, keepdims=True)
+    return np.asarray(np.min(value, axis=axis, keepdims=False))
 
 
 def _reduce_prod(
     value: np.ndarray, *, axis: tuple[int, ...], keepdims: bool
 ) -> np.ndarray:
-    return np.prod(value, axis=axis, keepdims=keepdims, dtype=value.dtype)
+    if keepdims:
+        return np.prod(value, axis=axis, keepdims=True, dtype=value.dtype)
+    return np.asarray(np.prod(value, axis=axis, keepdims=False, dtype=value.dtype))
 
 
 def _reduce_any(
     value: np.ndarray, *, axis: tuple[int, ...], keepdims: bool
 ) -> np.ndarray:
-    return np.any(value, axis=axis, keepdims=keepdims)
+    if keepdims:
+        return np.any(value, axis=axis, keepdims=True)
+    return np.asarray(np.any(value, axis=axis, keepdims=False))
 
 
 def _arg_reduction(operation: Callable[..., np.ndarray], option_name: str) -> Kernel:

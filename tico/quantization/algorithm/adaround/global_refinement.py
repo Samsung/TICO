@@ -220,6 +220,10 @@ class CheckpointInitializedScaleAdaRoundQuantizer(
     information needed for a second optimization pass.
     """
 
+    _checkpoint_decision_mask: torch.Tensor
+    _checkpoint_round_up: torch.Tensor
+    _checkpoint_rounding_sign: torch.Tensor
+
     _checkpoint_initial_codes: torch.Tensor
     _checkpoint_effective_weight: torch.Tensor
 

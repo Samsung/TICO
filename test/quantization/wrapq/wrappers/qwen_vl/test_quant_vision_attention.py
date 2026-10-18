@@ -18,6 +18,11 @@ The tests run only if *transformers* is available (they depend on the genuine
 """
 
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionAttention
+
 
 import torch
 from tico.quantization.config.ptq import PTQConfig
@@ -38,7 +43,7 @@ skip_msg = "required transformers not installed — skipping LlamaAttention test
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLAttention(unittest.TestCase):
-    fp_attn: torch.nn.Module
+    fp_attn: "Qwen3VLVisionAttention"
     head_dim: int
     hidden_size: int
 

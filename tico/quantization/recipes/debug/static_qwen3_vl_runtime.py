@@ -16,11 +16,16 @@ import argparse
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Sequence, Tuple
+from typing import Any, cast, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLForConditionalGeneration,
+    )
 
 from tico.quantization import prepare
 from tico.quantization.config.ptq import PTQConfig
@@ -32,6 +37,7 @@ from tico.quantization.recipes.debug.token_mask import (
     validate_padding_layout as _validate_padding_layout,
 )
 from tico.quantization.wrapq.wrap_helper import PTQWrapHelper
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
     Qwen3VLVisualEmbeddingFusionAdapter,
 )
@@ -291,7 +297,7 @@ def _resize_image_to_pixel_budget(image, image_max_pixels: Optional[int]):
     try:
         from PIL import Image
 
-        resample = Image.Resampling.LANCZOS
+        resample: int = Image.Resampling.LANCZOS
     except Exception:  # pragma: no cover - Pillow compatibility fallback.
         resample = 1
 
@@ -451,7 +457,7 @@ class StaticQwen3VLTextLayerRuntime:
         visual_start_idx: Optional[int] = None,
         enable_deepstack: bool = True,
     ):
-        self.model = model.eval().to(device)
+        self.model = cast("Qwen3VLForConditionalGeneration", model).eval().to(device)
         self.tokenizer = tokenizer
         self.max_seq = max_seq
         self.device = torch.device(device)
@@ -490,13 +496,17 @@ class StaticQwen3VLTextLayerRuntime:
 
         self.prefill_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("prefill", return_kv=True)
+                cast(QuantQwen3VLTextDecoderLayer, layer.wrapped).as_export_module(
+                    "prefill", return_kv=True
+                )
                 for layer in self.layers
             ]
         ).to(self.device)
         self.decode_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("decode", return_kv=True)
+                cast(QuantQwen3VLTextDecoderLayer, layer.wrapped).as_export_module(
+                    "decode", return_kv=True
+                )
                 for layer in self.layers
             ]
         ).to(self.device)
@@ -543,22 +553,22 @@ class StaticQwen3VLTextLayerRuntime:
     def _position_embeddings(
         self,
         hidden_states: torch.Tensor,
-        position_ids: torch.LongTensor,
+        position_ids: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute Qwen3-VL mRoPE embeddings on CPU/runtime side."""
         cos, sin = self.text_model.rotary_emb(hidden_states, position_ids)
         return cos.to(dtype=hidden_states.dtype), sin.to(dtype=hidden_states.dtype)
 
-    def _text_position_ids(self, valid: torch.Tensor) -> torch.LongTensor:
+    def _text_position_ids(self, valid: torch.Tensor) -> torch.Tensor:
         """Build text-only 3D-compatible position IDs."""
         ids_2d = _build_text_position_ids_from_valid_token_mask(valid)
         return ids_2d.unsqueeze(0).expand(3, -1, -1).to(self.device)
 
     def _compute_rope_delta(
         self,
-        position_ids: torch.LongTensor,
+        position_ids: torch.Tensor,
         valid: torch.Tensor,
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """Compute the decode rope delta from compact cache length and mRoPE max index."""
         deltas = []
         for b in range(valid.size(0)):
@@ -570,11 +580,11 @@ class StaticQwen3VLTextLayerRuntime:
 
     def _compute_multimodal_position_ids(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         image_grid_thw: torch.Tensor,
         mm_token_type_ids: Optional[torch.Tensor],
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """Compute Qwen3-VL 3D position IDs for a padded single-image prompt."""
         get_rope_index = getattr(self.qwen_model, "get_rope_index", None)
         if callable(get_rope_index):
@@ -599,10 +609,10 @@ class StaticQwen3VLTextLayerRuntime:
 
     def _compute_single_image_position_ids_fallback(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         image_grid_thw: torch.Tensor,
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """Fallback single-image mRoPE position ID builder."""
         if input_ids.size(0) != 1:
             raise ValueError("Fallback mRoPE builder supports batch_size=1 only.")
@@ -681,7 +691,8 @@ class StaticQwen3VLTextLayerRuntime:
             return adapter
 
         adapter = (
-            self._vision_model.as_export_module(
+            cast(PTQWrapper, self._vision_model)
+            .as_export_module(
                 mode="prefill",
                 grid_thw=profile,
             )
@@ -693,7 +704,7 @@ class StaticQwen3VLTextLayerRuntime:
 
     def _find_visual_span(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         valid: torch.Tensor,
         image_embeds: torch.Tensor,
     ) -> tuple[int, int]:
@@ -778,13 +789,13 @@ class StaticQwen3VLTextLayerRuntime:
 
     def _prepare_inputs_embeds_and_positions(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         pixel_values: Optional[torch.Tensor],
         image_grid_thw: Optional[torch.Tensor],
         mm_token_type_ids: Optional[torch.Tensor],
         valid: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.LongTensor, Optional[list[torch.Tensor]],]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[list[torch.Tensor]],]:
         """Prepare fused embeddings, position IDs, and optional DeepStack deltas."""
         input_ids = input_ids.to(self.device)
         inputs_embeds = self.embed_tokens(input_ids)
@@ -849,7 +860,7 @@ class StaticQwen3VLTextLayerRuntime:
     @torch.no_grad()
     def prefill(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
@@ -942,7 +953,7 @@ class StaticQwen3VLTextLayerRuntime:
         logits = self.lm_head(hidden_states)
         return _gather_last_token_logits(logits, valid)
 
-    def _decode_position_ids(self, batch_size: int) -> torch.LongTensor:
+    def _decode_position_ids(self, batch_size: int) -> torch.Tensor:
         """Build mRoPE decode position IDs for one generated token."""
         delta = self.rope_delta.to(self.device)
         if delta.size(0) != batch_size:
@@ -959,7 +970,7 @@ class StaticQwen3VLTextLayerRuntime:
         return pos.unsqueeze(0).expand(3, -1, -1)
 
     @torch.no_grad()
-    def decode_one(self, input_ids: torch.LongTensor) -> torch.Tensor:
+    def decode_one(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Run one static decode step and return logits for the current token."""
         assert input_ids.dim() == 2 and input_ids.size(1) == 1
         assert len(self.layer_caches) == self.num_hidden_layers, "Call prefill() first."
@@ -1018,7 +1029,7 @@ class StaticQwen3VLTextLayerRuntime:
         batch: dict[str, Any],
         max_new_tokens: int,
         eos_token_id: Optional[int] = None,
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """Generate tokens greedily with a preprocessed static batch."""
         input_ids = batch["input_ids"].to(self.device)
         attention_mask = batch.get("attention_mask")
@@ -1081,7 +1092,7 @@ class StaticQwen3VLTextLayerRuntime:
         generated_input_ids = torch.cat([generated_input_ids, next_token], dim=1)
         generated_mm_types = _append_token_type_zero(generated_mm_types)
 
-        static_image_payload = {
+        static_image_payload: dict[str, torch.Tensor] = {
             key: compact_batch[key]
             for key in ("pixel_values", "image_grid_thw")
             if key in compact_batch
@@ -1089,7 +1100,7 @@ class StaticQwen3VLTextLayerRuntime:
 
         for step in range(1, steps + 1):
             logits_rt = self.decode_one(next_token)
-            ref_batch = {
+            ref_batch: dict[str, torch.Tensor] = {
                 "input_ids": generated_input_ids,
                 "attention_mask": torch.ones_like(generated_input_ids),
                 **static_image_payload,

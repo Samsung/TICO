@@ -45,20 +45,23 @@ class TestLlamaAttentionPrefillExample(unittest.TestCase):
         from transformers.models.llama.configuration_llama import LlamaConfig
         from transformers.models.llama.modeling_llama import LlamaAttention
 
-        self.cfg = LlamaConfig(
-            hidden_size=16,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=8,
-            intermediate_size=32,
-            attention_bias=False,
-            attention_dropout=0.0,
-            attn_implementation="eager",
-            max_position_embeddings=16,
+        self.cfg = LlamaConfig.from_dict(
+            {
+                "hidden_size": 16,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "intermediate_size": 32,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "attn_implementation": "eager",
+                "max_position_embeddings": 16,
+            }
         )
         self.fp_attn = LlamaAttention(self.cfg, layer_idx=0).eval()
         self.fp_ref = copy.deepcopy(self.fp_attn).eval()
         self.hidden_size = self.cfg.hidden_size
+        assert self.cfg.head_dim is not None
         self.head_dim = self.cfg.head_dim
 
     def _rand_rope(self, batch_size: int, seq_len: int):

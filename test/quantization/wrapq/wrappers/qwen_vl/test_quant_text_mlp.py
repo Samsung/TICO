@@ -15,6 +15,11 @@
 import pathlib
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextMLP
+
 import warnings
 
 import tico
@@ -51,7 +56,7 @@ class DummyTextMLP(torch.nn.Module):
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLTextMLP(unittest.TestCase):
-    mlp_fp: torch.nn.Module
+    mlp_fp: "Qwen3VLTextMLP"
     hidden_size: int
     intermediate_size: int
 

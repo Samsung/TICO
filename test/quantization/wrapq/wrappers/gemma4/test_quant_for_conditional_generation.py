@@ -17,6 +17,7 @@
 import copy
 import os
 import unittest
+from unittest import mock
 
 import torch
 
@@ -48,22 +49,24 @@ def _make_vision_config():
     """Create a tiny Gemma4 vision config for synthetic smoke tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
 
-    cfg = Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        patch_size=4,
-        position_embedding_size=8,
-        pooling_kernel_size=2,
-        attention_dropout=0.0,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-        use_clipped_linears=False,
-        rope_parameters={"rope_type": "default", "rope_theta": 100.0},
-        standardize=True,
+    cfg = Gemma4VisionConfig.from_dict(
+        dict(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            patch_size=4,
+            position_embedding_size=8,
+            pooling_kernel_size=2,
+            attention_dropout=0.0,
+            max_position_embeddings=128,
+            rms_norm_eps=1e-6,
+            use_clipped_linears=False,
+            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+            standardize=True,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -76,27 +79,29 @@ def _make_text_config():
     """Create a tiny Gemma4 text config for synthetic smoke tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
-    cfg = Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_global_key_value_heads=2,
-        head_dim=32,
-        global_head_dim=32,
-        max_position_embeddings=128,
-        layer_types=["full_attention"],
-        rope_parameters={
-            "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
-        },
-        attention_bias=False,
-        attention_dropout=0.0,
-        use_cache=False,
-        enable_moe_block=False,
-        # Enable logit softcapping to exercise that code path.
-        final_logit_softcapping=30.0,
+    cfg = Gemma4TextConfig.from_dict(
+        dict(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=32,
+            global_head_dim=32,
+            max_position_embeddings=128,
+            layer_types=["full_attention"],
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
+            },
+            attention_bias=False,
+            attention_dropout=0.0,
+            use_cache=False,
+            enable_moe_block=False,
+            # Enable logit softcapping to exercise that code path.
+            final_logit_softcapping=30.0,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -109,13 +114,15 @@ def _make_gemma4_config():
     """Create a tiny Gemma4 top-level config for synthetic smoke tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4Config
 
-    return Gemma4Config(
-        text_config=_make_text_config(),
-        vision_config=_make_vision_config(),
-        audio_config=None,
-        image_token_id=10,
-        video_token_id=11,
-        audio_token_id=12,
+    return Gemma4Config.from_dict(
+        dict(
+            text_config=_make_text_config(),
+            vision_config=_make_vision_config(),
+            audio_config=None,
+            image_token_id=10,
+            video_token_id=11,
+            audio_token_id=12,
+        )
     )
 
 
@@ -375,6 +382,46 @@ class TestQuantGemma4ForConditionalGenerationGeneration(unittest.TestCase):
             )
 
         self.assertEqual(out.shape[1], self.seq_len + max_new)
+
+
+@unittest.skipUnless(_has_gemma4(), _SKIP_MSG)
+class TestQuantGemma4ConditionalGenerationContract(unittest.TestCase):
+    """Check delegation of the current Transformers generation interface."""
+
+    def setUp(self):
+        """Build a tiny floating-point model and its quantized wrapper."""
+        torch.manual_seed(2026)
+        self.fp_model = _make_gemma4_for_conditional_generation()
+        self.wrapper = QuantGemma4ForConditionalGeneration(
+            self.fp_model,
+            qcfg=PTQConfig(
+                model_args={"vision": {"visual_start_idx": 0, "num_visual_tokens": 4}}
+            ),
+        )
+
+    def test_next_sequence_length_is_forwarded(self):
+        """Preserve the base generation method's second positional argument."""
+        input_ids = torch.tensor([[1, 2, 3]])
+        prepared_inputs = {"input_ids": input_ids}
+        with mock.patch.object(
+            self.fp_model,
+            "prepare_inputs_for_generation",
+            return_value=prepared_inputs,
+        ) as prepare_inputs:
+            result = self.wrapper.prepare_inputs_for_generation(input_ids, 2)
+
+        self.assertIs(result, prepared_inputs)
+        self.assertIs(prepare_inputs.call_args.args[0], input_ids)
+        self.assertEqual(prepare_inputs.call_args.kwargs["next_sequence_length"], 2)
+
+    def test_generation_config_assignment_updates_original_model(self):
+        """Keep writable generation state shared with the original model."""
+        from transformers.generation.configuration_utils import GenerationConfig
+
+        generation_config = GenerationConfig(max_new_tokens=3)
+        self.wrapper.generation_config = generation_config
+        self.assertIs(self.fp_model.generation_config, generation_config)
+        self.assertIs(self.wrapper.generation_config, generation_config)
 
 
 if __name__ == "__main__":

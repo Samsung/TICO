@@ -18,7 +18,7 @@ import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, cast, Mapping
 
 import torch
 
@@ -40,6 +40,22 @@ from tico.quantization.wrapq.wrappers.gemma4.ple_embedding_host import (
     estimate_gemma4_ple_embedding_circle_bytes,
     save_gemma4_ple_embedding_artifact,
 )
+from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
+    QuantGemma4ForConditionalGeneration,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_model import QuantGemma4Model
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+    QuantGemma4TextAttention,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+    QuantGemma4TextDecoderLayer,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+    QuantGemma4TextModel,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
+    QuantGemma4VisionModel,
+)
 from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     build_gemma4_static_vision_profile,
     canonicalize_gemma4_static_vision_model_args,
@@ -54,6 +70,7 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_dynamic_shapes,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 _VISION_EXPORT_GRANULARITIES = frozenset({"monolithic", "layer", "both"})
@@ -182,14 +199,22 @@ def _circle_name(stem: str, artifact_tag: str) -> str:
 
 def _unwrap_gemma4_components(
     export_model: torch.nn.Module,
-) -> tuple[torch.nn.Module, torch.nn.Module, torch.nn.Module, torch.nn.Module]:
+) -> tuple[
+    QuantGemma4ForConditionalGeneration,
+    QuantGemma4Model,
+    QuantGemma4VisionModel,
+    QuantGemma4TextModel,
+]:
     """Return top-level, multimodal, vision, and text Gemma4 wrappers."""
-    qmodel = export_model.wrapped
-    gemma_model = qmodel.model.wrapped
+    qmodel = cast(
+        QuantGemma4ForConditionalGeneration, cast(PTQWrapper, export_model).wrapped
+    )
+    gemma_model = cast(QuantGemma4Model, qmodel.model.wrapped)
     if getattr(gemma_model, "vision_tower", None) is None:
         raise ValueError("Gemma4 Circle export requires an image vision tower.")
-    qvision = gemma_model.vision_tower.wrapped
-    qtext = gemma_model.language_model.wrapped
+    assert gemma_model.vision_tower is not None
+    qvision = cast(QuantGemma4VisionModel, gemma_model.vision_tower.wrapped)
+    qtext = cast(QuantGemma4TextModel, gemma_model.language_model.wrapped)
     return qmodel, gemma_model, qvision, qtext
 
 
@@ -424,6 +449,7 @@ def _export_gemma4_vision_stages(
             strict=strict,
         )
 
+    qvision = cast(QuantGemma4VisionModel, qvision)
     vision_hidden_size = int(qvision.config.hidden_size)
     hidden_states = torch.randn(
         1,
@@ -621,7 +647,8 @@ def _attention_contract(
     max_seq_len: int,
 ) -> tuple[torch.nn.Module, int, int, int | None, bool]:
     """Return attention dimensions and sharing mode for one text layer."""
-    attention = layer.wrapped.self_attn.wrapped
+    decoder = cast(QuantGemma4TextDecoderLayer, cast(PTQWrapper, layer).wrapped)
+    attention = cast(QuantGemma4TextAttention, decoder.self_attn.wrapped)
     attention_capacity = int(getattr(attention, "max_seq", max_seq_len))
     if max_seq_len > attention_capacity:
         raise ValueError(
@@ -640,7 +667,7 @@ def _attention_contract(
     num_kv_heads = num_heads // num_kv_groups
     head_dim = int(attention.head_dim)
     sliding_window = (
-        int(attention.sliding_window)
+        int(cast(int, attention.sliding_window))
         if bool(getattr(attention, "is_sliding", False))
         else None
     )
@@ -1120,7 +1147,7 @@ def export_gemma4_per_layer(
         if per_layer_input_observer is not None:
             prefill_export_kwargs["per_layer_input_observer"] = per_layer_input_observer
         _convert_and_save(
-            layer.wrapped.as_export_module(
+            cast(QuantGemma4TextDecoderLayer, layer.wrapped).as_export_module(
                 "prefill",
                 **prefill_export_kwargs,
             ),
@@ -1179,7 +1206,9 @@ def export_gemma4_per_layer(
         if per_layer_input_observer is not None:
             decode_export_kwargs["per_layer_input_observer"] = per_layer_input_observer
         _convert_and_save(
-            layer.wrapped.as_export_module("decode", **decode_export_kwargs),
+            cast(QuantGemma4TextDecoderLayer, layer.wrapped).as_export_module(
+                "decode", **decode_export_kwargs
+            ),
             (decode_hidden,),
             output_dir
             / _circle_name(f"decoder_layer_decode_{layer_idx}", artifact_tag),

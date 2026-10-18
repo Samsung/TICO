@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import tqdm
 
 
-def _resolve_device(device: torch.device, model: torch.nn.Module):
+def _resolve_device(device: torch.device | str, model: torch.nn.Module) -> torch.device:
     if device != "auto":
         return torch.device(device)
 

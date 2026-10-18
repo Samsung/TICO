@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -27,6 +27,10 @@ from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPatchEmbedder
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionPatchEmbedder")
@@ -46,6 +50,8 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
     - Final output (output activation)
     """
 
+    position_embedding_table: torch.Tensor
+
     def __init__(
         self,
         fp: nn.Module,
@@ -53,6 +59,7 @@ class QuantGemma4VisionPatchEmbedder(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp = cast("Gemma4VisionPatchEmbedder", fp)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
 

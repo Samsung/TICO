@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import cast, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaMLP
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -33,6 +37,7 @@ class QuantLlamaMLP(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        mlp_fp = cast("LlamaMLP", mlp_fp)
         super().__init__(qcfg, fp_name=fp_name)
 
         # ----- child configs (hierarchical override) -------------------

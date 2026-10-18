@@ -15,9 +15,13 @@
 """Smoke cases for LLaMA wrapper checks."""
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from transformers.models.llama.configuration_llama import LlamaConfig
+
 
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
@@ -111,7 +115,7 @@ def _llama_static_runtime_shape(cfg: Mapping[str, Any]) -> LlamaStaticRuntimeSha
     )
 
 
-def _build_llama_config(*, size_profile: str, max_seq: int) -> Any:
+def _build_llama_config(*, size_profile: str, max_seq: int) -> "LlamaConfig":
     """Create a tiny or Llama 3.2-3B-width eager config.
 
     The large profiles copy the target model's channel, MLP, and attention-head
@@ -152,11 +156,13 @@ def _build_llama_config(*, size_profile: str, max_seq: int) -> Any:
     else:
         raise AssertionError(f"Unhandled Llama size profile: {size_profile}")
 
-    return LlamaConfig(
-        **params,
-        attention_bias=False,
-        attention_dropout=0.0,
-        attn_implementation="eager",
+    return LlamaConfig.from_dict(
+        dict(
+            **params,
+            attention_bias=False,
+            attention_dropout=0.0,
+            attn_implementation="eager",
+        )
     )
 
 
@@ -222,7 +228,9 @@ class LlamaBaseCase(WrapperSmokeCase):
             1 if profile == _LLAMA_SIZE_PROFILE_LLAMA3_2_3B_STATIC_RUNTIME else default
         )
 
-    def _make_config(self, cfg: Mapping[str, Any], *, tiny_max_seq: int) -> Any:
+    def _make_config(
+        self, cfg: Mapping[str, Any], *, tiny_max_seq: int
+    ) -> "LlamaConfig":
         """Create a profile-aware one-layer Llama configuration."""
         profile = self._validated_size_profile(cfg)
         shape = self._static_runtime_shape()
@@ -321,7 +329,7 @@ class LlamaAttentionPrefillCase(LlamaBaseCase):
 
     def __init__(self) -> None:
         """Initialize shape metadata without importing Transformers."""
-        self.config = None
+        self.config: "LlamaConfig | None" = None
         self.seq_len = 6
         self.batch_size = 2
 
@@ -345,6 +353,7 @@ class LlamaAttentionPrefillCase(LlamaBaseCase):
     def _sample(self) -> ForwardInput:
         """Create one synthetic prefill attention sample."""
         assert self.config is not None
+        assert self.config.head_dim is not None
         hidden = torch.randn(self.batch_size, self.seq_len, self.config.hidden_size)
         rope = _rand_rope(self.batch_size, self.seq_len, self.config.head_dim)
         mask = torch.zeros(self.batch_size, self.seq_len, self.seq_len)
@@ -380,9 +389,10 @@ class LlamaAttentionPrefillCase(LlamaBaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped attention module in prefill mode when available."""
         wrapped = getattr(quantized, "wrapped", quantized)
+        as_export_module = getattr(wrapped, "as_export_module", None)
         return (
-            wrapped.as_export_module("prefill").eval()
-            if hasattr(wrapped, "as_export_module")
+            as_export_module("prefill").eval()
+            if callable(as_export_module)
             else quantized
         )
 
@@ -391,6 +401,7 @@ class LlamaAttentionPrefillCase(LlamaBaseCase):
     ) -> ForwardInput:
         """Create fixed prefill export inputs without an attention mask."""
         assert self.config is not None
+        assert self.config.head_dim is not None
         export_seq_len = int(self.config.max_position_embeddings)
         hidden = torch.randn(1, export_seq_len, self.config.hidden_size)
         rope = _rand_rope(1, export_seq_len, self.config.head_dim)
@@ -410,7 +421,7 @@ class LlamaAttentionDecodeCase(LlamaBaseCase):
     def __init__(self) -> None:
         """Initialize static decode shape metadata."""
         self.max_seq = 16
-        self.config = None
+        self.config: "LlamaConfig | None" = None
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a profile-aware LlamaAttention module and reference copy."""
@@ -425,6 +436,7 @@ class LlamaAttentionDecodeCase(LlamaBaseCase):
     def _decode_sample(self, prepared: torch.nn.Module | None = None) -> ForwardInput:
         """Create one static decode input sample."""
         assert self.config is not None
+        assert self.config.head_dim is not None
         hidden = torch.randn(1, 1, self.config.hidden_size)
         cos = torch.randn(1, 1, self.config.head_dim)
         sin = torch.randn(1, 1, self.config.head_dim)
@@ -436,6 +448,7 @@ class LlamaAttentionDecodeCase(LlamaBaseCase):
                 ..., : self.config.head_dim // 2
             ]
         mask = torch.zeros(1, 1, self.max_seq)
+        assert self.config.num_key_value_heads is not None
         past = (
             torch.randn(
                 1,
@@ -473,9 +486,10 @@ class LlamaAttentionDecodeCase(LlamaBaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped attention module in decode mode when available."""
         wrapped = getattr(quantized, "wrapped", quantized)
+        as_export_module = getattr(wrapped, "as_export_module", None)
         return (
-            wrapped.as_export_module("decode").eval()
-            if hasattr(wrapped, "as_export_module")
+            as_export_module("decode").eval()
+            if callable(as_export_module)
             else quantized
         )
 
@@ -501,7 +515,7 @@ class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
         """Initialize prefill shape metadata."""
         self.max_seq = 16
         self.batch_size = 2
-        self.config = None
+        self.config: "LlamaConfig | None" = None
 
     def ptq_config(self, cfg: Mapping[str, Any]) -> Any:
         """Build the reference-eval PTQ config used by the decoder prefill test."""
@@ -523,6 +537,7 @@ class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
     def _sample(self) -> ForwardInput:
         """Create one synthetic decoder-layer prefill sample."""
         assert self.config is not None
+        assert self.config.head_dim is not None
         hidden = torch.randn(self.batch_size, self.max_seq, self.config.hidden_size)
         rope = _rand_rope(self.batch_size, self.max_seq, self.config.head_dim)
         mask = torch.ones(self.batch_size, self.max_seq, self.max_seq, dtype=torch.bool)
@@ -560,6 +575,7 @@ class LlamaDecoderLayerPrefillCase(LlamaBaseCase):
     ) -> ForwardInput:
         """Create static decoder-layer prefill export input."""
         assert self.config is not None
+        assert self.config.head_dim is not None
         return ForwardInput((torch.randn(1, self.max_seq, self.config.hidden_size),))
 
 
@@ -575,7 +591,7 @@ class LlamaDecoderLayerDecodeCase(LlamaBaseCase):
     def __init__(self) -> None:
         """Initialize static decode shape metadata."""
         self.max_seq = 16
-        self.config = None
+        self.config: "LlamaConfig | None" = None
 
     def build(self, cfg: Mapping[str, Any]) -> tuple[torch.nn.Module, torch.nn.Module]:
         """Build a profile-aware LlamaDecoderLayer and reference copy."""
@@ -590,17 +606,19 @@ class LlamaDecoderLayerDecodeCase(LlamaBaseCase):
     def after_prepare(self, prepared: torch.nn.Module, cfg: Mapping[str, Any]) -> None:
         """Force tuple return so hidden and cache deltas are available."""
         if hasattr(prepared, "wrapped"):
-            prepared.wrapped.return_type = "tuple"
+            setattr(prepared.wrapped, "return_type", "tuple")
 
     def _decode_sample(self) -> ForwardInput:
         """Create one static decode input sample for a decoder layer."""
         assert self.config is not None
+        assert self.config.head_dim is not None
         hidden = torch.randn(1, 1, self.config.hidden_size)
         pos = (
             torch.randn(1, 1, self.config.head_dim),
             torch.randn(1, 1, self.config.head_dim),
         )
         mask = torch.zeros(1, 1, self.max_seq)
+        assert self.config.num_key_value_heads is not None
         past = (
             torch.randn(
                 1,
@@ -643,9 +661,10 @@ class LlamaDecoderLayerDecodeCase(LlamaBaseCase):
         self, quantized: torch.nn.Module, cfg: Mapping[str, Any]
     ) -> torch.nn.Module:
         """Export the decoder layer in decode mode when supported."""
+        as_export_module = getattr(quantized, "as_export_module", None)
         return (
-            quantized.as_export_module("decode").eval()
-            if hasattr(quantized, "as_export_module")
+            as_export_module("decode").eval()
+            if callable(as_export_module)
             else quantized
         )
 

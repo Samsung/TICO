@@ -20,6 +20,12 @@ import torch
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear import (
+    QuantGemma4ClippableLinear,
+)
+from tico.quantization.wrapq.wrappers.gemma4.quant_vision_attention import (
+    QuantGemma4VisionAttention,
+)
 
 
 _SKIP_MSG = "required transformers Gemma4 vision modules are not installed"
@@ -58,7 +64,7 @@ def _make_vision_config(**overrides):
         allow_global_per_layer_attribute_access=True,
     )
     kwargs.update(overrides)
-    cfg = Gemma4VisionConfig(**kwargs)
+    cfg = Gemma4VisionConfig.from_dict(kwargs)
     if hasattr(cfg, "_attn_implementation"):
         cfg._attn_implementation = "eager"
     else:
@@ -171,8 +177,12 @@ class TestQuantGemma4VisionEncoderLayer(unittest.TestCase):
         qlayer.freeze_qparams()
 
         self.assertIs(qlayer._mode, Mode.QUANT)
-        inner_q_proj = qlayer.self_attn.wrapped.q_proj.wrapped.linear.wrapped
-        self.assertIsInstance(inner_q_proj, QuantLinear)
+        attention = qlayer.self_attn.wrapped
+        assert isinstance(attention, QuantGemma4VisionAttention)
+        q_proj = attention.q_proj.wrapped
+        assert isinstance(q_proj, QuantGemma4ClippableLinear)
+        inner_q_proj = q_proj.linear.wrapped
+        assert isinstance(inner_q_proj, QuantLinear)
         self.assertEqual(inner_q_proj.obs_act_in.dtype, DType.uint(4))
         self.assertEqual(inner_q_proj.obs_act_out.dtype, DType.uint(4))
 

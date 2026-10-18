@@ -33,6 +33,8 @@
 import argparse
 import sys
 
+from typing import cast
+
 import torch
 import tqdm
 from datasets import load_dataset
@@ -152,16 +154,14 @@ def main():
         token=args.hf_token,
         legacy=False,
     )
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            args.model,
-            dtype=dtype,
-            trust_remote_code=args.trust_remote_code,
-            token=args.hf_token,
-        )
-        .to(device)
-        .eval()
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model,
+        dtype=dtype,
+        trust_remote_code=args.trust_remote_code,
+        token=args.hf_token,
     )
+    cast(torch.nn.Module, model).to(device)
+    model.eval()
 
     # Disable KV cache to force full forward passes for introspection
     model.config.use_cache = args.use_cache

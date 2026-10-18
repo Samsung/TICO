@@ -12,12 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import cast, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+
+    from tico.quantization.wrapq.wrappers.llama.quant_attention import (
+        QuantLlamaAttention,
+    )
+
 
 from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import ExportMode, PTQConfig
@@ -45,6 +53,10 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
       `QuantLlamaAttention` for RoPE table generation.
     """
 
+    causal_mask_template: torch.Tensor
+    rope_cos_template: torch.Tensor
+    rope_sin_template: torch.Tensor
+
     def __init__(
         self,
         fp_layer: nn.Module,
@@ -61,6 +73,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         `transformers` wrap decoder output in different containers: a plain
         tensor or a tuple.
         """
+        fp_layer = cast("LlamaDecoderLayer", fp_layer)
         self.return_type = return_type
         if self.return_type is None:
             import transformers
@@ -98,7 +111,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         if hasattr(self.self_attn, "wrapped") and hasattr(
             self.self_attn.wrapped, "layer_idx"
         ):
-            self.self_attn.wrapped.layer_idx = layer_idx
+            cast("QuantLlamaAttention", self.self_attn.wrapped).layer_idx = layer_idx
         self.mlp = PTQWrapper(
             fp_layer.mlp,
             qcfg=mlp_cfg,
@@ -312,11 +325,11 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         self,
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         **kwargs,
     ):

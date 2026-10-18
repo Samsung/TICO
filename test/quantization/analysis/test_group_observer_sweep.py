@@ -39,6 +39,8 @@ from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.percentile import PercentileObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
+from torch import nn
+
 
 class GroupObserverSweepTest(unittest.TestCase):
     """Verify override paths, candidate policies, and group-local rankings."""
@@ -67,7 +69,7 @@ class GroupObserverSweepTest(unittest.TestCase):
             "iter_quantization_sites",
             return_value=iter(sites),
         ):
-            paths = activation_group_override_paths(SimpleNamespace(), group)
+            paths = activation_group_override_paths(nn.Module(), group)
 
         self.assertEqual(
             paths,
@@ -184,7 +186,7 @@ class GroupObserverSweepTest(unittest.TestCase):
             return_value=iter((site,)),
         ):
             validate_group_observer_overrides(
-                SimpleNamespace(),
+                nn.Module(),
                 policy,
                 (path,),
             )
@@ -197,7 +199,7 @@ class GroupObserverSweepTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "mismatched percentile"):
                 validate_group_observer_overrides(
-                    SimpleNamespace(),
+                    nn.Module(),
                     policy,
                     (path,),
                 )

@@ -50,7 +50,7 @@ class TestRegistry(unittest.TestCase):
     def setUp(self):
         self._wrappers_backup = dict(registry._WRAPPERS)
         self._import_once_backup = registry._IMPORT_ONCE
-        self._modules_backup = {
+        self._modules_backup: dict[str, types.ModuleType] = {
             name: sys.modules[name]
             for name in ("tmp_mod", "tmp_mod2", "tmp_mod3")
             if name in sys.modules

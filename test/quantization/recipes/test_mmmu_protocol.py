@@ -1148,6 +1148,7 @@ class TestMmmuRecipePreflight(unittest.TestCase):
                 keywords=[],
                 body=[method],
                 decorator_list=[],
+                type_params=[],
             )
             module = ast.fix_missing_locations(
                 ast.Module(body=[isolated], type_ignores=[])

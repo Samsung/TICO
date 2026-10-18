@@ -22,6 +22,7 @@ import torch.nn as nn
 
 from tico.quantization.recipes.qparams import inject_gptq_qparams
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.quant_clippable_linear import (
     QuantGemma4ClippableLinear,
 )
@@ -68,7 +69,7 @@ class TestQuantGemma4ClippableLinear(unittest.TestCase):
 
         self.assertIsInstance(quant.linear, PTQWrapper)
         inner = quant.linear.wrapped
-        self.assertIsInstance(inner, QuantLinear)
+        assert isinstance(inner, QuantLinear)
         self.assertEqual(inner.fp_name, f"{self._FP_NAME}.linear")
         self.assertEqual(inner.obs_weight.dtype, DType.uint(4))
 
@@ -98,6 +99,7 @@ class TestQuantGemma4ClippableLinear(unittest.TestCase):
         )
 
         self.assertEqual(stats, {"matched": 1, "missed": 0, "unused": 0})
+        assert isinstance(inner.obs_weight, AffineObserverBase)
         self.assertTrue(torch.equal(inner.obs_weight._cached_scale, scale))
         self.assertTrue(torch.equal(inner.obs_weight._cached_zp, zero))
         self.assertFalse(inner.obs_weight.enabled)

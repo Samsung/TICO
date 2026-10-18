@@ -13,6 +13,11 @@
 # limitations under the License.
 
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+
 
 import torch
 from tico.quantization.config.ptq import PTQConfig
@@ -30,7 +35,7 @@ skip_msg = "required transformers not installed — skipping Qwen3VLTextModel te
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLTextModel(unittest.TestCase):
-    fp_model: torch.nn.Module
+    fp_model: "Qwen3VLTextModel"
     vocab_size: int
     hidden_size: int
     num_hidden_layers: int
@@ -43,17 +48,19 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
         # Use smaller sizes for testing
-        cfg = Qwen3VLTextConfig(
-            vocab_size=1000,
-            hidden_size=64,
-            intermediate_size=256,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            num_key_value_heads=2,
-            head_dim=16,
-            max_position_embeddings=1024,
-            rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
-            use_cache=True,
+        cfg = Qwen3VLTextConfig.from_dict(
+            {
+                "vocab_size": 1000,
+                "hidden_size": 64,
+                "intermediate_size": 256,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 2,
+                "head_dim": 16,
+                "max_position_embeddings": 1024,
+                "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
+                "use_cache": True,
+            }
         )
 
         # Ensure eager attention implementation so outputs are deterministic
@@ -619,12 +626,16 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         from transformers.cache_utils import DynamicCache
 
         cache = DynamicCache(config=q_model.config)
+        assert q_model.config.num_key_value_heads is not None
+        assert q_model.config.head_dim is not None
         dummy_k = torch.randn(
             2,
             q_model.config.num_key_value_heads,
             4,
             q_model.config.head_dim,
         )
+        assert q_model.config.num_key_value_heads is not None
+        assert q_model.config.head_dim is not None
         dummy_v = torch.randn(
             2,
             q_model.config.num_key_value_heads,
@@ -669,12 +680,16 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         from transformers.cache_utils import DynamicCache
 
         cache = DynamicCache(config=q_model.config)
+        assert q_model.config.num_key_value_heads is not None
+        assert q_model.config.head_dim is not None
         dummy_k = torch.randn(
             2,
             q_model.config.num_key_value_heads,
             4,
             q_model.config.head_dim,
         )
+        assert q_model.config.num_key_value_heads is not None
+        assert q_model.config.head_dim is not None
         dummy_v = torch.randn(
             2,
             q_model.config.num_key_value_heads,
@@ -703,12 +718,16 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         from transformers.cache_utils import DynamicCache
 
         cache = DynamicCache(config=q_model.config)
+        assert q_model.config.num_key_value_heads is not None
+        assert q_model.config.head_dim is not None
         dummy_k = torch.randn(
             2,
             q_model.config.num_key_value_heads,
             4,
             q_model.config.head_dim,
         )
+        assert q_model.config.num_key_value_heads is not None
+        assert q_model.config.head_dim is not None
         dummy_v = torch.randn(
             2,
             q_model.config.num_key_value_heads,
@@ -939,7 +958,7 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         # self.rotate_embedding(inputs_embeds).
         rotate_embedding.forward = rotate_once  # type: ignore[method-assign]
 
-        cases = [
+        cases: list[dict[str, object]] = [
             {
                 "name": "input_ids",
                 "kwargs": {
@@ -957,7 +976,9 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         with torch.no_grad():
             for case in cases:
                 with self.subTest(case["name"]):
-                    out = q_model(**case["kwargs"], use_cache=False)
+                    out = q_model(
+                        **cast(dict[str, torch.Tensor], case["kwargs"]), use_cache=False
+                    )
                     self.assertEqual(
                         out.last_hidden_state.shape,
                         (1, 8, self.hidden_size),

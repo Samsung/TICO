@@ -32,6 +32,8 @@ It is a safe no-op when DynamicLayer does not exist in the installed
 transformers version.
 """
 
+from typing import cast
+
 import torch
 
 from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
@@ -60,7 +62,8 @@ class TinyLlamaWithDynamicCache(TestModuleBase):
         # float32 KV cache below matches the model dtype.
         self.model = AutoModelForCausalLM.from_pretrained(
             "Maykeye/TinyLLama-v0", dtype=torch.float32
-        ).to("cpu")
+        )
+        cast(torch.nn.Module, self.model).to("cpu")
         self.cfg = self.model.config
         self.rtol = 1e-4
         self.atol = 1e-4

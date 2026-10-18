@@ -22,7 +22,11 @@ from circle_schema import circle
 
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.validate_args_kwargs import PReLUArgs
 
@@ -31,7 +35,7 @@ from tico.utils.validate_args_kwargs import PReLUArgs
 class PReLUVisitor(NodeVisitor):
     """Serialize native or layout-legalized PReLU nodes as Circle PRELU."""
 
-    target: List[torch._ops.OpOverload] = [
+    target: List[TorchOperator] = [
         torch.ops.aten.prelu.default,
         torch.ops.circle_custom.prelu,
     ]

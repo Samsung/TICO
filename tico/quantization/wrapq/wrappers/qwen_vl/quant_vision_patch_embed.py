@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchEmbed
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -50,6 +54,7 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_patch_embed = cast("Qwen3VLVisionPatchEmbed", fp_patch_embed)
         super().__init__(qcfg, fp_name=fp_name)
 
         self.patch_size = fp_patch_embed.patch_size
@@ -154,9 +159,7 @@ class QuantQwen3VLVisionPatchEmbed(QuantModuleBase):
 
         # Match the original Hugging Face implementation, which casts patch
         # values to the projection weight dtype before applying the projection.
-        target_dtype = (
-            self.proj.wrapped.module.weight.dtype  # type: ignore[attr-defined]
-        )
+        target_dtype = cast(nn.Linear, self.proj.wrapped.module).weight.dtype
         hidden_states = hidden_states.to(dtype=target_dtype)
 
         hidden_states = self.proj(hidden_states)

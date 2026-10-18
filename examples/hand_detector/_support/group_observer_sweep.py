@@ -265,7 +265,7 @@ def validate_group_observer_overrides(
                 path
                 for path, observer in observed.items()
                 if not math.isclose(
-                    float(observer.percentile),  # type: ignore[attr-defined]
+                    float(cast(PercentileObserver, observer).percentile),
                     policy.percentile,
                     rel_tol=0.0,
                     abs_tol=1.0e-12,

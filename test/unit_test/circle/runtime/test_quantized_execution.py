@@ -510,7 +510,7 @@ class PackedFourBitConstantTest(unittest.TestCase):
     def _packed(self, tensor_type: int, payload: bytes, count: int) -> np.ndarray:
         builder = CircleModelBuilder()
         buffer = circle.Buffer.BufferT()
-        buffer.data = np.frombuffer(payload, dtype=np.uint8).copy()
+        setattr(buffer, "data", np.frombuffer(payload, dtype=np.uint8).copy())
         builder.model.buffers.append(buffer)
         dtype = np.uint8 if tensor_type == UINT4 else np.int8
         index = builder._add_tensor(

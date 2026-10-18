@@ -14,6 +14,14 @@
 
 import copy
 import unittest
+from typing import cast, TYPE_CHECKING
+from unittest.mock import patch
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLForConditionalGeneration,
+    )
+
 from typing import Tuple
 
 import torch
@@ -32,7 +40,7 @@ skip_msg = "transformers not installed — skipping Qwen3VLForConditionalGenerat
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
-    fp_model: torch.nn.Module
+    fp_model: "Qwen3VLForConditionalGeneration"
     hidden_size: int
     vocab_size: int
     patch_size: int
@@ -44,7 +52,11 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+            Qwen3VLConfig,
+            Qwen3VLTextConfig,
+            Qwen3VLVisionConfig,
+        )
         from transformers.models.qwen3_vl.modeling_qwen3_vl import (
             Qwen3VLForConditionalGeneration,
         )
@@ -78,12 +90,16 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
             video_token_id=999,
         )
 
+        assert isinstance(cfg.text_config, Qwen3VLTextConfig)
+        assert isinstance(cfg.vision_config, Qwen3VLVisionConfig)
         assert cfg.image_token_id < cfg.text_config.vocab_size
         assert cfg.video_token_id < cfg.text_config.vocab_size
         assert cfg.vision_config.out_hidden_size == cfg.text_config.hidden_size
 
         cls.fp_model = Qwen3VLForConditionalGeneration(cfg)
+        assert isinstance(cfg.vision_config.patch_size, int)
         cls.patch_size = cfg.vision_config.patch_size
+        assert isinstance(cfg.vision_config.temporal_patch_size, int)
         cls.temporal_patch_size = cfg.vision_config.temporal_patch_size
         cls.hidden_size = cfg.text_config.hidden_size
         cls.vocab_size = cfg.text_config.vocab_size
@@ -126,14 +142,14 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
             image_mask = input_ids[i] == image_token_id
             image_positions = torch.nonzero(image_mask, as_tuple=True)[0]
 
-            llm_pos_ids_list: list[torch.tensor] = []
+            llm_pos_ids_list: list[torch.Tensor] = []
             st = 0
 
             # Process visual tokens
             if len(image_positions) > 0:
                 # Group consecutive placeholder tokens into a single visual object
                 # All consecutive image tokens represent ONE image/video
-                start_pos = image_positions[0].item()
+                start_pos = int(image_positions[0].item())
 
                 # Text position IDs (before first visual token)
                 text_len = start_pos - st
@@ -220,8 +236,15 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
             raise ValueError(
                 "Synthetic Qwen3-VL visual tests support batch size 1 only."
             )
+        from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+            Qwen3VLVisionConfig,
+        )
+
         vision_cfg = self.fp_model.config.vision_config
+        assert isinstance(vision_cfg, Qwen3VLVisionConfig)
         num_patches = thw[0] * thw[1] * thw[2]
+        assert isinstance(vision_cfg.patch_size, int)
+        assert isinstance(vision_cfg.temporal_patch_size, int)
         patch_dim = (
             vision_cfg.in_channels
             * vision_cfg.temporal_patch_size
@@ -401,6 +424,43 @@ class TestQuantQwen3VLForConditionalGeneration(unittest.TestCase):
             self.skipTest(
                 "This Transformers version does not use the position-ID generation hook"
             )
+
+    def test_generation_config_assignment_updates_underlying_model(self):
+        """Keep the writable GenerationMixin configuration contract."""
+        q_model = QuantQwen3VLForConditionalGeneration(
+            copy.deepcopy(self.fp_model),
+            qcfg=self._make_ptq_config(grid_thw=(1, 8, 8)),
+        )
+        generation_config = copy.deepcopy(q_model.generation_config)
+        generation_config.max_new_tokens = 5
+
+        q_model.generation_config = generation_config
+
+        self.assertIs(q_model.generation_config, generation_config)
+        self.assertIs(q_model.module.generation_config, generation_config)
+        self.assertEqual(q_model.generation_config.max_new_tokens, 5)
+
+    def test_generation_hook_forwards_current_transformers_arguments(self):
+        """Forward positional generation inputs to the underlying HF model."""
+        q_model = QuantQwen3VLForConditionalGeneration(
+            self.fp_model, qcfg=self._make_ptq_config(grid_thw=(1, 8, 8))
+        )
+        input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        expected = {"input_ids": input_ids}
+        with patch.object(
+            q_model.module, "prepare_inputs_for_generation", return_value=expected
+        ) as prepare_inputs:
+            actual = q_model.prepare_inputs_for_generation(
+                input_ids, 3, None, attention_mask, None, True
+            )
+
+        self.assertIs(actual, expected)
+        prepare_inputs.assert_called_once()
+        self.assertIs(prepare_inputs.call_args.kwargs["input_ids"], input_ids)
+        self.assertIs(prepare_inputs.call_args.kwargs["attention_mask"], attention_mask)
+        self.assertEqual(prepare_inputs.call_args.kwargs["next_sequence_length"], 3)
+        self.assertTrue(prepare_inputs.call_args.kwargs["is_first_iteration"])
 
     def test_prepare_position_ids_for_generation_returns_3d_layout(self):
         """generate() must inject 3D mrope position ids, not 1D sequential ones.

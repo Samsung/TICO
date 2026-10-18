@@ -11,5 +11,26 @@ black==22.12.0
 ufmt==2.9.1
 usort==1.0.5
 
+# Formatter dependency closure for the canonical Python 3.12 environment.
+# stdlibs controls import grouping; parser and helper versions must match too.
+# Keep shared pins compatible with infra/scripts/install_requirements.txt.
+attrs==26.1.0
+click==8.5.0
+libcst==1.9.0
+moreorless==0.6.0
+mypy-extensions==1.1.0
+pathspec==1.1.1
+platformdirs==4.13.3
+PyYAML==6.0.2
+stdlibs==2026.9.3
+toml==0.10.2
+tomli==2.3.0; python_version < '3.11'
+tomlkit==0.15.2
+trailrunner==1.4.0
+typing-extensions==4.16.0
+
 # Type checker
-mypy==1.9.0
+# NumPy 2.5 uses type aliases that older mypy versions cannot resolve.
+mypy==2.4.0
+ast-serialize==0.13.1
+librt==0.16.0

@@ -1,3 +1,7 @@
+[MAIN]
+init-hook=import sys; sys.path.insert(0, ".")
+load-plugins=infra.style.transformers_config_pylint
+
 [MESSAGES CONTROL]
 disable=
   W, C, R,

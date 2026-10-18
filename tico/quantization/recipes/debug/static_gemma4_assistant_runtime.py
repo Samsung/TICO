@@ -30,7 +30,7 @@ The flow mirrors the intended NPU execution:
 import copy
 import os
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, cast, Optional, TYPE_CHECKING
 
 import torch
 
@@ -41,6 +41,9 @@ from tico.quantization.config.gemma4_assistant_builders import (
 from tico.quantization.config.gemma4_attention import (
     get_gemma4_text_attention_options,
     RopeConvention,
+)
+from tico.quantization.recipes.export.gemma4_assistant import (
+    resolve_assistant_quant_wrapper,
 )
 from tico.quantization.recipes.utils import set_seed, torch_dtype_from_name
 from tico.quantization.wrapq.wrappers.gemma4_assistant.export_adapters import (
@@ -62,6 +65,12 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
 )
 
 
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantForCausalLM,
+    )
+
+
 @dataclass
 class StaticGemma4AssistantRuntimeConfig:
     """Configuration for the static Gemma4 assistant debug runtime."""
@@ -79,16 +88,18 @@ class StaticGemma4AssistantRuntimeConfig:
     rope: RopeConvention = "pre_negated_sin"
 
 
-def _make_tiny_synthetic_assistant() -> torch.nn.Module:
+def _make_tiny_synthetic_assistant() -> "Gemma4AssistantForCausalLM":
     """Build the tiny synthetic assistant used when no checkpoint is given."""
     from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4_assistant import (
         make_tiny_gemma4_assistant_model,
     )
 
-    return make_tiny_gemma4_assistant_model()
+    return cast("Gemma4AssistantForCausalLM", make_tiny_gemma4_assistant_model())
 
 
-def _load_assistant(cfg: StaticGemma4AssistantRuntimeConfig) -> torch.nn.Module:
+def _load_assistant(
+    cfg: StaticGemma4AssistantRuntimeConfig,
+) -> "Gemma4AssistantForCausalLM":
     """Load the assistant checkpoint or fall back to the tiny synthetic model."""
     if cfg.synthetic:
         return _make_tiny_synthetic_assistant()
@@ -98,11 +109,11 @@ def _load_assistant(cfg: StaticGemma4AssistantRuntimeConfig) -> torch.nn.Module:
     model = AutoModelForCausalLM.from_pretrained(
         path, dtype=torch_dtype_from_name(cfg.dtype)
     )
-    return model.eval()
+    return cast("Gemma4AssistantForCausalLM", model.eval())
 
 
 def _synthetic_target_fixture(
-    assistant: torch.nn.Module, *, kv_len: int
+    assistant: "Gemma4AssistantForCausalLM", *, kv_len: int
 ) -> dict[str, Any]:
     """Build a target-side fixture with the correct shared-KV geometry."""
     text_config = extract_assistant_text_config(assistant.config)
@@ -137,7 +148,7 @@ def _synthetic_target_fixture(
 
 def _target_fixture_from_prompt(
     cfg: StaticGemma4AssistantRuntimeConfig,
-    assistant: torch.nn.Module,
+    assistant: "Gemma4AssistantForCausalLM",
 ) -> Optional[dict[str, Any]]:
     """Run the FP target on the prompt and collect the assistant inputs."""
     target_path = os.environ.get("GEMMA4_TARGET_PATH", cfg.target_model)
@@ -150,7 +161,8 @@ def _target_fixture_from_prompt(
     dtype = torch_dtype_from_name(cfg.dtype)
     tokenizer = AutoTokenizer.from_pretrained(target_path)
     target = AutoModelForCausalLM.from_pretrained(target_path, dtype=dtype)
-    target = target.to(device).eval()
+    cast(Callable[..., object], target.to)(device)
+    target.eval()
 
     encoded = tokenizer(cfg.prompt, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -191,7 +203,9 @@ def run_static_gemma4_assistant_runtime(
     """Run the FP/PTQ/static parity reference flow and print metrics."""
     set_seed(cfg.seed)
 
-    assistant = _load_assistant(cfg).to(torch.float32).eval()
+    assistant = _load_assistant(cfg)
+    cast(Callable[..., object], assistant.to)(torch.float32)
+    assistant.eval()
     validate_gemma4_assistant_architecture(assistant)
     text_config = extract_assistant_text_config(assistant.config)
 
@@ -257,15 +271,17 @@ def run_static_gemma4_assistant_runtime(
         projected, hidden, centroid_logits = adapter(*static.as_tuple())
 
     # 4) Host sparse head on the static core outputs.
-    quant_assistant = quantized.wrapped
+    quant_assistant = resolve_assistant_quant_wrapper(quantized)
+    quant_masked_embedding = quant_assistant.masked_embedding
+    assert quant_masked_embedding is not None
     lm_head_weight = quant_assistant._lm_head_weight()
     candidates = select_sparse_candidates(
         hidden,
         lm_head_weight,
         centroid_logits=centroid_logits,
-        token_ordering=quant_assistant.masked_embedding.token_ordering,
-        num_centroids=quant_assistant.masked_embedding.num_centroids,
-        centroid_top_k=quant_assistant.masked_embedding.centroid_top_k,
+        token_ordering=quant_masked_embedding.token_ordering,
+        num_centroids=quant_masked_embedding.num_centroids,
+        centroid_top_k=quant_masked_embedding.centroid_top_k,
     )
     static_token = int(sparse_top1_token(candidates).item())
 
@@ -284,13 +300,15 @@ def run_static_gemma4_assistant_runtime(
             shared_kv_states=fixture["shared_kv_states"],
             use_cache=False,
         ).last_hidden_state
-        fp_centroid = assistant.masked_embedding.centroids(fp_backbone_hidden)
+        fp_masked_embedding = assistant.masked_embedding
+        assert fp_masked_embedding is not None
+        fp_centroid = fp_masked_embedding.centroids(fp_backbone_hidden)
 
     fp_selected = select_sparse_candidates(
         fp_backbone_hidden,
         assistant.lm_head.weight,
         centroid_logits=fp_centroid,
-        token_ordering=assistant.masked_embedding.token_ordering,
+        token_ordering=fp_masked_embedding.token_ordering,
         num_centroids=int(assistant.config.num_centroids),
         centroid_top_k=int(assistant.config.centroid_intermediate_top_k),
     )

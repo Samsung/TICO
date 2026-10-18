@@ -114,6 +114,9 @@ class CastClampIntInputFloatMaxTest(SinglePassValueTest):
 class CastClampTensorBounds(torch.nn.Module):
     """Use lifted scalar tensor buffers as Clamp min/max arguments."""
 
+    min_value: torch.Tensor
+    max_value: torch.Tensor
+
     def __init__(self):
         super().__init__()
         self.register_buffer("min_value", torch.tensor(-10.0))

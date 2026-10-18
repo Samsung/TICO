@@ -47,9 +47,9 @@ QuantizationAliasKey = tuple[
 TensorAliasKey = tuple[
     str,
     int,
-    int,
-    tuple[int, ...],
-    tuple[int, ...],
+    int | torch.SymInt,
+    tuple[int | torch.SymInt, ...],
+    tuple[int | torch.SymInt, ...],
     torch.dtype,
     torch.layout,
     QuantizationAliasKey | None,

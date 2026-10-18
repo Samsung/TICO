@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -26,6 +26,10 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionModel
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionModel")
@@ -45,6 +49,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
     - Standardization: Applies learned std_bias and std_scale (if enabled)
     """
 
+    std_bias: torch.Tensor
+    std_scale: torch.Tensor
+
     def __init__(
         self,
         fp_model: nn.Module,
@@ -52,6 +59,7 @@ class QuantGemma4VisionModel(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Gemma4VisionModel", fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
         self.config = fp_model.config
@@ -202,7 +210,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
         # Quantize output
         hidden_states = self._fq(hidden_states, self.obs_last_hidden_state)
 
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states)
+        return BaseModelOutputWithPast(
+            last_hidden_state=cast(torch.FloatTensor, hidden_states)
+        )
 
     def forward_export(self, pixel_values: torch.Tensor):
         """Run the pixel-values-only static vision graph for torch.export.
@@ -239,7 +249,9 @@ class QuantGemma4VisionModel(QuantModuleBase):
 
         hidden_states = hidden_states.to(inputs_embeds.dtype)
         hidden_states = self._fq(hidden_states, self.obs_last_hidden_state)
-        return BaseModelOutputWithPast(last_hidden_state=hidden_states)
+        return BaseModelOutputWithPast(
+            last_hidden_state=cast(torch.FloatTensor, hidden_states)
+        )
 
     def as_export_module(
         self,

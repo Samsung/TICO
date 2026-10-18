@@ -24,7 +24,7 @@ Artifacts:
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, cast, Mapping
 
 import torch
 
@@ -32,6 +32,7 @@ from tico.circle._schema import enum_name
 from tico.circle.document import CircleDocument
 from tico.circle.graph import as_indices, as_list
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.gemma4_assistant.export_adapters import (
     Gemma4AssistantCoreExportAdapter,
 )
@@ -52,6 +53,7 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     assistant_shared_kv_num_heads,
     extract_assistant_text_config,
 )
+from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
 
 GEMMA4_ASSISTANT_MANIFEST_SCHEMA_VERSION = 1
@@ -142,8 +144,8 @@ def _quantized_lm_head_payload(
     assistant: QuantGemma4AssistantForCausalLM,
 ) -> dict[str, Any]:
     """Extract the integer tied LM-head weight and its qparams."""
-    quant_linear = assistant.lm_head.wrapped
-    observer = quant_linear.obs_weight
+    quant_linear = cast(QuantLinear, assistant.lm_head.wrapped)
+    observer = cast(AffineObserverBase, quant_linear.obs_weight)
     if not getattr(observer, "has_qparams", False):
         raise RuntimeError(
             "The assistant lm_head weight observer has no qparams. "

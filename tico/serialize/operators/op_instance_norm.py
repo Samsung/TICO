@@ -22,7 +22,11 @@ from circle_schema import circle
 
 from tico.serialize.circle_mapping import extract_shape
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.validate_args_kwargs import InstanceNormArgs
 
@@ -35,7 +39,7 @@ class InstanceNormVisitor(NodeVisitor):
     Bias    -------/
     """
 
-    target: List[torch._ops.OpOverload] = [
+    target: List[TorchOperator] = [
         torch.ops.circle_custom.instance_norm,
     ]
 

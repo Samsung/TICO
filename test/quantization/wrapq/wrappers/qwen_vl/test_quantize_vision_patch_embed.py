@@ -61,6 +61,8 @@ class TestQwenVisionPatchEmbedExample(unittest.TestCase):
         prepared = tico.quantization.prepare(model, PTQConfig(), inplace=True)
         self.assertIsInstance(prepared, PTQWrapper)
 
+        assert isinstance(cfg.patch_size, int)
+        assert isinstance(cfg.temporal_patch_size, int)
         patch_dim = (
             cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
         )

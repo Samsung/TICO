@@ -25,11 +25,14 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLTextModel,
     Qwen3VLVisionModel,
 )
+from transformers.utils import ModelOutput
 
 try:
     from transformers.models.qwen3_vl.modeling_qwen3_vl import (
-        Qwen3VLCausalLMOutputWithPast,
+        Qwen3VLCausalLMOutputWithPast as _Qwen3VLCausalLMOutputWithPast,
     )
+
+    Qwen3VLCausalLMOutputWithPast: type[ModelOutput] = _Qwen3VLCausalLMOutputWithPast
 except ImportError:
     Qwen3VLCausalLMOutputWithPast = CausalLMOutputWithPast
 
@@ -257,6 +260,7 @@ class SpinQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         hidden_states = outputs[0]
         hidden_states = self.rotate_lm_head(hidden_states)
 
+        slice_indices: slice | torch.Tensor
         if isinstance(logits_to_keep, int):
             slice_indices = slice(-logits_to_keep, None)
         else:
@@ -269,7 +273,7 @@ class SpinQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             loss = self.loss_function(
                 logits=logits,
                 labels=labels,
-                vocab_size=int(self.config.text_config.vocab_size),
+                vocab_size=int(getattr(self.config.text_config, "vocab_size")),
                 **kwargs,
             )
 

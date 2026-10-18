@@ -13,6 +13,11 @@
 # limitations under the License.
 
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaDecoderLayer
+
 
 import torch
 
@@ -24,6 +29,7 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
     LlamaDecoderLayerPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.llama.quant_attention import QuantLlamaAttention
 from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
 )
@@ -36,7 +42,7 @@ skip_msg = "required transformers not installed — skipping LlamaDecoderLayer t
 
 @unittest.skipUnless(has_transformers_for("llama"), skip_msg)
 class TestQuantLlamaDecoderLayer(unittest.TestCase):
-    fp_layer: torch.nn.Module
+    fp_layer: "LlamaDecoderLayer"
     cfg: object
     max_seq: int
     head_dim: int
@@ -51,19 +57,23 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         from transformers.models.llama.modeling_llama import LlamaDecoderLayer
 
         cls.max_seq = 32
-        cls.cfg = LlamaConfig(
-            hidden_size=16,
-            max_position_embeddings=cls.max_seq,
-            intermediate_size=32,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=8,
-            attention_bias=False,
-            attention_dropout=0.0,
-            attn_implementation="eager",
+        cls.cfg = LlamaConfig.from_dict(
+            {
+                "hidden_size": 16,
+                "max_position_embeddings": cls.max_seq,
+                "intermediate_size": 32,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "attn_implementation": "eager",
+            }
         )
         cls.fp_layer = LlamaDecoderLayer(cls.cfg, layer_idx=0)
+        assert cls.cfg.head_dim is not None
         cls.head_dim = cls.cfg.head_dim  # type: ignore[attr-defined]
+        assert cls.cfg.num_key_value_heads is not None
         cls.n_kv = cls.cfg.num_key_value_heads  # type: ignore[attr-defined]
         cls.hidden_size = cls.cfg.hidden_size  # type: ignore[attr-defined]
 
@@ -74,7 +84,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
     def _rand_additive_mask(self, batch_size: int, q_len: int, k_len: int):
         mask = torch.zeros(batch_size, q_len, k_len, dtype=torch.float32)
         if k_len > 1:
-            valid_len = torch.randint(low=1, high=k_len + 1, size=(1,)).item()
+            valid_len = int(torch.randint(low=1, high=k_len + 1, size=(1,)).item())
             if valid_len < k_len:
                 mask[:, :, valid_len:] = float("-120")
         return mask
@@ -92,7 +102,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertEqual(qlayer.attn_options.rope, "hf")
         self.assertEqual(qlayer.attn_options.layout, "batched")
 
-        qattn = qlayer.self_attn.wrapped
+        qattn = cast(QuantLlamaAttention, qlayer.self_attn.wrapped)
         self.assertEqual(qattn.attn_options.scale_fusion, "none")
         self.assertEqual(qattn.attn_options.rope, "hf")
         self.assertEqual(qattn.attn_options.layout, "batched")
@@ -110,7 +120,7 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
         self.assertEqual(qlayer.attn_options.rope, "pre_negated_sin")
         self.assertEqual(qlayer.attn_options.layout, "unrolled")
 
-        qattn = qlayer.self_attn.wrapped
+        qattn = cast(QuantLlamaAttention, qlayer.self_attn.wrapped)
         self.assertEqual(qattn.attn_options.scale_fusion, "k_proj")
         self.assertEqual(qattn.attn_options.rope, "pre_negated_sin")
         self.assertEqual(qattn.attn_options.layout, "unrolled")

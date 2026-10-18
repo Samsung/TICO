@@ -119,6 +119,7 @@ class QuantizeMXDefaultVisitor(NodeVisitor):
         tensor = node.args[0]
         elem_format = node.args[1]
         axis = node.args[2]
+        assert isinstance(elem_format, str)
         expected_dtype = mx_dtype_from_elem_format(elem_format)
 
         output_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)

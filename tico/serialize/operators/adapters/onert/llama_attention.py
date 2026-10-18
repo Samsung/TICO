@@ -12,12 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, List, TYPE_CHECKING
+from typing import cast, Dict, List, TYPE_CHECKING
 
 import torch
 
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.modeling_llama import LlamaAttention
+
+if TYPE_CHECKING:
+    from transformers.cache_utils import CacheLayerMixin
 
 
 def llama_attention_forward_adapter(
@@ -29,10 +32,14 @@ def llama_attention_forward_adapter(
     cache_position: torch.Tensor,
     **kwargs,
 ):
-    # past_key_value is a dict with key_cache and value_cache.
-    # It needs to be decomposed for tico and circle which does not know dict.
-    key_cache = past_key_value.key_cache  # type: ignore[union-attr]
-    value_cache = past_key_value.value_cache  # type: ignore[union-attr]
+    # Decompose the cache into tensors before calling the Circle custom operator.
+    if hasattr(past_key_value, "layers"):
+        layer = cast("CacheLayerMixin", past_key_value.layers[self.layer_idx])
+        past_key, past_value = layer.keys, layer.values
+    else:
+        past_key = getattr(past_key_value, "key_cache")[self.layer_idx]
+        past_value = getattr(past_key_value, "value_cache")[self.layer_idx]
+    assert past_key is not None and past_value is not None
     return (
         torch.ops.circle_custom.attention(
             hidden_states,
@@ -43,8 +50,8 @@ def llama_attention_forward_adapter(
             position_embeddings[0],  # cos
             position_embeddings[1],  # sin
             attention_mask,
-            key_cache[self.layer_idx],
-            value_cache[self.layer_idx],  # Same to value_cache
+            past_key,
+            past_value,
             cache_position,
         ),
         None,

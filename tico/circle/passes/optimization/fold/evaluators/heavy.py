@@ -116,15 +116,16 @@ class DequantizeEvaluator(ConstantEvaluator):
             quantization = input_contract.quantization
             if quantization is None or not quantization.scale:
                 return None
-            result = _affine_dequantize(
+            dequantized = _affine_dequantize(
                 source,
                 input_contract.shape,
                 quantization.scale,
                 quantization.zero_point,
                 quantization.quantized_dimension,
             )
-            if result is None:
+            if dequantized is None:
                 return None
+            result = dequantized
 
         return ConstantEvaluation(
             outputs=(
@@ -644,9 +645,9 @@ def _affine_dequantize(
         return None
     rank = len(shape)
     if len(scales) == 1:
-        scale = np.float32(scales[0])
-        zero_point = np.float32(zero_points[0])
-        return (np.asarray(source, dtype=np.float32) - zero_point) * scale
+        scalar_scale = np.float32(scales[0])
+        scalar_zero_point = np.float32(zero_points[0])
+        return (np.asarray(source, dtype=np.float32) - scalar_zero_point) * scalar_scale
     if rank == 0:
         return None
     axis = int(quantized_dimension)

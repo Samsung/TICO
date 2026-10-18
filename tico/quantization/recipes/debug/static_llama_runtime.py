@@ -13,11 +13,14 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import Callable, cast, Optional, Sequence, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 from tico.quantization import prepare
 from tico.quantization.config.ptq import PTQConfig
@@ -126,7 +129,7 @@ def _gather_last_token_logits(
 def _gather_rope_by_position_ids(
     rope_cos: torch.Tensor,
     rope_sin: torch.Tensor,
-    position_ids: torch.LongTensor,
+    position_ids: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -181,9 +184,9 @@ def _slice_rope_range(
 
 
 def _compact_valid_tokens(
-    input_ids: torch.LongTensor,
+    input_ids: torch.Tensor,
     valid_token_mask: torch.Tensor,
-) -> torch.LongTensor:
+) -> torch.Tensor:
     """Compact equally sized valid token rows into a dense token tensor."""
     valid_lengths = valid_token_mask.sum(dim=1)
     if torch.unique(valid_lengths).numel() != 1:
@@ -274,8 +277,8 @@ class StaticLlamaLayerRuntime:
 
     def __init__(
         self,
-        model: AutoModelForCausalLM,
-        tokenizer: AutoTokenizer,
+        model: "LlamaForCausalLM",
+        tokenizer: PreTrainedTokenizerBase,
         max_seq: int,
         device: str = "cpu",
         padding_side: str = "right",
@@ -305,19 +308,25 @@ class StaticLlamaLayerRuntime:
 
         self.prefill_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("prefill", return_kv=True)
+                cast(QuantLlamaDecoderLayer, layer.wrapped).as_export_module(
+                    "prefill", return_kv=True
+                )
                 for layer in self.layers
             ]
         ).to(self.device)
         self.decode_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("decode", return_kv=True)
+                cast(QuantLlamaDecoderLayer, layer.wrapped).as_export_module(
+                    "decode", return_kv=True
+                )
                 for layer in self.layers
             ]
         ).to(self.device)
         self.append_prefill_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("append_prefill", return_kv=True)
+                cast(QuantLlamaDecoderLayer, layer.wrapped).as_export_module(
+                    "append_prefill", return_kv=True
+                )
                 for layer in self.layers
             ]
         ).to(self.device)
@@ -362,7 +371,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def prefill(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert (
@@ -437,7 +446,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def append_prefill(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         *,
         bucket_size: Optional[int] = None,
@@ -569,7 +578,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def append_prefill_chunked(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         *,
         bucket_size: int,
@@ -607,7 +616,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def append_turn_by_decode_loop(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -635,7 +644,7 @@ class StaticLlamaLayerRuntime:
         return logits
 
     @torch.no_grad()
-    def decode_one(self, input_ids: torch.LongTensor) -> torch.Tensor:
+    def decode_one(self, input_ids: torch.Tensor) -> torch.Tensor:
         assert input_ids.dim() == 2 and input_ids.size(1) == 1
         assert len(self.layer_caches) == self.num_hidden_layers, "Call prefill() first."
         assert self.past_len < self.max_seq - 1
@@ -681,7 +690,7 @@ class StaticLlamaLayerRuntime:
         return logits[:, -1, :]
 
     @torch.no_grad()
-    def _reference_last_token_logits(self, input_ids: torch.LongTensor) -> torch.Tensor:
+    def _reference_last_token_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Compute reference logits without materializing all sequence positions."""
         base_outputs = self.model.model(
             input_ids=input_ids,
@@ -698,7 +707,7 @@ class StaticLlamaLayerRuntime:
         prompt: str,
         max_new_tokens: int,
         eos_token_id: Optional[int] = None,
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         batch = self.tokenizer(
             prompt,
             return_tensors="pt",
@@ -807,7 +816,7 @@ def _clone_layer_caches(caches: Sequence[LayerCache]) -> list[LayerCache]:
 
 
 def _tokenize_to_device(
-    tokenizer: AutoTokenizer,
+    tokenizer: PreTrainedTokenizerBase,
     text: str,
     *,
     device: torch.device,
@@ -815,7 +824,7 @@ def _tokenize_to_device(
     padding: bool | str = False,
     truncation: bool = False,
     max_length: Optional[int] = None,
-) -> tuple[torch.LongTensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """Tokenize text and move token tensors to the requested device."""
     batch = tokenizer(
         text,
@@ -834,13 +843,13 @@ def _tokenize_to_device(
 
 def _run_decode_steps_against_reference(
     runtime: StaticLlamaLayerRuntime,
-    generated: torch.LongTensor,
+    generated: torch.Tensor,
     logits: torch.Tensor,
     *,
     steps: int,
     title_prefix: str,
     verbose: bool,
-) -> tuple[torch.LongTensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Run greedy decode steps and compare each step with the reference model."""
     for step in range(1, steps + 1):
         if generated.size(1) >= runtime.max_seq - 1:
@@ -867,7 +876,7 @@ def _run_multiturn_append_prefill_check(
     cfg: StaticLlamaRuntimeConfig,
     *,
     verbose: bool = True,
-) -> torch.LongTensor:
+) -> torch.Tensor:
     """Validate append-prefill in a two-turn static runtime scenario.
 
     Returns:
@@ -978,10 +987,11 @@ def _run_multiturn_append_prefill_check(
 def run_static_llama_runtime(cfg: StaticLlamaRuntimeConfig) -> None:
     torch.set_grad_enabled(False)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg.model,
-        dtype=torch.float32,
-    ).to(cfg.device)
+    load_model = cast(
+        "Callable[..., LlamaForCausalLM]", AutoModelForCausalLM.from_pretrained
+    )
+    model = load_model(cfg.model, dtype=torch.float32)
+    cast(nn.Module, model).to(cfg.device)
     tokenizer = AutoTokenizer.from_pretrained(cfg.model, legacy=False)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token

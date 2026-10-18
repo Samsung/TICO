@@ -42,8 +42,8 @@ jobs:
 
           echo "TICO-DCO-1.0-Signed-off-by is OK"
 
-  check-style:
-    name: Check style
+  check-format:
+    name: Check format
     runs-on: ubuntu-24.04
 
     steps:
@@ -55,8 +55,58 @@ jobs:
       - name: Run configure
         run: ./ccex configure format
 
-      - name: Run linters
-        run: ./ccex format --no-apply-patches
+      - name: Check formatting
+        run: lintrunner --force-color --all-files --take UFMT --config .lintrunner.toml
+
+  check-static:
+    name: Check static analysis
+    needs:
+      - resolve_torch_policy
+      - build_package
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: tico-wheel
+          path: ./dist/
+
+      - name: Set up analysis environment
+        uses: ./.github/actions/setup-tico-test
+        with:
+          torch-version: ${{ needs.resolve_torch_policy.outputs.default_family }}
+
+      - name: Configure analysis tools
+        run: ./ccex configure format
+
+      - name: Check and show analysis dependencies
+        run: |
+          python3 -m pip check
+          python3 -m pip list --format=freeze
+
+      - name: Run static analysis
+        run: lintrunner --force-color --all-files --take PYLINT,MYPY --config .lintrunner.toml
+
+  # Preserve the existing required check while reporting both jobs separately.
+  check-style:
+    name: Check style
+    if: always()
+    needs:
+      - check-format
+      - check-static
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Require formatting and static analysis to pass
+        env:
+          FORMAT_RESULT: ${{ needs.check-format.result }}
+          STATIC_RESULT: ${{ needs.check-static.result }}
+        run: |
+          test "$FORMAT_RESULT" = success
+          test "$STATIC_RESULT" = success
 
   resolve_torch_policy:
     name: Resolve PyTorch policy

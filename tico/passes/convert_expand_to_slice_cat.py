@@ -26,7 +26,7 @@ from tico.utils.graph import create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
-from tico.utils.validate_args_kwargs import ExpandArgs, ReshapeArgs
+from tico.utils.validate_args_kwargs import ExpandArgs, parse_node_args, ReshapeArgs
 
 
 @trace_graph_diff_on_pass
@@ -64,7 +64,7 @@ class ConvertExpandToSliceCat(PassBase):
                 continue
 
             post_reshape = node
-            post_reshape_args = ReshapeArgs(*post_reshape.args, **post_reshape.kwargs)
+            post_reshape_args = parse_node_args(ReshapeArgs, post_reshape)
             post_reshape_input = post_reshape_args.input
 
             if not isinstance(post_reshape_input, torch.fx.Node) or not is_target_node(
@@ -73,7 +73,7 @@ class ConvertExpandToSliceCat(PassBase):
                 continue
 
             expand = post_reshape_input
-            expand_args = ExpandArgs(*expand.args, **expand.kwargs)
+            expand_args = parse_node_args(ExpandArgs, expand)
             expand_input = expand_args.input
             expand_shape = extract_shape(expand)
 
@@ -83,7 +83,7 @@ class ConvertExpandToSliceCat(PassBase):
                 continue
 
             pre_reshape = expand_input
-            pre_reshape_args = ReshapeArgs(*pre_reshape.args, **pre_reshape.kwargs)
+            pre_reshape_args = parse_node_args(ReshapeArgs, pre_reshape)
             pre_reshape_input = pre_reshape_args.input
             pre_reshape_shape = extract_shape(pre_reshape)
 

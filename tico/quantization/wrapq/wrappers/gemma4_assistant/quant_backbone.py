@@ -14,10 +14,14 @@
 
 """Assistant-only container over the shared-KV Gemma4 text backbone."""
 
-from typing import Iterable, Mapping, Optional, Tuple
+from typing import cast, Iterable, Mapping, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
 
 from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import PTQConfig
@@ -53,9 +57,11 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_text_model = cast("Gemma4TextModel", fp_text_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.rope_convention = get_gemma4_text_attention_options(self.qcfg).rope
         self.config = fp_text_model.config
+        assert self.config.layer_types is not None
         self.unique_layer_types = tuple(sorted(set(self.config.layer_types)))
 
         unsupported = set(self.unique_layer_types) - SUPPORTED_ASSISTANT_LAYER_TYPES
@@ -172,6 +178,7 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
             )
 
         hidden_states = inputs_embeds
+        assert self.config.layer_types is not None
         for i, decoder_layer in enumerate(self.layers):
             layer_type = self.config.layer_types[i]
             hidden_states = decoder_layer(

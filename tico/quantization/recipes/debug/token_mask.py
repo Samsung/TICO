@@ -20,7 +20,7 @@ import torch
 
 
 def normalize_valid_token_mask(
-    input_ids: torch.LongTensor,
+    input_ids: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
     *,
     pad_token_id: Optional[int],
@@ -71,18 +71,18 @@ def validate_padding_layout(valid_token_mask: torch.Tensor, padding_side: str) -
 
 def build_position_ids_from_valid_token_mask(
     valid_token_mask: torch.Tensor,
-) -> torch.LongTensor:
+) -> torch.Tensor:
     """Build compact text-only position IDs for padded prefill inputs."""
     position_ids = valid_token_mask.to(torch.long).cumsum(dim=1) - 1
     position_ids = torch.clamp(position_ids, min=0)
-    return cast(torch.LongTensor, position_ids.masked_fill(~valid_token_mask, 0))
+    return cast(torch.Tensor, position_ids.masked_fill(~valid_token_mask, 0))
 
 
-def last_valid_token_indices(valid_token_mask: torch.Tensor) -> torch.LongTensor:
+def last_valid_token_indices(valid_token_mask: torch.Tensor) -> torch.Tensor:
     """Return the input index of the last real token for each batch row."""
     batch_size, seq_len = valid_token_mask.shape
     positions = torch.arange(seq_len, device=valid_token_mask.device)
     positions = positions.unsqueeze(0).expand(batch_size, -1)
     return cast(
-        torch.LongTensor, positions.masked_fill(~valid_token_mask, 0).max(dim=1).values
+        torch.Tensor, positions.masked_fill(~valid_token_mask, 0).max(dim=1).values
     )

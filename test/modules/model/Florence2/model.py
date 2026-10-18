@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import requests  # type: ignore[import-untyped]
+
 import torch
 from PIL import Image
 from transformers import AutoProcessor, Florence2ForConditionalGeneration
@@ -34,7 +37,8 @@ class Florence2(TestModuleBase):
         model_id = "florence-community/Florence-2-base"
         self.model = Florence2ForConditionalGeneration.from_pretrained(
             model_id, dtype=torch.float32
-        ).to("cpu")
+        )
+        cast(torch.nn.Module, self.model).to("cpu")
         self.processor = AutoProcessor.from_pretrained(model_id)
         # TODO: Revisit the threshold values
         self.rtol = 4e-3

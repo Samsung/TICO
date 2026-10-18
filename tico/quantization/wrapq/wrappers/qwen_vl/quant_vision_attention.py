@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import copy
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionAttention
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -36,6 +40,7 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        attn_fp = cast("Qwen3VLVisionAttention", attn_fp)
         super().__init__(qcfg, fp_name=fp_name)
         cfg = attn_fp.config
         self.config = cfg
@@ -63,7 +68,7 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
             float(getattr(attn_fp, "scaling", self.head_dim**-0.5))
         )
         with torch.no_grad():
-            lin = self.qkv.wrapped.module
+            lin = cast(nn.Linear, self.qkv.wrapped.module)
             k_offset = lin.weight.shape[0] // 3
             k_size = lin.weight.shape[0] // 3
             lin.weight[k_offset : k_offset + k_size, :].mul_(scale_t)
@@ -164,9 +169,9 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         # execution keeps the original dynamic cu_seqlens behavior.
         if attention_split_sizes is None:
             lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-            split_sizes = lengths.tolist()
+            split_sizes: list[int] = lengths.tolist()
         else:
-            split_sizes = attention_split_sizes
+            split_sizes = list(attention_split_sizes)
 
         q_splits, k_splits, v_splits = [
             torch.split(tensor, split_sizes, dim=2)

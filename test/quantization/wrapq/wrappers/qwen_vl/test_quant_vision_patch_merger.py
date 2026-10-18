@@ -15,6 +15,11 @@
 import pathlib
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchMerger
+
 import warnings
 
 import tico
@@ -40,7 +45,7 @@ skip_msg = (
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLVisionPatchMerger(unittest.TestCase):
-    fp_merger: torch.nn.Module
+    fp_merger: "Qwen3VLVisionPatchMerger"
     hidden_size: int
     out_hidden_size: int
     spatial_merge_size: int

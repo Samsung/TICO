@@ -18,6 +18,8 @@ import inspect
 
 import torch
 
+from test.modules.base import TestModuleBase
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -48,6 +50,7 @@ def main() -> None:
     for name, cls in models:
         if name == model_name:
             model = cls()
+            assert isinstance(model, TestModuleBase)
             example_inputs = model.get_example_inputs()
 
             pt2_module = torch.export.export(model, example_inputs)

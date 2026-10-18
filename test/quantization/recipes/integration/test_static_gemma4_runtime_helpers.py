@@ -232,7 +232,7 @@ class TestBuildStaticInputs(unittest.TestCase):
         runtime = object.__new__(StaticGemma4Runtime)
         runtime.rope_convention = "pre_negated_sin"
         runtime.processor = FakeProcessor()  # type: ignore[assignment]
-        runtime.text_config = SimpleNamespace(pad_token_id=0)
+        setattr(runtime, "text_config", SimpleNamespace(pad_token_id=0))
         runtime.device = torch.device("cpu")
         runtime.layout = SimpleNamespace(max_seq=8)  # type: ignore[assignment]
         runtime.config = SimpleNamespace(image_token_id=99)  # type: ignore[assignment]
@@ -941,13 +941,17 @@ def _make_ple_runtime(*, max_seq: int, num_layers: int, ple_dim: int):
     runtime.rope_convention = "pre_negated_sin"
     runtime.device = torch.device("cpu")
     runtime.layout = SimpleNamespace(max_seq=max_seq)  # type: ignore[assignment]
-    runtime.text_config = SimpleNamespace(
-        layer_types=["full_attention"] * num_layers,
-        sliding_window=4,
-        final_logit_softcapping=None,
-        num_hidden_layers=num_layers,
+    setattr(
+        runtime,
+        "text_config",
+        SimpleNamespace(
+            layer_types=["full_attention"] * num_layers,
+            sliding_window=4,
+            final_logit_softcapping=None,
+            num_hidden_layers=num_layers,
+        ),
     )
-    runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=ple_dim)
+    setattr(runtime, "text_model", SimpleNamespace(hidden_size_per_layer_input=ple_dim))
     runtime.model = _FakeRuntimeModel(rotary_emb)  # type: ignore[assignment]
     runtime.attention_mask_fill_value = -120.0
     runtime.token_embedding = lambda ids: torch.full(  # type: ignore[assignment]
@@ -1039,7 +1043,7 @@ class TestStaticRuntimePLEStages(unittest.TestCase):
 
         runtime = object.__new__(StaticGemma4Runtime)
         runtime.rope_convention = "pre_negated_sin"
-        runtime.text_model = qtext
+        setattr(runtime, "text_model", qtext)
         runtime.ple_embedding = Gemma4PLEEmbeddingExportAdapter(qtext)
         runtime.ple_projection = Gemma4PLEProjectionExportAdapter(qtext)
 
@@ -1063,7 +1067,7 @@ class TestStaticRuntimePLEStages(unittest.TestCase):
 
         runtime = object.__new__(StaticGemma4Runtime)
         runtime.rope_convention = "pre_negated_sin"
-        runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=0)
+        setattr(runtime, "text_model", SimpleNamespace(hidden_size_per_layer_input=0))
         runtime.ple_embedding = None
         runtime.ple_projection = None
 
@@ -1249,12 +1253,16 @@ class TestDecodeOneFixedCacheContract(unittest.TestCase):
         runtime.rope_convention = "pre_negated_sin"
         runtime.device = torch.device("cpu")
         runtime.layout = SimpleNamespace(max_seq=max_seq)  # type: ignore[assignment]
-        runtime.text_config = SimpleNamespace(
-            layer_types=["full_attention", "full_attention"],
-            sliding_window=4,
-            final_logit_softcapping=None,
+        setattr(
+            runtime,
+            "text_config",
+            SimpleNamespace(
+                layer_types=["full_attention", "full_attention"],
+                sliding_window=4,
+                final_logit_softcapping=None,
+            ),
         )
-        runtime.text_model = SimpleNamespace(hidden_size_per_layer_input=0)
+        setattr(runtime, "text_model", SimpleNamespace(hidden_size_per_layer_input=0))
         runtime.model = SimpleNamespace(  # type: ignore[assignment]
             model=SimpleNamespace(language_model=SimpleNamespace(rotary_emb=rotary_emb))
         )
