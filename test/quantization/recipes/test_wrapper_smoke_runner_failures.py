@@ -15,21 +15,32 @@
 """Failure-kind tagging tests for the wrapper smoke runner."""
 
 import io
+import json
+import tempfile
 import unittest
 from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import tico.quantization.recipes.debug.wrapper_smoke.registry as registry
 import tico.quantization.recipes.debug.wrapper_smoke.runner as runner
+from tico.quantization.recipes.debug.wrapper_smoke.case import (
+    CaseAvailability,
+    WrapperSmokeCase,
+)
 
 
-class _UnavailableCase:
+class _UnavailableCase(WrapperSmokeCase):
     """Fake case whose environment check reports unavailability."""
 
     name = "fake_unavailable"
 
     def availability(self):
-        return SimpleNamespace(available=False, reason="optional dependency missing")
+        return CaseAvailability(False, "optional dependency missing")
+
+    def validate_config(self, cfg):
+        raise AssertionError("An unavailable case must not validate or build a model")
 
 
 class _InvalidConfigCase:
@@ -74,6 +85,54 @@ class TestWrapperSmokeRunnerFailureKinds(unittest.TestCase):
         with patch.object(runner, "get_case", lambda name: _UnavailableCase()):
             with self.assertRaisesRegex(RuntimeError, r"failed \(UNAVAILABLE\)"):
                 runner.run_wrapper_smoke("fake_unavailable", strict=True)
+
+    def _check_unavailable_report(self, *, strict):
+        original_registry = registry._REGISTRY.copy()
+        case = _UnavailableCase()
+        try:
+            registry.register_case(case)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                report_path = Path(tmpdir) / "reports" / "unavailable.json"
+                stdout = io.StringIO()
+                with redirect_stdout(stdout):
+                    if strict:
+                        with self.assertRaisesRegex(
+                            RuntimeError,
+                            r"failed \(UNAVAILABLE\): optional dependency missing",
+                        ):
+                            runner.run_wrapper_smoke(
+                                case.name, strict=True, report_json=report_path
+                            )
+                    else:
+                        result = runner.run_wrapper_smoke(
+                            case.name, report_json=report_path
+                        )
+                        self.assertTrue(report_path.is_file())
+                        self.assertEqual(
+                            result.artifacts["report_json"], str(report_path)
+                        )
+                self.assertTrue(report_path.is_file())
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                self.assertEqual(report["case"], case.name)
+                self.assertFalse(report["passed"])
+                self.assertEqual(report["failures"], ["UNAVAILABLE"])
+                self.assertEqual(report["messages"], ["optional dependency missing"])
+                self.assertEqual(report["metrics"], {})
+                summary = stdout.getvalue()
+                self.assertIn("Status           : FAIL (UNAVAILABLE)", summary)
+                self.assertIn("optional dependency missing", summary)
+                self.assertIn(f"report_json: {report_path}", summary)
+        finally:
+            registry._REGISTRY.clear()
+            registry._REGISTRY.update(original_registry)
+
+    def test_unavailable_case_writes_report_and_prints_summary(self):
+        """Unavailability retains the requested diagnostics without building a model."""
+        self._check_unavailable_report(strict=False)
+
+    def test_strict_unavailable_reports_before_raising(self):
+        """Strict failures emit the same report and summary before raising."""
+        self._check_unavailable_report(strict=True)
 
 
 if __name__ == "__main__":
