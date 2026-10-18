@@ -339,35 +339,57 @@ trace=True)` returns every intermediate tensor value for debugging.
 
 ## Formatting and static checks
 
-Install the tools:
-
-```bash
-./ccex configure format
-```
-
-Apply formatter-generated patches:
+Before opening a pull request, apply formatting and run all static checks with one
+command:
 
 ```bash
 ./ccex format
 ```
 
-Check all files without applying changes, as CI does:
+This runs UFMT (Black formatting and import sorting), Pylint, and mypy together.
+To check without applying formatter patches:
 
 ```bash
 ./ccex format --no-apply-patches
 ```
 
-Check only files changed from the local `main` branch:
+Use Python 3.12 and the development environment described above. Pylint and mypy
+need the project and test dependencies: missing PyTorch or different installed
+library versions can change inferred types without reporting an import error.
+
+To reproduce CI in a fresh Python 3.12 virtual environment, install the
+policy-selected CPU Torch build and configure the same dependencies:
+
+```bash
+TORCH_FAMILY=$(python3 tico/utils/compat/torch_version_policy.py default-family)
+./ccex install --torch_ver "$TORCH_FAMILY" --cpu_only
+./ccex configure test --torch_ver "$TORCH_FAMILY" --cpu_only
+./ccex configure format
+python3 -m pip check
+python3 -m pip list --format=freeze
+./ccex format --no-apply-patches
+```
+
+Use a separate environment when developing against another Torch version or optional
+model dependencies. The static-analysis CI job records installed package versions to
+help compare environments.
+
+To check tracked files changed from the local `main` branch, use `--diff-only`.
+Add new files to Git before checking them:
 
 ```bash
 ./ccex format --diff-only --no-apply-patches
 ```
 
-The current lintrunner configuration executes:
+CI runs formatting and static analysis as separate jobs so formatting can finish
+without installing PyTorch. Both jobs use the same lintrunner configuration as
+`./ccex format`; developers do not need to select individual tools.
 
-- Pylint
-- ufmt (Black-compatible formatting plus import sorting)
-- mypy
+The formatter's transitive dependencies are pinned in
+[`requirements-lintrunner.txt`](../requirements-lintrunner.txt), including `stdlibs`
+and `libcst`. Keep those pins when updating formatter packages: their versions can
+change import classification and formatting even when Black, UFMT, and usort are
+unchanged.
 
 ## Coverage
 
@@ -399,16 +421,28 @@ central policy module rather than duplicated in workflow YAML.
      TICO-DCO-1.0-Signed-off-by: <NAME> <<EMAIL>>
      ```
 
-2. **Style check**
+2. **Format check**
    - Runs on Ubuntu 24.04 with Python 3.12.
-   - Executes `./ccex configure format` and
-     `./ccex format --no-apply-patches`.
+   - Executes `./ccex configure format`, then runs lintrunner for UFMT only without
+     applying patches.
+   - Does not depend on the package build or install PyTorch.
 
 3. **Package build**
    - Builds the TICO wheel once.
-   - Uploads one short-lived artifact reused by all versioned test jobs.
+   - Uploads one short-lived artifact reused by static analysis and versioned tests.
 
-4. **Versioned tests**
+4. **Static analysis**
+   - Runs on Ubuntu 24.04 with Python 3.12.
+   - Reuses the test-environment setup action with the default Torch family from the
+     central policy, including CPU Torch, matching TorchVision, TICO, and test
+     dependencies.
+   - Configures the analysis tools, checks package dependency consistency, records
+     installed versions, and runs lintrunner for Pylint and mypy without applying
+     patches.
+   - The existing **Check style** status succeeds only when both formatting and
+     static analysis succeed, preserving existing required-check settings.
+
+5. **Versioned tests**
    - Runs the complete suite on the default qualified family, currently 2.13.
    - Runs blocking export and quantization smoke tests on the oldest supported family,
      currently 2.11.
