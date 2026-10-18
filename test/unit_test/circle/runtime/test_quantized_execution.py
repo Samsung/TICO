@@ -22,6 +22,8 @@ from typing import Any
 import numpy as np
 from circle_schema import circle
 from tico.circle.document import CircleDocument
+from tico.circle.passes import CanonicalizeEquivalentOpsPass, CirclePassContext
+from tico.circle.passes.optimization._utils import operator_builtin_code
 from tico.circle.runtime import (
     CircleReferenceRuntime,
     CircleRuntimeValidationError,
@@ -293,6 +295,215 @@ class QuantizeDequantizeKernelTest(unittest.TestCase):
             CircleReferenceRuntime(builder.build()).run(
                 (np.array([1, 2], dtype=np.int32),)
             )
+
+
+class QuantizedPadTest(unittest.TestCase):
+    def _pad_document(
+        self, value, paddings, *, qparams=None, output_qparams=None, constant=None
+    ):
+        builder = CircleModelBuilder()
+        x = builder.input("x", value.shape, dtype=value.dtype)
+        builder.subgraph.tensors[x].quantization = qparams
+        widths = builder.const_i32("paddings", paddings)
+        output_shape = tuple(
+            size + before + after
+            for size, (before, after) in zip(value.shape, paddings)
+        )
+        if output_qparams is None:
+            output_qparams = qparams
+        output = builder.activation(
+            "padded", output_shape, dtype=value.dtype, quantization=output_qparams
+        )
+        inputs = [x, widths]
+        if constant is None:
+            name, options = "PAD", "PadOptions"
+        else:
+            name, options = "PADV2", "PadV2Options"
+            padding_value = builder.constant("constant", constant, dtype=value.dtype)
+            builder.subgraph.tensors[padding_value].quantization = qparams
+            inputs.append(padding_value)
+        builder.operator(name, inputs, [output], options=_options(options))
+        if qparams is None:
+            builder.set_outputs(output)
+        else:
+            dequantized = builder.activation("dequantized", output_shape)
+            builder.operator(
+                "DEQUANTIZE",
+                [output],
+                [dequantized],
+                options=_options("DequantizeOptions"),
+            )
+            builder.set_outputs(output, dequantized)
+        document = CircleDocument.from_bytes(builder.build().to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        return document
+
+    def _assert_quantized_pad(self, document, value, expected_raw, expected_real):
+        runtime = CircleReferenceRuntime(document)
+        original = value.copy()
+        value.setflags(write=False)
+        expected_raw = np.asarray(expected_raw, dtype=value.dtype)
+        expected_real = np.asarray(expected_real, dtype=np.float32)
+        quantization = runtime.program.tensor(0).quantization
+        assert quantization is not None
+        scale = np.asarray(quantization.scale, dtype=np.float32)
+        zero_point = np.asarray(quantization.zero_point, dtype=np.float32)
+        real_input = (value.astype(np.float32) - zero_point) * scale
+        for _ in range(2):
+            native = runtime.run((value,), mode=ExecutionMode.NATIVE)
+            np.testing.assert_array_equal(native.outputs[0], expected_raw)
+            np.testing.assert_array_equal(native.outputs[1], expected_real)
+            self.assertEqual(native.outputs[0].dtype, value.dtype)
+            self.assertFalse(np.shares_memory(native.outputs[0], value))
+            # These test inputs are exactly representable on their serialized grid.
+            fake = runtime.run((real_input,), mode=ExecutionMode.FAKE_QUANTIZE)
+            for output in fake.outputs:
+                np.testing.assert_array_equal(output, expected_real)
+                self.assertEqual(output.dtype, np.float32)
+            np.testing.assert_array_equal(value, original)
+            self.assertFalse(value.flags.writeable)
+
+    def test_per_tensor_pad_inserts_real_zero(self):
+        for dtype, scale, zero_point, raw, real in (
+            (np.uint8, 0.5, 128, [130, 132], [1, 2]),
+            (np.int8, 1.5, -3, [-1, 1], [3, 6]),
+            (np.int8, 0.5, 0, [2, 4], [1, 2]),
+        ):
+            with self.subTest(dtype=dtype, zero_point=zero_point):
+                value = np.asarray(raw, dtype=dtype)
+                qparams = CircleModelBuilder.quantization([scale], [zero_point])
+                document = self._pad_document(value, [[1, 1]], qparams=qparams)
+                self._assert_quantized_pad(
+                    document, value, [zero_point, *raw, zero_point], [0, *real, 0]
+                )
+
+    def test_per_channel_pad_outside_channel_axis(self):
+        source: np.ndarray = np.array([[5, 7], [-3, -2]], dtype=np.int8)
+        value = source.T
+        self.assertFalse(value.flags.c_contiguous)
+        qparams = CircleModelBuilder.quantization(
+            [0.5, 2], [3, -4], quantized_dimension=1
+        )
+        document = self._pad_document(value, [[1, 1], [0, 0]], qparams=qparams)
+        self._assert_quantized_pad(
+            document,
+            value,
+            [[3, -4], [5, -3], [7, -2], [3, -4]],
+            [[0, 0], [1, 2], [2, 4], [0, 0]],
+        )
+
+    def test_channel_axis_padding_uses_aligned_output_qparams(self):
+        value = np.array([[5, -3], [7, -2]], dtype=np.int8)
+        qparams = CircleModelBuilder.quantization(
+            [0.5, 2], [3, -4], quantized_dimension=1
+        )
+        output_qparams = CircleModelBuilder.quantization(
+            [1, 0.5, 2, 1], [9, 3, -4, -8], quantized_dimension=1
+        )
+        document = self._pad_document(
+            value, [[0, 0], [1, 1]], qparams=qparams, output_qparams=output_qparams
+        )
+        self._assert_quantized_pad(
+            document,
+            value,
+            [[9, 5, -3, -8], [9, 7, -2, -8]],
+            [[0, 1, 2, 0], [0, 2, 4, 0]],
+        )
+
+    def test_output_channel_count_mismatch_is_rejected(self):
+        value = np.array([[5, -3]], dtype=np.int8)
+        qparams = CircleModelBuilder.quantization(
+            [0.5, 2], [3, -4], quantized_dimension=1
+        )
+        document = self._pad_document(value, [[0, 0], [1, 1]], qparams=qparams)
+        with self.assertRaisesRegex(
+            CircleRuntimeValidationError,
+            "2 per-channel scales on quantized dimension 1.*does not match shape",
+        ):
+            CircleReferenceRuntime(document).run((value,))
+
+    def test_dynamic_pad_uses_actual_shape_including_empty_input(self):
+        value = np.array([130, 132], dtype=np.uint8)
+        qparams = CircleModelBuilder.quantization([0.5], [128])
+        document = self._pad_document(value, [[1, 1]], qparams=qparams)
+        graph = document.subgraph()
+        for index in (*graph.inputs, *graph.outputs):
+            graph.tensors[index].shape = [1]
+            graph.tensors[index].shapeSignature = [-1]
+        document = CircleDocument.from_bytes(document.to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        cases: tuple[tuple[list[int], list[int]], ...] = (
+            ([], []),
+            ([134], [3]),
+            ([130, 132], [1, 2]),
+        )
+        for raw, real in cases:
+            with self.subTest(raw=raw):
+                self._assert_quantized_pad(
+                    document,
+                    np.asarray(raw, dtype=np.uint8),
+                    [128, *raw, 128],
+                    [0, *real, 0],
+                )
+
+    def test_scalar_pad_retains_existing_rejection(self):
+        value = np.array(130, dtype=np.uint8)
+        qparams = CircleModelBuilder.quantization([0.5], [128])
+        document = self._pad_document(
+            value, np.empty((0, 2), dtype=np.int32), qparams=qparams
+        )
+        with self.assertRaisesRegex(
+            CircleRuntimeValidationError, "pad_width.*must be of integral type"
+        ):
+            CircleReferenceRuntime(document).run((value,))
+
+    def test_output_dtype_mismatch_is_not_hidden_by_casting(self):
+        value = np.array([-1, 1], dtype=np.int8)
+        qparams = CircleModelBuilder.quantization([1.5], [-3])
+        document = self._pad_document(value, [[1, 1]], qparams=qparams)
+        graph = document.subgraph()
+        graph.tensors[graph.outputs[0]].type = INT16
+        document = CircleDocument.from_bytes(document.to_bytes())
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        with self.assertRaisesRegex(
+            CircleRuntimeValidationError, "dtype int8.*requires INT16"
+        ):
+            CircleReferenceRuntime(document).run((value,))
+
+    def test_unquantized_pad_keeps_raw_zero(self):
+        for dtype in (np.float32, np.int32):
+            with self.subTest(dtype=dtype):
+                value: np.ndarray = np.array([1, 2], dtype=dtype)
+                original = value.copy()
+                runtime = CircleReferenceRuntime(self._pad_document(value, [[1, 1]]))
+                for mode in ExecutionMode:
+                    result = runtime.run((value,), mode=mode).outputs[0]
+                    np.testing.assert_array_equal(
+                        result, np.array([0, 1, 2, 0], dtype=dtype)
+                    )
+                    self.assertEqual(result.dtype, value.dtype)
+                    np.testing.assert_array_equal(value, original)
+
+    def test_padv2_keeps_explicit_nonzero_constant(self):
+        value = np.array([130, 132], dtype=np.uint8)
+        qparams = CircleModelBuilder.quantization([0.5], [128])
+        document = self._pad_document(value, [[1, 1]], qparams=qparams, constant=132)
+        self._assert_quantized_pad(document, value, [132, 130, 132, 132], [2, 1, 2, 2])
+
+    def test_zero_padv2_canonicalization_preserves_native_values(self):
+        value = np.array([130, 132], dtype=np.uint8)
+        qparams = CircleModelBuilder.quantization([0.5], [128])
+        document = self._pad_document(value, [[1, 1]], qparams=qparams, constant=128)
+        self._assert_quantized_pad(document, value, [128, 130, 132, 128], [0, 1, 2, 0])
+        result = CanonicalizeEquivalentOpsPass().run(document, CirclePassContext())
+        self.assertTrue(result.modified)
+        self.assertEqual(
+            operator_builtin_code(document.model, document.subgraph().operators[0]),
+            circle.BuiltinOperator.BuiltinOperator.PAD,
+        )
+        optimized = CircleDocument.from_bytes(document.to_bytes())
+        self.assertTrue(optimized.verify(raise_on_error=False).ok)
+        self._assert_quantized_pad(optimized, value, [128, 130, 132, 128], [0, 1, 2, 0])
 
 
 class PackedFourBitConstantTest(unittest.TestCase):
