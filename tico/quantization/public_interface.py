@@ -80,7 +80,6 @@ def convert(model, inplace: Optional[bool] = True):
     # Get quantizer first before calling deepcopy that does not copy attributes properly.
     if hasattr(model, QUANTIZER_ATTRIBUTE_NAME):
         quantizer = getattr(model, QUANTIZER_ATTRIBUTE_NAME)
-        delattr(model, QUANTIZER_ATTRIBUTE_NAME)
     else:
         raise RuntimeError("Call prepare() function first.")
 
@@ -91,6 +90,7 @@ def convert(model, inplace: Optional[bool] = True):
             "GPTQ quantization only supports `in-place=True`. Please set 'inplace=True' to proceed."
         )
 
+    delattr(model, QUANTIZER_ATTRIBUTE_NAME)
     model = model if inplace else copy.deepcopy(model)
 
     assert isinstance(quantizer, BaseQuantizer)

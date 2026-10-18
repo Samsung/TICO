@@ -94,7 +94,9 @@ convert(model, inplace=True)
 print(model.quantizers.keys())
 ```
 
-> **Note** GPTQ only supports `inplace=True` in `convert()`.
+> **Note** GPTQ only supports `inplace=True` in `convert()`. A rejected
+> `convert(model, inplace=False)` call preserves the prepared quantizer and cached
+> calibration inputs, so you can retry with `inplace=True` without recalibrating.
 
 Mixed precision via overrides:
 
