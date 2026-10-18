@@ -23,7 +23,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from tico.quantization import convert, prepare
+from tico.quantization.algorithm.smoothquant.observer import ChannelwiseMaxActsObserver
+from tico.quantization.algorithm.smoothquant.quantizer import SmoothQuantQuantizer
 from tico.quantization.config.smoothquant import SmoothQuantConfig
+from tico.quantization.public_interface import QUANTIZER_ATTRIBUTE_NAME
 
 # Initialize the registry with real transformer classes before any faux classes are installed.
 # This prevents the registry from registering wrappers for faux/mock classes.
@@ -32,6 +35,98 @@ from tico.quantization.wrapq.wrappers.registry import _lazy_init
 _lazy_init()
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
+
+
+class SmoothQuantObserverLayoutTest(unittest.TestCase):
+    def test_prepare_calibrates_noncontiguous_inputs_without_mutation(self):
+        model = nn.Sequential(nn.Linear(4, 4, bias=False)).double().eval()
+        with torch.no_grad():
+            model[0].weight.copy_(torch.eye(4, dtype=torch.float64))
+        x = -torch.arange(24, dtype=torch.float64).reshape(2, 3, 4).transpose(0, 1)
+        self.assertFalse(x.is_contiguous())
+        original_input = x.clone()
+        original_stride = x.stride()
+        original_pointer = x.data_ptr()
+        original_weight = model[0].weight.detach().clone()
+        expected_output = model(x)
+
+        prepared = prepare(model, SmoothQuantConfig())
+        self.assertIs(prepared, model)
+        quantizer = getattr(prepared, QUANTIZER_ATTRIBUTE_NAME)
+        self.assertIsInstance(quantizer, SmoothQuantQuantizer)
+        assert isinstance(quantizer, SmoothQuantQuantizer)
+        observer = quantizer.observer
+        assert observer is not None
+        self.addCleanup(observer.remove)
+
+        actual_output = prepared(x)
+        maxima = observer.get_max_acts()["0"]
+        torch.testing.assert_close(
+            maxima, torch.tensor([20, 21, 22, 23], dtype=torch.float64), rtol=0, atol=0
+        )
+        self.assertFalse(maxima.requires_grad)
+        torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
+        torch.testing.assert_close(x, original_input, rtol=0, atol=0)
+        torch.testing.assert_close(model[0].weight, original_weight, rtol=0, atol=0)
+        self.assertEqual(x.stride(), original_stride)
+        self.assertEqual(x.data_ptr(), original_pointer)
+
+        observer.remove()
+        self.assertFalse(model[0]._forward_pre_hooks)
+        prepared(x * 10)
+        torch.testing.assert_close(observer.get_max_acts()["0"], maxima, rtol=0, atol=0)
+
+    def test_input_maxima_accumulate_for_contiguous_and_transposed_layouts(self):
+        for contiguous in (True, False):
+            with self.subTest(contiguous=contiguous):
+                model = nn.Sequential(nn.Linear(4, 2, bias=False))
+                observer = ChannelwiseMaxActsObserver(model)
+                observer.attach()
+                self.addCleanup(observer.remove)
+                first = torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+                second = torch.tensor([[[-30.0, 1.0, -40.0, 2.0]]]).expand(2, 3, 4)
+                for values in (first, second):
+                    x = values.transpose(0, 1)
+                    if contiguous:
+                        x = x.contiguous()
+                    model(x)
+                torch.testing.assert_close(
+                    observer.get_max_acts()["0"],
+                    torch.tensor([30.0, 21.0, 40.0, 23.0]),
+                    rtol=0,
+                    atol=0,
+                )
+                observer.remove()
+                self.assertFalse(model[0]._forward_pre_hooks)
+
+    def test_output_maxima_accept_noncontiguous_linear_outputs(self):
+        class TransposedLinear(nn.Linear):
+            def forward(self, x):
+                return super().forward(x).transpose(0, 1)
+
+        model = nn.Sequential(TransposedLinear(4, 4, bias=False))
+        with torch.no_grad():
+            model[0].weight.copy_(torch.eye(4))
+        x = -torch.arange(24, dtype=torch.float32).reshape(2, 3, 4)
+        expected_output = model(x)
+        self.assertFalse(expected_output.is_contiguous())
+        observer = ChannelwiseMaxActsObserver(model, acts_from="output")
+        observer.attach()
+        self.addCleanup(observer.remove)
+
+        actual_output = model(x)
+        torch.testing.assert_close(actual_output, expected_output, rtol=0, atol=0)
+        self.assertEqual(actual_output.stride(), expected_output.stride())
+        maxima = observer.get_max_acts()["0"]
+        torch.testing.assert_close(
+            maxima, torch.tensor([20.0, 21.0, 22.0, 23.0]), rtol=0, atol=0
+        )
+        self.assertFalse(maxima.requires_grad)
+
+        observer.remove()
+        self.assertFalse(model[0]._forward_hooks)
+        model(x * 10)
+        torch.testing.assert_close(observer.get_max_acts()["0"], maxima, rtol=0, atol=0)
 
 
 class SmoothQuantTest(unittest.TestCase):

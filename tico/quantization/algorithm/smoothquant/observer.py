@@ -56,7 +56,7 @@ class ChannelwiseMaxActsObserver:
 
         def stat_tensor(name, tensor: torch.Tensor):
             hidden_dim = tensor.shape[-1]
-            tensor = tensor.view(-1, hidden_dim).abs().detach()
+            tensor = tensor.reshape(-1, hidden_dim).abs().detach()
             coming_max = torch.max(tensor, dim=0)[0]
             if name in self.max_acts:
                 self.max_acts[name] = torch.max(self.max_acts[name], coming_max)
