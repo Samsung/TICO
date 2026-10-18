@@ -69,6 +69,48 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
         self.assertEqual(dXXT.shape, gptq.H.shape)  # type: ignore[union-attr]
         self.assertGreater(dXXT.abs().sum().item(), 0.0)
 
+    @torch.no_grad()
+    def test_linear_token_weights_scale_hessian(self):
+        """Linear token weights should accumulate X diag(w) X.T."""
+        layer = torch.nn.Linear(2, 3, bias=False)
+        gptq = GPTQ(layer, normalize_H=False)
+
+        inp = torch.tensor(
+            [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]],
+        )
+        token_weight = torch.tensor([[1.0, 0.25, 4.0]])
+        out = layer(inp)
+
+        gptq.add_batch(inp, out, token_weight=token_weight)
+
+        x = inp.reshape(-1, inp.shape[-1]).t()
+        scale = token_weight.reshape(1, -1).sqrt()
+        expected = (x * scale).matmul((x * scale).t())
+        torch.testing.assert_close(gptq.H, expected)
+
+    @torch.no_grad()
+    def test_linear_token_weights_scale_dXXT(self):
+        """GPTQv2 dXXT should use the same weighted token space as H."""
+        layer = torch.nn.Linear(2, 3, bias=False)
+        gptq = GPTQ(layer, normalize_H=False)
+
+        current = torch.tensor(
+            [[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]],
+        )
+        native = current + 0.5
+        token_weight = torch.tensor([[1.0, 0.25, 4.0]])
+        out = layer(current)
+
+        gptq.native_inp = [native]
+        gptq.add_batch(current, out, token_weight=token_weight)
+
+        scale = token_weight.reshape(1, -1).sqrt()
+        cur = current.reshape(-1, current.shape[-1]).t() * scale
+        nat = native.reshape(-1, native.shape[-1]).t() * scale
+        expected = (nat - cur).matmul(cur.t())
+        assert gptq.dXXT is not None
+        torch.testing.assert_close(gptq.dXXT, expected)
+
 
 class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
     """Test Qwen3VLGPTQQuantizer helper methods."""
@@ -93,6 +135,21 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
         # For v2 (gptq_v2=True), native_inp should be initialized as an empty list
         self.assertEqual(gptq_objs["linear"].native_inp, [])
 
+    def test_build_gptq_objects_token_weighting_config(self):
+        """Linear GPTQ objects should get token-weight queues when enabled."""
+        quantizer = Qwen3VLGPTQQuantizer(
+            Qwen3VLGPTQConfig(token_weighting="grad_act")
+        )
+        linear = torch.nn.Linear(4, 3)
+        conv = torch.nn.Conv2d(1, 1, 1)
+        gptq_objs = quantizer._build_gptq_objects(
+            {"linear": linear, "conv": conv},
+            {linear: "linear", conv: "conv"},
+        )
+
+        self.assertEqual(gptq_objs["linear"].token_weights, [])
+        self.assertIsNone(gptq_objs["conv"].token_weights)
+
     def test_assign_native_inputs(self):
         """_assign_native_inputs should copy FP inputs to GPTQ objects."""
         quantizer = Qwen3VLGPTQQuantizer(Qwen3VLGPTQConfig(gptq_v2=True))
@@ -109,6 +166,144 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
         self.assertEqual(len(native_inp), 2)
         self.assertTrue(torch.allclose(native_inp[0], fp_inputs[0]))
         self.assertTrue(torch.allclose(native_inp[1], fp_inputs[1]))
+
+    @torch.no_grad()
+    def test_add_batch_hook_consumes_token_weights(self):
+        """The calibration hook should pop one token-weight tensor per call."""
+        quantizer = Qwen3VLGPTQQuantizer(
+            Qwen3VLGPTQConfig(token_weighting="grad_act")
+        )
+        layer = torch.nn.Linear(4, 3)
+        gptq_objs = quantizer._build_gptq_objects({"linear": layer}, {layer: "linear"})
+        quantizer._assign_token_weights(
+            gptq_objs,
+            {"linear": [torch.ones(2)]},
+        )
+
+        inp = torch.randn(2, 4)
+        out = layer(inp)
+        hook = quantizer._make_add_batch_hook(gptq_objs, "linear")
+        hook(layer, (inp,), out)
+
+        self.assertEqual(gptq_objs["linear"].token_weights, [])
+        self.assertIsNotNone(gptq_objs["linear"].H)
+
+    def test_collect_token_weights_from_stage_cache(self):
+        """Gradient saliency replay should produce one weight tensor per call."""
+        torch.manual_seed(7)
+        quantizer = Qwen3VLGPTQQuantizer(
+            Qwen3VLGPTQConfig(token_weighting="grad_act", show_progress=False)
+        )
+        stage = torch.nn.Sequential(
+            torch.nn.Linear(3, 4),
+            torch.nn.ReLU(),
+            torch.nn.Linear(4, 2),
+        )
+        cached_args = [[torch.randn(1, 5, 3), torch.randn(1, 5, 3)]]
+        with torch.no_grad():
+            weights = quantizer._collect_token_weights_from_stage_cache(
+                stage_module=stage,
+                subset={"0": stage[0], "2": stage[2]},
+                cached_args=cached_args,
+                cached_kwargs={},
+                stage_desc="tiny_stage",
+                num_batches=2,
+            )
+
+        self.assertEqual(set(weights), {"0", "2"})
+        self.assertEqual(len(weights["0"]), 2)
+        self.assertEqual(len(weights["2"]), 2)
+        self.assertEqual(tuple(weights["0"][0].shape), (1, 5))
+        self.assertTrue(torch.isfinite(weights["0"][0]).all())
+
+    def test_collect_token_weights_from_raw_replay_for_linear_stage(self):
+        """Raw replay should work when the stage boundary is also a target Linear."""
+        torch.manual_seed(11)
+        quantizer = Qwen3VLGPTQQuantizer(
+            Qwen3VLGPTQConfig(token_weighting="grad_act", show_progress=False)
+        )
+        model = torch.nn.Sequential(
+            torch.nn.Linear(3, 4),
+            torch.nn.ReLU(),
+            torch.nn.Linear(4, 2),
+            torch.nn.Linear(2, 1),
+        )
+        stage = model[2]
+        cached_args = [[torch.randn(1, 5, 3), torch.randn(1, 5, 3)]]
+
+        with torch.no_grad():
+            weights = quantizer._collect_token_weights_from_raw_replay(
+                model=model,
+                stage_module=stage,
+                subset={"": stage},
+                cache_args=cached_args,
+                cache_kwargs={},
+                num_batches=2,
+                stage_desc="raw_linear_stage",
+            )
+
+        self.assertEqual(set(weights), {""})
+        self.assertEqual(len(weights[""]), 2)
+        self.assertEqual(tuple(weights[""][0].shape), (1, 5))
+        self.assertTrue(torch.isfinite(weights[""][0]).all())
+
+    def test_quantize_stage_from_stage_cache_with_grad_act(self):
+        """Stage-cache quantization must wire token-weight collection correctly."""
+        torch.manual_seed(13)
+        quantizer = Qwen3VLGPTQQuantizer(
+            Qwen3VLGPTQConfig(
+                token_weighting="grad_act", groupsize=-1, show_progress=False
+            )
+        )
+        stage = torch.nn.Sequential(
+            torch.nn.Linear(4, 4),
+            torch.nn.ReLU(),
+            torch.nn.Linear(4, 2),
+        )
+        module_name = {stage[0]: "stage.0", stage[2]: "stage.2"}
+        cached_args = [[torch.randn(1, 3, 4), torch.randn(1, 3, 4)]]
+
+        with torch.no_grad():
+            quantizer._quantize_stage_from_stage_cache(
+                stage_module=stage,
+                module_name=module_name,
+                cached_args=cached_args,
+                cached_kwargs={},
+                stage_desc="tiny_stage",
+                num_batches=2,
+            )
+
+        self.assertIn("stage.0", quantizer._quantizers)
+        self.assertIn("stage.2", quantizer._quantizers)
+
+    def test_quantize_stage_from_raw_replay_with_grad_act(self):
+        """Raw-replay quantization must wire token-weight collection correctly."""
+        torch.manual_seed(17)
+        quantizer = Qwen3VLGPTQQuantizer(
+            Qwen3VLGPTQConfig(
+                token_weighting="grad_act", groupsize=-1, show_progress=False
+            )
+        )
+        model = torch.nn.Sequential(
+            torch.nn.Linear(4, 4),
+            torch.nn.ReLU(),
+            torch.nn.Linear(4, 2),
+        )
+        stage = model[2]
+        module_name = {stage: "2"}
+        quantizer.cache_args = [[torch.randn(1, 3, 4), torch.randn(1, 3, 4)]]
+        quantizer.cache_kwargs = {}
+        quantizer.num_batches = 2
+
+        with torch.no_grad():
+            quantizer._quantize_stage_from_raw_replay(
+                model=model,
+                stage_module=stage,
+                module_name=module_name,
+                stage_desc="tiny_raw",
+            )
+
+        self.assertIn("2", quantizer._quantizers)
 
     def test_resolve_weight_bits_default(self):
         """_resolve_weight_bits should return the config default when no override."""
@@ -1487,12 +1682,18 @@ class TestGPTQInpAndHessianDtype(unittest.TestCase):
         cfg = Qwen3VLGPTQConfig()
         self.assertEqual(cfg.hessian_dtype, torch.float32)
         self.assertIsInstance(cfg.inp_dtype, torch.dtype)
+        self.assertEqual(cfg.token_weighting, "none")
         cfg.validate()
 
     def test_config_string_conversion(self):
-        cfg = Qwen3VLGPTQConfig(hessian_dtype="double", inp_dtype="fp32")
+        cfg = Qwen3VLGPTQConfig(
+            hessian_dtype="double",
+            inp_dtype="fp32",
+            token_weighting=" Grad_Act ",
+        )
         self.assertEqual(cfg.hessian_dtype, torch.float64)
         self.assertEqual(cfg.inp_dtype, torch.float32)
+        self.assertEqual(cfg.token_weighting, "grad_act")
         cfg.validate()
 
     def test_config_validate_rejects_bad_dtypes(self):
@@ -1504,6 +1705,22 @@ class TestGPTQInpAndHessianDtype(unittest.TestCase):
             Qwen3VLGPTQConfig(hessian_dtype=torch.float16).validate()
         with self.assertRaises(ValueError):
             Qwen3VLGPTQConfig(inp_dtype="float128")
+
+    def test_config_validate_rejects_bad_token_weighting(self):
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(token_weighting="saliency").validate()
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(token_weight_loss="teacher").validate()
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(token_weight_min=2.0, token_weight_max=1.0).validate()
+        with self.assertRaises(ValueError):
+            Qwen3VLGPTQConfig(token_weight_eps=0.0).validate()
+
+    def test_config_token_weighting_cli_none_normalized(self):
+        """``--set token_weighting=none`` arrives as None (CLI null); treat as 'none'."""
+        cfg = Qwen3VLGPTQConfig(token_weighting=None)
+        self.assertEqual(cfg.token_weighting, "none")
+        cfg.validate()
 
 
 # ---------------------------------------------------------------------------
