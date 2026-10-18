@@ -437,6 +437,167 @@ class TestRecipeDatasetValidation(unittest.TestCase):
 
         self.assertEqual([usage.consumer for usage in evaluation], ["evaluation.ppl"])
 
+    def test_selected_tasks_skips_invalid_inactive_vqa_config(self):
+        for selected in ([], ["ppl"]):
+            for raw_tasks in (123, {"invalid": "inactive"}):
+                with self.subTest(selected=selected, raw_tasks=raw_tasks):
+                    cfg = self._qwen_config()
+                    cfg["evaluation"]["selected_tasks"] = selected
+                    cfg["evaluation"]["vlm_tasks"] = raw_tasks
+                    before = copy.deepcopy(cfg)
+
+                    calibration, evaluation = validate_recipe_dataset_usage(
+                        cfg,
+                        include_calibration=False,
+                        emit_summary=False,
+                    )
+
+                    self.assertEqual(calibration, [])
+                    self.assertEqual(
+                        [usage.consumer for usage in evaluation],
+                        ["evaluation.ppl"] if selected else [],
+                    )
+                    self.assertEqual(
+                        cfg["evaluation"],
+                        {
+                            **before["evaluation"],
+                            "resolved_sources": [
+                                usage.to_config() for usage in evaluation
+                            ],
+                        },
+                    )
+                    self.assertEqual(
+                        cfg["calibration"]["datasets"],
+                        before["calibration"]["datasets"],
+                    )
+
+    def test_invalid_active_vqa_config_is_rejected(self):
+        for selected in ("absent", None, ["vqa"]):
+            for raw_tasks in (123, {"invalid": "active"}):
+                with self.subTest(selected=selected, raw_tasks=raw_tasks):
+                    cfg = self._qwen_config()
+                    cfg["evaluation"]["vlm_tasks"] = raw_tasks
+                    if selected != "absent":
+                        cfg["evaluation"]["selected_tasks"] = selected
+                    before = copy.deepcopy(cfg)
+
+                    with self.assertRaisesRegex(
+                        TypeError, "evaluation.vlm_tasks must be a sequence or string"
+                    ):
+                        validate_recipe_dataset_usage(
+                            cfg,
+                            include_calibration=False,
+                            emit_summary=False,
+                        )
+
+                    self.assertEqual(cfg, before)
+
+    def test_active_vqa_selection_preserves_normalization_and_provenance(self):
+        for selected in ("absent", None, ["vqa"]):
+            for raw_tasks in (" vqav2, , textvqa ", [" vqav2 ", "", " textvqa "]):
+                with self.subTest(selected=selected, raw_tasks=raw_tasks):
+                    cfg = self._qwen_config()
+                    cfg["evaluation"] = {
+                        "enabled": True,
+                        "vlm_tasks": raw_tasks,
+                        "n_samples": 12,
+                    }
+                    if selected != "absent":
+                        cfg["evaluation"]["selected_tasks"] = selected
+                    before = copy.deepcopy(cfg["evaluation"])
+
+                    _, evaluation = validate_recipe_dataset_usage(
+                        cfg,
+                        include_calibration=False,
+                        emit_summary=False,
+                    )
+
+                    self.assertEqual(
+                        [
+                            (usage.consumer, usage.split, usage.n_samples)
+                            for usage in evaluation
+                        ],
+                        [
+                            ("evaluation.vlm_tasks:vqav2", "validation", 12),
+                            ("evaluation.vlm_tasks:textvqa", "validation", 12),
+                        ],
+                    )
+                    self.assertEqual(
+                        cfg["evaluation"],
+                        {
+                            **before,
+                            "resolved_sources": [
+                                usage.to_config() for usage in evaluation
+                            ],
+                        },
+                    )
+
+    def test_implicit_vqa_selection_keeps_empty_defaults(self):
+        empty_task_values: tuple[str | None | list[str], ...] = (
+            "absent",
+            None,
+            [],
+            "",
+            " , ",
+        )
+        for selected in ("absent", None):
+            for raw_tasks in empty_task_values:
+                with self.subTest(selected=selected, raw_tasks=raw_tasks):
+                    cfg = self._qwen_config()
+                    cfg["evaluation"] = {"enabled": True}
+                    if selected != "absent":
+                        cfg["evaluation"]["selected_tasks"] = selected
+                    if raw_tasks != "absent":
+                        cfg["evaluation"]["vlm_tasks"] = raw_tasks
+
+                    _, evaluation = validate_recipe_dataset_usage(
+                        cfg,
+                        include_calibration=False,
+                        emit_summary=False,
+                    )
+
+                    self.assertEqual(evaluation, [])
+                    self.assertEqual(cfg["evaluation"]["resolved_sources"], [])
+
+    def test_explicit_vqa_selection_keeps_overlap_protection(self):
+        cfg = self._qwen_config()
+        cfg["calibration"]["datasets"] = [
+            {"dataset": "lmms-lab/VQAv2", "split": "validation", "n_samples": 8}
+        ]
+        cfg["evaluation"]["selected_tasks"] = ["vqa"]
+        before = copy.deepcopy(cfg)
+
+        with self.assertRaisesRegex(
+            DatasetUsageError, "calibration/evaluation overlap"
+        ):
+            validate_recipe_dataset_usage(
+                cfg,
+                include_calibration=True,
+                emit_summary=False,
+            )
+
+        self.assertEqual(cfg, before)
+
+    def test_inactive_vqa_keeps_selected_ppl_overlap_protection(self):
+        cfg = self._qwen_config()
+        cfg["calibration"]["datasets"] = [
+            {"dataset": "wikitext2", "split": "test", "n_samples": 8}
+        ]
+        cfg["evaluation"]["selected_tasks"] = ["ppl"]
+        cfg["evaluation"]["vlm_tasks"] = 123
+        before = copy.deepcopy(cfg)
+
+        with self.assertRaisesRegex(
+            DatasetUsageError, "calibration/evaluation overlap"
+        ):
+            validate_recipe_dataset_usage(
+                cfg,
+                include_calibration=True,
+                emit_summary=False,
+            )
+
+        self.assertEqual(cfg, before)
+
     def test_skipped_calibration_is_not_validated_or_resolved(self):
         cfg = self._qwen_config()
         cfg["calibration"]["datasets"] = [

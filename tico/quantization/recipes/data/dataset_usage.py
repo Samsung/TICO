@@ -781,28 +781,33 @@ def _collect_evaluation_usages(cfg: Mapping[str, Any]) -> list[DatasetUsage]:
     selected = _selected_evaluation_targets(evaluation)
     usages: list[DatasetUsage] = []
 
-    raw_vqa_tasks = evaluation.get("vlm_tasks") or []
-    if isinstance(raw_vqa_tasks, str):
-        vqa_tasks = [task.strip() for task in raw_vqa_tasks.split(",") if task.strip()]
-    elif isinstance(raw_vqa_tasks, Sequence):
-        vqa_tasks = [str(task).strip() for task in raw_vqa_tasks if str(task).strip()]
-    else:
-        raise TypeError("evaluation.vlm_tasks must be a sequence or string.")
-    if _target_enabled(
-        evaluation,
-        selected,
-        "vqa",
-        default_enabled=bool(vqa_tasks),
-    ):
-        usages.extend(
-            resolve_dataset_usage(
-                dataset=task,
-                role=EVALUATION_ROLE,
-                consumer=f"evaluation.vlm_tasks:{task}",
-                n_samples=_coerce_optional_int(evaluation.get("n_samples")),
+    if selected is None or "vqa" in selected:
+        raw_vqa_tasks = evaluation.get("vlm_tasks") or []
+        if isinstance(raw_vqa_tasks, str):
+            vqa_tasks = [
+                task.strip() for task in raw_vqa_tasks.split(",") if task.strip()
+            ]
+        elif isinstance(raw_vqa_tasks, Sequence):
+            vqa_tasks = [
+                str(task).strip() for task in raw_vqa_tasks if str(task).strip()
+            ]
+        else:
+            raise TypeError("evaluation.vlm_tasks must be a sequence or string.")
+        if _target_enabled(
+            evaluation,
+            selected,
+            "vqa",
+            default_enabled=bool(vqa_tasks),
+        ):
+            usages.extend(
+                resolve_dataset_usage(
+                    dataset=task,
+                    role=EVALUATION_ROLE,
+                    consumer=f"evaluation.vlm_tasks:{task}",
+                    n_samples=_coerce_optional_int(evaluation.get("n_samples")),
+                )
+                for task in vqa_tasks
             )
-            for task in vqa_tasks
-        )
 
     if _target_enabled(
         evaluation,
