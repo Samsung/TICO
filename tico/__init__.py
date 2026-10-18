@@ -24,7 +24,14 @@ from tico.utils.compat.torch_version_policy import (
     SUPPORTED_STABLE_FAMILIES,
     version_family,
 )
-from tico.utils.convert import convert, convert_from_exported_program, convert_from_pt2
+from tico.utils.convert import (
+    convert,
+    convert_from_exported_program,
+    convert_from_exported_program_to_file,
+    convert_from_pt2,
+    convert_from_pt2_to_file,
+    convert_to_file,
+)
 
 __all__ = [
     "CompileConfigV1",
@@ -32,6 +39,9 @@ __all__ = [
     "convert",
     "convert_from_exported_program",
     "convert_from_pt2",
+    "convert_to_file",
+    "convert_from_exported_program_to_file",
+    "convert_from_pt2_to_file",
 ]
 
 # THIS LINE IS AUTOMATICALLY GENERATED

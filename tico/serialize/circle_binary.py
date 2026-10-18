@@ -331,7 +331,9 @@ def plan_circle_layout(
         if inline_budget < 0:
             raise ValueError("inline_budget must not be negative.")
         inline_threshold = min(inline_threshold, inline_budget)
-    if sum(sizes) <= inline_threshold:
+    # A lowered streaming budget cannot relocate empty or one-byte buffers.
+    # Still attempt their metadata-only pack, bounded by the real format limit.
+    if sum(sizes) <= inline_threshold or not any(size > 1 for size in sizes):
         try:
             return CircleBinaryLayout(_pack_flatbuffer(model, limit), (), ())
         except _FlatbufferTooLarge:

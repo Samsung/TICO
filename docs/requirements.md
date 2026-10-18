@@ -55,6 +55,12 @@ For a supported exported graph, TICO shall produce Circle bytes with the `CIR0` 
 identifier and return them through `CircleModel` or write them through the
 `pt2-to-circle` command.
 
+Explicit `convert_to_file`, `convert_from_exported_program_to_file`, and
+`convert_from_pt2_to_file` APIs shall write atomic files without creating complete
+binary intermediates, preserving the configured Circle optimization behavior.
+The bytes-returning APIs retain their complete-bytes contracts. See
+[Large Circle export](./large_circle_export.md#direct-file-conversion).
+
 The current core serializer shall create one Circle subgraph and register supported
 user inputs and non-`None` user outputs.
 

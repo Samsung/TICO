@@ -27,8 +27,10 @@ from tico.circle.analysis import TensorContract
 from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleRewriteError
 from tico.circle.graph import as_indices, as_list
+from tico.circle.io import write_circle_bytes
 from tico.circle.passes import create_o1_pipeline
 from tico.circle.passes.base import CirclePassContext
+from tico.circle.passes.presets import CirclePassPipelineResult
 
 
 def _interface_snapshot(document: CircleDocument) -> tuple[Any, ...]:
@@ -100,6 +102,124 @@ def _operator_count(document: CircleDocument) -> int:
     )
 
 
+def _run_export_pipeline(
+    document: CircleDocument, logger: logging.Logger
+) -> tuple[CirclePassPipelineResult, int, int]:
+    """Optimize an existing document and validate its exported contracts."""
+
+    document.verify()
+    interface = _interface_snapshot(document)
+    operators_before = _operator_count(document)
+    context = CirclePassContext(logger=logger, preserve_io=True)
+    result = create_o1_pipeline().run(document, context)
+    document.verify()
+    if _interface_snapshot(document) != interface:
+        raise CircleRewriteError(
+            "Circle O1 changed an exported I/O or signature contract. "
+            "Disable circle_optimize to inspect the unoptimized artifact."
+        )
+    return result, operators_before, _operator_count(document)
+
+
+def _create_dump_directory(
+    directory: str | os.PathLike[str] | None, logger: logging.Logger
+) -> Path | None:
+    """Create a unique directory for one optimization's debug artifacts."""
+
+    if directory is None:
+        return None
+    parent = Path(directory)
+    parent.mkdir(parents=True, exist_ok=True)
+    path = Path(tempfile.mkdtemp(prefix="tico_circle_o1_", dir=parent))
+    logger.info("Circle O1 debug artifacts: %s", path)
+    return path
+
+
+def _write_report(
+    dump_path: Path,
+    result: CirclePassPipelineResult,
+    elapsed: float,
+    operators_before: int,
+    operators_after: int,
+    bytes_before: int,
+    bytes_after: int,
+) -> None:
+    """Atomically publish the report after both debug models were saved."""
+
+    report = {
+        "preset": "o1",
+        "preserve_io": True,
+        "modified": result.modified,
+        "changes": result.changes,
+        "elapsed_seconds": elapsed,
+        "operators_before": operators_before,
+        "operators_after": operators_after,
+        "bytes_before": bytes_before,
+        "bytes_after": bytes_after,
+        "phases": [
+            {
+                "name": phase.name,
+                "executions": [
+                    {
+                        "pass_name": execution.pass_name,
+                        "modified": execution.result.modified,
+                        "changes": execution.result.changes,
+                        "diagnostics": list(execution.result.diagnostics),
+                    }
+                    for execution in phase.result.executions
+                ],
+            }
+            for phase in result.phases
+        ],
+    }
+    write_circle_bytes(
+        (json.dumps(report, indent=2) + "\n").encode("utf-8"),
+        dump_path / "report.json",
+    )
+
+
+def optimize_document_for_export(
+    document: CircleDocument,
+    *,
+    logger: logging.Logger | None = None,
+    dump_directory: str | os.PathLike[str] | None = None,
+) -> None:
+    """Run export's default O1 pipeline in place, without packing a binary.
+
+    The caller supplies a normalized Circle Object API document and retains its
+    ownership. Verification and exported interface checks match the bytes API;
+    failures propagate before a caller can save a successful output artifact.
+    Debug dumps, when requested, use atomic document saves without joining the
+    complete binary in memory. The original dump remains if optimization fails.
+    """
+
+    logger = logger or logging.getLogger(__name__)
+    start = time.perf_counter()
+    dump_path = _create_dump_directory(dump_directory, logger)
+    if dump_path is not None:
+        document.save(dump_path / "before.circle")
+    result, operators_before, operators_after = _run_export_pipeline(document, logger)
+    elapsed = time.perf_counter() - start
+    logger.info(
+        "Circle O1: %d -> %d operators; %d changes in %.3fs.",
+        operators_before,
+        operators_after,
+        result.changes,
+        elapsed,
+    )
+    if dump_path is not None:
+        document.save(dump_path / "after.circle")
+        _write_report(
+            dump_path,
+            result,
+            elapsed,
+            operators_before,
+            operators_after,
+            (dump_path / "before.circle").stat().st_size,
+            (dump_path / "after.circle").stat().st_size,
+        )
+
+
 def optimize_for_export(
     circle_binary: bytes,
     *,
@@ -121,29 +241,14 @@ def optimize_for_export(
 
     logger = logger or logging.getLogger(__name__)
     start = time.perf_counter()
-    dump_path = None
-    if dump_directory is not None:
-        parent = Path(dump_directory)
-        parent.mkdir(parents=True, exist_ok=True)
-        dump_path = Path(tempfile.mkdtemp(prefix="tico_circle_o1_", dir=parent))
-        (dump_path / "before.circle").write_bytes(circle_binary)
-        logger.info("Circle O1 debug artifacts: %s", dump_path)
+    dump_path = _create_dump_directory(dump_directory, logger)
+    if dump_path is not None:
+        write_circle_bytes(circle_binary, dump_path / "before.circle")
 
     document = CircleDocument.from_bytes(circle_binary)
-    document.verify()
-    interface = _interface_snapshot(document)
-    operators_before = _operator_count(document)
-    context = CirclePassContext(logger=logger, preserve_io=True)
-    result = create_o1_pipeline().run(document, context)
-    document.verify()
-    if _interface_snapshot(document) != interface:
-        raise CircleRewriteError(
-            "Circle O1 changed an exported I/O or signature contract. "
-            "Disable circle_optimize to inspect the unoptimized artifact."
-        )
+    result, operators_before, operators_after = _run_export_pipeline(document, logger)
     optimized = document.to_bytes() if result.modified else circle_binary
     elapsed = time.perf_counter() - start
-    operators_after = _operator_count(document)
     logger.info(
         "Circle O1: %d -> %d operators; %d -> %d bytes; %d changes in %.3fs.",
         operators_before,
@@ -154,34 +259,14 @@ def optimize_for_export(
         elapsed,
     )
     if dump_path is not None:
-        (dump_path / "after.circle").write_bytes(optimized)
-        report = {
-            "preset": "o1",
-            "preserve_io": True,
-            "modified": result.modified,
-            "changes": result.changes,
-            "elapsed_seconds": elapsed,
-            "operators_before": operators_before,
-            "operators_after": operators_after,
-            "bytes_before": len(circle_binary),
-            "bytes_after": len(optimized),
-            "phases": [
-                {
-                    "name": phase.name,
-                    "executions": [
-                        {
-                            "pass_name": execution.pass_name,
-                            "modified": execution.result.modified,
-                            "changes": execution.result.changes,
-                            "diagnostics": list(execution.result.diagnostics),
-                        }
-                        for execution in phase.result.executions
-                    ],
-                }
-                for phase in result.phases
-            ],
-        }
-        (dump_path / "report.json").write_text(
-            json.dumps(report, indent=2) + "\n", encoding="utf-8"
+        write_circle_bytes(optimized, dump_path / "after.circle")
+        _write_report(
+            dump_path,
+            result,
+            elapsed,
+            operators_before,
+            operators_after,
+            len(circle_binary),
+            len(optimized),
         )
     return optimized

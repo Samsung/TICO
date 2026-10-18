@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, TypeAlias
 
+import numpy as np
+
 from tico.circle._schema import accessor_api_type, object_api_type
 from tico.circle.errors import CircleIOError
 from tico.serialize.circle_binary import (
@@ -323,6 +325,52 @@ def model_from_bytes(data: bytes) -> Any:
     return _model_from_buffer(data)
 
 
+def model_from_object(model: Any) -> Any:
+    """Normalize Object API metadata while borrowing constant payload storage.
+
+    Only graph metadata and constants too small to relocate are packed and
+    unpacked. This applies the schema's ordinary binary representation (including
+    float32 rounding and default values), removes construction-only attributes,
+    and leaves larger constants as read-only views of their existing storage.
+    The views retain that storage after the original model is released; callers
+    must not mutate the source payloads while the normalized model is in use.
+    """
+
+    if model is None or not hasattr(model, "Pack"):
+        raise TypeError("Expected a Circle Object API model with a Pack method.")
+
+    try:
+        layout = plan_circle_layout(model, inline_budget=0)
+        root = accessor_api_type("Model").GetRootAsModel(layout.header, 0)
+        ranges = external_buffer_ranges(root, layout.size)
+        model_type = object_api_type("Model")
+        if hasattr(model_type, "InitFromObj"):
+            normalized = model_type.InitFromObj(root)
+        elif hasattr(root, "UnPack"):
+            normalized = root.UnPack()
+        else:
+            raise RuntimeError(
+                "The Circle schema does not expose an Object API unpacker."
+            )
+
+        payloads = dict(zip(layout.offsets, layout.payloads))
+        for region in ranges:
+            payload = payloads.pop(region.offset)
+            if payload.nbytes != region.size:
+                raise ValueError(
+                    "Circle layout payload size does not match its header."
+                )
+            buffer = normalized.buffers[region.index]
+            buffer.data = np.frombuffer(payload.toreadonly(), dtype=np.uint8)
+            buffer.offset = 0
+            buffer.size = 0
+        if payloads:
+            raise ValueError("Circle layout contains an unreferenced payload.")
+        return normalized
+    except Exception as error:
+        raise CircleIOError(f"Failed to normalize the Circle model: {error}") from error
+
+
 def model_to_bytes(model: Any) -> bytes:
     """Serialize a generated Circle Object API model into binary data."""
 
@@ -358,13 +406,20 @@ def load_model_mapped(path: PathLike) -> tuple[Any, CirclePayloadMapping]:
     return model, mapping
 
 
-def _plan_model_layout(model: Any) -> CircleBinaryLayout:
+def _plan_model_layout(
+    model: Any, *, inline_budget: int | None = None
+) -> CircleBinaryLayout:
     """Prepare the file layout used by ``save_model``; errors become I/O errors."""
 
     if model is None or not hasattr(model, "Pack"):
         raise TypeError("Expected a Circle Object API model with a Pack method.")
     try:
-        return plan_circle_layout(model, inline_budget=_STREAMING_INLINE_BUDGET)
+        return plan_circle_layout(
+            model,
+            inline_budget=(
+                _STREAMING_INLINE_BUDGET if inline_budget is None else inline_budget
+            ),
+        )
     except Exception as error:
         raise CircleIOError(f"Failed to serialize the Circle model: {error}") from error
 
@@ -374,6 +429,7 @@ def save_model(
     destination: BinaryDestination,
     *,
     atomic: bool = True,
+    inline_budget: int | None = None,
 ) -> None:
     """Serialize and save a Circle Object API model.
 
@@ -381,7 +437,9 @@ def save_model(
     is written, then header, padding, and payload views are streamed in order.
     No buffer the size of the complete binary is allocated for the appended
     layout; the inline layout writes the header the packer already produced.
+    ``inline_budget`` can lower the payload threshold for selecting appended
+    storage; its default keeps the existing file-save policy.
     """
 
-    layout = _plan_model_layout(model)
+    layout = _plan_model_layout(model, inline_budget=inline_budget)
     _write_destination(destination, layout.write_to, atomic=atomic)
