@@ -253,6 +253,10 @@ shape. The cast does not change other users of the source tensor.
 end for `index=-1`. This preserves one-element selection without specializing a
 symbolic input axis length.
 
+`RestoreLinear` matches only a rank-two weight transposed by `t` or `permute`.
+It restores `addmm` only when both `alpha` and `beta` are one; other coefficients
+remain available to `DecomposeAddmm`, which preserves their scaling.
+
 `DecomposeSliceScatter` normalizes unit-step slice bounds against the input axis
 length before constructing the retained prefix and suffix. Negative and clipped
 bounds follow ATen slicing semantics; reversed bounds describe an empty replacement.
