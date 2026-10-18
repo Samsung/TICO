@@ -131,6 +131,11 @@ class TestGemma4PLEScaleFusionIntegration(unittest.TestCase):
                 adapter(torch.tensor([[1, 2, 3]]))
 
     def test_dynamic_quantized_export_has_no_mul(self):
+        from tico.quantization.wrapq.wrappers.llama.export_adapters import (
+            register_fake_quant_meta_kernels_for_dynamic_export,
+        )
+
+        register_fake_quant_meta_kernels_for_dynamic_export()
         adapter = make_adapter()
         ids = torch.tensor([[1, 2, 3, 4]])
         ep = torch.export.export(
