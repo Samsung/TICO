@@ -385,6 +385,8 @@ Write a report under `test/reports/cov/`:
 ```
 
 If `coverage` is not installed, the current helper requests version 7.6.1.
+Failed tests return a nonzero exit status while still generating the requested report;
+report failures also return nonzero when the tests pass.
 
 ## Pull-request CI
 
