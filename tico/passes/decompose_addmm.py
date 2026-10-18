@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 import torch
 from torch.export import ExportedProgram
 
-from tico.serialize.circle_mapping import extract_shape
+from tico.serialize.circle_mapping import extract_shape, extract_torch_dtype
 from tico.utils.graph import add_placeholder, create_node
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
@@ -85,7 +85,9 @@ class DecomposeAddmm(PassBase):
                 elif beta == 0:
                     bias = add_placeholder(
                         exported_program,
-                        torch.zeros(extract_shape(input)),
+                        torch.zeros(
+                            extract_shape(input), dtype=extract_torch_dtype(input)
+                        ),
                         f"{node.name}_beta_zeros",
                     )
                 else:
@@ -98,7 +100,9 @@ class DecomposeAddmm(PassBase):
                 elif alpha == 0:
                     scaled_matmul = add_placeholder(
                         exported_program,
-                        torch.zeros(extract_shape(matmul)),
+                        torch.zeros(
+                            extract_shape(matmul), dtype=extract_torch_dtype(matmul)
+                        ),
                         f"{node.name}_alpha_zeros",
                     )
                 else:
