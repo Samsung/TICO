@@ -99,8 +99,10 @@ calibration-safe corpora are registered.
 
 The recipe runner validates canonical dataset ID, config, split, and active
 evaluation consumers before loading a model or downloading data. It also saves
-resolved source provenance into `effective_config.yaml`. Deliberately
-transductive experiments must set:
+resolved source provenance into `effective_config.yaml`. When
+`evaluation.selected_tasks` excludes `vqa`, preflight does not normalize or
+validate inactive `evaluation.vlm_tasks`. Active evaluation sources still receive
+the same role and overlap checks. Deliberately transductive experiments must set:
 
 ```yaml
 calibration:
