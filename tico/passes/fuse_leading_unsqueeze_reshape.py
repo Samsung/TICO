@@ -73,6 +73,8 @@ class FuseLeadingUnsqueezeReshape(PassBase):
                 reshape_front_args.input,
                 reshape_front_args.shape,
             )
+            if isinstance(reshape_front_size, torch.fx.Node):
+                continue
 
             # ---- condition: only leading unsqueeze ------------------------
             back_shape = extract_shape(reshape_back)

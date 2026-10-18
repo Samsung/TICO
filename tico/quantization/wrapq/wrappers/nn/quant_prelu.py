@@ -76,7 +76,7 @@ class QuantPReLU(QuantModuleBase):
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         """Execute PReLU under the current WrapQ mode."""
         input_q = self._fq(input_, self.obs_act_in)
-        weight = self.module.weight
+        weight: torch.Tensor = self.module.weight
         if self._mode is Mode.QUANT:
             weight = self.obs_weight.fake_quant(weight)
         output = F.prelu(input_q, weight)

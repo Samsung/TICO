@@ -16,7 +16,7 @@
 
 from collections import UserDict
 from collections.abc import Mapping
-from typing import Any, Iterable, Optional
+from typing import Any, cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -24,6 +24,7 @@ import torch.nn as nn
 from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.gemma4.rope import prepare_gemma4_rope_sin
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
@@ -34,6 +35,13 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import (
+        Gemma4TextModel,
+        Gemma4TextScaledWordEmbedding,
+    )
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4TextModel")
@@ -55,6 +63,8 @@ class QuantGemma4TextModel(QuantModuleBase):
     sampling, and CPU/NPU orchestration remain runtime responsibilities.
     """
 
+    position_ids_template: torch.Tensor
+
     force_export: bool = False
     _DEFAULT_STATIC_MAX_SEQ = 2048
     _SUPPORTED_LAYER_TYPES = frozenset(("full_attention", "sliding_attention"))
@@ -66,6 +76,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Gemma4TextModel", fp_model)
         assert_gemma4_e2b_no_moe(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.rope_convention = get_gemma4_text_attention_options(self.qcfg).rope
@@ -74,7 +85,9 @@ class QuantGemma4TextModel(QuantModuleBase):
         self.config = fp_model.config
         self.padding_idx = getattr(fp_model, "padding_idx", None)
         self.vocab_size = getattr(fp_model, "vocab_size", self.config.vocab_size)
-        self.unique_layer_types = tuple(sorted(set(self.config.layer_types)))
+        self.unique_layer_types = tuple(
+            sorted(set(cast(list[str], self.config.layer_types)))
+        )
         self.hidden_size_per_layer_input = int(
             getattr(fp_model, "hidden_size_per_layer_input", 0) or 0
         )
@@ -240,6 +253,7 @@ class QuantGemma4TextModel(QuantModuleBase):
 
     def _register_static_templates(self, fp_model: nn.Module) -> None:
         """Register bounded masks, position ids, and per-layer-type RoPE tables."""
+        fp_model = cast("Gemma4TextModel", fp_model)
         embedding_weight = fp_model.embed_tokens.weight
         device = embedding_weight.device
         dtype = embedding_weight.dtype
@@ -559,7 +573,9 @@ class QuantGemma4TextModel(QuantModuleBase):
     ) -> dict[str, torch.Tensor]:
         """Observe each bounded attention mask."""
         return {
-            layer_type: self._fq(mask, self.obs_attention_masks[layer_type])
+            layer_type: self._fq(
+                mask, cast(ObserverBase, self.obs_attention_masks[layer_type])
+            )
             for layer_type, mask in mapping.items()
         }
 
@@ -601,8 +617,8 @@ class QuantGemma4TextModel(QuantModuleBase):
                 cos, sin = self.rotary_emb(hidden_states, position_ids, layer_type)
                 sin = prepare_gemma4_rope_sin(sin, self.rope_convention)
             outputs[layer_type] = (
-                self._fq(cos, self.obs_position_cos[layer_type]),
-                self._fq(sin, self.obs_position_sin[layer_type]),
+                self._fq(cos, cast(ObserverBase, self.obs_position_cos[layer_type])),
+                self._fq(sin, cast(ObserverBase, self.obs_position_sin[layer_type])),
             )
         return outputs
 
@@ -610,7 +626,9 @@ class QuantGemma4TextModel(QuantModuleBase):
         self, inputs_embeds: torch.Tensor
     ) -> torch.Tensor:
         """Recover input ids from exact main embeddings for PLE compatibility."""
-        embedding = self._unwrap_fp_module(self.embed_tokens)
+        embedding = cast(
+            "Gemma4TextScaledWordEmbedding", self._unwrap_fp_module(self.embed_tokens)
+        )
         weight = embedding.weight
         scale = getattr(embedding, "embed_scale", None)
         if scale is not None:
@@ -768,7 +786,7 @@ class QuantGemma4TextModel(QuantModuleBase):
             past_key_values = DynamicCache(config=self.config)
 
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
+            inputs_embeds = cast(torch.Tensor, self.embed_tokens(input_ids))
         else:
             inputs_embeds = self._fq(inputs_embeds, self.obs_inputs_embeds)
 
@@ -811,12 +829,14 @@ class QuantGemma4TextModel(QuantModuleBase):
         if shared_kv_states is None:
             shared_kv_states = UserDict()
 
-        all_hidden_states = () if output_hidden_states else None
+        all_hidden_states: Optional[tuple[torch.Tensor, ...]] = (
+            () if output_hidden_states else None
+        )
         for i, decoder_layer in enumerate(self.layers[: self.config.num_hidden_layers]):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)  # type: ignore[operator]
+            if all_hidden_states is not None:
+                all_hidden_states = all_hidden_states + (hidden_states,)
 
-            layer_type = self.config.layer_types[i]
+            layer_type = cast(list[str], self.config.layer_types)[i]
             per_layer_input = (
                 per_layer_inputs[:, :, i, :] if per_layer_inputs is not None else None
             )
@@ -836,8 +856,8 @@ class QuantGemma4TextModel(QuantModuleBase):
                 past_key_values = cache_output
 
         hidden_states = self.norm(hidden_states)
-        if output_hidden_states:
-            all_hidden_states = all_hidden_states + (hidden_states,)  # type: ignore[operator]
+        if all_hidden_states is not None:
+            all_hidden_states = all_hidden_states + (hidden_states,)
 
         attentions = None
         if not return_dict:

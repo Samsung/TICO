@@ -27,6 +27,40 @@ class TestRegisterCustomOp(unittest.TestCase):
         # Register all custom ops
         register_custom_op.RegisterOps()
 
+    def _attention_inputs(self) -> tuple[torch.Tensor, ...]:
+        """Return tiny inputs matching the Circle attention tensor contract."""
+        return (
+            torch.randn(1, 2, 8),
+            torch.randn(8, 8),
+            torch.randn(8, 8),
+            torch.randn(8, 8),
+            torch.randn(8, 8),
+            torch.randn(1, 2, 4),
+            torch.randn(1, 2, 4),
+            torch.zeros(1, 1, 2, 4),
+            torch.randn(1, 2, 2, 4),
+            torch.randn(1, 2, 2, 4),
+            torch.arange(2, dtype=torch.int64),
+        )
+
+    def test_circle_attention_rejects_eager_execution(self):
+        """Reject eager attention execution with its documented tracing boundary."""
+        with self.assertRaisesRegex(
+            NotImplementedError, "Circle attention only supports fake tensor tracing"
+        ):
+            torch.ops.circle_custom.attention(*self._attention_inputs())
+
+    def test_circle_attention_fake_tensor_preserves_metadata(self):
+        """Keep the hidden-state shape and dtype when tracing attention."""
+        from torch._subclasses.fake_tensor import FakeTensor, FakeTensorMode
+
+        with FakeTensorMode():
+            inputs = self._attention_inputs()
+            output = torch.ops.circle_custom.attention(*inputs)
+            self.assertIsInstance(output, FakeTensor)
+            self.assertEqual(output.shape, inputs[0].shape)
+            self.assertEqual(output.dtype, inputs[0].dtype)
+
     def test_circle_resize_nearest_neighbor_basic(self):
         """Test CircleResizeNearestNeighbor basic functionality"""
         input_tensor = torch.randn(1, 32, 32, 3)

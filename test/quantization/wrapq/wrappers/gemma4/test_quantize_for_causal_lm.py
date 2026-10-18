@@ -48,28 +48,30 @@ def _make_text_config():
     """Create a tiny Gemma4 text config for synthetic smoke tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
-    cfg = Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_global_key_value_heads=2,
-        head_dim=32,
-        global_head_dim=32,
-        max_position_embeddings=128,
-        layer_types=["full_attention"],
-        rope_parameters={
-            "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
-        },
-        attention_bias=False,
-        attention_dropout=0.0,
-        use_cache=False,
-        enable_moe_block=False,
-        # Enable logit softcapping to exercise that code path.
-        final_logit_softcapping=30.0,
-        allow_global_per_layer_attribute_access=True,
+    cfg = Gemma4TextConfig.from_dict(
+        dict(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=32,
+            global_head_dim=32,
+            max_position_embeddings=128,
+            layer_types=["full_attention"],
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
+            },
+            attention_bias=False,
+            attention_dropout=0.0,
+            use_cache=False,
+            enable_moe_block=False,
+            # Enable logit softcapping to exercise that code path.
+            final_logit_softcapping=30.0,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")

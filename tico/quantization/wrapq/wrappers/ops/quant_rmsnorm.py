@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,10 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaRMSNorm
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextRMSNorm
 
 
 @try_register(
@@ -36,7 +40,7 @@ class QuantRMSNorm(QuantModuleBase):
         fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
-        self.module = fp
+        self.module = cast("LlamaRMSNorm | Qwen3VLTextRMSNorm", fp)
         self.eps = float(self.module.variance_epsilon)
 
         self.obs_weight = self._make_obs("weight")
@@ -53,7 +57,7 @@ class QuantRMSNorm(QuantModuleBase):
         x_q = self._fq(x, self.obs_act_in)
 
         # 2) quantize weights
-        w = self.module.weight
+        w: torch.Tensor = self.module.weight
         if self._mode is Mode.QUANT:
             w = self.obs_weight.fake_quant(w)
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import cast, Optional
 
 import torch
 import torch.nn as nn
@@ -187,10 +187,10 @@ def get_decoder_layers(model: nn.Module) -> nn.ModuleList:
         raise AttributeError(
             "Expected `model.model.layers` to exist, but `model.model.layers` is missing."
         )
-    return model.model.layers
+    return cast(nn.ModuleList, getattr(model.model, "layers"))
 
 
-def require_linear_attr(module: nn.Module, attr_name: str) -> nn.Linear:
+def require_linear_attr(module: object, attr_name: str) -> nn.Linear:
     """
     Fetch and validate that a module attribute is an nn.Linear.
 
@@ -234,7 +234,7 @@ def build_r1(
     Raises:
         ValueError: If the configuration is invalid.
     """
-    hidden_size = int(model.config.hidden_size)
+    hidden_size = int(getattr(model.config, "hidden_size"))
     device = infer_device(model)
 
     if init_method == "random":
@@ -314,20 +314,23 @@ def extract_and_reset_final_norm_scale(model: nn.Module) -> torch.Tensor:
     if not hasattr(model, "model") or not hasattr(model.model, "norm"):
         raise AttributeError("Expected `model.model.norm` to exist.")
 
-    norm = model.model.norm
+    norm = cast(nn.Module, getattr(model.model, "norm"))
     if not hasattr(norm, "weight") or norm.weight is None:
         raise AttributeError("Expected final norm to expose `weight`.")
 
     gamma = (
-        norm.weight.data.detach()
+        cast(torch.Tensor, norm.weight)
+        .data.detach()
         .to(
-            device=norm.weight.device,
+            device=cast(torch.Tensor, norm.weight).device,
             dtype=torch.float64,
         )
         .clone()
     )
 
-    norm.weight.data.copy_(torch.ones_like(norm.weight.data))
+    cast(torch.Tensor, norm.weight).data.copy_(
+        torch.ones_like(cast(torch.Tensor, norm.weight).data)
+    )
     assert not hasattr(norm, "bias")
 
     return gamma

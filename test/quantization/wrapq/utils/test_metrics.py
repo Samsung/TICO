@@ -93,6 +93,7 @@ class DummyLM(nn.Module):
 
         # Match Gemma4: slice hidden states before applying the LM head so
         # unnecessary vocabulary projections are not computed.
+        slice_indices: slice | torch.Tensor
         if isinstance(logits_to_keep, int) and logits_to_keep:
             slice_indices = slice(-logits_to_keep, None)
         elif isinstance(logits_to_keep, torch.Tensor):

@@ -138,6 +138,8 @@ class LearnableScaleAdaRoundWeightQuantizer(AffineObserverBase):
     always use exact integer floor/ceil decisions.
     """
 
+    _initial_nearest_codes: torch.Tensor
+
     _reference_weight: torch.Tensor
     _initial_scale: torch.Tensor
     _fixed_zero_point: torch.Tensor

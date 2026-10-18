@@ -13,8 +13,9 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import Any, cast, Iterable, Optional, Tuple
+from typing import Any, cast, Iterable, Iterator, Optional, Tuple
 
+import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import PTQConfig
@@ -55,7 +56,7 @@ class QuantModuleBase(nn.Module, ABC):
         self._mode: Mode = Mode.NO_QUANT  # default state
         self.fp_name = fp_name
 
-    def _child_quant_modules(self):
+    def _child_quant_modules(self) -> Iterator["QuantModuleBase"]:
         """
         Yield immediate QuantModuleBase *descendants*, skipping over pure containers
         (e.g., ModuleList/Sequential/ModuleDict). Once a QuantModuleBase is found,
@@ -75,7 +76,7 @@ class QuantModuleBase(nn.Module, ABC):
                 # `m` is a container or a non-quant leaf: keep descending until we hit quant modules
                 stack.extend(list(m.children()))
 
-    def _named_child_quant_modules(self):
+    def _named_child_quant_modules(self) -> Iterator[Tuple[str, "QuantModuleBase"]]:
         """
         Yield immediate QuantModuleBase descendants with their module-tree names,
         skipping over pure containers.
@@ -120,7 +121,7 @@ class QuantModuleBase(nn.Module, ABC):
         for child in self._child_quant_modules():
             child.freeze_qparams()
 
-    def _fq(self, x, obs: ObserverBase):
+    def _fq(self, x: torch.Tensor, obs: ObserverBase) -> torch.Tensor:
         """Fake-quant or collect."""
         if self._mode is Mode.CALIB:
             obs.collect(x.detach())

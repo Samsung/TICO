@@ -14,12 +14,19 @@
 
 """PTQ wrapper for the Gemma4 assistant draft-one causal LM."""
 
-from typing import Any, Iterable, Mapping, Optional, Tuple
+from typing import Any, cast, Iterable, Mapping, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 from transformers.generation.utils import GenerationMixin
+
+if TYPE_CHECKING:
+    from transformers._typing import GenerativePreTrainedModel
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantForCausalLM,
+    )
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
@@ -35,6 +42,7 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     HF_GEMMA4_ASSISTANT_CLASS_PATH,
     validate_gemma4_assistant_architecture,
 )
+from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -64,6 +72,7 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Gemma4AssistantForCausalLM", fp_model)
         validate_gemma4_assistant_architecture(fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
@@ -100,6 +109,7 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
 
         self.masked_embedding: Optional[QuantGemma4AssistantMaskedEmbedder] = None
         if self.use_ordered_embeddings:
+            assert fp_model.masked_embedding is not None
             self.masked_embedding = QuantGemma4AssistantMaskedEmbedder(
                 fp_model.masked_embedding,
                 qcfg=qcfg.child("masked_embedding") if qcfg else None,
@@ -109,6 +119,7 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
     @staticmethod
     def _validate_tied_lm_head(fp_model: nn.Module) -> None:
         """Reject a broken tied-weight layout before quantization starts."""
+        fp_model = cast("Gemma4AssistantForCausalLM", fp_model)
         if not bool(getattr(fp_model.config, "tie_word_embeddings", False)):
             return
         embed_tokens = getattr(fp_model.model, "embed_tokens", None)
@@ -210,7 +221,7 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
 
     def _lm_head_weight(self) -> torch.Tensor:
         """Return the single (fake-quantized) tied LM-head weight source."""
-        quant_linear = self.lm_head.wrapped
+        quant_linear = cast(QuantLinear, self.lm_head.wrapped)
         weight = quant_linear.module.weight
         if self._mode is Mode.QUANT:
             weight = quant_linear.obs_weight.fake_quant(weight)
@@ -220,7 +231,7 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
         self,
         input_ids: Optional[torch.Tensor] = None,  # ignored, HF signature parity
         inputs_embeds: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         attention_mask: Any = None,
         shared_kv_states: Optional[Mapping[str, LayerKV]] = None,
         use_cache: Optional[bool] = None,  # ignored, HF signature parity
@@ -292,9 +303,16 @@ class QuantGemma4AssistantForCausalLM(QuantModuleBase, GenerationMixin):
         """Return the generation config."""
         return self.module.generation_config
 
+    @generation_config.setter
+    def generation_config(self, value):
+        """Update the wrapped assistant's generation configuration."""
+        self.module.generation_config = value
+
     def prepare_inputs_for_generation(self, *args, **kwargs):
         """Delegate input preparation to the original model."""
-        return self.module.prepare_inputs_for_generation(*args, **kwargs)
+        return cast(
+            "GenerativePreTrainedModel", self.module
+        ).prepare_inputs_for_generation(*args, **kwargs)
 
     def tie_weights(self):
         pass

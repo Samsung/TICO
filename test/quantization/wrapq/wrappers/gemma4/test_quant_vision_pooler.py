@@ -51,18 +51,20 @@ def _make_vision_config():
     """Create a tiny Gemma4 vision config for synthetic pooler tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
 
-    cfg = Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        attention_dropout=0.0,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-        use_clipped_linears=False,
-        rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+    cfg = Gemma4VisionConfig.from_dict(
+        dict(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            attention_dropout=0.0,
+            max_position_embeddings=128,
+            rms_norm_eps=1e-6,
+            use_clipped_linears=False,
+            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -195,7 +197,7 @@ class TestQuantGemma4VisionPooler(unittest.TestCase):
         fp_pooler = _make_pooler()
         q_pooler = QuantGemma4VisionPooler(fp_pooler).eval()
 
-        all_obs = q_pooler._all_observers()
+        all_obs = tuple(q_pooler._all_observers())
         self.assertEqual(len(all_obs), 6)
 
     # ------------------------------------------------------------------

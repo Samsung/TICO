@@ -15,9 +15,15 @@
 """Smoke cases for the Gemma4 assistant (MTP draft) wrappers."""
 
 import copy
-from typing import Any, Mapping
+from typing import Any, Mapping, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantForCausalLM,
+    )
+
 
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
@@ -49,49 +55,53 @@ def make_tiny_gemma4_assistant_config() -> Any:
         Gemma4AssistantConfig,
     )
 
-    text_cfg = Gemma4TextConfig(
-        vocab_size=64,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=16,
-        global_head_dim=32,
-        max_position_embeddings=128,
-        layer_types=["sliding_attention", "full_attention"],
-        sliding_window=4,
-        rope_parameters={
-            "full_attention": {
-                "rope_type": "proportional",
-                "partial_rotary_factor": 0.25,
-                "rope_theta": 1_000_000.0,
+    text_cfg = Gemma4TextConfig.from_dict(
+        dict(
+            vocab_size=64,
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=16,
+            global_head_dim=32,
+            max_position_embeddings=128,
+            layer_types=["sliding_attention", "full_attention"],
+            sliding_window=4,
+            rope_parameters={
+                "full_attention": {
+                    "rope_type": "proportional",
+                    "partial_rotary_factor": 0.25,
+                    "rope_theta": 1_000_000.0,
+                },
+                "sliding_attention": {"rope_type": "default", "rope_theta": 10_000.0},
             },
-            "sliding_attention": {"rope_type": "default", "rope_theta": 10_000.0},
-        },
-        attention_bias=False,
-        attention_dropout=0.0,
-        use_cache=False,
-        enable_moe_block=False,
-        num_kv_shared_layers=2,
-        hidden_size_per_layer_input=0,
-        vocab_size_per_layer_input=0,
-        allow_global_per_layer_attribute_access=True,
+            attention_bias=False,
+            attention_dropout=0.0,
+            use_cache=False,
+            enable_moe_block=False,
+            num_kv_shared_layers=2,
+            hidden_size_per_layer_input=0,
+            vocab_size_per_layer_input=0,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
-    config = Gemma4AssistantConfig(
-        text_config=text_cfg,
-        backbone_hidden_size=24,
-        use_ordered_embeddings=True,
-        num_centroids=8,
-        centroid_intermediate_top_k=2,
-        tie_word_embeddings=True,
+    config = Gemma4AssistantConfig.from_dict(
+        dict(
+            text_config=text_cfg,
+            backbone_hidden_size=24,
+            use_ordered_embeddings=True,
+            num_centroids=8,
+            centroid_intermediate_top_k=2,
+            tie_word_embeddings=True,
+        )
     )
     config._attn_implementation = "eager"
-    config.text_config._attn_implementation = "eager"
+    text_cfg._attn_implementation = "eager"
     return config
 
 
-def make_tiny_gemma4_assistant_model() -> torch.nn.Module:
+def make_tiny_gemma4_assistant_model() -> "Gemma4AssistantForCausalLM":
     """Create a tiny synthetic Gemma4 assistant model (no download)."""
     from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
         Gemma4AssistantForCausalLM,
@@ -107,7 +117,13 @@ def make_tiny_gemma4_assistant_model() -> torch.nn.Module:
 
 def _make_assistant_sample(model: torch.nn.Module, kv_len: int) -> ForwardInput:
     """Create one synthetic draft-one assistant sample."""
-    text_cfg = model.config.get_text_config()
+    from transformers.models.gemma4_assistant.configuration_gemma4_assistant import (
+        Gemma4AssistantConfig,
+    )
+
+    config = model.config
+    assert isinstance(config, Gemma4AssistantConfig)
+    text_cfg = config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
     full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
     sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
@@ -124,9 +140,7 @@ def _make_assistant_sample(model: torch.nn.Module, kv_len: int) -> ForwardInput:
     return ForwardInput(
         (),
         {
-            "inputs_embeds": torch.randn(
-                1, 1, 2 * int(model.config.backbone_hidden_size)
-            ),
+            "inputs_embeds": torch.randn(1, 1, 2 * int(config.backbone_hidden_size)),
             "position_ids": torch.tensor([[kv_len - 1]]),
             "attention_mask": torch.ones(1, kv_len, dtype=torch.long),
             "shared_kv_states": shared_kv_states,

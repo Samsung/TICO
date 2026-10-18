@@ -48,27 +48,29 @@ def _make_text_config():
     """Create a tiny Gemma4 text config for synthetic smoke tests."""
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 
-    cfg = Gemma4TextConfig(
-        vocab_size=128,
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        num_global_key_value_heads=2,
-        head_dim=4,
-        global_head_dim=4,
-        attention_bias=False,
-        attention_dropout=0.0,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-        sliding_window=8,
-        layer_types=["full_attention"],
-        hidden_size_per_layer_input=0,
-        attention_k_eq_v=False,
-        num_kv_shared_layers=0,
-        enable_moe_block=False,
-        allow_global_per_layer_attribute_access=True,
+    cfg = Gemma4TextConfig.from_dict(
+        dict(
+            vocab_size=128,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=4,
+            global_head_dim=4,
+            attention_bias=False,
+            attention_dropout=0.0,
+            max_position_embeddings=128,
+            rms_norm_eps=1e-6,
+            sliding_window=8,
+            layer_types=["full_attention"],
+            hidden_size_per_layer_input=0,
+            attention_k_eq_v=False,
+            num_kv_shared_layers=0,
+            enable_moe_block=False,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")

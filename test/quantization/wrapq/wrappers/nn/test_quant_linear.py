@@ -20,6 +20,7 @@ from tico.quantization.config.ptq import PTQConfig
 
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
@@ -61,6 +62,7 @@ class TestQuantLinear(unittest.TestCase):
         self.q_lin.enable_calibration()
         self.q_lin.obs_weight.compute_qparams()
         assert hasattr(self.q_lin.obs_weight, "_cached_scale")
+        assert isinstance(self.q_lin.obs_weight, AffineObserverBase)
         pre_scale = self.q_lin.obs_weight._cached_scale.clone()
 
         # calibration cycle

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple
+from typing import cast, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -23,7 +23,23 @@ from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
 )
 
 
-def _find_vision_export_model(module: nn.Module) -> nn.Module:
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_for_conditional_generation import (
+        QuantQwen3VLForConditionalGeneration,
+    )
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_model import QuantQwen3VLModel
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer import (
+        QuantQwen3VLTextDecoderLayer,
+    )
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
+        QuantQwen3VLTextModel,
+    )
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
+        QuantQwen3VLVisionModel,
+    )
+
+
+def _find_vision_export_model(module: nn.Module) -> "QuantQwen3VLVisionModel":
     """Find the wrapped Qwen3-VL vision model that owns ``forward_export``."""
     current: Optional[nn.Module] = module
     visited: set[int] = set()
@@ -32,7 +48,7 @@ def _find_vision_export_model(module: nn.Module) -> nn.Module:
         visited.add(id(current))
         forward_export = getattr(current, "forward_export", None)
         if callable(forward_export):
-            return current
+            return cast("QuantQwen3VLVisionModel", current)
 
         wrapped = getattr(current, "wrapped", None)
         current = wrapped if isinstance(wrapped, nn.Module) else None
@@ -177,7 +193,7 @@ class Qwen3VLTextDecoderLayerPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
-        self.wrapped.return_type = "tuple"
+        cast("QuantQwen3VLTextDecoderLayer", self.wrapped).return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -234,7 +250,7 @@ class Qwen3VLTextDecoderLayerDecodeExportAdapter(nn.Module):
     def __init__(self, wrapped: nn.Module, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
-        self.wrapped.return_type = "tuple"
+        cast("QuantQwen3VLTextDecoderLayer", self.wrapped).return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -285,6 +301,12 @@ class Qwen3VLVisionPrefillExportAdapter(nn.Module):
         merged visual token tensor and ``deepstack_features`` is a tuple of
         merged DeepStack tensors for this adapter's profile.
     """
+
+    vision_grid_thw: torch.Tensor
+    pos_embed_template: torch.Tensor
+    rope_cos_template: torch.Tensor
+    rope_sin_template: torch.Tensor
+    cu_seqlens_template: torch.Tensor
 
     def __init__(
         self,
@@ -458,10 +480,11 @@ class Qwen3VLVisualEmbeddingFusionAdapter(nn.Module):
         return fused
 
 
-def _unwrap_qwen3_vl_text_model(wrapped: nn.Module) -> nn.Module:
+def _unwrap_qwen3_vl_text_model(wrapped: nn.Module) -> "QuantQwen3VLTextModel":
     """Return the wrapped Qwen3-VL text model from the top-level wrapper."""
-    qwen_model = wrapped.model.wrapped
-    return qwen_model.language_model.wrapped
+    qmodel = cast("QuantQwen3VLForConditionalGeneration", wrapped)
+    qwen_model = cast("QuantQwen3VLModel", qmodel.model.wrapped)
+    return cast("QuantQwen3VLTextModel", qwen_model.language_model.wrapped)
 
 
 class Qwen3VLTextEmbeddingExportAdapter(nn.Module):
@@ -645,7 +668,7 @@ class Qwen3VLLMHeadExportAdapter(nn.Module):
             "rotate_lm_head",
             None,
         )
-        self.lm_head = wrapped.lm_head
+        self.lm_head = cast("QuantQwen3VLForConditionalGeneration", wrapped).lm_head
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Return vocabulary logits for the supplied decoder hidden states."""

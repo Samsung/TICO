@@ -48,10 +48,24 @@ def make_codec():
     return TensorValueCodec(
         TensorTypeRegistry(
             [
-                TensorTypeSpec("FLOAT32", 0, np.float32, np.float32, 32),
-                TensorTypeSpec("INT32", 2, np.int32, np.int32, 32, True),
-                TensorTypeSpec("UINT8", 3, np.uint8, np.uint8, 8, False),
-                TensorTypeSpec("UINT4", 1004, np.uint8, np.uint8, 4, False, True),
+                TensorTypeSpec(
+                    "FLOAT32", 0, np.dtype(np.float32), np.dtype(np.float32), 32
+                ),
+                TensorTypeSpec(
+                    "INT32", 2, np.dtype(np.int32), np.dtype(np.int32), 32, True
+                ),
+                TensorTypeSpec(
+                    "UINT8", 3, np.dtype(np.uint8), np.dtype(np.uint8), 8, False
+                ),
+                TensorTypeSpec(
+                    "UINT4",
+                    1004,
+                    np.dtype(np.uint8),
+                    np.dtype(np.uint8),
+                    4,
+                    False,
+                    True,
+                ),
             ]
         )
     )
@@ -398,7 +412,7 @@ class ConstantPoolMemoryTest(unittest.TestCase):
         model = make_model(np.full(1024, 1, np.uint8))
         old = weakref.ref(model.buffers[1].data)
         pool = make_pool(model)
-        model.buffers[1].data = np.full(1024, 2, np.uint8)
+        setattr(model.buffers[1], "data", np.full(1024, 2, np.uint8))
         pool.synchronize(force=True)
         gc.collect()
         self.assertIsNone(old())
@@ -537,11 +551,12 @@ class ConstantPoolGeneratedSchemaTest(unittest.TestCase):
 
         model = circle.Model.ModelT()
         model.buffers = [circle.Buffer.BufferT(), circle.Buffer.BufferT()]
-        model.buffers[1].data = np.full(16 * 1024 * 1024, 5, np.uint8)
+        payload = np.full(16 * 1024 * 1024, 5, np.uint8)
+        setattr(model.buffers[1], "data", payload)
         tensor = circle.Tensor.TensorT()
         tensor.name = "weight"
         tensor.type = circle.TensorType.TensorType.UINT8
-        tensor.shape = [model.buffers[1].data.size]
+        tensor.shape = [payload.size]
         tensor.buffer = 1
         graph = circle.SubGraph.SubGraphT()
         graph.tensors = [tensor]
@@ -576,7 +591,7 @@ class ConstantPoolGeneratedSchemaTest(unittest.TestCase):
         model = circle.Model.ModelT()
         model.buffers = [circle.Buffer.BufferT(), circle.Buffer.BufferT()]
         weights = np.arange(1024, dtype=np.float32).reshape(256, 4)
-        model.buffers[1].data = weights.reshape(-1).view(np.uint8)
+        setattr(model.buffers[1], "data", weights.reshape(-1).view(np.uint8))
         tensors = []
         for name, dtype, shape, signature, buffer in (
             ("weight", circle.TensorType.TensorType.FLOAT32, [256, 4], None, 1),

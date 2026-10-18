@@ -13,10 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Mapping
+from typing import Mapping, Union
 
 import torch
 import tqdm
+
+WeightedLayer = Union[
+    torch.nn.Linear,
+    torch.nn.Conv1d,
+    torch.nn.Conv2d,
+    torch.nn.Conv3d,
+    torch.nn.ConvTranspose2d,
+]
 
 
 def resolve_weight_bits(
@@ -110,12 +118,16 @@ def gather_single_batch_from_list(data_list, idx):
     return single_batch
 
 
-def get_numerical_padding(layer: torch.nn.Module):
-    padding = layer.padding
+def get_numerical_padding(
+    layer: torch.nn.Conv1d
+    | torch.nn.Conv2d
+    | torch.nn.Conv3d
+    | torch.nn.ConvTranspose2d,
+) -> int | tuple[int, ...]:
+    padding: str | int | tuple[int, ...] = layer.padding
     if isinstance(padding, str):
         assert padding == "valid"  # TODO add support for the `same` padding
-        if padding == "valid":
-            padding = 0
+        padding = 0
     return padding
 
 
@@ -177,13 +189,13 @@ class SensitivityCalibrator:
         self.model = model
         self.dataset = dataset
         self.show_progress = show_progress
-        self.calibrated_types = [
+        self.calibrated_types: tuple[type[WeightedLayer], ...] = (
             torch.nn.Linear,
             torch.nn.Conv2d,
             torch.nn.Conv1d,
             torch.nn.Conv3d,
             torch.nn.ConvTranspose2d,
-        ]
+        )
 
     def compute_sensitivity_info(self):
 
@@ -195,11 +207,11 @@ class SensitivityCalibrator:
         model = self.model.float()
 
         sensitivity = {}
-        modules_to_process = {}
+        modules_to_process: dict[str, WeightedLayer] = {}
 
         for name, module in model.named_modules():
-            for type in self.calibrated_types:
-                if isinstance(module, type):
+            for layer_type in self.calibrated_types:
+                if isinstance(module, layer_type):
                     modules_to_process[name] = module
                     sensitivity[name] = torch.zeros_like(module.weight).cpu()
                     break
@@ -244,7 +256,6 @@ class SensitivityCalibrator:
 
                 sensitivity[name] += torch.mul(cur_grad, cur_grad).cpu()
 
-                cur_grad = None
                 del cur_grad
 
                 if model.device.type != "cpu":

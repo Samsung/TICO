@@ -12,10 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Iterable, List, Optional, Tuple, Union
+from typing import Any, cast, Iterable, List, Optional, Tuple, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
+        Qwen3VLVisionPrefillExportAdapter,
+    )
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        BaseModelOutputWithDeepstackFeatures,
+        Qwen3VLVisionModel,
+    )
+
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.mode import Mode
@@ -41,6 +51,8 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
     their own profile-specific tensors.
     """
 
+    rope_inv_freq: torch.Tensor
+
     has_deepstack_model_output: bool = qwen3_vl_has_deepstack_model_output()
 
     def __init__(
@@ -50,6 +62,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Qwen3VLVisionModel", fp_model)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_model
 
@@ -232,7 +245,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
     ) -> torch.Tensor:
         """Compute interpolated position embeddings."""
         grid_ts, grid_hs, grid_ws = grid_thw[:, 0], grid_thw[:, 1], grid_thw[:, 2]
-        device = pos_embedder.weight.device
+        device = cast(nn.Embedding, pos_embedder).weight.device
 
         idx_list: List[Any] = [[] for _ in range(4)]
         weight_list: List[Any] = [[] for _ in range(4)]
@@ -272,7 +285,9 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
 
         idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=device)
         weight_tensor = torch.tensor(
-            weight_list, dtype=pos_embedder.weight.dtype, device=device
+            weight_list,
+            dtype=cast(nn.Embedding, pos_embedder).weight.dtype,
+            device=device,
         )
         pos_embeds = pos_embedder(idx_tensor).to(device) * weight_tensor[:, :, None]
         patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
@@ -304,7 +319,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         cu_seqlens: torch.Tensor,
         attention_split_sizes: Optional[tuple[int, ...]] = None,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple]:
+    ) -> Union["BaseModelOutputWithDeepstackFeatures", tuple]:
         """Run the shared vision tensor path with explicit metadata.
 
         Dynamic eager execution and fixed-profile export differ only in how
@@ -369,7 +384,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             )
 
             return BaseModelOutputWithDeepstackFeatures(
-                last_hidden_state=hidden_states,
+                last_hidden_state=cast(torch.FloatTensor, hidden_states),
                 pooler_output=merged_hidden_states,
                 deepstack_features=deepstack_feature_lists,
             )
@@ -381,7 +396,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         grid_thw: torch.Tensor,
         attention_split_sizes: Optional[tuple[int, ...]] = None,
         **kwargs,
-    ) -> Union[torch.Tensor, tuple]:
+    ) -> Union["BaseModelOutputWithDeepstackFeatures", tuple]:
         """Run the dynamic eager/PTQ vision path.
 
         Metadata is computed from the actual ``grid_thw`` argument on every
@@ -432,7 +447,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         cu_seqlens: torch.Tensor,
         attention_split_sizes: tuple[int, ...],
         **kwargs,
-    ) -> Union[torch.Tensor, tuple]:
+    ) -> Union["BaseModelOutputWithDeepstackFeatures", tuple]:
         """Run the fixed-profile tensor path with adapter-owned metadata.
 
         The static adapter materializes every grid-dependent tensor before graph
@@ -466,7 +481,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         mode: ExportMode = "prefill",
         *,
         grid_thw: (Qwen3VLVisionProfile | Qwen3VLVisionGridInput | None) = None,
-    ) -> nn.Module:
+    ) -> "Qwen3VLVisionPrefillExportAdapter":
         """Return a static vision adapter for one explicit THW profile.
 
         Args:

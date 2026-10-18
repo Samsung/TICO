@@ -492,11 +492,14 @@ def trace_model_input_output(
         if not module_to_name and not hasattr(module, "fp_name"):
             return
 
-        module_name: ModuleName
+        module_name: ModuleName | None
         if module_to_name:
             module_name = module_to_name[module]
         else:
-            module_name = module.fp_name
+            fp_name = getattr(module, "fp_name")
+            if fp_name is not None and not isinstance(fp_name, str):
+                raise TypeError("Module fp_name must be a string or None.")
+            module_name = fp_name
             # fp_name attribute of PTQWrapper is usually None,
             # fp_name is set to a meaningful string for wrapped modules only.
             if module_name is not None:

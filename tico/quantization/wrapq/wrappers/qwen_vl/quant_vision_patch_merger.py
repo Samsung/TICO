@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionPatchMerger
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -42,6 +46,7 @@ class QuantQwen3VLVisionPatchMerger(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_merger = cast("Qwen3VLVisionPatchMerger", fp_merger)
         super().__init__(qcfg, fp_name=fp_name)
 
         self.hidden_size = fp_merger.hidden_size

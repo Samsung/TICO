@@ -45,6 +45,7 @@ from typing import (
     Optional,
     Protocol,
     runtime_checkable,
+    TypeVar,
 )
 
 import torch
@@ -75,6 +76,9 @@ _QUANTIZABLE_LAYER_TYPES: tuple[type[nn.Module], ...] = (
 )
 
 
+ModelT = TypeVar("ModelT", bound=nn.Module)
+
+
 @runtime_checkable
 class GPTQProtocol(Protocol):
     """
@@ -97,7 +101,11 @@ class GPTQProtocol(Protocol):
         True
     """
 
-    layer: nn.Module
+    @property
+    def layer(self) -> nn.Module:
+        """Return the layer whose weights are quantized."""
+        ...
+
     H: Optional[torch.Tensor]
     nsamples: int
     quantizer: Any
@@ -107,7 +115,7 @@ class GPTQProtocol(Protocol):
         ...
 
     @torch.no_grad()
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor) -> None:
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor | None) -> None:
         """
         Accumulate Hessian statistics from one calibration batch.
 
@@ -126,7 +134,6 @@ class GPTQProtocol(Protocol):
         actorder: bool = False,
         static_groups: bool = False,
         verbose: bool = False,
-        **kwargs,
     ) -> None:
         """
         Run blockwise GPTQ quantization on layer weights.
@@ -346,10 +353,10 @@ class UniversalGPTQQuantizer(BaseQuantizer):
     @torch.no_grad()
     def prepare(
         self,
-        model: torch.nn.Module,
+        model: ModelT,
         args: Any | None = None,
         kwargs: dict[str, Any] | None = None,
-    ) -> nn.Module:
+    ) -> ModelT:
         """
         Prepare the model for GPTQ quantization by replacing its forward method.
 
@@ -386,7 +393,7 @@ class UniversalGPTQQuantizer(BaseQuantizer):
         return model
 
     @torch.no_grad()
-    def convert(self, model: torch.nn.Module) -> nn.Module:
+    def convert(self, model: ModelT) -> ModelT:
         """
         Apply GPTQ quantization to the prepared model.
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,10 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4RMSNorm")
@@ -34,6 +38,7 @@ class QuantGemma4RMSNorm(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp = cast("Gemma4RMSNorm", fp)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
         self.eps = float(getattr(fp, "eps", getattr(fp, "variance_epsilon", 1e-6)))

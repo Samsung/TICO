@@ -95,7 +95,7 @@ class PrefillDecodeUtils:
         )
 
         # fill in input
-        inputs = {}
+        inputs: dict[str, object] = {}
         inputs["input_ids"] = next_token
         inputs["attention_mask"] = attention_mask
         inputs["position_embeddings"] = position_embeddings

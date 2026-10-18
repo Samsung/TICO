@@ -17,7 +17,7 @@ This module provides utilites that help test.
 """
 
 import unittest
-from typing import Callable, List
+from typing import Callable, Sequence
 
 import torch
 from torch.export import ExportedProgram
@@ -25,7 +25,10 @@ from torch.export import ExportedProgram
 from test.support.base_builders import TestDictBuilderBase
 
 
-def num_of_ops(ep: ExportedProgram, ops: List[torch._ops.OpOverload]):
+def num_of_ops(
+    ep: ExportedProgram,
+    ops: Sequence[torch._ops.OpOverload | torch._ops.OpOverloadPacket],
+):
     count = 0
     for node in ep.graph.nodes:
         if not node.op == "call_function":

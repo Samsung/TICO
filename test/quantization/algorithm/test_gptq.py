@@ -373,9 +373,9 @@ class GPTQTest(unittest.TestCase):
         convert(q_m, inplace=True)
 
         self.assertTrue(hasattr(q_m, "quantizers"))
-        self.assertEqual(q_m.quantizers["m.0"].maxq.item(), 15)
-        self.assertEqual(q_m.quantizers["m.1"].maxq.item(), 255)
-        self.assertEqual(q_m.quantizers["m.2"].maxq.item(), 15)
+        self.assertEqual(getattr(q_m, "quantizers")["m.0"].maxq.item(), 15)
+        self.assertEqual(getattr(q_m, "quantizers")["m.1"].maxq.item(), 255)
+        self.assertEqual(getattr(q_m, "quantizers")["m.2"].maxq.item(), 15)
 
     @unittest.skipIf(
         not IS_INTERNAL_TEST, "Internal test — run only if --include-internal is set"

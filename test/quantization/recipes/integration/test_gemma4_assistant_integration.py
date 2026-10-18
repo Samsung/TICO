@@ -24,8 +24,15 @@ environment variables point at local checkpoints:
 import copy
 import os
 import unittest
+from typing import Callable, cast, TYPE_CHECKING
 
 import torch
+
+
+if TYPE_CHECKING:
+    from tico.quantization.recipes.adapters.gemma4_assistant import (
+        _GreedyTokenGenerator,
+    )
 
 
 ASSISTANT_PATH = os.environ.get("GEMMA4_ASSISTANT_PATH")
@@ -42,6 +49,7 @@ _TARGET_SKIP_MSG = (
 
 
 def _load_assistant():
+    assert ASSISTANT_PATH is not None
     from transformers import AutoModelForCausalLM
 
     return (
@@ -156,6 +164,7 @@ class TestRealGemma4AssistedGeneration(unittest.TestCase):
         )
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        assert TARGET_PATH is not None
         torch.manual_seed(42)
         device = "cuda" if torch.cuda.is_available() else "cpu"
         tokenizer = AutoTokenizer.from_pretrained(TARGET_PATH)
@@ -164,11 +173,10 @@ class TestRealGemma4AssistedGeneration(unittest.TestCase):
         # verification (K+1 tokens per forward) can flip near-tie argmax
         # decisions even with the unmodified HF FP assistant, so the exact
         # sequence-equality contract is checked with a float32 target.
-        target = (
-            AutoModelForCausalLM.from_pretrained(TARGET_PATH, dtype=torch.float32)
-            .to(device)
-            .eval()
-        )
+        target = AutoModelForCausalLM.from_pretrained(TARGET_PATH, dtype=torch.float32)
+        cast(Callable[..., object], target.to)(device)
+        target.eval()
+        target_generator = cast("_GreedyTokenGenerator", target)
         assistant = _load_assistant()
 
         text_config = assistant.config.get_text_config()
@@ -194,7 +202,7 @@ class TestRealGemma4AssistedGeneration(unittest.TestCase):
         prompt = tokenizer("The quick brown fox", return_tensors="pt").to(device)
         pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
         with torch.no_grad():
-            baseline = target.generate(
+            baseline = target_generator.generate(
                 **prompt,
                 max_new_tokens=12,
                 do_sample=False,
@@ -202,7 +210,7 @@ class TestRealGemma4AssistedGeneration(unittest.TestCase):
             )
             # Calibration pass: real assisted generation with the prepared
             # assistant collecting observer statistics.
-            target.generate(
+            target_generator.generate(
                 **prompt,
                 assistant_model=generation_adapter,
                 max_new_tokens=12,
@@ -215,7 +223,7 @@ class TestRealGemma4AssistedGeneration(unittest.TestCase):
         quant_adapter.generation_config.num_assistant_tokens = 4
         quant_adapter.generation_config.num_assistant_tokens_schedule = "constant"
         with torch.no_grad():
-            assisted = target.generate(
+            assisted = target_generator.generate(
                 **prompt,
                 assistant_model=quant_adapter,
                 max_new_tokens=12,

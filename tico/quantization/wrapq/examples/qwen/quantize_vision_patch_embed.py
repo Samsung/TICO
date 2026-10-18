@@ -45,11 +45,13 @@ def generate_calibration_data(batch_size: int, sample_shape: tuple) -> list:
 
 
 def main():
-    cfg = Qwen3VLVisionConfig(
-        in_channels=3,
-        hidden_size=1024,
-        temporal_merge_size=2,
-        patch_size=16,
+    cfg = Qwen3VLVisionConfig.from_dict(
+        dict(
+            in_channels=3,
+            hidden_size=1024,
+            temporal_merge_size=2,
+            patch_size=16,
+        )
     )
     model = Qwen3VLVisionPatchEmbed(cfg)
     orig_model = copy.deepcopy(model)
@@ -61,6 +63,8 @@ def main():
     assert model.proj.stride == (2, 16, 16)
 
     num_patches = 16
+    assert isinstance(cfg.patch_size, int)
+    assert isinstance(cfg.temporal_patch_size, int)
     patch_dim = (
         cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
     )

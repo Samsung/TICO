@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import torch
 from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import GPT2Config, GPT2LMHeadModel
@@ -22,9 +24,8 @@ from test.modules.base import TestModuleBase
 class GPT2(TestModuleBase):
     def __init__(self):
         super().__init__()
-        self.model = GPT2LMHeadModel(config=GPT2Config.from_pretrained("gpt2")).to(
-            "cpu"
-        )
+        self.model = GPT2LMHeadModel(config=GPT2Config.from_pretrained("gpt2"))
+        cast(torch.nn.Module, self.model).to("cpu")
         # The model returns its KV cache as a DynamicCache, which must be
         # pytree-flattenable for torch.export.
         register_dynamic_cache()

@@ -67,7 +67,7 @@ def _make_vision_config(**overrides):
         allow_global_per_layer_attribute_access=True,
     )
     kwargs.update(overrides)
-    cfg = Gemma4VisionConfig(**kwargs)
+    cfg = Gemma4VisionConfig.from_dict(kwargs)
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
     else:

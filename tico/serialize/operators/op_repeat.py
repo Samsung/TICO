@@ -46,7 +46,11 @@ class RepeatVisitor(NodeVisitor):
     ) -> circle.Operator.OperatorT:
         args = RepeatArgs(*node.args, **node.kwargs)  # type: ignore[arg-type]
         input = args.input
-        repeats = args.repeats
+        repeats: list[int | torch.SymInt] = []
+        for repeat in args.repeats:
+            if isinstance(repeat, torch.fx.Node):
+                raise NotYetSupportedError("Dynamic repeat values are not supported")
+            repeats.append(repeat)
 
         for r in repeats:
             if r == 0:

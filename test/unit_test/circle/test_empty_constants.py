@@ -98,7 +98,8 @@ def _codec():
 
 class TestEmptyConstantClassification(unittest.TestCase):
     def test_empty_inline_and_omitted_data_are_constants(self):
-        for data in (None, b"", [], np.empty(0, dtype=np.uint8)):
+        empty_list: list[int] = []
+        for data in (None, b"", empty_list, np.empty(0, dtype=np.uint8)):
             with self.subTest(data_type=type(data).__name__):
                 document = _select_graph(data)
                 document.verify()
@@ -208,7 +209,8 @@ class TestEmptyConstantClassification(unittest.TestCase):
 
 class TestEmptyConstantCodec(unittest.TestCase):
     def test_decode_empty_and_omitted_data(self):
-        for data in (None, b"", [], np.empty(0, dtype=np.uint8)):
+        empty_list: list[int] = []
+        for data in (None, b"", empty_list, np.empty(0, dtype=np.uint8)):
             with self.subTest(data_type=type(data).__name__):
                 document = _select_graph(data)
                 value = _codec().decode_tensor(

@@ -28,7 +28,11 @@ from tico.serialize.circle_mapping import (
     to_circle_shape,
 )
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import (
     create_builtin_operator,
     get_integer_dtype_min,
@@ -45,7 +49,7 @@ class PaddingType(IntEnum):
 
 @register_node_visitor
 class MaxPool2DWithIndicesVisitor(NodeVisitor):
-    target: List[torch._ops.OpOverload] = [torch.ops.circle_custom.maxpool2d]
+    target: List[TorchOperator] = [torch.ops.circle_custom.maxpool2d]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
         super().__init__(op_codes, graph)

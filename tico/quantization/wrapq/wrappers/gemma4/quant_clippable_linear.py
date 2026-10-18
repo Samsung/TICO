@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,10 @@ from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4ClippableLinear")
@@ -40,11 +44,12 @@ class QuantGemma4ClippableLinear(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp = cast("Gemma4ClippableLinear", fp)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp
         self.use_clipped_linears = bool(getattr(fp, "use_clipped_linears", False))
         self.linear = PTQWrapper(
-            fp.linear,  # type: ignore[arg-type]
+            fp.linear,
             qcfg=qcfg.child("linear") if qcfg else None,
             fp_name=join_name(fp_name, "linear"),
         )
@@ -53,12 +58,12 @@ class QuantGemma4ClippableLinear(QuantModuleBase):
         """Run the clippable linear layer with quantized inner linear weights."""
         if self.use_clipped_linears:
             hidden_states = torch.clamp(
-                hidden_states, self.module.input_min, self.module.input_max  # type: ignore[arg-type]
+                hidden_states, self.module.input_min, self.module.input_max
             )
         hidden_states = self.linear(hidden_states)
         if self.use_clipped_linears:
             hidden_states = torch.clamp(
-                hidden_states, self.module.output_min, self.module.output_max  # type: ignore[arg-type]
+                hidden_states, self.module.output_min, self.module.output_max
             )
         return hidden_states
 

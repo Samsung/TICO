@@ -20,10 +20,16 @@ import torch
 
 from tico.quantization.recipes.debug.wrapper_smoke.cases.qwen3_vl import (
     _create_image_input,
+    _get_position_embeddings,
     _has_qwen3_vl,
     _make_tiny_qwen3vl_config,
+    _make_tiny_qwen3vl_model,
     QwenVisionModelCase,
     QwenVisionPatchEmbedCase,
+)
+
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
+    QuantQwen3VLVisionModel,
 )
 
 
@@ -47,6 +53,25 @@ class TestQwen3VLWrapperSmokeInputs(unittest.TestCase):
             * vision_cfg.patch_size
         )
         return (1, num_patches, patch_dim)
+
+    def test_vision_rope_matches_static_wrapper_for_current_transformers(self):
+        """Synthetic vision inputs preserve patch order across HF RoPE APIs."""
+        visual = _make_tiny_qwen3vl_model().visual
+        grid_thw = torch.tensor([[1, 4, 6]], dtype=torch.long)
+
+        actual_cos, actual_sin = _get_position_embeddings(visual, grid_thw)
+        (
+            expected_cos,
+            expected_sin,
+        ) = QuantQwen3VLVisionModel._precompute_rope_position_embeddings(
+            visual.spatial_merge_size,
+            visual.rotary_pos_emb.inv_freq,
+            grid_thw,
+        )
+
+        self.assertEqual(actual_cos.shape[0], 24)
+        torch.testing.assert_close(actual_cos, expected_cos)
+        torch.testing.assert_close(actual_sin, expected_sin)
 
     def test_patch_embed_case_uses_batch_one_flattened_patches(self):
         """Patch-embed calibration must not reintroduce an NCTHW input."""

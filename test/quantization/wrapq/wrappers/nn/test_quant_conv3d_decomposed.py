@@ -14,6 +14,7 @@
 
 import unittest
 import warnings
+from typing import cast, Union
 
 import torch
 import torch.nn as nn
@@ -22,6 +23,7 @@ import torch.nn.functional as F
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.nn.quant_conv3d_decomposed import (
     QuantConv3dDecomposed,
 )
@@ -222,6 +224,7 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
 
         # Check that scale/zero_point have correct shape (per output channel)
         expected_num_channels = self.fp32.out_channels
+        assert isinstance(self.q_conv.obs_weight, AffineObserverBase)
         self.assertEqual(
             self.q_conv.obs_weight._cached_scale.shape[0], expected_num_channels
         )
@@ -238,7 +241,9 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
         _ = self.q_conv(self.x)
 
         # Check that activation observers have collected stats
+        assert isinstance(self.q_conv.obs_act_in, AffineObserverBase)
         self.assertTrue(self.q_conv.obs_act_in.min_val.numel() > 0)
+        assert isinstance(self.q_conv.obs_act_out, AffineObserverBase)
         self.assertTrue(self.q_conv.obs_act_out.min_val.numel() > 0)
 
         # Freeze and check qparams exist
@@ -254,12 +259,15 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
 
         # Check that dynamic observers have collected stats
         for obs in self.q_conv._input_slice_obs.values():
+            assert isinstance(obs, AffineObserverBase)
             self.assertTrue(obs.min_val.numel() > 0)
 
         for obs in self.q_conv._conv2d_obs.values():
+            assert isinstance(obs, AffineObserverBase)
             self.assertTrue(obs.min_val.numel() > 0)
 
         for obs in self.q_conv._acc_obs.values():
+            assert isinstance(obs, AffineObserverBase)
             self.assertTrue(obs.min_val.numel() > 0)
 
     def test_dtype_override(self):
@@ -352,7 +360,8 @@ class TestQuantConv3dDecomposed(unittest.TestCase):
                         in_channels=3,
                         out_channels=8,
                         kernel_size=(2, 3, 3),
-                        padding=padding,
+                        # Torch accepts these iterable padding forms at runtime.
+                        padding=cast(Union[str, int, tuple[int, int, int]], padding),
                         bias=True,
                     )
 

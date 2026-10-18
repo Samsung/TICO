@@ -68,6 +68,8 @@ class TestQwenVisionModelExample(unittest.TestCase):
         grid_tuple = (1, 2, 2)
         grid_thw = torch.tensor([grid_tuple])
         num_patches = grid_tuple[0] * grid_tuple[1] * grid_tuple[2]
+        assert isinstance(cfg.patch_size, int)
+        assert isinstance(cfg.temporal_patch_size, int)
         patch_dim = (
             cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
         )

@@ -35,17 +35,19 @@ def _make_text_config():
     """Create a tiny Qwen3-VL text config for synthetic smoke tests."""
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextConfig
 
-    return Qwen3VLTextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        head_dim=32,
-        max_position_embeddings=128,
-        use_cache=False,
-        rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
+    return Qwen3VLTextConfig.from_dict(
+        {
+            "vocab_size": 256,
+            "hidden_size": 64,
+            "intermediate_size": 128,
+            "num_hidden_layers": 1,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 2,
+            "head_dim": 32,
+            "max_position_embeddings": 128,
+            "use_cache": False,
+            "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
+        }
     )
 
 

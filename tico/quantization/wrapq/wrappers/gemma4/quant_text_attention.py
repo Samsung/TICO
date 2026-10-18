@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from collections.abc import MutableMapping
-from typing import Any, Iterable, Literal, Optional, Tuple
+from typing import Any, cast, Iterable, Literal, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -29,6 +29,10 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
 
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
@@ -53,6 +57,8 @@ class QuantGemma4TextAttention(QuantModuleBase):
     and sampling remains outside this module.
     """
 
+    causal_mask_template: torch.Tensor
+
     def __init__(
         self,
         fp_attn: nn.Module,
@@ -60,6 +66,7 @@ class QuantGemma4TextAttention(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_attn = cast("Gemma4TextAttention", fp_attn)
         super().__init__(qcfg, fp_name=fp_name)
         self.attn_options = get_gemma4_text_attention_options(self.qcfg)
 
@@ -68,7 +75,9 @@ class QuantGemma4TextAttention(QuantModuleBase):
         self.layer_idx = fp_attn.layer_idx
         self.layer_type = fp_attn.layer_type
         self.is_sliding = bool(getattr(fp_attn, "is_sliding", False))
-        self.sliding_window = int(fp_attn.sliding_window) if self.is_sliding else None
+        self.sliding_window = (
+            int(cast(int, fp_attn.sliding_window)) if self.is_sliding else None
+        )
         self.is_kv_shared_layer = bool(getattr(fp_attn, "is_kv_shared_layer", False))
         self.store_full_length_kv = bool(
             getattr(fp_attn, "store_full_length_kv", False)
@@ -388,7 +397,11 @@ class QuantGemma4TextAttention(QuantModuleBase):
         """Return full shared K/V tensors for a shared-KV consumer layer."""
         if shared_key_value is not None:
             return shared_key_value
-        if shared_kv_states is not None and self.layer_type in shared_kv_states:
+        if (
+            shared_kv_states is not None
+            and self.layer_type is not None
+            and self.layer_type in shared_kv_states
+        ):
             return shared_kv_states[self.layer_type]
         raise RuntimeError(
             "Gemma4 shared-KV attention requires shared_key_value or "

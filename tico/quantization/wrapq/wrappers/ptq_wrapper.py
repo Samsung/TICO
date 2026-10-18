@@ -50,7 +50,7 @@ class PTQWrapper(QuantModuleBase):
             raise NotImplementedError(
                 f"{type(self.wrapped).__name__} does not implement as_export_module()."
             )
-        return self.wrapped.as_export_module(mode=mode, **kwargs)
+        return getattr(self.wrapped, "as_export_module")(mode=mode, **kwargs)
 
     def _all_observers(self):
         """
@@ -87,4 +87,4 @@ class PTQWrapper(QuantModuleBase):
         interface as the original Hugging Face model, which is required for
         evaluation and inference workflows.
         """
-        return self.wrapped.generate(*args, **kwargs)
+        return getattr(self.wrapped, "generate")(*args, **kwargs)

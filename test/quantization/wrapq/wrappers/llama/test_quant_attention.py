@@ -13,6 +13,11 @@
 # limitations under the License.
 
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaAttention
+
 
 import torch
 
@@ -35,7 +40,7 @@ skip_msg = "required transformers not installed — skipping LlamaAttention test
 
 @unittest.skipUnless(has_transformers_for("llama"), skip_msg)
 class TestQuantLlamaAttention(unittest.TestCase):
-    fp_attn: torch.nn.Module
+    fp_attn: "LlamaAttention"
     head_dim: int
     n_kv: int
     n_h: int
@@ -50,18 +55,22 @@ class TestQuantLlamaAttention(unittest.TestCase):
         from transformers.models.llama.modeling_llama import LlamaAttention
 
         cls.max_seq = 16
-        cfg = LlamaConfig(
-            hidden_size=8,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=4,
-            attention_bias=False,
-            attention_dropout=0.0,
-            attn_implementation="eager",
-            max_position_embeddings=cls.max_seq,
+        cfg = LlamaConfig.from_dict(
+            {
+                "hidden_size": 8,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "attn_implementation": "eager",
+                "max_position_embeddings": cls.max_seq,
+            }
         )
         cls.fp_attn = LlamaAttention(cfg, layer_idx=0)
+        assert cfg.head_dim is not None
         cls.head_dim = cfg.head_dim
+        assert cfg.num_key_value_heads is not None
         cls.n_kv = cfg.num_key_value_heads
         cls.n_h = cfg.num_attention_heads
         cls.hidden_size = cfg.hidden_size
@@ -109,7 +118,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
     def _rand_additive_mask(self, batch_size: int, q_len: int, k_len: int):
         mask = torch.zeros(batch_size, q_len, k_len, dtype=torch.float32)
         if k_len > 1:
-            valid_len = torch.randint(low=1, high=k_len + 1, size=(1,)).item()
+            valid_len = int(torch.randint(low=1, high=k_len + 1, size=(1,)).item())
             if valid_len < k_len:
                 mask[:, :, valid_len:] = float("-120")
         return mask
@@ -117,7 +126,7 @@ class TestQuantLlamaAttention(unittest.TestCase):
     def _rand_bool_mask(self, batch_size: int, q_len: int, k_len: int):
         mask = torch.ones(batch_size, q_len, k_len, dtype=torch.bool)
         if k_len > 1:
-            valid_len = torch.randint(low=1, high=k_len + 1, size=(1,)).item()
+            valid_len = int(torch.randint(low=1, high=k_len + 1, size=(1,)).item())
             if valid_len < k_len:
                 mask[:, :, valid_len:] = False
         return mask
@@ -147,11 +156,11 @@ class TestQuantLlamaAttention(unittest.TestCase):
 
         qattn_npu = QuantLlamaAttention(self.fp_attn)
         torch.testing.assert_close(
-            qattn_npu.q_proj.wrapped.module.weight,
+            cast(QuantLinear, qattn_npu.q_proj.wrapped).module.weight,
             self.fp_attn.q_proj.weight,
         )
         torch.testing.assert_close(
-            qattn_npu.k_proj.wrapped.module.weight,
+            cast(QuantLinear, qattn_npu.k_proj.wrapped).module.weight,
             self.fp_attn.k_proj.weight * scale,
         )
 
@@ -160,11 +169,11 @@ class TestQuantLlamaAttention(unittest.TestCase):
             qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
         )
         torch.testing.assert_close(
-            qattn_ref.q_proj.wrapped.module.weight,
+            cast(QuantLinear, qattn_ref.q_proj.wrapped).module.weight,
             self.fp_attn.q_proj.weight,
         )
         torch.testing.assert_close(
-            qattn_ref.k_proj.wrapped.module.weight,
+            cast(QuantLinear, qattn_ref.k_proj.wrapped).module.weight,
             self.fp_attn.k_proj.weight,
         )
 
@@ -181,11 +190,11 @@ class TestQuantLlamaAttention(unittest.TestCase):
             ),
         )
         torch.testing.assert_close(
-            qattn_q_fused.q_proj.wrapped.module.weight,
+            cast(QuantLinear, qattn_q_fused.q_proj.wrapped).module.weight,
             self.fp_attn.q_proj.weight * scale,
         )
         torch.testing.assert_close(
-            qattn_q_fused.k_proj.wrapped.module.weight,
+            cast(QuantLinear, qattn_q_fused.k_proj.wrapped).module.weight,
             self.fp_attn.k_proj.weight,
         )
 

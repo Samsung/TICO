@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import types
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+
 
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
@@ -41,6 +45,11 @@ class QuantQwen3VLTextModel(QuantModuleBase):
     - Rotary position embedding (rotary_emb) - NOT wrapped
     """
 
+    causal_mask_template: torch.Tensor
+    position_ids_template: torch.Tensor
+    cos_template: torch.Tensor
+    sin_template: torch.Tensor
+
     # This boolean flag enforces model behavior that is only activated during model graph tracing (torch.export.export).
     # This flag is used in unit tests only in order to check the behavior without actually exporting the model.
     force_export: bool = False
@@ -52,6 +61,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_model = cast("Qwen3VLTextModel", fp_model)
         super().__init__(qcfg, fp_name=fp_name)
 
         self.module = fp_model
@@ -431,11 +441,11 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         visual_end_idx = visual_start_idx + num_visual_tokens
 
         if visual_end_idx < seq_len:
-            st_idx = pos_ids_list[-1].max() + 1 if len(pos_ids_list) > 0 else 0
+            trailing_start = pos_ids_list[-1].max() + 1 if len(pos_ids_list) > 0 else 0
             trailing_text_len = seq_len - visual_end_idx
             trailing_pos_ids = (
                 torch.arange(trailing_text_len, device=device).view(1, -1).expand(3, -1)
-                + st_idx
+                + trailing_start
             )
             pos_ids_list.append(trailing_pos_ids)
 
@@ -447,7 +457,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         return position_ids  # shape = (3, 1, seq_len) where 3=THW, 1=batch_size
 
     @staticmethod
-    def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> torch.Tensor | None:
+    def _get_vision_grid_thw(qcfg: Optional[PTQConfig]) -> tuple[int, int, int] | None:
         grid_thw = get_model_arg(qcfg, "vision", "grid_thw", default=None)
         if grid_thw is not None:
             if type(grid_thw) is not tuple or len(grid_thw) != 3:
@@ -489,13 +499,13 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
     def forward(
         self,
-        input_ids: torch.LongTensor | None = None,
+        input_ids: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
+        position_ids: torch.Tensor | None = None,
         past_key_values: Cache | None = None,
-        inputs_embeds: torch.FloatTensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         use_cache: bool | None = None,
-        cache_position: torch.LongTensor | None = None,
+        cache_position: torch.Tensor | None = None,
         visual_pos_masks: torch.Tensor | None = None,
         deepstack_visual_embeds: list[torch.Tensor] | None = None,
         return_dict: bool = True,
@@ -542,6 +552,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         if self.rotate_embedding is not None:
             inputs_embeds = self.rotate_embedding(inputs_embeds)
 
+        assert inputs_embeds is not None
         batch_size, seq_len, _ = inputs_embeds.shape
         past_seen_tokens = (
             past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -632,6 +643,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                     deepstack_visual_embeds[layer_idx],  # type: ignore[index]
                     self.obs_deepstack_visual_embeds[layer_idx],
                 )
+                assert visual_pos_masks is not None
                 hidden_states = self._deepstack_process(
                     hidden_states,
                     visual_pos_masks,
@@ -647,7 +659,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             return (hidden_states,)
 
         return BaseModelOutputWithPast(
-            last_hidden_state=hidden_states,
+            last_hidden_state=cast(torch.FloatTensor, hidden_states),
             past_key_values=past_key_values,
         )
 

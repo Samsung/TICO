@@ -14,7 +14,7 @@
 # limitations under the License.
 
 import inspect
-from typing import Optional, Union
+from typing import cast, Optional, Union
 
 import torch
 from torch import nn
@@ -132,12 +132,12 @@ class SpinLlamaModel(SpinLlamaPreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         **kwargs,
     ) -> BaseModelOutputWithPast:
@@ -222,7 +222,10 @@ class SpinLlamaForCausalLM(SpinLlamaPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     _tp_plan = {"lm_head": "colwise_rep"}
-    _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
+    # Transformers accepts lists here, but its base-class annotation uses strings.
+    _pp_plan = cast(
+        dict[str, tuple[str, str]], {"lm_head": (["hidden_states"], ["logits"])}
+    )
 
     def __init__(self, config: LlamaConfig):
         """
@@ -291,14 +294,14 @@ class SpinLlamaForCausalLM(SpinLlamaPreTrainedModel, GenerationMixin):
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs,
     ) -> CausalLMOutputWithPast:
@@ -332,6 +335,7 @@ class SpinLlamaForCausalLM(SpinLlamaPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs.last_hidden_state
+        assert hidden_states is not None
         # Rotate
         hidden_states = self.rotate_lm_head(hidden_states)
 

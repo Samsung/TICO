@@ -20,7 +20,11 @@ if TYPE_CHECKING:
 import torch
 from circle_schema import circle
 
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 
 
@@ -28,7 +32,7 @@ from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 class CircleGatherNdVisitor(NodeVisitor):
     """Serialize the internal GatherNd custom operator to Circle GATHER_ND."""
 
-    target: List[torch._ops.OpOverload] = [
+    target: List[TorchOperator] = [
         torch.ops.circle_custom.gather_nd,
     ]
 

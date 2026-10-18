@@ -225,9 +225,11 @@ class TestQuantGemma4RMSNorm(unittest.TestCase):
         q_rms.enable_calibration()
         _ = q_rms(self.x)
 
-        one = torch.tensor(1.0, device=q_rms.obs_weight.min_val.device)
-        self.assertTrue(torch.allclose(q_rms.obs_weight.min_val, one))
-        self.assertTrue(torch.allclose(q_rms.obs_weight.max_val, one))
+        weight_observer = q_rms.obs_weight
+        assert isinstance(weight_observer, AffineObserverBase)
+        one = torch.tensor(1.0, device=weight_observer.min_val.device)
+        self.assertTrue(torch.allclose(weight_observer.min_val, one))
+        self.assertTrue(torch.allclose(weight_observer.max_val, one))
 
         q_rms.freeze_qparams()
 

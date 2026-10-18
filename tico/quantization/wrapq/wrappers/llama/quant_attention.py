@@ -13,12 +13,16 @@
 # limitations under the License.
 
 import copy
-from typing import Literal, Optional, Tuple
+from typing import cast, Literal, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaAttention
+
 
 from tico.quantization.config.llama_attention import (
     get_llama_attention_options,
@@ -97,6 +101,8 @@ class QuantLlamaAttention(QuantModuleBase):
         - "delta": return only the newly produced K/V
     """
 
+    causal_mask_template: torch.Tensor
+
     def __init__(
         self,
         fp_attn: nn.Module,
@@ -105,6 +111,7 @@ class QuantLlamaAttention(QuantModuleBase):
         fp_name: Optional[str] = None,
         layer_idx: Optional[int] = None,
     ):
+        fp_attn = cast("LlamaAttention", fp_attn)
         super().__init__(qcfg, fp_name=fp_name)
 
         self.attn_options = get_llama_attention_options(self.qcfg)
@@ -153,8 +160,8 @@ class QuantLlamaAttention(QuantModuleBase):
             fp_attn.o_proj, torch.nn.Module
         )
 
-        q_proj_fp = fp_attn.q_proj
-        k_proj_fp = fp_attn.k_proj
+        q_proj_fp: nn.Module = fp_attn.q_proj
+        k_proj_fp: nn.Module = fp_attn.k_proj
         if self.attn_options.scale_fusion == "q_proj":
             q_proj_fp = _clone_projection_with_scale(fp_attn.q_proj, self.attn_scale)
         elif self.attn_options.scale_fusion == "k_proj":
@@ -643,6 +650,7 @@ class QuantLlamaAttention(QuantModuleBase):
             present_v_i = self._fq(new_v_i, self.obs_present_value)
             return present_k_i, present_v_i
 
+        assert past_v_i is not None
         present_k_i = self._fq(
             torch.cat([past_k_i, new_k_i], dim=1),
             self.obs_present_key,
@@ -1011,7 +1019,7 @@ class QuantLlamaAttention(QuantModuleBase):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Cache | LayerKV] = None,
         use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
         cache_output_mode: CacheOutputMode = "present",
         **kwargs,
     ):

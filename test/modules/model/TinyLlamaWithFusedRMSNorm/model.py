@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import torch
 
 from tico.serialize.operators.adapters.llama_rmsnorm import patched_llama_rmsnorm
@@ -30,7 +32,8 @@ class TinyLlamaWithFusedRMSNorm(TestModuleBase):
             # reference comparison.
             self.model = AutoModelForCausalLM.from_pretrained(
                 "Maykeye/TinyLLama-v0", dtype=torch.float32
-            ).to("cpu")
+            )
+            cast(torch.nn.Module, self.model).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
         register_dynamic_cache()

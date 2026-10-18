@@ -111,7 +111,9 @@ class GlobalCheckpointPreservationTest(unittest.TestCase):
         self.assertTrue(torch.equal(output.detach(), effective))
         output.square().mean().backward()
         self.assertIsNotNone(quantizer.alpha.grad)
+        assert quantizer.alpha.grad is not None
         self.assertIsNotNone(quantizer.raw_log_scale_delta.grad)
+        assert quantizer.raw_log_scale_delta.grad is not None
         self.assertTrue(torch.isfinite(quantizer.alpha.grad).all())
         self.assertTrue(torch.isfinite(quantizer.raw_log_scale_delta.grad).all())
         self.assertGreater(float(quantizer.alpha.grad.abs().sum()), 0.0)

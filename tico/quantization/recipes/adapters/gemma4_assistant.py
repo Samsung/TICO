@@ -16,7 +16,7 @@
 
 import os
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, cast, Mapping, Protocol, Sequence
 
 import torch
 import tqdm
@@ -51,6 +51,22 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
 
 TARGET_MODEL_ENV_VAR = "GEMMA4_TARGET_PATH"
 ASSISTANT_MODEL_ENV_VAR = "GEMMA4_ASSISTANT_PATH"
+
+
+class _GreedyTokenGenerator(Protocol):
+    """Describe the tensor-returning generation path used by this adapter."""
+
+    def generate(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        max_new_tokens: int,
+        do_sample: bool,
+        pad_token_id: int | None,
+        assistant_model: Gemma4AssistantGenerationAdapter | None = None,
+    ) -> torch.Tensor:
+        ...
 
 
 def _load_causal_lm(name: str, **kwargs: Any) -> torch.nn.Module:
@@ -332,7 +348,7 @@ class Gemma4AssistantAdapter(ModelAdapter):
                 for prompt_dict in iterator:
                     input_ids = prompt_dict["input_ids"].to(ctx.device)
                     attention_mask = prompt_dict["attention_mask"].to(ctx.device)
-                    target.generate(
+                    cast(_GreedyTokenGenerator, target).generate(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         assistant_model=generation_adapter,
@@ -468,7 +484,7 @@ class Gemma4AssistantAdapter(ModelAdapter):
             for prompt in prompts:
                 input_ids = prompt.to(ctx.device)
                 attention_mask = torch.ones_like(input_ids)
-                baseline = target.generate(
+                baseline = cast(_GreedyTokenGenerator, target).generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     max_new_tokens=max_new_tokens,
@@ -478,7 +494,7 @@ class Gemma4AssistantAdapter(ModelAdapter):
                 target_counter = _ForwardCounter(target)
                 recorder = _AssistantCallRecorder(generation_adapter.assistant)
                 try:
-                    assisted = target.generate(
+                    assisted = cast(_GreedyTokenGenerator, target).generate(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
                         assistant_model=generation_adapter,

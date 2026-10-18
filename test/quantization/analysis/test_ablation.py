@@ -71,7 +71,7 @@ class TinyQuantBlock(QuantModuleBase):
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         input_q = self._fq(input_, self.obs_act_in)
-        weight = self.weight
+        weight: torch.Tensor = self.weight
         if self._mode.name == "QUANT":
             weight = self.obs_weight.fake_quant(weight)
         output = input_q * weight

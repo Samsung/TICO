@@ -55,7 +55,7 @@ def make_model(*payloads):
     model.buffers = [circle.Buffer.BufferT()]
     for data in payloads:
         value = circle.Buffer.BufferT()
-        value.data = np.asarray(data, dtype=np.uint8)
+        setattr(value, "data", np.asarray(data, dtype=np.uint8))
         model.buffers.append(value)
     model.metadataBuffer = []
     model.metadata = []
@@ -275,7 +275,9 @@ class LargeCircleSchemaRoundTripTest(unittest.TestCase):
                 make_model(np.arange(5001, dtype=np.uint8))
             )
             document = CircleDocument.from_bytes(original)
-            document.model.buffers[1].data = np.array([1, 2, 3], dtype=np.uint8)
+            setattr(
+                document.model.buffers[1], "data", np.array([1, 2, 3], dtype=np.uint8)
+            )
             saved = document.to_bytes()
         self.assertEqual(
             circle.Model.Model.GetRootAsModel(saved, 0).Buffers(1).Offset(), 0

@@ -68,12 +68,15 @@ class QuantConvTranspose2d(QuantModuleBase):
         if self._mode is Mode.QUANT:
             weight = self.obs_weight.fake_quant(weight)
 
+        # ConvTranspose2d normalizes numeric padding to a pair in its constructor.
+        padding = self.module.padding
+        assert not isinstance(padding, str)
         output = F.conv_transpose2d(
             input_q,
             weight,
             self.module.bias,
             self.module.stride,
-            self.module.padding,
+            padding,
             self.module.output_padding,
             self.module.groups,
             self.module.dilation,

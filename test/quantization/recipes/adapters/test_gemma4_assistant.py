@@ -27,10 +27,10 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import cast, TYPE_CHECKING
 from unittest.mock import patch
 
 import torch
-import transformers
 
 from tico.quantization import convert, prepare
 from tico.quantization.recipes.adapters import get_adapter
@@ -49,6 +49,12 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.static_inputs import (
 from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     assistant_layer_type_head_dim,
 )
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.configuration_gemma4_assistant import (
+        Gemma4AssistantConfig,
+    )
 
 
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
@@ -72,12 +78,13 @@ def _has_gemma4_assistant() -> bool:
 
 
 def _make_sample(model: torch.nn.Module, kv_len: int = 10) -> dict:
-    text_cfg = model.config.get_text_config()
+    config = cast("Gemma4AssistantConfig", model.config)
+    text_cfg = config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
     full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")
     sliding_head_dim = assistant_layer_type_head_dim(text_cfg, "sliding_attention")
     return {
-        "inputs_embeds": torch.randn(1, 1, 2 * int(model.config.backbone_hidden_size)),
+        "inputs_embeds": torch.randn(1, 1, 2 * int(config.backbone_hidden_size)),
         "position_ids": torch.tensor([[kv_len - 1]]),
         "attention_mask": torch.ones(1, kv_len, dtype=torch.long),
         "shared_kv_states": {
@@ -121,10 +128,8 @@ class TestGemma4AssistantCausalLMLoader(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 causal = _RecordingAutoClass(error=error)
                 image_text = _RecordingAutoClass(result=object())
-                with patch.object(
-                    transformers, "AutoModelForCausalLM", causal
-                ), patch.object(
-                    transformers, "AutoModelForImageTextToText", image_text
+                with patch("transformers.AutoModelForCausalLM", causal), patch(
+                    "transformers.AutoModelForImageTextToText", image_text
                 ):
                     with self.assertRaises(type(error)) as raised:
                         _load_causal_lm("org/fake-target", dtype=torch.float32)
@@ -138,8 +143,8 @@ class TestGemma4AssistantCausalLMLoader(unittest.TestCase):
         model = object()
         causal = _RecordingAutoClass(result=model)
         image_text = _RecordingAutoClass(result=object())
-        with patch.object(transformers, "AutoModelForCausalLM", causal), patch.object(
-            transformers, "AutoModelForImageTextToText", image_text
+        with patch("transformers.AutoModelForCausalLM", causal), patch(
+            "transformers.AutoModelForImageTextToText", image_text
         ):
             result = _load_causal_lm(
                 "org/fake-target",

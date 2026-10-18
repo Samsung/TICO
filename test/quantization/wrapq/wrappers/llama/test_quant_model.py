@@ -18,6 +18,11 @@ The tests run only if *transformers* is available (they depend on the genuine
 """
 
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaModel
+
 
 import torch
 
@@ -26,7 +31,12 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.utils.version import has_transformers_for
+from tico.quantization.wrapq.wrappers.llama.quant_attention import QuantLlamaAttention
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+    QuantLlamaDecoderLayer,
+)
 from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
@@ -37,7 +47,7 @@ skip_msg = "required transformers not installed — skipping LlamaModel tests"
 class TestQuantLlamaModel(unittest.TestCase):
     seq_len: int
     vocab_size: int
-    fp_model: torch.nn.Module
+    fp_model: "LlamaModel"
     head_dim: int
 
     @classmethod
@@ -51,18 +61,20 @@ class TestQuantLlamaModel(unittest.TestCase):
         cls.vocab_size = 10000
         cls.head_dim = 4
 
-        cfg = LlamaConfig(
-            hidden_size=8,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=cls.head_dim,
-            attention_bias=False,
-            attention_dropout=0.0,
-            attn_implementation="eager",
-            num_hidden_layers=2,
-            max_position_embeddings=cls.seq_len,
-            use_cache=False,
-            return_dict=False,
+        cfg = LlamaConfig.from_dict(
+            {
+                "hidden_size": 8,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": cls.head_dim,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "attn_implementation": "eager",
+                "num_hidden_layers": 2,
+                "max_position_embeddings": cls.seq_len,
+                "use_cache": False,
+                "return_dict": False,
+            }
         )
 
         cls.fp_model = LlamaModel(cfg)
@@ -115,8 +127,10 @@ class TestQuantLlamaModel(unittest.TestCase):
         qcfg = make_affine_ptq_config(model_args={"profile": "reference_eval"})
         qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg)
 
-        first_layer = qmodel.layers[0].wrapped
-        first_attn = first_layer.self_attn.wrapped
+        first_layer = cast(
+            QuantLlamaDecoderLayer, cast(PTQWrapper, qmodel.layers[0]).wrapped
+        )
+        first_attn = cast(QuantLlamaAttention, first_layer.self_attn.wrapped)
 
         self.assertEqual(qmodel.attn_options.scale_fusion, "none")
         self.assertEqual(qmodel.attn_options.rope, "hf")
@@ -141,7 +155,10 @@ class TestQuantLlamaModel(unittest.TestCase):
         )
         qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg)
 
-        first_attn = qmodel.layers[0].wrapped.self_attn.wrapped
+        first_layer = cast(
+            QuantLlamaDecoderLayer, cast(PTQWrapper, qmodel.layers[0]).wrapped
+        )
+        first_attn = cast(QuantLlamaAttention, first_layer.self_attn.wrapped)
 
         self.assertEqual(qmodel.attn_options.scale_fusion, "k_proj")
         self.assertEqual(qmodel.attn_options.rope, "pre_negated_sin")
@@ -204,7 +221,10 @@ class TestQuantLlamaModel(unittest.TestCase):
 
         qmodel = QuantLlamaModel(self.fp_model, qcfg=qcfg, fp_name="model")
 
-        obs = qmodel.layers[0].wrapped.self_attn.wrapped.q_proj.get_observer("weight")
+        layer = cast(QuantLlamaDecoderLayer, cast(PTQWrapper, qmodel.layers[0]).wrapped)
+        attention = cast(QuantLlamaAttention, layer.self_attn.wrapped)
+        obs = attention.q_proj.get_observer("weight")
 
+        assert obs is not None
         self.assertEqual(obs.dtype, DType.uint(4))
         self.assertEqual(obs.qscheme, QScheme.PER_TENSOR_ASYMM)

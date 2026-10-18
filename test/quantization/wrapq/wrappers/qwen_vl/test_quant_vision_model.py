@@ -14,6 +14,11 @@
 
 import math
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
+
 from typing import Tuple
 from unittest import mock
 
@@ -36,7 +41,7 @@ skip_msg = "transformers not installed — skipping Qwen3VLVisionModel tests"
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLVisionModel(unittest.TestCase):
-    fp_model: torch.nn.Module
+    fp_model: "Qwen3VLVisionModel"
     hidden_size: int
     num_heads: int
     head_dim: int
@@ -88,6 +93,8 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         t, h, w = grid_thw
         num_patches = t * h * w
         vision_cfg = self.fp_model.config
+        assert isinstance(vision_cfg.patch_size, int)
+        assert isinstance(vision_cfg.temporal_patch_size, int)
         patch_dim = (
             vision_cfg.in_channels
             * vision_cfg.temporal_patch_size
@@ -253,7 +260,10 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
 
         self.assertIsInstance(export_module, Qwen3VLVisionPrefillExportAdapter)
         self.assertIs(export_module.wrapped, q_model)
-        self.assertEqual(export_module.profile.grid_thw, grid_thw)
+        self.assertEqual(
+            cast(Qwen3VLVisionPrefillExportAdapter, export_module).profile.grid_thw,
+            grid_thw,
+        )
         self.assertEqual(export_module.profile_key, "t1_h8_w8")
         self.assertEqual(
             export_module.circle_filename("q"),
@@ -300,7 +310,10 @@ class TestQuantQwen3VLVisionModel(unittest.TestCase):
         export_module = case.export_module(q_model, {})
 
         self.assertIsInstance(export_module, Qwen3VLVisionPrefillExportAdapter)
-        self.assertEqual(export_module.profile.grid_thw, case.grid_tuple)
+        self.assertEqual(
+            cast(Qwen3VLVisionPrefillExportAdapter, export_module).profile.grid_thw,
+            case.grid_tuple,
+        )
 
     def test_as_export_module_supports_quant_mode(self):
         """A calibrated vision wrapper should expose a fixed-profile adapter."""

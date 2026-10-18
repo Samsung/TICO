@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, cast, Iterable, Literal, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer
+
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
@@ -51,6 +55,7 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         fp_name: Optional[str] = None,
         return_type: Optional[ReturnType] = None,
     ):
+        fp_layer = cast("Qwen3VLTextDecoderLayer", fp_layer)
         super().__init__(qcfg, fp_name=fp_name)
 
         assert hasattr(fp_layer, "self_attn")
@@ -116,11 +121,11 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         hidden_states: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None = None,
-        position_ids: torch.LongTensor | None = None,
+        position_ids: torch.Tensor | None = None,
         past_key_values=None,
         use_cache: bool | None = False,
         output_attentions: bool | None = False,
-        cache_position: torch.LongTensor | None = None,
+        cache_position: torch.Tensor | None = None,
         cache_output_mode: Literal["present", "delta"] = "present",
         **kwargs,
     ):

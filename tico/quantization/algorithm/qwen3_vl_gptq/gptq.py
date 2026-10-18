@@ -14,13 +14,14 @@
 
 import math
 import time
-from typing import Optional
+from typing import cast, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
+from tico.quantization.algorithm.gptq.utils import WeightedLayer
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -114,8 +115,8 @@ def get_matmul_input_for_convtranspose2d(
         Matrix shaped like (flattened_kernel_input_dim, num_samples).
     """
     strided_pad = (
-        layer.dilation[0] * (layer.kernel_size[0] - 1) - layer.padding[0],
-        layer.dilation[1] * (layer.kernel_size[1] - 1) - layer.padding[1],
+        layer.dilation[0] * (layer.kernel_size[0] - 1) - int(layer.padding[0]),
+        layer.dilation[1] * (layer.kernel_size[1] - 1) - int(layer.padding[1]),
     )
 
     inp_strided = torch.zeros(
@@ -154,7 +155,7 @@ def get_matmul_input_for_convtranspose2d(
 
 
 def _normalize_2d_padding(
-    padding: int | tuple[int, int] | str,
+    padding: int | tuple[int, ...] | str,
 ) -> tuple[int, int]:
     """
     Normalize Conv2d padding into a tuple.
@@ -178,11 +179,11 @@ def _normalize_2d_padding(
     if isinstance(padding, int):
         return (padding, padding)
 
-    return padding
+    return padding[0], padding[1]
 
 
 def _normalize_3d_padding(
-    padding: int | tuple[int, int, int] | str,
+    padding: int | tuple[int, ...] | str,
 ) -> tuple[int, int, int]:
     """
     Normalize Conv3d padding into a tuple.
@@ -206,7 +207,7 @@ def _normalize_3d_padding(
     if isinstance(padding, int):
         return (padding, padding, padding)
 
-    return padding
+    return padding[0], padding[1], padding[2]
 
 
 def _conv3d_input_to_unfolded(
@@ -296,14 +297,15 @@ class GPTQ:
                 A value of 0 disables the correction (standard GPTQ). Values
                 around 0.25 provide the best empirical results.
         """
-        self.layer = layer
+        # GPTQ dispatch only selects the supported weighted layer classes.
+        self.layer = cast(WeightedLayer, layer)
         self.dev = self.layer.weight.device
         self.normalize_H = normalize_H
         self.hessian_dtype = hessian_dtype
         self.inp_dtype = inp_dtype
         self.gptq_v2_alpha = gptq_v2_alpha
 
-        w = layer.weight.data.clone()
+        w = self.layer.weight.data.clone()
         if isinstance(layer, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
             w = w.flatten(1)
         elif isinstance(layer, nn.ConvTranspose2d):
@@ -325,7 +327,7 @@ class GPTQ:
         self.native_inp: Optional[list] = None
 
     @torch.no_grad()
-    def add_batch(self, inp: torch.Tensor, out: torch.Tensor) -> None:
+    def add_batch(self, inp: torch.Tensor, out: torch.Tensor | None) -> None:
         """
         Accumulate Hessian statistics from one calibration batch.
 
@@ -382,7 +384,10 @@ class GPTQ:
             unfold = nn.Unfold(
                 kernel_size=(1, self.layer.kernel_size[0]),
                 dilation=(1, self.layer.dilation[0]),
-                padding=(0, self.layer.padding[0]),
+                padding=(
+                    0,
+                    0 if self.layer.padding == "valid" else int(self.layer.padding[0]),
+                ),
                 stride=(1, self.layer.stride[0]),
             )
 
@@ -437,7 +442,12 @@ class GPTQ:
                 unfold = nn.Unfold(
                     kernel_size=(1, self.layer.kernel_size[0]),
                     dilation=(1, self.layer.dilation[0]),
-                    padding=(0, self.layer.padding[0]),
+                    padding=(
+                        0,
+                        0
+                        if self.layer.padding == "valid"
+                        else int(self.layer.padding[0]),
+                    ),
                     stride=(1, self.layer.stride[0]),
                 )
 
@@ -461,6 +471,7 @@ class GPTQ:
 
         self.nsamples += batch_size
 
+        assert self.H is not None
         if self.normalize_H:
             # Running average with sqrt(2/N) normalization
             self.H *= (self.nsamples - batch_size) / self.nsamples

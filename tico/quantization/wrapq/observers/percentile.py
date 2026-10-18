@@ -48,6 +48,9 @@ class PercentileObserver(AffineObserverBase):
     substantially different memory and API contract.
     """
 
+    clip_min_val: torch.Tensor
+    clip_max_val: torch.Tensor
+
     def __init__(
         self,
         *,

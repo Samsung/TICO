@@ -18,6 +18,8 @@ import inspect
 
 import torch
 
+from test.modules.base import TestModuleBase
+
 
 def dump(model, example_inputs):
     exported_program = torch.export.export(model.eval(), example_inputs)
@@ -44,6 +46,7 @@ def main() -> None:
 
         for name, cls in models:
             model = cls()
+            assert isinstance(model, TestModuleBase)
             example_inputs = model.get_example_inputs()
 
             dump(model, example_inputs)
@@ -61,6 +64,7 @@ def main() -> None:
         for name, cls in models:
             if name == model_name:
                 model = cls()
+                assert isinstance(model, TestModuleBase)
                 example_inputs = model.get_example_inputs()
 
                 dump(model, example_inputs)

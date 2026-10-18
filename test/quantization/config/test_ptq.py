@@ -42,14 +42,14 @@ class DummyObserverA(AffineObserverBase):
     """Observer used only to check precedence."""
 
     def _update_stats(self, x):
-        return super()._update_stats(x)
+        return None
 
 
 class DummyObserverB(AffineObserverBase):
     """Observer used only to check precedence."""
 
     def _update_stats(self, x):
-        return super()._update_stats(x)
+        return None
 
 
 class TestPTQConfigRoles(unittest.TestCase):

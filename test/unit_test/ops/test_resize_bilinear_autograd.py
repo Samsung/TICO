@@ -33,7 +33,7 @@ class ResizeBilinearAutogradTest(unittest.TestCase):
         output = module(input_)
         self.assertEqual(tuple(output.shape), (1, 2, 5, 7))
         output.square().mean().backward()
-        self.assertIsNotNone(input_.grad)
+        assert input_.grad is not None
         self.assertTrue(torch.isfinite(input_.grad).all())
         self.assertGreater(float(input_.grad.abs().sum()), 0.0)
 

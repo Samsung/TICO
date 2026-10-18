@@ -173,13 +173,13 @@ class TestLlamaExport(unittest.TestCase):
             head_dim=4,
             attention_bias=False,
             attention_dropout=0.0,
-            attn_implementation="eager",
             num_hidden_layers=1,
             max_position_embeddings=4,
             vocab_size=32,
             use_cache=False,
             return_dict=True,
         )
+        config._attn_implementation = "eager"
         model = LlamaForCausalLM(config).eval()
 
         (

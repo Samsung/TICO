@@ -14,6 +14,8 @@
 
 import pathlib
 
+from typing import cast
+
 import torch
 from transformers import AutoModelForCausalLM
 
@@ -37,7 +39,8 @@ torch.manual_seed(123)
 # -----------------------------------------------------------------------------
 # Build model + replace attention with quant wrapper
 # -----------------------------------------------------------------------------
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32).to(DEVICE)
+model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.float32)
+cast(torch.nn.Module, model).to(DEVICE)
 model.eval()
 # make config consistent with static decode length if wrapper reads it
 model.config.max_position_embeddings = MAX_SEQ
@@ -66,7 +69,7 @@ def make_random_decode_batch():
     # additive mask: (B,1,MAX_SEQ)
     # Here we randomly mask some tail region to simulate padding.
     # Keep it simple: choose a random effective length L_eff and mask [L_eff:].
-    L_eff = torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item()
+    L_eff = int(torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item())
     mask = torch.zeros(B, 1, MAX_SEQ, device=DEVICE, dtype=torch.float32)
     if L_eff < MAX_SEQ:
         mask[:, :, L_eff:] = float("-120")

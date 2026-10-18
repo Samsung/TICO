@@ -170,6 +170,12 @@ class Gemma4AssistantSparseHead(nn.Module):
     and the integer ``token_ordering`` metadata.
     """
 
+    token_ordering: torch.Tensor
+    lm_head_weight: torch.Tensor
+    _lm_head_weight_int: torch.Tensor
+    _lm_head_weight_scale: torch.Tensor
+    _lm_head_weight_zero_point: torch.Tensor
+
     def __init__(
         self,
         *,

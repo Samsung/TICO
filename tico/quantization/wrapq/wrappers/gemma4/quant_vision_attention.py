@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional, Tuple
+from typing import cast, Iterable, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -23,6 +23,10 @@ from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionAttention
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionAttention")
@@ -48,6 +52,7 @@ class QuantGemma4VisionAttention(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_attn = cast("Gemma4VisionAttention", fp_attn)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_attn
         self.config = fp_attn.config

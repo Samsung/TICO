@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import cast, Iterable, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -27,6 +27,21 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
 )
+
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder import (
+        QuantGemma4VisionEncoder,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder_layer import (
+        QuantGemma4VisionEncoderLayer,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_model import (
+        QuantGemma4VisionModel,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler import (
+        QuantGemma4VisionPooler,
+    )
 
 
 def _unwrap(module: nn.Module) -> nn.Module:
@@ -170,7 +185,7 @@ class Gemma4VisionEncoderLayerExportAdapter(nn.Module):
         for observer in self.output_observers:
             hidden_states = _apply_export_observer(
                 hidden_states,
-                observer,
+                cast(ObserverBase, observer),
                 quantized=self.quantized,
             )
         return hidden_states
@@ -184,6 +199,9 @@ class Gemma4VisionPostProjectionExportAdapter(nn.Module):
     idempotent, and it gives the consumer Circle input the same quantization
     parameters as the producer Circle output.
     """
+
+    std_bias: torch.Tensor
+    std_scale: torch.Tensor
 
     def __init__(
         self,
@@ -360,7 +378,7 @@ def build_gemma4_vision_split_export_bundle(
     vision_tower = getattr(wrapped_model, "vision_tower", None)
     if vision_tower is None:
         raise ValueError("Gemma4 split vision export requires a vision tower.")
-    vision_model = _unwrap(vision_tower)
+    vision_model = cast("QuantGemma4VisionModel", _unwrap(vision_tower))
     vision_projection = getattr(wrapped_model, "embed_vision", None)
     if vision_projection is None:
         raise ValueError("Gemma4 split vision export requires embed_vision.")
@@ -373,8 +391,8 @@ def build_gemma4_vision_split_export_bundle(
             "Gemma4 vision model did not materialize split export components."
         )
 
-    encoder = _unwrap(encoder_export)
-    pooler = _unwrap(pooler_export)
+    encoder = cast("QuantGemma4VisionEncoder", _unwrap(encoder_export))
+    pooler = cast("QuantGemma4VisionPooler", _unwrap(pooler_export))
     encoder_layers = tuple(getattr(encoder, "layers", ()))
     if not encoder_layers:
         raise ValueError("Gemma4 split vision export requires encoder layers.")
@@ -389,6 +407,7 @@ def build_gemma4_vision_split_export_bundle(
             "Gemma4 vision split components must share the same quantization mode."
         )
 
+    vision_mode = cast(Mode, vision_mode)
     patch_stage = Gemma4VisionPatchStageExportAdapter(
         patch_embedder,
         mode=vision_mode,
@@ -407,7 +426,10 @@ def build_gemma4_vision_split_export_bundle(
                 )
             )
         else:
-            next_layer = _unwrap(encoder_layers[layer_index + 1])
+            next_layer = cast(
+                "QuantGemma4VisionEncoderLayer",
+                _unwrap(encoder_layers[layer_index + 1]),
+            )
             output_observers.append(next_layer.obs_act_in)
 
         layer_stages.append(
@@ -431,7 +453,9 @@ def build_gemma4_vision_split_export_bundle(
         )
     ]
     for layer_index in range(num_layers - 1):
-        next_layer = _unwrap(encoder_layers[layer_index + 1])
+        next_layer = cast(
+            "QuantGemma4VisionEncoderLayer", _unwrap(encoder_layers[layer_index + 1])
+        )
         boundary_contracts.append(
             Gemma4VisionBoundaryContract(
                 name=f"encoder_layer_{layer_index}_to_{layer_index + 1}",

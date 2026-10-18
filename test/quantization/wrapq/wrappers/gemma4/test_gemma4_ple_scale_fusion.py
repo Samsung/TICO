@@ -33,6 +33,8 @@ from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
 class Gemma4TextScaledWordEmbedding(nn.Embedding):
     """Tiny stand-in for the HF module's exact embedding-times-scalar contract."""
 
+    embed_scale: torch.Tensor
+
     def __init__(self, scale=16.0, dtype=torch.float32, **kwargs):
         super().__init__(19, 12, padding_idx=0, dtype=dtype, **kwargs)
         self.register_buffer("embed_scale", torch.tensor(scale), persistent=False)
@@ -145,13 +147,14 @@ class TestGemma4PLEScaleFusion(unittest.TestCase):
 
     def test_all_candidates_checked_before_mutation(self):
         model = nn.Module()
-        model.first = make_model()
+        first = make_model()
+        model.first = first
         model.second = make_model(float("inf"))
-        original = model.first.embed_tokens_per_layer.weight.detach().clone()
+        original = first.embed_tokens_per_layer.weight.detach().clone()
         with self.assertRaises(ValueError):
             fuse_gemma4_ple_embedding_scale(model)
         torch.testing.assert_close(
-            model.first.embed_tokens_per_layer.weight, original, atol=0, rtol=0
+            first.embed_tokens_per_layer.weight, original, atol=0, rtol=0
         )
 
     def test_chunk_validation(self):
@@ -197,8 +200,8 @@ class TestGemma4PLEScaleFusion(unittest.TestCase):
         for mode in ("NO_QUANT", "CALIB", "QUANT"):
             model = make_model()
             model.prepared = nn.Module()
-            model.prepared.qcfg = object()
-            model.prepared._mode = mode
+            setattr(model.prepared, "qcfg", object())
+            setattr(model.prepared, "_mode", mode)
             with self.assertRaisesRegex(RuntimeError, "fresh FP model"):
                 fuse_gemma4_ple_embedding_scale(model)
         model = make_model()
@@ -270,7 +273,8 @@ class TestGemma4PLEScaleFusionConfig(unittest.TestCase):
             )
 
     def test_invalid_config_rejected(self):
-        for value in ("true", "false", 0, 1, None, [], {}):
+        invalid_values: tuple[object, ...] = ("true", "false", 0, 1, None, [], {})
+        for value in invalid_values:
             with self.subTest(value=value), self.assertRaisesRegex(TypeError, "bool"):
                 gemma4_ple_scale_fusion_enabled(
                     {"text": {"ple_embedding_scale_fusion": value}}

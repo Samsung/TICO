@@ -51,11 +51,13 @@ def _make_patch_embedder(
     from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
     from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPatchEmbedder
 
-    config = Gemma4VisionConfig(
-        hidden_size=hidden_size,
-        patch_size=patch_size,
-        position_embedding_size=position_embedding_size,
-        allow_global_per_layer_attribute_access=True,
+    config = Gemma4VisionConfig.from_dict(
+        dict(
+            hidden_size=hidden_size,
+            patch_size=patch_size,
+            position_embedding_size=position_embedding_size,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     return Gemma4VisionPatchEmbedder(config).eval()
 
@@ -128,11 +130,13 @@ class TestQuantGemma4VisionPatchEmbedder(unittest.TestCase):
 
         q_module = QuantGemma4VisionPatchEmbedder(fp_module).eval()
         folded_linear = q_module.input_proj.wrapped.module
+        assert isinstance(folded_linear, torch.nn.Linear)
         pixel_values, _, _ = self._sample_inputs()
 
         self.assertIsNot(folded_linear, fp_module.input_proj)
         torch.testing.assert_close(folded_linear.weight, original_weight * 2.0)
         self.assertIsNotNone(folded_linear.bias)
+        assert folded_linear.bias is not None
         torch.testing.assert_close(
             folded_linear.bias,
             -original_weight.sum(dim=1),

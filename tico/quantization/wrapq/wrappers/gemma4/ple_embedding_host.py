@@ -30,7 +30,7 @@ bit-identical to the export adapter (and therefore to the Circle graph).
 """
 
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, cast, Mapping, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -40,6 +40,15 @@ from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
     FusedGemma4PLEEmbedding,
 )
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+        Gemma4PLEEmbeddingExportAdapter,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_scaled_word_embedding import (
+        QuantGemma4TextScaledWordEmbedding,
+    )
+
 
 PLE_EMBEDDING_ARTIFACT_SCHEMA_VERSION = 1
 # Version 2 has the same tensor payload but omits the embed_scale operation.
@@ -61,7 +70,7 @@ _ACTIVATION_OBSERVER_KEYS = (
 )
 
 
-def _unwrap_embedding(adapter: nn.Module) -> nn.Module:
+def _unwrap_embedding(adapter: nn.Module) -> "QuantGemma4TextScaledWordEmbedding":
     """Return the QuantGemma4TextScaledWordEmbedding behind the PLE adapter."""
     wrapper = adapter.embed_tokens_per_layer
     quant_embedding = getattr(wrapper, "wrapped", wrapper)
@@ -72,7 +81,7 @@ def _unwrap_embedding(adapter: nn.Module) -> nn.Module:
             "Gemma4 PLE embedding artifact requires a "
             "QuantGemma4TextScaledWordEmbedding wrapper."
         )
-    return quant_embedding
+    return cast("QuantGemma4TextScaledWordEmbedding", quant_embedding)
 
 
 def _require_affine(observer: Any, name: str) -> AffineObserverBase:
@@ -132,7 +141,9 @@ def _apply_observer_payload(
     )
 
 
-def _weight_storage_bytes_per_element(quantized: bool, embedding: nn.Module) -> float:
+def _weight_storage_bytes_per_element(
+    quantized: bool, embedding: "QuantGemma4TextScaledWordEmbedding"
+) -> float:
     """Return the bytes one table element occupies in a Circle constant buffer."""
     if not quantized:
         return float(embedding.module.weight.element_size())
@@ -152,7 +163,12 @@ def estimate_gemma4_ple_embedding_circle_bytes(adapter: nn.Module) -> int:
     """
     embedding = _unwrap_embedding(adapter)
     numel = int(embedding.module.weight.numel())
-    return int(numel * _weight_storage_bytes_per_element(adapter.quantized, embedding))
+    return int(
+        numel
+        * _weight_storage_bytes_per_element(
+            cast("Gemma4PLEEmbeddingExportAdapter", adapter).quantized, embedding
+        )
+    )
 
 
 def _int_storage_dtype(bits: int, signed: bool) -> torch.dtype:
@@ -164,7 +180,9 @@ def _int_storage_dtype(bits: int, signed: bool) -> torch.dtype:
     return torch.int32
 
 
-def _quantized_weight_payload(embedding: nn.Module) -> dict[str, Any]:
+def _quantized_weight_payload(
+    embedding: "QuantGemma4TextScaledWordEmbedding",
+) -> dict[str, Any]:
     """Return the integer table and qparams of the frozen weight observer.
 
     The integer values are recovered from the fake-quantized weight so that
@@ -208,6 +226,7 @@ def _quantized_weight_payload(embedding: nn.Module) -> dict[str, Any]:
 
 def build_gemma4_ple_embedding_artifact(adapter: nn.Module) -> dict[str, Any]:
     """Return the host ``ple_embedding`` payload for a PLE embedding adapter."""
+    adapter = cast("Gemma4PLEEmbeddingExportAdapter", adapter)
     embedding = _unwrap_embedding(adapter)
     module = embedding.module
     quantized = bool(adapter.quantized)
@@ -300,6 +319,12 @@ class Gemma4PLEEmbeddingHostTable(nn.Module):
         ``(1, S, num_hidden_layers, hidden_size_per_layer_input)`` and equals
         ``Gemma4PLEEmbeddingExportAdapter(input_ids)`` for the same model.
     """
+
+    embed_scale: torch.Tensor
+    weight_int: torch.Tensor
+    weight_scale: torch.Tensor
+    weight_zero_point: torch.Tensor
+    weight: torch.Tensor
 
     def __init__(self, artifact: Mapping[str, Any]):
         super().__init__()

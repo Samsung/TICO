@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Optional
+from typing import Any, Callable, cast, Dict, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from transformers import PretrainedConfig
+
+if TYPE_CHECKING:
+    from transformers import GenerationConfig
+
+from transformers import LlamaConfig, PretrainedConfig
 
 from tico.quantization.algorithm.spinquant.fuse_norm_utils import (
     fuse_spinquant_layer_norms,
@@ -130,8 +134,8 @@ class SpinQuantQuantizer(BaseQuantizer):
         )
 
         layers = get_decoder_layers(model)
-        hidden_size = int(model.config.hidden_size)
-        num_heads = int(model.config.num_attention_heads)
+        hidden_size = int(getattr(model.config, "hidden_size"))
+        num_heads = int(getattr(model.config, "num_attention_heads"))
 
         if hidden_size % num_heads != 0:
             raise ValueError(
@@ -231,8 +235,10 @@ class SpinQuantQuantizer(BaseQuantizer):
         target_device = infer_device(model)
         target_dtype = infer_dtype(model)
 
-        spin_model = SpinLlamaForCausalLM(model.config)
-        spin_model.to(device=target_device, dtype=target_dtype)
+        spin_model = SpinLlamaForCausalLM(cast(LlamaConfig, model.config))
+        cast(Callable[..., nn.Module], spin_model.to)(
+            device=target_device, dtype=target_dtype
+        )
 
         missing_keys, unexpected_keys = spin_model.load_state_dict(
             model.state_dict(),
@@ -350,16 +356,18 @@ class SpinQuantQuantizer(BaseQuantizer):
             dst: The converted SpinLlama model.
         """
         if hasattr(src, "generation_config"):
-            dst.generation_config = src.generation_config
+            dst.generation_config = cast("GenerationConfig", src.generation_config)
 
         if hasattr(src, "name_or_path"):
-            dst.name_or_path = src.name_or_path
+            dst.name_or_path = cast(Optional[str], src.name_or_path)
 
         if hasattr(src, "_keep_in_fp32_modules"):
-            dst._keep_in_fp32_modules = src._keep_in_fp32_modules
+            dst._keep_in_fp32_modules = cast(
+                set[str] | list[str] | None, src._keep_in_fp32_modules
+            )
 
         if hasattr(src, "config"):
-            dst.config = src.config
+            dst.config = cast("LlamaConfig", src.config)
 
 
 # Register additional SpinQuant variants.

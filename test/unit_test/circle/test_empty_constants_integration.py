@@ -144,7 +144,7 @@ class TestEmptyConstantsIntegration(unittest.TestCase):
         model.version = 0
         model.operatorCodes = []
         model.buffers = [circle.Buffer.BufferT(), circle.Buffer.BufferT()]
-        model.buffers[1].data = np.empty(0, dtype=np.uint8)
+        setattr(model.buffers[1], "data", np.empty(0, dtype=np.uint8))
         graph = circle.SubGraph.SubGraphT()
         graph.name = "empty_output"
         graph.inputs, graph.outputs, graph.operators = [], [0], []

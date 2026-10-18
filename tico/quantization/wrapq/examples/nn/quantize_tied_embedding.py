@@ -38,6 +38,7 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_embedding import QuantEmbedding
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.utils.utils import SuppressWarning
 
 
@@ -60,9 +61,12 @@ class TiedEmbeddingLM(nn.Module):
 
 def _unwrap_weight(module: nn.Module) -> torch.Tensor:
     """Return the wrapped floating-point module weight when WrapQ is applied."""
-    if hasattr(module, "wrapped") and hasattr(module.wrapped, "module"):
-        return module.wrapped.module.weight
-    return module.weight  # type: ignore[attr-defined]
+    if isinstance(module, PTQWrapper):
+        wrapped = module.wrapped
+        assert isinstance(wrapped, (QuantEmbedding, QuantLinear))
+        return wrapped.module.weight
+    assert isinstance(module, (nn.Embedding, nn.Linear))
+    return module.weight
 
 
 def _assert_tied_weight(model: TiedEmbeddingLM, stage: str) -> None:

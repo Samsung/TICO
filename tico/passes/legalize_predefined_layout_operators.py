@@ -298,7 +298,9 @@ class LegalizePreDefinedLayoutOperators(PassBase):
         _permute_conv_weight(graph, node, args, perm)
 
         with graph.inserting_before(node):
-            legalized_op = None
+            legalized_op: torch._ops.OpOverload | torch._ops.OpOverloadPacket | None = (
+                None
+            )
             if groups == 1:
                 if isinstance(padding, list):
                     legalized_op = torch.ops.circle_custom.conv2d

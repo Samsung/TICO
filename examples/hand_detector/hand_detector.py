@@ -120,6 +120,7 @@ class ResizeBilinearTConv(nn.Module):
             weight[range(self.group_channels), range(self.group_channels)] = kernel
             with torch.no_grad():
                 tconv.weight.copy_(weight)
+                assert tconv.bias is not None
                 tconv.bias.zero_()
             tconvs.append(tconv)
         self.tconvs = nn.ModuleList(tconvs)

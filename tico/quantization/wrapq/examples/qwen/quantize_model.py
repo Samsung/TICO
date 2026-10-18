@@ -54,7 +54,11 @@ if not has_transformers_for("qwen3-vl"):
     )
     sys.exit(1)
 
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+    Qwen3VLConfig,
+    Qwen3VLTextConfig,
+    Qwen3VLVisionConfig,
+)
 from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
 ModelInput = namedtuple(
@@ -160,19 +164,20 @@ def compute_3d_position_ids(
         3, batch_size, seq_len, dtype=input_ids.dtype, device=device
     )
 
+    st_idx: torch.Tensor | int
     for i in range(batch_size):
         # Find positions of image tokens
         image_mask = input_ids[i] == image_token_id
         image_positions = torch.nonzero(image_mask, as_tuple=True)[0]
 
-        llm_pos_ids_list: list[torch.tensor] = []
+        llm_pos_ids_list: list[torch.Tensor] = []
         st = 0
 
         # Process visual tokens
         if len(image_positions) > 0:
             # Group consecutive placeholder tokens into a single visual object
             # All consecutive image tokens represent ONE image/video
-            start_pos = image_positions[0].item()
+            start_pos = int(image_positions[0].item())
 
             # Text position IDs (before first visual token)
             text_len = start_pos - st
@@ -288,6 +293,10 @@ def main():
         image_token_id=998,
         video_token_id=999,
     )
+    assert isinstance(cfg.vision_config, Qwen3VLVisionConfig)
+    assert isinstance(cfg.text_config, Qwen3VLTextConfig)
+    assert isinstance(cfg.vision_config.patch_size, int)
+    assert isinstance(cfg.vision_config.temporal_patch_size, int)
     thw = (1, 8, 8)
     visual_start_idx = 0
 

@@ -17,6 +17,13 @@
 import copy
 import tempfile
 import unittest
+from typing import cast, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantForCausalLM,
+    )
+
 from pathlib import Path
 
 import torch
@@ -59,7 +66,7 @@ else:
     assistant_layer_type_head_dim = None  # type: ignore[assignment]
 
 
-def _make_sample(model: torch.nn.Module, kv_len: int = 10) -> dict:
+def _make_sample(model: "Gemma4AssistantForCausalLM", kv_len: int = 10) -> dict:
     """Create one shape-valid draft-one assistant sample."""
     text_cfg = model.config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
@@ -96,6 +103,19 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
     def _prepare(self, model=None):
         qcfg = build_gemma4_assistant_ptq_config(num_hidden_layers=2)
         return prepare(model or self.fp_model, qcfg)
+
+    def test_generation_config_assignment_updates_underlying_assistant(self):
+        """Preserve the writable GenerationMixin configuration contract."""
+        prepared = self._prepare(copy.deepcopy(self.fp_ref))
+        wrapper = cast(QuantGemma4AssistantForCausalLM, prepared.wrapped)
+        generation_config = copy.deepcopy(wrapper.generation_config)
+        generation_config.max_new_tokens = 4
+
+        wrapper.generation_config = generation_config
+
+        self.assertIs(wrapper.generation_config, generation_config)
+        self.assertIs(wrapper.module.generation_config, generation_config)
+        self.assertEqual(wrapper.generation_config.max_new_tokens, 4)
 
     def test_registry_maps_hf_assistant_class(self):
         """The exact HF assistant class must resolve to the new wrapper."""

@@ -54,6 +54,8 @@ class AffineObserverGroup:
 class LearnableAffineObserver(ObserverBase):
     """Use STE affine fake quantization with learnable per-tensor qparams."""
 
+    _fixed_zero_point: torch.Tensor
+
     def __init__(
         self,
         original: AffineObserverBase,

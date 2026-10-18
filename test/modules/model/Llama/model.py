@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import cast
+
 import torch
 from tico.utils.pytree_utils import register_dynamic_cache, register_dynamic_layer
 from transformers import LlamaConfig, LlamaModel
@@ -28,7 +30,8 @@ class Llama(TestModuleBase):
                 num_hidden_layers=8,
                 num_attention_heads=8,
             )
-        ).to("cpu")
+        )
+        cast(torch.nn.Module, self.model).to("cpu")
         self.rtol = 1e-4
         self.atol = 1e-4
         # The model returns its KV cache as a DynamicCache, which must be

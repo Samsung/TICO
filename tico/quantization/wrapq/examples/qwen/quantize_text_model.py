@@ -53,24 +53,26 @@ def generate_calibration_data(
 
 def main():
     # Create a sample config (small model for faster testing)
-    cfg = Qwen3VLTextConfig(
-        vocab_size=10000,  # Smaller vocab for testing
-        hidden_size=256,  # Smaller hidden size
-        intermediate_size=1024,  # Smaller intermediate size
-        num_hidden_layers=2,  # Only 2 layers for testing
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        head_dim=128,
-        max_position_embeddings=2048,
-        use_cache=False,
-        rope_scaling={
-            "mrope_section": [
-                1,
-                1,
-                2,
-            ],
-            "rope_type": "default",
-        },
+    cfg = Qwen3VLTextConfig.from_dict(
+        dict(
+            vocab_size=10000,  # Smaller vocab for testing
+            hidden_size=256,  # Smaller hidden size
+            intermediate_size=1024,  # Smaller intermediate size
+            num_hidden_layers=2,  # Only 2 layers for testing
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            head_dim=128,
+            max_position_embeddings=2048,
+            use_cache=False,
+            rope_scaling={
+                "mrope_section": [
+                    1,
+                    1,
+                    2,
+                ],
+                "rope_type": "default",
+            },
+        )
     )
 
     # Ensure eager attention implementation so outputs are deterministic

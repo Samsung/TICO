@@ -367,7 +367,9 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
 
     # --- Patch model class from_pretrained ---
     # Collect all model classes that might be used by lmms-eval
-    _model_classes = []
+    from transformers import PreTrainedModel
+
+    _model_classes: list[type[PreTrainedModel]] = []
     try:
         from transformers import Qwen3VLForConditionalGeneration as _Q3
 
@@ -414,7 +416,7 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
 
             return _patched_from_pretrained
 
-        cls.from_pretrained = classmethod(_make_patched_fp(_orig_fn))
+        setattr(cls, "from_pretrained", classmethod(_make_patched_fp(_orig_fn)))
 
     # Also patch AutoModel, AutoModelForCausalLM, and AutoModelForImageTextToText
     # because the Huggingface wrapper's __init__ uses AutoConfig to pick the
@@ -427,10 +429,12 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
     )
 
     _auto_classes = [AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText]
-    _original_auto_fps = {cls: cls.from_pretrained for cls in _auto_classes}
+    _original_auto_fps = {
+        auto_cls: auto_cls.from_pretrained for auto_cls in _auto_classes
+    }
 
-    for cls in _auto_classes:
-        _orig_fn = cls.from_pretrained
+    for auto_cls in _auto_classes:
+        _orig_auto_fn = auto_cls.from_pretrained
 
         def _make_patched_auto_fp(orig_fn):
             def _patched_from_pretrained(cls_arg, *args, **kwargs):
@@ -438,7 +442,11 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
 
             return _patched_from_pretrained
 
-        cls.from_pretrained = classmethod(_make_patched_auto_fp(_orig_fn))
+        setattr(
+            auto_cls,
+            "from_pretrained",
+            classmethod(_make_patched_auto_fp(_orig_auto_fn)),
+        )
 
     # --- Patch AutoProcessor.from_pretrained ---
     _original_processor_fp = AutoProcessor.from_pretrained
@@ -446,7 +454,7 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
     def _patched_processor_fp(cls_arg, *args, **kwargs):
         return processor
 
-    AutoProcessor.from_pretrained = classmethod(_patched_processor_fp)
+    setattr(AutoProcessor, "from_pretrained", classmethod(_patched_processor_fp))
 
     # --- Patch AutoTokenizer.from_pretrained ---
     _original_tokenizer_fp = AutoTokenizer.from_pretrained
@@ -455,7 +463,7 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
     def _patched_tokenizer_fp(cls_arg, *args, **kwargs):
         return _tokenizer
 
-    AutoTokenizer.from_pretrained = classmethod(_patched_tokenizer_fp)
+    setattr(AutoTokenizer, "from_pretrained", classmethod(_patched_tokenizer_fp))
 
     @contextlib.contextmanager
     def _restore():
@@ -464,11 +472,11 @@ def _patch_from_pretrained_to_reuse_model(model, processor):
         finally:
             # Restore original from_pretrained methods
             for cls, orig_fp in _original_model_fps.items():
-                cls.from_pretrained = orig_fp
-            for cls, orig_fp in _original_auto_fps.items():
-                cls.from_pretrained = orig_fp
-            AutoProcessor.from_pretrained = _original_processor_fp
-            AutoTokenizer.from_pretrained = _original_tokenizer_fp
+                setattr(cls, "from_pretrained", orig_fp)
+            for auto_cls, orig_auto_fp in _original_auto_fps.items():
+                setattr(auto_cls, "from_pretrained", orig_auto_fp)
+            setattr(AutoProcessor, "from_pretrained", _original_processor_fp)
+            setattr(AutoTokenizer, "from_pretrained", _original_tokenizer_fp)
 
     return _restore()
 

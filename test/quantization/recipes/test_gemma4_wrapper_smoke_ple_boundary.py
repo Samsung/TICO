@@ -26,6 +26,7 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
 )
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.qscheme import QScheme
 
@@ -98,7 +99,7 @@ class TestGemma4WrapperSmokePLEBoundary(unittest.TestCase):
         case.after_prepare(prepared, {})
         observer = case._per_layer_input_observer
         self.assertIsNotNone(observer)
-        assert observer is not None
+        assert isinstance(observer, AffineObserverBase)
 
         hidden = torch.zeros(1, 2, 2)
         per_layer_input = torch.tensor(

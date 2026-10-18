@@ -244,7 +244,7 @@ def get_module_name_chain(node: Optional[torch.fx.Node]) -> str:
 
 def create_node(
     graph: torch.fx.Graph,
-    target: torch._ops.OpOverload,
+    target: torch._ops.OpOverload | torch._ops.OpOverloadPacket,
     args: Optional[Tuple[Any, ...]] = None,
     kwargs: Optional[Dict[str, Any]] = None,
     *,
@@ -258,7 +258,7 @@ def create_node(
     graph : torch.fx.Graph
         The graph that will own the newly-created node.
 
-    target : torch._ops.OpOverload
+    target : torch._ops.OpOverload | torch._ops.OpOverloadPacket
         The op to call (e.g. `torch.add` or "call_function" target).
 
     args : Tuple[Any, ...], optional

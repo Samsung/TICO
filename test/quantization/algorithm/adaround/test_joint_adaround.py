@@ -81,7 +81,9 @@ class JointAdaRoundTest(unittest.TestCase):
         loss = proxy.fake_quant(weight).square().sum()
         loss.backward()
         self.assertIsNotNone(proxy.alpha.grad)
+        assert proxy.alpha.grad is not None
         self.assertIsNotNone(proxy.raw_log_scale_delta.grad)
+        assert proxy.raw_log_scale_delta.grad is not None
         self.assertGreater(float(proxy.alpha.grad.abs().sum()), 0.0)
         self.assertGreater(float(proxy.raw_log_scale_delta.grad.abs().sum()), 0.0)
 

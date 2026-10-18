@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from tico.quantization import convert, prepare
+from tico.quantization.algorithm.gptq.quant import Quantizer
 from tico.quantization.config.gptq import GPTQConfig
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.public_interface import QUANTIZER_ATTRIBUTE_NAME
@@ -27,6 +28,8 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 class _LinearModel(nn.Module):
+    quantizers: dict[str, Quantizer]
+
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(use_cache=True)

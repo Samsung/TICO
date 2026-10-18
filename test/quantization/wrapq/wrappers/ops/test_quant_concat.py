@@ -22,6 +22,7 @@ from tico.ops import Concat
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine
 from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.ops.quant_concat import QuantConcat
 from tico.quantization.wrapq.wrappers.registry import lookup
@@ -61,6 +62,7 @@ class QuantConcatTest(unittest.TestCase):
         right = torch.full((1, 3, 3), 7.0)
         wrapper.enable_calibration()
         wrapper((left, right))
+        assert isinstance(wrapper.obs_act_out, AffineObserverBase)
         self.assertEqual(wrapper.obs_act_out.min_val.item(), -4.0)
         self.assertEqual(wrapper.obs_act_out.max_val.item(), 7.0)
 

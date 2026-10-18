@@ -105,19 +105,21 @@ def generate_calibration_data(
 def main():
     # Create the vision pooler model with a tiny config (no download needed).
     # Use seq_len=16 and output_length=4 so that k=2 (16 / 4 = 4, sqrt(4) = 2).
-    cfg = Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        attention_dropout=0.0,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-        use_clipped_linears=False,
-        rope_parameters={"rope_type": "default", "rope_theta": 100.0},
-        allow_global_per_layer_attribute_access=True,
+    cfg = Gemma4VisionConfig.from_dict(
+        dict(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            attention_dropout=0.0,
+            max_position_embeddings=128,
+            rms_norm_eps=1e-6,
+            use_clipped_linears=False,
+            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")

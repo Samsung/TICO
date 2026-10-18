@@ -16,6 +16,13 @@
 
 import copy
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantForCausalLM,
+    )
+
 
 import torch
 
@@ -59,7 +66,7 @@ else:
 
 
 def _make_dynamic_inputs(
-    model: torch.nn.Module,
+    model: "Gemma4AssistantForCausalLM",
     *,
     kv_len: int,
     attention_mask: torch.Tensor | None = None,

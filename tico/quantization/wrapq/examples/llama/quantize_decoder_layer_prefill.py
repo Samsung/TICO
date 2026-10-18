@@ -147,7 +147,8 @@ with SuppressWarning(UserWarning, ".*"):
         )
     else:
         qattn = qlayer.wrapped
-        attn_mask = qattn._slice_causal(S, "cpu").squeeze(0)
+        assert isinstance(qattn, QuantLlamaDecoderLayer)
+        attn_mask = qattn.causal_mask_template[:, :, :S, :S].squeeze(0)
         dtype = example_hidden.dtype
         pos_embeds = (
             qattn.rope_cos_template.cpu().to(dtype),

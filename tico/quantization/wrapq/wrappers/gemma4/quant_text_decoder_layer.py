@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Iterable, Optional, Tuple
+from typing import Any, Callable, cast, Iterable, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -30,6 +30,10 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
 
 
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
@@ -50,6 +54,8 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
     requested by the export adapters.
     """
 
+    layer_scalar: torch.Tensor
+
     def __init__(
         self,
         fp_layer: nn.Module,
@@ -57,6 +63,7 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_layer = cast("Gemma4TextDecoderLayer", fp_layer)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_layer
         self.config = fp_layer.config

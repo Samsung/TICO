@@ -69,8 +69,8 @@ class TestRegisterDynamicCache(unittest.TestCase):
         cache = DynamicCache()
         if Version(transformers.__version__) < Version("4.54.0"):
             # Legacy attribute-based structure
-            cache.key_cache = [_make_tensor(1, 4, 8, 16)]
-            cache.value_cache = [_make_tensor(1, 4, 8, 16)]
+            setattr(cache, "key_cache", [_make_tensor(1, 4, 8, 16)])
+            setattr(cache, "value_cache", [_make_tensor(1, 4, 8, 16)])
         else:
             # Layer-based structure — populate via standard update call
             # so that cache.layers is initialised correctly.
@@ -88,9 +88,13 @@ class TestRegisterDynamicCache(unittest.TestCase):
         from packaging.version import Version
 
         if Version(transformers.__version__) < Version("4.54.0"):
-            self.assertEqual(len(restored.key_cache), len(cache.key_cache))
-            torch.testing.assert_close(restored.key_cache[0], cache.key_cache[0])
-            torch.testing.assert_close(restored.value_cache[0], cache.value_cache[0])
+            original_keys = getattr(cache, "key_cache")
+            original_values = getattr(cache, "value_cache")
+            restored_keys = getattr(restored, "key_cache")
+            restored_values = getattr(restored, "value_cache")
+            self.assertEqual(len(restored_keys), len(original_keys))
+            torch.testing.assert_close(restored_keys[0], original_keys[0])
+            torch.testing.assert_close(restored_values[0], original_values[0])
         else:
             self.assertEqual(len(restored.layers), len(cache.layers))
 

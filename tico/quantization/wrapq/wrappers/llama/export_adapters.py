@@ -12,12 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple
+from typing import cast, List, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 from transformers.cache_utils import Cache
+
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
+    from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (
+        QuantLlamaForCausalLM,
+    )
 
 
 _FAKE_QUANT_META_KERNELS_REGISTERED = False
@@ -125,7 +132,7 @@ def make_token_embedding_example_input(
 
     return torch.randint(
         low=0,
-        high=int(qmodel.config.vocab_size),
+        high=int(cast("QuantLlamaForCausalLM", qmodel).config.vocab_size),
         size=(1, max_seq_len),
         dtype=torch.long,
         device="cpu",
@@ -175,7 +182,8 @@ class LlamaTokenEmbeddingExportAdapter(torch.nn.Module):
 
     def __init__(self, qmodel: torch.nn.Module):
         super().__init__()
-        llama_model = qmodel.model.wrapped
+        qmodel = cast("QuantLlamaForCausalLM", qmodel)
+        llama_model = cast("QuantLlamaModel", qmodel.model.wrapped)
         self.embed_tokens = llama_model.embed_tokens
         self.rotate_embedding = getattr(llama_model, "rotate_embedding", None)
 
@@ -204,7 +212,8 @@ class LlamaLMHeadExportAdapter(torch.nn.Module):
 
     def __init__(self, qmodel: torch.nn.Module):
         super().__init__()
-        llama_model = qmodel.model.wrapped
+        qmodel = cast("QuantLlamaForCausalLM", qmodel)
+        llama_model = cast("QuantLlamaModel", qmodel.model.wrapped)
         self.norm = llama_model.norm
         self.rotate_lm_head = getattr(qmodel, "rotate_lm_head", None)
         self.lm_head = qmodel.lm_head

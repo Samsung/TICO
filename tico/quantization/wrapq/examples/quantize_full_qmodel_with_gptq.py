@@ -608,7 +608,7 @@ def make_random_position_embeddings(B, head_dim, DEVICE):
 def make_random_decode_attn_mask(B, MAX_SEQ, DEVICE):
     # Additive mask of final static width: (B, 1, MAX_SEQ)
     # Simulate that only the first L_eff positions are valid and the rest are padding.
-    L_eff = torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item()
+    L_eff = int(torch.randint(low=1, high=MAX_SEQ + 1, size=(1,)).item())
     mask = torch.zeros(B, 1, MAX_SEQ, device=DEVICE, dtype=torch.float32)
     if L_eff < MAX_SEQ:
         mask[:, :, L_eff:] = float("-120")
@@ -721,10 +721,12 @@ def save_lm_head_to(
     """
     artifact_name = "lm_head"
     save_path = pathlib.Path(save_layers_to_folder, f"{artifact_name}.q.circle")
+    hidden_size = getattr(getattr(qmodel, "config"), "hidden_size")
+    assert isinstance(hidden_size, int)
     example_hidden = torch.randn(
         1,
         1,
-        int(qmodel.config.hidden_size),
+        hidden_size,
         device="cpu",
     )
 
@@ -1067,7 +1069,7 @@ def setup_runtime(args) -> tuple[torch.device, torch.dtype]:
     random.seed(args.seed)
     torch.backends.cudnn.benchmark = False
     torch.use_deterministic_algorithms(True)
-    torch.utils.deterministic.fill_uninitialized_memory = True
+    setattr(torch.utils.deterministic, "fill_uninitialized_memory", True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     device = torch.device(args.device)

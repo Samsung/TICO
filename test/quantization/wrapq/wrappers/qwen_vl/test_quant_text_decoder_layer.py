@@ -14,6 +14,11 @@
 
 import inspect
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer
+
 
 import torch
 from tico.quantization.wrapq.dtypes import DType
@@ -37,7 +42,7 @@ skip_msg = (
 
 @unittest.skipUnless(has_transformers_for("qwen3-vl"), skip_msg)
 class TestQuantQwen3VLTextDecoderLayer(unittest.TestCase):
-    fp_model: torch.nn.Module
+    fp_model: "Qwen3VLTextDecoderLayer"
     hidden_size: int
     num_attention_heads: int
     num_key_value_heads: int
@@ -73,7 +78,9 @@ class TestQuantQwen3VLTextDecoderLayer(unittest.TestCase):
         cls.fp_model = Qwen3VLTextDecoderLayer(cfg, layer_idx=0)
         cls.hidden_size = cfg.hidden_size
         cls.num_attention_heads = cfg.num_attention_heads
+        assert cfg.num_key_value_heads is not None
         cls.num_key_value_heads = cfg.num_key_value_heads
+        assert cfg.head_dim is not None
         cls.head_dim = cfg.head_dim
 
     def _rand_position_embeddings(self, batch_size, seq_len):

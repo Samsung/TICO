@@ -28,6 +28,8 @@ from test.support.helper import num_of_ops
 class _ConstantFakeQuantModule(torch.nn.Module):
     """Expose one constant tensor through a configurable affine fake quantizer."""
 
+    constant: torch.Tensor
+
     def __init__(self, quant_max: int) -> None:
         super().__init__()
         self.quant_max = int(quant_max)

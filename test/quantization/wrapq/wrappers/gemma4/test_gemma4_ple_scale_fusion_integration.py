@@ -27,6 +27,7 @@ from circle_schema import circle
 from tico.quantization import convert, prepare
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
     fuse_gemma4_ple_embedding_scale,
     FusedGemma4PLEEmbedding,
@@ -48,6 +49,15 @@ from test.quantization.wrapq.wrappers.gemma4.test_gemma4_ple_scale_fusion import
 )
 
 
+class _PLETextModel(nn.Module):
+    """Declare the synthetic text-model state consumed by the export adapter."""
+
+    hidden_size_per_layer_input: int
+    config: SimpleNamespace
+    obs_per_layer_token_inputs: ObserverBase
+    _mode: Mode
+
+
 def make_adapter(fused=True, quantized=True):
     """Use the real wrapper, observers and PLE adapter around a tiny FP table."""
     torch.manual_seed(17)
@@ -65,7 +75,7 @@ def make_adapter(fused=True, quantized=True):
         with torch.no_grad():
             wrapper(torch.arange(19).reshape(1, 19))
         wrapper.freeze_qparams()
-    text = nn.Module()
+    text = _PLETextModel()
     text.embed_tokens_per_layer = wrapper
     text.hidden_size_per_layer_input = 4
     text.config = SimpleNamespace(num_hidden_layers=3)

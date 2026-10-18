@@ -14,6 +14,7 @@
 
 import torch
 from transformers import MambaConfig, MambaForCausalLM
+from transformers.models.mamba.modeling_mamba import MambaBlock
 
 from test.modules.base import TestModuleBase
 
@@ -30,7 +31,9 @@ class MambaMixer(TestModuleBase):
         self.atol = 1e-2
 
     def forward(self, x):
-        return self.model.backbone.layers[0].mixer(x)
+        layer = self.model.backbone.layers[0]
+        assert isinstance(layer, MambaBlock)
+        return layer.mixer(x)
 
     def get_example_inputs(self):
         # Let's fix the seed for now.

@@ -18,7 +18,12 @@ from typing import List, Literal, Optional, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    LlamaForCausalLM,
+    PreTrainedTokenizerBase,
+)
 
 from tico.quantization import prepare
 from tico.quantization.config.ptq import PTQConfig
@@ -99,7 +104,7 @@ def _clone_quant_layer(layer: nn.Module) -> nn.Module:
 
 
 def _normalize_valid_token_mask(
-    input_ids: torch.LongTensor,
+    input_ids: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
     *,
     pad_token_id: Optional[int],
@@ -162,7 +167,7 @@ def _validate_padding_layout(
 
 def _build_position_ids_from_valid_token_mask(
     valid_token_mask: torch.Tensor,
-) -> torch.LongTensor:
+) -> torch.Tensor:
     """
     Build compact absolute position IDs for padded prefill inputs.
 
@@ -176,7 +181,7 @@ def _build_position_ids_from_valid_token_mask(
     return position_ids
 
 
-def _last_valid_token_indices(valid_token_mask: torch.Tensor) -> torch.LongTensor:
+def _last_valid_token_indices(valid_token_mask: torch.Tensor) -> torch.Tensor:
     """
     Return the input index of the last real token for each batch row.
     """
@@ -201,7 +206,7 @@ def _gather_last_token_logits(
 def _gather_rope_by_position_ids(
     rope_cos: torch.Tensor,
     rope_sin: torch.Tensor,
-    position_ids: torch.LongTensor,
+    position_ids: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -329,7 +334,7 @@ def _slice_prefill_rope(
 
 def _build_decode_attention_mask(
     batch_size: int,
-    past_lengths: torch.LongTensor,
+    past_lengths: torch.Tensor,
     max_seq: int,
     device: torch.device,
     dtype: torch.dtype,
@@ -372,7 +377,7 @@ def _build_decode_attention_mask(
 
 def _build_prefill_attention_mask(
     valid_token_mask: torch.Tensor,
-    position_ids: torch.LongTensor,
+    position_ids: torch.Tensor,
     device: torch.device,
     dtype: torch.dtype,
     mask_value: float = -120.0,
@@ -431,7 +436,7 @@ def _write_decode_delta_to_cache(
     cache: LayerCache,
     new_k: torch.Tensor,
     new_v: torch.Tensor,
-    write_positions: torch.LongTensor,
+    write_positions: torch.Tensor,
 ) -> None:
     """
     Write one-token decode K/V deltas into per-row cache positions.
@@ -469,8 +474,8 @@ class StaticLlamaLayerRuntime:
 
     def __init__(
         self,
-        model: AutoModelForCausalLM,
-        tokenizer: AutoTokenizer,
+        model: LlamaForCausalLM,
+        tokenizer: PreTrainedTokenizerBase,
         max_seq: int,
         device: str = "cpu",
         layers: Optional[Sequence[nn.Module]] = None,
@@ -496,26 +501,29 @@ class StaticLlamaLayerRuntime:
         else:
             self.layers = nn.ModuleList(layers).to(self.device)
 
+        wrapped_layers: list[QuantLlamaDecoderLayer] = []
         for layer in self.layers:
             assert hasattr(layer, "wrapped")
             assert isinstance(layer.wrapped, QuantLlamaDecoderLayer)
+            wrapped_layers.append(layer.wrapped)
 
         self.prefill_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("prefill", return_kv=True)
-                for layer in self.layers
+                layer.as_export_module("prefill", return_kv=True)
+                for layer in wrapped_layers
             ]
         ).to(self.device)
         self.decode_layers = nn.ModuleList(
             [
-                layer.wrapped.as_export_module("decode", return_kv=True)
-                for layer in self.layers
+                layer.as_export_module("decode", return_kv=True)
+                for layer in wrapped_layers
             ]
         ).to(self.device)
 
         self.config = self.model.config
         self.hidden_size = self.config.hidden_size
         self.num_hidden_layers = self.config.num_hidden_layers
+        assert self.config.num_key_value_heads is not None
         self.num_kv_heads = self.config.num_key_value_heads
         self.head_dim = getattr(self.config, "head_dim", None) or (
             self.hidden_size // self.config.num_attention_heads
@@ -529,7 +537,7 @@ class StaticLlamaLayerRuntime:
         )
 
         self.layer_caches: List[LayerCache] = []
-        self.past_lengths: Optional[torch.LongTensor] = None
+        self.past_lengths: Optional[torch.Tensor] = None
         self.past_len = 0
 
     def reset_cache(self) -> None:
@@ -582,7 +590,7 @@ class StaticLlamaLayerRuntime:
     def _prepare_prompt_batch(
         self,
         prompt: PromptInput,
-    ) -> Tuple[torch.LongTensor, torch.LongTensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Tokenize prompts and pad them to the static prefill length `max_seq`.
 
@@ -641,9 +649,9 @@ class StaticLlamaLayerRuntime:
 
     def _pad_prefill_tensors_to_max_seq(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor],
-    ) -> Tuple[torch.LongTensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Pad caller-provided prefill tensors to the static length `max_seq`.
 
@@ -706,9 +714,9 @@ class StaticLlamaLayerRuntime:
 
     @staticmethod
     def _compact_input_rows(
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         valid_token_mask: torch.Tensor,
-    ) -> List[torch.LongTensor]:
+    ) -> List[torch.Tensor]:
         """
         Extract unpadded token rows from a padded batch.
         """
@@ -720,8 +728,8 @@ class StaticLlamaLayerRuntime:
 
     def _pad_token_rows(
         self,
-        rows: Sequence[torch.LongTensor],
-    ) -> torch.LongTensor:
+        rows: Sequence[torch.Tensor],
+    ) -> torch.Tensor:
         """
         Pad a list of generated token rows into one tensor.
         """
@@ -749,7 +757,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def _reference_last_logits_from_sequences(
         self,
-        rows: Sequence[torch.LongTensor],
+        rows: Sequence[torch.Tensor],
     ) -> torch.Tensor:
         """
         Run the original model on compact, unpadded token rows.
@@ -765,7 +773,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def prefill(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
@@ -879,7 +887,7 @@ class StaticLlamaLayerRuntime:
         return logits_last
 
     @torch.no_grad()
-    def decode_one(self, input_ids: torch.LongTensor) -> torch.Tensor:
+    def decode_one(self, input_ids: torch.Tensor) -> torch.Tensor:
         """
         Run one decode step with strict static input shapes.
 
@@ -964,7 +972,7 @@ class StaticLlamaLayerRuntime:
         prompt: PromptInput,
         max_new_tokens: int,
         eos_token_id: Optional[int] = None,
-    ) -> torch.LongTensor:
+    ) -> torch.Tensor:
         """
         Greedy generation using padded prefill once and static decode steps.
         """
@@ -1101,7 +1109,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def dump_decode_inputs(
         self,
-        input_id: Union[int, torch.LongTensor],
+        input_id: Union[int, torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Prepare one-step decode inputs without running the layers.
@@ -1151,7 +1159,7 @@ class StaticLlamaLayerRuntime:
     @torch.no_grad()
     def dump_prefill_inputs(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
@@ -1214,6 +1222,7 @@ def main():
         args.model,
         dtype=torch.float32,
     ).to(args.device)
+    assert isinstance(model, LlamaForCausalLM)
     tokenizer = AutoTokenizer.from_pretrained(args.model, legacy=False)
 
     if tokenizer.pad_token_id is None:

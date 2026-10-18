@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.wrappers.nn.quant_conv3d import QuantConv3d
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
@@ -130,6 +131,7 @@ class TestQuantConv3d(unittest.TestCase):
         self.q_conv.enable_calibration()
         self.q_conv.obs_weight.compute_qparams()
         self.assertTrue(hasattr(self.q_conv.obs_weight, "_cached_scale"))
+        assert isinstance(self.q_conv.obs_weight, AffineObserverBase)
         pre_scale = self.q_conv.obs_weight._cached_scale.clone()
 
         # Full calibration cycle again
@@ -155,6 +157,7 @@ class TestQuantConv3d(unittest.TestCase):
 
         # Check that scale/zero_point have correct shape (per output channel)
         expected_num_channels = self.fp32.out_channels
+        assert isinstance(self.q_conv.obs_weight, AffineObserverBase)
         self.assertEqual(
             self.q_conv.obs_weight._cached_scale.shape[0], expected_num_channels
         )
@@ -173,10 +176,12 @@ class TestQuantConv3d(unittest.TestCase):
         _ = self.q_conv(self.x)
 
         # Check that activation observers have collected stats
+        assert isinstance(self.q_conv.obs_act_in, AffineObserverBase)
         self.assertTrue(
             self.q_conv.obs_act_in.has_qparams
             or self.q_conv.obs_act_in.min_val.numel() > 0
         )
+        assert isinstance(self.q_conv.obs_act_out, AffineObserverBase)
         self.assertTrue(
             self.q_conv.obs_act_out.has_qparams
             or self.q_conv.obs_act_out.min_val.numel() > 0
@@ -258,7 +263,8 @@ class TestQuantConv3d(unittest.TestCase):
         q_conv.freeze_qparams()
 
         # Verify bias is still in the module and not modified
-        self.assertIsNotNone(q_conv.module.bias)
+        assert q_conv.module.bias is not None
+        assert fp32_with_bias.bias is not None
         self.assertTrue(torch.equal(q_conv.module.bias, fp32_with_bias.bias))
 
     def test_registration_in_registry(self):

@@ -15,9 +15,16 @@
 """Smoke cases for Qwen3-VL wrapper checks."""
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Tuple
+from typing import Any, Mapping, Tuple, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+        Qwen3VLModel,
+        Qwen3VLVisionModel,
+    )
+
 
 from tico.quantization.recipes.debug.wrapper_smoke.case import (
     CaseAvailability,
@@ -341,7 +348,7 @@ def _build_vision_config(*, size_profile: str, **overrides: Any) -> Any:
 
 def _make_bounded_vision_model(
     *, size_profile: str, **overrides: Any
-) -> torch.nn.Module:
+) -> "Qwen3VLVisionModel":
     """Build a vision-only Qwen3-VL model without allocating text embeddings.
 
     The tiny profile preserves the original two-layer smoke configuration. The
@@ -396,7 +403,7 @@ def _make_tiny_qwen3vl_config() -> Any:
     )
 
 
-def _make_tiny_qwen3vl_model() -> torch.nn.Module:
+def _make_tiny_qwen3vl_model() -> "Qwen3VLModel":
     """Build the existing tiny multimodal model without downloading weights."""
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
@@ -417,14 +424,21 @@ def _text_rope(
     return emb.cos(), emb.sin()
 
 
-def _get_position_embeddings(visual_model: torch.nn.Module, grid_thw: torch.Tensor):
+def _get_position_embeddings(
+    visual_model: "Qwen3VLVisionModel", grid_thw: torch.Tensor
+):
     """Return Qwen3-VL vision RoPE embeddings for a synthetic image grid."""
-    pos_embeds = visual_model.fast_pos_embed_interpolate(grid_thw)
-    rotary_pos_emb = visual_model.rot_pos_emb(grid_thw)
-    seq_len, _ = pos_embeds.size()
-    rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-    emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-    return emb.cos(), emb.sin()
+    legacy_rotary = getattr(visual_model, "rot_pos_emb", None)
+    if callable(legacy_rotary):
+        seq_len = int(torch.prod(grid_thw, dim=1).sum().item())
+        rotary_pos_emb = legacy_rotary(grid_thw).reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        return emb.cos(), emb.sin()
+
+    from transformers.vision_utils import get_vision_position_ids
+
+    position_ids = get_vision_position_ids(grid_thw, visual_model.spatial_merge_size)
+    return visual_model.rotary_pos_emb(visual_model.pos_embed.weight, position_ids)
 
 
 def _get_cu_seqlens(grid_thw: torch.Tensor) -> torch.Tensor:
@@ -485,7 +499,7 @@ def _compute_3d_position_ids(
         llm_pos_ids_list: list[torch.Tensor] = []
         st = 0
         if len(image_positions) > 0:
-            start_pos = image_positions[0].item()
+            start_pos = int(image_positions[0].item())
             text_len = start_pos - st
             if text_len > 0:
                 st_idx = llm_pos_ids_list[-1].max() + 1 if llm_pos_ids_list else 0
@@ -664,7 +678,7 @@ class QwenBaseCase(WrapperSmokeCase):
 
     def _make_vision_model(
         self, cfg: Mapping[str, Any], **overrides: Any
-    ) -> torch.nn.Module:
+    ) -> "Qwen3VLVisionModel":
         """Create a profile-aware vision-only Qwen3-VL model."""
         return _make_bounded_vision_model(
             size_profile=self._validated_size_profile(cfg),
@@ -720,9 +734,10 @@ class QwenTextAttentionBaseCase(QwenBaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped text attention module in the case-specific mode."""
         wrapped = getattr(quantized, "wrapped", quantized)
+        as_export_module = getattr(wrapped, "as_export_module", None)
         return (
-            wrapped.as_export_module(self.export_mode).eval()
-            if hasattr(wrapped, "as_export_module")
+            as_export_module(self.export_mode).eval()
+            if callable(as_export_module)
             else quantized
         )
 
@@ -895,9 +910,10 @@ class QwenTextDecoderLayerBaseCase(QwenBaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped text decoder layer in the case-specific mode."""
         wrapped = getattr(quantized, "wrapped", quantized)
+        as_export_module = getattr(wrapped, "as_export_module", None)
         return (
-            wrapped.as_export_module(self.export_mode).eval()
-            if hasattr(wrapped, "as_export_module")
+            as_export_module(self.export_mode).eval()
+            if callable(as_export_module)
             else quantized
         )
 
@@ -1157,6 +1173,7 @@ class QwenVisionBlockCase(QwenBaseCase):
 
         torch.manual_seed(123)
         profile = self._validated_size_profile(cfg)
+        module: torch.nn.Module
         if profile == _QWEN3_VL_SIZE_PROFILE_TINY:
             self.vision_cfg = self._make_vision_config(cfg)
             self.seq_len = 8
@@ -1322,7 +1339,9 @@ class QwenVisionModelCase(QwenBaseCase):
         """Return the fixed-grid vision adapter used by static export."""
         del cfg
         wrapped = getattr(quantized, "wrapped", quantized)
-        return wrapped.as_export_module(
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        assert callable(as_export_module)
+        return as_export_module(
             "prefill",
             grid_thw=self.grid_tuple,
         ).eval()

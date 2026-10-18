@@ -15,7 +15,7 @@
 import copy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import cast, Sequence
 
 import torch
 import torch.nn as nn
@@ -118,8 +118,9 @@ def run_tied_embedding_smoke(cfg: TiedEmbeddingSmokeConfig) -> None:
 
 def _unwrap_weight(module: nn.Module) -> torch.Tensor:
     if hasattr(module, "wrapped") and hasattr(module.wrapped, "module"):
-        return module.wrapped.module.weight
-    return module.weight  # type: ignore[attr-defined]
+        quant_module = cast(QuantEmbedding | QuantLinear, module.wrapped)
+        return quant_module.module.weight
+    return cast(nn.Embedding | nn.Linear, module).weight
 
 
 def _assert_tied_weight(model: TiedEmbeddingLM, stage: str) -> None:

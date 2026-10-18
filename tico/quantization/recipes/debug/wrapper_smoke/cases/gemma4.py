@@ -334,19 +334,21 @@ def _build_text_config(
     else:
         raise AssertionError(f"Unhandled Gemma4 size profile: {size_profile}")
 
-    text_cfg = Gemma4TextConfig(
-        **dimension_kwargs,
-        num_hidden_layers=len(layer_types),
-        layer_types=list(layer_types),
-        rope_parameters=_rope_parameters_for_layer_types(layer_types),
-        attention_bias=False,
-        attention_dropout=0.0,
-        use_cache=False,
-        enable_moe_block=False,
-        attention_k_eq_v=attention_k_eq_v,
-        num_kv_shared_layers=num_kv_shared_layers,
-        hidden_size_per_layer_input=hidden_size_per_layer_input,
-        allow_global_per_layer_attribute_access=True,
+    text_cfg = Gemma4TextConfig.from_dict(
+        dict(
+            **dimension_kwargs,
+            num_hidden_layers=len(layer_types),
+            layer_types=list(layer_types),
+            rope_parameters=_rope_parameters_for_layer_types(layer_types),
+            attention_bias=False,
+            attention_dropout=0.0,
+            use_cache=False,
+            enable_moe_block=False,
+            attention_k_eq_v=attention_k_eq_v,
+            num_kv_shared_layers=num_kv_shared_layers,
+            hidden_size_per_layer_input=hidden_size_per_layer_input,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     return _set_eager_attention(text_cfg)
 
@@ -361,41 +363,45 @@ def _build_vision_config(*, size_profile: str) -> Any:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
 
     if size_profile == _GEMMA4_SIZE_PROFILE_TINY:
-        vision_cfg = Gemma4VisionConfig(
-            hidden_size=32,
-            intermediate_size=64,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=8,
-            attention_dropout=0.0,
-            max_position_embeddings=128,
-            rms_norm_eps=1e-6,
-            use_clipped_linears=False,
-            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
-            standardize=True,
-            allow_global_per_layer_attribute_access=True,
+        vision_cfg = Gemma4VisionConfig.from_dict(
+            dict(
+                hidden_size=32,
+                intermediate_size=64,
+                num_hidden_layers=1,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                head_dim=8,
+                attention_dropout=0.0,
+                max_position_embeddings=128,
+                rms_norm_eps=1e-6,
+                use_clipped_linears=False,
+                rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+                standardize=True,
+                allow_global_per_layer_attribute_access=True,
+            )
         )
     elif size_profile in _GEMMA4_E2B_WIDTH_PROFILES:
-        vision_cfg = Gemma4VisionConfig(
-            hidden_size=768,
-            intermediate_size=3_072,
-            num_hidden_layers=1,
-            num_attention_heads=12,
-            num_key_value_heads=12,
-            head_dim=64,
-            hidden_activation="gelu_pytorch_tanh",
-            attention_bias=False,
-            attention_dropout=0.0,
-            max_position_embeddings=131_072,
-            rms_norm_eps=1e-6,
-            pooling_kernel_size=3,
-            patch_size=16,
-            position_embedding_size=10_240,
-            use_clipped_linears=True,
-            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
-            standardize=False,
-            allow_global_per_layer_attribute_access=True,
+        vision_cfg = Gemma4VisionConfig.from_dict(
+            dict(
+                hidden_size=768,
+                intermediate_size=3_072,
+                num_hidden_layers=1,
+                num_attention_heads=12,
+                num_key_value_heads=12,
+                head_dim=64,
+                hidden_activation="gelu_pytorch_tanh",
+                attention_bias=False,
+                attention_dropout=0.0,
+                max_position_embeddings=131_072,
+                rms_norm_eps=1e-6,
+                pooling_kernel_size=3,
+                patch_size=16,
+                position_embedding_size=10_240,
+                use_clipped_linears=True,
+                rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+                standardize=False,
+                allow_global_per_layer_attribute_access=True,
+            )
         )
     else:
         raise AssertionError(f"Unhandled Gemma4 size profile: {size_profile}")
@@ -408,11 +414,13 @@ def _build_vision_patch_embedder_config(*, size_profile: str) -> Any:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4VisionConfig
 
     if size_profile == _GEMMA4_SIZE_PROFILE_TINY:
-        return Gemma4VisionConfig(
-            hidden_size=32,
-            patch_size=4,
-            position_embedding_size=8,
-            allow_global_per_layer_attribute_access=True,
+        return Gemma4VisionConfig.from_dict(
+            dict(
+                hidden_size=32,
+                patch_size=4,
+                position_embedding_size=8,
+                allow_global_per_layer_attribute_access=True,
+            )
         )
     return _build_vision_config(size_profile=size_profile)
 
@@ -919,9 +927,10 @@ class Gemma4TextAttentionBaseCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Return the static attention adapter selected by this smoke case."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if not hasattr(wrapped, "as_export_module"):
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if not callable(as_export_module):
             return quantized
-        return wrapped.as_export_module(
+        return as_export_module(
             self.export_mode,
             return_kv=not bool(getattr(wrapped, "is_kv_shared_layer", False)),
         ).eval()
@@ -1344,7 +1353,8 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         """Export the decoder with the calibrated producer-side PLE observer."""
         del cfg
         wrapped = getattr(quantized, "wrapped", quantized)
-        if not hasattr(wrapped, "as_export_module"):
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if not callable(as_export_module):
             return quantized
 
         observer = getattr(self, "_per_layer_input_observer", None)
@@ -1359,7 +1369,7 @@ class Gemma4TextDecoderLayerBaseCase(Gemma4BaseCase):
         }
         if observer is not None:
             export_kwargs["per_layer_input_observer"] = observer
-        return wrapped.as_export_module(
+        return as_export_module(
             self.export_mode,
             **export_kwargs,
         ).eval()
@@ -1865,8 +1875,9 @@ class Gemma4VisionEncoderLayerCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Return the static vision encoder-layer prefill adapter."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
-            return wrapped.as_export_module("prefill").eval()
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
+            return as_export_module("prefill").eval()
         return quantized
 
     def export_input(
@@ -2017,9 +2028,10 @@ class Gemma4VisionPatchEmbedderCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Bake the fixed patch-coordinate profile into an export adapter."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if not hasattr(wrapped, "as_export_module"):
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if not callable(as_export_module):
             return quantized
-        return wrapped.as_export_module(
+        return as_export_module(
             mode="prefill",
             pixel_position_ids=self._case_pixel_position_ids(self.batch_size),
             padding_positions=self._case_padding_positions(self.batch_size),
@@ -2120,9 +2132,10 @@ class Gemma4VisionPoolerCase(Gemma4BaseCase):
         ``matmul``.
         """
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
             pixel_pos_ids = self._case_pixel_position_ids(1)
-            return wrapped.as_export_module(
+            return as_export_module(
                 mode="prefill",
                 output_length=self.output_length,
                 pixel_position_ids=pixel_pos_ids,
@@ -2236,9 +2249,10 @@ class Gemma4VisionModelCase(Gemma4BaseCase):
         pixel values.
         """
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
             pixel_pos_ids = self._case_pixel_position_ids(1)
-            return wrapped.as_export_module(
+            return as_export_module(
                 mode="prefill",
                 pixel_position_ids=pixel_pos_ids,
             ).eval()
@@ -2307,8 +2321,9 @@ class Gemma4MultimodalEmbedderCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped multimodal embedder in prefill mode."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
-            return wrapped.as_export_module(mode="prefill").eval()
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
+            return as_export_module(mode="prefill").eval()
         return quantized
 
     def export_input(
@@ -2388,9 +2403,10 @@ class Gemma4VisionEncoderCase(Gemma4BaseCase):
         with static gather from precomputed tables.
         """
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
             pixel_pos_ids = self._case_vision_position_ids(1)
-            return wrapped.as_export_module(
+            return as_export_module(
                 mode="prefill", pixel_position_ids=pixel_pos_ids
             ).eval()
         return quantized
@@ -2445,13 +2461,15 @@ class Gemma4ModelCase(Gemma4BaseCase):
         self.text_cfg = self._make_text_config(cfg, layer_types=("full_attention",))
         self.vision_cfg = self._make_vision_config(cfg)
 
-        config = Gemma4Config(
-            text_config=self.text_cfg,
-            vision_config=self.vision_cfg,
-            audio_config=None,
-            image_token_id=10,
-            video_token_id=11,
-            audio_token_id=12,
+        config = Gemma4Config.from_dict(
+            dict(
+                text_config=self.text_cfg,
+                vision_config=self.vision_cfg,
+                audio_config=None,
+                image_token_id=10,
+                video_token_id=11,
+                audio_token_id=12,
+            )
         )
         module = Gemma4Model(config).eval()
         return module, clone_module(module)
@@ -2512,8 +2530,9 @@ class Gemma4ModelCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped Gemma4Model in prefill mode."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
-            return wrapped.as_export_module(mode="prefill").eval()
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
+            return as_export_module(mode="prefill").eval()
         return quantized
 
     def export_input(
@@ -2594,13 +2613,15 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
         self.text_cfg.final_logit_softcapping = 30.0
         self.vision_cfg = self._make_vision_config(cfg)
 
-        config = Gemma4Config(
-            text_config=self.text_cfg,
-            vision_config=self.vision_cfg,
-            audio_config=None,
-            image_token_id=10,
-            video_token_id=11,
-            audio_token_id=12,
+        config = Gemma4Config.from_dict(
+            dict(
+                text_config=self.text_cfg,
+                vision_config=self.vision_cfg,
+                audio_config=None,
+                image_token_id=10,
+                video_token_id=11,
+                audio_token_id=12,
+            )
         )
         module = Gemma4ForConditionalGeneration(config).eval()
         return module, clone_module(module)
@@ -2659,8 +2680,9 @@ class Gemma4ForConditionalGenerationCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped Gemma4ForConditionalGeneration in prefill mode."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
-            return wrapped.as_export_module(mode="prefill").eval()
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
+            return as_export_module(mode="prefill").eval()
         return quantized
 
     def export_input(
@@ -2782,8 +2804,9 @@ class Gemma4ForCausalLMCase(Gemma4BaseCase):
     ) -> torch.nn.Module:
         """Export the wrapped Gemma4ForCausalLM in prefill mode."""
         wrapped = getattr(quantized, "wrapped", quantized)
-        if hasattr(wrapped, "as_export_module"):
-            return wrapped.as_export_module(mode="prefill").eval()
+        as_export_module = getattr(wrapped, "as_export_module", None)
+        if callable(as_export_module):
+            return as_export_module(mode="prefill").eval()
         return quantized
 
     def export_input(

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, cast, Sequence
 
 import torch
 
@@ -29,6 +29,14 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     make_token_embedding_example_input,
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
+from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+    QuantLlamaDecoderLayer,
+)
+from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
+from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (
+    QuantLlamaForCausalLM,
+)
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 def _make_random_position_embeddings(
@@ -242,6 +250,7 @@ def export_lm_head(
     artifact_tag: str = "q",
 ) -> None:
     """Export the final normalization and LM head stage."""
+    qmodel = cast(QuantLlamaForCausalLM, qmodel)
     example_hidden = torch.randn(1, 1, int(qmodel.config.hidden_size), device="cpu")
     _convert_and_save(
         LlamaLMHeadExportAdapter(qmodel),
@@ -278,8 +287,8 @@ def export_llama_per_layer(
         artifact_tag,
         register_fake_quant_kernels,
     ) = _prepare_llama_export_model(q_model)
-    qmodel = export_model.wrapped
-    layers = qmodel.model.wrapped.layers
+    qmodel = cast(QuantLlamaForCausalLM, cast(PTQWrapper, export_model).wrapped)
+    layers = cast(QuantLlamaModel, qmodel.model.wrapped).layers
     config = qmodel.config
     append_buckets = _normalize_append_prefill_buckets(
         append_prefill_buckets, max_seq_len
@@ -301,17 +310,22 @@ def export_llama_per_layer(
         batch, seq, hidden_size = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(batch, seq, hidden_size, device="cpu")
         attention_mask = (
-            qlayer.wrapped.causal_mask_template[..., :seq, :seq].squeeze(0).to("cpu")
+            cast(QuantLlamaDecoderLayer, qlayer.wrapped)
+            .causal_mask_template[..., :seq, :seq]
+            .squeeze(0)
+            .to("cpu")
         )
-        position_embeddings = qlayer.wrapped._slice_rope(
+        position_embeddings = cast(QuantLlamaDecoderLayer, qlayer.wrapped)._slice_rope(
             start=0,
             seq_len=seq,
-            device="cpu",
+            device=torch.device("cpu"),
             dtype=example_hidden.dtype,
         )
 
         _convert_and_save(
-            qlayer.wrapped.as_export_module("prefill", return_kv=prefill_decode),
+            cast(QuantLlamaDecoderLayer, qlayer.wrapped).as_export_module(
+                "prefill", return_kv=prefill_decode
+            ),
             (example_hidden,),
             save_path,
             kwargs={
@@ -326,7 +340,7 @@ def export_llama_per_layer(
                 qmodel, 1, "cpu", max_seq_len
             )
             _convert_and_save(
-                qlayer.wrapped.as_export_module("decode"),
+                cast(QuantLlamaDecoderLayer, qlayer.wrapped).as_export_module("decode"),
                 (hidden,),
                 output_dir / _circle_name(layer_name, artifact_tag),
                 kwargs={
@@ -342,7 +356,9 @@ def export_llama_per_layer(
                 qmodel, 1, "cpu", max_seq_len, append_seq
             )
             _convert_and_save(
-                qlayer.wrapped.as_export_module("append_prefill"),
+                cast(QuantLlamaDecoderLayer, qlayer.wrapped).as_export_module(
+                    "append_prefill"
+                ),
                 (hidden,),
                 output_dir / _circle_name(layer_name, artifact_tag),
                 kwargs={

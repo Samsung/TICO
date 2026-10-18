@@ -13,10 +13,14 @@
 # limitations under the License.
 
 import copy
-from typing import Any, Iterable, Literal, Optional, Tuple
+from typing import Any, cast, Iterable, Literal, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextAttention
+
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.config.qwen3_vl_attention import (
@@ -50,6 +54,8 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
     Hugging Face-like batched attention graph for experiments.
     """
 
+    causal_mask_template: torch.Tensor
+
     def __init__(
         self,
         fp_attn: nn.Module,
@@ -57,6 +63,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_attn = cast("Qwen3VLTextAttention", fp_attn)
         super().__init__(qcfg, fp_name=fp_name)
 
         self.attn_options = get_qwen3_vl_text_attention_options(self.qcfg)
@@ -72,6 +79,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads
         )
         self.num_heads = cfg.num_attention_heads
+        assert cfg.num_key_value_heads is not None
         self.num_kv_heads = cfg.num_key_value_heads
         self.kv_rep = self.num_heads // self.num_kv_heads
 
@@ -475,7 +483,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         *,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cache_position: Optional[torch.LongTensor],
+        cache_position: Optional[torch.Tensor],
     ) -> LayerKV:
         """
         Update an HF Cache-like object and return the full present KV tensors.
@@ -530,7 +538,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         new_v: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
-        cache_position: Optional[torch.LongTensor],
+        cache_position: Optional[torch.Tensor],
     ) -> LayerKV:
         """Build the full present KV tensors used by the attention matmul."""
         if normalized_static_past is not None:
@@ -732,7 +740,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values=None,
         use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
         cache_output_mode: CacheOutputMode = "present",
         **kwargs,
     ):

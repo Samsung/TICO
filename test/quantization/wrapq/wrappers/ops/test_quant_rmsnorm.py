@@ -135,6 +135,7 @@ class TestQuantRMSNorm(unittest.TestCase):
         self.q_rms.obs_weight.compute_qparams()
         self.assertTrue(hasattr(self.q_rms.obs_weight, "_cached_scale"))
         self.assertIsInstance(self.q_rms.obs_weight, AffineObserverBase)
+        assert isinstance(self.q_rms.obs_weight, AffineObserverBase)
         pre_scale = self.q_rms.obs_weight._cached_scale.clone()
 
         # Full calibration cycle again

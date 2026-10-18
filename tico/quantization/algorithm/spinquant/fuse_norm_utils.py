@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable
+from typing import cast, Iterable
 
 import torch
 import torch.nn as nn
 
 
-def _require_attr(module: nn.Module, attr_name: str) -> nn.Module:
+def _require_attr(module: object, attr_name: str) -> nn.Module:
     """
     Return a required attribute from a module.
 
@@ -39,7 +39,7 @@ def _require_attr(module: nn.Module, attr_name: str) -> nn.Module:
     return getattr(module, attr_name)
 
 
-def _require_linear(module: nn.Module, attr_name: str) -> nn.Linear:
+def _require_linear(module: object, attr_name: str) -> nn.Linear:
     """
     Return a required nn.Linear attribute from a module.
 
@@ -101,10 +101,10 @@ def fuse_norm_into_linears(
             f"Normalization module `{type(norm).__name__}` must expose `weight`."
         )
 
-    gamma = norm.weight.data.to(torch.float64)
+    gamma = cast(torch.Tensor, norm.weight).data.to(torch.float64)
     beta = None
     if hasattr(norm, "bias") and norm.bias is not None:
-        beta = norm.bias.data.to(torch.float64)
+        beta = cast(torch.Tensor, norm.bias).data.to(torch.float64)
 
     for linear in linear_layers:
         if not isinstance(linear, nn.Linear):
@@ -160,10 +160,12 @@ def reset_norm_affine_to_identity(norm: nn.Module) -> None:
         - `bias` is set to zeros when present.
     """
     if hasattr(norm, "weight") and norm.weight is not None:
-        norm.weight.data.copy_(torch.ones_like(norm.weight.data))
+        cast(torch.Tensor, norm.weight).data.copy_(
+            torch.ones_like(cast(torch.Tensor, norm.weight).data)
+        )
 
     if hasattr(norm, "bias") and norm.bias is not None:
-        norm.bias.data.zero_()
+        cast(torch.Tensor, norm.bias).data.zero_()
 
 
 @torch.no_grad()
@@ -226,7 +228,7 @@ def fuse_spinquant_layer_norms(
             )
         center_embedding_weights(embed_tokens)
 
-    for layer in model.model.layers:
+    for layer in cast(nn.ModuleList, getattr(model.model, "layers")):
         input_norm = _require_attr(layer, "input_layernorm")
         post_attn_norm = _require_attr(layer, "post_attention_layernorm")
 
@@ -249,7 +251,7 @@ def fuse_spinquant_layer_norms(
     if fuse_lm_head:
         if not hasattr(model, "lm_head"):
             raise AttributeError("Expected model to have `lm_head`.")
-        final_norm = model.model.norm
+        final_norm = cast(nn.Module, getattr(model.model, "norm"))
         lm_head = model.lm_head
         if not isinstance(lm_head, nn.Linear):
             raise TypeError(

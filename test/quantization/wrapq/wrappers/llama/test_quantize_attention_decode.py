@@ -46,16 +46,18 @@ class TestLlamaAttentionDecodeExample(unittest.TestCase):
         from transformers.models.llama.modeling_llama import LlamaAttention
 
         self.max_seq = 16
-        self.cfg = LlamaConfig(
-            hidden_size=16,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=8,
-            intermediate_size=32,
-            attention_bias=False,
-            attention_dropout=0.0,
-            attn_implementation="eager",
-            max_position_embeddings=self.max_seq,
+        self.cfg = LlamaConfig.from_dict(
+            {
+                "hidden_size": 16,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "intermediate_size": 32,
+                "attention_bias": False,
+                "attention_dropout": 0.0,
+                "attn_implementation": "eager",
+                "max_position_embeddings": self.max_seq,
+            }
         )
         self.fp_attn = LlamaAttention(self.cfg, layer_idx=0).eval()
 
@@ -63,12 +65,17 @@ class TestLlamaAttentionDecodeExample(unittest.TestCase):
         """Create static decode inputs matching the old example contract."""
         batch_size = 1
         hidden = torch.randn(batch_size, 1, self.cfg.hidden_size)
+        assert self.cfg.head_dim is not None
         cos = torch.randn(batch_size, 1, self.cfg.head_dim)
+        assert self.cfg.head_dim is not None
         sin = torch.randn(batch_size, 1, self.cfg.head_dim)
         if qattn is not None and qattn.wrapped.attn_options.rope == "pre_negated_sin":
             sin = sin.clone()
+            assert self.cfg.head_dim is not None
             sin[..., : self.cfg.head_dim // 2] = -sin[..., : self.cfg.head_dim // 2]
         mask = torch.zeros(batch_size, 1, self.max_seq)
+        assert self.cfg.num_key_value_heads is not None
+        assert self.cfg.head_dim is not None
         past = (
             torch.randn(
                 batch_size,
@@ -224,6 +231,8 @@ activation:
                 actual = exported.module()(*inputs)
                 self.assertEqual(len(actual), 3)
                 self.assertEqual(actual[0].shape, inputs[0].shape)
+                assert self.cfg.num_key_value_heads is not None
+                assert self.cfg.head_dim is not None
                 self.assertEqual(
                     actual[1].shape,
                     (

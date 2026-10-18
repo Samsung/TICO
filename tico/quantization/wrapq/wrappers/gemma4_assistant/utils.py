@@ -14,10 +14,16 @@
 
 """Shared helpers for the Gemma4 assistant (MTP draft) wrapper family."""
 
-from typing import Any, Mapping
+from typing import Any, cast, Mapping, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4_assistant.quant_for_causal_lm import (
+        QuantGemma4AssistantForCausalLM,
+    )
+
 
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
@@ -182,7 +188,7 @@ class Gemma4AssistantGenerationAdapter(nn.Module):
                 "QuantGemma4AssistantForCausalLM (optionally inside a "
                 f"PTQWrapper), got {type(quant_model).__name__}."
             )
-        self.assistant = wrapped
+        self.assistant = cast("QuantGemma4AssistantForCausalLM", wrapped)
 
     def _cast_to_assistant(self, value: Any) -> Any:
         """Move floating inputs to the assistant's device and compute dtype.

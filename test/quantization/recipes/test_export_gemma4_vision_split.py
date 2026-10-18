@@ -34,7 +34,10 @@ import tico.quantization.recipes.export.gemma4 as gemma_export
 import torch
 from tico.quantization.recipes.adapters.gemma4 import Gemma4Adapter
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
     build_gemma4_vision_split_export_bundle,
     Gemma4VisionEncoderLayerExportAdapter,
@@ -42,15 +45,13 @@ from tico.quantization.wrapq.wrappers.gemma4.vision_split_export import (
 )
 
 
-class FakeObserver(torch.nn.Module):
+class FakeObserver(MinMaxObserver):
     """Apply a deterministic idempotent fake-quantization transform."""
 
     def __init__(self, name: str, step: float = 0.125) -> None:
-        super().__init__()
-        self.name = name
-        self.dtype = "int16"
-        self.qscheme = "per_tensor_symmetric"
-        self.channel_axis = None
+        super().__init__(
+            name=name, dtype=DType.int(16), qscheme=QScheme.PER_TENSOR_SYMM
+        )
         self.register_buffer("_cached_scale", torch.tensor(step))
         self.register_buffer("_cached_zp", torch.tensor(0, dtype=torch.int))
 
@@ -135,6 +136,10 @@ class FakeVisionLayer(torch.nn.Module):
 
 class FakeEncoder(torch.nn.Module):
     """Provide the static Gemma4 encoder contract used by split export."""
+
+    attention_mask_template: torch.Tensor
+    position_embeddings_cos_template: torch.Tensor
+    position_embeddings_sin_template: torch.Tensor
 
     def __init__(self, num_layers: int) -> None:
         super().__init__()
@@ -242,6 +247,9 @@ class FakeVisionModelExport(torch.nn.Module):
 
 class FakeVision(torch.nn.Module):
     """Expose the production vision-wrapper attributes needed by the builder."""
+
+    std_bias: torch.Tensor
+    std_scale: torch.Tensor
 
     def __init__(self, *, num_layers: int = 3, output_length: int = 4) -> None:
         super().__init__()

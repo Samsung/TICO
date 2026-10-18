@@ -227,7 +227,8 @@ class TestAdapterMmmuRouting(unittest.TestCase):
 
     def test_invalid_mapping_and_argument_coercion_propagate(self):
         for _module, adapter_cls in self.ADAPTERS:
-            for raw in (True, "enabled", []):
+            invalid_values: tuple[object, ...] = (True, "enabled", [])
+            for raw in invalid_values:
                 with self.subTest(adapter=adapter_cls.family, mmmu=raw):
                     ctx = self._context(adapter_cls(), {"enabled": True, "mmmu": raw})
                     with patch.object(mmmu_mod, "evaluate_mmmu") as evaluate:

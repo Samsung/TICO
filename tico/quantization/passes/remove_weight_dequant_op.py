@@ -34,6 +34,7 @@ from tico.utils.utils import get_quant_dtype
 from tico.utils.validate_args_kwargs import (
     DequantizePerChannelArgs,
     DequantizePerTensorArgs,
+    parse_node_args,
 )
 
 
@@ -163,10 +164,10 @@ def _extract_dequantize_args(
     )
 
     if dequantize_per_channel is not None and dq.target == dequantize_per_channel:
-        return DequantizePerChannelArgs(*dq.args, **dq.kwargs)
+        return parse_node_args(DequantizePerChannelArgs, dq)
 
     if dequantize_per_tensor is not None and dq.target == dequantize_per_tensor:
-        return DequantizePerTensorArgs(*dq.args, **dq.kwargs)
+        return parse_node_args(DequantizePerTensorArgs, dq)
 
     return None
 

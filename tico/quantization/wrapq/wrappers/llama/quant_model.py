@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional, Tuple, Union
+from typing import cast, Optional, Tuple, TYPE_CHECKING, Union
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,18 @@ import torch.nn as nn
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.processing_utils import Unpack
+from typing_extensions import Unpack
+
+if TYPE_CHECKING:
+    from transformers.models.llama.modeling_llama import LlamaModel
+
+    from tico.quantization.wrapq.wrappers.llama.quant_attention import (
+        QuantLlamaAttention,
+    )
+    from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
+        QuantLlamaDecoderLayer,
+    )
+
 
 from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import PTQConfig
@@ -46,6 +57,10 @@ class QuantLlamaModel(QuantModuleBase):
     stays consistent with `QuantLlamaAttention`.
     """
 
+    causal_mask_template: torch.Tensor
+    rope_cos_template: torch.Tensor
+    rope_sin_template: torch.Tensor
+
     def __init__(
         self,
         model_fp: nn.Module,
@@ -53,6 +68,7 @@ class QuantLlamaModel(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        model_fp = cast("LlamaModel", model_fp)
         super().__init__(qcfg, fp_name=fp_name)
 
         self.attn_options = get_llama_attention_options(self.qcfg)
@@ -106,18 +122,25 @@ class QuantLlamaModel(QuantModuleBase):
 
             # Generation/cache path needs tuple outputs from decoder layers.
             if hasattr(wrapped_layer.wrapped, "return_type"):
-                wrapped_layer.wrapped.return_type = "tuple"
+                cast(
+                    "QuantLlamaDecoderLayer", wrapped_layer.wrapped
+                ).return_type = "tuple"
 
             # Pass layer index down so QuantLlamaAttention can update the
             # correct slot in Cache / DynamicCache.
             if hasattr(wrapped_layer.wrapped, "layer_idx"):
-                wrapped_layer.wrapped.layer_idx = idx
+                cast("QuantLlamaDecoderLayer", wrapped_layer.wrapped).layer_idx = idx
             if (
                 hasattr(wrapped_layer.wrapped, "self_attn")
                 and hasattr(wrapped_layer.wrapped.self_attn, "wrapped")
                 and hasattr(wrapped_layer.wrapped.self_attn.wrapped, "layer_idx")
             ):
-                wrapped_layer.wrapped.self_attn.wrapped.layer_idx = idx
+                cast(
+                    "QuantLlamaAttention",
+                    cast(
+                        "QuantLlamaDecoderLayer", wrapped_layer.wrapped
+                    ).self_attn.wrapped,
+                ).layer_idx = idx
 
             new_list.append(wrapped_layer)
 
@@ -511,16 +534,16 @@ class QuantLlamaModel(QuantModuleBase):
 
     def forward(
         self,
-        input_ids: torch.LongTensor = None,
+        input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache | LegacyCache] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        cache_position: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
         position_embeddings: Optional[torch.Tensor] = None,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> Union[Tuple, BaseModelOutputWithPast]:
@@ -585,8 +608,12 @@ class QuantLlamaModel(QuantModuleBase):
             )
 
         # decoder layers
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
+        all_hidden_states: Optional[Tuple[torch.Tensor, ...]] = (
+            () if output_hidden_states else None
+        )
+        all_self_attns: Optional[Tuple[torch.Tensor, ...]] = (
+            () if output_attentions else None
+        )
 
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
@@ -624,8 +651,10 @@ class QuantLlamaModel(QuantModuleBase):
         output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=formatted_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
+            hidden_states=cast(
+                Optional[Tuple[torch.FloatTensor, ...]], all_hidden_states
+            ),
+            attentions=cast(Optional[Tuple[torch.FloatTensor, ...]], all_self_attns),
         )
         return output if return_dict else output.to_tuple()
 

@@ -15,7 +15,7 @@
 
 import copy
 import types
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, cast, Dict, List, Optional
 
 import torch
 from tqdm.auto import tqdm
@@ -61,6 +61,7 @@ class GPTQQuantizer(BaseQuantizer):
         # cache_kwargs[k] -> list of the value for keyword k for each batch
         self.cache_kwargs: Dict[str, List[Any]] = {}
         self.num_batches: int = 0
+        self.orig_model: Optional[torch.nn.Module] = None
 
         # References to original forwards for restoration
         self._orig_model_forward: Optional[Callable[..., Any]] = None
@@ -222,7 +223,9 @@ class GPTQQuantizer(BaseQuantizer):
             if hasattr(model.model, "layers"):
                 target_layers = model.model.layers
                 if self.orig_model is not None:
-                    orig_layers = self.orig_model.model.layers
+                    orig_layers = cast(
+                        torch.nn.ModuleList, getattr(self.orig_model.model, "layers")
+                    )
             else:
                 target_layers = [model]
         else:
@@ -431,7 +434,9 @@ class GPTQQuantizer(BaseQuantizer):
             if self.orig_model is None:
                 hidden_states = model.model.norm(hidden_states)
             else:
-                norm = self.orig_model.model.norm.to(device)
+                norm = cast(torch.nn.Module, getattr(self.orig_model.model, "norm")).to(
+                    device
+                )
                 hidden_states = norm(hidden_states)
                 norm = norm.cpu()
             if len(self.cache_args) > 0:

@@ -230,7 +230,10 @@ class GPTQ:
             unfold = nn.Unfold(
                 (1, self.layer.kernel_size[0]),
                 dilation=(1, self.layer.dilation[0]),
-                padding=(0, self.layer.padding[0]),
+                padding=(
+                    0,
+                    0 if self.layer.padding == "valid" else int(self.layer.padding[0]),
+                ),
                 stride=(1, self.layer.stride[0]),
             )
             if self.layer.groups != 1:
@@ -293,9 +296,10 @@ class GPTQ:
                 inp.shape[0] * inp.shape[1], inp.shape[2] * inp.shape[3]
             ).T  # inp.shape =(C_in * krn_size[0] * krn_size[1] * krn_size[2], N * num_patches)
 
+        assert self.H is not None
         self.nsamples += tmp
         inp = inp.double()
-        self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)  # type: ignore[union-attr]
+        self.H += inp.matmul(inp.t()).to(device=self.H.device, dtype=self.H.dtype)
 
     def fasterquant(
         self,

@@ -12,13 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional, Tuple
+from typing import cast, Optional, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 
 from tico.quantization.config.ptq import ExportMode, PTQConfig
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4VisionEncoderPrefillExportAdapter,
@@ -26,6 +27,10 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionEncoder
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4VisionEncoder")
@@ -45,6 +50,12 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
       shape-dependent computation inside the graph.
     """
 
+    cos_table: torch.Tensor
+    sin_table: torch.Tensor
+    position_embeddings_cos_template: torch.Tensor
+    position_embeddings_sin_template: torch.Tensor
+    attention_mask_template: torch.Tensor
+
     def __init__(
         self,
         fp_encoder: nn.Module,
@@ -52,6 +63,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_encoder = cast("Gemma4VisionEncoder", fp_encoder)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_encoder
         self.config = fp_encoder.config
@@ -109,7 +121,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
 
     def _gather_position_embeddings(
         self,
-        pixel_position_ids: torch.LongTensor,
+        pixel_position_ids: torch.Tensor,
         dtype: torch.dtype = torch.float32,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Gather position embeddings from precomputed lookup tables.
@@ -137,7 +149,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
 
     def _make_bidirectional_mask(
         self,
-        pixel_position_ids: torch.LongTensor,
+        pixel_position_ids: torch.Tensor,
         dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
         """Create a 4D additive bidirectional attention mask with padding support.
@@ -176,7 +188,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         self,
         inputs_embeds: torch.Tensor,
         attention_mask: torch.Tensor,
-        pixel_position_ids: torch.LongTensor | None = None,
+        pixel_position_ids: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run the vision encoder with dynamic RoPE and mask computation.
@@ -199,6 +211,8 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         """
         # Compute position_embeddings dynamically from lookup tables using
         # the actual pixel_position_ids for this batch.
+        if pixel_position_ids is None:
+            raise ValueError("Gemma4 vision encoder requires pixel_position_ids.")
         cos, sin = self._gather_position_embeddings(
             pixel_position_ids, dtype=inputs_embeds.dtype
         )
@@ -290,7 +304,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         self,
         mode: ExportMode = "prefill",
         *,
-        pixel_position_ids: torch.LongTensor,
+        pixel_position_ids: torch.Tensor,
     ) -> nn.Module:
         """Return a static export adapter for the requested execution mode.
 
@@ -324,6 +338,8 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
         # encoder compute dtype when baking static templates so BF16 models do
         # not promote only Q/K to FP32 while V remains BF16.
         template_dtype = next(self.module.parameters()).dtype
+        if pixel_position_ids is None:
+            raise ValueError("Gemma4 vision encoder requires pixel_position_ids.")
         cos, sin = self._gather_position_embeddings(
             pixel_position_ids,
             dtype=template_dtype,
@@ -339,7 +355,7 @@ class QuantGemma4VisionEncoder(QuantModuleBase):
 
         return Gemma4VisionEncoderPrefillExportAdapter(self)
 
-    def _all_observers(self) -> Iterable:
+    def _all_observers(self) -> tuple[ObserverBase, ...]:
         """Return observers owned directly by this wrapper."""
         return (
             self.obs_act_in,

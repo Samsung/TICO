@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Iterable, Optional
+from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,10 @@ from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
+
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4TextMLP
 
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4TextMLP")
@@ -35,6 +39,7 @@ class QuantGemma4TextMLP(QuantModuleBase):
         qcfg: Optional[PTQConfig] = None,
         fp_name: Optional[str] = None,
     ):
+        fp_mlp = cast("Gemma4TextMLP", fp_mlp)
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp_mlp
         self.act_fn = fp_mlp.act_fn

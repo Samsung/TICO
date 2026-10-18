@@ -32,6 +32,8 @@ class CLEQuantizer(BaseQuantizer):
     performed in ``convert``.
     """
 
+    config: CLEConfig
+
     def __init__(self, config: CLEConfig):
         super().__init__(config)
         self.applied_scales = {}  # type: ignore[var-annotated]

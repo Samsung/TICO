@@ -63,23 +63,25 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4ForConditionalGener
 
 def _make_vision_config() -> Gemma4VisionConfig:
     """Create a tiny Gemma4 vision config for the example."""
-    cfg = Gemma4VisionConfig(
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=8,
-        patch_size=4,
-        position_embedding_size=8,
-        pooling_kernel_size=2,
-        attention_dropout=0.0,
-        max_position_embeddings=128,
-        rms_norm_eps=1e-6,
-        use_clipped_linears=False,
-        rope_parameters={"rope_type": "default", "rope_theta": 100.0},
-        standardize=True,
-        allow_global_per_layer_attribute_access=True,
+    cfg = Gemma4VisionConfig.from_dict(
+        dict(
+            hidden_size=32,
+            intermediate_size=64,
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_key_value_heads=2,
+            head_dim=8,
+            patch_size=4,
+            position_embedding_size=8,
+            pooling_kernel_size=2,
+            attention_dropout=0.0,
+            max_position_embeddings=128,
+            rms_norm_eps=1e-6,
+            use_clipped_linears=False,
+            rope_parameters={"rope_type": "default", "rope_theta": 100.0},
+            standardize=True,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -90,28 +92,30 @@ def _make_vision_config() -> Gemma4VisionConfig:
 
 def _make_text_config() -> Gemma4TextConfig:
     """Create a tiny Gemma4 text config for the example."""
-    cfg = Gemma4TextConfig(
-        vocab_size=256,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_global_key_value_heads=2,
-        head_dim=32,
-        global_head_dim=32,
-        max_position_embeddings=128,
-        layer_types=["full_attention"],
-        rope_parameters={
-            "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
-        },
-        attention_bias=False,
-        attention_dropout=0.0,
-        use_cache=False,
-        enable_moe_block=False,
-        # Enable logit softcapping to exercise that code path.
-        final_logit_softcapping=30.0,
-        allow_global_per_layer_attribute_access=True,
+    cfg = Gemma4TextConfig.from_dict(
+        dict(
+            vocab_size=256,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            num_global_key_value_heads=2,
+            head_dim=32,
+            global_head_dim=32,
+            max_position_embeddings=128,
+            layer_types=["full_attention"],
+            rope_parameters={
+                "full_attention": {"rope_type": "default", "rope_theta": 10000.0}
+            },
+            attention_bias=False,
+            attention_dropout=0.0,
+            use_cache=False,
+            enable_moe_block=False,
+            # Enable logit softcapping to exercise that code path.
+            final_logit_softcapping=30.0,
+            allow_global_per_layer_attribute_access=True,
+        )
     )
     if not hasattr(cfg, "_attn_implementation"):
         setattr(cfg, "_attn_implementation", "eager")
@@ -156,6 +160,7 @@ def main():
     config = _make_gemma4_config()
     text_config = config.get_text_config()
     vision_config = config.vision_config
+    assert isinstance(vision_config, Gemma4VisionConfig)
 
     model = Gemma4ForConditionalGeneration(config)
     orig_model = copy.deepcopy(model)

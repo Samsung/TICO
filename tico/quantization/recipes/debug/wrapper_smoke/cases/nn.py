@@ -14,7 +14,7 @@
 
 """Smoke cases for standalone nn wrapper checks."""
 
-from typing import Any, Mapping
+from typing import Any, cast, Mapping
 
 import torch
 import torch.nn as nn
@@ -170,6 +170,7 @@ class NNTiedEmbeddingCase(WrapperSmokeCase):
         """Prepare the embedding and LM head independently to preserve tied weights."""
         from tico.quantization import prepare
 
+        model = cast(TiedEmbeddingLM, model)
         qcfg = self.ptq_config(cfg)
         model.embed = prepare(model.embed, qcfg)  # type: ignore[assignment]
         model.lm_head = prepare(model.lm_head, qcfg)  # type: ignore[assignment]

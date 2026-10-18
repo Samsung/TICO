@@ -28,7 +28,11 @@ from tico.serialize.circle_mapping import (
     to_circle_shape,
 )
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.utils.define import define_pad_node
 from tico.utils.errors import NotYetSupportedError
@@ -48,7 +52,7 @@ class AvgPool2DVisitor(NodeVisitor):
     * Circle's avgpool2d has no option for count_include_pad, so we always set it as False.
     """
 
-    target: List[torch._ops.OpOverload] = [torch.ops.circle_custom.avgpool2d]
+    target: List[TorchOperator] = [torch.ops.circle_custom.avgpool2d]
 
     def __init__(self, op_codes: Dict[OpCode, int], graph: CircleSubgraph):
         super().__init__(op_codes, graph)

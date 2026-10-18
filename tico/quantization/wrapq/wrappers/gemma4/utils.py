@@ -106,7 +106,7 @@ def _normalize_image_mask(
     batch: int,
     seq_len: int,
     device: torch.device,
-) -> torch.BoolTensor:
+) -> torch.Tensor:
     """Return an image placeholder mask with shape ``(B, S)``."""
     if image_mask.dim() == 3:
         image_mask = image_mask[..., 0]

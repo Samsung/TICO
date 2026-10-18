@@ -19,7 +19,7 @@ loaded model, before any quantization algorithm is prepared or calibrated.
 """
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,8 @@ class FusedGemma4PLEEmbedding(nn.Embedding):
     the existing Gemma4 export/host interfaces, but is not used by forward.
     """
 
+    embed_scale: torch.Tensor
+
     def __init__(self, source: nn.Embedding):
         super().__init__(
             num_embeddings=source.num_embeddings,
@@ -54,7 +56,9 @@ class FusedGemma4PLEEmbedding(nn.Embedding):
         # Preserve the original Parameter identity, device and requires_grad too.
         self.weight = source.weight
         self.register_buffer(
-            "embed_scale", torch.ones_like(source.embed_scale), persistent=False
+            "embed_scale",
+            torch.ones_like(cast(torch.Tensor, source.embed_scale)),
+            persistent=False,
         )
         self.train(source.training)
 
@@ -166,7 +170,9 @@ def fuse_gemma4_ple_embedding_scale(model: nn.Module) -> tuple[str, ...]:
         return ()
 
     owners: dict[tuple[torch.device, int], list[str]] = {}
-    tensors = list(model.named_parameters(remove_duplicate=False))
+    tensors: list[tuple[str, torch.Tensor]] = list(
+        model.named_parameters(remove_duplicate=False)
+    )
     tensors.extend(model.named_buffers(remove_duplicate=False))
     for name, tensor in tensors:
         if tensor.is_meta or tensor.layout != torch.strided or tensor.numel() == 0:

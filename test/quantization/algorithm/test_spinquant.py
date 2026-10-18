@@ -123,6 +123,7 @@ class SpinQuantTest(unittest.TestCase):
     def test_prepare_converts_llama_to_spin_llama(self):
         model = self._build_llama_model()
         q_m = prepare(model, SpinQuantConfig())
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         self.assertIsInstance(q_m, SpinLlamaForCausalLM)
         self.assertTrue(hasattr(q_m.model, "rotate_embedding"))
@@ -137,6 +138,7 @@ class SpinQuantTest(unittest.TestCase):
         model._keep_in_fp32_modules = {"lm_head"}
 
         q_m = prepare(model, SpinQuantConfig())
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         self.assertEqual(q_m.name_or_path, "dummy-llama")
         self.assertEqual(q_m._keep_in_fp32_modules, {"lm_head"})
@@ -148,6 +150,7 @@ class SpinQuantTest(unittest.TestCase):
         original_state = self._clone_state_dict(model)
 
         q_m = prepare(model, SpinQuantConfig())
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         # Check that original model weights are copied into the converted model.
         self.assertTrue(
@@ -175,6 +178,7 @@ class SpinQuantTest(unittest.TestCase):
         self.assertIs(model.model.embed_tokens.weight, model.lm_head.weight)
 
         q_m = prepare(model, SpinQuantConfig())
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         # Check that the converted model still uses tied weights.
         self.assertIs(q_m.model.embed_tokens.weight, q_m.lm_head.weight)
@@ -183,6 +187,7 @@ class SpinQuantTest(unittest.TestCase):
     def test_convert_changes_decoder_weights(self):
         model = self._build_llama_model()
         q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         before_q = q_m.model.layers[0].self_attn.q_proj.weight.detach().clone()
         before_o = q_m.model.layers[0].self_attn.o_proj.weight.detach().clone()
@@ -190,6 +195,7 @@ class SpinQuantTest(unittest.TestCase):
         before_down = q_m.model.layers[0].mlp.down_proj.weight.detach().clone()
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         after_q = q_m.model.layers[0].self_attn.q_proj.weight
         after_o = q_m.model.layers[0].self_attn.o_proj.weight
@@ -205,11 +211,13 @@ class SpinQuantTest(unittest.TestCase):
     def test_convert_updates_rotation_side_layers(self):
         model = self._build_llama_model()
         q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         before_embed_rot = q_m.model.rotate_embedding.weight.detach().clone()
         before_lm_head_rot = q_m.rotate_lm_head.weight.detach().clone()
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         after_embed_rot = q_m.model.rotate_embedding.weight
         after_lm_head_rot = q_m.rotate_lm_head.weight
@@ -221,7 +229,9 @@ class SpinQuantTest(unittest.TestCase):
     def test_convert_resets_folded_layer_norms_to_identity(self):
         model = self._build_llama_model()
         q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
+        assert isinstance(q_m, SpinLlamaForCausalLM)
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         for layer in q_m.model.layers:
             self.assertTrue(
@@ -267,7 +277,9 @@ class SpinQuantTest(unittest.TestCase):
         )
 
         q_m = quantizer.prepare(model)
+        assert isinstance(q_m, SpinLlamaForCausalLM)
         q_m = quantizer.convert(q_m)
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         expected_embed_rot = torch.eye(
             hidden_size,
@@ -312,7 +324,9 @@ class SpinQuantTest(unittest.TestCase):
     def test_forward_runs_after_spinquant_prepare_and_convert(self):
         model = self._build_llama_model()
         q_m = prepare(model, SpinQuantConfig(init_method="random", show_progress=False))
+        assert isinstance(q_m, SpinLlamaForCausalLM)
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinLlamaForCausalLM)
 
         input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
         outputs = q_m(input_ids=input_ids)

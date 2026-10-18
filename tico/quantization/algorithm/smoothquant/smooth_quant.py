@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, cast, Dict, List, Optional, Sequence
 
 import torch
 
@@ -20,7 +20,7 @@ import torch
 @torch.no_grad()
 def smooth_weights(
     front_module: torch.nn.Module,
-    back_modules: torch.nn.Module | List[torch.nn.Module],
+    back_modules: torch.nn.Module | Sequence[torch.nn.Module],
     activation_max: torch.Tensor,
     alpha: float,
 ):
@@ -53,7 +53,7 @@ def smooth_weights(
     """
     from transformers.models.llama.modeling_llama import LlamaRMSNorm
 
-    if not isinstance(back_modules, list):
+    if isinstance(back_modules, torch.nn.Module):
         back_modules = [back_modules]
 
     # Check attributes
@@ -117,9 +117,9 @@ def smooth_weights(
     )
 
     # Smooth
-    front_module.weight.div_(scales)
+    cast(torch.Tensor, front_module.weight).div_(scales)
     if hasattr(front_module, "bias"):
-        front_module.bias.div_(scales)
+        cast(torch.Tensor, front_module.bias).div_(scales)
 
     for back_m in back_modules:
         back_m.weight.mul_(scales.view(1, -1))  # type: ignore[operator]
@@ -411,7 +411,10 @@ def _apply_if_qwen3vl_vision_block(
         hasattr(attn, "q_proj") and hasattr(attn, "k_proj") and hasattr(attn, "v_proj")
     ):
         # Separate q, k, v projections
-        back_modules_attn = [attn.q_proj, attn.k_proj, attn.v_proj]
+        back_modules_attn = [
+            cast(torch.nn.Linear, attr)
+            for attr in (attn.q_proj, attn.k_proj, attn.v_proj)
+        ]
     else:
         # Try to find any linear layers in attention
         back_modules_attn = []

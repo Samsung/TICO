@@ -54,9 +54,9 @@ _MISSING = object()
 TensorStorageIdentityKey = tuple[
     str,
     int,
-    int,
-    tuple[int, ...],
-    tuple[int, ...],
+    int | torch.SymInt,
+    tuple[int | torch.SymInt, ...],
+    tuple[int | torch.SymInt, ...],
     torch.dtype,
     torch.layout,
 ]
@@ -491,7 +491,7 @@ def create_constant_placeholder(
         first_user_input = first_node
 
     # Iterate over nodes in reverse order to insert created placeholder before the `first_user_input`.
-    for node, prop_constant_tensor in reversed(const_node_to_tensor.items()):
+    for node, prop_constant_tensor in reversed(list(const_node_to_tensor.items())):
         if all(x in const_node_to_tensor for x in node.users):
             # All users of this constant node are also constant, so we don't need to create a new constant node.
             erase_constant_node(exported_program, node)

@@ -26,7 +26,11 @@ from tico.serialize.circle_mapping import (
     to_circle_shape,
 )
 from tico.serialize.operators.hashable_opcode import OpCode
-from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
+from tico.serialize.operators.node_visitor import (
+    NodeVisitor,
+    register_node_visitor,
+    TorchOperator,
+)
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.define import define_pad_node
@@ -67,7 +71,7 @@ class DepthwiseConv2dVisitor(NodeVisitor):
                          Bias -------------/
     """
 
-    target: List[torch._ops.OpOverload] = [
+    target: List[TorchOperator] = [
         torch.ops.circle_custom.depthwise_conv2d,
         torch.ops.circle_custom.depthwise_conv2d.padding,
     ]

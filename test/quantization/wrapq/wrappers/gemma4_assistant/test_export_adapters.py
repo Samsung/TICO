@@ -16,6 +16,13 @@
 
 import copy
 import unittest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
+        Gemma4AssistantForCausalLM,
+    )
+
 
 import torch
 
@@ -62,7 +69,7 @@ else:
     assistant_layer_type_head_dim = None  # type: ignore[assignment]
 
 
-def _make_dynamic_inputs(model: torch.nn.Module, kv_len: int = 10) -> dict:
+def _make_dynamic_inputs(model: "Gemma4AssistantForCausalLM", kv_len: int = 10) -> dict:
     text_cfg = model.config.get_text_config()
     kv_heads = int(text_cfg.num_key_value_heads)
     full_head_dim = assistant_layer_type_head_dim(text_cfg, "full_attention")

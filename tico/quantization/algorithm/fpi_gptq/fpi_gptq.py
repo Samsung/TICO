@@ -33,6 +33,7 @@ from tico.quantization.algorithm.gptq.gptq import (
 
 from tico.quantization.algorithm.gptq.quant import quantize, Quantizer
 from tico.quantization.algorithm.fpi_gptq.util import iterate_GPTQ, quantize
+from tico.quantization.algorithm.gptq.utils import get_numerical_padding
 
 
 class FPI_GPTQ:
@@ -66,7 +67,7 @@ class FPI_GPTQ:
             unfold = nn.Unfold(
                 self.layer.kernel_size,
                 dilation=self.layer.dilation,
-                padding=self.layer.padding,
+                padding=get_numerical_padding(self.layer),
                 stride=self.layer.stride,
             )
 
@@ -102,7 +103,10 @@ class FPI_GPTQ:
             unfold = nn.Unfold(
                 (1, self.layer.kernel_size[0]),
                 dilation=(1, self.layer.dilation[0]),
-                padding=(0, self.layer.padding[0]),
+                padding=(
+                    0,
+                    0 if self.layer.padding == "valid" else int(self.layer.padding[0]),
+                ),
                 stride=(1, self.layer.stride[0]),
             )
             if self.layer.groups != 1:
@@ -122,6 +126,7 @@ class FPI_GPTQ:
         if isinstance(self.layer, nn.ConvTranspose2d):
             inp = get_matmul_input_for_convtranspose2d(self.layer, inp)
 
+        assert self.H is not None
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
         inp = math.sqrt(2 / self.nsamples) * inp.float()

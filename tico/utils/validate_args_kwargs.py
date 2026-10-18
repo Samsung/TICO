@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, TYPE_CHECKING, Union
+from typing import Callable, List, Optional, TYPE_CHECKING, TypeVar, Union
 
 if TYPE_CHECKING:
     import torch.fx
@@ -30,6 +30,15 @@ This file includes OpArgs classes that provide arguments with type annotations.
     1. Torch spec (aten/src/ATen/native/native_functions.yaml in pytorch repo)
     2. pytorch doc (https://pytorch.org/docs/stable/index.html)
 """
+
+_OpArgs = TypeVar("_OpArgs")
+
+
+def parse_node_args(
+    constructor: Callable[..., _OpArgs], node: torch.fx.Node
+) -> _OpArgs:
+    """Parse dynamic FX arguments through an operator's validated constructor."""
+    return constructor(*node.args, **node.kwargs)
 
 
 @enforce_type

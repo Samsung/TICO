@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import cast
 
 import torch
 
@@ -28,7 +29,11 @@ try:
     from tico.quantization.algorithm.spinquant.spin_qwen3_vl import (
         SpinQwen3VLForConditionalGeneration,
     )
-    from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+        Qwen3VLConfig,
+        Qwen3VLTextConfig,
+        Qwen3VLVisionConfig,
+    )
     from transformers.models.qwen3_vl.modeling_qwen3_vl import (
         Qwen3VLForConditionalGeneration,
     )
@@ -36,10 +41,6 @@ try:
     QWEN3_VL_AVAILABLE = True
     QWEN3_VL_SKIP_REASON = ""
 except (AttributeError, ImportError, ModuleNotFoundError) as exc:
-    Qwen3VLConfig = None  # type: ignore[assignment]
-    Qwen3VLForConditionalGeneration = None  # type: ignore[assignment]
-    Qwen3VLSpinQuantQuantizer = None  # type: ignore[assignment, arg-type, misc]
-    SpinQwen3VLForConditionalGeneration = None  # type: ignore[assignment, arg-type, misc]
     QWEN3_VL_AVAILABLE = False
     QWEN3_VL_SKIP_REASON = f"Qwen3-VL transformers integration is unavailable: {exc}"
 
@@ -146,7 +147,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         vocab_size: int = 80,
         tie_word_embeddings: bool = True,
         deepstack_visual_indexes: list[int] | None = None,
-    ) -> torch.nn.Module:
+    ) -> Qwen3VLForConditionalGeneration:
         """
         Build a tiny Qwen3-VL model for SpinQuant unit tests.
 
@@ -227,7 +228,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
 
     def _force_qwen3_vl_embedding_tie(
         self,
-        model: torch.nn.Module,
+        model: Qwen3VLForConditionalGeneration,
         *,
         tie_word_embeddings: bool,
     ) -> None:
@@ -291,7 +292,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         if not hasattr(text_config, "rope_theta"):
             text_config.rope_theta = 10000.0
 
-    def _force_tied_qwen3_vl_word_embeddings(self, model: torch.nn.Module) -> None:
+    def _force_tied_qwen3_vl_word_embeddings(
+        self, model: Qwen3VLForConditionalGeneration
+    ) -> None:
         """
         Force Qwen3-VL input embeddings and LM head to share storage.
 
@@ -301,7 +304,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model.config.tie_word_embeddings = True
         model.lm_head.weight = model.model.language_model.embed_tokens.weight
 
-    def _force_untied_qwen3_vl_word_embeddings(self, model: torch.nn.Module) -> None:
+    def _force_untied_qwen3_vl_word_embeddings(
+        self, model: Qwen3VLForConditionalGeneration
+    ) -> None:
         """
         Force Qwen3-VL input embeddings and LM head to use separate storage.
 
@@ -311,7 +316,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model.config.tie_word_embeddings = False
         model.lm_head.weight = torch.nn.Parameter(model.lm_head.weight.detach().clone())
 
-    def _clone_state_dict(self, model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    def _clone_state_dict(
+        self, model: Qwen3VLForConditionalGeneration
+    ) -> dict[str, torch.Tensor]:
         """
         Clone a model state_dict into detached tensors.
 
@@ -342,7 +349,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         if layer.bias is not None:
             self.assertTrue(torch.allclose(layer.bias, torch.zeros_like(layer.bias)))
 
-    def _assert_tied_word_embedding(self, model: torch.nn.Module) -> None:
+    def _assert_tied_word_embedding(
+        self, model: Qwen3VLForConditionalGeneration
+    ) -> None:
         """
         Assert that a Qwen3-VL model has tied input and output embeddings.
 
@@ -373,7 +382,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
             shifts=1, dims=1
         )
 
-    def _make_identity_r2_map(self, model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    def _make_identity_r2_map(
+        self, model: Qwen3VLForConditionalGeneration
+    ) -> dict[str, torch.Tensor]:
         """
         Build an identity R2 map for all Qwen3-VL text layers.
 
@@ -383,7 +394,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         Returns:
             Mapping from supported R2 keys to identity matrices.
         """
-        text_config = model.config.text_config
+        text_config = cast(Qwen3VLTextConfig, model.config.text_config)
         head_dim = int(text_config.head_dim)
         return {
             f"model.language_model.layers.{idx}.self_attn.R2": torch.eye(
@@ -394,7 +405,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         }
 
     def _make_identity_vision_r2_map(
-        self, model: torch.nn.Module
+        self, model: Qwen3VLForConditionalGeneration
     ) -> dict[str, torch.Tensor]:
         """
         Build an identity R2 map for all Qwen3-VL vision blocks.
@@ -405,7 +416,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         Returns:
             Mapping from supported vision R2 keys to identity matrices.
         """
-        vision_config = model.config.vision_config
+        vision_config = cast(Qwen3VLVisionConfig, model.config.vision_config)
         hidden_size = int(vision_config.hidden_size)
         num_heads = int(vision_config.num_heads)
         head_dim = hidden_size // num_heads
@@ -420,7 +431,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
 
     def _make_external_config(
         self,
-        model: torch.nn.Module,
+        model: Qwen3VLForConditionalGeneration,
         r1: torch.Tensor,
         *,
         enable_r2: bool = True,
@@ -528,6 +539,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         cfg = Qwen3VLSpinQuantConfig(show_progress=False)
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         self.assertIsInstance(q_m, SpinQwen3VLForConditionalGeneration)
         self.assertTrue(hasattr(q_m.model.language_model, "rotate_embedding"))
@@ -540,9 +552,10 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         model = self._build_qwen3_vl_model()
         model.name_or_path = "dummy-qwen3-vl"
         model._keep_in_fp32_modules = {"lm_head"}
-        model.hf_device_map = {"": "cpu"}
+        setattr(model, "hf_device_map", {"": "cpu"})
 
         q_m = prepare(model, Qwen3VLSpinQuantConfig(show_progress=False))
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         self.assertEqual(q_m.name_or_path, "dummy-qwen3-vl")
         self.assertEqual(q_m._keep_in_fp32_modules, {"lm_head"})
@@ -555,6 +568,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         original_state = self._clone_state_dict(model)
 
         q_m = prepare(model, Qwen3VLSpinQuantConfig(show_progress=False))
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         self.assertTrue(
             torch.allclose(
@@ -578,6 +592,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         self._assert_tied_word_embedding(model)
 
         q_m = prepare(model, Qwen3VLSpinQuantConfig(show_progress=False))
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         self._assert_tied_word_embedding(q_m)
 
@@ -606,6 +621,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         ).logits
 
         q_m = prepare(model, Qwen3VLSpinQuantConfig(show_progress=False))
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         prepared_logits = q_m(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -620,6 +636,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     def test_rotate_embedding_is_on_forward_path(self):
         model = self._build_qwen3_vl_model()
         q_m = prepare(model, Qwen3VLSpinQuantConfig(show_progress=False))
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
@@ -639,6 +656,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     def test_rotate_lm_head_is_on_forward_path(self):
         model = self._build_qwen3_vl_model()
         q_m = prepare(model, Qwen3VLSpinQuantConfig(show_progress=False))
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         input_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
         attention_mask = torch.ones_like(input_ids)
@@ -658,7 +676,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     def test_convert_with_external_r1_preserves_text_logits(self):
         torch.manual_seed(0)
         model = self._build_qwen3_vl_model()
-        hidden_size = int(model.config.text_config.hidden_size)
+        hidden_size = int(cast(Qwen3VLTextConfig, model.config.text_config).hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
         cfg = self._make_external_config(model, r1, enable_r2=True)
 
@@ -672,7 +690,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         ).logits
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         converted_logits = q_m(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -691,14 +711,16 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_updates_runtime_boundary_layers(self):
         model = self._build_qwen3_vl_model()
-        hidden_size = int(model.config.text_config.hidden_size)
+        hidden_size = int(cast(Qwen3VLTextConfig, model.config.text_config).hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
         cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         final_norm_scale = q_m.model.language_model.norm.weight.detach().clone()
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         expected_rotate_embedding = r1.T.to(
             device=q_m.model.language_model.rotate_embedding.weight.device,
@@ -724,12 +746,14 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_resets_folded_text_norms_to_identity(self):
         model = self._build_qwen3_vl_model()
-        hidden_size = int(model.config.text_config.hidden_size)
+        hidden_size = int(cast(Qwen3VLTextConfig, model.config.text_config).hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
         cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         for layer in q_m.model.language_model.layers:
             self.assertTrue(
@@ -755,11 +779,12 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_changes_decoder_weights_but_keeps_tied_embedding(self):
         model = self._build_qwen3_vl_model()
-        hidden_size = int(model.config.text_config.hidden_size)
+        hidden_size = int(cast(Qwen3VLTextConfig, model.config.text_config).hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
         cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         before_q = (
             q_m.model.language_model.layers[0].self_attn.q_proj.weight.detach().clone()
         )
@@ -774,6 +799,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         )
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         self.assertFalse(
             torch.allclose(
@@ -800,17 +826,19 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_fuses_deepstack_outputs_but_not_main_visual_merger(self):
         model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
-        hidden_size = int(model.config.text_config.hidden_size)
+        hidden_size = int(cast(Qwen3VLTextConfig, model.config.text_config).hidden_size)
         r1 = self._make_permutation_rotation(hidden_size)
         cfg = self._make_external_config(model, r1, enable_r2=False)
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         main_before = q_m.model.visual.merger.linear_fc2.weight.detach().clone()
         deep_before = (
             q_m.model.visual.deepstack_merger_list[0].linear_fc2.weight.detach().clone()
         )
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         main_after = q_m.model.visual.merger.linear_fc2.weight
         deep_after = q_m.model.visual.deepstack_merger_list[0].linear_fc2.weight
@@ -833,6 +861,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         )
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         block = q_m.model.visual.blocks[0]
         with torch.no_grad():
             block.norm1.weight.copy_(
@@ -846,6 +875,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         norm1_gamma = block.norm1.weight.detach().clone()
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         expected_qkv = qkv_before * norm1_gamma.to(qkv_before.dtype).unsqueeze(0)
         self.assertTrue(torch.allclose(block.attn.qkv.weight, expected_qkv))
@@ -871,7 +901,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_vision_r1_rotates_vision_weights_and_merger_inputs(self):
         model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
-        vision_hidden_size = int(model.config.vision_config.hidden_size)
+        vision_hidden_size = int(
+            cast(Qwen3VLVisionConfig, model.config.vision_config).hidden_size
+        )
         vision_r1 = self._make_permutation_rotation(vision_hidden_size)
         cfg = Qwen3VLSpinQuantConfig(
             init_method="random",
@@ -886,6 +918,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         )
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         visual = q_m.model.visual
         block = visual.blocks[0]
         patch_before = visual.patch_embed.proj.weight.detach().clone()
@@ -900,6 +933,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         )
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         expected_patch = self._left_multiply_conv3d_output(patch_before, vision_r1.T)
         expected_pos = (
@@ -964,8 +998,12 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_convert_vision_r2_rotates_fused_qkv_v_slice_and_proj_input(self):
         model = self._build_qwen3_vl_model(deepstack_visual_indexes=[0])
-        vision_hidden_size = int(model.config.vision_config.hidden_size)
-        head_dim = vision_hidden_size // int(model.config.vision_config.num_heads)
+        vision_hidden_size = int(
+            cast(Qwen3VLVisionConfig, model.config.vision_config).hidden_size
+        )
+        head_dim = vision_hidden_size // int(
+            cast(Qwen3VLVisionConfig, model.config.vision_config).num_heads
+        )
         vision_r2 = self._make_permutation_rotation(head_dim)
         cfg = Qwen3VLSpinQuantConfig(
             init_method="random",
@@ -979,11 +1017,13 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         )
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         block = q_m.model.visual.blocks[0]
         qkv_before = block.attn.qkv.weight.detach().clone()
         proj_before = block.attn.proj.weight.detach().clone()
 
         q_m = convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         q_before = qkv_before[:vision_hidden_size]
         k_before = qkv_before[vision_hidden_size : 2 * vision_hidden_size]
@@ -1008,7 +1048,9 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
     @torch.inference_mode()
     def test_external_vision_r1_rejects_non_layernorm_compatible_rotation(self):
         model = self._build_qwen3_vl_model()
-        vision_hidden_size = int(model.config.vision_config.hidden_size)
+        vision_hidden_size = int(
+            cast(Qwen3VLVisionConfig, model.config.vision_config).hidden_size
+        )
         bad_rotation = torch.eye(vision_hidden_size, dtype=torch.float64)
         bad_rotation[0, 0] = -1.0
         cfg = Qwen3VLSpinQuantConfig(
@@ -1023,6 +1065,7 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         )
 
         q_m = prepare(model, cfg)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         with self.assertRaises(ValueError):
             convert(q_m)
 
@@ -1031,13 +1074,15 @@ class Qwen3VLSpinQuantTest(unittest.TestCase):
         assert Qwen3VLSpinQuantQuantizer is not None
 
         model = self._build_qwen3_vl_model()
-        hidden_size = int(model.config.text_config.hidden_size)
+        hidden_size = int(cast(Qwen3VLTextConfig, model.config.text_config).hidden_size)
         r1 = torch.eye(hidden_size, dtype=torch.float64)
         cfg = self._make_external_config(model, r1, enable_r2=True)
         quantizer = Qwen3VLSpinQuantQuantizer(cfg)
 
         q_m = quantizer.prepare(model)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
         q_m = quantizer.convert(q_m)
+        assert isinstance(q_m, SpinQwen3VLForConditionalGeneration)
 
         expected_identity = torch.eye(
             hidden_size,
