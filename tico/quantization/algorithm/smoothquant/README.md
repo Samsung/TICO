@@ -15,6 +15,11 @@ the framework dispatches the request to the SmoothQuant-specific implementation.
       Layers specified in this dictionary will use the corresponding alpha
       value instead of the default.
 
+Calibration collects one absolute maximum per channel in the last activation
+dimension for both contiguous and non-contiguous Linear inputs or outputs. It
+preserves activation values and strides; flattening the statistics may allocate a
+temporary copy for a non-contiguous tensor.
+
 ### How to use SmoothQuantQuantizer
 
 Below is an example that demonstrates how to use the SmoothQuant algorithm via the public interface:
