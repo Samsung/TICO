@@ -30,7 +30,8 @@ decides **how** to evaluate a task.
 ## Top-level target selection
 
 `recipes/evaluation/selection.py` defines the common selection contract used by
-all model adapters.
+all model adapters and dataset preflight. Both use the same selector validation
+and diagnostics.
 
 `evaluation.selected_tasks` is either:
 

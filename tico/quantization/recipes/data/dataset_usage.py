@@ -22,6 +22,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from tico.quantization.recipes.evaluation.selection import (
+    get_selected_evaluation_targets,
+)
+
 
 CALIBRATION_ROLE = "calibration"
 EVALUATION_ROLE = "evaluation"
@@ -667,37 +671,6 @@ def _collect_calibration_usages(cfg: Mapping[str, Any]) -> list[DatasetUsage]:
     return usages
 
 
-def _selected_evaluation_targets(
-    evaluation: Mapping[str, Any],
-) -> tuple[str, ...] | None:
-    """Resolve evaluation.selected_tasks with the existing exclusive semantics."""
-    if "selected_tasks" not in evaluation or evaluation.get("selected_tasks") is None:
-        return None
-    raw = evaluation.get("selected_tasks")
-    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
-        raise TypeError(
-            "evaluation.selected_tasks must be a sequence of target names or null."
-        )
-    targets: list[str] = []
-    seen: set[str] = set()
-    for index, value in enumerate(raw):
-        if not isinstance(value, str):
-            raise TypeError(
-                f"evaluation.selected_tasks[{index}] must be a string, got "
-                f"{type(value).__name__}."
-            )
-        target = value.strip()
-        if not target:
-            raise ValueError("evaluation.selected_tasks must not contain empty names.")
-        if target in seen:
-            raise ValueError(
-                f"evaluation.selected_tasks contains duplicate target {target!r}."
-            )
-        seen.add(target)
-        targets.append(target)
-    return tuple(targets)
-
-
 def _target_enabled(
     evaluation: Mapping[str, Any],
     selected: tuple[str, ...] | None,
@@ -778,7 +751,7 @@ def _collect_evaluation_usages(cfg: Mapping[str, Any]) -> list[DatasetUsage]:
     if not evaluation.get("enabled", False):
         return []
 
-    selected = _selected_evaluation_targets(evaluation)
+    selected = get_selected_evaluation_targets(evaluation)
     usages: list[DatasetUsage] = []
 
     if selected is None or "vqa" in selected:
