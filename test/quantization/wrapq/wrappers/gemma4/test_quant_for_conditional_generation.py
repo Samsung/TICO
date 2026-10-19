@@ -194,8 +194,9 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
         with torch.no_grad():
             out = quantized(**sample)
 
-        # The wrapper returns logits directly (not a Gemma4CausalLMOutputWithPast).
-        self.assertTrue(torch.isfinite(out).all())
+        # The wrapper mirrors the HF contract and returns a
+        # Gemma4CausalLMOutputWithPast; the logits live on ``.logits``.
+        self.assertTrue(torch.isfinite(out.logits).all())
 
     def test_forward_output_shape(self):
         """Forward output should have shape (batch, seq_len, vocab_size)."""
@@ -211,7 +212,7 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
             out = quantized(**sample)
 
         self.assertEqual(
-            out.shape,
+            out.logits.shape,
             (self.batch_size, self.seq_len, self.text_config.vocab_size),
         )
 
@@ -229,7 +230,7 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
             out = quantized(**sample, logits_to_keep=1)
 
         self.assertEqual(
-            out.shape,
+            out.logits.shape,
             (self.batch_size, 1, self.text_config.vocab_size),
         )
 
@@ -248,7 +249,7 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
 
         softcap = self.text_config.final_logit_softcapping
         if softcap is not None:
-            self.assertTrue(out.abs().max().item() <= softcap + 1e-5)
+            self.assertTrue(out.logits.abs().max().item() <= softcap + 1e-5)
 
     def test_prepare_convert_flow(self):
         """Full prepare → calibrate → convert flow should succeed."""
@@ -268,10 +269,10 @@ class TestQuantGemma4ForConditionalGenerationSmoke(unittest.TestCase):
             out = quantized(**sample)
 
         self.assertEqual(
-            out.shape,
+            out.logits.shape,
             (self.batch_size, self.seq_len, self.text_config.vocab_size),
         )
-        self.assertTrue(torch.isfinite(out).all())
+        self.assertTrue(torch.isfinite(out.logits).all())
 
     def test_observers_calibrated(self):
         """After convert, the softcapping and logits observers should have qparams."""

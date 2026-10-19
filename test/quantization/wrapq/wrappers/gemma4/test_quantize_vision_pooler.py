@@ -183,18 +183,17 @@ class TestGemma4VisionPoolerSmoke(unittest.TestCase):
         )
 
         self.assertIsInstance(adapter, Gemma4VisionPoolerPrefillExportAdapter)
+        self.assertEqual(adapter.num_valid_outputs, self.output_length)
 
-        # Verify adapter forward works
+        # The export adapter consumes only hidden_states: padding is baked
+        # into the precomputed pooling weights, so no runtime mask is taken.
         sample = self._sample()
-        adapter_kwargs = {
-            "hidden_states": sample["hidden_states"],
-            "padding_positions": sample["padding_positions"],
-        }
         with torch.no_grad():
-            out = adapter(**adapter_kwargs)
+            out = adapter(hidden_states=sample["hidden_states"])
 
-        self.assertIsInstance(out, tuple)
-        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out, torch.Tensor)
+        self.assertEqual(out.shape, (1, self.output_length, self.cfg.hidden_size))
+        self.assertTrue(torch.isfinite(out).all())
 
 
 if __name__ == "__main__":
