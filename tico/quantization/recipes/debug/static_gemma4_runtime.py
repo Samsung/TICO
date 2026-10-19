@@ -23,7 +23,7 @@ stage that produces the packed ``per_layer_inputs`` tensor.
 """
 
 from dataclasses import dataclass
-from typing import Any, cast, NotRequired, Optional, TYPE_CHECKING, TypedDict
+from typing import Any, cast, Optional, TYPE_CHECKING, TypedDict
 
 import torch
 import torch.nn as nn

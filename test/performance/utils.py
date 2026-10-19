@@ -23,6 +23,10 @@ class Llama32LayerBase(torch.nn.Module):
         super().__init__()
         self.seq_len = seq_len
         self.config = self.get_config()
+        # The decoder layer is instantiated directly, so no ``PreTrainedModel``
+        # resolves the attention backend. Older Transformers releases leave it
+        # unset, which fails the attention-function lookup at forward time.
+        self.config._attn_implementation = "eager"
         self.model = LlamaDecoderLayer(config=self.config, layer_idx=0)
         parameters = inspect.signature(self.model.forward).parameters
         self._cache_keyword = (
