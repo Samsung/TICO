@@ -21,8 +21,10 @@ import os
 import tempfile
 import unittest
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, BinaryIO, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -127,6 +129,141 @@ class CircleIOTest(unittest.TestCase):
             path = Path(temporary_directory) / "model.circle"
             write_circle_bytes(b"circle", path)
             self.assertEqual(read_circle_bytes(path), b"circle")
+
+
+class PartialWriteStream:
+    """A real sink that accepts bounded writes and can fail after progress."""
+
+    def __init__(self, stream=None, *, limit=3, fail_after=None, error=None):
+        self.stream = io.BytesIO() if stream is None else stream
+        self.limit = limit
+        self.fail_after = fail_after
+        self.error = error
+        self.views = []
+        self.flushes = 0
+
+    def write(self, data):
+        if self.fail_after is not None and self.stream.tell() >= self.fail_after:
+            raise self.error
+        view = memoryview(data)
+        self.views.append(view)
+        return self.stream.write(view[: self.limit])
+
+    def flush(self):
+        self.flushes += 1
+        self.stream.flush()
+
+    def fileno(self):
+        return self.stream.fileno()
+
+    @property
+    def name(self):
+        return self.stream.name
+
+
+class CircleBytesWriteTest(unittest.TestCase):
+    def test_partial_stream_writes_complete_the_existing_bytes_without_copying(self):
+        data = b"circle\x00\xffpayload"
+        stream = PartialWriteStream()
+        write_circle_bytes(data, cast(BinaryIO, stream))
+        self.assertEqual(stream.stream.getvalue(), data)
+        self.assertTrue(stream.views)
+        self.assertTrue(all(view.obj is data for view in stream.views))
+        self.assertEqual(stream.flushes, 0)
+
+    def test_invalid_write_counts_are_reported_as_stream_errors(self):
+        for result in (0, None, -1, 100):
+            with self.subTest(result=result):
+                stream = SimpleNamespace(write=lambda data, result=result: result)
+                with self.assertRaisesRegex(CircleIOError, "output stream") as raised:
+                    write_circle_bytes(b"circle", stream)
+                self.assertIsInstance(raised.exception.__cause__, OSError)
+
+    def test_error_after_a_partial_write_is_preserved(self):
+        error = OSError("disk full")
+        stream = PartialWriteStream(fail_after=3, error=error)
+        with self.assertRaisesRegex(CircleIOError, "output stream") as raised:
+            write_circle_bytes(b"circle", cast(BinaryIO, stream))
+        self.assertIs(raised.exception.__cause__, error)
+        self.assertEqual(stream.stream.getvalue(), b"cir")
+
+    def test_stdout_completes_partial_writes_before_flushing(self):
+        stream = PartialWriteStream()
+        with patch("tico.circle.io.sys.stdout", SimpleNamespace(buffer=stream)):
+            write_circle_bytes(b"circle\x00\xff", "-")
+        self.assertEqual(stream.stream.getvalue(), b"circle\x00\xff")
+        self.assertEqual(stream.flushes, 1)
+
+    def test_stdout_failure_is_wrapped_without_flushing(self):
+        error = OSError("broken pipe")
+        stream = PartialWriteStream(fail_after=3, error=error)
+        with patch("tico.circle.io.sys.stdout", SimpleNamespace(buffer=stream)):
+            with self.assertRaisesRegex(CircleIOError, "standard output") as raised:
+                write_circle_bytes(b"circle", "-")
+        self.assertIs(raised.exception.__cause__, error)
+        self.assertEqual(stream.stream.getvalue(), b"cir")
+        self.assertEqual(stream.flushes, 0)
+
+    def test_path_writes_preserve_routing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for atomic in (False, True):
+                with self.subTest(atomic=atomic):
+                    path = Path(temporary) / "nested" / "model.circle"
+                    write_circle_bytes(b"circle", path, atomic=atomic)
+                    self.assertEqual(path.read_bytes(), b"circle")
+                    self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_atomic_partial_failure_preserves_existing_file_and_cleans_temporary(self):
+        error = OSError("disk full")
+        open_temporary = tempfile.NamedTemporaryFile
+
+        @contextmanager
+        def partial_temporary(**kwargs):
+            with open_temporary(**kwargs) as stream:
+                yield PartialWriteStream(stream, fail_after=3, error=error)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.circle"
+            path.write_bytes(b"previous")
+            with patch("tico.circle.io.tempfile.NamedTemporaryFile", partial_temporary):
+                with self.assertRaisesRegex(CircleIOError, "Failed to write") as raised:
+                    write_circle_bytes(b"circle", path)
+            self.assertIs(raised.exception.__cause__, error)
+            self.assertEqual(path.read_bytes(), b"previous")
+            self.assertEqual(list(Path(temporary).iterdir()), [path])
+
+    def test_bytes_only_and_empty_bytes_contracts(self):
+        invalid_data: Any
+        for invalid_data in (bytearray(b"circle"), memoryview(b"circle"), "circle"):
+            with self.subTest(data_type=type(invalid_data).__name__):
+                stream = io.BytesIO()
+                with self.assertRaisesRegex(TypeError, "Expected bytes"):
+                    write_circle_bytes(invalid_data, stream)
+                self.assertEqual(stream.getvalue(), b"")
+        for data in (b"", b"circle"):
+            with self.subTest(data=data):
+                stream = io.BytesIO()
+                write_circle_bytes(data, stream)
+                self.assertEqual(stream.getvalue(), data)
+
+    def test_empty_bytes_still_check_stream_writability(self):
+        with self.subTest(stream="closed"):
+            stream = io.BytesIO()
+            stream.close()
+            with self.assertRaisesRegex(ValueError, "closed"):
+                write_circle_bytes(b"", stream)
+        with self.subTest(
+            stream="read-only"
+        ), tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "model.circle"
+            path.write_bytes(b"previous")
+            with path.open("rb", buffering=0) as read_only:
+                with self.assertRaisesRegex(CircleIOError, "output stream") as raised:
+                    write_circle_bytes(b"", read_only)
+                self.assertIsInstance(
+                    raised.exception.__cause__, io.UnsupportedOperation
+                )
+            self.assertEqual(path.read_bytes(), b"previous")
 
 
 def _fake_layout(header=b"header", payloads=(b"abc", bytes(range(40)))):

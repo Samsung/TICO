@@ -87,6 +87,11 @@ depend on the mapping. `save()` streams the header and payload views to a file w
 joining the complete binary, whereas `to_bytes()` always returns the complete binary. See
 [Large Circle export](../../docs/large_circle_export.md) for the layout and ownership rules.
 
+`tico.circle.io.write_circle_bytes()` writes an existing complete `bytes` object to
+a path, binary stream, or `"-"` for standard output. It retries partial writes and
+raises `CircleIOError` if a stream reports no progress or a write fails. File paths
+use atomic replacement by default; a failed atomic write preserves the existing file.
+
 ```python
 with CircleDocument.load_mapped("model.circle") as mapped:
     result = extract_by_operator_indices(mapped, range(20, 65))

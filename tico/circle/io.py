@@ -26,6 +26,7 @@ from typing import Any, BinaryIO, Callable, TypeAlias
 from tico.circle._schema import accessor_api_type, object_api_type
 from tico.circle.errors import CircleIOError
 from tico.serialize.circle_binary import (
+    _write_all,
     CircleBinaryLayout,
     external_buffer_ranges,
     plan_circle_layout,
@@ -199,7 +200,13 @@ def write_circle_bytes(
 
     if not isinstance(data, bytes):
         raise TypeError(f"Expected bytes, received {type(data).__name__}.")
-    _write_destination(destination, lambda stream: stream.write(data), atomic=atomic)
+    _write_destination(
+        destination,
+        lambda stream: _write_all(stream, memoryview(data))
+        if data
+        else stream.write(data),
+        atomic=atomic,
+    )
 
 
 def _write_destination(
