@@ -79,7 +79,7 @@ from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropP
 from tico.quantization.passes.quantize_bias import QuantizeBias
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.quantization.wrapq.utils.check_missing_qparam import check_missing_qparam
-from tico.serialize.circle_serializer import build_circle, build_circle_model
+from tico.serialize.circle_serializer import build_circle_bytes, build_circle_model
 from tico.serialize.operators.node_visitor import get_support_targets
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -366,11 +366,11 @@ def convert_exported_module_to_circle(
     assert isinstance(config, CompileConfigBase)
     exported_program = _prepare_exported_program(exported_program, config)
     logger = logging.getLogger(__name__)
-    circle_program = build_circle(exported_program, config)
+    circle_program = build_circle_bytes(exported_program, config)
 
-    # Keep build_circle() and CircleModel.save() serialization-only. Bytes-returning
-    # entry points optimize after serialization; file output reuses the same O1
-    # document pipeline before final packing.
+    # Keep build_circle_bytes() and CircleModel.save() serialization-only.
+    # Bytes-returning entry points optimize after serialization; file output reuses
+    # the same O1 document pipeline before final packing.
     if config.get("circle_optimize") is not False:
         from tico.circle.export import optimize_for_export
 

@@ -2,7 +2,7 @@
 
 TICO's ordinary conversion path can represent models whose constant payloads
 make the complete Circle binary exceed 2 GiB. The converter does not expose an
-extended-buffer API, a file-path argument to `build_circle`, or a model-family
+extended-buffer API, a file-path argument to `build_circle_bytes`, or a model-family
 specific serialization branch.
 
 Bytes-returning APIs materialize the complete output in memory. Explicit file
@@ -31,7 +31,7 @@ circle_model = tico.convert_from_pt2("model.pt2")
 circle_model.save("model.circle")
 ```
 
-`build_circle()`, `convert_exported_module_to_circle()`, and
+`build_circle_bytes()`, `convert_exported_module_to_circle()`, and
 `CircleModel.circle_binary` continue to contain complete `bytes`. They never
 contain just a FlatBuffer header, a pathname, or a lazy object. Serialization does
 not create or open a file; the existing save APIs remain responsible for I/O.
@@ -81,7 +81,7 @@ can import and execute the model. Backend validation is a separate step.
 ## Layout selection
 
 The shared implementation is `tico/serialize/circle_binary.py`.
-`build_circle()` delegates its final Object API packing to this module.
+`build_circle_bytes()` delegates its final Object API packing to this module.
 `tico.circle.io.model_to_bytes()` uses the same implementation for document
 repacking and post-serialization optimization.
 

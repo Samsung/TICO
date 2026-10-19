@@ -68,7 +68,7 @@ def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
     return model, graph
 
 
-def build_circle(
+def build_circle_bytes(
     ep: ExportedProgram, config: CompileConfigBase = get_default_config()
 ) -> bytes:
     """Convert ExportedProgram to Circle format.
@@ -79,7 +79,7 @@ def build_circle(
     Returns:
         bytes: Complete Circle binary, including any out-of-line constants.
     """
-    return serialize_circle_model(_build_circle_model(ep, config))
+    return serialize_circle_model(_assemble_circle_model(ep, config))
 
 
 def build_circle_model(
@@ -92,10 +92,12 @@ def build_circle_model(
     """
     from tico.circle.io import model_from_object
 
-    return model_from_object(_build_circle_model(ep, config))
+    return model_from_object(_assemble_circle_model(ep, config))
 
 
-def _build_circle_model(ep: ExportedProgram, config: CompileConfigBase) -> CircleModel:
+def _assemble_circle_model(
+    ep: ExportedProgram, config: CompileConfigBase
+) -> CircleModel:
     logger = logging.getLogger(__name__)
     model, graph = _initialize_model()
 

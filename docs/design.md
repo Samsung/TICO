@@ -333,7 +333,7 @@ Before serialization, TICO:
    allowing `operator.getitem` as a multiple-output bookkeeping operation.
 2. Rejects training operators such as `aten.dropout` and `aten.native_dropout`.
 3. Builds Circle tables through the shared serializer. Bytes APIs call
-   `build_circle()` and then optimize the serialized document; file APIs call
+   `build_circle_bytes()` and then optimize the serialized document; file APIs call
    `build_circle_model()` and optimize its normalized document before saving.
 
 `full_like` retains its `dtype` through legalization. Its serializer creates the
@@ -399,7 +399,7 @@ At the end of conversion:
 | Field | Default | Consumed by |
 |---|---:|---|
 | `legalize_causal_mask_value` | `False` | `LegalizeCausalMaskValue` |
-| `remove_constant_input` | `False` | Circle input registration in `build_circle()` |
+| `remove_constant_input` | `False` | Circle input registration in `build_circle_bytes()` |
 | `convert_lhs_const_mm_to_fc` | `False` | `ConvertMatmulToLinear` |
 | `convert_rhs_const_mm_to_fc` | `True` | `ConvertMatmulToLinear` |
 | `convert_single_batch_lhs_const_bmm_to_fc` | `False` | `ConvertMatmulToLinear` |
@@ -417,7 +417,7 @@ field. Keep the dataclass, YAML examples, implementation wiring, and tests synch
 
 ## 8. Circle serialization
 
-`build_circle()` constructs a generated Circle object model and packs it with
+`build_circle_bytes()` constructs a generated Circle object model and packs it with
 FlatBuffers. `build_circle_model()` shares construction but normalizes only
 metadata through the schema, retaining constant payload views for file output.
 

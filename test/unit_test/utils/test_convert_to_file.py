@@ -153,8 +153,8 @@ class ConvertToFileTest(unittest.TestCase):
                 patch.object(conversion, "_FILE_OUTPUT_INLINE_BUDGET", 0)
             )
             forbidden = (
-                (conversion, "build_circle"),
-                (circle_serializer, "build_circle"),
+                (conversion, "build_circle_bytes"),
+                (circle_serializer, "build_circle_bytes"),
                 (circle_serializer, "serialize_circle_model"),
                 (circle_binary, "serialize_circle_model"),
                 (io, "serialize_circle_model"),
@@ -253,7 +253,7 @@ class ConvertToFileTest(unittest.TestCase):
                 wraps=tico.convert_from_pt2_to_file,
             ) as convert_file, patch.object(
                 conversion,
-                "build_circle",
+                "build_circle_bytes",
                 side_effect=AssertionError("CLI must use file conversion"),
             ), patch.object(
                 conversion, "_FILE_OUTPUT_INLINE_BUDGET", 0
