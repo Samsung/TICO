@@ -1,7 +1,7 @@
 # Examples
 
 This directory contains thin command-line examples for running quantization,
-evaluation, export, and debugging workflows.
+evaluation, export, Circle-bundle generation, and debugging workflows.
 
 The examples are intentionally small. Real implementation code lives in
 `tico.quantization.recipes`.
@@ -14,6 +14,7 @@ tico/quantization/examples/
 ├── quantize.py          # Run a config-driven quantization pipeline
 ├── evaluate.py          # Evaluate an FP model or saved checkpoint
 ├── export.py            # Export artifacts from a model or saved checkpoint
+├── generate.py          # Generate from an exported LLaMA Circle bundle
 ├── inspector.py         # Run trace/parity/debug tools
 └── configs/             # Reusable recipe presets
 ```
@@ -39,6 +40,10 @@ LLaMA and Qwen3-VL staged Circle files and does **not** run `pipeline` stages.
 Use `inspector.py` for debug-oriented workflows such as trace, parity, runtime
 inspection, and wrapper-level smoke checks.
 
+Use `generate.py` to run greedy text generation from a saved LLaMA Circle
+bundle. It consumes bundle artifacts directly and has no recipe config or
+checkpoint-loading step.
+
 Summary:
 
 | Command | Runs `pipeline` stages? | Builds calibration inputs? | Evaluates? | Exports? |
@@ -46,11 +51,12 @@ Summary:
 | `quantize.py` | Yes | Yes | If `evaluation.enabled=true` | If `export.enabled=true` |
 | `evaluate.py` | No | No | Yes | No |
 | `export.py` | No | No | No | Yes |
+| `generate.py` | No | No | No | No |
 | `inspector.py` | Mode-dependent | Mode-dependent | Debug only | Debug only |
 
-All four commands load the optional top-level `extensions` list from the config
-before resolving the adapter, and honor `model.adapter` for selecting a
-registered adapter variant. See the
+The four config-driven commands load the optional top-level `extensions` list
+from the config before resolving the adapter, and honor `model.adapter` for
+selecting a registered adapter variant. See the
 [config guide](./configs/README.md#extensions-optional) for the schema and the
 trust implications.
 
@@ -396,6 +402,72 @@ python -m tico.quantization.examples.export \
   --output-dir ./out/llama_layers
 ```
 
+### Generate from a LLaMA Circle bundle
+
+Export a pretrained floating-point model with the existing LLaMA export preset
+and opt in to the `circle_bundle` artifact:
+
+```bash
+python -m tico.quantization.examples.export \
+  --config tico/quantization/examples/configs/llama_export.yaml \
+  --source model \
+  --artifacts circle_bundle \
+  --output-dir ./out/llama_bundle \
+  --set export.max_seq_len=128
+```
+
+The directory includes the staged Circle files, a versioned manifest, frozen
+host RoPE/mask context, and local tokenizer files when the exporter has a
+tokenizer. See the [bundle contract](../recipes/export/README.md#llama-circle-bundles)
+for the layout and runtime API. Existing `circle_per_layer` exports remain
+available; select `circle_bundle` to add the metadata needed for generation.
+
+Generate from prompt text:
+
+```bash
+python -m tico.quantization.examples.generate \
+  --bundle ./out/llama_bundle \
+  --prompt "The capital of France is" \
+  --max-new-tokens 16 \
+  --output-json ./out/llama_generation.json
+```
+
+Prompt mode uses `transformers.AutoTokenizer` with `local_files_only=True` and
+`trust_remote_code=False` on the bundle's `tokenizer/` directory. It adds the
+tokenizer's special tokens to the supplied text; it does not apply a chat
+template. Generation does not load the original Transformers model or download
+model/tokenizer files. Install `transformers` separately when using prompt mode.
+
+For bundles without tokenizer files, or to replay exact token inputs without
+loading `transformers`, use numeric mode:
+
+```bash
+python -m tico.quantization.examples.generate \
+  --bundle ./out/llama_bundle \
+  --input-ids 1,2,3 \
+  --max-new-tokens 4
+```
+
+Use IDs from the exported model's vocabulary. The two input options are mutually
+exclusive. The runtime accepts one unpadded prompt, generates greedily, and
+stops on a bundle EOS token or after `--max-new-tokens` steps (default: 16).
+The prompt length plus the requested number of new tokens must fit
+`export.max_seq_len`; an oversized request is rejected without truncation.
+
+Both modes print JSON. `token_ids` contains the prompt and continuation as a
+flat list; `generated_token_ids` contains only the continuation. `text` is the
+decoded continuation in prompt mode and `null` in numeric mode.
+`--output-json` saves the same JSON, including `execution_mode`, to an existing
+parent directory.
+
+Floating-point bundles run in `native` mode. Quantized bundles run in explicit
+`fake_quantize` reference mode. These CPU reference runs validate artifact
+composition and quantized semantics; they do not establish NPU speed or
+bit-exact integer-backend behavior. Tiny random-model tests establish numerical
+parity and deterministic generation, not pretrained model quality. Use a
+pretrained bundle and a separate quality evaluation for meaningful text, and
+measure performance on the intended backend.
+
 ### LLaVA-Bench judge evaluation
 
 > [!NOTE]
@@ -647,7 +719,8 @@ python -m tico.quantization.examples.inspector \
 ```
 ## CLI overrides
 
-All example CLIs accept `--set KEY=VALUE` for simple dotted overrides:
+The config-driven example CLIs accept `--set KEY=VALUE` for simple dotted
+overrides. `generate.py` consumes a bundle and uses the options described above.
 
 ```bash
 python -m tico.quantization.examples.quantize \
@@ -827,6 +900,8 @@ these commands:
 ```text
 quantize.py
 evaluate.py
+export.py
+generate.py
 inspector.py
 ```
 

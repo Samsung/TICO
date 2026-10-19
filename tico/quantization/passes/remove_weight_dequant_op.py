@@ -26,6 +26,7 @@ from torch._export.utils import (
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.fold_quant_ops import _PRESERVE_FLOAT_INPUTS_KEY
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam, to_qparam_dtype
 from tico.utils import logging
 from tico.utils.passes import PassBase, PassResult
@@ -225,6 +226,11 @@ class RemoveWeightDequantOp(PassBase):
     node attaches quantization metadata to the weight, and later dequantize
     nodes are removed after verifying that their quantization parameters match.
 
+    A FLOAT32 embedding lookup keeps its table Dequantize: Circle GATHER only
+    selects values and cannot convert integer table codes into float values or
+    apply an independently calibrated activation grid. Other users can still
+    consume the same annotated integer weight without the Dequantize.
+
     NOTE Removing a DQ causes a semantic change: f32 -> quantized.
 
     [BEFORE]
@@ -257,7 +263,10 @@ class RemoveWeightDequantOp(PassBase):
 
             q_weight = dq_args.input
             # All weights are placeholders.
-            if q_weight.op != "placeholder":
+            if (
+                q_weight.op != "placeholder"
+                or q_weight.name in exported_program.graph_signature.user_inputs
+            ):
                 continue
 
             quant_param = _build_quant_param(exported_program, dq, dq_args, q_weight)
@@ -275,13 +284,21 @@ class RemoveWeightDequantOp(PassBase):
                         "is already annotated with different quantization parameters."
                     )
 
-                dq.replace_all_uses_with(q_weight, propagate_meta=False)
-                logger.debug(f"{dq.name} is removed.")
-                continue
+            else:
+                q_weight.meta[QPARAM_KEY] = quant_param
 
-            q_weight.meta[QPARAM_KEY] = quant_param
-            dq.replace_all_uses_with(q_weight, propagate_meta=False)
-            logger.debug(f"{dq.name} is removed.")
+            for user in list(dq.users):
+                if (
+                    user.op == "call_function"
+                    and QPARAM_KEY not in user.meta
+                    and (
+                        user.target == torch.ops.aten.embedding.default
+                        or user.meta.get(_PRESERVE_FLOAT_INPUTS_KEY)
+                    )
+                ):
+                    continue
+                user.replace_input_with(dq, q_weight)
+            logger.debug(f"{dq.name} is removed from eligible weight consumers.")
 
         graph.eliminate_dead_code()
         graph.lint()

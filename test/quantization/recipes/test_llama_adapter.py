@@ -63,6 +63,31 @@ class TiedEmbeddingLlamaModel(torch.nn.Module):
 
 
 class TestLlamaAdapter(unittest.TestCase):
+    def test_export_routes_circle_bundle_without_repeating_per_layer_export(self):
+        """Bundle export supplies its own paired stages and records the manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = {
+                "export": {
+                    "enabled": True,
+                    "output_dir": tmpdir,
+                    "max_seq_len": 8,
+                    "prefill_decode": False,
+                    "artifacts": ["circle_bundle", "circle_per_layer"],
+                },
+            }
+            ctx = _fake_llama_context(cfg)
+            ctx.tokenizer = object()
+            with patch.object(
+                llama_mod, "export_llama_bundle", return_value="llama_manifest.json"
+            ) as bundle, patch.object(llama_mod, "export_llama_per_layer") as per_layer:
+                LlamaAdapter().export(ctx)
+            bundle.assert_called_once()
+            self.assertIs(bundle.call_args.kwargs["q_model"], ctx.model)
+            self.assertIs(bundle.call_args.kwargs["tokenizer"], ctx.tokenizer)
+            self.assertEqual(bundle.call_args.kwargs["max_seq_len"], 8)
+            per_layer.assert_not_called()
+            self.assertEqual(ctx.artifacts["circle_bundle"], "llama_manifest.json")
+
     def test_build_ptq_config_forwards_profile_and_weight_options(self):
         """LlamaAdapter should forward recipe PTQ options to the config builder."""
         captured = {}

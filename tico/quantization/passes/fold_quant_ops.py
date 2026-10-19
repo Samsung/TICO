@@ -24,6 +24,7 @@ from torch.export import ExportedProgram
 
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
+from tico.utils.errors import NotYetSupportedError
 from tico.utils.mx.dtypes import (
     assert_supported_mx_export_options,
     is_mx_dtype,
@@ -32,7 +33,7 @@ from tico.utils.mx.dtypes import (
 )
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.utils import get_quant_dtype
+from tico.utils.utils import get_quant_dtype, quant_min_max
 from tico.utils.validate_args_kwargs import (
     DequantizePerTensorArgs,
     QuantizePerTensorArgs,
@@ -43,18 +44,71 @@ _QPARAM_PRESERVING_VIEW_TARGETS = frozenset(
     {
         torch.ops.aten.permute.default,
         torch.ops.aten.reshape.default,
+        torch.ops.aten.slice.Tensor,
     }
 )
+
+# Weight-DQ removal must also preserve the inputs of a producer whose original
+# floating-point result is still observed outside its explicit Quantize branch.
+_PRESERVE_FLOAT_INPUTS_KEY = "_tico_preserve_float_quantization_inputs"
+
+
+def _restore_float_inputs(graph: torch.fx.Graph) -> None:
+    """Bridge folded affine inputs back to protected producers' float domains."""
+    for node in list(graph.nodes):
+        if not node.meta.get(_PRESERVE_FLOAT_INPUTS_KEY):
+            continue
+        for source in list(node.all_input_nodes):
+            qparam = source.meta.get(QPARAM_KEY)
+            if qparam is None:
+                continue
+            if (
+                qparam.quantized_dimension is not None
+                or qparam.scale is None
+                or len(qparam.scale) != 1
+                or qparam.zero_point is None
+                or len(qparam.zero_point) != 1
+                or is_mx_dtype(qparam.dtype)
+            ):
+                raise NotYetSupportedError(
+                    "A shared floating-point producer requires per-tensor affine "
+                    f"Dequantize inputs; {source.name} has unsupported qparams."
+                )
+            quant_min, quant_max = quant_min_max(qparam.dtype)
+            storage_dtype = (
+                torch.uint8
+                if qparam.dtype == "uint4"
+                else torch.int8
+                if qparam.dtype == "int4"
+                else getattr(torch, qparam.dtype)
+            )
+            with graph.inserting_before(node):
+                dequantize = graph.call_function(
+                    torch.ops.quantized_decomposed.dequantize_per_tensor.default,
+                    args=(
+                        source,
+                        qparam.scale[0],
+                        qparam.zero_point[0],
+                        quant_min,
+                        quant_max,
+                        storage_dtype,
+                    ),
+                )
+            dequantize.meta = copy.copy(source.meta)
+            dequantize.meta.pop(QPARAM_KEY)
+            dequantize.meta["val"] = source.meta["val"].to(dtype=torch.float32)
+            node.replace_input_with(source, dequantize)
 
 
 def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
     """Seed an unfused per-tensor view chain with its source qparams.
 
     ``FoldQuantOps`` runs before ``PropagateQParamForward``.  A
-    requantization after ``PERMUTE -> RESHAPE`` must therefore discover
+    requantization after a slice/view chain must therefore discover
     the already-folded producer qparams by walking through the view
-    chain.  Otherwise the target Q-DQ pair is folded into RESHAPE and
-    the required Quantize operation disappears.
+    chain, including concatenations whose inputs share one domain. Otherwise
+    the target Q-DQ pair can be folded into RESHAPE and the required Quantize
+    operation disappears.
 
     Only per-tensor qparams are propagated.  Per-channel propagation
     would require axis remapping through PERMUTE and RESHAPE.
@@ -67,6 +121,27 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
     while QPARAM_KEY not in current.meta:
         if current.op != "call_function":
             return False
+        if current.target == torch.ops.aten.cat.default:
+            inputs = current.args[0]
+            if not isinstance(inputs, (list, tuple)) or not inputs:
+                return False
+            sources: list[torch.fx.Node] = []
+            for source in inputs:
+                if not isinstance(source, torch.fx.Node):
+                    return False
+                sources.append(source)
+            for source in sources:
+                _inherit_qparam_from_view_chain(source)
+            qparams = [source.meta.get(QPARAM_KEY) for source in sources]
+            first_qparam = qparams[0]
+            if (
+                first_qparam is None
+                or first_qparam.quantized_dimension is not None
+                or any(qparam != first_qparam for qparam in qparams[1:])
+            ):
+                return False
+            current.meta[QPARAM_KEY] = copy.deepcopy(first_qparam)
+            break
         if current.target not in _QPARAM_PRESERVING_VIEW_TARGETS:
             return False
         if not current.args:
@@ -164,6 +239,19 @@ class FoldQuantOps(PassBase):
     4. After all replacements, run `graph.eliminate_dead_code()`.
        Any Quantize that became orphaned because *all* its DQs were folded
        is deleted automatically.
+
+    Embedding lowers to value-preserving Circle GATHER, which cannot apply an
+    independently calibrated output quantization grid. For an unquantized
+    embedding output, keep Q explicitly and remove only DQ. Its table remains
+    dequantized so the lookup preserves FLOAT32 values before that Quantize.
+
+    Also keep Q when the unquantized producer has other users: folding it into
+    that producer would round those users' values too. Preserve that producer's
+    float inputs with explicit Dequantize bridges after the remaining folds.
+
+    Discover an existing source domain through slices, views, and same-domain
+    concatenations before deciding whether a trailing Q is a requantization.
+    A float producer behind a layout view can still adopt its first Q domain.
     """
 
     def __init__(self):
@@ -208,6 +296,17 @@ class FoldQuantOps(PassBase):
                 qparam.scale = [q_args.scale]
                 qparam.zero_point = [q_args.zero_p]
                 qparam.dtype = get_quant_dtype(q_args.quant_min, q_args.quant_max)
+                if op.target == torch.ops.aten.embedding.default or any(
+                    user is not q for user in op.users
+                ):
+                    if op.target not in _QPARAM_PRESERVING_VIEW_TARGETS:
+                        op.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True
+                    q.meta[QPARAM_KEY] = qparam
+                    dq.replace_all_uses_with(q, propagate_meta=False)
+                    logger.debug(
+                        f"{dq.name} is folded; {q.name} preserves its branch output grid."
+                    )
+                    continue
                 op.meta[QPARAM_KEY] = qparam
 
                 dq.replace_all_uses_with(op, propagate_meta=False)
@@ -283,6 +382,7 @@ class FoldQuantOps(PassBase):
                     dq.replace_all_uses_with(op, propagate_meta=False)
                     logger.debug(f"Removed redundant {dq.name}")
 
+        _restore_float_inputs(graph)
         graph.eliminate_dead_code()
         graph.lint()
         graph_module.recompile()

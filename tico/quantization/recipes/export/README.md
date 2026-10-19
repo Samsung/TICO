@@ -35,6 +35,7 @@ recipes/export/
 ├── circle.py         # full-model and shared single-stage Circle export helpers
 ├── gemma4.py         # static Gemma4 vision/text staged Circle export
 ├── llama.py          # staged LLaMA Circle export
+├── llama_bundle.py   # versioned LLaMA bundle manifest and frozen host context
 └── qwen3_vl.py       # fixed-grid Qwen3-VL staged Circle export
 ```
 
@@ -81,6 +82,65 @@ accepts only `pixel_values`; `image_grid_thw` remains a CPU-runtime value used
 to select the matching profile-specific artifacts.
 
 The output directory should come from `export.output_dir`.
+
+### LLaMA Circle bundles
+
+Opt in to `export.artifacts: [circle_bundle]` for a self-contained LLaMA
+generation bundle. The LLaMA adapter writes it directly under
+`export.output_dir`; the existing `circle_per_layer` artifact keeps its current
+behavior. A bundle requires paired prefill/decode export and batch size 1.
+
+```text
+llama_manifest.json
+llama_host.npz
+token_embedding.<tag>.circle
+decoder_layer_prefill_<index>.<tag>.circle
+decoder_layer_decode_<index>.<tag>.circle
+lm_head.<tag>.circle
+tokenizer/                                  # when a tokenizer is available
+```
+
+`<tag>` is `f32` for float32 model export and `q` for a quantized checkpoint.
+The versioned manifest records model geometry, sequence capacity, pad/EOS IDs,
+stage input/output roles, the host-context file, and the optional tokenizer
+directory. The host context preserves the prepared decoder layers' RoPE tables
+and attention-mask fill values. The consumer uses these frozen values instead
+of reconstructing them from a model name or a Transformers config.
+
+`LlamaCircleRuntime` loads the saved Circle stages through the built-in reference
+runtime. It owns causal masks, right-padding for static prefill, logical token
+positions, and per-layer KV cache updates:
+
+```python
+import numpy as np
+
+from tico.quantization.recipes.runtime.llama import LlamaCircleRuntime
+
+runtime = LlamaCircleRuntime("./out/llama_bundle")
+tokens = runtime.generate(
+    np.asarray([[1, 2, 3]], dtype=np.int64),
+    max_new_tokens=4,
+)
+```
+
+Input IDs are one unpadded sequence with shape `[1, prompt_length]`. The result
+has shape `[1, prompt_length + generated_length]`, including EOS when emitted.
+Generation is greedy and uses the manifest's EOS ID or IDs by default. The
+requested prompt length plus `max_new_tokens` must not exceed `max_seq_len`;
+capacity errors do not silently truncate the prompt or reduce the requested
+steps. Generation starts a fresh sequence when at least one token is requested;
+a zero-token request returns the prompt without changing the current cache.
+
+`runtime.execution_mode` is `native` for floating-point artifacts or
+`fake_quantize` for quantized artifacts. Fake-quantize reference execution is a
+semantic check, not bit-exact validation of an integer target backend. The
+runtime itself does not import Transformers, load a PyTorch model, or fetch
+files. The optional [generation CLI](../../examples/README.md#generate-from-a-llama-circle-bundle)
+uses only local tokenizer files for prompt encoding/continuation decoding.
+
+Tiny deterministic random-model tests exercise saved-artifact parity and cache
+composition. Meaningful language output requires pretrained weights; model
+quality and target-device performance need their own evaluation.
 
 A file-by-file description of a complete Gemma4 E2B quantized export is kept in
 [`gemma4_artifacts.md`](gemma4_artifacts.md).
