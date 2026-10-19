@@ -28,6 +28,9 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_attention import (
     QuantQwen3VLVisionAttention,
 )
+from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
+    QuantQwen3VLVisionModel,
+)
 
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 
@@ -71,14 +74,17 @@ def _make_tiny_qwen3vl_model():
 
 
 def _get_position_embeddings(visual_model, grid_thw: torch.Tensor):
-    """Return Qwen3-VL vision RoPE embeddings for a synthetic image grid."""
-    pos_embeds = visual_model.fast_pos_embed_interpolate(grid_thw)
-    rotary_pos_emb = visual_model.rot_pos_emb(grid_thw)
+    """Return Qwen3-VL vision RoPE embeddings for a synthetic image grid.
 
-    seq_len, _ = pos_embeds.size()
-    rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-    emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-    return emb.cos(), emb.sin()
+    The helper derives cos/sin from the vision model's rotary inverse
+    frequencies with TICO's own grid-position computation instead of the
+    ``Qwen3VLVisionModel.rot_pos_emb`` helper, which transformers 5.18 removed.
+    """
+    return QuantQwen3VLVisionModel._precompute_rope_position_embeddings(
+        merge_size=int(visual_model.spatial_merge_size),
+        rope_inv_freq=visual_model.rotary_pos_emb.inv_freq,
+        grid_thw=grid_thw,
+    )
 
 
 def _get_cu_seqlens(grid_thw: torch.Tensor):
@@ -121,7 +127,11 @@ class TestQwenVisionAttentionExample(unittest.TestCase):
         with torch.no_grad():
             for _ in range(3):
                 hidden = self._make_hidden()
-                _ = prepared(hidden, self.cu_seqlens, None, self.position_embeddings)
+                _ = prepared(
+                    hidden,
+                    self.cu_seqlens,
+                    position_embeddings=self.position_embeddings,
+                )
 
     def test_prepare_convert_vision_attention_flow_matches_example(self):
         """Quantize one Qwen3-VL vision attention block and compare its output."""
@@ -136,12 +146,19 @@ class TestQwenVisionAttentionExample(unittest.TestCase):
         self.assertIs(quantized._mode, Mode.QUANT)
 
         hidden = self._make_hidden()
+        # Pass RoPE by keyword: the positional slot after ``cu_seqlens`` is
+        # ``rotary_pos_emb`` in transformers 5.9 but ``position_embeddings``
+        # in 5.18, so positional calls bind differently across versions.
         with torch.no_grad():
             quant_out = quantized(
-                hidden, self.cu_seqlens, None, self.position_embeddings
+                hidden,
+                self.cu_seqlens,
+                position_embeddings=self.position_embeddings,
             )
             fp_out = self.fp_ref(
-                hidden, self.cu_seqlens, None, self.position_embeddings
+                hidden,
+                self.cu_seqlens,
+                position_embeddings=self.position_embeddings,
             )
 
         diff = (quant_out - fp_out).abs().mean().item()

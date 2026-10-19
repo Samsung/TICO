@@ -124,7 +124,7 @@ class TestGemma4ForCausalLMSmoke(unittest.TestCase):
         sample = self._text_sample()
 
         with torch.no_grad():
-            quant_out = wrapped(**sample)
+            quant_out = wrapped(**sample).logits
             fp_out = self.fp_ref(**sample).logits
 
         self.assertEqual(quant_out.shape, fp_out.shape)
@@ -149,7 +149,7 @@ class TestGemma4ForCausalLMSmoke(unittest.TestCase):
 
         sample = self._text_sample()
         with torch.no_grad():
-            quant_out = quantized(**sample)
+            quant_out = quantized(**sample).logits
             fp_out = self.fp_ref(**sample).logits
 
         self.assertEqual(quant_out.shape, fp_out.shape)
@@ -167,7 +167,7 @@ class TestGemma4ForCausalLMSmoke(unittest.TestCase):
 
         sample = self._text_sample()
         with torch.no_grad():
-            quant_out = quantized(**sample, logits_to_keep=1)
+            quant_out = quantized(**sample, logits_to_keep=1).logits
             fp_out = self.fp_ref(**sample, logits_to_keep=1).logits
 
         self.assertEqual(quant_out.shape, fp_out.shape)
@@ -186,7 +186,7 @@ class TestGemma4ForCausalLMSmoke(unittest.TestCase):
 
         sample = self._text_sample()
         with torch.no_grad():
-            quant_out = quantized(**sample)
+            quant_out = quantized(**sample).logits
 
         softcap = self.text_cfg.final_logit_softcapping
         if softcap is not None:

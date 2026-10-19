@@ -279,14 +279,29 @@ class TestQuantGemma4ModelSmoke(unittest.TestCase):
         }
 
     def _text_with_image_sample(self):
-        """Create a sample with image placeholder tokens at the start."""
+        """Create a sample with image placeholder tokens at the start.
+
+        The wrapper rejects image placeholders without matching pixel inputs,
+        so the sample also carries a synthetic image whose patch grid pools
+        down to the four visual tokens used by the placeholder layout.
+        """
         input_ids = torch.randint(
             0, self.text_config.vocab_size, (self.batch_size, self.seq_len)
         )
         # Place image tokens at positions 0..3
         input_ids[0, :4] = self.config.image_token_id
+        vision_config = self.config.vision_config
+        num_patches = 4 * vision_config.pooling_kernel_size**2
+        patch_dim = 3 * vision_config.patch_size**2
+        side = int(num_patches**0.5)
+        coords = torch.arange(num_patches)
+        pixel_position_ids = torch.stack((coords % side, coords // side), dim=-1)
         return {
             "input_ids": input_ids,
+            "pixel_values": torch.randn(self.batch_size, num_patches, patch_dim),
+            "image_position_ids": pixel_position_ids.unsqueeze(0)
+            .expand(self.batch_size, -1, -1)
+            .long(),
         }
 
     def test_text_only_forward_is_finite(self):
