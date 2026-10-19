@@ -643,9 +643,12 @@ def _affine_dequantize(
 
     if not scales or len(scales) != len(zero_points):
         return None
+    scale = np.asarray(scales, dtype=np.float32)
+    if np.any(scale <= 0) or not np.all(np.isfinite(scale)):
+        return None
     rank = len(shape)
     if len(scales) == 1:
-        scalar_scale = np.float32(scales[0])
+        scalar_scale = scale[0]
         scalar_zero_point = np.float32(zero_points[0])
         return (np.asarray(source, dtype=np.float32) - scalar_zero_point) * scalar_scale
     if rank == 0:
@@ -657,7 +660,7 @@ def _affine_dequantize(
         return None
     broadcast_shape = [1] * rank
     broadcast_shape[axis] = len(scales)
-    scale = np.asarray(scales, dtype=np.float32).reshape(broadcast_shape)
+    scale = scale.reshape(broadcast_shape)
     zero_point = np.asarray(zero_points, dtype=np.float32).reshape(broadcast_shape)
     return (np.asarray(source, dtype=np.float32) - zero_point) * scale
 

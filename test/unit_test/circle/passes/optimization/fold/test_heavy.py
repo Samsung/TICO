@@ -18,7 +18,9 @@ import unittest
 
 import numpy as np
 
-from tico.circle.passes import CirclePassContext
+from tico.circle.document import CircleDocument
+from tico.circle.errors import CircleValueError
+from tico.circle.passes import CirclePassContext, create_o1_pipeline
 from tico.circle.passes.optimization.fold import (
     ConstantFoldingProfile,
     FoldConstantsPass,
@@ -27,7 +29,10 @@ from tico.circle.passes.optimization.fold.evaluators import (
     ConstantEvaluatorRegistry,
     register_heavy_constant_evaluators,
 )
-from tico.circle.value import TensorQuantization
+from tico.circle.runtime import CircleReferenceRuntime, CircleRuntimeValidationError
+from tico.circle.value import default_tensor_type_registry, TensorQuantization
+
+from test.support.circle.builder import CircleModelBuilder
 
 from test.unit_test.circle.infrastructure_fixture import (
     add_runtime_tensor,
@@ -398,6 +403,155 @@ class HeavyConstantFoldingTest(unittest.TestCase):
 
         self.assertFalse(result.modified)
         self.assertEqual(len(document.subgraph().operators), 1)
+
+
+class SerializedDequantizeFoldingTest(unittest.TestCase):
+    """Preserve affine validation and values through real Circle serialization."""
+
+    def _document(self, scales, zero_points, *, axis=0, value=None):
+        builder = CircleModelBuilder()
+        if value is None:
+            value = np.array([1, 3], dtype=np.int8)
+        source = builder.quantized_constant(
+            "source",
+            value,
+            tensor_type=default_tensor_type_registry().by_name("INT8").tensor_type,
+            scale=scales,
+            zero_point=zero_points,
+            quantized_dimension=axis,
+        )
+        output = builder.activation("dequantized", value.shape)
+        builder.operator("DEQUANTIZE", (source,), (output,))
+        builder.set_outputs(output)
+        return CircleDocument.from_bytes(builder.build().to_bytes())
+
+    def _assert_invalid_scale_is_preserved(self, document):
+        self.assertTrue(document.verify(raise_on_error=False).ok)
+        binary = document.to_bytes()
+        error_message = "non-positive or non-finite quantization scale"
+        with self.assertRaisesRegex(
+            CircleRuntimeValidationError, error_message
+        ) as original_error:
+            CircleReferenceRuntime(document).run(())
+
+        result = FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY).run(
+            document, CirclePassContext()
+        )
+
+        self.assertFalse(result.modified)
+        self.assertEqual(result.changes, 0)
+        self.assertEqual(document.to_bytes(), binary)
+        self.assertEqual(len(document.subgraph().operators), 1)
+        restored = CircleDocument.from_bytes(document.to_bytes())
+        with self.assertRaisesRegex(
+            CircleRuntimeValidationError, error_message
+        ) as restored_error:
+            CircleReferenceRuntime(restored).run(())
+        self.assertEqual(str(restored_error.exception), str(original_error.exception))
+
+    def test_invalid_per_tensor_scales_keep_runtime_validation(self):
+        for scale in (0.0, np.nan, np.inf):
+            with self.subTest(scale=scale):
+                self._assert_invalid_scale_is_preserved(self._document([scale], [0]))
+
+    def test_one_invalid_per_axis_scale_keeps_entire_operator(self):
+        value = np.array([[0, 1], [2, 3]], dtype=np.int8)
+        for scale in (0.0, np.nan, np.inf):
+            for invalid_channel in (0, 1):
+                with self.subTest(scale=scale, invalid_channel=invalid_channel):
+                    scales = [0.5, 1.0]
+                    scales[invalid_channel] = scale
+                    document = self._document(scales, [0, -1], axis=1, value=value)
+                    self._assert_invalid_scale_is_preserved(document)
+
+    def test_negative_scales_keep_existing_contract_errors(self):
+        for scale in (-0.5, -np.inf):
+            for scales in ([scale], [0.5, scale]):
+                with self.subTest(scales=scales):
+                    document = self._document(scales, [0] * len(scales))
+                    binary = document.to_bytes()
+                    error_message = "Quantization scales must not be negative"
+                    with self.assertRaisesRegex(
+                        CircleRuntimeValidationError, error_message
+                    ):
+                        CircleReferenceRuntime(document).run(())
+                    with self.assertRaisesRegex(CircleValueError, error_message):
+                        FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY).run(
+                            document, CirclePassContext()
+                        )
+                    self.assertEqual(document.to_bytes(), binary)
+                    with self.assertRaisesRegex(
+                        CircleRuntimeValidationError, error_message
+                    ):
+                        CircleReferenceRuntime(
+                            CircleDocument.from_bytes(document.to_bytes())
+                        ).run(())
+
+    def _assert_folded_value(self, document, expected):
+        original = CircleReferenceRuntime(document).run(()).outputs[0]
+        np.testing.assert_array_equal(original, expected)
+        output_indices = list(document.subgraph().outputs)
+        source_bytes = bytes(document.model.buffers[1].data)
+
+        result = FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY).run(
+            document, CirclePassContext()
+        )
+
+        self.assertTrue(result.modified)
+        self.assertEqual(len(document.subgraph().operators), 0)
+        self.assertEqual(list(document.subgraph().outputs), output_indices)
+        self.assertEqual(bytes(document.model.buffers[1].data), source_bytes)
+        restored = CircleDocument.from_bytes(document.to_bytes())
+        self.assertTrue(restored.verify(raise_on_error=False).ok)
+        actual = CircleReferenceRuntime(restored).run(()).outputs[0]
+        self.assertEqual(actual.dtype, np.float32)
+        self.assertEqual(actual.shape, expected.shape)
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_positive_per_tensor_scale_still_folds(self):
+        self._assert_folded_value(
+            self._document([0.5], [-1]),
+            np.array([1.0, 2.0], dtype=np.float32),
+        )
+
+    def test_positive_subnormal_float32_scale_still_folds(self):
+        scale = np.nextafter(np.float32(0), np.float32(1))
+        self._assert_folded_value(
+            self._document([float(scale)], [0]),
+            np.array([scale, scale * np.float32(3)], dtype=np.float32),
+        )
+
+    def test_positive_per_axis_scales_still_fold(self):
+        self._assert_folded_value(
+            self._document(
+                [0.5, 1.0],
+                [0, -1],
+                axis=1,
+                value=np.array([[0, 1], [2, 3]], dtype=np.int8),
+            ),
+            np.array([[0.0, 2.0], [1.0, 4.0]], dtype=np.float32),
+        )
+
+    def test_float16_conversion_without_affine_metadata_still_folds(self):
+        builder = CircleModelBuilder()
+        source = builder.constant("source", [1.5, -2.25], dtype=np.float16)
+        output = builder.activation("converted", (2,))
+        builder.operator("DEQUANTIZE", (source,), (output,))
+        builder.set_outputs(output)
+        self._assert_folded_value(
+            CircleDocument.from_bytes(builder.build().to_bytes()),
+            np.array([1.5, -2.25], dtype=np.float32),
+        )
+
+    def test_default_basic_profile_and_o1_do_not_fold_dequantize(self):
+        for scale in (0.0, 0.5):
+            for pipeline in (FoldConstantsPass(), create_o1_pipeline()):
+                with self.subTest(scale=scale, pipeline=type(pipeline).__name__):
+                    document = self._document([scale], [0])
+                    binary = document.to_bytes()
+                    result = pipeline.run(document, CirclePassContext())
+                    self.assertFalse(result.modified)
+                    self.assertEqual(document.to_bytes(), binary)
 
 
 if __name__ == "__main__":
