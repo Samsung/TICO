@@ -851,6 +851,12 @@ from tico.circle.passes import ConstantFoldingProfile, FoldConstantsPass
 folding = FoldConstantsPass(profile=ConstantFoldingProfile.HEAVY)
 ```
 
+Affine integer `DEQUANTIZE` folding requires finite, positive FLOAT32 scales in
+every channel. Zero, NaN, or positive-infinite scales leave the operator unchanged so
+reference execution still reports invalid qparams. Negative scales retain their
+existing tensor contract error. FLOAT16-to-FLOAT32 conversion without affine metadata
+is unchanged.
+
 ### Benchmark full-model O1 scheduling
 
 A caller-provided full Circle artifact can compare the former restart
