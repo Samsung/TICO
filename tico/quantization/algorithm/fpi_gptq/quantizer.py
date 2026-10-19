@@ -53,12 +53,9 @@ class FPIGPTQQuantizer(GPTQQuantizer):
 
         gptq_conf = self.config
         assert isinstance(gptq_conf, FPIGPTQConfig)
-        # Disable use_cache during calibration
+        # Keep use_cache disabled during conversion.
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
-            orig_use_cache = model.config.use_cache
             model.config.use_cache = False
-        else:
-            orig_use_cache = None
 
         # Identify layers
         if hasattr(model, "model"):
@@ -175,8 +172,8 @@ class FPIGPTQQuantizer(GPTQQuantizer):
                 torch.cuda.empty_cache()
 
         # Restore the original cache configuration.
-        if orig_use_cache is not None:
-            model.config.use_cache = orig_use_cache
+        if self.orig_use_cache is not None:
+            model.config.use_cache = self.orig_use_cache
 
         # Clear caches to free memory
         self.cache_args.clear()

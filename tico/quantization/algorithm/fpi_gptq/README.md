@@ -38,6 +38,9 @@ Everything else mirrors the GPTQ implementation:
 - Per-module `Quantizer` objects are attached as `model.quantizers` after
   `convert()`.
 
+When present, `model.config.use_cache` is disabled by `prepare()` and restored to
+its pre-prepare value after a successful `convert()`.
+
 Statistics hooks installed by FPI-GPTQ are removed even if registration or cached
 replay fails. Caller-owned hooks remain installed and the original error propagates.
 This cleanup does not roll back quantized weights or make a failed conversion retryable.
