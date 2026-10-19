@@ -63,10 +63,13 @@ class TestQuantLlamaAttention(unittest.TestCase):
                 "head_dim": 4,
                 "attention_bias": False,
                 "attention_dropout": 0.0,
-                "attn_implementation": "eager",
                 "max_position_embeddings": cls.max_seq,
             }
         )
+        # Modules are built without a ``PreTrainedModel``, so set the attention
+        # backend explicitly; older Transformers releases drop a dict-provided
+        # ``attn_implementation`` in ``from_dict``.
+        cfg._attn_implementation = "eager"
         cls.fp_attn = LlamaAttention(cfg, layer_idx=0)
         assert cfg.head_dim is not None
         cls.head_dim = cfg.head_dim

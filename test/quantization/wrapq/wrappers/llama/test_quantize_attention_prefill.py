@@ -54,10 +54,13 @@ class TestLlamaAttentionPrefillExample(unittest.TestCase):
                 "intermediate_size": 32,
                 "attention_bias": False,
                 "attention_dropout": 0.0,
-                "attn_implementation": "eager",
                 "max_position_embeddings": 16,
             }
         )
+        # Modules are built without a ``PreTrainedModel``, so set the attention
+        # backend explicitly; older Transformers releases drop a dict-provided
+        # ``attn_implementation`` in ``from_dict``.
+        self.cfg._attn_implementation = "eager"
         self.fp_attn = LlamaAttention(self.cfg, layer_idx=0).eval()
         self.fp_ref = copy.deepcopy(self.fp_attn).eval()
         self.hidden_size = self.cfg.hidden_size

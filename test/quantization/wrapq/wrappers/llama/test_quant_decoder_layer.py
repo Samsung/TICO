@@ -67,9 +67,12 @@ class TestQuantLlamaDecoderLayer(unittest.TestCase):
                 "head_dim": 8,
                 "attention_bias": False,
                 "attention_dropout": 0.0,
-                "attn_implementation": "eager",
             }
         )
+        # Modules are built without a ``PreTrainedModel``, so set the attention
+        # backend explicitly; older Transformers releases drop a dict-provided
+        # ``attn_implementation`` in ``from_dict``.
+        cls.cfg._attn_implementation = "eager"
         cls.fp_layer = LlamaDecoderLayer(cls.cfg, layer_idx=0)
         assert cls.cfg.head_dim is not None
         cls.head_dim = cls.cfg.head_dim  # type: ignore[attr-defined]

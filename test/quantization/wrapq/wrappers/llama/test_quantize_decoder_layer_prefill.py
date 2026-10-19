@@ -59,10 +59,13 @@ class TestLlamaDecoderLayerPrefillExample(unittest.TestCase):
                 "head_dim": 8,
                 "attention_bias": False,
                 "attention_dropout": 0.0,
-                "attn_implementation": "eager",
                 "max_position_embeddings": self.max_seq,
             }
         )
+        # Modules are built without a ``PreTrainedModel``, so set the attention
+        # backend explicitly; older Transformers releases drop a dict-provided
+        # ``attn_implementation`` in ``from_dict``.
+        self.cfg._attn_implementation = "eager"
         self.fp_layer = LlamaDecoderLayer(self.cfg, layer_idx=0).eval()
         self.fp_ref = copy.deepcopy(self.fp_layer).eval()
         self.hidden_size = self.cfg.hidden_size
