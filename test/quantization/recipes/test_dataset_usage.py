@@ -25,6 +25,8 @@ import copy
 import unittest
 import warnings
 
+from typing import Any
+
 from tico.quantization.recipes.data.dataset_usage import (
     CALIBRATION_ROLE,
     dataset_usages_overlap,
@@ -33,6 +35,9 @@ from tico.quantization.recipes.data.dataset_usage import (
     resolve_dataset_usage,
     validate_recipe_dataset_usage,
     validate_single_dataset_usage,
+)
+from tico.quantization.recipes.evaluation.selection import (
+    get_selected_evaluation_targets,
 )
 
 
@@ -436,6 +441,103 @@ class TestRecipeDatasetValidation(unittest.TestCase):
         )
 
         self.assertEqual([usage.consumer for usage in evaluation], ["evaluation.ppl"])
+
+    def test_preflight_preserves_selected_target_semantics(self):
+        """Preflight and evaluation should agree without mutating the selector."""
+        defaults = ["evaluation.vlm_tasks:vqav2", "evaluation.ppl"]
+        cases: tuple[tuple[dict[str, Any], tuple[str, ...] | None, list[str]], ...] = (
+            ({}, None, defaults),
+            ({"selected_tasks": None}, None, defaults),
+            ({"selected_tasks": []}, (), []),
+            ({"selected_tasks": ()}, (), []),
+            ({"selected_tasks": [" ppl "]}, ("ppl",), ["evaluation.ppl"]),
+            (
+                {"selected_tasks": (" ppl ", "coco")},
+                ("ppl", "coco"),
+                ["evaluation.coco", "evaluation.ppl"],
+            ),
+            (
+                {"selected_tasks": ["coco", "ppl"]},
+                ("coco", "ppl"),
+                ["evaluation.coco", "evaluation.ppl"],
+            ),
+            ({"selected_tasks": ["PPL"]}, ("PPL",), []),
+            (
+                {"selected_tasks": ["PPL", "ppl"]},
+                ("PPL", "ppl"),
+                ["evaluation.ppl"],
+            ),
+        )
+        for selection, expected, consumers in cases:
+            with self.subTest(selection=selection):
+                cfg = self._qwen_config()
+                cfg["evaluation"].update(selection)
+                before = copy.deepcopy(cfg)
+
+                self.assertEqual(
+                    get_selected_evaluation_targets(cfg["evaluation"]), expected
+                )
+                calibration, evaluation = validate_recipe_dataset_usage(
+                    cfg,
+                    include_calibration=False,
+                    emit_summary=False,
+                )
+
+                self.assertEqual(calibration, [])
+                self.assertEqual([usage.consumer for usage in evaluation], consumers)
+                self.assertEqual(
+                    cfg["evaluation"],
+                    {
+                        **before["evaluation"],
+                        "resolved_sources": [usage.to_config() for usage in evaluation],
+                    },
+                )
+
+    def test_preflight_rejects_invalid_selected_targets_like_evaluation(self):
+        """Both entry points should reject malformed selectors before provenance."""
+        cases = (
+            ("ppl", TypeError, "must be a sequence"),
+            (b"ppl", TypeError, "must be a sequence"),
+            (123, TypeError, "must be a sequence"),
+            ({"ppl": True}, TypeError, "must be a sequence"),
+            ({"ppl"}, TypeError, "must be a sequence"),
+            (["ppl", 1], TypeError, r"selected_tasks\[1\] must be a string"),
+            ([""], ValueError, "must not contain empty"),
+            (["ppl", "  "], ValueError, "must not contain empty"),
+            (["ppl", "ppl"], ValueError, "duplicate target 'ppl'"),
+            (["ppl", " ppl "], ValueError, "duplicate target 'ppl'"),
+        )
+        for selected, error_type, message in cases:
+            with self.subTest(selected=selected):
+                cfg = self._qwen_config()
+                cfg["evaluation"]["selected_tasks"] = selected
+                before = copy.deepcopy(cfg)
+
+                with self.assertRaisesRegex(error_type, message):
+                    get_selected_evaluation_targets(cfg["evaluation"])
+                with self.assertRaisesRegex(error_type, message):
+                    validate_recipe_dataset_usage(
+                        cfg,
+                        include_calibration=False,
+                        emit_summary=False,
+                    )
+
+                self.assertEqual(cfg, before)
+
+    def test_disabled_evaluation_does_not_parse_selected_targets(self):
+        """An invalid selector should stay inactive when evaluation is disabled."""
+        cfg = self._qwen_config()
+        cfg["evaluation"].update(enabled=False, selected_tasks=123)
+        before = copy.deepcopy(cfg["evaluation"])
+
+        calibration, evaluation = validate_recipe_dataset_usage(
+            cfg,
+            include_calibration=False,
+            emit_summary=False,
+        )
+
+        self.assertEqual((calibration, evaluation), ([], []))
+        self.assertEqual(cfg["evaluation"], {**before, "resolved_sources": []})
 
     def test_selected_tasks_skips_invalid_inactive_vqa_config(self):
         for selected in ([], ["ppl"]):
