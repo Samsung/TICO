@@ -47,6 +47,8 @@ class FuseLeadingUnsqueezeReshape(PassBase):
         x - aten.reshape(s1) - aten.permute(p) - aten.reshape([1]*k + p(s1))
     [AFTER]
         x - aten.reshape([1]*k + s1) - aten.permute(list(range(k)) + [d+k for d in p])
+
+    Negative axes in p are normalized against the original rank before shifting.
     """
 
     def call(self, ep: ExportedProgram) -> PassResult:
@@ -85,6 +87,7 @@ class FuseLeadingUnsqueezeReshape(PassBase):
 
             # ---- create new reshape & new permute -------------------------
             k = len(back_shape) - len(permute_shape)
+            rank = len(permute_shape)
             with graph.inserting_before(permute):
                 new_shape = [1] * k + list(reshape_front_size)
                 r_new = create_node(
@@ -94,7 +97,7 @@ class FuseLeadingUnsqueezeReshape(PassBase):
                     origin=reshape_back,
                 )
                 new_p_dims = list(range(k)) + [
-                    d + k for d in permute_dims
+                    (d + rank if d < 0 else d) + k for d in permute_dims
                 ]  # shift by k
                 p_new = create_node(
                     graph,
