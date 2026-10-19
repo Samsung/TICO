@@ -143,6 +143,25 @@ Use `convert()` when starting from an `nn.Module`,
 `convert_from_exported_program()` when export has already been performed in memory,
 and `convert_from_pt2()` for a saved exported program.
 
+For large models, convert directly to a file to reduce peak memory from complete
+intermediate binaries:
+
+```python
+tico.convert_to_file(model.eval(), example_inputs, "model.circle")
+tico.convert_from_exported_program_to_file(exported_program, "model.circle")
+tico.convert_from_pt2_to_file("model.pt2", "model.circle")
+```
+
+These APIs return `None` and atomically replace the destination after conversion and
+writing succeed. `convert_to_file()` accepts the same `kwargs`, `dynamic_shapes`,
+`strict`, and `config` options as `convert()`; the other file APIs also accept
+`config`. Circle O1 optimization remains enabled by default. The existing APIs
+continue to return `CircleModel` objects containing complete bytes.
+
+File conversion still keeps the source tensors and conversion graph in memory;
+see [Large Circle export](./large_circle_export.md) for layout selection and
+remaining memory limits.
+
 ## Keyword arguments
 
 Pass keyword example inputs through the `kwargs` argument:
@@ -247,6 +266,7 @@ Current version 1.0 fields are:
 | `convert_single_batch_lhs_const_bmm_to_fc` | `False` | Enables the supported single-batch `bmm` rewrite with a constant left-hand side. |
 | `convert_expand_to_slice_cat` | `False` | Enables lowering of supported `expand` patterns to slice/concatenate operations. |
 | `eliminate_rank_round_trip` | `False` | Declared in `CompileConfigV1`, but the current conversion pipeline does not read this field; `EliminateRankRoundTripRegion` is currently enabled unconditionally. Do not rely on this field to disable that pass. |
+| `circle_optimize` | `True` | Runs the verified Circle O1 pipeline on both bytes and file conversion paths. Set to `False` to disable Circle O1 while retaining the FX passes. |
 
 Create a default configuration with either of the following:
 
@@ -304,6 +324,7 @@ convert_rhs_const_mm_to_fc: true
 convert_single_batch_lhs_const_bmm_to_fc: false
 convert_expand_to_slice_cat: false
 eliminate_rank_round_trip: false
+circle_optimize: true
 ```
 
 ```bash

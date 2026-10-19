@@ -16,12 +16,11 @@ import argparse
 import os
 from typing import Optional
 
-import torch
 import yaml  # type: ignore[import-untyped]
 
 from tico.config import CompileConfigBase, get_default_config
 
-from tico.utils.convert import convert_exported_module_to_circle
+from tico.utils.convert import convert_from_pt2_to_file
 
 
 def convert(
@@ -37,11 +36,7 @@ def convert(
     if verbose:
         os.environ["TICO_LOG"] = "4"
 
-    exported_program = torch.export.load(input)
-    circle_program = convert_exported_module_to_circle(exported_program, config=config)
-    circle_binary = circle_program
-    with open(output, "wb") as f:
-        f.write(circle_binary)
+    convert_from_pt2_to_file(input, output, config=config)
 
 
 def main():

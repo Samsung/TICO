@@ -68,7 +68,7 @@ def _initialize_model() -> tuple[CircleModel, CircleSubgraph]:
     return model, graph
 
 
-def build_circle(
+def build_circle_bytes(
     ep: ExportedProgram, config: CompileConfigBase = get_default_config()
 ) -> bytes:
     """Convert ExportedProgram to Circle format.
@@ -79,6 +79,25 @@ def build_circle(
     Returns:
         bytes: Complete Circle binary, including any out-of-line constants.
     """
+    return serialize_circle_model(_assemble_circle_model(ep, config))
+
+
+def build_circle_model(
+    ep: ExportedProgram, config: CompileConfigBase = get_default_config()
+):
+    """Build normalized Circle tables without materializing a complete binary.
+
+    Metadata takes the same schema round trip as the bytes path. Constant
+    payloads instead remain borrowed read-only views for file conversion and O1.
+    """
+    from tico.circle.io import model_from_object
+
+    return model_from_object(_assemble_circle_model(ep, config))
+
+
+def _assemble_circle_model(
+    ep: ExportedProgram, config: CompileConfigBase
+) -> CircleModel:
     logger = logging.getLogger(__name__)
     model, graph = _initialize_model()
 
@@ -145,8 +164,11 @@ def build_circle(
     model.description = "circle"
     model.version = 0
 
-    # The serializer owns the size-dependent binary layout, not callers.
-    return serialize_circle_model(model)
+    # Construction-only references would otherwise pin the FX graph and form a
+    # model/subgraph cycle throughout Circle optimization and file emission.
+    graph.name_to_node.clear()
+    del graph.model
+    return model
 
 
 def _get_quantization_alias_key(node: torch.fx.Node) -> QuantizationAliasKey | None:

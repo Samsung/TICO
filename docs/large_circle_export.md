@@ -2,12 +2,13 @@
 
 TICO's ordinary conversion path can represent models whose constant payloads
 make the complete Circle binary exceed 2 GiB. The converter does not expose an
-extended-buffer API, a file-path argument to `build_circle`, or a model-family
+extended-buffer API, a file-path argument to `build_circle_bytes`, or a model-family
 specific serialization branch.
 
-This is an in-memory serialization implementation. It is not an out-of-core or
-streaming converter. The complete output still has to fit in the Python process's
-address space and available memory. See [Memory and backend limits](#memory-and-backend-limits).
+Bytes-returning APIs materialize the complete output in memory. Explicit file
+conversion avoids whole-binary intermediates while retaining the source tensors
+and conversion/pass working storage in memory. It is not an out-of-core
+converter. See [Memory and backend limits](#memory-and-backend-limits).
 
 ## Usage
 
@@ -30,10 +31,49 @@ circle_model = tico.convert_from_pt2("model.pt2")
 circle_model.save("model.circle")
 ```
 
-`build_circle()`, `convert_exported_module_to_circle()`, and
+`build_circle_bytes()`, `convert_exported_module_to_circle()`, and
 `CircleModel.circle_binary` continue to contain complete `bytes`. They never
 contain just a FlatBuffer header, a pathname, or a lazy object. Serialization does
 not create or open a file; the existing save APIs remain responsible for I/O.
+
+### Direct file conversion
+
+When a file is the desired result, use the explicit file APIs:
+
+```python
+tico.convert_to_file(model.eval(), example_inputs, "model.circle")
+tico.convert_from_exported_program_to_file(exported_program, "model.circle")
+tico.convert_from_pt2_to_file("model.pt2", "model.circle")
+```
+
+These functions return `None`. `convert_to_file` also accepts `kwargs`,
+`dynamic_shapes`, `strict`, and `config`, as does the corresponding in-memory
+conversion. All three use the same PyTorch legalization pipeline and configured
+Circle optimization, including default O1. `pt2-to-circle -i model.pt2 -o model.circle`
+uses this file path too.
+
+The file path builds the Circle object model, packs and unpacks only its metadata
+to apply normal schema defaults and float32 rounding, and borrows constant storage
+through read-only views. Construction-only references to the FX graph are removed.
+The same verified O1 document pipeline runs before the final file layout is packed.
+Neither a complete unoptimized binary nor a complete optimized replacement binary
+is created. Do not mutate source tensors concurrently with conversion.
+
+Final file conversion uses a private 64 MiB aggregate inline-payload budget:
+ordinary smaller outputs keep their inline layout, while larger outputs write
+appended payload views in bounded chunks. The bytes APIs and document-save budget
+are unchanged. Above this threshold, compare graph contracts, constant contents,
+and numerical outputs rather than requiring byte identity between inline and
+appended layouts. Final output is saved atomically; conversion, optimization, or
+write failures preserve an existing destination. Requested O1 debug artifacts use
+file saves as well, and can add extra packing and I/O cost.
+
+This reduces the RAM required to convert the same model and can increase the
+largest model convertible within a fixed RAM budget. It does not bound the memory
+used by PyTorch export, legalization, tensor layout/quantization conversions, or O1
+passes that create new constants. Use the
+[full conversion benchmark](../test/performance/README.md) to measure peak RSS,
+conversion time, and equivalence for several synthetic sizes.
 
 A successful export does not establish that a particular compiler or interpreter
 can import and execute the model. Backend validation is a separate step.
@@ -41,7 +81,7 @@ can import and execute the model. Backend validation is a separate step.
 ## Layout selection
 
 The shared implementation is `tico/serialize/circle_binary.py`.
-`build_circle()` delegates its final Object API packing to this module.
+`build_circle_bytes()` delegates its final Object API packing to this module.
 `tico.circle.io.model_to_bytes()` uses the same implementation for document
 repacking and post-serialization optimization.
 
@@ -123,9 +163,10 @@ and `os.replace()` it. Any failure removes the temporary file and leaves the
 existing destination untouched. Standard output receives the same stream;
 diagnostics stay on standard error.
 
-Which layout a file save produces:
+Which layout a document save produces (the explicit conversion APIs use the
+lower 64 MiB budget described above):
 
-| Aggregate `Buffer.data` bytes | `to_bytes()` / converter bytes | File save |
+| Aggregate `Buffer.data` bytes | `to_bytes()` / converter bytes | Document save |
 |---|---|---|
 | ≤ 1 GiB | inline FlatBuffer | inline FlatBuffer (byte-identical to `to_bytes()`) |
 | 1 GiB < total ≤ FlatBuffer budget | inline FlatBuffer | appended payloads |
@@ -136,9 +177,9 @@ with `tobytes()`, copies it into a buffer that grows by doubling, and copies the
 finished FlatBuffer once more, so packing a payload total of *P* bytes transiently
 needs several times *P* (the extraction benchmark measured about 3 GiB of peak
 RSS beyond the input for a 512 MiB inline output). Ordinary small
-models keep the inline layout and their existing byte equivalence, and no output
-that used to be inline becomes appended below 1 GiB. Above that private
-streaming budget a file save selects the appended layout directly, which keeps
+models keep the inline layout and their existing byte equivalence, and document
+saves retain their inline layout below 1 GiB. Above that private
+streaming budget a document save selects the appended layout directly, which keeps
 the transient cost to the small header. Bytes-returning APIs keep the full
 FlatBuffer budget so their return contract and layout are unchanged; a model
 between the two thresholds therefore saves as appended payloads but serializes to
@@ -278,9 +319,11 @@ large-model limit:
 
 1. **RAM:** bytes-returning APIs materialize the complete output. Source tensor
    storage, conversion intermediates, the original binary during O1, and an
-   optimized replacement binary can coexist. Memory requirements can
+   optimized replacement binary can coexist on the bytes path. Memory requirements can
    substantially exceed the final file size. A multi-gigabyte export should run
-   in a sufficiently provisioned 64-bit process. File saves stream appended
+   in a sufficiently provisioned 64-bit process. Explicit file conversion avoids
+   those complete binary intermediates, but still retains source tensors and pass
+   working storage. File saves stream appended
    payloads, and `tico-circle extract` maps its input, but inline packing and
    any pass that copies constants still allocate in proportion to the payloads
    involved.

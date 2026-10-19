@@ -71,7 +71,7 @@ Saved .pt2                    In-memory ExportedProgram
     │ torch.export.load             │
     └──────────────┬───────────────┘
                    ▼
-      convert_exported_module_to_circle
+         _prepare_exported_program
                    │
                    ├─ fake-quant decomposition
                    ├─ PyTorch decomposition with preserved operators
@@ -80,10 +80,10 @@ Saved .pt2                    In-memory ExportedProgram
                    ├─ conditional quantization passes
                    ├─ supported-target and training-op checks
                    ▼
-             Circle serializer
+     Circle serializer + configured O1
                    │
                    ▼
-               Circle bytes
+       Circle bytes / atomic .circle file
                    │
                    ├─ CircleModel.save/load/__call__
                    └─ tico.circle inspect/verify/extract/optimize
@@ -101,7 +101,10 @@ from tico import (
     CompileConfigV1,
     convert,
     convert_from_exported_program,
+    convert_from_exported_program_to_file,
     convert_from_pt2,
+    convert_from_pt2_to_file,
+    convert_to_file,
     get_default_config,
 )
 ```
@@ -137,6 +140,18 @@ Loads an exported program with `torch.export.load()` and runs the same conversio
 The `pt2-to-circle` executable is a file-oriented wrapper around this behavior and
 supports a versioned YAML compile configuration.
 
+### Explicit file conversion
+
+`convert_to_file(mod, args, output_path, ...)`,
+`convert_from_exported_program_to_file(program, output_path, config=None)`, and
+`convert_from_pt2_to_file(pt2_path, output_path, config=None)` return `None` and
+write an atomic output file. They share the PyTorch legalization pipeline with
+the bytes APIs. A metadata-only schema round trip produces a normalized Circle
+document with borrowed read-only constants; the same configured O1 pipeline runs
+on that document before file serialization. The `pt2-to-circle` executable uses
+this path. See [Large Circle export](./large_circle_export.md#direct-file-conversion)
+for memory ownership and layout policies.
+
 ## 4. Package responsibilities
 
 | Package | Current responsibility |
@@ -160,8 +175,8 @@ A key boundary is the IR being transformed:
 
 ## 5. Conversion pipeline
 
-The authoritative implementation is
-`convert_exported_module_to_circle()` in `tico/utils/convert.py`.
+The authoritative pass sequence is `_prepare_exported_program()` in
+`tico/utils/convert.py`, shared by bytes-returning and file-output conversion.
 
 ### 5.1 Input assumptions
 
@@ -317,7 +332,9 @@ Before serialization, TICO:
 1. Checks every remaining `call_function` target against registered serializer visitors,
    allowing `operator.getitem` as a multiple-output bookkeeping operation.
 2. Rejects training operators such as `aten.dropout` and `aten.native_dropout`.
-3. Calls `build_circle()` to produce a `CIR0` FlatBuffer.
+3. Builds Circle tables through the shared serializer. Bytes APIs call
+   `build_circle_bytes()` and then optimize the serialized document; file APIs call
+   `build_circle_model()` and optimize its normalized document before saving.
 
 `full_like` retains its `dtype` through legalization. Its serializer creates the
 fill values directly in that dtype, or in the input dtype when it is omitted or
@@ -382,12 +399,13 @@ At the end of conversion:
 | Field | Default | Consumed by |
 |---|---:|---|
 | `legalize_causal_mask_value` | `False` | `LegalizeCausalMaskValue` |
-| `remove_constant_input` | `False` | Circle input registration in `build_circle()` |
+| `remove_constant_input` | `False` | Circle input registration in `build_circle_bytes()` |
 | `convert_lhs_const_mm_to_fc` | `False` | `ConvertMatmulToLinear` |
 | `convert_rhs_const_mm_to_fc` | `True` | `ConvertMatmulToLinear` |
 | `convert_single_batch_lhs_const_bmm_to_fc` | `False` | `ConvertMatmulToLinear` |
 | `convert_expand_to_slice_cat` | `False` | `ConvertExpandToSliceCat` |
 | `eliminate_rank_round_trip` | `False` | Currently not consumed; the pass is instantiated with `enabled=True`. |
+| `circle_optimize` | `True` | Shared Circle O1 document pipeline, after packing on the bytes path and before final packing on the file path. |
 
 `CompileConfigBase.from_dict()` applies only keys already present on the dataclass. The
 current implementation ignores unknown fields rather than rejecting them. Configuration
@@ -399,8 +417,9 @@ field. Keep the dataclass, YAML examples, implementation wiring, and tests synch
 
 ## 8. Circle serialization
 
-`build_circle()` constructs a generated Circle object model and packs it with
-FlatBuffers.
+`build_circle_bytes()` constructs a generated Circle object model and packs it with
+FlatBuffers. `build_circle_model()` shares construction but normalizes only
+metadata through the schema, retaining constant payload views for file output.
 
 ### 8.1 Model construction
 
@@ -545,8 +564,9 @@ for the current package contracts.
 
 ## 11. Circle artifact layer
 
-`tico.circle` operates on serialized Circle bytes and is intentionally independent from
-the exported-graph pass pipeline.
+`tico.circle` operates on Circle object-model documents and is independent from
+the exported-graph pass pipeline. Documents may come from serialized bytes or
+the file converter's metadata-only schema round trip.
 
 ```text
 Circle bytes

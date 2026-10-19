@@ -79,7 +79,7 @@ from tico.quantization.passes.qparam_safe_const_prop import QParamSafeConstPropP
 from tico.quantization.passes.quantize_bias import QuantizeBias
 from tico.quantization.passes.remove_weight_dequant_op import RemoveWeightDequantOp
 from tico.quantization.wrapq.utils.check_missing_qparam import check_missing_qparam
-from tico.serialize.circle_serializer import build_circle
+from tico.serialize.circle_serializer import build_circle_bytes, build_circle_model
 from tico.serialize.operators.node_visitor import get_support_targets
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -91,6 +91,11 @@ from tico.utils.trace_decorators import (
     trace_graph_diff_on_func,
 )
 from tico.utils.utils import has_quantization_ops, SuppressWarning
+
+
+# Bound the final inline pack for explicit file conversion. The bytes APIs and
+# ordinary Circle document saves retain their existing layout budgets.
+_FILE_OUTPUT_INLINE_BUDGET = 64 << 20
 
 
 @trace_const_diff_on_func
@@ -209,10 +214,10 @@ def check_training_ops(exported_program: ExportedProgram):
         )
 
 
-def convert_exported_module_to_circle(
+def _prepare_exported_program(
     exported_program: ExportedProgram,
     config: Optional[CompileConfigBase] = None,
-) -> bytes:
+) -> ExportedProgram:
     if not config:
         config = get_default_config()
 
@@ -349,10 +354,23 @@ def convert_exported_module_to_circle(
 
     check_unsupported_target(exported_program)
     check_training_ops(exported_program)
-    circle_program = build_circle(exported_program, config)
+    return exported_program
 
-    # Keep build_circle() and CircleModel.save() serialization-only. All public
-    # conversion entry points share this post-serialization optimization stage.
+
+def convert_exported_module_to_circle(
+    exported_program: ExportedProgram,
+    config: Optional[CompileConfigBase] = None,
+) -> bytes:
+    if not config:
+        config = get_default_config()
+    assert isinstance(config, CompileConfigBase)
+    exported_program = _prepare_exported_program(exported_program, config)
+    logger = logging.getLogger(__name__)
+    circle_program = build_circle_bytes(exported_program, config)
+
+    # Keep build_circle_bytes() and CircleModel.save() serialization-only.
+    # Bytes-returning entry points optimize after serialization; file output reuses
+    # the same O1 document pipeline before final packing.
     if config.get("circle_optimize") is not False:
         from tico.circle.export import optimize_for_export
 
@@ -408,3 +426,70 @@ def convert_from_pt2(
     circle_binary = convert_exported_module_to_circle(exported_program, config=config)
 
     return CircleModel(circle_binary)
+
+
+def convert_to_file(
+    mod: torch.nn.Module,
+    args: Tuple[Any, ...],
+    output_path: str | os.PathLike[str],
+    kwargs: Optional[Dict[str, Any]] = None,
+    dynamic_shapes: Optional[dict] = None,
+    strict: bool = True,
+    config: CompileConfigBase = get_default_config(),
+) -> None:
+    """Convert directly to a file without creating complete Circle bytes.
+
+    Uses the same export, legalization, and configured Circle O1 passes as
+    :func:`convert`. The output is saved atomically after successful conversion.
+    Source tensors and conversion/pass intermediates still require memory.
+    """
+    if hasattr(mod, "training") and mod.training:
+        logger = logging.getLogger(__name__)
+        logger.fatal(
+            "Your model is in TRAINING MODE. PLEASE CHECK IF YOU FORGOT `model.eval()`."
+        )
+
+    with torch.no_grad():
+        exported_program = export(
+            mod, args, kwargs, dynamic_shapes=dynamic_shapes, strict=strict
+        )
+    with SuppressWarning(FutureWarning, ".*LeafSpec"):
+        convert_from_exported_program_to_file(exported_program, output_path, config)
+
+
+def convert_from_exported_program_to_file(
+    exported_program: ExportedProgram,
+    output_path: str | os.PathLike[str],
+    config: Optional[CompileConfigBase] = None,
+) -> None:
+    """Convert an ExportedProgram to a file, retaining no complete binary.
+
+    Constants are borrowed during this call; do not mutate the program or its
+    tensor storage concurrently. Failures propagate and preserve existing output.
+    """
+    from tico.circle.document import CircleDocument
+    from tico.circle.export import optimize_document_for_export
+    from tico.circle.io import save_model
+
+    if not config:
+        config = get_default_config()
+    assert isinstance(config, CompileConfigBase)
+    exported_program = _prepare_exported_program(exported_program, config)
+    document = CircleDocument(build_circle_model(exported_program, config))
+    if config.get("circle_optimize") is not False:
+        optimize_document_for_export(
+            document,
+            logger=logging.getLogger(__name__),
+            dump_directory="." if os.environ.get("TICO_GRAPH_DUMP") else None,
+        )
+    save_model(document.model, output_path, inline_budget=_FILE_OUTPUT_INLINE_BUDGET)
+
+
+def convert_from_pt2_to_file(
+    pt2_path: str | os.PathLike[str],
+    output_path: str | os.PathLike[str],
+    config: Optional[CompileConfigBase] = None,
+) -> None:
+    """Load a saved ExportedProgram and convert directly to an atomic file."""
+    exported_program = torch.export.load(pt2_path)
+    convert_from_exported_program_to_file(exported_program, output_path, config)

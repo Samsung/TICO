@@ -121,7 +121,7 @@ User Code
   - Quantization: `FoldQuantOps`, `RemoveWeightDequantOp`, `PropagateQParamForward/Backward`, `QuantizeBias`, `InsertQuantizeOnDtypeMismatch`
 
 - **Circle Builder**
-  - `build_circle(exported_program, config) -> bytes`, then `CircleModel(bytes)`.
+  - `build_circle_bytes(exported_program, config) -> bytes`, then `CircleModel(bytes)`.
 
 - **Validation & Checks**
   - `check_unsupported_target`, `check_training_ops`
@@ -183,7 +183,7 @@ User Code
 
 6. **Validation & Circle Build**
    - `check_unsupported_target(exported_program)`, `check_training_ops(exported_program)`
-   - `build_circle(...)` → `bytes` → `CircleModel`
+   - `build_circle_bytes(...)` → `bytes` → `CircleModel`
 
 7. **(Optional) Runtime Inference**
    - Test harness loads the circle and runs with `circle-interpreter` or `onert`.

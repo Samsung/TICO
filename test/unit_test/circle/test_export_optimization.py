@@ -27,7 +27,11 @@ import numpy as np
 
 from tico.circle.document import CircleDocument
 from tico.circle.errors import CircleRewriteError
-from tico.circle.export import _interface_snapshot, optimize_for_export
+from tico.circle.export import (
+    _interface_snapshot,
+    optimize_document_for_export,
+    optimize_for_export,
+)
 from tico.circle.passes.base import CirclePassContext
 from tico.circle.passes.cleanup import CompactIndicesPass, DeadCodeEliminationPass
 from tico.circle.passes.manager import CirclePassManager
@@ -35,6 +39,7 @@ from tico.circle.passes.optimization.simplify.identity_ops import (
     EliminateIdentityOpsPass,
 )
 from tico.circle.passes.optimization.simplify.views import SimplifyViewOpsPass
+from tico.circle.verify import CircleVerificationError
 from tico.config import CompileConfigV1, get_default_config
 
 from test.unit_test.circle.export_fixture import (
@@ -456,6 +461,63 @@ class TestExportOperation(unittest.TestCase):
             pack.assert_called_once()
         self.assertEqual(_interface_snapshot(document), before)
 
+    def test_document_runs_same_pipeline_without_binary_io(self):
+        document = mul_document()
+        before = _interface_snapshot(document)
+        with (
+            patch.object(CircleDocument, "from_bytes") as unpack,
+            patch.object(CircleDocument, "to_bytes") as pack,
+            patch.object(CircleDocument, "save") as save,
+            patch("tico.circle.export.create_o1_pipeline") as create,
+        ):
+            create.return_value.run.side_effect = self.pipeline
+            optimize_document_for_export(document)
+            supplied_document, context = create.return_value.run.call_args.args
+            self.assertIs(supplied_document, document)
+            self.assertTrue(context.preserve_io)
+            self.assertTrue(context.verify_after_each_pass)
+            unpack.assert_not_called()
+            pack.assert_not_called()
+            save.assert_not_called()
+        self.assertEqual(len(document.subgraph().operators), 1)
+        self.assertEqual(_interface_snapshot(document), before)
+
+    def test_document_verifies_before_pipeline(self):
+        document = mul_document()
+        document.subgraph().outputs = [99]
+        with patch("tico.circle.export.create_o1_pipeline") as create:
+            with self.assertRaisesRegex(CircleVerificationError, "99"):
+                optimize_document_for_export(document)
+            create.assert_not_called()
+
+    def test_document_verifies_after_pipeline(self):
+        document = mul_document()
+
+        def corrupt(document, context):
+            document.subgraph().outputs = [99]
+            return NS(modified=True, changes=1)
+
+        with patch("tico.circle.export.create_o1_pipeline") as create:
+            create.return_value.run.side_effect = corrupt
+            with self.assertRaisesRegex(CircleVerificationError, "99"):
+                optimize_document_for_export(document)
+
+    def test_document_interface_violation_propagates_before_save(self):
+        document = mul_document()
+
+        def corrupt(document, context):
+            document.subgraph().tensors[2].name = "wrong_output"
+            return NS(modified=True, changes=1)
+
+        with (
+            patch.object(CircleDocument, "save") as save,
+            patch("tico.circle.export.create_o1_pipeline") as create,
+        ):
+            create.return_value.run.side_effect = corrupt
+            with self.assertRaisesRegex(CircleRewriteError, "I/O or signature"):
+                optimize_document_for_export(document)
+            save.assert_not_called()
+
     def test_unchanged_pipeline_returns_original_bytes_without_pack(self):
         document = mul_document()
         with (
@@ -516,6 +578,8 @@ class TestExportOperation(unittest.TestCase):
                 report = json.loads((folder / "report.json").read_text())
                 self.assertTrue(report["preserve_io"])
                 self.assertTrue(report["phases"][0]["executions"])
+                self.assertEqual(report["bytes_before"], len(b"raw"))
+                self.assertEqual(report["bytes_after"], len(b"optimized"))
 
     def test_original_dump_survives_failure(self):
         with tempfile.TemporaryDirectory() as directory:

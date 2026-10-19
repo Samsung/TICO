@@ -1,9 +1,11 @@
 # Circle artifact tools
 
 `tico.circle` provides a reusable Python library and command-line interface for inspecting and transforming
- exported Circle model artifacts. It operates **after** TICO has serialized a `torch.export.ExportedProgram`
- into Circle, so it is intentionally separate from the existing `tico.passes` package, whose passes operate
- on PyTorch IR.
+ exported Circle model artifacts. It operates on Circle object-model documents, separate from
+ the existing `tico.passes` package, whose passes operate on PyTorch IR. Documents normally
+ come from serialized files; explicit file conversion also runs the same export O1 pipeline
+ on a normalized Circle document before final file serialization. See
+ [Direct file conversion](../../docs/large_circle_export.md#direct-file-conversion).
 
 ## Architecture
 
