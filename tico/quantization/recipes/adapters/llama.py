@@ -21,9 +21,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from tico.quantization.config.builders import build_llm_ptq_config
 from tico.quantization.recipes.adapters.base import ModelAdapter
-from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.llm import build_wikitext_calibration_inputs
+from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
 from tico.quantization.recipes.evaluation.llm import (
     evaluate_lm_tasks,
     evaluate_perplexity,
@@ -39,6 +39,11 @@ from tico.quantization.recipes.override_policies import (
     COMMON_LINEAR_MODULES,
     ComponentQuantTargetInfo,
     QuantTargetResolverContext,
+)
+from tico.quantization.recipes.sequence_length import (
+    model_context_length,
+    resolve_export_max_seq_len,
+    resolve_ppl_max_seq_len,
 )
 from tico.quantization.recipes.utils import (
     get_attr_path,
@@ -195,23 +200,12 @@ class LlamaAdapter(ModelAdapter):
             device_map=device_map,
         ).eval()
 
-        calib_seq_len = get_by_path(cfg, "calibration.seq_len")
-        if calib_seq_len is not None and hasattr(
-            ctx.model.config, "max_position_embeddings"
-        ):
-            ctx.model.config.max_position_embeddings = min(
-                int(ctx.model.config.max_position_embeddings),
-                int(calib_seq_len),
-            )
+        ctx.artifacts["pretrained_context_length"] = model_context_length(ctx.model)
         return ctx
 
     def requires_calibration_inputs(self, cfg: Mapping[str, Any]) -> bool:
-        """Preserve example inputs required by full-model Circle export."""
-        export_cfg = cfg.get("export", {})
-        if not isinstance(export_cfg, Mapping) or not export_cfg.get("enabled", False):
-            return False
-        artifacts = export_cfg.get("artifacts", [])
-        return "circle_full" in set(artifacts)
+        """Export builds shape examples independently of calibration samples."""
+        return False
 
     def build_calibration_inputs(self, ctx: RecipeContext) -> list[torch.Tensor]:
         cfg = ctx.cfg
@@ -353,11 +347,7 @@ class LlamaAdapter(ModelAdapter):
             return
 
         self.validate_evaluation_config(ctx.cfg)
-        max_seq_len = int(
-            eval_cfg.get("max_seq_len")
-            or ctx.cfg.get("calibration", {}).get("seq_len")
-            or ctx.model.config.max_position_embeddings
-        )
+        max_seq_len = prepare_eager_evaluation(ctx)
 
         raw_ppl_cfg = eval_cfg.get("perplexity")
         if should_run_evaluation(
@@ -379,7 +369,10 @@ class LlamaAdapter(ModelAdapter):
                 tokenizer=ctx.tokenizer,
                 device=str(ctx.device),
                 cache_dir=ctx.cfg.get("model", {}).get("cache_dir"),
-                max_seq_len=max_seq_len,
+                max_seq_len=resolve_ppl_max_seq_len(
+                    ppl_cfg, evaluation_max_seq_len=max_seq_len
+                ),
+                stride=ppl_cfg.get("stride"),
                 dataset_name=ppl_cfg.get("dataset", "Salesforce/wikitext"),
                 dataset_config=ppl_cfg.get(
                     "dataset_config",
@@ -434,20 +427,12 @@ class LlamaAdapter(ModelAdapter):
                 f"Current profile={profile!r}."
             )
 
-        max_seq_len = int(
-            export_cfg.get("max_seq_len")
-            or ctx.cfg.get("evaluation", {}).get("max_seq_len")
-            or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-        )
+        max_seq_len = resolve_export_max_seq_len(ctx)
 
         if "circle_full" in artifacts:
-            if not ctx.calibration_inputs:
-                raise RuntimeError(
-                    "Circle export requires at least one calibration input."
-                )
             export_full_circle(
                 model=ctx.model,
-                example_input=ctx.calibration_inputs[0],
+                example_input=torch.zeros((1, max_seq_len), dtype=torch.long),
                 output_dir=output_dir,
                 name="model.q.circle",
                 strict=bool(export_cfg.get("strict", False)),

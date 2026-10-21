@@ -26,9 +26,12 @@ pipeline: []
 
 evaluation:
   enabled: true
+  backend: eager
+  output_dir: ./out/llama_eval_suite/evaluation
+  use_cache: true
   perplexity: null
   lm_eval_tasks: mmlu,hellaswag,piqa,truthfulqa_mc1,truthfulqa_mc2,race,triviaqa
-  max_seq_len: 2048
+  max_seq_len: null  # Use the original model context; independent of calibration.
 
 export:
   enabled: false

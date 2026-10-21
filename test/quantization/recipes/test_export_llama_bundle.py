@@ -35,12 +35,22 @@ from tico.quantization.recipes.export.llama_bundle import (
 )
 
 
+class _BundleLayer(SimpleNamespace):
+    """Provide explicit RoPE spans for host-context contract tests."""
+
+    def _slice_rope(self, *, start, seq_len, device, dtype):
+        return tuple(
+            template[:, start : start + seq_len].to(device=device, dtype=dtype)
+            for template in (self.rope_cos_template, self.rope_sin_template)
+        )
+
+
 def _bundle_model():
     layers = []
     for index in range(2):
         layers.append(
             SimpleNamespace(
-                wrapped=SimpleNamespace(
+                wrapped=_BundleLayer(
                     rope_cos_template=torch.full((1, 6, 4), float(index + 2)),
                     rope_sin_template=torch.arange(24).reshape(1, 6, 4).float() + index,
                     qcfg=SimpleNamespace(attention_mask_fill_value=-100.0 - index),
@@ -123,7 +133,7 @@ class TestLlamaBundleContext(unittest.TestCase):
         for mutation, message in (
             (
                 lambda layer: setattr(layer, "rope_sin_template", torch.zeros(1, 2, 4)),
-                "rope_sin_template",
+                "rope_sin",
             ),
             (
                 lambda layer: setattr(
@@ -203,7 +213,7 @@ class TestLlamaBundleContext(unittest.TestCase):
                 "_prepare_llama_export_model",
                 return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
             ), patch.object(llama, "_export_prepared_llama_per_layer") as export:
-                with self.assertRaisesRegex(ValueError, "rope_cos_template"):
+                with self.assertRaisesRegex(ValueError, "rope_cos"):
                     llama.export_llama_bundle(
                         q_model=torch.nn.Identity(), max_seq_len=4, output_dir=directory
                     )

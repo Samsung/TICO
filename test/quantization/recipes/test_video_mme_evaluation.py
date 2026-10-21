@@ -69,8 +69,8 @@ class TestVideoMmeEvaluation(unittest.TestCase):
         # Verify results are returned
         self.assertIn("results", result)
 
-    def test_evaluate_and_print_video_mme_passes_cache_args(self):
-        """Cache-related arguments should be forwarded to evaluate_vlm_on_tasks."""
+    def test_evaluate_and_print_video_mme_passes_cache_and_context_args(self):
+        """Forward the eager context and both independent cache policies."""
         captured = {}
 
         def fake_evaluate_vlm_on_tasks(**kwargs):
@@ -94,9 +94,143 @@ class TestVideoMmeEvaluation(unittest.TestCase):
                     processor=MagicMock(),
                     device="cpu",
                     use_cache="/tmp/cache",
+                    max_seq_len=4096,
+                    kv_cache=False,
                 )
 
         self.assertEqual(captured["use_cache"], "/tmp/cache")
+        self.assertEqual(captured["max_seq_len"], 4096)
+        self.assertIs(captured["kv_cache"], False)
+
+
+class TestEagerVideoProtocolRouting(unittest.TestCase):
+    """Run evaluation routing with real budget logic and external calls stubbed."""
+
+    def setUp(self):
+        from tico.quantization.evaluation import lmms_eval_utils
+
+        self.utils = lmms_eval_utils
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.dict("os.environ", {}))
+        self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        self.evaluate = self.stack.enter_context(
+            patch(
+                "lmms_eval.evaluator.simple_evaluate",
+                return_value={"results": {"videomme_mini": {"acc": 0.5}}},
+            )
+        )
+        # These boundaries import external model wrappers or download data.
+        # Context resolution, budget computation, and call routing remain real.
+        for name in (
+            "_patch_from_pretrained_to_reuse_model",
+            "_patch_subsample_video_inputs_for_debug",
+            "_patch_video_frame_budget",
+            "_patch_snapshot_download_for_limit",
+        ):
+            self.stack.enter_context(
+                patch.object(
+                    self.utils,
+                    name,
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(),
+                )
+            )
+        self.stack.enter_context(
+            patch.object(self.utils, "_patch_lmms_eval_broken_tasks")
+        )
+        self.stack.enter_context(
+            patch.object(self.utils, "_ensure_videomme_chunks_downloaded")
+        )
+        self.stack.enter_context(
+            patch(
+                "tico.quantization.evaluation.lmms_tasks.videomme_mini.utils._reset_printed_prompts"
+            )
+        )
+
+    @staticmethod
+    def _make_model(*, quantized):
+        """Represent FP and PTQ models with the same native text capacity."""
+        from types import SimpleNamespace
+
+        class Qwen3VLForConditionalGeneration(SimpleNamespace):
+            """Expose the class identity used by lmms model routing."""
+
+        model = Qwen3VLForConditionalGeneration(
+            config=SimpleNamespace(
+                _name_or_path="local-qwen3-vl",
+                text_config=SimpleNamespace(max_position_embeddings=8192),
+            )
+        )
+        if quantized:
+            model.model = SimpleNamespace(
+                language_model=SimpleNamespace(static_max_seq=512)
+            )
+            return SimpleNamespace(wrapped=model)
+        return model
+
+    def _run_evaluation(self, model, **kwargs):
+        """Capture the actual lmms call without loading a model or dataset."""
+        from types import SimpleNamespace
+
+        processor = SimpleNamespace(
+            image_processor=SimpleNamespace(patch_size=16, merge_size=2)
+        )
+        result = self.utils.evaluate_vlm_on_tasks(
+            model=model,
+            processor=processor,
+            tasks=["videomme"],
+            device="cpu",
+            max_num_frames=10,
+            max_new_tokens=30,
+            limit=2,
+            verbose=False,
+            task_manager=object(),
+            **kwargs,
+        )
+        self.assertEqual(result["results"]["videomme_mini"]["acc"], 0.5)
+        call = self.evaluate.call_args.kwargs
+        self.assertEqual(call["tasks"], ["videomme_mini"])
+        self.assertEqual(call["limit"], 2)
+        model_args = dict(item.split("=", 1) for item in call["model_args"].split(","))
+        return call, model_args
+
+    def test_fp_and_quant_share_native_or_explicit_video_budget(self):
+        """A common context cap produces identical FP/PTQ video preprocessing."""
+        for max_seq_len, expected_max_pixels in ((None, 808960), (2048, 180224)):
+            routed_args = []
+            for quantized in (False, True):
+                with self.subTest(max_seq_len=max_seq_len, quantized=quantized):
+                    call, model_args = self._run_evaluation(
+                        self._make_model(quantized=quantized),
+                        max_seq_len=max_seq_len,
+                    )
+                    self.assertEqual(call["model"], "qwen3_vl")
+                    self.assertEqual(int(model_args["max_pixels"]), expected_max_pixels)
+                    self.assertEqual(int(model_args["max_num_frames"]), 10)
+                    routed_args.append(model_args)
+            self.assertEqual(routed_args[0], routed_args[1])
+
+    def test_kv_cache_is_separate_from_evaluator_results_cache(self):
+        """Inference cache policy reaches model_args and preserves results caching."""
+        for kv_cache in (False, True, None):
+            with self.subTest(kv_cache=kv_cache):
+                call, model_args = self._run_evaluation(
+                    self._make_model(quantized=True),
+                    max_seq_len=2048,
+                    kv_cache=kv_cache,
+                    use_cache="/unused/results-cache",
+                )
+                self.assertEqual(call["use_cache"], "/unused/results-cache")
+                if kv_cache is None:
+                    self.assertNotIn("use_cache", model_args)
+                else:
+                    self.assertEqual(model_args["use_cache"], str(kv_cache))
+
+    def test_explicit_budget_cannot_exceed_native_capacity(self):
+        """Reject an invalid common cap before invoking the external evaluator."""
+        with self.assertRaisesRegex(ValueError, "exceeds the model context capacity"):
+            self._run_evaluation(self._make_model(quantized=True), max_seq_len=8193)
+        self.evaluate.assert_not_called()
 
 
 class TestCoerceIntAttr(unittest.TestCase):
@@ -394,6 +528,22 @@ class TestGetMaxPositionEmbeddings(unittest.TestCase):
 
         model = SimpleNamespace(config=Config())
         self.assertEqual(_get_max_position_embeddings(model), 4096)
+
+    def test_native_context_ignores_nested_static_export_capacity(self):
+        """Static export buffers do not reduce the eager context budget."""
+        from types import SimpleNamespace
+
+        from tico.quantization.evaluation.lmms_eval_utils import (
+            _get_max_position_embeddings,
+        )
+
+        model = SimpleNamespace(
+            config=SimpleNamespace(
+                text_config=SimpleNamespace(max_position_embeddings=8192)
+            ),
+            model=SimpleNamespace(language_model=SimpleNamespace(static_max_seq=512)),
+        )
+        self.assertEqual(_get_max_position_embeddings(model), 8192)
 
     def test_no_config_returns_none(self):
         """Model without config returns None."""

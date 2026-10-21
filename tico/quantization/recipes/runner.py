@@ -217,21 +217,6 @@ def _calibration_sample_count(calibration_cfg: Mapping[str, Any]) -> Any:
     return calibration_cfg.get("n_samples", "not set")
 
 
-def _max_seq_len(cfg: Mapping[str, Any]) -> Any:
-    """Return the most relevant max sequence length."""
-    evaluation_cfg = cfg.get("evaluation", {})
-    export_cfg = cfg.get("export", {})
-    calibration_cfg = cfg.get("calibration", {})
-
-    if isinstance(evaluation_cfg, Mapping) and evaluation_cfg.get("max_seq_len"):
-        return evaluation_cfg["max_seq_len"]
-    if isinstance(export_cfg, Mapping) and export_cfg.get("max_seq_len"):
-        return export_cfg["max_seq_len"]
-    if isinstance(calibration_cfg, Mapping) and calibration_cfg.get("seq_len"):
-        return calibration_cfg["seq_len"]
-    return "not set"
-
-
 def _print_config_row(label: str, value: Any) -> None:
     """Print one aligned config summary row."""
     print(f"{label:<22}: {value}")
@@ -343,7 +328,17 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
         "Calibration seq length",
         calibration_cfg.get("seq_len", "not set"),
     )
-    _print_config_row("Max seq length", _max_seq_len(cfg))
+    evaluation_cfg = cfg.get("evaluation", {})
+    export_cfg = cfg.get("export", {})
+    _print_config_row("Evaluation backend", evaluation_cfg.get("backend", "eager"))
+    _print_config_row(
+        "Evaluation context",
+        evaluation_cfg.get("max_seq_len") or "model context",
+    )
+    _print_config_row(
+        "Export capacity",
+        export_cfg.get("max_seq_len") or "min(2048, model context)",
+    )
     _print_config_row("Profile", profile)
     _print_override_policy_summary(ptq_stage)
     print()

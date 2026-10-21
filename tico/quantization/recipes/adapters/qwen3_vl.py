@@ -24,9 +24,9 @@ from tico.quantization.config.builders import build_qwen3_vl_ptq_config
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.config.qwen3_vl_spinquant import Qwen3VLSpinQuantConfig
 from tico.quantization.recipes.adapters.base import ModelAdapter
-from tico.quantization.recipes.config import get_by_path
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.data.vlm import build_vlm_calibration_inputs
+from tico.quantization.recipes.evaluation.eager import prepare_eager_evaluation
 from tico.quantization.recipes.evaluation.hellaswag import evaluate_and_print_hellaswag
 from tico.quantization.recipes.evaluation.llava_bench import run_llava_bench_evaluation
 from tico.quantization.recipes.evaluation.mmlu import evaluate_and_print_mmlu
@@ -52,6 +52,11 @@ from tico.quantization.recipes.override_policies import (
     COMMON_LINEAR_MODULES,
     ComponentQuantTargetInfo,
     QuantTargetResolverContext,
+)
+from tico.quantization.recipes.sequence_length import (
+    model_context_length,
+    resolve_export_max_seq_len,
+    resolve_ppl_max_seq_len,
 )
 from tico.quantization.recipes.utils import (
     get_attr_path,
@@ -135,12 +140,7 @@ class Qwen3VLAdapter(ModelAdapter):
         ctx.model.eval()
         self._disable_cache(ctx.model)
 
-        calib_seq_len = get_by_path(cfg, "calibration.seq_len")
-        if calib_seq_len is not None and hasattr(ctx.model.config, "text_config"):
-            ctx.model.config.text_config.max_position_embeddings = min(
-                int(ctx.model.config.text_config.max_position_embeddings),
-                int(calib_seq_len),
-            )
+        ctx.artifacts["pretrained_context_length"] = model_context_length(ctx.model)
         return ctx
 
     @staticmethod
@@ -439,7 +439,7 @@ class Qwen3VLAdapter(ModelAdapter):
             return
 
         self.validate_evaluation_config(ctx.cfg)
-        max_seq_len = eval_cfg.get("max_seq_len")
+        max_seq_len = prepare_eager_evaluation(ctx)
         n_samples = int(eval_cfg.get("n_samples", 50))
         verbose = bool(eval_cfg.get("verbose", False))
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
@@ -498,6 +498,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 max_new_tokens=int(videomme.get("max_new_tokens", 30)),
                 n_samples=video_n_samples if video_n_samples > 0 else None,
                 max_num_frames=max_num_frames,
+                max_seq_len=max_seq_len,
+                kv_cache=eval_cfg.get("use_cache", True),
                 use_cache=videomme.get("use_cache", None),
                 verbose=bool(videomme.get("verbose", verbose)),
             )
@@ -512,9 +514,7 @@ class Qwen3VLAdapter(ModelAdapter):
                 n_shots=int(mmlu.get("n_shots", 5)),
                 n_samples=int(mmlu.get("n_samples", -1)),
                 batch_size=int(mmlu.get("batch_size", 1)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-                ),
+                max_seq_len=max_seq_len,
             )
 
         if should_run_mapping_evaluation(eval_cfg, "hellaswag"):
@@ -526,9 +526,7 @@ class Qwen3VLAdapter(ModelAdapter):
                 n_shots=int(hellaswag.get("n_shots", 10)),
                 n_samples=int(hellaswag.get("n_samples", -1)),
                 batch_size=int(hellaswag.get("batch_size", 1)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
-                ),
+                max_seq_len=max_seq_len,
             )
 
         run_mmmu_evaluation(
@@ -549,8 +547,8 @@ class Qwen3VLAdapter(ModelAdapter):
                 split=ppl_cfg.get("split", "test"),
                 device=str(ctx.device),
                 stride=int(ppl_cfg.get("stride", 512)),
-                max_seq_len=int(
-                    max_seq_len or ctx.cfg.get("calibration", {}).get("seq_len", 2048)
+                max_seq_len=resolve_ppl_max_seq_len(
+                    ppl_cfg, evaluation_max_seq_len=max_seq_len
                 ),
                 show_progress=show_progress,
             )
@@ -567,12 +565,7 @@ class Qwen3VLAdapter(ModelAdapter):
             save_checkpoint(ctx.model, output_dir)
 
         if "circle_per_layer" in artifacts:
-            max_seq_len = int(
-                export_cfg.get(
-                    "max_seq_len",
-                    ctx.cfg.get("calibration", {}).get("seq_len", 2048),
-                )
-            )
+            max_seq_len = resolve_export_max_seq_len(ctx)
             model_args = ctx.cfg.get("model_args", {})
             if not isinstance(model_args, Mapping):
                 raise TypeError(

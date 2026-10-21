@@ -36,6 +36,12 @@ if TYPE_CHECKING:
 from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import join_name
+from tico.quantization.wrapq.wrappers.llama.position import (
+    build_causal_mask,
+    combine_binary_attention_mask,
+    make_rotary_embedding,
+    position_embeddings as make_position_embeddings,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -52,14 +58,10 @@ class QuantLlamaModel(QuantModuleBase):
     """
     Quantized wrapper for a Llama-style decoder-only model.
 
-    The wrapper owns model-level masks and RoPE templates shared across decoder
-    layers. RoPE sign convention is controlled by `PTQConfig.model_args` so it
-    stays consistent with `QuantLlamaAttention`.
+    The wrapper builds masks and pretrained RoPE for the actual eager inputs and
+    shares them across decoder layers. RoPE sign convention is controlled by
+    `PTQConfig.model_args` so it stays consistent with `QuantLlamaAttention`.
     """
-
-    causal_mask_template: torch.Tensor
-    rope_cos_template: torch.Tensor
-    rope_sin_template: torch.Tensor
 
     def __init__(
         self,
@@ -150,58 +152,16 @@ class QuantLlamaModel(QuantModuleBase):
 
         self.layers = new_list  # type: ignore[union-attr]
         self.config = model_fp.config
-        # Static causal mask template ---------------------------------------
-        assert isinstance(self.config.max_position_embeddings, int)
-        max_seq = self.config.max_position_embeddings
-        mask = torch.full(
-            (1, 1, max_seq, max_seq), float(self.qcfg.attention_mask_fill_value)
+        self.rotary_emb = make_rotary_embedding(
+            self.config, getattr(model_fp, "rotary_emb", None)
         )
-        mask.triu_(1)
-        self.register_buffer("causal_mask_template", mask, persistent=False)
-
-        # Static RoPE (position_embeddings) templates ------------------------
-        cfg = self.config
-        head_dim = getattr(cfg, "head_dim", None) or (
-            cfg.hidden_size // cfg.num_attention_heads
-        )
-
-        # 1) inv_freq, scaling
-        rotary = getattr(model_fp, "rotary_emb", None)
-        assert rotary is not None
-        if hasattr(rotary, "inv_freq"):
-            inv_freq = rotary.inv_freq.detach().float()
-            attn_scaling = float(getattr(rotary, "attention_scaling", 1.0))
-        else:
-            rope_params = getattr(cfg, "rope_parameters", None)
-            if (
-                rope_params is not None
-                and isinstance(rope_params, dict)
-                and "rope_theta" in rope_params
-            ):
-                base = float(rope_params["rope_theta"])
-            else:
-                base = float(getattr(cfg, "rope_theta", 10000.0))
-            inv_freq = 1.0 / (
-                base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
-            )
-            attn_scaling = 1.0
-
-        # 2) Create cos/sin: [max_seq, head_dim]
-        pos = torch.arange(
-            max_seq, dtype=torch.float32, device=inv_freq.device
-        )  # [max_seq]
-        freqs = torch.outer(pos, inv_freq)  # [max_seq, head_dim/2]
-        emb = torch.cat([freqs, freqs], dim=-1)  # [max_seq, head_dim]
-        cos_t = emb.cos() * attn_scaling
-        sin_t = emb.sin() * attn_scaling
-        half_dim = head_dim // 2
-        if self.attn_options.rope == "pre_negated_sin":
-            sin_t[..., :half_dim] = -sin_t[..., :half_dim]
-        cos_t = cos_t.unsqueeze(0)  # [1, max_seq, head_dim]
-        sin_t = sin_t.unsqueeze(0)  # [1, max_seq, head_dim]
-
-        self.register_buffer("rope_cos_template", cos_t, persistent=False)
-        self.register_buffer("rope_sin_template", sin_t, persistent=False)
+        # Standalone layer export must use the same pretrained rotary state as
+        # the full eager model, including frequencies resolved by the loader.
+        for layer in self.layers:
+            if isinstance(layer.wrapped, QuantModuleBase):
+                layer.wrapped.rotary_emb = make_rotary_embedding(
+                    self.config, self.rotary_emb
+                )
 
     def _make_empty_cache(self) -> Cache:
         """
@@ -453,7 +413,7 @@ class QuantLlamaModel(QuantModuleBase):
 
         return cache
 
-    def _slice_causal(
+    def _build_causal_mask(
         self,
         *,
         q_len: int,
@@ -461,12 +421,13 @@ class QuantLlamaModel(QuantModuleBase):
         past_len: int,
         device: torch.device,
     ) -> torch.Tensor:
-        """
-        Slice the static causal mask template.
-        """
-        assert isinstance(self.causal_mask_template, torch.Tensor)
-        return self.causal_mask_template[..., past_len : past_len + q_len, :k_len].to(
-            device
+        """Build a causal mask only for the requested query and key lengths."""
+        return build_causal_mask(
+            q_len=q_len,
+            k_len=k_len,
+            past_len=past_len,
+            device=device,
+            fill_value=float(self.qcfg.attention_mask_fill_value),
         )
 
     def get_attention_mask_for(
@@ -484,30 +445,28 @@ class QuantLlamaModel(QuantModuleBase):
         device = hidden_states.device
 
         if attention_mask is None:
-            causal_mask = self._slice_causal(
+            causal_mask = self._build_causal_mask(
                 q_len=q_len,
                 k_len=k_len,
                 past_len=past_len,
                 device=device,
             )
-            return self._fq(causal_mask.squeeze(0), self.obs_causal_mask)
+            return self._fq(causal_mask, self.obs_causal_mask)
 
         if attention_mask.dtype in (torch.bool, torch.int64):
-            if attention_mask.dtype == torch.int64:
-                attention_mask = attention_mask != 0
-
-            causal_mask = self._slice_causal(
+            causal_mask = self._build_causal_mask(
                 q_len=q_len,
                 k_len=k_len,
                 past_len=past_len,
                 device=device,
             )
 
-            fill_val = self.qcfg.attention_mask_fill_value
-            additive = torch.zeros_like(attention_mask, dtype=torch.float32)
-            additive = additive.masked_fill(~attention_mask, float(fill_val))
-            mask = torch.clamp(causal_mask + additive, min=fill_val)
-            return self._fq(mask.squeeze(0), self.obs_causal_mask)
+            mask = combine_binary_attention_mask(
+                causal_mask,
+                attention_mask,
+                fill_value=float(self.qcfg.attention_mask_fill_value),
+            )
+            return self._fq(mask, self.obs_causal_mask)
 
         return self._fq(attention_mask, self.obs_causal_mask)
 
@@ -516,16 +475,21 @@ class QuantLlamaModel(QuantModuleBase):
         hidden_states: torch.Tensor,
         *,
         start: int,
+        position_ids: Optional[torch.Tensor] = None,
     ):
         """
         Return RoPE tables for the current model step.
         """
-        end = start + hidden_states.size(1)
-        cos = self.rope_cos_template[:, start:end, :].to(
-            dtype=hidden_states.dtype, device=hidden_states.device
-        )
-        sin = self.rope_sin_template[:, start:end, :].to(
-            dtype=hidden_states.dtype, device=hidden_states.device
+        if position_ids is None:
+            position_ids = torch.arange(
+                start, start + hidden_states.size(1), device=hidden_states.device
+            ).unsqueeze(0)
+        cos, sin = make_position_embeddings(
+            self,
+            self.config,
+            hidden_states,
+            position_ids,
+            pre_negated_sin=self.attn_options.rope == "pre_negated_sin",
         )
         return (
             self._fq(cos, self.obs_cos),
@@ -605,6 +569,7 @@ class QuantLlamaModel(QuantModuleBase):
             position_embeddings = self.get_position_embeddings_for(
                 hidden_states,
                 start=past_seen_tokens,
+                position_ids=position_ids,
             )
 
         # decoder layers

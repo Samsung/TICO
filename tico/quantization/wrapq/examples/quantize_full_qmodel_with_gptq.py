@@ -537,12 +537,11 @@ def save_model_to(
             if prefill_decode is True:
                 # kwargs for padding
                 S = calib_input.shape[-1]
-                attention_mask = (
-                    qmodel.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
+                attention_mask = qmodel._build_causal_mask(
+                    q_len=S, k_len=S, past_len=0, device=torch.device("cpu")
                 )
-                pos_embeds = (
-                    qmodel.rope_cos_template[:, :S, :].to("cpu"),
-                    qmodel.rope_sin_template[::S, :].to("cpu"),
+                pos_embeds = qmodel.get_position_embeddings_for(
+                    torch.empty(1, S, config.hidden_size, device="cpu"), start=0
                 )
                 kwargs = {
                     "attention_mask": attention_mask,
@@ -789,8 +788,8 @@ def save_layers_to(
         B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D, device="cpu")
 
-        attention_mask = (
-            qlayer.wrapped.causal_mask_template[..., :S, :S].squeeze(0).to("cpu")
+        attention_mask = qlayer.wrapped._build_causal_mask(
+            q_len=S, k_len=S, past_len=0, device=torch.device("cpu")
         )
         dtype = example_hidden.dtype
         pos_embeds = qlayer.wrapped._slice_rope(

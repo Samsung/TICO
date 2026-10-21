@@ -38,6 +38,14 @@ class FakeLayerWrapper(torch.nn.Module):
         super().__init__()
         self.causal_mask_template = torch.zeros(1, 1, max_seq, max_seq)
 
+    def _build_causal_mask(self, *, q_len, k_len, past_len, device):
+        """Return the requested mask span for export routing tests."""
+        return (
+            self.causal_mask_template[..., past_len : past_len + q_len, :k_len]
+            .squeeze(0)
+            .to(device)
+        )
+
     def _slice_rope(self, start, seq_len, device, dtype):
         """Return fake RoPE tensors with the requested sequence length."""
         return (

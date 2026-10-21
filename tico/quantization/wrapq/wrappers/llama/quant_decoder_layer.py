@@ -34,6 +34,12 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
     LlamaDecoderLayerPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.llama.position import (
+    build_causal_mask,
+    combine_binary_attention_mask,
+    make_rotary_embedding,
+    position_embeddings as make_position_embeddings,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -52,10 +58,6 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
     - Share the same Llama attention implementation profile used by
       `QuantLlamaAttention` for RoPE table generation.
     """
-
-    causal_mask_template: torch.Tensor
-    rope_cos_template: torch.Tensor
-    rope_sin_template: torch.Tensor
 
     def __init__(
         self,
@@ -137,53 +139,26 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         assert hasattr(cfg, "max_position_embeddings")
         assert isinstance(cfg.max_position_embeddings, int)
         self.max_seq = cfg.max_position_embeddings
-        # Static causal mask template
-        mask = torch.full(
-            (1, 1, self.max_seq, self.max_seq),
-            float(self.qcfg.attention_mask_fill_value),
+        self.rotary_emb = make_rotary_embedding(
+            cfg, getattr(fp_layer, "rotary_emb", None)
         )
-        mask.triu_(1)
-        self.register_buffer("causal_mask_template", mask, persistent=False)
 
-        head_dim = getattr(cfg, "head_dim", None) or (
-            cfg.hidden_size // cfg.num_attention_heads
+    def _build_causal_mask(
+        self,
+        *,
+        q_len: int,
+        k_len: int,
+        past_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build the [1, Q, K] mask for eager execution or an explicit export shape."""
+        return build_causal_mask(
+            q_len=q_len,
+            k_len=k_len,
+            past_len=past_len,
+            device=device,
+            fill_value=float(self.qcfg.attention_mask_fill_value),
         )
-        rotary = getattr(fp_layer, "rotary_emb", None)
-        # Static RoPE (position_embeddings) templates
-        # `rotray_emb` is normally inside `LlamaModel`.
-        # 1) inv_freq, scaling
-        if rotary is not None and hasattr(rotary, "inv_freq"):
-            inv_freq = rotary.inv_freq.detach().float()
-            attn_scaling = float(getattr(rotary, "attention_scaling", 1.0))
-        else:
-            rope_params = getattr(cfg, "rope_parameters", None)
-            if (
-                rope_params is not None
-                and isinstance(rope_params, dict)
-                and "rope_theta" in rope_params
-            ):
-                base = float(rope_params["rope_theta"])
-            else:
-                base = float(getattr(cfg, "rope_theta", 10000.0))
-            inv_freq = 1.0 / (
-                base ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim)
-            )
-            attn_scaling = 1.0
-        # 2) Create cos/sin: [max_seq, head_dim]
-        pos = torch.arange(self.max_seq, dtype=torch.float32)  # [max_seq]
-        freqs = torch.outer(pos, inv_freq)  # [max_seq, head_dim/2]
-        emb = torch.cat([freqs, freqs], dim=-1)  # [max_seq, head_dim]
-        cos_t = emb.cos() * attn_scaling
-        sin_t = emb.sin() * attn_scaling
-        half_dim = head_dim // 2
-        if self.attn_options.rope == "pre_negated_sin":
-            sin_t[..., :half_dim] = -sin_t[..., :half_dim]
-        self.register_buffer(
-            "rope_cos_template", cos_t.unsqueeze(0), persistent=False
-        )  # [1, max_seq, head_dim]
-        self.register_buffer(
-            "rope_sin_template", sin_t.unsqueeze(0), persistent=False
-        )  # [1, max_seq, head_dim]
 
     def _slice_rope(
         self,
@@ -193,15 +168,15 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Slice the static RoPE templates for the requested token range.
-        """
-        assert isinstance(self.rope_cos_template, torch.Tensor)
-        assert isinstance(self.rope_sin_template, torch.Tensor)
-        end = start + seq_len
-        cos = self.rope_cos_template[:, start:end, :].to(device=device, dtype=dtype)
-        sin = self.rope_sin_template[:, start:end, :].to(device=device, dtype=dtype)
-        return cos, sin
+        """Generate pretrained RoPE for the requested range without a full table."""
+        positions = torch.arange(start, start + seq_len, device=device).unsqueeze(0)
+        return make_position_embeddings(
+            self,
+            self.self_attn.wrapped.config,
+            torch.empty((), device=device, dtype=dtype),
+            positions,
+            pre_negated_sin=self.attn_options.rope == "pre_negated_sin",
+        )
 
     def _get_past_len(
         self,
@@ -227,18 +202,25 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         hidden_states: torch.Tensor,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]],
         past_key_value: Optional[Cache | Tuple[torch.Tensor, torch.Tensor]],
+        position_ids: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Return position embeddings that match this wrapper's RoPE convention.
         """
         if position_embeddings is None:
-            q_len = hidden_states.size(1)
-            past_len = self._get_past_len(past_key_value)
-            cos, sin = self._slice_rope(
-                start=past_len,
-                seq_len=q_len,
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
+            if position_ids is None:
+                past_len = self._get_past_len(past_key_value)
+                position_ids = torch.arange(
+                    past_len,
+                    past_len + hidden_states.size(1),
+                    device=hidden_states.device,
+                ).unsqueeze(0)
+            cos, sin = make_position_embeddings(
+                self,
+                self.self_attn.wrapped.config,
+                hidden_states,
+                position_ids,
+                pre_negated_sin=self.attn_options.rope == "pre_negated_sin",
             )
         else:
             cos, sin = position_embeddings
@@ -256,7 +238,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         Return an additive attention mask usable with per-head logits.
 
         Supported cases:
-        - None: build a causal mask slice.
+        - None: build a causal mask for the current query and key lengths.
         - bool mask: convert to additive mask using 0 / configured fill value.
         - additive mask: use as-is.
         """
@@ -265,27 +247,21 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         k_len = past_len + q_len
 
         if attention_mask is None:
-            assert isinstance(self.causal_mask_template, torch.Tensor)
-            mask = self.causal_mask_template[
-                ..., past_len : past_len + q_len, :k_len
-            ].to(device)
-            return self._fq(mask.squeeze(0), self.obs_attn_mask)
+            mask = self._build_causal_mask(
+                q_len=q_len, k_len=k_len, past_len=past_len, device=device
+            )
+            return self._fq(mask, self.obs_attn_mask)
 
         if attention_mask.dtype in (torch.bool, torch.int64):
-            if attention_mask.dtype == torch.int64:
-                attention_mask = attention_mask != 0
-
-            assert isinstance(self.causal_mask_template, torch.Tensor)
-            causal_mask = self.causal_mask_template[
-                ..., past_len : past_len + q_len, :k_len
-            ].to(device)
-
-            fill_val = self.qcfg.attention_mask_fill_value
-            additive = torch.zeros_like(attention_mask, dtype=torch.float32)
-            additive = additive.masked_fill(~attention_mask, float(fill_val))
-
-            mask = torch.clamp(causal_mask + additive, min=fill_val)
-            return self._fq(mask.squeeze(0), self.obs_attn_mask)
+            causal_mask = self._build_causal_mask(
+                q_len=q_len, k_len=k_len, past_len=past_len, device=device
+            )
+            mask = combine_binary_attention_mask(
+                causal_mask,
+                attention_mask,
+                fill_value=float(self.qcfg.attention_mask_fill_value),
+            )
+            return self._fq(mask, self.obs_attn_mask)
 
         return self._fq(attention_mask, self.obs_attn_mask)
 
@@ -336,8 +312,6 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         """
         Run the quantized decoder layer.
         """
-        del position_ids
-
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -351,6 +325,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
             past_key_value=past_key_value,
+            position_ids=position_ids,
         )
 
         attn_out = self.self_attn(
