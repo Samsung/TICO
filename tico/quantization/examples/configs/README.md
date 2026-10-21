@@ -476,7 +476,6 @@ for paired commands, metadata, PPL windows, and legacy checkpoint migration.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `backend` | `eager` | Supported quality-evaluation execution mode; static/NPU tests use separate workflows |
 | `max_seq_len` | `null` | Native model context when null; otherwise a positive integer no larger than the loaded model capacity |
 | `use_cache` | `true` | Inference KV-cache default for both FP and Quant |
 | `output_dir` | `null` | Optional directory for `evaluation_protocol.json` |
@@ -492,7 +491,6 @@ calibration:
   seq_len: 2048
 evaluation:
   enabled: true
-  backend: eager
   max_seq_len: null
   use_cache: true
   output_dir: ./out/evaluation/fp

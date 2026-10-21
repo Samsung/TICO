@@ -221,7 +221,6 @@ LM head weight        : uint8
 Spin rotation weight  : int16
 Calibration samples   : 128
 Calibration seq length: 2048
-Evaluation backend    : eager
 Evaluation context    : model context
 Export capacity       : 2048
 Profile               : npu_export

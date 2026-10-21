@@ -29,10 +29,10 @@ native-context square masks at construction. Gemma4 retains bounded export
 templates but builds full/sliding-window eager masks independently, including
 the offsets of sliding KV caches.
 
-`evaluation.backend` defaults to `eager`; other values fail validation. The
-execution backend and a quantizer's attention `profile` are different settings.
-An `npu_export` quantization profile can still run in eager mode, and evaluation
-does not change its fused weights, arithmetic, observer placement, or qparams.
+Standard quality evaluation always uses eager execution; no execution selector
+is required. An `npu_export` quantization profile can still run eagerly, and
+evaluation does not change its fused weights, arithmetic, observer placement,
+or qparams. Static/NPU measurements use separate deployment workflows.
 
 `evaluation.use_cache` defaults to `true` for all three adapters and controls
 the inference default on both the model and generation configuration. A

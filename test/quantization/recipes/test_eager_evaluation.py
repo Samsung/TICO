@@ -178,7 +178,8 @@ class TestEagerEvaluationProtocol(unittest.TestCase):
                 prepare_eager_evaluation(ctx)
             text = (Path(directory) / "evaluation_protocol.json").read_text()
             protocol = json.loads(text)
-            self.assertEqual(protocol["backend"], "eager")
+            self.assertNotIn("backend", protocol)
+            self.assertNotIn("backend", protocol["evaluation"])
             self.assertEqual(protocol["context"]["resolved"], 4096)
             self.assertEqual(protocol["checkpoint"], "quantized_model.pt")
             self.assertEqual(protocol["versions"]["torch"], torch.__version__)
@@ -225,21 +226,52 @@ class TestEagerEvaluationProtocol(unittest.TestCase):
             ctx.artifacts["evaluation_protocol"]["quantization_modes"], ["quant"]
         )
 
-    def test_static_backend_and_forced_export_are_rejected(self):
-        with self.assertRaisesRegex(ValueError, "deployment profile"):
-            validate_eager_evaluation_config({"backend": "static"})
+    def test_forced_export_is_rejected(self):
         ctx = _context()
         ctx.model.force_export = True
         with self.assertRaisesRegex(ValueError, "force_export"):
             prepare_eager_evaluation(ctx)
 
-    def test_adapter_preflight_rejects_invalid_protocol(self):
+    def test_default_protocol_needs_no_execution_selector(self):
+        """All model families accept the shared eager policy without a selector."""
+        validate_eager_evaluation_config({})
         for adapter in (LlamaAdapter(), Qwen3VLAdapter(), Gemma4Adapter()):
             with self.subTest(family=adapter.family):
-                with self.assertRaisesRegex(ValueError, "backend"):
-                    adapter.validate_evaluation_config(
-                        {"evaluation": {"enabled": True, "backend": "npu"}}
-                    )
+                adapter.validate_evaluation_config({"evaluation": {"enabled": True}})
+
+    def test_adapter_preflight_rejects_invalid_protocol(self):
+        cases = (
+            ("max_seq_len", 0, ValueError),
+            ("use_cache", "true", TypeError),
+            ("output_dir", " ", ValueError),
+        )
+        for adapter in (LlamaAdapter(), Qwen3VLAdapter(), Gemma4Adapter()):
+            for field, value, error_type in cases:
+                with self.subTest(family=adapter.family, field=field):
+                    with self.assertRaisesRegex(error_type, f"evaluation\\.{field}"):
+                        adapter.validate_evaluation_config(
+                            {"evaluation": {"enabled": True, field: value}}
+                        )
+
+    def test_standard_presets_use_eager_evaluation_without_a_selector(self):
+        """Every standard preset retains its protocol without a backend field."""
+        import yaml
+
+        root = Path(__file__).resolve().parents[3]
+        presets = (
+            "llama_eval_suite",
+            "qwen3_vl_eval_suite",
+            "gemma4_eval_suite",
+            "qwen3_vl_eval_suite_mx_override_polices",
+        )
+        for preset in presets:
+            with self.subTest(preset=preset):
+                path = root / "tico/quantization/examples/configs" / (preset + ".yaml")
+                config = yaml.safe_load(path.read_text())["evaluation"]
+                self.assertNotIn("backend", config)
+                self.assertIsNone(config["max_seq_len"])
+                self.assertTrue(config["use_cache"])
+                validate_eager_evaluation_config(config)
 
 
 class TestNativeModelLoading(unittest.TestCase):

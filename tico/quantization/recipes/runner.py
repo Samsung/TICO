@@ -330,7 +330,6 @@ def _print_config_summary(cfg: Mapping[str, Any]) -> None:
     )
     evaluation_cfg = cfg.get("evaluation", {})
     export_cfg = cfg.get("export", {})
-    _print_config_row("Evaluation backend", evaluation_cfg.get("backend", "eager"))
     _print_config_row(
         "Evaluation context",
         evaluation_cfg.get("max_seq_len") or "model context",
