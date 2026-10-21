@@ -23,6 +23,7 @@ These tests verify that:
 
 import copy
 import json
+import math
 import os
 import unittest
 from typing import cast
@@ -69,6 +70,83 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
         assert dXXT is not None
         self.assertEqual(dXXT.shape, gptq.H.shape)  # type: ignore[union-attr]
         self.assertGreater(dXXT.abs().sum().item(), 0.0)
+
+    @torch.no_grad()
+    def test_fasterquant_retries_damping_for_unstable_hessian(self):
+        """Auto retry should raise per-layer damping instead of using pinv."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.tensor(
+            [[1.0, 1.1], [1.1, 1.0]],
+            dtype=gptq.hessian_dtype,
+            device=gptq.dev,
+        )
+
+        gptq.fasterquant(
+            blocksize=2,
+            percdamp=0.01,
+            percdamp_max=0.2,
+            groupsize=-1,
+            actorder=False,
+            verbose=False,
+        )
+
+        assert gptq.percdamp_used is not None
+        self.assertGreater(gptq.percdamp_used, 0.01)
+        self.assertLessEqual(gptq.percdamp_used, 0.2)
+
+    @torch.no_grad()
+    def test_fasterquant_retries_above_heuristic_clamp(self):
+        """The retry ceiling may exceed a caller-clamped starting damping.
+
+        Regression test: when the resolved percdamp is already clamped to the
+        heuristic maximum (e.g. auto_percdamp_max=0.08), a separate higher
+        retry ceiling must still rescue a layer that needs more damping
+        instead of aborting after a single attempt.
+        """
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        # Indefinite Hessian: factorization needs percdamp > 0.09.
+        gptq.H = torch.tensor(
+            [[1.0, 1.09], [1.09, 1.0]],
+            dtype=gptq.hessian_dtype,
+            device=gptq.dev,
+        )
+
+        gptq.fasterquant(
+            blocksize=2,
+            percdamp=0.08,  # e.g. clamped to auto_percdamp_max by the caller
+            percdamp_max=0.5,  # separate, higher retry ceiling
+            groupsize=-1,
+            actorder=False,
+            verbose=False,
+        )
+
+        assert gptq.percdamp_used is not None
+        self.assertGreater(gptq.percdamp_used, 0.08)
+        self.assertLessEqual(gptq.percdamp_used, 0.5)
+
+    @torch.no_grad()
+    def test_fasterquant_oom_propagates_without_retries(self):
+        """OOM during factorization must not be retried or rewrapped."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(2, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        with unittest.mock.patch(
+            "torch.linalg.cholesky",
+            side_effect=torch.OutOfMemoryError("simulated OOM"),
+        ):
+            with self.assertRaises(torch.OutOfMemoryError):
+                gptq.fasterquant(
+                    blocksize=2,
+                    percdamp=0.01,
+                    percdamp_max=0.5,
+                    groupsize=-1,
+                )
 
 
 class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
@@ -165,6 +243,165 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
             local_module_name="self_attn.q_proj",
         )
         self.assertEqual(bits, 8)
+
+    def test_auto_percdamp_stage_factor_prefers_vision_patch_embed(self):
+        """Auto damping should distinguish vision patch embedding from text."""
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 128
+        quantizer._num_vision_batches = 0
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(cfg.auto_percdamp_ref_observations)
+
+        text = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.language_model.layers.0",
+            num_batches=128,
+        )
+        vision = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.visual.patch_embed.proj",
+            num_batches=128,
+        )
+
+        self.assertAlmostEqual(text, 0.01)
+        self.assertGreater(vision, text)
+
+    def test_auto_percdamp_ref_batches_auto_uses_run_batch_count(self):
+        """Zero ref_batches -> actual run total; under-covered stages get more."""
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 384
+        quantizer._num_vision_batches = 192
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(128 * 2048)
+
+        # Text stage replays all 384 batches: batch factor is neutral.
+        text = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.language_model.layers.0",
+            num_batches=384,
+        )
+        # Vision stage replays only its 192 vision batches: sqrt(384/192) = sqrt(2).
+        vision = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.visual.blocks.0",
+            num_batches=192,
+        )
+
+        self.assertAlmostEqual(text, 0.01 * 1.125, places=6)
+        self.assertAlmostEqual(vision, 0.01 * 1.25 * math.sqrt(2.0), places=6)
+        self.assertGreater(vision, text)
+
+    def test_auto_percdamp_ref_batches_explicit_pins_reference(self):
+        """An explicit ref_batches wins over the run batch count."""
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_ref_batches=128,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 384
+        quantizer._num_vision_batches = 192
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(128 * 2048)
+
+        # sqrt(128/384) clamped to 0.75 even though the run replayed 384 batches.
+        text = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.language_model.layers.0",
+            num_batches=384,
+        )
+        self.assertAlmostEqual(text, 0.01 * 1.125 * 0.75, places=6)
+
+    def test_finalize_stage_quantization_passes_retry_ceiling(self):
+        """Auto mode must pass auto_percdamp_retry_max as the retry ceiling.
+
+        The heuristic clamp (auto_percdamp_max) and the retry ceiling are
+        separate knobs: fasterquant must receive the retry ceiling so layers
+        clamped to auto_percdamp_max can still be rescued by retries.
+        """
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_retry_max=0.5,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 8
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(128 * 2048)
+
+        captured = {}
+
+        def fake_fasterquant(self, **kwargs):
+            captured.update(kwargs)
+
+        with unittest.mock.patch.object(GPTQ, "fasterquant", fake_fasterquant):
+            quantizer._finalize_stage_quantization(
+                gptq_objs={"linear": gptq},
+                subset={"linear": layer},
+                module_name={layer: "linear"},
+                stage_desc="model.language_model.layers.0",
+                num_batches=8,
+            )
+
+        self.assertEqual(captured["percdamp_max"], 0.5)
+
+    def test_finalize_stage_quantization_static_mode_disables_retry(self):
+        """Static mode must keep the no-retry behavior (percdamp_max=None)."""
+        cfg = Qwen3VLGPTQConfig(percdamp_mode="static")
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 8
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+
+        captured = {}
+
+        def fake_fasterquant(self, **kwargs):
+            captured.update(kwargs)
+
+        with unittest.mock.patch.object(GPTQ, "fasterquant", fake_fasterquant):
+            quantizer._finalize_stage_quantization(
+                gptq_objs={"linear": gptq},
+                subset={"linear": layer},
+                module_name={layer: "linear"},
+                stage_desc="model.language_model.layers.0",
+                num_batches=8,
+            )
+
+        self.assertIsNone(captured["percdamp_max"])
 
     def test_module_device(self):
         """_module_device should return the device of the module's parameters."""

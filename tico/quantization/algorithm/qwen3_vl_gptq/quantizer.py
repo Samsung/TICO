@@ -16,6 +16,7 @@ import copy
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -1543,6 +1544,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             subset=subset,
             module_name=module_name,
             stage_desc=stage_desc,
+            num_batches=num_batches,
         )
 
     @torch.no_grad()
@@ -1653,6 +1655,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
             subset=subset,
             module_name=module_name,
             stage_desc=stage_desc,
+            num_batches=num_batches,
         )
 
     def _build_gptq_objects(
@@ -1746,12 +1749,112 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
         return _hook
 
     @torch.no_grad()
+    def _resolve_percdamp(
+        self,
+        gptq_obj: GPTQ,
+        stage_desc: str,
+        num_batches: int,
+    ) -> float:
+        """
+        Resolve the per-layer damping factor for Qwen3-VL GPTQ.
+
+        Static mode preserves the configured ``percdamp``. Auto mode keeps the
+        configured value as the base and applies mild, clamped factors for the
+        stage modality, calibration volume, and Hessian diagonal spread.
+        """
+        gptq_conf = self.config
+        assert isinstance(gptq_conf, Qwen3VLGPTQConfig)
+
+        base = float(gptq_conf.percdamp)
+        if gptq_conf.percdamp_mode == "static":
+            return base
+
+        stage_factor = self._auto_percdamp_stage_factor(stage_desc)
+
+        # A zero reference means "auto": use the actual total number of
+        # calibration batches replayed in this run, so the batch factor only
+        # corrects per-stage coverage (vision stages replay fewer batches).
+        ref_batches = float(gptq_conf.auto_percdamp_ref_batches) or float(
+            max(self.num_batches, 1)
+        )
+        batch_factor = math.sqrt(ref_batches / max(float(num_batches), 1.0))
+        batch_factor = self._clamp_float(batch_factor, 0.75, 2.0)
+
+        # A zero reference means "auto" without a known calibration spec:
+        # fall back to the historical default of 128 batches x 2048 tokens.
+        ref_observations = float(gptq_conf.auto_percdamp_ref_observations) or float(
+            128 * 2048
+        )
+        effective_observations = max(float(gptq_obj.effective_observation_count), 1.0)
+        observation_factor = (ref_observations / effective_observations) ** 0.25
+        observation_factor = self._clamp_float(observation_factor, 0.75, 2.0)
+
+        hessian_factor = self._auto_percdamp_hessian_factor(gptq_obj)
+
+        value = (
+            base
+            * stage_factor
+            * batch_factor
+            * observation_factor
+            * hessian_factor
+        )
+        return self._clamp_float(
+            value,
+            float(gptq_conf.auto_percdamp_min),
+            float(gptq_conf.auto_percdamp_max),
+        )
+
+    @staticmethod
+    def _clamp_float(value: float, minimum: float, maximum: float) -> float:
+        """Clamp a floating point value."""
+        return min(max(float(value), float(minimum)), float(maximum))
+
+    def _auto_percdamp_stage_factor(self, stage_desc: str) -> float:
+        """Return the modality/stage damping multiplier."""
+        desc = stage_desc.lower()
+        if "patch_embed" in desc:
+            return 2.0
+        if "deepstack_merger" in desc or "merger" in desc:
+            return 1.5
+        if "visual" in desc or "vision" in desc:
+            return 1.25
+        if "lm_head" in desc:
+            return 1.25
+        if "language_model" in desc or "text" in desc or "layers" in desc:
+            if self.num_batches <= 0:
+                return 1.0
+            vision_ratio = float(self._num_vision_batches) / float(self.num_batches)
+            return 1.0 + 0.25 * self._clamp_float(vision_ratio, 0.0, 1.0)
+        return 1.0
+
+    @staticmethod
+    def _auto_percdamp_hessian_factor(gptq_obj: GPTQ) -> float:
+        """Return a mild multiplier for uneven Hessian diagonal statistics."""
+        h = gptq_obj.H
+        if h is None:
+            return 1.0
+
+        diag = torch.diag(h).detach().float()
+        finite_positive = diag[torch.isfinite(diag) & (diag > 0)]
+        if finite_positive.numel() <= 1:
+            return 1.0
+
+        mean = finite_positive.mean()
+        if mean <= 0:
+            return 1.0
+
+        std = finite_positive.std(unbiased=False)
+        coeff_var = (std / mean.clamp_min(torch.finfo(mean.dtype).eps)).item()
+        return min(2.0, 1.0 + 0.25 * math.log1p(max(0.0, coeff_var)))
+
+    @torch.no_grad()
     def _finalize_stage_quantization(
         self,
         gptq_objs: dict[str, GPTQ],
         subset: dict[str, nn.Module],
         module_name: dict[nn.Module, str],
         stage_desc: str,
+        num_batches: int,
     ) -> None:
         """
         Run GPTQ.fasterquant() for all submodules in a stage and store resulting
@@ -1765,13 +1868,38 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
                 print(f"[{stage_desc}] {local_name} -> Quantizing ...")
 
             gptq_obj = gptq_objs[local_name]
+            percdamp = self._resolve_percdamp(
+                gptq_obj=gptq_obj,
+                stage_desc=stage_desc,
+                num_batches=num_batches,
+            )
+            percdamp_max = (
+                float(gptq_conf.auto_percdamp_retry_max)
+                if gptq_conf.percdamp_mode == "auto"
+                else None
+            )
+            if gptq_conf.verbose and percdamp != float(gptq_conf.percdamp):
+                print(
+                    f"[{stage_desc}] {local_name} -> auto percdamp "
+                    f"{percdamp:.6g} (base {float(gptq_conf.percdamp):.6g})"
+                )
             gptq_obj.fasterquant(
-                percdamp=gptq_conf.percdamp,
+                percdamp=percdamp,
+                percdamp_max=percdamp_max,
                 groupsize=gptq_conf.groupsize,
                 actorder=gptq_conf.actorder,
                 static_groups=gptq_conf.static_groups,
                 verbose=gptq_conf.verbose,
             )
+            if (
+                gptq_conf.verbose
+                and gptq_obj.percdamp_used is not None
+                and gptq_obj.percdamp_used != percdamp
+            ):
+                print(
+                    f"[{stage_desc}] {local_name} -> damping raised to "
+                    f"{gptq_obj.percdamp_used:.6g} after retries"
+                )
 
             full_name = module_name.get(submodule, local_name)
             self._quantizers[full_name] = gptq_obj.quantizer

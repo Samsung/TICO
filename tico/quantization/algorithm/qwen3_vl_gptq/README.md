@@ -84,11 +84,23 @@ Qwen3-VL specific fields:
 | `quantize_lm_head` | `False` | Quantize the output head (see the tied-embedding caveat in the base README). |
 | `move_cache_to_cpu` | `False` | Store cached calibration inputs on CPU to reduce GPU memory pressure. |
 | `cache_dtype` | `None` | Optional dtype for cached floating-point tensors (e.g. `torch.float16`). |
+| `percdamp_mode` | `"static"` | `"static"` preserves the configured `percdamp`; `"auto"` derives a per-layer starting damping from stage type, calibration volume, effective observations, and Hessian diagonal spread. |
+| `auto_percdamp_min` | `0.002` | Lower bound for auto-selected per-layer damping. |
+| `auto_percdamp_max` | `0.08` | Upper bound for the auto-selected starting damping. |
+| `auto_percdamp_retry_max` | `0.5` | Retry ceiling for per-layer damping escalation when Cholesky factorization fails or looks unstable. Independent of `auto_percdamp_max`, so layers already clamped to `auto_percdamp_max` can still be rescued by retries. |
+| `auto_percdamp_ref_batches` | `0` | Reference calibration batch count used by the auto policy. `0` means "auto": use the actual total number of calibration batches replayed in this run, so the batch factor only raises damping for stages with reduced coverage (e.g. vision stages replaying fewer batches). |
+| `auto_percdamp_ref_observations` | `0` | Reference effective token/patch observation count used by the auto policy. `0` means "auto": the GPTQ recipe stage derives it as `sum(datasets n_samples) * calibration.seq_len`; without a calibration spec the quantizer falls back to `128 * 2048` (262144). |
 | `visual_attr` … `lm_head_attr` | HF defaults | Dotted attribute paths used to locate the model components (`model.visual`, `model.visual.blocks`, `model.visual.patch_embed.proj`, `model.visual.merger`, `model.visual.deepstack_merger_list`, `model.language_model`, `model.language_model.layers`, `lm_head`). Override these if the model structure differs. |
 
 `validate()` enforces stage-switch consistency: sub-stage switches require their
 master switch (e.g. `quantize_vision_blocks=True` requires `quantize_vision=True`),
 and at least one stage must be enabled.
+
+Auto damping is opt-in. It keeps `percdamp` as the base value and applies mild,
+clamped multipliers for Qwen3-VL stages: vision patch embedding and merger stages
+receive more regularization than text layers. During factorization, auto mode may
+retry a numerically unstable layer with higher damping up to
+`auto_percdamp_retry_max`; it does not silently fall back to a pseudo-inverse.
 
 ### How to use Qwen3VLGPTQQuantizer
 

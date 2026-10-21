@@ -137,12 +137,46 @@ class Qwen3VLGPTQConfig(GPTQConfig):
     # When False, uses summation.
     normalize_H: bool = True
 
+    # ------------------------------------------------------------------
+    # Auto damping options
+    # ------------------------------------------------------------------
+    # ``static`` preserves the generic GPTQ behavior and uses ``percdamp``
+    # unchanged. ``auto`` derives a per-layer starting value from Qwen3-VL
+    # stage type, calibration batch count, effective token/patch observations,
+    # and Hessian diagonal spread. Auto mode may
+    # retry factorization up to ``auto_percdamp_retry_max`` if Cholesky
+    # succeeds poorly or fails.
+    percdamp_mode: str = "static"
+    auto_percdamp_min: float = 0.002
+    auto_percdamp_max: float = 0.08
+    # Retry ceiling for per-layer damping escalation, independent of the
+    # heuristic clamp ``auto_percdamp_max`` applied to the resolved starting
+    # value. Layers whose resolved percdamp is already clamped to
+    # ``auto_percdamp_max`` (e.g. vision patch embed) can still be rescued by
+    # retries up to this ceiling instead of aborting the whole run.
+    auto_percdamp_retry_max: float = 0.5
+    # ``0`` (default) means "auto": the quantizer uses the actual total number
+    # of calibration batches replayed in this run (``self.num_batches``) as
+    # the reference. The batch factor then only corrects per-stage coverage
+    # (e.g. vision stages that replay fewer batches get more damping);
+    # a positive value pins the reference explicitly (e.g. 128 restores the
+    # historical "standard calibration" normalization).
+    auto_percdamp_ref_batches: int = 0
+    # ``0`` (default) means "auto": the GPTQ recipe stage derives the reference
+    # from the calibration config as ``sum(datasets n_samples) * seq_len``
+    # (e.g. "vqav2:128,wikitext:128" with seq_len 2048 -> 524288). When no
+    # calibration spec is known (programmatic use), the quantizer falls back
+    # to ``128 * 2048``. A positive value pins the reference explicitly.
+    auto_percdamp_ref_observations: int = 0
+
     def __post_init__(self) -> None:
         """Convert string dtype options (from YAML) to torch.dtype."""
         if isinstance(self.hessian_dtype, str):
             self.hessian_dtype = torch_dtype_from_name(self.hessian_dtype)
         if isinstance(self.inp_dtype, str):
             self.inp_dtype = torch_dtype_from_name(self.inp_dtype)
+        if isinstance(self.percdamp_mode, str):
+            self.percdamp_mode = self.percdamp_mode.strip().lower()
 
     @property
     def name(self) -> str:
@@ -219,6 +253,59 @@ class Qwen3VLGPTQConfig(GPTQConfig):
             raise TypeError(
                 "calibration_dataset_spec must be str or None. "
                 f"got {type(self.calibration_dataset_spec)}"
+            )
+
+        if self.percdamp_mode not in {"static", "auto"}:
+            raise ValueError(
+                "percdamp_mode must be 'static' or 'auto'. "
+                f"got {self.percdamp_mode!r}"
+            )
+
+        for field_name in (
+            "auto_percdamp_min",
+            "auto_percdamp_max",
+            "auto_percdamp_retry_max",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, (float, int)):
+                raise TypeError(f"{field_name} must be numeric. got {type(value)}")
+            if not (0.0 < float(value) <= 1.0):
+                raise ValueError(f"{field_name} must be in (0, 1]. got {value}")
+
+        if float(self.auto_percdamp_min) > float(self.auto_percdamp_max):
+            raise ValueError(
+                "auto_percdamp_min must be <= auto_percdamp_max. "
+                f"got {self.auto_percdamp_min} > {self.auto_percdamp_max}"
+            )
+
+        if float(self.auto_percdamp_retry_max) < float(self.auto_percdamp_max):
+            raise ValueError(
+                "auto_percdamp_retry_max must be >= auto_percdamp_max, otherwise "
+                "layers clamped to auto_percdamp_max could not retry with "
+                "larger damping. "
+                f"got {self.auto_percdamp_retry_max} < {self.auto_percdamp_max}"
+            )
+
+        if not isinstance(self.auto_percdamp_ref_batches, int):
+            raise TypeError(
+                "auto_percdamp_ref_batches must be int. "
+                f"got {type(self.auto_percdamp_ref_batches)}"
+            )
+        if self.auto_percdamp_ref_batches < 0:
+            raise ValueError(
+                "auto_percdamp_ref_batches must be >= 0 (0 = auto). "
+                f"got {self.auto_percdamp_ref_batches}"
+            )
+
+        if not isinstance(self.auto_percdamp_ref_observations, int):
+            raise TypeError(
+                "auto_percdamp_ref_observations must be int. "
+                f"got {type(self.auto_percdamp_ref_observations)}"
+            )
+        if self.auto_percdamp_ref_observations < 0:
+            raise ValueError(
+                "auto_percdamp_ref_observations must be >= 0 (0 = auto). "
+                f"got {self.auto_percdamp_ref_observations}"
             )
 
         attr_fields = {
