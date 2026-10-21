@@ -47,6 +47,8 @@ from typing import Any, Optional
 import numpy as np
 
 import torch
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
+from tico.quantization.wrapq.wrappers.llama.static_inputs import prepare_llama_static_inputs
 import tqdm
 from datasets import load_dataset
 from lm_eval.utils import make_table
@@ -531,7 +533,7 @@ def save_model_to(
     save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
     print(f"saving the whole {model_name} to {save_path.resolve()}")
     config = q_m.wrapped.config
-    with torch.no_grad():
+    with torch.no_grad(), prepared_static_export(q_m, int(calib_input.shape[-1])):
         with SuppressWarning(UserWarning, ".*"):
             qmodel = q_m.wrapped.model.wrapped
             if prefill_decode is True:
@@ -564,7 +566,7 @@ def save_model_to(
         model_name = f"model_decode"
         save_path = pathlib.Path(save_circle_to_folder, f"{model_name}.q.circle")
         print(f"saving the whole {model_name} to {save_path.resolve()}")
-        with torch.no_grad():
+        with torch.no_grad(), prepared_static_export(q_m, int(calib_input.shape[-1])):
             with SuppressWarning(UserWarning, ".*"):
                 token = torch.Tensor([[calib_input[..., 0]]], device="cpu").to(
                     dtype=calib_input.dtype
@@ -788,12 +790,10 @@ def save_layers_to(
         B, S, D = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(B, S, D, device="cpu")
 
-        attention_mask = qlayer.wrapped._build_causal_mask(
-            q_len=S, k_len=S, past_len=0, device=torch.device("cpu")
-        )
-        dtype = example_hidden.dtype
-        pos_embeds = qlayer.wrapped._slice_rope(
-            start=0, seq_len=S, device="cpu", dtype=dtype
+        static_inputs = prepare_llama_static_inputs(qlayer.wrapped, max_seq_len)
+        attention_mask = static_inputs.mask(S, S, 0, device=torch.device("cpu"))
+        pos_embeds = static_inputs.rope(
+            0, S, device="cpu", dtype=example_hidden.dtype
         )
 
         print(f"Saving {layer_name} to {save_path.resolve()}")

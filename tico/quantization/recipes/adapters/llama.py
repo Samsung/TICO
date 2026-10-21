@@ -436,6 +436,7 @@ class LlamaAdapter(ModelAdapter):
                 output_dir=output_dir,
                 name="model.q.circle",
                 strict=bool(export_cfg.get("strict", False)),
+                max_seq_len=max_seq_len,
             )
 
         if "circle_bundle" in artifacts:

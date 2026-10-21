@@ -127,6 +127,7 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         output_attentions: bool | None = False,
         cache_position: torch.Tensor | None = None,
         cache_output_mode: Literal["present", "delta"] = "present",
+        return_type: Optional[ReturnType] = None,
         **kwargs,
     ):
         """
@@ -200,9 +201,10 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         if use_cache:
             outputs.append(present_key_value)
 
-        if self.return_type == "tuple":
+        result_type = self.return_type if return_type is None else return_type
+        if result_type == "tuple":
             return tuple(outputs)
-        if self.return_type == "tensor":
+        if result_type == "tensor":
             return hidden_states
         raise RuntimeError(f"Invalid return_type: {self.return_type!r}")
 

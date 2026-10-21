@@ -147,8 +147,8 @@ class TestLlamaEagerContext(unittest.TestCase):
                         result.last_hidden_state, expected, atol=2e-6, rtol=2e-5
                     )
 
-    def test_layer_export_uses_pretrained_rotary_state(self):
-        """Export must preserve resolved rotary state, not only its config inputs."""
+    def test_standalone_eager_layer_uses_pretrained_rotary_state(self):
+        """Standalone eager calls must preserve the resolved pretrained rotary state."""
         model = self._model()
         model.rotary_emb.inv_freq.mul_(0.5)
         wrapped = self._wrapper(model)

@@ -20,6 +20,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from tico.quantization.wrapq.wrappers.llama.static_inputs import prepare_llama_static_inputs
+
 import numpy as np
 import torch
 
@@ -76,11 +78,9 @@ def build_llama_bundle_context(
     mask_fill_values = []
     for index, layer in enumerate(layers):
         wrapped = layer.wrapped
-        position_embeddings = wrapped._slice_rope(
-            start=0,
-            seq_len=max_seq_len,
-            device=torch.device("cpu"),
-            dtype=torch.float32,
+        prepared_inputs = prepare_llama_static_inputs(wrapped, max_seq_len)
+        position_embeddings = prepared_inputs.rope(
+            0, max_seq_len, device=torch.device("cpu"), dtype=torch.float32
         )
         for key, template in zip(("rope_cos", "rope_sin"), position_embeddings):
             if (

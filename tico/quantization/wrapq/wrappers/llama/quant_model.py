@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 
 from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    capture_rope_state,
+    prepare_llama_static_inputs,
+)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.position import (
     build_causal_mask,
@@ -152,16 +156,23 @@ class QuantLlamaModel(QuantModuleBase):
 
         self.layers = new_list  # type: ignore[union-attr]
         self.config = model_fp.config
+        capture_rope_state(self, self.config, getattr(model_fp, "rotary_emb", None))
         self.rotary_emb = make_rotary_embedding(
             self.config, getattr(model_fp, "rotary_emb", None)
         )
-        # Standalone layer export must use the same pretrained rotary state as
-        # the full eager model, including frequencies resolved by the loader.
+        # Both standalone and full-model paths use the model-level source.
+        # Keep independent snapshots so an eager frequency update cannot leak
+        # into another layer or subsequent static export.
         for layer in self.layers:
             if isinstance(layer.wrapped, QuantModuleBase):
                 layer.wrapped.rotary_emb = make_rotary_embedding(
                     self.config, self.rotary_emb
                 )
+                capture_rope_state(layer.wrapped, self.config, self._export_rotary_emb)
+
+    def _build_static_export_inputs(self, max_seq_len: int):
+        """Build bounded full-model inputs from the frozen static rotary state."""
+        return prepare_llama_static_inputs(self, max_seq_len)
 
     def _make_empty_cache(self) -> Cache:
         """
@@ -422,6 +433,9 @@ class QuantLlamaModel(QuantModuleBase):
         device: torch.device,
     ) -> torch.Tensor:
         """Build a causal mask only for the requested query and key lengths."""
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            return prepared.mask(q_len, k_len, past_len, device=device)
         return build_causal_mask(
             q_len=q_len,
             k_len=k_len,
@@ -480,6 +494,17 @@ class QuantLlamaModel(QuantModuleBase):
         """
         Return RoPE tables for the current model step.
         """
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            cos, sin = prepared.rope(
+                start, hidden_states.size(1),
+                device=hidden_states.device, dtype=hidden_states.dtype,
+            )
+            return self._fq(cos, self.obs_cos), self._fq(sin, self.obs_sin)
+        if torch.compiler.is_compiling():
+            raise ValueError(
+                "Full LLaMA export requires prepared_static_export(model, max_seq_len)."
+            )
         if position_ids is None:
             position_ids = torch.arange(
                 start, start + hidden_states.size(1), device=hidden_states.device

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ import torch
 
 import tico
 from tico.utils.utils import SuppressWarning
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
 
 
 def convert_and_save_circle(
@@ -50,6 +52,7 @@ def export_full_circle(
     output_dir: str | Path,
     name: str = "model.q.circle",
     strict: bool = False,
+    max_seq_len: int | None = None,
 ) -> Path:
     """Best-effort full-model Circle export for PTQ/fake-quant models."""
     output_dir = Path(output_dir)
@@ -83,7 +86,17 @@ def export_full_circle(
         args = (example_input,)
         kwargs = {}
 
-    with torch.no_grad(), SuppressWarning(UserWarning, ".*"):
+    has_static_owner = any(
+        callable(getattr(module, "_build_static_export_inputs", None))
+        for module in export_model.modules()
+    )
+    if has_static_owner and max_seq_len is None:
+        raise ValueError("Full text export requires an explicit max_seq_len profile.")
+    preparation = (
+        prepared_static_export(export_model, max_seq_len)
+        if max_seq_len is not None else nullcontext()
+    )
+    with preparation, torch.no_grad(), SuppressWarning(UserWarning, ".*"):
         cm = tico.convert(export_model, args, kwargs=kwargs, strict=strict)
     cm.save(path)
     print(f"Saved Circle model to {path.resolve()}")

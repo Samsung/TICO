@@ -900,6 +900,11 @@ class QuantGemma4TextModel(QuantModuleBase):
                 inputs_embeds, per_layer_inputs
             )
 
+        if position_ids_were_provided and self._requires_static_inputs():
+            raise ValueError(
+                "Full Gemma4 text export uses its fixed position profile. "
+                "Use per-layer export with explicit RoPE for custom positions."
+            )
         position_ids = self._make_position_ids(
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
