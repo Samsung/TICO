@@ -24,6 +24,8 @@ from typing import Any, cast, Iterable, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
+from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
+
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
@@ -605,6 +607,7 @@ class Gemma4TextAttentionPrefillExportAdapter(nn.Module):
         shared_key_value: Optional[LayerKV] = None,
     ) -> Any:
         """Run the fixed-shape prefill graph and return an optional K/V delta."""
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         output = self.wrapped(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -650,6 +653,7 @@ class Gemma4TextAttentionDecodeExportAdapter(nn.Module):
         shared_key_value: Optional[LayerKV] = None,
     ) -> Any:
         """Run the fixed-shape decode graph and return an optional K/V delta."""
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         output = self.wrapped(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -708,6 +712,7 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
             self.per_layer_input_observer,
             quantized=self.quantized,
         )
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         output = self.wrapped(
             hidden_states,
             per_layer_input=per_layer_input,
@@ -769,6 +774,7 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
             self.per_layer_input_observer,
             quantized=self.quantized,
         )
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         output = self.wrapped(
             hidden_states,
             per_layer_input=per_layer_input,

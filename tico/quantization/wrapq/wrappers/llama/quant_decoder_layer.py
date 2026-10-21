@@ -29,6 +29,10 @@ if TYPE_CHECKING:
 
 from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import ExportMode, PTQConfig
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    capture_rope_state,
+    prepare_llama_static_inputs,
+)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
@@ -67,13 +71,15 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         fp_name: Optional[str] = None,
         return_type: Optional[str] = None,
         layer_idx: Optional[int] = None,
+        rotary_emb: Optional[nn.Module] = None,
     ):
         """
         Initialize the quantized decoder-layer wrapper.
 
         `return_type` is needed because different versions of
         `transformers` wrap decoder output in different containers: a plain
-        tensor or a tuple.
+        tensor or a tuple. Pass the original model-level ``rotary_emb`` for
+        customized rotary state; otherwise the complete layer config is used.
         """
         fp_layer = cast("LlamaDecoderLayer", fp_layer)
         self.return_type = return_type
@@ -139,9 +145,13 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         assert hasattr(cfg, "max_position_embeddings")
         assert isinstance(cfg.max_position_embeddings, int)
         self.max_seq = cfg.max_position_embeddings
-        self.rotary_emb = make_rotary_embedding(
-            cfg, getattr(fp_layer, "rotary_emb", None)
-        )
+        source = rotary_emb if rotary_emb is not None else getattr(fp_layer, "rotary_emb", None)
+        self.rotary_emb = make_rotary_embedding(cfg, source)
+        capture_rope_state(self, cfg, self.rotary_emb)
+
+    def _build_static_export_inputs(self, max_seq_len: int):
+        """Support direct layer export without calling eager input builders."""
+        return prepare_llama_static_inputs(self, max_seq_len)
 
     def _build_causal_mask(
         self,
@@ -152,6 +162,13 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         device: torch.device,
     ) -> torch.Tensor:
         """Build the [1, Q, K] mask for eager execution or an explicit export shape."""
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            return prepared.mask(q_len, k_len, past_len, device=device)
+        if torch.compiler.is_compiling():
+            raise ValueError(
+                "Static layer export requires an explicit mask or prepared_static_export()."
+            )
         return build_causal_mask(
             q_len=q_len,
             k_len=k_len,
@@ -169,6 +186,13 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Generate pretrained RoPE for the requested range without a full table."""
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            return prepared.rope(start, seq_len, device=device, dtype=dtype)
+        if torch.compiler.is_compiling():
+            raise ValueError(
+                "Static layer export requires explicit RoPE or prepared_static_export()."
+            )
         positions = torch.arange(start, start + seq_len, device=device).unsqueeze(0)
         return make_position_embeddings(
             self,
@@ -207,7 +231,19 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         """
         Return position embeddings that match this wrapper's RoPE convention.
         """
-        if position_embeddings is None:
+        prepared = getattr(self, "_static_export_inputs", None)
+        if position_embeddings is None and prepared is not None:
+            if position_ids is not None:
+                raise ValueError("Provide explicit RoPE tensors for custom static positions.")
+            cos, sin = prepared.rope(
+                self._get_past_len(past_key_value), hidden_states.size(1),
+                device=hidden_states.device, dtype=hidden_states.dtype,
+            )
+        elif position_embeddings is None:
+            if torch.compiler.is_compiling():
+                raise ValueError(
+                    "Static layer export requires explicit RoPE or prepared_static_export()."
+                )
             if position_ids is None:
                 past_len = self._get_past_len(past_key_value)
                 position_ids = torch.arange(
@@ -307,6 +343,7 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         use_cache: Optional[bool] = False,
         cache_position: Optional[torch.Tensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        return_type: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -357,9 +394,10 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         if use_cache:
             outputs += (present_key_value,)  # type: ignore[assignment]
 
-        if self.return_type == "tuple":
+        result_type = self.return_type if return_type is None else return_type
+        if result_type == "tuple":
             return outputs
-        if self.return_type == "tensor":
+        if result_type == "tensor":
             return hidden_states
         raise RuntimeError("Invalid return_type configuration.")
 
