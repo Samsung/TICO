@@ -92,7 +92,6 @@ pipeline:
 
 evaluation:
   enabled: true
-  backend: eager
   output_dir: ./out/qwen3_vl_eval_suite_mx_override_polices/evaluation
   use_cache: true
   vlm_tasks:

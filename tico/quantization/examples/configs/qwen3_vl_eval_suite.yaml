@@ -54,7 +54,6 @@ pipeline:
 
 evaluation:
   enabled: true
-  backend: eager
   output_dir: ./out/qwen3_vl_eval_suite/evaluation
   use_cache: true
   vlm_tasks:

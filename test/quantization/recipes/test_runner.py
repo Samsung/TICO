@@ -124,6 +124,22 @@ class TestQuantizationRunner(unittest.TestCase):
             ],
         )
 
+    def test_config_summary_has_no_evaluation_backend_selector(self):
+        """The summary reports context budgets without a redundant selector."""
+        cfg = {
+            "model": {"family": "llama", "name_or_path": "local-test-model"},
+            "evaluation": {"enabled": True, "max_seq_len": None},
+            "export": {"max_seq_len": 2048},
+        }
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            runner_mod._print_config_summary(cfg)
+        output = stdout.getvalue()
+        self.assertNotIn("Evaluation backend", output)
+        self.assertIn("Evaluation context", output)
+        self.assertIn("model context", output)
+        self.assertIn("Export capacity", output)
+
     def test_config_summary_prints_ptq_override_policies(self):
         """Config summary should print PTQ override policy declarations."""
         cfg = {

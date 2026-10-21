@@ -34,12 +34,7 @@ from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
 
 def validate_eager_evaluation_config(eval_cfg: Mapping[str, Any]) -> None:
-    """Reject unsupported execution modes and invalid eager protocol fields."""
-    if eval_cfg.get("backend", "eager") != "eager":
-        raise ValueError(
-            "evaluation.backend must be 'eager'. Static/NPU measurements require "
-            "a separate deployment profile and runtime workflow."
-        )
+    """Validate context, cache, and reporting settings for eager evaluation."""
     if eval_cfg.get("max_seq_len") is not None:
         positive_sequence_length(
             eval_cfg["max_seq_len"], field="evaluation.max_seq_len"
@@ -133,7 +128,6 @@ def prepare_eager_evaluation(ctx: RecipeContext) -> int:
     protocol = {
         "schema_version": 1,
         "purpose": "quantization_quality",
-        "backend": "eager",
         "model": {
             "family": model_cfg.get("family", getattr(ctx.adapter, "family", None)),
             "name_or_path": model_cfg.get("name_or_path"),

@@ -26,7 +26,6 @@ pipeline: []
 
 evaluation:
   enabled: true
-  backend: eager
   output_dir: ./out/llama_eval_suite/evaluation
   use_cache: true
   perplexity: null
