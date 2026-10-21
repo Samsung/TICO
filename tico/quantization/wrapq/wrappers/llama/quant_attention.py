@@ -37,6 +37,10 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaAttentionDecodeExportAdapter,
     LlamaAttentionPrefillExportAdapter,
 )
+from tico.quantization.wrapq.wrappers.llama.position import (
+    build_causal_mask,
+    combine_binary_attention_mask,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
@@ -100,8 +104,6 @@ class QuantLlamaAttention(QuantModuleBase):
         - "present": return the full present cache
         - "delta": return only the newly produced K/V
     """
-
-    causal_mask_template: torch.Tensor
 
     def __init__(
         self,
@@ -233,14 +235,6 @@ class QuantLlamaAttention(QuantModuleBase):
         # Total KV after concat (used for matmul/attn)
         self.obs_present_key = mk("present_key")  # (B, max_seq, H)
         self.obs_present_value = mk("present_value")  # (B, max_seq, H)
-
-        # Static causal mask template
-        mask = torch.full(
-            (1, 1, self.max_seq, self.max_seq),
-            float(self.qcfg.attention_mask_fill_value),
-        )
-        mask.triu_(1)
-        self.register_buffer("causal_mask_template", mask, persistent=False)
 
     def _rot(self, t: torch.Tensor, o_x1, o_x2, o_cat):
         """
@@ -553,7 +547,7 @@ class QuantLlamaAttention(QuantModuleBase):
         Build an additive attention mask for per-head logits.
 
         Supported cases:
-        - None: build a causal mask slice.
+        - None: build a causal mask for the current query and key lengths.
         - bool/int mask: convert to additive mask using 0 / configured fill value.
         - additive mask: use as-is.
 
@@ -571,29 +565,29 @@ class QuantLlamaAttention(QuantModuleBase):
         k_len = past_len + q_len
 
         if attention_mask is None:
-            assert isinstance(self.causal_mask_template, torch.Tensor)
-            mask = self.causal_mask_template[
-                ..., past_len : past_len + q_len, :k_len
-            ].to(device)
-            mask = mask.squeeze(0)
+            mask = build_causal_mask(
+                q_len=q_len,
+                k_len=k_len,
+                past_len=past_len,
+                device=device,
+                fill_value=float(self.qcfg.attention_mask_fill_value),
+            )
             return self._fq(mask, self.obs_attn_mask)
 
         if attention_mask.dtype in (torch.bool, torch.int64):
-            if attention_mask.dtype == torch.int64:
-                attention_mask = attention_mask != 0
-
-            assert isinstance(self.causal_mask_template, torch.Tensor)
-            causal_mask = self.causal_mask_template[
-                ..., past_len : past_len + q_len, :k_len
-            ].to(device)
-
-            fill_val = self.qcfg.attention_mask_fill_value
-            additive = torch.zeros_like(attention_mask, dtype=torch.float32)
-            additive = additive.masked_fill(~attention_mask, float(fill_val))
-
-            # Combine causal mask and padding mask.
-            mask = torch.clamp(causal_mask + additive, min=fill_val)
-            return self._fq(mask.squeeze(0), self.obs_attn_mask)
+            causal_mask = build_causal_mask(
+                q_len=q_len,
+                k_len=k_len,
+                past_len=past_len,
+                device=device,
+                fill_value=float(self.qcfg.attention_mask_fill_value),
+            )
+            mask = combine_binary_attention_mask(
+                causal_mask,
+                attention_mask,
+                fill_value=float(self.qcfg.attention_mask_fill_value),
+            )
+            return self._fq(mask, self.obs_attn_mask)
 
         return self._fq(attention_mask, self.obs_attn_mask)
 

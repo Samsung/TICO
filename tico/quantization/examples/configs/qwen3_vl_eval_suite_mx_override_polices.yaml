@@ -92,6 +92,9 @@ pipeline:
 
 evaluation:
   enabled: true
+  backend: eager
+  output_dir: ./out/qwen3_vl_eval_suite_mx_override_polices/evaluation
+  use_cache: true
   vlm_tasks:
     - vqav2
   coco: true
@@ -102,7 +105,6 @@ evaluation:
     split: train
     n_samples: 50
     start_index: 0
-    max_seq_len: 2048
     max_new_tokens: 512
     temperature: 0.0
     image_max_pixels: 602112  # 768 * 28 * 28
@@ -114,7 +116,7 @@ evaluation:
     baseline_label: reference
     candidate_answers: null
     baseline_answers: null
-    regenerate: false
+    regenerate: true  # Recompute candidate answers for each FP/Quant run.
     output:
       dir: ./out/qwen3_vl_eval_suite_mx/llava_bench
       answers: ./out/qwen3_vl_eval_suite_mx/llava_bench/qwen3_vl_4b.answers.jsonl
@@ -167,11 +169,12 @@ evaluation:
     verbose: false
   ppl:
     enabled: true
+    max_seq_len: 2048  # Explicit PPL window; does not cap generation tasks.
     dataset: wikitext2
     split: test
     stride: 512
   n_samples: 1000
-  max_seq_len: 2048
+  max_seq_len: null  # Use the original model context; independent of calibration.
 
 export:
   enabled: false

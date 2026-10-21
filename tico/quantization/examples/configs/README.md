@@ -469,6 +469,44 @@ reuse reports the number of matched PTQ weight observers.
 
 ## `evaluation`
 
+LLaMA, Qwen3-VL, and Gemma4 use **FP eager vs Quant eager** for standard
+quantization quality measurements. See the
+[evaluation protocol](../../recipes/evaluation/README.md#standard-quality-protocol-fp-eager-vs-quant-eager)
+for paired commands, metadata, PPL windows, and legacy checkpoint migration.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `backend` | `eager` | Supported quality-evaluation execution mode; static/NPU tests use separate workflows |
+| `max_seq_len` | `null` | Native model context when null; otherwise a positive integer no larger than the loaded model capacity |
+| `use_cache` | `true` | Inference KV-cache default for both FP and Quant |
+| `output_dir` | `null` | Optional directory for `evaluation_protocol.json` |
+
+`calibration.seq_len` never limits evaluation or modifies pretrained positional
+configuration. `export.max_seq_len` never supplies an evaluation default.
+An explicit task-level PPL window (`perplexity.max_seq_len` for LLaMA,
+`ppl.max_seq_len` for VLMs) may be smaller than the evaluation context. Record
+the PPL window and stride when comparing scores.
+
+```yaml
+calibration:
+  seq_len: 2048
+evaluation:
+  enabled: true
+  backend: eager
+  max_seq_len: null
+  use_cache: true
+  output_dir: ./out/evaluation/fp
+export:
+  enabled: false
+  max_seq_len: 2048
+```
+
+The calibration and export lengths remain 2048 in this example; the eager
+evaluation uses the native model context. The `*_eval_suite.yaml` presets use
+this policy. Other presets with an explicit evaluation limit keep that limit.
+The static export default is independently `min(2048, model context)`;
+set `export.max_seq_len` explicitly to reproduce another deployment profile.
+
 LLM example:
 
 ```yaml

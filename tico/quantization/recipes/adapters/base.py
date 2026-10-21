@@ -19,6 +19,7 @@ import torch
 
 from tico.quantization.config.base import BaseConfig
 from tico.quantization.recipes.context import RecipeContext
+from tico.quantization.recipes.evaluation.eager import validate_eager_evaluation_config
 from tico.quantization.recipes.evaluation.selection import (
     get_selected_evaluation_targets,
 )
@@ -43,6 +44,8 @@ class ModelAdapter(ABC):
             raise TypeError("evaluation must be a mapping.")
         if not eval_cfg.get("enabled", False):
             return
+
+        validate_eager_evaluation_config(eval_cfg)
 
         selected_targets = get_selected_evaluation_targets(eval_cfg)
         if selected_targets is None:

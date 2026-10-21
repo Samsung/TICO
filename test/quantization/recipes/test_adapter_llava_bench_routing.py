@@ -72,7 +72,9 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
         ctx.model = SimpleNamespace(
             config=SimpleNamespace(
                 use_cache=False,
-                text_config=SimpleNamespace(use_cache=False),
+                text_config=SimpleNamespace(
+                    use_cache=False, max_position_embeddings=8192
+                ),
             )
         )
         ctx.device = torch.device("cpu")
@@ -187,7 +189,7 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                     self.assertIs(kwargs["model_cfg"], ctx.cfg["model"])
                     self.assertIs(kwargs["runtime_cfg"], ctx.cfg["runtime"])
                     self.assertEqual(kwargs["default_n_samples"], 3)
-                    self.assertIsNone(kwargs["default_max_seq_len"])
+                    self.assertEqual(kwargs["default_max_seq_len"], 8192)
 
     def test_unselected_null_or_false_config_does_not_run(self):
         """Without explicit selection, null/false llava_bench stays off."""
@@ -420,9 +422,9 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                         ctx.adapter.evaluate(ctx)
                     self.assertEqual(ctx.cfg, snapshot)
 
-    def test_gemma4_enables_cache_and_qwen_does_not(self):
-        """Gemma4 keeps enabling KV cache in evaluate(); Qwen3-VL does not."""
-        expected = {"gemma4": True, "qwen3_vl": False}
+    def test_vlm_adapters_use_the_same_default_cache_policy(self):
+        """Both VLM adapters enable KV cache for eager evaluation by default."""
+        expected = {"gemma4": True, "qwen3_vl": True}
         for family, _module, adapter_cls in self.ADAPTERS:
             with self.subTest(family=family):
                 _mocks, _stdout, ctx = self._run(

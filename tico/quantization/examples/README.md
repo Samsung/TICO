@@ -33,6 +33,12 @@ already saved checkpoint. `evaluate.py` does **not** run `pipeline` stages from
 the config. If the config contains enabled stages such as `gptq` or `ptq`, they
 are ignored by `evaluate.py`.
 
+For LLaMA, Qwen3-VL, and Gemma4 the standard quality protocol is **FP eager vs
+Quant eager**. Calibration length, evaluation context, and static export capacity
+are independent. Run both models with the same evaluation config and use
+`--output-dir` to save separate `evaluation_protocol.json` records. See the
+[protocol and paired commands](../recipes/evaluation/README.md#standard-quality-protocol-fp-eager-vs-quant-eager).
+
 Use `export.py` to export either a floating-point model loaded through its
 adapter or an already saved checkpoint. It writes configured artifacts such as
 LLaMA and Qwen3-VL staged Circle files and does **not** run `pipeline` stages.
@@ -215,7 +221,9 @@ LM head weight        : uint8
 Spin rotation weight  : int16
 Calibration samples   : 128
 Calibration seq length: 2048
-Max seq length        : 2048
+Evaluation backend    : eager
+Evaluation context    : model context
+Export capacity       : 2048
 Profile               : npu_export
 ```
 

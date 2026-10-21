@@ -39,6 +39,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=None, help="Override model.name_or_path.")
     parser.add_argument("--device", default=None, help="Override runtime.device.")
     parser.add_argument(
+        "--output-dir", default=None, help="Write evaluation_protocol.json here."
+    )
+    parser.add_argument(
         "--tasks",
         default=None,
         help=(
@@ -68,6 +71,8 @@ def main() -> None:
         overrides.append(f"model.name_or_path={args.model}")
     if args.device:
         overrides.append(f"runtime.device={args.device}")
+    if args.output_dir:
+        overrides.append(f"evaluation.output_dir={args.output_dir}")
     if args.verbose:
         overrides.append("evaluation.verbose=true")
     if args.no_progress:
@@ -99,6 +104,7 @@ def main() -> None:
         if hasattr(checkpoint, "to"):
             checkpoint = checkpoint.to(ctx.device)
         ctx.model = checkpoint.eval()
+        ctx.artifacts["evaluation_checkpoint"] = args.checkpoint
 
     adapter.evaluate(ctx)
 

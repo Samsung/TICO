@@ -148,11 +148,12 @@ with SuppressWarning(UserWarning, ".*"):
     else:
         qattn = qlayer.wrapped
         assert isinstance(qattn, QuantLlamaDecoderLayer)
-        attn_mask = qattn.causal_mask_template[:, :, :S, :S].squeeze(0)
+        attn_mask = qattn._build_causal_mask(
+            q_len=S, k_len=S, past_len=0, device=torch.device("cpu")
+        )
         dtype = example_hidden.dtype
-        pos_embeds = (
-            qattn.rope_cos_template.cpu().to(dtype),
-            qattn.rope_sin_template.cpu().to(dtype),
+        pos_embeds = qattn._slice_rope(
+            start=0, seq_len=S, device=torch.device("cpu"), dtype=dtype
         )
 
         cm = tico.convert(

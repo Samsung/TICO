@@ -334,11 +334,10 @@ def _export_prepared_llama_per_layer(
 
         batch, seq, hidden_size = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(batch, seq, hidden_size, device="cpu")
-        attention_mask = (
-            cast(QuantLlamaDecoderLayer, qlayer.wrapped)
-            .causal_mask_template[..., :seq, :seq]
-            .squeeze(0)
-            .to("cpu")
+        attention_mask = cast(
+            QuantLlamaDecoderLayer, qlayer.wrapped
+        )._build_causal_mask(
+            q_len=seq, k_len=seq, past_len=0, device=torch.device("cpu")
         )
         position_embeddings = cast(QuantLlamaDecoderLayer, qlayer.wrapped)._slice_rope(
             start=0,

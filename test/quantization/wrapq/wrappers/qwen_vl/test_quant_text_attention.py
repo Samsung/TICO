@@ -544,10 +544,6 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
         qcfg = make_affine_ptq_config(attention_mask_fill_value=-100.0)
         attn = QuantQwen3VLTextAttention(self.fp_attn, qcfg=qcfg)
 
-        mask = torch.full((1, 1, 8, 8), -100.0)
-        mask.triu_(1)
-        attn.register_buffer("causal_mask_template", mask, persistent=False)
-
         # B=1, K=4. Last key is padding, so every query should mask key index 3.
         keep_mask = torch.tensor([[1, 1, 1, 0]], dtype=torch.bool)
 

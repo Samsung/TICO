@@ -63,6 +63,27 @@ class TiedEmbeddingLlamaModel(torch.nn.Module):
 
 
 class TestLlamaAdapter(unittest.TestCase):
+    def test_full_export_uses_export_shape_without_calibration_samples(self):
+        """A static full-model graph uses the independently configured capacity."""
+        ctx = _fake_llama_context(
+            {
+                "calibration": {"seq_len": 4},
+                "evaluation": {"max_seq_len": 12},
+                "export": {
+                    "enabled": True,
+                    "max_seq_len": 8,
+                    "artifacts": ["circle_full"],
+                },
+            }
+        )
+        self.assertFalse(ctx.adapter.requires_calibration_inputs(ctx.cfg))
+        with patch.object(llama_mod, "export_full_circle") as export:
+            ctx.adapter.export(ctx)
+        example = export.call_args.kwargs["example_input"]
+        self.assertEqual(tuple(example.shape), (1, 8))
+        self.assertEqual(example.dtype, torch.long)
+        self.assertEqual(ctx.calibration_inputs, [])
+
     def test_export_routes_circle_bundle_without_repeating_per_layer_export(self):
         """Bundle export supplies its own paired stages and records the manifest."""
         with tempfile.TemporaryDirectory() as tmpdir:

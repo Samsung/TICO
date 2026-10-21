@@ -167,7 +167,7 @@ class TestQuantLlamaModel(unittest.TestCase):
         self.assertEqual(first_attn.attn_options.rope, "pre_negated_sin")
         self.assertEqual(first_attn.attn_options.layout, "unrolled")
 
-    def test_rope_sin_template_convention_depends_on_profile(self):
+    def test_rope_sin_convention_depends_on_profile(self):
         qmodel_ref = QuantLlamaModel(
             self.fp_model,
             qcfg=make_affine_ptq_config(model_args={"profile": "reference_eval"}),
@@ -177,20 +177,13 @@ class TestQuantLlamaModel(unittest.TestCase):
             qcfg=make_affine_ptq_config(model_args={"profile": "npu_export"}),
         )
 
+        hidden = torch.zeros(1, self.seq_len, self.fp_model.config.hidden_size)
+        cos_ref, sin_ref = qmodel_ref.get_position_embeddings_for(hidden, start=0)
+        cos_npu, sin_npu = qmodel_npu.get_position_embeddings_for(hidden, start=0)
         half_dim = self.head_dim // 2
-
-        torch.testing.assert_close(
-            qmodel_ref.rope_cos_template,
-            qmodel_npu.rope_cos_template,
-        )
-        torch.testing.assert_close(
-            qmodel_npu.rope_sin_template[..., :half_dim],
-            -qmodel_ref.rope_sin_template[..., :half_dim],
-        )
-        torch.testing.assert_close(
-            qmodel_npu.rope_sin_template[..., half_dim:],
-            qmodel_ref.rope_sin_template[..., half_dim:],
-        )
+        torch.testing.assert_close(cos_ref, cos_npu)
+        torch.testing.assert_close(sin_npu[..., :half_dim], -sin_ref[..., :half_dim])
+        torch.testing.assert_close(sin_npu[..., half_dim:], sin_ref[..., half_dim:])
 
     def test_layer_qscheme_override_propagates_to_projection_weight_observer(self):
         """

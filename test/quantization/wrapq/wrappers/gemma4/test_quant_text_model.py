@@ -14,6 +14,7 @@
 
 """Unit tests for the Gemma4 text-model PTQ wrapper."""
 
+import copy
 import unittest
 from typing import cast
 from unittest import mock
@@ -291,6 +292,212 @@ class TestQuantGemma4TextModel(unittest.TestCase):
 
         _assert_close(self, quant_out.last_hidden_state, fp_out.last_hidden_state)
         self.assertIsNotNone(quant_out.shared_kv_states)
+
+    def test_eager_context_is_independent_of_export_template_capacity(self):
+        """Long eager inputs retain HF parity without growing export templates."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(
+            layer_types=["sliding_attention", "full_attention"],
+            sliding_window=4,
+            max_position_embeddings=32,
+        )
+        fp_model = _make_text_model(cfg)
+        qmodel = QuantGemma4TextModel(
+            copy.deepcopy(fp_model),
+            qcfg=PTQConfig(model_args={"text": {"max_seq": 3}}),
+        ).eval()
+        input_ids = torch.randint(0, cfg.vocab_size, (2, 11))
+        attention_mask = torch.ones_like(input_ids)
+        attention_mask[1, -2:] = 0
+
+        with torch.no_grad():
+            actual = qmodel(input_ids=input_ids, attention_mask=attention_mask)
+            expected = fp_model(input_ids=input_ids, attention_mask=attention_mask)
+
+        _assert_close(self, actual.last_hidden_state, expected.last_hidden_state)
+        self.assertEqual(qmodel.config.max_position_embeddings, 32)
+        self.assertEqual(qmodel.static_max_seq, 3)
+        for layer_type in qmodel.unique_layer_types:
+            template = getattr(qmodel, qmodel._mask_template_name(layer_type))
+            self.assertEqual(tuple(template.shape), (1, 1, 3, 3))
+        attention_templates = [
+            buffer
+            for name, buffer in qmodel.named_buffers()
+            if name.endswith("causal_mask_template")
+        ]
+        self.assertEqual(len(attention_templates), cfg.num_hidden_layers)
+        for template in attention_templates:
+            self.assertEqual(tuple(template.shape), (1, 1, 3, 3))
+
+    def test_long_cached_eager_decode_matches_hf_with_sliding_and_shared_kv(self):
+        """Sliding-cache eviction preserves decode, shared-KV, and PLE semantics."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(
+            layer_types=[
+                "sliding_attention",
+                "full_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+            sliding_window=4,
+            max_position_embeddings=32,
+            num_kv_shared_layers=2,
+            hidden_size_per_layer_input=8,
+        )
+        fp_model = _make_text_model(cfg)
+        qmodel = QuantGemma4TextModel(
+            copy.deepcopy(fp_model),
+            qcfg=PTQConfig(model_args={"text": {"max_seq": 3}}),
+        ).eval()
+        input_ids = torch.randint(0, cfg.vocab_size, (1, 10))
+        actual_cache = expected_cache = None
+        start = 0
+
+        for end in (6, 8, 10):
+            with self.subTest(end=end), torch.no_grad():
+                kwargs = {
+                    "input_ids": input_ids[:, start:end],
+                    "attention_mask": torch.ones_like(input_ids[:, :end]),
+                    "use_cache": True,
+                    "return_shared_kv_states": True,
+                }
+                actual = qmodel(past_key_values=actual_cache, **kwargs)
+                expected = fp_model(past_key_values=expected_cache, **kwargs)
+                _assert_close(
+                    self, actual.last_hidden_state, expected.last_hidden_state
+                )
+                for layer_type in cfg.layer_types:
+                    for actual_kv, expected_kv in zip(
+                        actual.shared_kv_states[layer_type],
+                        expected.shared_kv_states[layer_type],
+                    ):
+                        _assert_close(self, actual_kv, expected_kv)
+                actual_cache = actual.past_key_values
+                expected_cache = expected.past_key_values
+                self.assertEqual(actual_cache.get_seq_length(), end)
+            start = end
+
+    def test_quantized_eager_length_exceeds_calibration_and_export_template(self):
+        """Frozen qparams produce identical outputs across independent export caps."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(
+            layer_types=["sliding_attention", "full_attention"],
+            sliding_window=4,
+            max_position_embeddings=32,
+        )
+        fp_model = _make_text_model(cfg)
+        models = [
+            QuantGemma4TextModel(
+                copy.deepcopy(fp_model),
+                qcfg=PTQConfig(model_args={"text": {"max_seq": capacity}}),
+            ).eval()
+            for capacity in (3, 32)
+        ]
+        calibration_ids = torch.randint(0, cfg.vocab_size, (1, 3))
+        input_ids = torch.randint(0, cfg.vocab_size, (1, 9))
+        for model in models:
+            model.enable_calibration()
+            with torch.no_grad():
+                model(input_ids=calibration_ids)
+            model.freeze_qparams()
+            self.assertIs(model._mode, Mode.QUANT)
+
+        with torch.no_grad():
+            actual = models[0](input_ids=input_ids, use_cache=True)
+            expected = models[1](input_ids=input_ids, use_cache=True)
+            torch.testing.assert_close(
+                actual.last_hidden_state, expected.last_hidden_state, atol=0, rtol=0
+            )
+            next_ids = torch.randint(0, cfg.vocab_size, (1, 1))
+            actual = models[0](
+                input_ids=next_ids,
+                past_key_values=actual.past_key_values,
+                use_cache=True,
+            )
+            expected = models[1](
+                input_ids=next_ids,
+                past_key_values=expected.past_key_values,
+                use_cache=True,
+            )
+        torch.testing.assert_close(
+            actual.last_hidden_state, expected.last_hidden_state, atol=0, rtol=0
+        )
+
+    def test_native_and_static_context_limits_remain_distinct(self):
+        """Eager uses the native limit while explicit static mode keeps its cap."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(max_position_embeddings=16)
+        qmodel = QuantGemma4TextModel(
+            _make_text_model(cfg),
+            qcfg=PTQConfig(model_args={"text": {"max_seq": 4}}),
+        ).eval()
+        with self.assertRaisesRegex(
+            ValueError, "eager context exceeds max_position_embeddings"
+        ):
+            qmodel(input_ids=torch.ones(1, 17, dtype=torch.long))
+        qmodel.force_export = True
+        try:
+            with self.assertRaisesRegex(
+                ValueError, "position range exceeds static_max_seq"
+            ):
+                qmodel(input_ids=torch.ones(1, 5, dtype=torch.long))
+        finally:
+            qmodel.force_export = False
+
+    def test_static_mode_preserves_short_eager_output(self):
+        """Static templates and eager masks agree within the exported capacity."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(
+            layer_types=["sliding_attention", "full_attention"], sliding_window=2
+        )
+        qmodel = QuantGemma4TextModel(
+            _make_text_model(cfg),
+            qcfg=PTQConfig(model_args={"text": {"max_seq": 4}}),
+        ).eval()
+        input_ids = torch.randint(0, cfg.vocab_size, (1, 4))
+        masks = {
+            "full_attention": torch.tensor(
+                [
+                    [0.0, -120.0, -120.0, -120.0],
+                    [0.0, 0.0, -120.0, -120.0],
+                    [0.0, 0.0, 0.0, -120.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ]
+            ).view(1, 1, 4, 4),
+            "sliding_attention": torch.tensor(
+                [
+                    [0.0, -120.0, -120.0, -120.0],
+                    [0.0, 0.0, -120.0, -120.0],
+                    [-120.0, 0.0, 0.0, -120.0],
+                    [-120.0, -120.0, 0.0, 0.0],
+                ]
+            ).view(1, 1, 4, 4),
+        }
+        with torch.no_grad():
+            expected = qmodel(input_ids=input_ids).last_hidden_state
+            qmodel.force_export = True
+            try:
+                actual = qmodel(
+                    input_ids=input_ids, attention_mask=masks
+                ).last_hidden_state
+            finally:
+                qmodel.force_export = False
+        _assert_close(self, actual, expected)
 
     def test_ple_path_matches_hf_with_input_ids(self):
         """Check Hugging Face parity when Gemma4 PLE is enabled."""

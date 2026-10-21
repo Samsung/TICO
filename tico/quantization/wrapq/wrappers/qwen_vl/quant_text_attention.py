@@ -54,8 +54,6 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
     Hugging Face-like batched attention graph for experiments.
     """
 
-    causal_mask_template: torch.Tensor
-
     def __init__(
         self,
         fp_attn: nn.Module,
@@ -185,15 +183,6 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         self.obs_new_v = mk("new_v")
         self.obs_present_key = mk("present_key")
         self.obs_present_value = mk("present_value")
-
-        # Static causal mask template
-        assert hasattr(cfg, "max_position_embeddings")
-        max_seq = cfg.max_position_embeddings
-        mask = torch.full(
-            (1, 1, max_seq, max_seq), float(self.qcfg.attention_mask_fill_value)
-        )
-        mask.triu_(1)
-        self.register_buffer("causal_mask_template", mask, persistent=False)
 
     def _rot(self, t: torch.Tensor, o_x1, o_x2, o_neg, o_cat) -> torch.Tensor:
         """Return rotate_half(t) as [-x2, x1] along the last dimension."""
@@ -330,28 +319,22 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             resulting padding mask with the causal mask.
           - floating point: assume the caller already provided an additive mask.
         """
+        # Full-model eager execution and staged export already supply additive
+        # masks. Reuse them without allocating another Q-by-K mask per layer.
+        if attention_mask is not None and torch.is_floating_point(attention_mask):
+            attention_mask = self._normalize_attention_mask_shape(
+                attention_mask.to(device),
+                q_len=q_len,
+                k_len=k_len,
+            )
+            return self._fq(attention_mask, self.obs_causal_mask)
+
         fill_val = float(self.qcfg.attention_mask_fill_value)
-
-        assert isinstance(self.causal_mask_template, torch.Tensor)
-
-        if k_len > self.causal_mask_template.size(-1):
-            raise RuntimeError(
-                "Key length exceeds causal mask capacity: "
-                f"k_len={k_len}, capacity={self.causal_mask_template.size(-1)}"
-            )
-
-        # If KV cache is used, k_len == past_len + q_len. The current query rows
-        # correspond to [past_len, past_len + q_len), not [0, q_len).
-        q_start = max(k_len - q_len, 0)
-        q_end = q_start + q_len
-        if q_end > self.causal_mask_template.size(-2):
-            raise RuntimeError(
-                "Query range exceeds causal mask capacity: "
-                f"q_start={q_start}, q_end={q_end}, "
-                f"capacity={self.causal_mask_template.size(-2)}"
-            )
-
-        causal_mask = self.causal_mask_template[..., q_start:q_end, :k_len].to(device)
+        # Queries follow the cached prefix. Construct only the actual query/key
+        # span; the model's native context limit is not a mask allocation size.
+        causal_mask = torch.full(
+            (1, 1, q_len, k_len), fill_val, device=device, dtype=torch.float32
+        ).triu_(diagonal=max(k_len - q_len, 0) + 1)
 
         if attention_mask is None:
             return self._fq(causal_mask, self.obs_causal_mask)
@@ -389,14 +372,6 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             # Clamp prevents fill_val + fill_val from becoming twice as negative.
             mask = torch.clamp(causal_mask + additive_mask, min=fill_val)
             return self._fq(mask, self.obs_causal_mask)
-
-        if torch.is_floating_point(attention_mask):
-            attention_mask = self._normalize_attention_mask_shape(
-                attention_mask,
-                q_len=q_len,
-                k_len=k_len,
-            )
-            return self._fq(attention_mask, self.obs_causal_mask)
 
         raise RuntimeError(
             "Unsupported attention_mask dtype for Qwen text attention: "

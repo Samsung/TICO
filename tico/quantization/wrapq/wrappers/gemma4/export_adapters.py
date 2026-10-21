@@ -613,6 +613,7 @@ class Gemma4TextAttentionPrefillExportAdapter(nn.Module):
             past_key_value=None,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            static_export=True,
         )
         return _flatten_attention_and_kv(output, return_kv=self.return_kv)
 
@@ -657,6 +658,7 @@ class Gemma4TextAttentionDecodeExportAdapter(nn.Module):
             shared_key_value=shared_key_value,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            static_export=True,
         )
         return _flatten_attention_and_kv(output, return_kv=self.return_kv)
 
@@ -715,6 +717,7 @@ class Gemma4TextDecoderLayerPrefillExportAdapter(nn.Module):
             past_key_value=None,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            static_export=True,
         )
         return _flatten_hidden_and_kv(output, return_kv=self.return_kv)
 
@@ -775,6 +778,7 @@ class Gemma4TextDecoderLayerDecodeExportAdapter(nn.Module):
             shared_key_value=shared_key_value,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            static_export=True,
         )
         return _flatten_hidden_and_kv(output, return_kv=self.return_kv)
 
