@@ -145,6 +145,9 @@ class FakeText(torch.nn.Module):
         self.obs_per_layer_token_inputs = None
         self.obs_per_layer_projection = None
         self.obs_per_layer_inputs = None
+        self.obs_per_layer_model_projection_scale = None
+        self.obs_per_layer_input_scale = None
+        self.obs_per_layer_sum = None
         if ple_dim:
             packed = self.config.num_hidden_layers * ple_dim
             self.embed_tokens_per_layer = torch.nn.Embedding(16, packed)
@@ -152,9 +155,17 @@ class FakeText(torch.nn.Module):
             self.per_layer_projection_norm = torch.nn.Identity()
             self.per_layer_input_scale = 0.5
             self.per_layer_model_projection_scale = 0.25
+            self.register_buffer("per_layer_input_scale_tensor", torch.tensor([0.5]))
+            self.register_buffer(
+                "per_layer_model_projection_scale_tensor",
+                torch.tensor([0.25]),
+            )
             self.obs_per_layer_token_inputs = torch.nn.Identity()
             self.obs_per_layer_projection = torch.nn.Identity()
             self.obs_per_layer_inputs = torch.nn.Identity()
+            self.obs_per_layer_model_projection_scale = torch.nn.Identity()
+            self.obs_per_layer_input_scale = torch.nn.Identity()
+            self.obs_per_layer_sum = torch.nn.Identity()
         self.layers = torch.nn.ModuleList(
             [
                 FakePTQWrapper(
@@ -348,7 +359,14 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         projection_state = list(
             modules["ple_projection_prefill.q.circle"].state_dict().keys()
         )
-        self.assertEqual(projection_state, ["per_layer_model_projection.weight"])
+        self.assertCountEqual(
+            projection_state,
+            [
+                "per_layer_model_projection.weight",
+                "per_layer_model_projection_scale_tensor",
+                "per_layer_input_scale_tensor",
+            ],
+        )
         for name in projection_state:
             self.assertNotIn("embed_tokens", name)
 

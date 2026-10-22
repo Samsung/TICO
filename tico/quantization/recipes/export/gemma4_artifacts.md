@@ -46,6 +46,19 @@ Each decoder layer `i` consumes `per_layer_inputs[:, :, i, :]` from the PLE
 projection output. The `per_layer_inputs` qparam is identical on the projection
 output and on every decoder layer `per_layer_input` input.
 
+Inside `ple_projection_*`, `per_layer_model_projection_scale` and
+`per_layer_input_scale` observe the two multiplication constants, and
+`per_layer_sum` observes the projection-plus-token sum before the final scale.
+These internal observers follow the configured activation policy; the existing
+`per_layer_inputs` observer still owns the final output/decoder boundary. Both
+prefill and decode reuse the same frozen observers and scale buffers.
+
+Checkpoints created before these internal PLE observers were added must be
+prepared and PTQ-calibrated again before quantization and export. Re-exporting an
+older `quantized_model.pt` alone cannot supply the missing sum statistics and is
+rejected with a recalibration message. Adding the intermediate fake-quant boundary
+can change quantized outputs, so rerun accuracy validation after recalibration.
+
 ## `circle_layers/`: vision pipeline
 
 `granularity: both` writes the monolithic graph and the split pipeline.

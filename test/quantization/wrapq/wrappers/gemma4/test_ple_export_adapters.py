@@ -14,7 +14,10 @@
 
 """Tests for the split Gemma4 PLE embedding and projection export adapters."""
 
+import io
 import unittest
+
+import numpy as np
 
 import torch
 
@@ -82,7 +85,7 @@ def _make_ple_text_config(**overrides):
     return cfg
 
 
-def _make_quant_text_model(cfg, *, quantized: bool):
+def _make_quant_text_model(cfg, *, quantized: bool, qcfg=None):
     """Return a wrapped tiny text model in NO_QUANT or frozen QUANT mode."""
     from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
         QuantGemma4TextModel,
@@ -90,7 +93,7 @@ def _make_quant_text_model(cfg, *, quantized: bool):
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
     fp_model = Gemma4TextModel(cfg).eval()
-    qtext = QuantGemma4TextModel(fp_model, qcfg=PTQConfig()).eval()
+    qtext = QuantGemma4TextModel(fp_model, qcfg=qcfg or PTQConfig()).eval()
     if quantized:
         qtext.enable_calibration()
         with torch.no_grad():
@@ -222,8 +225,50 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
             qtext.obs_per_layer_projection,
         )
         self.assertIs(projection.per_layer_inputs_observer, qtext.obs_per_layer_inputs)
+        self.assertIs(
+            projection.per_layer_model_projection_scale_observer,
+            qtext.obs_per_layer_model_projection_scale,
+        )
+        self.assertIs(
+            projection.per_layer_input_scale_observer,
+            qtext.obs_per_layer_input_scale,
+        )
+        self.assertIs(projection.per_layer_sum_observer, qtext.obs_per_layer_sum)
         self.assertTrue(qtext.obs_per_layer_token_inputs.has_qparams)
         self.assertTrue(qtext.obs_per_layer_inputs.has_qparams)
+
+    def test_projection_quantization_survives_checkpoint_round_trip(self):
+        """Frozen sum and scale domains survive the saved-model export workflow."""
+        _fp_model, qtext = _make_quant_text_model(self.cfg, quantized=True)
+        _embedding, projection = self._adapters(qtext)
+        ids = self._ids(2)
+        with torch.no_grad():
+            inputs_embeds = qtext.embed_tokens(ids)
+            token_inputs = qtext.get_per_layer_inputs(ids, None)
+            expected = projection(inputs_embeds, token_inputs)
+
+        checkpoint = io.BytesIO()
+        torch.save(qtext, checkpoint)
+        checkpoint.seek(0)
+        restored = torch.load(checkpoint, weights_only=False)
+        _embedding, restored_projection = self._adapters(restored)
+        with torch.no_grad():
+            actual = restored_projection(inputs_embeds, token_inputs)
+        self.assertTrue(torch.equal(actual, expected))
+        for name in (
+            "obs_per_layer_model_projection_scale",
+            "obs_per_layer_input_scale",
+            "obs_per_layer_sum",
+        ):
+            original_observer = getattr(qtext, name)
+            restored_observer = getattr(restored, name)
+            self.assertTrue(restored_observer.has_qparams)
+            self.assertFalse(restored_observer.enabled)
+            for original, loaded in zip(
+                original_observer.compute_qparams(),
+                restored_observer.compute_qparams(),
+            ):
+                self.assertTrue(torch.equal(original, loaded))
 
     def test_shared_token_input_boundary_is_idempotent(self):
         """Re-applying the producer observer at the consumer must not change values."""
@@ -254,6 +299,25 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "NO_QUANT or QUANT"):
             Gemma4PLEProjectionExportAdapter(qtext)
 
+    def test_legacy_projection_checkpoint_requires_recalibration(self):
+        """Old quantized checkpoints must not silently omit the new sum domain."""
+        from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
+            Gemma4PLEProjectionExportAdapter,
+        )
+
+        _fp_model, qtext = _make_quant_text_model(self.cfg, quantized=True)
+        ids = self._ids(2)
+        with torch.no_grad():
+            inputs_embeds = qtext.embed_tokens(ids)
+            token_inputs = qtext.get_per_layer_inputs(ids, None)
+        del qtext.obs_per_layer_sum
+
+        message = "Re-prepare the model and rerun PTQ calibration"
+        with self.assertRaisesRegex(RuntimeError, message):
+            Gemma4PLEProjectionExportAdapter(qtext)
+        with self.assertRaisesRegex(RuntimeError, message):
+            qtext.project_per_layer_inputs(inputs_embeds, token_inputs)
+
     def test_adapters_reject_ple_disabled_text_model(self):
         """A model without PLE has no lookup or projection stage to export."""
         from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
@@ -267,6 +331,28 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
             Gemma4PLEEmbeddingExportAdapter(qtext)
         with self.assertRaisesRegex(RuntimeError, "hidden_size_per_layer_input"):
             Gemma4PLEProjectionExportAdapter(qtext)
+
+    def test_legacy_ple_disabled_model_can_still_be_calibrated(self):
+        """Models without PLE do not require the new PLE quantization state."""
+        cfg = _make_ple_text_config(hidden_size_per_layer_input=0)
+        _fp_model, qtext = _make_quant_text_model(cfg, quantized=False)
+        for name in (
+            "obs_per_layer_model_projection_scale",
+            "obs_per_layer_input_scale",
+            "obs_per_layer_sum",
+        ):
+            delattr(qtext, name)
+
+        ids = self._ids(2)
+        qtext.enable_calibration()
+        with torch.no_grad():
+            qtext(input_ids=ids)
+        qtext.freeze_qparams()
+        with torch.no_grad():
+            output = qtext(input_ids=ids).last_hidden_state
+        self.assertIs(qtext._mode, Mode.QUANT)
+        self.assertEqual(tuple(output.shape), (1, 2, cfg.hidden_size))
+        self.assertTrue(torch.isfinite(output).all())
 
     def test_no_quant_adapters_never_call_fake_quant(self):
         """NO_QUANT export must bypass every observer boundary."""
@@ -286,6 +372,9 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
             qtext.obs_per_layer_token_inputs,
             qtext.obs_per_layer_projection,
             qtext.obs_per_layer_inputs,
+            qtext.obs_per_layer_model_projection_scale,
+            qtext.obs_per_layer_input_scale,
+            qtext.obs_per_layer_sum,
         ):
             observer.fake_quant = _fail  # type: ignore[method-assign]
 
@@ -454,6 +543,115 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
                     )
                 self.assertIsNotNone(circle_embedding)
                 self.assertIsNotNone(circle_projection)
+
+    def test_projection_circle_quantizes_add_and_both_scale_constants(self):
+        """Prefill/decode ADD and scalar MUL operands carry the activation domain."""
+        import tico
+        from circle_schema import circle
+        from tico.circle.io import model_from_bytes
+        from tico.quantization.config.specs import affine
+        from tico.quantization.wrapq.dtypes import DType
+        from tico.quantization.wrapq.qscheme import QScheme
+
+        for bit_width in (8, 16):
+            dtype = DType.uint(8) if bit_width == 8 else DType.int(16)
+            qscheme = (
+                QScheme.PER_TENSOR_ASYMM if bit_width == 8 else QScheme.PER_TENSOR_SYMM
+            )
+            expected_type = (
+                circle.TensorType.TensorType.UINT8
+                if bit_width == 8
+                else circle.TensorType.TensorType.INT16
+            )
+            _fp_model, qtext = _make_quant_text_model(
+                self.cfg,
+                quantized=True,
+                qcfg=PTQConfig(activation=affine(dtype, qscheme=qscheme)),
+            )
+            _embedding, projection = self._adapters(qtext)
+
+            for seq_len in (2, 1):
+                with self.subTest(bit_width=bit_width, seq_len=seq_len):
+                    ids = self._ids(seq_len)
+                    with torch.no_grad():
+                        inputs_embeds = qtext.embed_tokens(ids)
+                        token_inputs = qtext.get_per_layer_inputs(ids, None)
+                        converted = tico.convert(
+                            projection,
+                            (inputs_embeds, token_inputs),
+                            strict=False,
+                        )
+                    model = model_from_bytes(converted.circle_binary)
+                    graph = model.subgraphs[0]
+                    arithmetic = {
+                        code: [
+                            operator
+                            for operator in graph.operators
+                            if model.operatorCodes[operator.opcodeIndex].builtinCode
+                            == code
+                        ]
+                        for code in (
+                            circle.BuiltinOperator.BuiltinOperator.ADD,
+                            circle.BuiltinOperator.BuiltinOperator.MUL,
+                        )
+                    }
+                    adds = arithmetic[circle.BuiltinOperator.BuiltinOperator.ADD]
+                    muls = arithmetic[circle.BuiltinOperator.BuiltinOperator.MUL]
+                    self.assertEqual(len(adds), 1)
+                    self.assertEqual(len(muls), 2)
+                    for operator in (*adds, *muls):
+                        for tensor_index in (*operator.inputs, *operator.outputs):
+                            tensor = graph.tensors[tensor_index]
+                            self.assertEqual(tensor.type, expected_type, tensor.name)
+                            self.assertIsNotNone(tensor.quantization, tensor.name)
+                            self.assertEqual(len(tensor.quantization.scale), 1)
+                            self.assertGreater(tensor.quantization.scale[0], 0.0)
+                            self.assertEqual(len(tensor.quantization.zeroPoint), 1)
+
+                    # Each scale is a stored quantized scalar, not a float
+                    # constant attached to an otherwise quantized MUL.
+                    for operator, scale_value in zip(
+                        muls,
+                        (
+                            _fp_model.per_layer_model_projection_scale,
+                            _fp_model.per_layer_input_scale,
+                        ),
+                    ):
+                        constants = [
+                            graph.tensors[index]
+                            for index in operator.inputs
+                            if graph.tensors[index].buffer != 0
+                        ]
+                        self.assertEqual(len(constants), 1)
+                        constant = constants[0]
+                        self.assertEqual(int(np.prod(constant.shape)), 1)
+                        payload = model.buffers[constant.buffer].data
+                        self.assertEqual(len(payload), bit_width // 8)
+                        stored = np.frombuffer(
+                            payload,
+                            dtype=np.uint8 if bit_width == 8 else np.dtype("<i2"),
+                        )
+                        dequantized = (
+                            stored.astype(np.float64)
+                            - constant.quantization.zeroPoint[0]
+                        ) * constant.quantization.scale[0]
+                        # A positive singleton is exactly representable by the
+                        # MinMax scalar domain, up to FP32 scale serialization.
+                        np.testing.assert_allclose(
+                            dequantized, [float(scale_value)], rtol=1e-6, atol=0.0
+                        )
+
+                    # The consumer boundary must retain the final observer,
+                    # rather than adopting the unscaled ADD output domain.
+                    output = graph.tensors[graph.outputs[0]]
+                    scale, zero_point = qtext.obs_per_layer_inputs.compute_qparams()
+                    np.testing.assert_array_equal(
+                        output.quantization.scale, scale.detach().cpu().reshape(-1)
+                    )
+                    np.testing.assert_array_equal(
+                        output.quantization.zeroPoint,
+                        zero_point.detach().cpu().reshape(-1),
+                    )
 
 
 if __name__ == "__main__":
