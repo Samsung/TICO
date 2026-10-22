@@ -38,6 +38,9 @@ from tico.quantization.recipes.export.llama_bundle import (
 class _BundleRotary(torch.nn.Module):
     """Return explicit source tables to exercise bundle serialization contracts."""
 
+    cos: torch.Tensor
+    sin: torch.Tensor
+
     def __init__(self, index):
         super().__init__()
         self.register_buffer("cos", torch.full((1, 6, 4), float(index + 2)))
@@ -53,7 +56,9 @@ class _BundleLayer(torch.nn.Module):
 
     def __init__(self, index):
         super().__init__()
-        from tico.quantization.wrapq.wrappers.llama.static_inputs import capture_rope_state
+        from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+            capture_rope_state,
+        )
 
         self.config = SimpleNamespace(max_position_embeddings=6, head_dim=4)
         self.qcfg = SimpleNamespace(attention_mask_fill_value=-100.0 - index)

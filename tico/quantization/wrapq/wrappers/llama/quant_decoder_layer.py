@@ -29,10 +29,6 @@ if TYPE_CHECKING:
 
 from tico.quantization.config.llama_attention import get_llama_attention_options
 from tico.quantization.config.ptq import ExportMode, PTQConfig
-from tico.quantization.wrapq.wrappers.llama.static_inputs import (
-    capture_rope_state,
-    prepare_llama_static_inputs,
-)
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaDecoderLayerDecodeExportAdapter,
@@ -43,6 +39,10 @@ from tico.quantization.wrapq.wrappers.llama.position import (
     combine_binary_attention_mask,
     make_rotary_embedding,
     position_embeddings as make_position_embeddings,
+)
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    capture_rope_state,
+    prepare_llama_static_inputs,
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase

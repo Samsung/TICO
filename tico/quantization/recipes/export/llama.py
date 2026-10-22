@@ -18,7 +18,6 @@ from typing import Any, cast, Sequence
 import torch
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.wrappers.llama.static_inputs import prepare_llama_static_inputs
 from tico.quantization.recipes.export.circle import (
     convert_and_save_circle as _convert_and_save,
 )
@@ -36,6 +35,9 @@ from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
 from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
 from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (
     QuantLlamaForCausalLM,
+)
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
@@ -335,7 +337,9 @@ def _export_prepared_llama_per_layer(
 
         batch, seq, hidden_size = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(batch, seq, hidden_size, device="cpu")
-        prepared_inputs = prepare_llama_static_inputs(qlayer.wrapped, max_seq_len)
+        prepared_inputs = prepare_llama_static_inputs(
+            cast(QuantLlamaDecoderLayer, qlayer.wrapped), max_seq_len
+        )
         attention_mask = prepared_inputs.mask(seq, seq, 0, device=torch.device("cpu"))
         position_embeddings = prepared_inputs.rope(
             0, seq, device=torch.device("cpu"), dtype=example_hidden.dtype

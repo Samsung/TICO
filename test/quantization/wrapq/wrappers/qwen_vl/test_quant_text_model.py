@@ -23,8 +23,8 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
-from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.utils.static_export import prepared_static_export
+from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
     QuantQwen3VLTextModel,
 )

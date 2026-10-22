@@ -21,6 +21,7 @@ import sys
 import traceback
 import unittest
 from pathlib import Path
+from typing import Any
 
 
 def main(argv=None) -> int:
@@ -38,7 +39,7 @@ def main(argv=None) -> int:
     if not (repo / "test/quantization/wrapq/wrappers/llama/test_rope_consistency.py").is_file():
         parser.error("--repo must include the patched RoPE consistency test.")
     sys.path.insert(0, str(repo))
-    report = {"status": "ERROR", "repo": str(repo), "scope": "Tiny real-HF models, actual wrappers, and Torch Export; not pretrained-model Circle or NPU validation."}
+    report: dict[str, Any] = {"status": "ERROR", "repo": str(repo), "scope": "Tiny real-HF models, actual wrappers, and Torch Export; not pretrained-model Circle or NPU validation."}
     code = 2
     try:
         import torch

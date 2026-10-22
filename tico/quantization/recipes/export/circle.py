@@ -19,8 +19,8 @@ from typing import Any
 import torch
 
 import tico
-from tico.utils.utils import SuppressWarning
 from tico.quantization.wrapq.utils.static_export import prepared_static_export
+from tico.utils.utils import SuppressWarning
 
 
 def convert_and_save_circle(

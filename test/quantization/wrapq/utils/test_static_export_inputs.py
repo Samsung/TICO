@@ -29,15 +29,19 @@ from tico.quantization.wrapq.utils.static_export import (
 )
 from tico.quantization.wrapq.wrappers.llama.static_inputs import (
     capture_rope_state,
+    LlamaStaticInputs,
     prepare_llama_static_inputs,
 )
 from tico.quantization.wrapq.wrappers.qwen_vl.static_inputs import (
     prepare_qwen3_vl_static_text_inputs,
+    Qwen3VLStaticTextInputs,
 )
 
 
 class _LlamaRotary(nn.Module):
     """Expose a deterministic rotary source without a Transformers dependency."""
+
+    inv_freq: torch.Tensor
 
     def __init__(self):
         super().__init__()
@@ -49,11 +53,20 @@ class _LlamaRotary(nn.Module):
         self.calls += 1
         frequencies = positions.float().unsqueeze(-1) * self.inv_freq
         phases = torch.cat((frequencies, frequencies), dim=-1)
-        return phases.cos() * self.attention_scaling, phases.sin() * self.attention_scaling
+        return (
+            phases.cos() * self.attention_scaling,
+            phases.sin() * self.attention_scaling,
+        )
 
 
 class _LlamaOwner(nn.Module):
     """Represent only the static-input protocol, not a language model."""
+
+    _static_export_inputs: LlamaStaticInputs | None
+    _export_rotary_emb: _LlamaRotary
+    _export_rope_contract_version: int
+    _export_rope_attention_scaling: float
+    _mode: SimpleNamespace
 
     def __init__(self, *, rope="hf", source=None, capacity=131072):
         super().__init__()
@@ -73,6 +86,8 @@ class _LlamaOwner(nn.Module):
 class _MutableRotary(nn.Module):
     """Expose mutation to test snapshot isolation without HF dependencies."""
 
+    inv_freq: torch.Tensor
+
     def __init__(self):
         super().__init__()
         self.register_buffer("inv_freq", torch.tensor([1.0, 0.1]))
@@ -87,6 +102,10 @@ class _MutableRotary(nn.Module):
 
 class _QwenOwner(nn.Module):
     """Implement the fixed-position owner protocol for snapshot tests."""
+
+    _static_export_inputs: Qwen3VLStaticTextInputs | None
+    rotary_emb: _MutableRotary
+    _export_rotary_emb: _MutableRotary
 
     def __init__(self):
         super().__init__()
@@ -131,6 +150,7 @@ class TestStaticInputContext(unittest.TestCase):
         weight = owner.weight
         original_keys = tuple(owner.state_dict())
         with prepared_static_export(owner, 8):
+            assert owner._static_export_inputs is not None
             self.assertEqual(owner._static_export_inputs.cos.shape, (1, 8, 4))
             self.assertEqual(owner._static_export_inputs.attention_mask.shape, (1, 1, 8, 8))
             self.assertIs(owner.weight, weight)
@@ -303,7 +323,9 @@ class TestLlamaStaticInputs(unittest.TestCase):
 
     def test_torch_export_graph_contains_no_table_generation(self):
         class Consumer(nn.Module):
-            def __init__(self, inputs):
+            inputs: LlamaStaticInputs
+
+            def __init__(self, inputs: LlamaStaticInputs):
                 super().__init__()
                 self.inputs = inputs
 
@@ -352,6 +374,7 @@ class TestQwenStaticInputs(unittest.TestCase):
         owner = _QwenOwner()
         self.assertEqual(sum(t.numel() for t in owner.buffers()), 4)
         with prepared_static_export(owner, 8):
+            assert owner._static_export_inputs is not None
             self.assertEqual(owner._static_export_inputs.attention_mask.shape[-1], 8)
         self.assertFalse(hasattr(owner, "_static_export_inputs"))
 

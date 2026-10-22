@@ -47,8 +47,6 @@ from typing import Any, Optional
 import numpy as np
 
 import torch
-from tico.quantization.wrapq.utils.static_export import prepared_static_export
-from tico.quantization.wrapq.wrappers.llama.static_inputs import prepare_llama_static_inputs
 import tqdm
 from datasets import load_dataset
 from lm_eval.utils import make_table
@@ -72,6 +70,7 @@ from tico.quantization.recipes.qparams import (
 )
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.utils.metrics import perplexity
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
 from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     LlamaLMHeadExportAdapter,
     LlamaTokenEmbeddingExportAdapter,
@@ -80,6 +79,9 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
     register_fake_quant_meta_kernels_for_dynamic_export,
 )
 
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 from tico.utils.utils import SuppressWarning
 
 DTYPE_MAP = {

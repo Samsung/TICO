@@ -52,12 +52,13 @@ class TestLlamaRoPEConsistency(unittest.TestCase):
                 "original_max_position_embeddings": 8192,
             },
         }[kind]
-        config = LlamaConfig(
-            vocab_size=64, hidden_size=32, intermediate_size=64,
-            num_hidden_layers=2, num_attention_heads=2, num_key_value_heads=1,
-            head_dim=16, max_position_embeddings=131072, rope_theta=500000.0,
-            rope_scaling=scaling, attention_dropout=0.0,
-        )
+        config = LlamaConfig.from_dict({
+            "vocab_size": 64, "hidden_size": 32, "intermediate_size": 64,
+            "num_hidden_layers": 2, "num_attention_heads": 2,
+            "num_key_value_heads": 1, "head_dim": 16,
+            "max_position_embeddings": 131072, "rope_theta": 500000.0,
+            "rope_scaling": scaling, "attention_dropout": 0.0,
+        })
         config._attn_implementation = "eager"
         return LlamaModel(config).eval()
 

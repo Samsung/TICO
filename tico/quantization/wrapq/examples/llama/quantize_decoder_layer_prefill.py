@@ -135,7 +135,9 @@ print(plot_two_outputs(fp32, int8))
 # -------------------------------------------------------------------------
 import tico
 from tico.quantization.wrapq.utils.static_export import prepared_static_export
-from tico.quantization.wrapq.wrappers.llama.static_inputs import prepare_llama_static_inputs
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 
 save_path = pathlib.Path("decoder_layer_prefill.q.circle")
 B, S, D = 1, MAX_SEQ, model.config.hidden_size
