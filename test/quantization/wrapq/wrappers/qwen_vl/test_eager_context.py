@@ -47,14 +47,21 @@ class TestQwen3VLEagerContext(unittest.TestCase):
         )
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
-        config = Qwen3VLTextConfig.from_dict({
-            "vocab_size": 32, "hidden_size": 16, "intermediate_size": 32,
-            "num_hidden_layers": 2, "num_attention_heads": 2,
-            "num_key_value_heads": 1, "head_dim": 8,
-            "max_position_embeddings": max_position_embeddings,
-            "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
-            "attention_dropout": 0.0, "use_cache": True,
-        })
+        config = Qwen3VLTextConfig.from_dict(
+            {
+                "vocab_size": 32,
+                "hidden_size": 16,
+                "intermediate_size": 32,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 8,
+                "max_position_embeddings": max_position_embeddings,
+                "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
+                "attention_dropout": 0.0,
+                "use_cache": True,
+            }
+        )
         config._attn_implementation = "eager"
         return Qwen3VLTextModel(config).eval()
 
@@ -126,7 +133,14 @@ class TestQwen3VLEagerContext(unittest.TestCase):
         wrapped.enable_calibration()
         with torch.no_grad():
             for _ in range(3):
-                wrapped(input_ids=torch.randint(1, 32, (1, 4)), use_cache=False)
+                calibration_ids = torch.randint(1, 32, (1, 4))
+                prefill = wrapped(input_ids=calibration_ids[:, :3], use_cache=True)
+                wrapped(
+                    input_ids=calibration_ids[:, 3:],
+                    attention_mask=torch.ones_like(calibration_ids),
+                    past_key_values=prefill.past_key_values,
+                    use_cache=True,
+                )
         wrapped.freeze_qparams()
         observers = dict(wrapped.named_observers())
         frozen = {

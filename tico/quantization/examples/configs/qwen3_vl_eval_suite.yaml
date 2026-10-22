@@ -20,6 +20,7 @@ calibration:
       split: train
       n_samples: 128
   seq_len: 2048
+  decode_steps: 8
 
 model_args:
   vision:

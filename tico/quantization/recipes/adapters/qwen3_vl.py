@@ -65,6 +65,7 @@ from tico.quantization.recipes.utils import (
     quant_specs_equivalent,
     torch_dtype_from_name,
 )
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 _VISION_LINEAR_MODULES = (
@@ -189,12 +190,127 @@ class Qwen3VLAdapter(ModelAdapter):
         prepared_model: torch.nn.Module,
         stage_cfg: Mapping[str, Any],
     ) -> None:
-        self.forward_calibration(
-            ctx,
-            prepared_model,
-            ctx.calibration_inputs,
-            desc="PTQ calibration",
+        """Reserve trailing dataset tokens for connected cache calibration.
+
+        The default one-token decode covers the static past-K/V boundary. Zero
+        explicitly requests prompt-only calibration. Short samples clamp the
+        decode count to leave at least one prefill token; a one-token sample
+        cannot calibrate a nonempty past boundary. No extra tokens are generated.
+        """
+        decode_steps = int(
+            stage_cfg.get(
+                "decode_calibration_steps",
+                ctx.cfg.get("calibration", {}).get("decode_steps", 1),
+            )
         )
+        if decode_steps < 0:
+            raise ValueError("decode_calibration_steps must be non-negative.")
+        show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
+        iterator = tqdm.tqdm(
+            ctx.calibration_inputs, desc="PTQ calibration", disable=not show_progress
+        )
+        prepared_model.eval()
+        owner = (
+            prepared_model.wrapped
+            if isinstance(prepared_model, PTQWrapper)
+            else prepared_model
+        )
+        model_config = owner.config
+        # Qwen owns request-local mRoPE offsets. Calibration must not leave its
+        # final image/text request installed for the next evaluation request.
+        rope_states = [
+            (module, module.rope_deltas)
+            for module in prepared_model.modules()
+            if hasattr(module, "rope_deltas")
+        ]
+        try:
+            with torch.no_grad():
+                for batch in iterator:
+                    batch = move_to_device(batch, ctx.device)
+                    ids = batch.get("input_ids")
+                    if (
+                        not isinstance(ids, torch.Tensor)
+                        or ids.ndim != 2
+                        or ids.size(1) == 0
+                    ):
+                        raise ValueError(
+                            "Qwen PTQ calibration requires nonempty rank-two input_ids."
+                        )
+                    budget = ctx.cfg.get("calibration", {}).get("seq_len")
+                    if budget is not None and ids.size(1) > int(budget):
+                        raise ValueError(
+                            "Qwen calibration input exceeds calibration.seq_len token budget."
+                        )
+                    if batch.get("past_key_values") is not None:
+                        raise ValueError(
+                            "Qwen calibration inputs must start without a cache."
+                        )
+                    steps = min(decode_steps, ids.size(1) - 1)
+                    prefix = ids.size(1) - steps
+                    if steps:
+                        special_ids = [
+                            getattr(model_config, name, None)
+                            for name in (
+                                "image_token_id",
+                                "video_token_id",
+                                "vision_start_token_id",
+                                "vision_end_token_id",
+                            )
+                        ]
+                        if any(
+                            value is not None and bool((ids[:, prefix:] == value).any())
+                            for value in special_ids
+                        ):
+                            raise ValueError(
+                                "Qwen cached calibration requires trailing text tokens after the complete image/video span."
+                            )
+                    mask = batch.get("attention_mask")
+                    if mask is not None and (mask.ndim != 2 or mask.shape != ids.shape):
+                        raise ValueError(
+                            "Qwen PTQ calibration requires a rank-two attention_mask matching input_ids."
+                        )
+                    prefill = dict(batch)
+                    prefill.pop("past_key_values", None)
+                    for name in (
+                        "input_ids",
+                        "attention_mask",
+                        "position_ids",
+                        "token_type_ids",
+                        "mm_token_type_ids",
+                    ):
+                        value = prefill.get(name)
+                        if isinstance(value, torch.Tensor):
+                            prefill[name] = value[..., :prefix]
+                    prefill["use_cache"] = bool(steps)
+                    prefill["return_dict"] = True
+                    outputs = prepared_model(**prefill)
+                    for position in range(prefix, ids.size(1)):
+                        decode = {
+                            "input_ids": ids[:, position : position + 1],
+                            "past_key_values": outputs.past_key_values,
+                            "use_cache": True,
+                            "return_dict": True,
+                        }
+                        if outputs.past_key_values is None:
+                            raise RuntimeError(
+                                "Qwen calibration prefill did not return a usable cache."
+                            )
+                        if mask is not None:
+                            decode["attention_mask"] = mask[:, : position + 1]
+                        for name in (
+                            "position_ids",
+                            "token_type_ids",
+                            "mm_token_type_ids",
+                        ):
+                            value = batch.get(name)
+                            if isinstance(value, torch.Tensor):
+                                decode[name] = value[..., position : position + 1]
+                        # Image/video pixels belong only to prefill. The text
+                        # suffix follows exactly the supplied dataset IDs.
+                        outputs = prepared_model(**decode)
+        finally:
+            for module, value in rope_states:
+                module.rope_deltas = value
 
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
         num_vision_blocks = self.get_num_vision_blocks(ctx.model)

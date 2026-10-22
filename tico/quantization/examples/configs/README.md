@@ -155,6 +155,7 @@ calibration:
   dataset: vqav2
   n_samples: 128
   seq_len: 2048
+  decode_steps: 8
 ```
 
 Rules:
@@ -164,6 +165,27 @@ Rules:
 - `seq_len` should match the intended export/evaluation path when static shapes
   matter.
 - Dataset-specific logic belongs in `recipes/data/`, not in config parsing.
+
+For Llama and Qwen3-VL PTQ, `decode_steps` reserves the final dataset token IDs
+for teacher-forced cached decode inside each sample's existing `seq_len` budget.
+The PTQ stage's `decode_calibration_steps` overrides this value. Values must be
+non-negative; short samples clamp to leave one prefill token. A one-token sample
+cannot collect a nonempty past cache. Zero selects prompt-only calibration.
+The defaults are zero for Llama and one for Qwen3-VL. Qwen image/video placeholders
+must remain wholly in prefill, with the reserved suffix containing text tokens.
+Pixels run only during prefill, and temporary mRoPE request offsets are restored
+after calibration, including errors.
+
+Qwen static decode and frozen cached inference reject active cache observers
+without observed affine ranges and valid qparams. A frozen flag or finite scale
+alone is insufficient. Existing checkpoints with valid persisted ranges remain
+usable; checkpoints with missing/sentinel ranges require explicit recalibration.
+Prefill-only, `NO_QUANT`, identity and explicitly bypassed cache observers retain
+their valid uses. HF cache execution supports append-only dynamic caches; fixed
+or sliding buffers must use the static tuple/delta interface with external masks.
+HF cache storage and the static host buffer retain new-K/V delta values; past
+and present grids are applied to read-only attention values rather than written
+back into the cache.
 
 ## `model_args`
 

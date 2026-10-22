@@ -286,5 +286,13 @@ class QuantQwen3VLForConditionalGeneration(QuantModuleBase, GenerationMixin):
             **model_kwargs,
         )
 
+    def get_experts_implementation(self):
+        """Snapshot the original HF model's top-level and submodel settings."""
+        return self.module.get_experts_implementation()
+
+    def set_experts_implementation(self, experts_implementation):
+        """Delegate backend validation and configuration updates to HF."""
+        return self.module.set_experts_implementation(experts_implementation)
+
     def tie_weights(self):
         pass

@@ -27,6 +27,10 @@ from tico.quantization.config.qwen3_vl_attention import (
     get_qwen3_vl_text_attention_options,
     is_npu_export_text_attention_options,
 )
+from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
+from tico.quantization.wrapq.observers.identity import IdentityObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.utils.utils import join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -392,18 +396,124 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
     def _normalize_static_past_key_values(
         self,
         past_key_values,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> Optional[LayerKV]:
         """Quantize and return a per-layer static KV tuple when one is provided."""
         if not self._is_static_kv_tuple(past_key_values):
             return None
 
-        past_k, past_v = past_key_values[0], past_key_values[1]
-        if past_k is None or past_v is None:
-            return None
+        if len(past_key_values) != 2:
+            raise ValueError("A static KV tuple must contain exactly key and value.")
 
-        past_k = self._fq(past_k, self.obs_past_key)
-        past_v = self._fq(past_v, self.obs_past_value)
-        return past_k, past_v
+        past_k, past_v = past_key_values[0], past_key_values[1]
+        if past_k is None and past_v is None:
+            return None
+        if past_k is None or past_v is None:
+            raise ValueError(
+                "A static KV tuple must provide both key and value tensors."
+            )
+
+        return self._quantize_past(past_k, past_v, attention_mask)
+
+    def require_calibrated_cache(self, *, include_past: bool = True) -> None:
+        """Reject frozen cache boundaries without usable calibration provenance.
+
+        Affine observers persist their observed ranges in checkpoints. Those
+        ranges, rather than a clamped or manually injected scale alone, establish
+        coverage, including legitimate constant tensors. MX is stateless and
+        identity or explicitly bypassed observers need no calibration.
+        """
+        if self._mode is not Mode.QUANT:
+            return
+        observers = [
+            self.obs_new_k,
+            self.obs_new_v,
+            self.obs_present_key,
+            self.obs_present_value,
+        ]
+        if include_past:
+            observers.extend((self.obs_past_key, self.obs_past_value))
+        for obs in observers:
+            if (
+                isinstance(obs, (IdentityObserver, MXObserver))
+                or not obs.fake_quant_enabled
+            ):
+                continue
+            valid = False
+            if isinstance(obs, AffineObserverBase):
+                valid = bool(
+                    obs.min_val.numel()
+                    and obs.max_val.numel()
+                    and torch.isfinite(obs.min_val).all()
+                    and torch.isfinite(obs.max_val).all()
+                    and (obs.min_val <= obs.max_val).all()
+                    and obs.has_qparams
+                    and torch.isfinite(obs._cached_scale).all()
+                    and (obs._cached_scale > 0).all()
+                    and obs._cached_zp.numel() == obs._cached_scale.numel()
+                    and (
+                        (obs._cached_zp >= obs.dtype.qmin)
+                        & (obs._cached_zp <= obs.dtype.qmax)
+                    ).all()
+                )
+            if not valid:
+                path = self.fp_name or f"text.layers.{self.layer_idx}.self_attn"
+                raise RuntimeError(
+                    f"Uncalibrated Qwen cache observer {path}.{obs.name} "
+                    f"({type(obs).__name__}). Recalibrate with the standard Qwen "
+                    "PTQ recipe and decode_calibration_steps > 0 using a nonempty "
+                    "cache; existing qparams are not repaired during execution/export."
+                )
+
+    def _quantize_past(
+        self,
+        past_k: torch.Tensor,
+        past_v: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+    ) -> LayerKV:
+        """Apply the same past-only boundary to HF and static delta caches."""
+        if (
+            past_k.ndim != 4
+            or past_v.shape != past_k.shape
+            or past_k.size(1) != self.num_kv_heads
+            or past_k.size(-1) != self.head_dim
+        ):
+            raise ValueError(
+                "Qwen cache tensors must have matching (batch, KV heads, length, head_dim) "
+                f"shapes; got {tuple(past_k.shape)}, {tuple(past_v.shape)}."
+            )
+        if past_k.size(2) == 0:
+            return past_k, past_v
+        if not torch.compiler.is_compiling():
+            self.require_calibrated_cache()
+
+        if self._mode is Mode.CALIB and attention_mask is not None:
+            # Collect only visible prefix positions, retaining the KV-head axis
+            # for per-channel overrides. Padding slots are not calibration data.
+            prefix_mask = attention_mask[..., : past_k.size(2)]
+            if prefix_mask.size(0) == 1 and past_k.size(0) != 1:
+                prefix_mask = prefix_mask.expand(past_k.size(0), *prefix_mask.shape[1:])
+            # Finite additive biases above the configured masking floor remain
+            # visible even when their score adjustment is nonzero.
+            visible = (
+                torch.isfinite(prefix_mask)
+                & (prefix_mask > float(self.qcfg.attention_mask_fill_value))
+                if torch.is_floating_point(prefix_mask)
+                else prefix_mask != 0
+            )
+            visible = visible.reshape(past_k.size(0), -1, past_k.size(2)).any(dim=1)
+            for index in range(past_k.size(0)):
+                if bool(visible[index].any()):
+                    self.obs_past_key.collect(
+                        past_k[index : index + 1, :, visible[index], :].detach()
+                    )
+                    self.obs_past_value.collect(
+                        past_v[index : index + 1, :, visible[index], :].detach()
+                    )
+            return past_k, past_v
+        return self._fq(past_k, self.obs_past_key), self._fq(
+            past_v, self.obs_past_value
+        )
 
     def _extract_layer_kv_from_cache(self, cache) -> Optional[LayerKV]:
         """
@@ -459,6 +569,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         cos: torch.Tensor,
         sin: torch.Tensor,
         cache_position: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
     ) -> LayerKV:
         """
         Update an HF Cache-like object and return the full present KV tensors.
@@ -466,6 +577,26 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         The exported runtime uses tuple caches, but HF-compatible eager tests and
         full-model execution may still pass a Cache-like object with `update()`.
         """
+        sliding = getattr(cache, "is_sliding", False)
+        has_sliding_layers = (
+            any(sliding) if isinstance(sliding, (tuple, list)) else bool(sliding)
+        )
+        if getattr(cache, "is_compileable", False) or has_sliding_layers:
+            raise RuntimeError(
+                "Qwen eager quantization supports append-only HF caches; "
+                "use a static KV tuple with an external mask for fixed buffers."
+            )
+        previous = self._extract_layer_kv_from_cache(cache)
+        previous_length = previous[0].size(2) if previous is not None else 0
+        if previous_length and not torch.compiler.is_compiling():
+            self.require_calibrated_cache()
+        if previous is None:
+            get_length = getattr(cache, "get_seq_length", None)
+            if callable(get_length) and get_length(self.layer_idx) != 0:
+                raise RuntimeError(
+                    "Unsupported populated HF cache layout: cannot inspect "
+                    f"layer {self.layer_idx}; use a supported dynamic cache or static KV tuple."
+                )
         update = getattr(cache, "update", None)
         if not callable(update):
             raise RuntimeError(
@@ -493,16 +624,56 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             if isinstance(present_k, torch.Tensor) and isinstance(
                 present_v, torch.Tensor
             ):
-                return present_k, present_v
+                return self._normalize_updated_cache(
+                    present_k,
+                    present_v,
+                    new_k,
+                    new_v,
+                    previous_length=previous_length,
+                    attention_mask=attention_mask,
+                )
 
         extracted = self._extract_layer_kv_from_cache(cache)
         if extracted is not None:
-            return extracted
+            return self._normalize_updated_cache(
+                *extracted,
+                new_k,
+                new_v,
+                previous_length=previous_length,
+                attention_mask=attention_mask,
+            )
 
         raise RuntimeError(
             "Cache update did not return key/value tensors and the updated cache "
             f"layout could not be inspected. type={type(cache)!r}"
         )
+
+    def _normalize_updated_cache(
+        self,
+        stored_k: torch.Tensor,
+        stored_v: torch.Tensor,
+        new_k: torch.Tensor,
+        new_v: torch.Tensor,
+        *,
+        previous_length: int,
+        attention_mask: Optional[torch.Tensor],
+    ) -> LayerKV:
+        """Quantize a read-only prefix while retaining raw delta storage in HF."""
+        if stored_k.size(2) != previous_length + new_k.size(2):
+            raise RuntimeError(
+                "Qwen eager quantization requires an append-only HF cache layout; "
+                "use a static KV tuple for fixed-capacity or sliding buffers."
+            )
+        if previous_length == 0:
+            return new_k, new_v
+        past_k, past_v = self._quantize_past(
+            stored_k[:, :, :previous_length],
+            stored_v[:, :, :previous_length],
+            attention_mask,
+        )
+        # Never overwrite HF's stored deltas with past/present-grid values.
+        # Each read applies past quantization once; new tokens use only new-K/V.
+        return torch.cat((past_k, new_k), dim=2), torch.cat((past_v, new_v), dim=2)
 
     def _build_present_key_values(
         self,
@@ -514,6 +685,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         cos: torch.Tensor,
         sin: torch.Tensor,
         cache_position: Optional[torch.Tensor],
+        attention_mask: Optional[torch.Tensor],
     ) -> LayerKV:
         """Build the full present KV tensors used by the attention matmul."""
         if normalized_static_past is not None:
@@ -538,6 +710,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
                 cos=cos,
                 sin=sin,
                 cache_position=cache_position,
+                attention_mask=attention_mask,
             )
             present_k = self._fq(present_k, self.obs_present_key)
             present_v = self._fq(present_v, self.obs_present_value)
@@ -739,6 +912,9 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         """
         del kwargs
 
+        if not torch.compiler.is_compiling():
+            self.require_calibrated_cache(include_past=False)
+
         hidden = self._fq(hidden_states, self.obs_hidden)
         B, S, _ = hidden.shape
         H = self.head_dim
@@ -758,7 +934,9 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
         sin = self._fq(sin, self.obs_sin)
         q_rot, k_rot = self._apply_rope(q, k, cos, sin, unsqueeze_dim=1)
 
-        normalized_static_past = self._normalize_static_past_key_values(past_key_values)
+        normalized_static_past = self._normalize_static_past_key_values(
+            past_key_values, attention_mask
+        )
 
         new_k = self._fq(k_rot, self.obs_new_k)
         new_v = self._fq(v, self.obs_new_v)
@@ -771,6 +949,7 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             cos=cos,
             sin=sin,
             cache_position=cache_position,
+            attention_mask=attention_mask,
         )
 
         # Build additive attention mask.
@@ -880,11 +1059,13 @@ class QuantQwen3VLTextAttention(QuantModuleBase):
             )
 
         if mode == "prefill":
+            self.require_calibrated_cache(include_past=False)
             return Qwen3VLTextAttentionPrefillExportAdapter(
                 self,
                 return_kv=return_kv,
             )
         if mode == "decode":
+            self.require_calibrated_cache()
             return Qwen3VLTextAttentionDecodeExportAdapter(
                 self,
                 return_kv=return_kv,

@@ -90,11 +90,46 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
                 fp_name=join_name(fp_name, "rotate_lm_head"),
             )
 
+        self._generation_model_class = type(model_fp)
         self.config = model_fp.config
         self.generation_config = model_fp.generation_config
         self.main_input_name = getattr(model_fp, "main_input_name", "input_ids")
         self.loss_function = model_fp.loss_function
         self.device = model_fp.device
+
+    @property
+    def _generation_source_class(self):
+        """Read legacy full-model checkpoints without retaining a second model."""
+        source_class = getattr(self, "_generation_model_class", None)
+        if source_class is None:
+            from transformers.models.llama.modeling_llama import LlamaForCausalLM
+
+            source_class = LlamaForCausalLM
+        return source_class
+
+    def get_experts_implementation(self):
+        """Use the source HF model's configuration snapshot contract."""
+        return self._generation_source_class.get_experts_implementation(self)
+
+    def set_experts_implementation(self, experts_implementation):
+        """Preserve HF backend validation and dense-model setter semantics."""
+        return self._generation_source_class.set_experts_implementation(
+            self, experts_implementation
+        )
+
+    def _check_and_adjust_experts_implementation(self, experts_implementation):
+        """Validate through HF without retaining the original FP model."""
+        return self._generation_source_class.get_correct_experts_implementation(
+            self, experts_implementation
+        )
+
+    def _can_set_experts_implementation(self):
+        """Query the source model class, whose dense/MoE contract is unchanged."""
+        return self._generation_source_class._can_set_experts_implementation()
+
+    def _grouped_mm_can_dispatch(self):
+        """Preserve HF's capability check for an explicitly requested backend."""
+        return self._generation_source_class._grouped_mm_can_dispatch(self)
 
     def tie_weights(self):
         pass
@@ -130,7 +165,7 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
         use_cache: Optional[bool] = True,
         **kwargs,
     ):
-        # Decode step: only feed the newest token ids.
+        # Select the unprocessed tokens supplied by the generation loop.
         past_seen_tokens = 0
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
@@ -138,14 +173,27 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
             else:
                 past_seen_tokens = int(past_key_values[0][0].shape[2])
 
-        if past_seen_tokens > 0:
+        if next_sequence_length is not None:
+            input_ids = input_ids[:, -next_sequence_length:]
+        elif past_seen_tokens > 0:
             input_ids = input_ids[:, -1:]
+
+        use_inputs_embeds = inputs_embeds is not None and (
+            is_first_iteration or past_seen_tokens == 0
+        )
+        if use_inputs_embeds and inputs_embeds is not None:
+            if next_sequence_length is not None:
+                inputs_embeds = inputs_embeds[:, -next_sequence_length:]
+            sequence_length = inputs_embeds.shape[1]
+        else:
+            sequence_length = input_ids.shape[1]
 
         # Standard HF-style position_ids fallback from attention_mask.
         if attention_mask is not None and position_ids is None:
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 0)
-            position_ids = position_ids[:, -input_ids.shape[1] :]
+        if position_ids is not None:
+            position_ids = position_ids[..., -sequence_length:]
 
         # Keep cache_position aligned with the current decoding step.
         if cache_position is None:
@@ -158,21 +206,27 @@ class QuantLlamaForCausalLM(QuantModuleBase, GenerationMixin):
 
             cache_position = torch.arange(
                 past_seen_tokens,
-                past_seen_tokens + input_ids.shape[1],
+                past_seen_tokens + sequence_length,
                 device=input_ids.device,
             )
 
-        model_inputs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "past_key_values": past_key_values,
-            "use_cache": use_cache,
-            "cache_position": cache_position,
-        }
+        else:
+            cache_position = cache_position[-sequence_length:]
+
+        model_inputs = {key: value for key, value in kwargs.items() if key != "labels"}
+        model_inputs.update(
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "cache_position": cache_position,
+            }
+        )
 
         # HF convention: inputs_embeds are only used on the first step.
-        if inputs_embeds is not None and past_key_values is None:
+        if use_inputs_embeds:
             model_inputs["inputs_embeds"] = inputs_embeds
             model_inputs.pop("input_ids", None)
 

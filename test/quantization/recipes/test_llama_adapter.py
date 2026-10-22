@@ -188,10 +188,8 @@ class TestLlamaAdapter(unittest.TestCase):
                 },
             )
 
-    def test_build_calibration_inputs_rejects_non_positive_effective_sequence_length(
-        self,
-    ):
-        """LlamaAdapter should validate seq_len after decode calibration steps are subtracted."""
+    def test_build_calibration_inputs_preserves_total_teacher_forcing_budget(self):
+        """UNIT_MOCK: dataset loading retains tokens reserved for decode."""
         cfg = {
             "calibration": {"seq_len": 4, "decode_steps": 4},
             "runtime": {"seed": 1},
@@ -199,9 +197,18 @@ class TestLlamaAdapter(unittest.TestCase):
         }
         ctx = _fake_llama_context(cfg)
         ctx.tokenizer = object()
-
-        with self.assertRaises(ValueError):
+        with patch.object(
+            llama_mod, "build_wikitext_calibration_inputs", return_value=[]
+        ) as loader:
             LlamaAdapter().build_calibration_inputs(ctx)
+        self.assertEqual(loader.call_args.kwargs["seq_len"], 4)
+
+    def test_build_calibration_inputs_rejects_non_positive_sequence_length(self):
+        """Invalid sample budgets fail before invoking a dataset loader."""
+        for length in (0, -1):
+            ctx = _fake_llama_context({"calibration": {"seq_len": length}})
+            with self.assertRaisesRegex(ValueError, "positive"):
+                LlamaAdapter().build_calibration_inputs(ctx)
 
     def test_export_rejects_circle_export_for_reference_eval_profile(self):
         """Circle export should be blocked for reference_eval LLaMA profiles."""

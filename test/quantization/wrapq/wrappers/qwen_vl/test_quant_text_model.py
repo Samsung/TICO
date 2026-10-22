@@ -585,7 +585,14 @@ class TestQuantQwen3VLTextModel(unittest.TestCase):
         q_model.enable_calibration()
 
         prefill_ids = self._create_test_inputs(batch_size=1, seq_len=8)
-        _ = q_model(input_ids=prefill_ids, use_cache=False)
+        with torch.no_grad():
+            calibration_prefill = q_model(input_ids=prefill_ids[:, :7], use_cache=True)
+            q_model(
+                input_ids=prefill_ids[:, 7:],
+                attention_mask=torch.ones_like(prefill_ids),
+                past_key_values=calibration_prefill.past_key_values,
+                use_cache=True,
+            )
         q_model.freeze_qparams()
 
         with torch.no_grad():

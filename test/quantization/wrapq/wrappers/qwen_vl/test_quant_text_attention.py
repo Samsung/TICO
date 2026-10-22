@@ -24,6 +24,7 @@ from unittest.mock import patch
 import torch
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
@@ -146,6 +147,39 @@ class TestQuantQwen3VLTextAttention(unittest.TestCase):
 
         qattn.freeze_qparams()
         self.assertIs(qattn._mode, Mode.QUANT)
+
+    def test_cache_calibration_accepts_visible_additive_biases(self):
+        """Observe finite biased prefix positions while excluding masked slots."""
+        qattn = QuantQwen3VLTextAttention(self.fp_attn)
+        fill = float(qattn.qcfg.attention_mask_fill_value)
+        past_k = torch.tensor([1000.0, 1.0, 2.0, -1000.0]).reshape(1, 1, 4, 1)
+        past_k = past_k.expand(1, self.num_kv_heads, 4, self.head_dim)
+        past_v = torch.tensor([3000.0, 3.0, 4.0, -3000.0]).reshape(1, 1, 4, 1)
+        past_v = past_v.expand_as(past_k)
+        hidden = torch.zeros(1, 1, self.hidden_size)
+        rope = (torch.ones(1, 1, self.head_dim), torch.zeros(1, 1, self.head_dim))
+        for padding in (float("-inf"), fill - 1.0):
+            with self.subTest(padding=padding):
+                qattn.enable_calibration()
+                mask = torch.tensor([fill, -0.25, 0.1, padding, 0.0]).reshape(
+                    1, 1, 1, 5
+                )
+                qattn(
+                    hidden,
+                    rope,
+                    attention_mask=mask,
+                    past_key_values=(past_k, past_v),
+                    use_cache=True,
+                    cache_output_mode="delta",
+                )
+                past_key = qattn.obs_past_key
+                past_value = qattn.obs_past_value
+                assert isinstance(past_key, AffineObserverBase)
+                assert isinstance(past_value, AffineObserverBase)
+                self.assertEqual(past_key.min_val.item(), 1.0)
+                self.assertEqual(past_key.max_val.item(), 2.0)
+                self.assertEqual(past_value.min_val.item(), 3.0)
+                self.assertEqual(past_value.max_val.item(), 4.0)
 
     def test_default_attention_profile_is_unrolled(self):
         """Verify that the default profile keeps the NPU-export-friendly layout."""
