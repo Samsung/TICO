@@ -390,18 +390,37 @@ def lookup_gemma4_per_layer_token_inputs(
     return fq(result, token_inputs_observer)
 
 
+def validate_gemma4_ple_projection_state(model: nn.Module) -> None:
+    """Reject wrappers missing the PLE scale buffers or arithmetic observers."""
+    required = (
+        "per_layer_model_projection_scale_tensor",
+        "per_layer_input_scale_tensor",
+        "obs_per_layer_model_projection_scale",
+        "obs_per_layer_input_scale",
+        "obs_per_layer_sum",
+    )
+    missing = [name for name in required if getattr(model, name, None) is None]
+    if missing:
+        raise RuntimeError(
+            "Gemma4 PLE projection quantization state is missing: "
+            f"{', '.join(missing)}. Re-prepare the model and rerun PTQ calibration "
+            "before quantization/export."
+        )
+
+
 def project_gemma4_per_layer_inputs(
     inputs_embeds: torch.Tensor,
     per_layer_token_inputs: Optional[torch.Tensor],
     *,
     projection: nn.Module,
     projection_norm: nn.Module,
-    projection_scale: float,
-    input_scale: float,
+    projection_scale: float | torch.Tensor,
+    input_scale: float | torch.Tensor,
     num_hidden_layers: int,
     hidden_size_per_layer_input: int,
     fq: PLEObserverFn,
     projection_observer: Any,
+    sum_observer: Any,
     inputs_observer: Any,
 ) -> torch.Tensor:
     """Project decoder inputs and combine them with token-identity PLE.
@@ -412,15 +431,24 @@ def project_gemma4_per_layer_inputs(
 
     ``projected = norm(reshape(projection(inputs_embeds) * projection_scale))``
     ``projected = fq(projected, projection_observer)``
-    ``combined = fq((projected + per_layer_token_inputs) * input_scale,
-    inputs_observer)``
+    ``summed = fq(projected + per_layer_token_inputs, sum_observer)``
+    ``combined = fq(summed * input_scale, inputs_observer)``
+
+    Callers supply observed scale tensors in QUANT mode and retain the original
+    Python scalars in NO_QUANT/CALIB mode. The ADD output has its own range;
+    the final observer remains the producer/decoder boundary after scaling.
 
     Only ``inputs_embeds`` passes through the projection; the token-identity
     tensor bypasses it and is added after normalization and observation. When
     ``per_layer_token_inputs`` is ``None`` (Hugging Face ``inputs_embeds``-only
     entry), the observed projection is returned without the final scale.
     """
-    projected = projection(inputs_embeds) * projection_scale
+    projected = projection(inputs_embeds)
+    if isinstance(projection_scale, torch.Tensor):
+        projection_scale = projection_scale.to(
+            dtype=projected.dtype, device=projected.device
+        )
+    projected = projected * projection_scale
     projected = projected.reshape(
         *inputs_embeds.shape[:-1],
         int(num_hidden_layers),
@@ -430,7 +458,10 @@ def project_gemma4_per_layer_inputs(
     projected = fq(projected, projection_observer)
     if per_layer_token_inputs is None:
         return fq(projected, inputs_observer)
-    combined = (projected + per_layer_token_inputs) * input_scale
+    summed = fq(projected + per_layer_token_inputs, sum_observer)
+    if isinstance(input_scale, torch.Tensor):
+        input_scale = input_scale.to(dtype=summed.dtype, device=summed.device)
+    combined = summed * input_scale
     return fq(combined, inputs_observer)
 
 

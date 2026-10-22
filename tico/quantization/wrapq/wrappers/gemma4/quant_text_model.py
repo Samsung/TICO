@@ -31,6 +31,7 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     assert_gemma4_e2b_no_moe,
     lookup_gemma4_per_layer_token_inputs,
     project_gemma4_per_layer_inputs,
+    validate_gemma4_ple_projection_state,
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -64,6 +65,8 @@ class QuantGemma4TextModel(QuantModuleBase):
     """
 
     position_ids_template: torch.Tensor
+    per_layer_model_projection_scale_tensor: torch.Tensor
+    per_layer_input_scale_tensor: torch.Tensor
 
     force_export: bool = False
     _DEFAULT_STATIC_MAX_SEQ = 2048
@@ -148,6 +151,17 @@ class QuantGemma4TextModel(QuantModuleBase):
             self.per_layer_model_projection_scale = float(
                 fp_model.per_layer_model_projection_scale
             )
+            # Rank-one constants also support MX observers with axis=-1.
+            self.register_buffer(
+                "per_layer_model_projection_scale_tensor",
+                fp_model.embed_tokens.weight.new_tensor(
+                    [self.per_layer_model_projection_scale]
+                ),
+            )
+            self.register_buffer(
+                "per_layer_input_scale_tensor",
+                fp_model.embed_tokens.weight.new_tensor([self.per_layer_input_scale]),
+            )
 
         self.static_max_seq = self._resolve_static_max_seq()
         self._register_static_templates(fp_model)
@@ -176,10 +190,29 @@ class QuantGemma4TextModel(QuantModuleBase):
         self.obs_per_layer_token_inputs = None
         self.obs_per_layer_projection = None
         self.obs_per_layer_inputs = None
+        self.obs_per_layer_model_projection_scale = None
+        self.obs_per_layer_input_scale = None
+        self.obs_per_layer_sum = None
         if self.hidden_size_per_layer_input:
             self.obs_per_layer_token_inputs = mk("per_layer_token_inputs")
             self.obs_per_layer_projection = mk("per_layer_projection")
             self.obs_per_layer_inputs = mk("per_layer_inputs")
+            self.obs_per_layer_model_projection_scale = mk(
+                "per_layer_model_projection_scale"
+            )
+            self.obs_per_layer_input_scale = mk("per_layer_input_scale")
+            self.obs_per_layer_sum = mk("per_layer_sum")
+
+    def enable_calibration(self) -> None:
+        """Reset observers and collect the constant PLE multiplication scales."""
+        super().enable_calibration()
+        if self.hidden_size_per_layer_input:
+            assert self.obs_per_layer_model_projection_scale is not None
+            assert self.obs_per_layer_input_scale is not None
+            self.obs_per_layer_model_projection_scale.collect(
+                self.per_layer_model_projection_scale_tensor
+            )
+            self.obs_per_layer_input_scale.collect(self.per_layer_input_scale_tensor)
 
     def _resolve_static_max_seq(self) -> int:
         """Resolve the capacity of static mask, position, and RoPE templates."""
@@ -694,6 +727,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         """
         if not self.hidden_size_per_layer_input:
             raise RuntimeError("Per-layer projection is disabled for this config.")
+        validate_gemma4_ple_projection_state(self)
         projection = self.per_layer_model_projection
         projection_norm = self.per_layer_projection_norm
         if projection is None or projection_norm is None:
@@ -701,17 +735,30 @@ class QuantGemma4TextModel(QuantModuleBase):
         if self.obs_per_layer_projection is None or self.obs_per_layer_inputs is None:
             raise RuntimeError("Gemma4 PLE observers are not initialized.")
 
+        projection_scale: float | torch.Tensor = self.per_layer_model_projection_scale
+        input_scale: float | torch.Tensor = self.per_layer_input_scale
+        if self._mode is Mode.QUANT:
+            assert self.obs_per_layer_model_projection_scale is not None
+            assert self.obs_per_layer_input_scale is not None
+            projection_scale = self.obs_per_layer_model_projection_scale.fake_quant(
+                self.per_layer_model_projection_scale_tensor
+            )
+            input_scale = self.obs_per_layer_input_scale.fake_quant(
+                self.per_layer_input_scale_tensor
+            )
+
         return project_gemma4_per_layer_inputs(
             inputs_embeds,
             per_layer_inputs,
             projection=projection,
             projection_norm=projection_norm,
-            projection_scale=self.per_layer_model_projection_scale,
-            input_scale=self.per_layer_input_scale,
+            projection_scale=projection_scale,
+            input_scale=input_scale,
             num_hidden_layers=self.config.num_hidden_layers,
             hidden_size_per_layer_input=self.hidden_size_per_layer_input,
             fq=self._fq,
             projection_observer=self.obs_per_layer_projection,
+            sum_observer=self.obs_per_layer_sum,
             inputs_observer=self.obs_per_layer_inputs,
         )
 
@@ -897,4 +944,15 @@ class QuantGemma4TextModel(QuantModuleBase):
             )
             if observer is not None
         )
+        if self.hidden_size_per_layer_input:
+            validate_gemma4_ple_projection_state(self)
+            observers.extend(
+                observer
+                for observer in (
+                    self.obs_per_layer_model_projection_scale,
+                    self.obs_per_layer_input_scale,
+                    self.obs_per_layer_sum,
+                )
+                if observer is not None
+            )
         return tuple(observers)

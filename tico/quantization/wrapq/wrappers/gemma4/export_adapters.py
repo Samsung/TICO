@@ -31,6 +31,7 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     fixed_slot_fuse,
     lookup_gemma4_per_layer_token_inputs,
     project_gemma4_per_layer_inputs,
+    validate_gemma4_ple_projection_state,
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
@@ -272,6 +273,9 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         consumes ``per_layer_inputs[:, :, i, :]``.
     """
 
+    per_layer_model_projection_scale_tensor: torch.Tensor
+    per_layer_input_scale_tensor: torch.Tensor
+
     def __init__(
         self,
         wrapped_text_model: nn.Module,
@@ -287,6 +291,7 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
                 "Gemma4 PLE projection export requires "
                 "hidden_size_per_layer_input > 0."
             )
+        validate_gemma4_ple_projection_state(wrapped_text_model)
         self.per_layer_model_projection = _require_ple_attribute(
             wrapped_text_model, "per_layer_model_projection"
         )
@@ -301,6 +306,16 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         self.per_layer_input_scale = float(
             _require_ple_attribute(wrapped_text_model, "per_layer_input_scale")
         )
+        self.register_buffer(
+            "per_layer_model_projection_scale_tensor",
+            _require_ple_attribute(
+                wrapped_text_model, "per_layer_model_projection_scale_tensor"
+            ),
+        )
+        self.register_buffer(
+            "per_layer_input_scale_tensor",
+            _require_ple_attribute(wrapped_text_model, "per_layer_input_scale_tensor"),
+        )
         self.num_hidden_layers = int(
             _require_ple_attribute(wrapped_text_model, "config").num_hidden_layers
         )
@@ -313,6 +328,17 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         )
         self.per_layer_inputs_observer: ObserverBase = _require_ple_attribute(
             wrapped_text_model, "obs_per_layer_inputs"
+        )
+        self.per_layer_model_projection_scale_observer: ObserverBase = (
+            _require_ple_attribute(
+                wrapped_text_model, "obs_per_layer_model_projection_scale"
+            )
+        )
+        self.per_layer_input_scale_observer: ObserverBase = _require_ple_attribute(
+            wrapped_text_model, "obs_per_layer_input_scale"
+        )
+        self.per_layer_sum_observer: ObserverBase = _require_ple_attribute(
+            wrapped_text_model, "obs_per_layer_sum"
         )
         self.quantized = _quantized_export(
             _resolve_ple_export_mode(wrapped_text_model, mode),
@@ -332,17 +358,28 @@ class Gemma4PLEProjectionExportAdapter(nn.Module):
         per_layer_token_inputs = self._fq(
             per_layer_token_inputs, self.per_layer_token_inputs_observer
         )
+        projection_scale: float | torch.Tensor = self.per_layer_model_projection_scale
+        input_scale: float | torch.Tensor = self.per_layer_input_scale
+        if self.quantized:
+            projection_scale = self._fq(
+                self.per_layer_model_projection_scale_tensor,
+                self.per_layer_model_projection_scale_observer,
+            )
+            input_scale = self._fq(
+                self.per_layer_input_scale_tensor, self.per_layer_input_scale_observer
+            )
         return project_gemma4_per_layer_inputs(
             inputs_embeds,
             per_layer_token_inputs,
             projection=self.per_layer_model_projection,
             projection_norm=self.per_layer_projection_norm,
-            projection_scale=self.per_layer_model_projection_scale,
-            input_scale=self.per_layer_input_scale,
+            projection_scale=projection_scale,
+            input_scale=input_scale,
             num_hidden_layers=self.num_hidden_layers,
             hidden_size_per_layer_input=self.hidden_size_per_layer_input,
             fq=self._fq,
             projection_observer=self.per_layer_projection_observer,
+            sum_observer=self.per_layer_sum_observer,
             inputs_observer=self.per_layer_inputs_observer,
         )
 
