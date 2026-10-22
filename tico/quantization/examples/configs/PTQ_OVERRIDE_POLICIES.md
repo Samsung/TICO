@@ -108,6 +108,48 @@ a `component: vision` policy with `allow_empty: true`.
 Do not use `allow_empty: true` for required overrides, because it can hide
 configuration mistakes.
 
+## Gemma4 INT16 cache with MX attention
+
+Keep `activation: int16` for the residual stream and producer `new_k`/`new_v`
+storage boundaries, then override the attention operands:
+
+```yaml
+override_policies:
+  - target:
+      component: text
+      layers: all
+      module: self_attn
+      observers: [softmax, attn_weights]
+    spec: {kind: mx, elem_format: int8, axis: -1}
+  - target:
+      component: text
+      layers: all
+      module: self_attn
+      observers: [present_value]
+    spec: {kind: mx, elem_format: int8, axis: -2}
+```
+
+The probability key axis (`-1`) and full-V sequence axis (`-2`) are the
+`P @ V` reduction dimensions in both attention layouts. The result and residual
+stream retain the base INT16 policy. `present_value` already owns the full
+attention V boundary; no additional `attn_value` observer is needed.
+
+`past_value` remains an independent per-tensor affine read observer. During
+cached decode, only existing tokens pass through that observer. The compute
+branch converts current V to the read grid, concatenates it with read V, and
+applies MX once to the complete sequence. Quantizing partial past/current MX
+blocks before concatenation would change their shared exponents. Producer
+storage, returned deltas, full cache returns, and shared-KV storage keep the
+frozen `new_*` grid.
+
+This MX compute path supports INT8 elements on the sequence axis with the
+default max shared-exponent and nearest-rounding policy, and per-tensor
+UINT8/INT16 affine storage/read grids. MX persistent storage and MX `past_*`
+read policies remain unsupported. Use positive cached decode calibration to
+prepare affine read statistics; an empty-cache prefill never supplies them.
+See the [Gemma4 KV cache contract](../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries)
+for binding, cache returns, and state loading.
+
 ## Diagnostics
 
 Set `print_overrides: true` on the PTQ stage to print the normalized final

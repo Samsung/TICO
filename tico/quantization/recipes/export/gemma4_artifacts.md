@@ -67,7 +67,7 @@ Gemma4 text attention has three independent observer roles:
 |---|---|
 | `new_k`, `new_v` | Current projected KV and the delta written to persistent storage. These producer observers own the cache input/output dtype, scale, zero-point, and granularity. |
 | `past_key`, `past_value` | Actual existing KV read by this attention layer; a shared consumer reads its producer's supplied KV. Read overrides do not change storage. |
-| `present_key`, `present_value` | Combined KV used by attention. The compute branch explicitly converts concat operands to this grid. |
+| `present_key`, `present_value` | Combined KV used by attention. Affine compute converts concat operands to this grid; sequence-axis MX V converts the complete assembled tensor. |
 
 An ordinary empty-cache prefill applies `new_*`, returns the storage delta, and
 applies `present_*` for attention. It never executes `past_*`, including in
@@ -81,10 +81,24 @@ frozen `new_*` qparams. Independent read and compute policies remain internal
 conversions, including when only scale or zero-point differs. Supported Circle
 cache conversions use per-tensor UINT8/INT16 affine policies, or a consistently
 unquantized cache path. An explicitly declared external float source can also
-feed affine read/compute boundaries. MX, per-channel cache grids, and unsupported
-affine-to-identity paths are rejected rather than serialized with mismatched
-concat qparams. Disabling fake quantization on an affine cache boundary is also
-rejected; use an explicit supported identity policy for a float path.
+feed affine read/compute boundaries. MX storage/read policies, per-channel
+cache grids, and unsupported affine-to-identity paths are rejected rather than
+serialized with mismatched concat qparams. Disabling fake quantization on an
+affine cache boundary is also rejected; use an explicit supported identity
+policy for a float path.
+
+With affine storage and affine reads, `present_value` can use MXINT8 on the
+sequence axis (`axis: -2`). For cached decode, the compute branch first converts
+current V to the independent `past_value` affine grid, concatenates it with the
+already converted existing V, then applies MX to the full sequence. It does not
+concatenate separately quantized partial MX blocks. Empty-cache prefill applies
+MX directly to current V without executing `past_value`; a shared consumer
+converts the actual supplied full storage tensor through its read and compute
+boundaries. The affine `present_*` path retains its existing conversions.
+Together with MXINT8 probabilities on the key axis (`axis: -1`), this supports
+MXINT8 × MXINT8 attention with an INT16 result and INT16 persistent cache. See
+the [policy example](../../examples/configs/PTQ_OVERRIDE_POLICIES.md#gemma4-int16-cache-with-mx-attention)
+for the supported observer settings.
 
 The full prepared text model binds each shared consumer to the corresponding
 KV-owning layer of the same layer type. For standalone shared attention or

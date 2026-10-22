@@ -28,6 +28,7 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.observers.identity import IdentityObserver
+from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     Gemma4TextAttentionDecodeExportAdapter,
@@ -627,6 +628,23 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 f"Gemma4 {observer.name} has invalid frozen cache qparams; reprepare and recalibrate with positive calibration.decode_steps."
             )
 
+    def _validate_compute_observer(self, observer: ObserverBase) -> None:
+        """Allow sequence-block MX only at the complete attention-V boundary."""
+        if not isinstance(observer, MXObserver):
+            self._validate_frozen_observer(observer)
+            return
+        if (
+            observer is not self.obs_present_value
+            or observer.elem_format != "int8"
+            or observer.axis not in (-2, 2)
+            or observer.shared_exp_method != "max"
+            or observer.round != "nearest"
+            or not observer.fake_quant_enabled
+        ):
+            raise ValueError(
+                "Gemma4 MX cache compute supports present_value=MXINT8 with sequence axis=-2, max shared exponent, nearest rounding, and enabled fake quantization only; storage/read and present_key require per-tensor affine policies."
+            )
+
     def validate_export_cache(self, mode: str) -> None:
         """Check storage boundaries and only the reads needed by this export."""
         self._validate_cache_observers()
@@ -635,14 +653,33 @@ class QuantGemma4TextAttention(QuantModuleBase):
         storage = self.cache_storage_observers()
         for observer in storage:
             self._validate_frozen_observer(observer)
+        if isinstance(self.obs_present_key, MXObserver):
+            self._validate_compute_observer(self.obs_present_key)
+        if isinstance(self.obs_present_value, MXObserver):
+            self._validate_compute_observer(self.obs_present_value)
+            if not isinstance(storage[1], AffineObserverBase) or isinstance(
+                storage[1], IdentityObserver
+            ):
+                raise ValueError(
+                    "Gemma4 MX attention V requires per-tensor affine storage and read grids."
+                )
         if mode == "prefill" and not self.is_kv_shared_layer:
             return
-        for group in (
+        for storage_obs, read_obs, compute_obs in (
             (storage[0], self.obs_past_key, self.obs_present_key),
             (storage[1], self.obs_past_value, self.obs_present_value),
         ):
-            for observer in group:
-                self._validate_frozen_observer(observer)
+            self._validate_frozen_observer(read_obs)
+            self._validate_compute_observer(compute_obs)
+            if isinstance(compute_obs, MXObserver):
+                if not isinstance(read_obs, AffineObserverBase) or isinstance(
+                    read_obs, IdentityObserver
+                ):
+                    raise ValueError(
+                        "Gemma4 MX attention V requires per-tensor affine storage and read grids."
+                    )
+                continue
+            group = (storage_obs, read_obs, compute_obs)
             identities = [isinstance(observer, IdentityObserver) for observer in group]
             float_input_conversion = identities[0] and not identities[2]
             if any(identities) and not all(identities) and not float_input_conversion:
@@ -699,13 +736,22 @@ class QuantGemma4TextAttention(QuantModuleBase):
     @staticmethod
     def _observer_grid_policy(
         observer: ObserverBase,
-    ) -> tuple[str, str, str, Optional[int]]:
-        return (
+    ) -> tuple[Any, ...]:
+        policy = (
             f"{type(observer).__module__}.{type(observer).__qualname__}",
             str(observer.dtype),
             str(observer.qscheme),
             observer.channel_axis,
         )
+        if isinstance(observer, MXObserver):
+            return (
+                *policy,
+                observer.elem_format,
+                observer.axis,
+                observer.shared_exp_method,
+                observer.round,
+            )
+        return policy
 
     def get_extra_state(self) -> dict[str, Any]:
         """Persist frozen cache grids, whose generic affine cache is transient."""
@@ -944,9 +990,16 @@ class QuantGemma4TextAttention(QuantModuleBase):
             current_k, current_v = new_k, new_v
             if self._mode is Mode.QUANT:
                 read_k = self._fq(read_k, self.obs_present_key)
-                read_v = self._fq(read_v, self.obs_present_value)
                 current_k = self._fq(current_k, self.obs_present_key)
-                current_v = self._fq(current_v, self.obs_present_value)
+                if isinstance(self.obs_present_value, MXObserver):
+                    # Sequence blocks can straddle past/current. Assemble on
+                    # the independent affine read grid before applying MX once
+                    # to full V; quantizing partial blocks before concat would
+                    # change their shared exponents. Storage is never modified.
+                    current_v = self._fq(current_v, self.obs_past_value)
+                else:
+                    read_v = self._fq(read_v, self.obs_present_value)
+                    current_v = self._fq(current_v, self.obs_present_value)
             compute = (
                 self._fq(torch.cat((read_k, current_k), dim=-2), self.obs_present_key),
                 self._fq(
