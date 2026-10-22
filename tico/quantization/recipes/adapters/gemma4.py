@@ -203,7 +203,7 @@ class Gemma4Adapter(ModelAdapter):
 
     @staticmethod
     def _disable_cache(model: Any) -> None:
-        """Disable HF dynamic cache paths during PTQ calibration."""
+        """Default to no-cache calibration; cached PTQ opts in per forward."""
         if hasattr(model, "config") and hasattr(model.config, "use_cache"):
             model.config.use_cache = False
         text_config = getattr(getattr(model, "config", None), "text_config", None)
@@ -297,15 +297,24 @@ class Gemma4Adapter(ModelAdapter):
         """Build VLM calibration inputs for fixed image-text PTQ."""
         calib = ctx.cfg.get("calibration", {})
         runtime = ctx.cfg.get("runtime", {})
+        decode_steps = self._ptq_decode_calibration_steps(ctx)
+        max_seq_len = calib.get("seq_len")
+        if decode_steps:
+            max_seq_len = self._decode_calibration_capacity(ctx) - decode_steps
+            if max_seq_len <= 0:
+                raise ValueError(
+                    "Gemma4 calibration context capacity / calibration.seq_len "
+                    "must be larger than decode calibration steps."
+                )
         image_size = self._static_calibration_image_size(ctx.cfg)
         with self._fixed_image_processor_size(ctx.processor, image_size):
-            return build_vlm_calibration_inputs(
+            inputs = build_vlm_calibration_inputs(
                 processor=ctx.processor,
                 dataset=calib.get("dataset", "vqav2"),
                 datasets=calib.get("datasets"),
                 n_samples=int(calib.get("n_samples", 128)),
                 split=calib.get("split"),
-                max_seq_len=calib.get("seq_len"),
+                max_seq_len=max_seq_len,
                 seed=int(runtime.get("seed", 42)),
                 allow_benchmark_overlap=bool(
                     calib.get("allow_benchmark_overlap", False)
@@ -314,6 +323,228 @@ class Gemma4Adapter(ModelAdapter):
                     calib.get("allow_unregistered_dataset", False)
                 ),
             )
+        if decode_steps:
+            for batch in inputs:
+                self._decode_calibration_inputs(ctx, batch, decode_steps)
+        return inputs
+
+    @staticmethod
+    def _ptq_decode_calibration_steps(
+        ctx: RecipeContext, stage_cfg: Mapping[str, Any] | None = None
+    ) -> int:
+        """Resolve the active PTQ override, including an explicit zero."""
+        if stage_cfg is None:
+            stages = [
+                stage
+                for stage in ctx.cfg.get("pipeline", [])
+                if stage.get("name") == "ptq" and stage.get("enabled", True)
+            ]
+            if len(stages) > 1:
+                counts = {
+                    Gemma4Adapter._ptq_decode_calibration_steps(ctx, stage)
+                    for stage in stages
+                }
+                if len(counts) != 1:
+                    raise ValueError(
+                        "Gemma4 enabled PTQ stages must use the same decode "
+                        "calibration steps to share a prompt budget."
+                    )
+            if not stages:
+                return 0
+            stage_cfg = stages[0]
+        if not stage_cfg.get("enabled", True):
+            return 0
+        field = "decode_calibration_steps"
+        if field in stage_cfg:
+            value = stage_cfg[field]
+            location = "ptq.decode_calibration_steps"
+        else:
+            value = ctx.cfg.get("calibration", {}).get("decode_steps", 0)
+            location = "calibration.decode_steps"
+        if isinstance(value, bool) or not isinstance(value, (int, str)):
+            raise ValueError(
+                f"{location} must be a non-negative integer, got {value!r}."
+            )
+        try:
+            steps = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"{location} must be a non-negative integer, got {value!r}."
+            ) from exc
+        if steps < 0:
+            raise ValueError(
+                f"{location} must be a non-negative integer, got {value!r}."
+            )
+        return steps
+
+    @staticmethod
+    def _decode_calibration_capacity(ctx: RecipeContext, model: Any = None) -> int:
+        """Use the recipe, model, and existing wrapper mask/RoPE limits."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+            QuantGemma4TextAttention,
+        )
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        model = ctx.model if model is None else model
+        config = getattr(getattr(model, "wrapped", model), "config", None)
+        text_config = (
+            config.get_text_config()
+            if config is not None and hasattr(config, "get_text_config")
+            else getattr(config, "text_config", config)
+        )
+        limits = [
+            ctx.cfg.get("calibration", {}).get("seq_len"),
+            getattr(text_config, "max_position_embeddings", None),
+        ]
+        model_args = ctx.cfg.get("model_args", {})
+        configured = model_args.get("text", {}).get("max_seq")
+        if configured is None:
+            configured = model_args.get("max_seq")
+        # Match the owning wrapper's default; do not invent a calibration cap.
+        limits.append(
+            configured
+            if configured is not None
+            else QuantGemma4TextModel._DEFAULT_STATIC_MAX_SEQ
+        )
+        if isinstance(model, torch.nn.Module):
+            for module in model.modules():
+                if isinstance(module, QuantGemma4TextModel):
+                    limits.append(module.static_max_seq)
+                elif isinstance(module, QuantGemma4TextAttention):
+                    limits.append(module.max_seq)
+        capacities = [int(value) for value in limits if value is not None]
+        if min(capacities) <= 0:
+            raise ValueError("Gemma4 calibration context capacity must be positive.")
+        return min(capacities)
+
+    def _decode_calibration_inputs(
+        self,
+        ctx: RecipeContext,
+        batch: Mapping[str, Any],
+        decode_steps: int,
+        model: Any = None,
+    ) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
+        """Validate processed VLM inputs without slicing multimodal tokens."""
+        inputs = dict(batch)
+        for key in (
+            "past_key_values",
+            "shared_kv_states",
+            "cache_position",
+            "inputs_embeds",
+            "per_layer_inputs",
+        ):
+            if inputs.get(key) is not None:
+                raise ValueError(
+                    f"Gemma4 cached decode calibration does not accept {key}; "
+                    "each sample must start with fresh input_ids."
+                )
+            inputs.pop(key, None)
+        input_ids = inputs.get("input_ids")
+        if (
+            not isinstance(input_ids, torch.Tensor)
+            or input_ids.ndim != 2
+            or input_ids.dtype not in (torch.int32, torch.int64)
+            or input_ids.shape[0] == 0
+            or input_ids.shape[1] == 0
+        ):
+            raise ValueError(
+                "Gemma4 cached decode calibration requires nonempty 2D integer input_ids."
+            )
+        capacity = self._decode_calibration_capacity(ctx, model)
+        if input_ids.shape[1] + decode_steps > capacity:
+            raise ValueError(
+                "Gemma4 processed sequence exceeds the calibration context budget: "
+                f"prefill={input_ids.shape[1]}, decode_steps={decode_steps}, "
+                f"capacity={capacity}. Reduce the prompt or model-specific visual budget."
+            )
+        mask = inputs.get("attention_mask")
+        if mask is None:
+            mask = torch.ones_like(input_ids)
+        if (
+            not isinstance(mask, torch.Tensor)
+            or mask.shape != input_ids.shape
+            or not bool(((mask == 0) | (mask == 1)).all())
+        ):
+            raise ValueError(
+                "Gemma4 cached decode requires a binary 2D attention_mask matching input_ids."
+            )
+        valid = mask.bool()
+        lengths = valid.sum(-1, keepdim=True)
+        indices = torch.arange(input_ids.shape[1], device=input_ids.device).expand_as(
+            input_ids
+        )
+        first = indices.masked_fill(~valid, input_ids.shape[1]).amin(-1, keepdim=True)
+        last = indices.masked_fill(~valid, -1).amax(-1, keepdim=True)
+        if bool((lengths == 0).any()) or not bool((last - first + 1 == lengths).all()):
+            raise ValueError(
+                "Gemma4 cached decode attention_mask requires nonempty contiguous tokens (left/right padding is supported)."
+            )
+        config_model = ctx.model if model is None else model
+        config = getattr(getattr(config_model, "wrapped", config_model), "config", None)
+        text_config = (
+            config.get_text_config()
+            if config is not None and hasattr(config, "get_text_config")
+            else getattr(config, "text_config", config)
+        )
+        if "sliding_attention" in getattr(text_config, "layer_types", ()) and bool(
+            (last != input_ids.shape[1] - 1).any()
+        ):
+            raise ValueError(
+                "Gemma4 cached decode with sliding attention requires left padding; "
+                "right padding would insert gaps in the sliding cache window."
+            )
+        positions = (valid.long().cumsum(-1) - 1).masked_fill(~valid, 0)
+        supplied_positions = inputs.get("position_ids")
+        if supplied_positions is not None:
+            if (
+                not isinstance(supplied_positions, torch.Tensor)
+                or supplied_positions.ndim not in (1, 2)
+                or supplied_positions.shape[-1] != input_ids.shape[1]
+                or (
+                    supplied_positions.ndim == 2
+                    and supplied_positions.shape[0] not in (1, input_ids.shape[0])
+                )
+            ):
+                raise ValueError(
+                    "Gemma4 cached decode position_ids must match input_ids shape."
+                )
+            if supplied_positions.ndim == 1:
+                supplied_positions = supplied_positions.unsqueeze(0)
+            if not torch.equal(supplied_positions.expand_as(positions), positions):
+                raise ValueError(
+                    "Gemma4 cached decode position_ids must match attention_mask positions."
+                )
+        for key in ("mm_token_type_ids", "token_type_ids"):
+            metadata = inputs.get(key)
+            if metadata is not None and (
+                not isinstance(metadata, torch.Tensor)
+                or metadata.shape != input_ids.shape
+            ):
+                raise ValueError(
+                    f"Gemma4 {key} must match input_ids for cached decode."
+                )
+        inputs.update(
+            attention_mask=mask,
+            position_ids=positions,
+            use_cache=True,
+            return_dict=True,
+            logits_to_keep=0,
+        )
+        return inputs, lengths, last
+
+    @staticmethod
+    def _calibration_cache(outputs: Any, expected_length: int) -> Any:
+        """Require a real growing cache; never recompute an uncached prefix."""
+        cache = getattr(outputs, "past_key_values", None)
+        get_length = getattr(cache, "get_seq_length", None)
+        if not callable(get_length) or int(get_length()) != expected_length:
+            raise RuntimeError(
+                "Gemma4 cached decode calibration requires past_key_values "
+                f"with cache length {expected_length}; the model did not return a valid cache."
+            )
+        return cache
 
     def forward_calibration(
         self,
@@ -337,10 +568,54 @@ class Gemma4Adapter(ModelAdapter):
         prepared_model: torch.nn.Module,
         stage_cfg: Mapping[str, Any],
     ) -> None:
-        """Calibrate a prepared PTQ model."""
-        self.forward_calibration(
-            ctx, prepared_model, ctx.calibration_inputs, desc="Gemma4 PTQ calibration"
+        """Collect PTQ statistics with prefill and exactly D cached forwards."""
+        decode_steps = self._ptq_decode_calibration_steps(ctx, stage_cfg)
+        if not decode_steps:
+            self.forward_calibration(
+                ctx,
+                prepared_model,
+                ctx.calibration_inputs,
+                desc="Gemma4 PTQ calibration",
+            )
+            return
+        prepared_model.eval()
+        iterator = tqdm.tqdm(
+            ctx.calibration_inputs,
+            desc="Gemma4 PTQ calibration",
+            disable=not ctx.cfg.get("runtime", {}).get("show_progress", True),
         )
+        with torch.no_grad():
+            for batch in iterator:
+                inputs, lengths, last = self._decode_calibration_inputs(
+                    ctx, move_to_device(batch, ctx.device), decode_steps, prepared_model
+                )
+                outputs = prepared_model(**inputs)
+                prefill_length = inputs["input_ids"].shape[1]
+                cache = self._calibration_cache(outputs, prefill_length)
+                rows = torch.arange(lengths.shape[0], device=lengths.device)
+                next_ids = outputs.logits[rows, last.squeeze(-1)].argmax(
+                    -1, keepdim=True
+                )
+                mask = inputs["attention_mask"]
+                # Decode only text IDs: the wrapper recomputes new-token PLE.
+                # Vision inputs and shared-KV scratch state belong to prefill/
+                # one forward respectively and must not cross these calls.
+                for step in range(decode_steps):
+                    mask = torch.cat((mask, torch.ones_like(mask[:, :1])), dim=-1)
+                    decode_inputs: dict[str, Any] = {
+                        "input_ids": next_ids,
+                        "attention_mask": mask,
+                        "position_ids": lengths + step,
+                        "past_key_values": cache,
+                        "use_cache": True,
+                        "return_dict": True,
+                    }
+                    for key in ("mm_token_type_ids", "token_type_ids"):
+                        if inputs.get(key) is not None:
+                            decode_inputs[key] = torch.zeros_like(inputs[key][:, :1])
+                    outputs = prepared_model(**decode_inputs)
+                    cache = self._calibration_cache(outputs, prefill_length + step + 1)
+                    next_ids = outputs.logits[:, -1].argmax(-1, keepdim=True)
 
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
         """Build the Gemma4 E2B PTQConfig from recipe stage settings."""

@@ -165,6 +165,47 @@ Rules:
   matter.
 - Dataset-specific logic belongs in `recipes/data/`, not in config parsing.
 
+Gemma4 PTQ can collect observer statistics through prefill and cached decode:
+
+```yaml
+calibration:
+  seq_len: 2048
+  decode_steps: 8
+```
+
+`calibration.decode_steps` defaults to `0`, preserving prefill-only calibration.
+An enabled PTQ stage's `decode_calibration_steps` overrides it when specified,
+including an explicit `0`. Set the value under `calibration` for the usual case;
+use the stage override when that PTQ stage needs a different count. Both settings
+require non-negative integer values. They do not add decode calls to GPTQ
+calibration or to runs without an enabled PTQ stage.
+Repeated enabled PTQ stages must resolve to the same count because they share
+calibration inputs.
+
+For each sample, a positive effective count `D` runs one multimodal prefill with
+a fresh cache, followed by exactly `D` single-token forwards through the prepared
+model. Each decode uses the preceding cache and the greedy token from the last
+valid logits; EOS does not shorten calibration. Thus `D=2` means three forward
+calls. Images are processed during prefill only.
+
+Cached decode accepts `input_ids` with a matching binary 2D attention mask
+(contiguous valid tokens, with left or right padding). Positions are derived
+from that mask; supplied positions must match. Sliding-attention models require
+left padding; right padding would leave gaps in their decode cache window and
+is rejected before prefill. Inputs with existing caches,
+shared-KV state, `inputs_embeds`, or explicit `per_layer_inputs` are rejected.
+
+Input preparation reserves `D` positions from the context budget using the same
+effective setting as execution: `seq_len: 2048` with `decode_steps: 8` permits at
+most 2040 processed prompt tokens. The processed length includes expanded image
+tokens and must also fit the model and wrapper capacities. Image structure is
+preserved; samples that cannot fit fail with an error. Externally supplied
+calibration inputs are checked before execution as well.
+
+These calls collect statistics in `Mode.CALIB`. They do not validate accuracy
+with a quantized cache or establish coverage for separate Gemma4 `past_*`
+observers.
+
 ## `model_args`
 
 Use `model_args` only for model-family-specific details needed by wrappers,
