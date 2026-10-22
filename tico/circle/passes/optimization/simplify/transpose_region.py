@@ -29,6 +29,7 @@ from tico.circle.passes.optimization.simplify._layout_utils import (
     _is_transpose_op,
 )
 from tico.circle.rewrite import replace_tensor_uses
+from tico.circle.value.dtype import is_mx_tensor_type
 from .transpose_region_rules import (
     _ADD_BUILTIN_CODE,
     _OperatorRewritePlan,
@@ -171,9 +172,13 @@ def _permuted_shape(
 
 
 def _per_tensor_encoding(tensor: Any) -> _PerTensorEncoding | None:
-    """Return one tensor encoding, or None for per-channel activation qparams."""
+    """Return one encoding, excluding per-channel and MX activation qparams."""
 
     tensor_type = int(getattr(tensor, "type", 0))
+    # MX has no affine scale vector, but its block axis is layout-sensitive.
+    # Keep these regions until their internal qparams can be remapped safely.
+    if is_mx_tensor_type(tensor_type):
+        return None
     quantization = getattr(tensor, "quantization", None)
     if quantization is None:
         return _PerTensorEncoding(tensor_type, None, None)

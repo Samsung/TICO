@@ -18,7 +18,11 @@ import torch
 from torch._subclasses.fake_tensor import FakeTensor
 from torch.library import custom_op, register_fake
 
-from tico.utils.mx.dtypes import normalize_mx_elem_format, SUPPORTED_MX_ELEM_FORMATS
+from tico.utils.mx.dtypes import (
+    normalize_mx_axis,
+    normalize_mx_elem_format,
+    SUPPORTED_MX_ELEM_FORMATS,
+)
 from tico.utils.mx.mx_ops import _quantize_mx
 
 
@@ -992,6 +996,7 @@ def CircleMXFakeQuantize():
             raise RuntimeError(
                 f"Unsupported elem_format in mx_fake_quantize: {elem_format}"
             )
+        normalize_mx_axis(axis, input_.ndim)
         return _quantize_mx(
             input_,
             scale_bits=8,
@@ -1010,6 +1015,7 @@ def CircleMXFakeQuantize():
         shared_exp_method: str = "max",
         round: str = "nearest",
     ) -> torch.Tensor:
+        normalize_mx_axis(axis, input_.ndim)
         return input_
 
 

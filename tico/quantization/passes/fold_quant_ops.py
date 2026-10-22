@@ -18,10 +18,12 @@ if TYPE_CHECKING:
     import torch.fx
 
 import copy
+import operator
 
 import torch
 from torch.export import ExportedProgram
 
+from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
@@ -29,6 +31,7 @@ from tico.utils.mx.dtypes import (
     assert_supported_mx_export_options,
     is_mx_dtype,
     mx_dtype_from_elem_format,
+    normalize_mx_axis,
     normalize_mx_elem_format,
 )
 from tico.utils.passes import PassBase, PassResult
@@ -45,6 +48,7 @@ _QPARAM_PRESERVING_VIEW_TARGETS = frozenset(
         torch.ops.aten.permute.default,
         torch.ops.aten.reshape.default,
         torch.ops.aten.slice.Tensor,
+        torch.ops.aten.expand.default,
     }
 )
 
@@ -101,7 +105,7 @@ def _restore_float_inputs(graph: torch.fx.Graph) -> None:
 
 
 def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
-    """Seed an unfused per-tensor view chain with its source qparams.
+    """Seed a view chain with its source's affine or remapped MX domain.
 
     ``FoldQuantOps`` runs before ``PropagateQParamForward``.  A
     requantization after a slice/view chain must therefore discover
@@ -110,8 +114,8 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
     the target Q-DQ pair can be folded into RESHAPE and the required Quantize
     operation disappears.
 
-    Only per-tensor qparams are propagated.  Per-channel propagation
-    would require axis remapping through PERMUTE and RESHAPE.
+    MX views must preserve the shared-exponent blocks. Affine per-channel
+    propagation is not handled here.
     """
     if QPARAM_KEY in node.meta:
         return False
@@ -134,30 +138,52 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
                 _inherit_qparam_from_view_chain(source)
             qparams = [source.meta.get(QPARAM_KEY) for source in sources]
             first_qparam = qparams[0]
+            if first_qparam is None or any(qparam is None for qparam in qparams):
+                return False
+            if is_mx_dtype(first_qparam.dtype):
+                current.meta[QPARAM_KEY] = remap_mx_qparam(first_qparam, current)
+            else:
+                if first_qparam.quantized_dimension is not None or any(
+                    qparam != first_qparam for qparam in qparams[1:]
+                ):
+                    return False
+                current.meta[QPARAM_KEY] = copy.deepcopy(first_qparam)
+            break
+        if current.target == operator.getitem:
+            split = current.args[0]
             if (
-                first_qparam is None
-                or first_qparam.quantized_dimension is not None
-                or any(qparam != first_qparam for qparam in qparams[1:])
+                not isinstance(split, torch.fx.Node)
+                or split.target != torch.ops.aten.split_with_sizes.default
             ):
                 return False
-            current.meta[QPARAM_KEY] = copy.deepcopy(first_qparam)
-            break
-        if current.target not in _QPARAM_PRESERVING_VIEW_TARGETS:
+            source = split.args[0]
+        elif current.target in _QPARAM_PRESERVING_VIEW_TARGETS or current.target == (
+            torch.ops.aten.constant_pad_nd.default
+        ):
+            source = current.args[0]
+        else:
             return False
-        if not current.args:
-            return False
-
-        source = current.args[0]
         if not isinstance(source, torch.fx.Node):
             return False
         chain.append(current)
         current = source
 
     source_qparam: QuantParam = current.meta[QPARAM_KEY]
-    if source_qparam.quantized_dimension is not None:
+    if source_qparam.quantized_dimension is not None and not is_mx_dtype(
+        source_qparam.dtype
+    ):
+        return False
+    if not is_mx_dtype(source_qparam.dtype) and any(
+        view.target in {operator.getitem, torch.ops.aten.constant_pad_nd.default}
+        for view in chain
+    ):
         return False
 
     for view in reversed(chain):
+        if is_mx_dtype(source_qparam.dtype):
+            mapped = remap_mx_qparam(source_qparam, view)
+            assert mapped is not None
+            source_qparam = mapped
         view.meta[QPARAM_KEY] = copy.deepcopy(source_qparam)
     return bool(chain)
 
@@ -167,7 +193,14 @@ def _mx_op_params(node) -> tuple[str, int, str, str]:
     assert len(node.args) >= 3
     elem_format = normalize_mx_elem_format(node.args[1])
     axis = node.args[2]
-    assert isinstance(axis, int)
+    source = node.args[0]
+    assert isinstance(source, torch.fx.Node)
+    # DecomposeFakeQuantize may not have refreshed the new Q node's value
+    # metadata yet. Q/DQ preserve shape, so use the quantizer's real input.
+    if node.target == torch.ops.circle_custom.dequantize_mx.default:
+        source = source.args[0]
+        assert isinstance(source, torch.fx.Node)
+    axis = normalize_mx_axis(axis, source.meta["val"].ndim)
     shared_exp_method = node.kwargs.get(
         "shared_exp_method", node.args[3] if len(node.args) > 3 else "max"
     )
@@ -202,6 +235,51 @@ def _same_mx_qparam(lhs: QuantParam, rhs: QuantParam) -> bool:
     )
 
 
+def _fold_mx_qdq(dq: torch.fx.Node) -> None:
+    """Fold an MX pair only after resolving its producer's existing domain."""
+    q = dq.args[0]
+    if not isinstance(q, torch.fx.Node):
+        return
+    if q.target != torch.ops.circle_custom.quantize_mx.default:
+        return
+    op = q.args[0]
+    if not isinstance(op, torch.fx.Node):
+        return
+    if _mx_op_params(q) != _mx_op_params(dq):
+        return
+
+    _inherit_qparam_from_view_chain(op)
+    qparam = _mx_qparam_from_quant_node(q)
+    existing = op.meta.get(QPARAM_KEY)
+    if existing is None:
+        # An explicit quantizer on a shared float value must not change its
+        # other users. Layout ops also cannot quantize their own inputs.
+        layout_output = op.target in _QPARAM_PRESERVING_VIEW_TARGETS or op.target in {
+            torch.ops.aten.cat.default,
+            torch.ops.aten.constant_pad_nd.default,
+            operator.getitem,
+        }
+        if (
+            layout_output
+            or op.target == torch.ops.aten.embedding.default
+            or any(user is not q for user in op.users)
+        ):
+            if not layout_output:
+                op.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True
+            q.meta[QPARAM_KEY] = qparam
+            dq.replace_all_uses_with(q, propagate_meta=False)
+        else:
+            op.meta[QPARAM_KEY] = qparam
+            dq.replace_all_uses_with(op, propagate_meta=False)
+    elif _same_mx_qparam(existing, qparam):
+        dq.replace_all_uses_with(op, propagate_meta=False)
+    else:
+        # A different axis or element format requires an explicit QUANTIZE,
+        # even when both sides use the same MX dtype.
+        q.meta[QPARAM_KEY] = qparam
+        dq.replace_all_uses_with(q, propagate_meta=False)
+
+
 @trace_graph_diff_on_pass
 class FoldQuantOps(PassBase):
     """
@@ -227,7 +305,8 @@ class FoldQuantOps(PassBase):
 
     Algorithm
     ---------
-    1. Iterate over *all* Dequantize nodes.
+    1. Iterate over affine and MX Dequantize nodes in graph order, so mixed
+       quantization boundaries see the preceding domain.
     2. For each DQ, verify it is driven by a Quantize node `q` and that
        `q` and `dq` share identical (scale, zero-point, dtype).
     3. a) If the producer op has **no** QPARAM, attach one, then replace
@@ -251,7 +330,8 @@ class FoldQuantOps(PassBase):
 
     Discover an existing source domain through slices, views, and same-domain
     concatenations before deciding whether a trailing Q is a requantization.
-    A float producer behind a layout view can still adopt its first Q domain.
+    A float producer behind a layout view can still adopt its first affine Q
+    domain. MX keeps an explicit Q after an unquantized layout operation.
     """
 
     def __init__(self):
@@ -264,6 +344,9 @@ class FoldQuantOps(PassBase):
         graph: torch.fx.Graph = graph_module.graph
         for dq in graph.nodes:
             if dq.op != "call_function":
+                continue
+            if dq.target == torch.ops.circle_custom.dequantize_mx.default:
+                _fold_mx_qdq(dq)
                 continue
             if (
                 dq.target
@@ -340,44 +423,6 @@ class FoldQuantOps(PassBase):
                     logger.debug(
                         f"{dq.name} is folded as requantization " f"({q.name} is left)."
                     )
-                else:
-                    dq.replace_all_uses_with(op, propagate_meta=False)
-                    logger.debug(f"Removed redundant {dq.name}")
-
-        for dq in graph.nodes:
-            if dq.op != "call_function":
-                continue
-            if dq.target != torch.ops.circle_custom.dequantize_mx.default:
-                continue
-
-            q = dq.args[0]
-            if not isinstance(q, torch.fx.Node):
-                continue
-            if q.target != torch.ops.circle_custom.quantize_mx.default:
-                continue
-
-            source = q.args[0]
-            if not isinstance(source, torch.fx.Node):
-                continue
-            op = source
-
-            if _mx_op_params(q) != _mx_op_params(dq):
-                continue
-
-            qparam = _mx_qparam_from_quant_node(q)
-
-            if QPARAM_KEY not in op.meta:
-                op.meta[QPARAM_KEY] = qparam
-                dq.replace_all_uses_with(op, propagate_meta=False)
-                logger.debug(f"{q.name} and {dq.name} are folded to {op.name}.")
-            else:
-                op_qparam = op.meta[QPARAM_KEY]
-                if not _same_mx_qparam(op_qparam, qparam):
-                    if QPARAM_KEY not in q.meta:
-                        q.meta[QPARAM_KEY] = qparam
-                        assert len(q.users) == 1, "Fix me unless"
-                    dq.replace_all_uses_with(q, propagate_meta=False)
-                    logger.debug(f"{dq.name} is folded ({q.name} is left).")
                 else:
                     dq.replace_all_uses_with(op, propagate_meta=False)
                     logger.debug(f"Removed redundant {dq.name}")

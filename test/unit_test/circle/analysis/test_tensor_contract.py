@@ -19,6 +19,7 @@ import numpy as np
 from tico.circle.analysis import TensorContract
 from tico.circle.errors import CircleValueError
 from tico.circle.value import TensorQuantization, TensorValue
+from tico.circle.value.dtype import circle_tensor_type_value
 
 from test.unit_test.circle.infrastructure_fixture import (
     fake_object_factory,
@@ -106,6 +107,39 @@ class TensorContractTest(unittest.TestCase):
                 shape=(1, 2),
                 quantization=quantization,
             )
+
+    def test_mx_axis_without_affine_vectors_must_fit_rank(self):
+        """Validate MX block axes even when no affine qparams are present."""
+
+        for name in ("MXINT8", "MXFP4"):
+            for shape, axis in (((), 0), ((2, 32), 2), ((2, 32), 5)):
+                with self.subTest(dtype=name, shape=shape, axis=axis):
+                    with self.assertRaisesRegex(
+                        CircleValueError, "MX quantized_dimension.*tensor rank"
+                    ):
+                        TensorContract(
+                            tensor_type=circle_tensor_type_value(name),
+                            shape=shape,
+                            quantization=TensorQuantization(quantized_dimension=axis),
+                        )
+
+    def test_mx_axis_round_trip_uses_normalized_dimension(self):
+        """Keep valid MX axes through generated schema tensor contracts."""
+
+        for name in ("MXINT8", "MXFP4"):
+            with self.subTest(dtype=name):
+                contract = TensorContract(
+                    tensor_type=circle_tensor_type_value(name),
+                    shape=(2, 32),
+                    quantization=TensorQuantization(quantized_dimension=1),
+                )
+                tensor = contract.make_tensor(name="mx")
+                self.assertEqual(TensorContract.from_tensor(tensor), contract)
+                tensor.quantization.quantizedDimension = -1
+                with self.assertRaisesRegex(
+                    CircleValueError, "quantized_dimension must not be negative"
+                ):
+                    TensorContract.from_tensor(tensor)
 
     def test_default_rank_metadata_round_trips_through_generated_defaults(self):
         """Treat a false generated hasRank field as the canonical absent value."""

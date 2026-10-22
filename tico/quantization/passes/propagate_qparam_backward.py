@@ -22,8 +22,10 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.quantization.passes.concat_qparam import is_width_direction_concat
+from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
+from tico.utils.mx.dtypes import is_mx_dtype
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs
@@ -56,13 +58,33 @@ class PropagateQParamBackward(PassBase):
             if QPARAM_KEY not in src.meta:
                 return
 
+            src_qparam = src.meta[QPARAM_KEY]
+            if is_mx_dtype(src_qparam.dtype):
+                # A producer's established domain belongs to all its users. In
+                # particular, never rewrite an explicit Quantize destination
+                # using the domain of a later view or requantization boundary.
+                if QPARAM_KEY in dst.meta or len(dst.users) != 1:
+                    return
+                schema = getattr(dst.target, "_schema", None)
+                if getattr(schema, "name", None) in {
+                    "circle_custom::quantize_mx",
+                    "quantized_decomposed::quantize_per_tensor",
+                    "quantized_decomposed::quantize_per_channel",
+                }:
+                    return
+                mapped = remap_mx_qparam(src_qparam, src, backward=True)
+                assert mapped is not None
+                dst.meta[QPARAM_KEY] = mapped
+                logger.debug(f"{src.name}'s MX quantparam is remapped to {dst.name}.")
+                return
+
             if (
                 QPARAM_KEY in dst.meta
-                and src.meta[QPARAM_KEY].dtype != dst.meta[QPARAM_KEY].dtype
+                and src_qparam.dtype != dst.meta[QPARAM_KEY].dtype
             ):
                 return
 
-            dst.meta[QPARAM_KEY] = copy.deepcopy(src.meta[QPARAM_KEY])
+            dst.meta[QPARAM_KEY] = copy.deepcopy(src_qparam)
 
             logger.debug(f"{src.name}'s quantparam is propagated to {dst.name}.")
 
@@ -74,7 +96,10 @@ class PropagateQParamBackward(PassBase):
                 concat_args = CatArgs(*node.args, **node.kwargs)
                 concat_inputs = concat_args.tensors
 
-                if is_width_direction_concat(node, concat_args):
+                node_qparam = node.meta.get(QPARAM_KEY)
+                if is_width_direction_concat(node, concat_args) and (
+                    node_qparam is None or not is_mx_dtype(node_qparam.dtype)
+                ):
                     continue
 
                 for concat_input in concat_inputs:

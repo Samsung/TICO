@@ -26,7 +26,11 @@ from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
 from tico.serialize.quant_param import QPARAM_KEY
-from tico.utils.mx.dtypes import is_mx_dtype, mx_dtype_from_elem_format
+from tico.utils.mx.dtypes import (
+    is_mx_dtype,
+    mx_dtype_from_elem_format,
+    normalize_mx_axis,
+)
 from tico.utils.validate_args_kwargs import QuantizePerTensorArgs
 
 
@@ -123,6 +127,8 @@ class QuantizeMXDefaultVisitor(NodeVisitor):
         expected_dtype = mx_dtype_from_elem_format(elem_format)
 
         output_tensor: circle.Tensor.TensorT = self.graph.get_tensor(node)
+        assert isinstance(axis, int), "MX axis must be a static integer."
+        axis = normalize_mx_axis(axis, len(output_tensor.shape))
         assert output_tensor.quantization is not None
         assert output_tensor.quantization.quantizedDimension == axis
         assert QPARAM_KEY in node.meta

@@ -320,6 +320,15 @@ Clamp lowering and Linear fusion remain outside the core converter.
 It then reports missing qparams non-strictly, with a specific exception for
 `split_with_sizes` because qparams are attached to its `getitem` result nodes.
 
+MX quantization stores a validated, non-negative block axis in tensor qparams.
+Propagation remaps that axis through permutations and permits reshapes only when
+the existing 32-element blocks remain intact, including aligned attention head
+splits and merges. Unsupported regrouping raises an explicit error. Folding visits
+affine and MX Q/DQ pairs in graph order and preserves a `QUANTIZE` boundary when
+the MX axis or element format changes, including changes after layout operations.
+The Circle transpose-region optimization conservatively preserves MX regions;
+see the [Circle pass contracts](../tico/circle/README.md).
+
 This phase legalizes and completes a graph that has already been prepared as quantized.
 It is not a replacement for model calibration or the public quantization workflow.
 

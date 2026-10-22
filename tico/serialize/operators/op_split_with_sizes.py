@@ -21,11 +21,15 @@ import torch
 from circle_schema import circle
 from torch._subclasses.fake_tensor import FakeTensor
 
+from tico.quantization.passes.mx_qparam import remap_mx_split_output
 from tico.serialize.circle_graph import CircleSubgraph
 from tico.serialize.circle_mapping import circle_legalize_dtype_to, to_circle_dtype
 from tico.serialize.operators.hashable_opcode import OpCode
 from tico.serialize.operators.node_visitor import NodeVisitor, register_node_visitor
 from tico.serialize.operators.utils import create_builtin_operator, get_op_index
+from tico.serialize.quant_param import QPARAM_KEY
+from tico.utils.errors import NotYetSupportedError
+from tico.utils.mx.dtypes import is_mx_dtype
 from tico.utils.validate_args_kwargs import SplitWithSizesArgs
 
 
@@ -49,6 +53,17 @@ class SplitWithSizesVisitor(NodeVisitor):
         input = args.input
         split_sizes = args.split_sizes
         axis = args.dim
+        input_qparam = input.meta.get(QPARAM_KEY)
+        # Circle materializes every split output, including segments with no
+        # surviving getitem. Their MX blocks must also be valid and preserved.
+        mx_qparams = (
+            [
+                remap_mx_split_output(input_qparam, node, idx)
+                for idx in range(len(split_sizes))
+            ]
+            if input_qparam is not None and is_mx_dtype(input_qparam.dtype)
+            else [None] * len(split_sizes)
+        )
 
         split_sizes_i32 = [
             circle_legalize_dtype_to(split_size, dtype=torch.int32)
@@ -72,8 +87,17 @@ class SplitWithSizesVisitor(NodeVisitor):
         users_indices = list(usrnode.args[1] for usrnode in sorted_users)
         user_it = iter(sorted_users)
         for idx, _ in enumerate(split_sizes):
+            output_qparam = mx_qparams[idx]
             if idx in users_indices:
                 user_node = next(user_it)
+                if (
+                    output_qparam is not None
+                    and user_node.meta.get(QPARAM_KEY) != output_qparam
+                ):
+                    raise NotYetSupportedError(
+                        f"MX SplitV output {user_node.name} must preserve its input "
+                        "domain; keep an explicit Quantize for a different domain."
+                    )
                 outputs.append(user_node)
             else:
                 # Let's add unused output tensor to satisfy circle split_v operator scheme
@@ -93,6 +117,7 @@ class SplitWithSizesVisitor(NodeVisitor):
                     shape=shape,
                     shape_signature=None,  # TODO: support dynamic shape
                     dtype=dtype,
+                    qparam=output_qparam,
                     source_node=node,
                 )
                 outputs.append(tensor)

@@ -548,6 +548,10 @@ outputs, and a matching `numSplits` option. `SPLIT_V` requires static INT32 axis
 size-splits constants, permits at most one inferred `-1` size, and validates every
 output shape. Rank-changing or unsupported axis-sensitive operators such as `PRELU`,
 `RESHAPE`, and `SOFTMAX` remain region boundaries.
+Regions containing `MXINT8` or `MXFP4` tensors are also preserved: their block axes
+remain layout-sensitive even though their affine scale and zero-point vectors are
+empty. MX tensor contracts require a nonnegative `quantizedDimension` smaller than
+the tensor rank.
 
 Run the bounded-region pass with round scheduling and cleanup:
 
