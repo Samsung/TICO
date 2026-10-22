@@ -85,7 +85,7 @@ def _make_ple_text_config(**overrides):
     return cfg
 
 
-def _make_quant_text_model(cfg, *, quantized: bool):
+def _make_quant_text_model(cfg, *, quantized: bool, qcfg=None):
     """Return a wrapped tiny text model in NO_QUANT or frozen QUANT mode."""
     from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
         QuantGemma4TextModel,
@@ -93,7 +93,7 @@ def _make_quant_text_model(cfg, *, quantized: bool):
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
     fp_model = Gemma4TextModel(cfg).eval()
-    qtext = QuantGemma4TextModel(fp_model, qcfg=PTQConfig()).eval()
+    qtext = QuantGemma4TextModel(fp_model, qcfg=qcfg or PTQConfig()).eval()
     if quantized:
         qtext.enable_calibration()
         with torch.no_grad():
