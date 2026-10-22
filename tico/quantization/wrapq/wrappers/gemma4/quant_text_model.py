@@ -44,6 +44,13 @@ if TYPE_CHECKING:
         Gemma4TextScaledWordEmbedding,
     )
 
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+        QuantGemma4TextDecoderLayer,
+    )
+
 
 @try_register("transformers.models.gemma4.modeling_gemma4.Gemma4TextModel")
 class QuantGemma4TextModel(QuantModuleBase):
@@ -116,6 +123,7 @@ class QuantGemma4TextModel(QuantModuleBase):
                 for i, layer in enumerate(fp_model.layers)
             ]
         )
+        self._bind_shared_cache_sources()
         self.norm = PTQWrapper(
             fp_model.norm,
             qcfg=qcfg.child("norm") if qcfg else None,
@@ -202,6 +210,34 @@ class QuantGemma4TextModel(QuantModuleBase):
             )
             self.obs_per_layer_input_scale = mk("per_layer_input_scale")
             self.obs_per_layer_sum = mk("per_layer_sum")
+
+    def _bind_shared_cache_sources(self) -> None:
+        """Bind shared reads to the owning layer's cache-storage observers.
+
+        Hugging Face marks the final K/V-owning layer of each layer type with
+        ``store_full_length_kv``. Later shared layers read that producer's
+        stored tensors, rather than its attention-compute tensors.
+        """
+        sources: dict[str, "QuantGemma4TextAttention"] = {}
+        for layer in self.layers:
+            decoder = cast(
+                "QuantGemma4TextDecoderLayer", cast(PTQWrapper, layer).wrapped
+            )
+            attention = cast("QuantGemma4TextAttention", decoder.self_attn.wrapped)
+            layer_type = attention.layer_type
+            if not isinstance(layer_type, str):
+                raise ValueError("Gemma4 cache source mapping requires a layer type.")
+            if attention.is_kv_shared_layer:
+                source = sources.get(layer_type)
+                if source is None:
+                    raise ValueError(
+                        "Gemma4 shared-KV layer has no preceding storage producer: "
+                        f"layer_idx={attention.layer_idx}, "
+                        f"layer_type={attention.layer_type!r}."
+                    )
+                attention.bind_cache_source(source)
+            elif attention.store_full_length_kv:
+                sources[layer_type] = attention
 
     def enable_calibration(self) -> None:
         """Reset observers and collect the constant PLE multiplication scales."""

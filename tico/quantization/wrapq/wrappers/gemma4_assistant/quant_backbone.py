@@ -22,6 +22,13 @@ import torch.nn as nn
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
 
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+        QuantGemma4TextDecoderLayer,
+    )
+
 
 from tico.quantization.config.gemma4_attention import get_gemma4_text_attention_options
 from tico.quantization.config.ptq import PTQConfig
@@ -87,6 +94,14 @@ class QuantGemma4AssistantBackbone(QuantModuleBase):
                 for i, layer in enumerate(fp_text_model.layers)
             ]
         )
+        # Assisted generation supplies real-valued KV from the FP target;
+        # there is no assistant-owned producer or integer storage grid to infer.
+        for layer in self.layers:
+            decoder = cast(
+                "QuantGemma4TextDecoderLayer", cast(PTQWrapper, layer).wrapped
+            )
+            attention = cast("QuantGemma4TextAttention", decoder.self_attn.wrapped)
+            attention.bind_external_float_cache()
         self.norm = PTQWrapper(
             fp_text_model.norm,
             qcfg=qcfg.child("norm") if qcfg else None,

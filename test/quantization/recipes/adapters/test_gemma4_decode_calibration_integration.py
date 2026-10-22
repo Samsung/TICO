@@ -14,7 +14,9 @@
 
 """CPU integration for adapter calibration with real, synthetic Gemma4 wrappers."""
 
+import io
 import unittest
+from contextlib import ExitStack
 from typing import Any
 from unittest import mock
 
@@ -49,7 +51,9 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation im
 class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
     """Exercise prepared forward, PLE, shared KV and vision without model downloads."""
 
-    def _make_prepared_model(self, *, max_seq=16, mixed_attention=False):
+    def _make_prepared_model(
+        self, *, max_seq=16, mixed_attention=False, shared_kv=True
+    ):
         from transformers.models.gemma4.configuration_gemma4 import Gemma4Config
         from transformers.models.gemma4.modeling_gemma4 import (
             Gemma4ForConditionalGeneration,
@@ -66,7 +70,7 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
             max_position_embeddings=16,
             hidden_size_per_layer_input=8,
             vocab_size_per_layer_input=128,
-            num_kv_shared_layers=2 if mixed_attention else 1,
+            num_kv_shared_layers=(2 if mixed_attention else 1) if shared_kv else 0,
             rope_parameters={
                 layer_type: {"rope_type": "default", "rope_theta": 10000.0}
                 for layer_type in set(layer_types)
@@ -145,6 +149,26 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
         shared_states = []
         vision_calls = []
         handles = []
+        observed: dict[str, list[torch.Tensor]] = {
+            name: []
+            for name in (
+                "new_k",
+                "new_v",
+                "past_key",
+                "past_value",
+                "shared_past_key",
+                "shared_past_value",
+            )
+        }
+
+        def record_observer(observer, name):
+            collect = observer.collect
+
+            def record(tensor):
+                observed[name].append(tensor.detach().clone())
+                collect(tensor)
+
+            return mock.patch.object(observer, "collect", side_effect=record)
 
         def before_forward(module, args, kwargs):
             cache = kwargs.get("past_key_values")
@@ -204,7 +228,7 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
             )
         )
         try:
-            with mock.patch.object(
+            with ExitStack() as observer_spies, mock.patch.object(
                 model, "forward", side_effect=AssertionError("unwrapped top forward")
             ), mock.patch.object(
                 model.model,
@@ -215,6 +239,16 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
                 "forward",
                 side_effect=AssertionError("unwrapped text forward"),
             ):
+                for name in ("new_k", "new_v", "past_key", "past_value"):
+                    observer_spies.enter_context(
+                        record_observer(getattr(owner, f"obs_{name}"), name)
+                    )
+                for name in ("past_key", "past_value"):
+                    observer_spies.enter_context(
+                        record_observer(
+                            getattr(consumer, f"obs_{name}"), f"shared_{name}"
+                        )
+                    )
                 adapter.calibrate_prepared_model(ctx, prepared, {"name": "ptq"})
         finally:
             for handle in handles:
@@ -224,6 +258,25 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
         self.assertEqual([call["length_in"] for call in calls], [0, 14, 15] * 2)
         self.assertEqual([call["length_out"] for call in calls], [14, 15, 16] * 2)
         self.assertEqual([length for _, length in shared_states], [14, 15, 16] * 2)
+        for suffix, new_name in (("key", "new_k"), ("value", "new_v")):
+            past = observed[f"past_{suffix}"]
+            shared = observed[f"shared_past_{suffix}"]
+            new = observed[new_name]
+            self.assertEqual([tensor.shape[-2] for tensor in past], [14, 15] * 2)
+            self.assertEqual([tensor.shape[-2] for tensor in shared], [14, 15, 16] * 2)
+            # The owner reads only the preceding cache. In particular, the
+            # current decode token must not enter its own past statistics.
+            for sample in range(2):
+                current = new[sample * 3 : sample * 3 + 3]
+                for step in range(3):
+                    expected = torch.cat(current[: step + 1], dim=-2)
+                    torch.testing.assert_close(
+                        shared[sample * 3 + step], expected, atol=0, rtol=0
+                    )
+                    if step < 2:
+                        torch.testing.assert_close(
+                            past[sample * 2 + step], expected, atol=0, rtol=0
+                        )
         self.assertEqual(ple_lengths, [14, 1, 1] * 2)
         self.assertEqual(len(vision_calls), 2 if with_image else 0)
         self.assertEqual(
@@ -286,6 +339,109 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
         self.assertFalse(text.obs_per_layer_token_inputs.enabled)
         self.assertTrue(owner.obs_present_key.has_qparams)
         self.assertFalse(owner.obs_present_key.enabled)
+        for attention in (owner, consumer):
+            for observer in (attention.obs_past_key, attention.obs_past_value):
+                self.assertTrue(observer.has_qparams)
+                self.assertFalse(observer.enabled)
+                scale, zero_point = observer.compute_qparams()
+                self.assertTrue(bool(torch.isfinite(scale).all()))
+                self.assertTrue(bool((scale > 0).all()))
+                self.assertTrue(bool(torch.isfinite(zero_point).all()))
+
+    def test_zero_decode_steps_keeps_past_unobserved_until_cached_inference(self):
+        """Prefill-only conversion works; an uncalibrated cache read explains recovery."""
+        model, prepared = self._make_prepared_model(shared_kv=False)
+        adapter = Gemma4Adapter()
+        input_ids = torch.arange(1, 5).reshape(1, 4)
+        ctx = RecipeContext(
+            cfg={
+                "calibration": {"seq_len": 16, "decode_steps": 0},
+                "pipeline": [{"name": "ptq"}],
+                "runtime": {"show_progress": False},
+            },
+            adapter=adapter,
+            model=model,
+            calibration_inputs=[{"input_ids": input_ids, "use_cache": False}],
+        )
+        text = prepared.wrapped.model.wrapped.language_model.wrapped
+        owner = text.layers[0].wrapped.self_attn.wrapped
+        with mock.patch.object(owner.obs_past_key, "collect") as key_collect, (
+            mock.patch.object(owner.obs_past_value, "collect")
+        ) as value_collect:
+            adapter.calibrate_prepared_model(ctx, prepared, {"name": "ptq"})
+        key_collect.assert_not_called()
+        value_collect.assert_not_called()
+        quantized = convert(prepared, inplace=True)
+        self.assertFalse(owner.obs_past_key.has_qparams)
+        self.assertFalse(owner.obs_past_value.has_qparams)
+        self.assertTrue(owner.obs_new_k.has_qparams)
+        self.assertTrue(owner.obs_present_key.has_qparams)
+        with torch.no_grad(), mock.patch.object(
+            owner.obs_past_key,
+            "fake_quant",
+            side_effect=AssertionError("Prefill invoked past fake quantization"),
+        ), mock.patch.object(
+            owner.obs_past_value,
+            "fake_quant",
+            side_effect=AssertionError("Prefill invoked past fake quantization"),
+        ):
+            output = quantized(input_ids=input_ids, use_cache=True, return_dict=True)
+        self.assertEqual(output.past_key_values.get_seq_length(), 4)
+        with torch.no_grad(), self.assertRaisesRegex(
+            RuntimeError, "(?i)(decode.*calibrat|calibrat.*decode)"
+        ):
+            quantized(
+                input_ids=torch.tensor([[5]]),
+                past_key_values=output.past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+
+    def test_loaded_frozen_read_qparams_allow_cached_inference(self):
+        """Loading a calibrated checkpoint does not require another decode stage."""
+        model, prepared = self._make_prepared_model()
+        adapter = Gemma4Adapter()
+        input_ids = torch.arange(1, 5).reshape(1, 4)
+        ctx = RecipeContext(
+            cfg={
+                "calibration": {"seq_len": 16, "decode_steps": 2},
+                "runtime": {"show_progress": False},
+            },
+            adapter=adapter,
+            model=model,
+            calibration_inputs=[{"input_ids": input_ids}],
+        )
+        adapter.calibrate_prepared_model(ctx, prepared, {})
+        quantized = convert(prepared, inplace=True)
+        stream = io.BytesIO()
+        torch.save(quantized, stream)
+        stream.seek(0)
+        restored = torch.load(stream, weights_only=False)
+        text = restored.wrapped.model.wrapped.language_model.wrapped
+        source = quantized.wrapped.model.wrapped.language_model.wrapped
+        for actual_layer, expected_layer in zip(text.layers, source.layers):
+            actual = actual_layer.wrapped.self_attn.wrapped
+            expected = expected_layer.wrapped.self_attn.wrapped
+            for name in ("past_key", "past_value"):
+                observer = getattr(actual, f"obs_{name}")
+                expected_observer = getattr(expected, f"obs_{name}")
+                self.assertTrue(observer.has_qparams)
+                for actual_qparam, expected_qparam in zip(
+                    observer.compute_qparams(), expected_observer.compute_qparams()
+                ):
+                    torch.testing.assert_close(
+                        actual_qparam, expected_qparam, atol=0, rtol=0
+                    )
+        with torch.no_grad():
+            output = restored(input_ids=input_ids, use_cache=True, return_dict=True)
+            output = restored(
+                input_ids=torch.tensor([[5]]),
+                past_key_values=output.past_key_values,
+                use_cache=True,
+                return_dict=True,
+            )
+        self.assertEqual(output.past_key_values.get_seq_length(), 5)
+        self.assertTrue(bool(torch.isfinite(output.logits).all()))
 
     def test_text_prefill_and_two_cached_decodes_with_ple_and_shared_kv(self):
         """The actual prepared text cache grows from fourteen to sixteen tokens."""

@@ -20,10 +20,18 @@ sparse LM head runs on the host from ``assistant_hidden`` and
 ``centroid_logits``.
 """
 
-from typing import Tuple
+from typing import cast, Tuple, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_decoder_layer import (
+        QuantGemma4TextDecoderLayer,
+    )
 
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.gemma4_assistant.quant_for_causal_lm import (
@@ -33,6 +41,7 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.static_inputs import (
     GEMMA4_ASSISTANT_CORE_INPUT_NAMES,
     GEMMA4_ASSISTANT_CORE_OUTPUT_NAMES,
 )
+from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
 def _resolve_quant_assistant(model: nn.Module) -> QuantGemma4AssistantForCausalLM:
@@ -97,6 +106,13 @@ class Gemma4AssistantCoreExportAdapter(nn.Module):
                 "and sliding_attention layer types, got "
                 f"{assistant.model.unique_layer_types}."
             )
+
+        for layer in assistant.model.layers:
+            decoder = cast(
+                "QuantGemma4TextDecoderLayer", cast(PTQWrapper, layer).wrapped
+            )
+            attention = cast("QuantGemma4TextAttention", decoder.self_attn.wrapped)
+            attention.validate_export_cache("decode")
 
         self.pre_projection = assistant.pre_projection
         self.backbone = assistant.model
