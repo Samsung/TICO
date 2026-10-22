@@ -94,6 +94,18 @@ non-overlapping window behavior. VLM `ppl.stride`, Gemma4's `chat-prefix` PPL,
 and the existing task-specific prompt/scoring protocols are preserved. Scores
 with different PPL windows, strides, or prompt modes are not the same protocol.
 
+Raw-text PPL preserves a tokenizer's padding mask. Padding, targets without a
+valid preceding token, and targets already scored in an overlapping window do
+not contribute to NLL. A corpus with no valid next-token targets is rejected
+explicitly. The offline CPU regression uses a local tokenizer and in-memory
+text with actual HF and frozen WrapQ models; its random-model PPL values verify
+the scoring loop and do not measure pretrained quality:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest \
+  test.quantization.recipes.test_cpu_evaluation
+```
+
 ### Protocol record and checkpoint migration
 
 Set `evaluation.output_dir`, or use `evaluate.py --output-dir`, to save

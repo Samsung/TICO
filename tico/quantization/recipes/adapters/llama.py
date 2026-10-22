@@ -211,13 +211,16 @@ class LlamaAdapter(ModelAdapter):
         cfg = ctx.cfg
         calib = cfg.get("calibration", {})
         runtime = cfg.get("runtime", {})
-        seq_len = int(calib.get("seq_len") or ctx.model.config.max_position_embeddings)
-        decode_steps = self._ptq_decode_calibration_steps(cfg)
-        seq_len = seq_len - decode_steps
+        requested_length = calib.get("seq_len")
+        seq_len = int(
+            ctx.model.config.max_position_embeddings
+            if requested_length is None
+            else requested_length
+        )
         if seq_len <= 0:
-            raise ValueError(
-                "calibration.seq_len must be larger than decode calibration steps"
-            )
+            raise ValueError("calibration.seq_len must be positive.")
+        if self._ptq_decode_calibration_steps(cfg) < 0:
+            raise ValueError("ptq.decode_calibration_steps must be nonnegative.")
 
         return build_wikitext_calibration_inputs(
             tokenizer=ctx.tokenizer,
@@ -262,6 +265,8 @@ class LlamaAdapter(ModelAdapter):
                 ctx.cfg.get("calibration", {}).get("decode_steps", 0),
             )
         )
+        if decode_steps < 0:
+            raise ValueError("ptq.decode_calibration_steps must be nonnegative.")
         show_progress = bool(ctx.cfg.get("runtime", {}).get("show_progress", True))
         iterator = tqdm.tqdm(
             ctx.calibration_inputs, desc="PTQ calibration", disable=not show_progress
@@ -275,23 +280,22 @@ class LlamaAdapter(ModelAdapter):
                     prepared_model(inp)
                     continue
 
+                # Reserve dataset tokens for connected teacher-forced decode;
+                # calibration never expands the configured sample token budget.
+                steps = min(decode_steps, max(inp.shape[-1] - 1, 0))
+                prompt_len = inp.shape[-1] - steps
                 outputs = prepared_model(
-                    input_ids=inp, use_cache=True, return_dict=True
+                    input_ids=inp[:, :prompt_len], use_cache=True, return_dict=True
                 )
                 past_key_values = outputs.past_key_values
-                next_input_ids = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-
-                for _ in range(decode_steps):
+                for token_index in range(prompt_len, inp.shape[-1]):
                     outputs = prepared_model(
-                        input_ids=next_input_ids,
+                        input_ids=inp[:, token_index : token_index + 1],
                         past_key_values=past_key_values,
                         use_cache=True,
                         return_dict=True,
                     )
                     past_key_values = outputs.past_key_values
-                    next_input_ids = outputs.logits[:, -1, :].argmax(
-                        dim=-1, keepdim=True
-                    )
 
     def build_ptq_config(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]):
         num_hidden_layers = len(ctx.model.model.layers)

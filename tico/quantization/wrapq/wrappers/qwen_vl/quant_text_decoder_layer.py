@@ -18,6 +18,9 @@ import torch
 import torch.nn as nn
 
 if TYPE_CHECKING:
+    from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
+        QuantQwen3VLTextAttention,
+    )
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextDecoderLayer
 
 
@@ -220,12 +223,15 @@ class QuantQwen3VLTextDecoderLayer(QuantModuleBase):
         """
         Return a static-runtime export adapter for the requested execution mode.
         """
+        attention = cast("QuantQwen3VLTextAttention", self.self_attn.wrapped)
         if mode == "prefill":
+            attention.require_calibrated_cache(include_past=False)
             return Qwen3VLTextDecoderLayerPrefillExportAdapter(
                 self,
                 return_kv=return_kv,
             )
         if mode == "decode":
+            attention.require_calibrated_cache()
             return Qwen3VLTextDecoderLayerDecodeExportAdapter(
                 self,
                 return_kv=return_kv,
