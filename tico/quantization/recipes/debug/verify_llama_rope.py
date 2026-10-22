@@ -27,7 +27,9 @@ from typing import Any
 def main(argv=None) -> int:
     """Run tiny real-HF models and static-input tests without downloading weights."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", default=".", help="Patched TICO source checkout, including test/.")
+    parser.add_argument(
+        "--repo", default=".", help="Patched TICO source checkout, including test/."
+    )
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--threads", type=int, default=1)
     args = parser.parse_args(argv)
@@ -36,13 +38,20 @@ def main(argv=None) -> int:
     if args.report.exists():
         parser.error("Report already exists; choose a new path.")
     repo = Path(args.repo).resolve()
-    if not (repo / "test/quantization/wrapq/wrappers/llama/test_rope_consistency.py").is_file():
+    if not (
+        repo / "test/quantization/wrapq/wrappers/llama/test_rope_consistency.py"
+    ).is_file():
         parser.error("--repo must include the patched RoPE consistency test.")
     sys.path.insert(0, str(repo))
-    report: dict[str, Any] = {"status": "ERROR", "repo": str(repo), "scope": "Tiny real-HF models, actual wrappers, and Torch Export; not pretrained-model Circle or NPU validation."}
+    report: dict[str, Any] = {
+        "status": "ERROR",
+        "repo": str(repo),
+        "scope": "Tiny real-HF models, actual wrappers, and Torch Export; not pretrained-model Circle or NPU validation.",
+    }
     code = 2
     try:
         import torch
+
         import tico
 
         if not Path(tico.__file__).resolve().is_relative_to(repo):
@@ -52,20 +61,33 @@ def main(argv=None) -> int:
             name: importlib.metadata.version(name)
             for name in ("torch", "transformers", "circle-schema")
         }
-        suite = unittest.defaultTestLoader.loadTestsFromNames([
-            "test.quantization.wrapq.wrappers.llama.test_rope_consistency",
-            "test.quantization.wrapq.utils.test_static_export_inputs",
-        ])
+        suite = unittest.defaultTestLoader.loadTestsFromNames(
+            [
+                "test.quantization.wrapq.wrappers.llama.test_rope_consistency",
+                "test.quantization.wrapq.utils.test_static_export_inputs",
+            ]
+        )
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         incomplete = bool(result.errors or result.skipped or result.testsRun == 0)
         code = 2 if incomplete else 0 if result.wasSuccessful() else 1
-        report.update({
-            "status": {0: "PASS", 1: "FAIL", 2: "ERROR"}[code],
-            "tests_run": result.testsRun,
-            "failures": [{"test": str(test), "traceback": text} for test, text in result.failures],
-            "errors": [{"test": str(test), "traceback": text} for test, text in result.errors],
-            "skipped": [{"test": str(test), "reason": reason} for test, reason in result.skipped],
-        })
+        report.update(
+            {
+                "status": {0: "PASS", 1: "FAIL", 2: "ERROR"}[code],
+                "tests_run": result.testsRun,
+                "failures": [
+                    {"test": str(test), "traceback": text}
+                    for test, text in result.failures
+                ],
+                "errors": [
+                    {"test": str(test), "traceback": text}
+                    for test, text in result.errors
+                ],
+                "skipped": [
+                    {"test": str(test), "reason": reason}
+                    for test, reason in result.skipped
+                ],
+            }
+        )
     except Exception as exc:
         traceback.print_exc()
         report.update({"error_type": type(exc).__name__, "message": str(exc)})

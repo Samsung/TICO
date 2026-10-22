@@ -100,9 +100,11 @@ def _json_value(value: Any) -> Any:
         return {str(key): _json_value(item) for key, item in sorted(value.items())}
     if hasattr(value, "detach"):
         import torch
+
         raw = value.detach().contiguous().cpu()
         return {
-            "tensor_shape": list(raw.shape), "tensor_dtype": str(raw.dtype),
+            "tensor_shape": list(raw.shape),
+            "tensor_dtype": str(raw.dtype),
             "bytes": _array_record(raw.reshape(-1).view(torch.uint8)),
         }
     if hasattr(value, "__dict__"):
@@ -160,10 +162,14 @@ def circle_contract(document) -> dict:
             }
             fields["opcode"] = _json_value(opcodes[int(operator.opcodeIndex)])
             operators.append(fields)
-        subgraphs.append({
-            "inputs": input_indices, "outputs": output_indices,
-            "tensors": tensors, "operators": operators,
-        })
+        subgraphs.append(
+            {
+                "inputs": input_indices,
+                "outputs": output_indices,
+                "tensors": tensors,
+                "operators": operators,
+            }
+        )
     return {
         "version": int(model.version),
         "subgraphs": subgraphs,
@@ -188,6 +194,7 @@ def _tree_arrays(value: Any, prefix: str = "") -> dict:
         # TICO registers HF caches as PyTrees. Use that registered ordering rather
         # than guessing the order of keys/values for a transformers version.
         from torch.utils._pytree import tree_flatten
+
         leaves, _ = tree_flatten(value)
         if len(leaves) == 1 and leaves[0] is value:
             raise TypeError(f"Unsupported output artifact: {type(value).__name__}")
@@ -204,14 +211,25 @@ def compare_arrays(left, right, *, atol: float, rtol: float) -> dict:
 
     left, right = _array(left), _array(right)
     if left.shape != right.shape or left.dtype != right.dtype:
-        return {"ok": False, "reason": "shape_or_dtype", "left": _array_record(left), "right": _array_record(right)}
+        return {
+            "ok": False,
+            "reason": "shape_or_dtype",
+            "left": _array_record(left),
+            "right": _array_record(right),
+        }
+    if left.dtype.kind not in "biufc":
+        return {"ok": False, "reason": "nonnumeric"}
     if not np.isfinite(left).all() or not np.isfinite(right).all():
         return {"ok": False, "reason": "nonfinite"}
     if left.dtype.kind in "biu":
         ok = np.array_equal(left, right)
     else:
         ok = np.allclose(left, right, atol=atol, rtol=rtol, equal_nan=False)
-    maximum = float(np.max(np.abs(left.astype(np.float64) - right.astype(np.float64)))) if left.size else 0.0
+    maximum = (
+        float(np.max(np.abs(left.astype(np.float64) - right.astype(np.float64))))
+        if left.size
+        else 0.0
+    )
     return {"ok": bool(ok), "max_abs_error": maximum}
 
 
@@ -246,6 +264,7 @@ def _first_differences(left: Any, right: Any, path: str = "$", limit: int = 20) 
 def _state_contract(model) -> dict:
     """Fingerprint weights, all observer buffers/qparams, and quantization modes."""
     import torch
+
     from tico.quantization.wrapq.mode import Mode
     from tico.quantization.wrapq.observers.base import ObserverBase
     from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
@@ -253,19 +272,32 @@ def _state_contract(model) -> dict:
     def tensor_record(tensor):
         raw = tensor.detach().contiguous().cpu()
         # Byte view also supports BF16, which NumPy may not expose as a dtype.
-        return {"shape": list(raw.shape), "dtype": str(raw.dtype), "bytes": _array_record(raw.reshape(-1).view(torch.uint8))}
+        return {
+            "shape": list(raw.shape),
+            "dtype": str(raw.dtype),
+            "bytes": _array_record(raw.reshape(-1).view(torch.uint8)),
+        }
 
     weights = {name: tensor_record(tensor) for name, tensor in model.named_parameters()}
     observers, modes = {}, {}
     for name, module in model.named_modules():
         if isinstance(module, QuantModuleBase):
             if module._mode is Mode.CALIB:
-                raise ValueError(f"Calibration is enabled at {name}; provide a frozen checkpoint.")
+                raise ValueError(
+                    f"Calibration is enabled at {name}; provide a frozen checkpoint."
+                )
             modes[name] = module._mode.name
         if isinstance(module, ObserverBase):
             fields: dict[str, Any] = {
                 key: repr(getattr(module, key, None))
-                for key in ("enabled", "fake_quant_enabled", "dtype", "qscheme", "channel_axis", "_qparams_locked")
+                for key in (
+                    "enabled",
+                    "fake_quant_enabled",
+                    "dtype",
+                    "qscheme",
+                    "channel_axis",
+                    "_qparams_locked",
+                )
             }
             fields["buffers"] = {
                 key: tensor_record(tensor) for key, tensor in module.named_buffers()
@@ -276,20 +308,33 @@ def _state_contract(model) -> dict:
                     fields[key] = tensor_record(value)
                 elif key == "_qparams" and value is not None:
                     if isinstance(value, (tuple, list)):
-                        fields[key] = [tensor_record(item) if isinstance(item, torch.Tensor) else _json_value(item) for item in value]
+                        fields[key] = [
+                            tensor_record(item)
+                            if isinstance(item, torch.Tensor)
+                            else _json_value(item)
+                            for item in value
+                        ]
                     elif isinstance(value, dict):
-                        fields[key] = {str(k): tensor_record(v) if isinstance(v, torch.Tensor) else _json_value(v) for k, v in value.items()}
+                        fields[key] = {
+                            str(k): tensor_record(v)
+                            if isinstance(v, torch.Tensor)
+                            else _json_value(v)
+                            for k, v in value.items()
+                        }
                     else:
                         fields[key] = _json_value(value)
             observers[name] = fields
     if not observers or not any(mode == "QUANT" for mode in modes.values()):
-        raise ValueError("This regression runner requires a frozen quantized checkpoint.")
+        raise ValueError(
+            "This regression runner requires a frozen quantized checkpoint."
+        )
     return {"weights": weights, "observers": observers, "modes": modes}
 
 
 def _seed(seed: int) -> None:
     """Reset all random sources before every export, not only before model load."""
     import random
+
     import numpy as np
     import torch
 
@@ -319,7 +364,11 @@ def _probes(args, kwargs):
 
     probes = [("export_example", _clone_inputs(args), _clone_inputs(kwargs))]
     mask = kwargs.get("attention_mask")
-    if not isinstance(mask, torch.Tensor) or not mask.is_floating_point() or mask.ndim < 3:
+    if (
+        not isinstance(mask, torch.Tensor)
+        or not mask.is_floating_point()
+        or mask.ndim < 3
+    ):
         return probes
     if mask.shape[-2] == 1:
         for name, empty in (("decode_empty_past", True), ("decode_full_past", False)):
@@ -330,7 +379,9 @@ def _probes(args, kwargs):
             if empty:
                 for key in ("past_key_value", "past_key_values"):
                     past = new_kwargs.get(key)
-                    if isinstance(past, (tuple, list)) and all(isinstance(t, torch.Tensor) for t in past):
+                    if isinstance(past, (tuple, list)) and all(
+                        isinstance(t, torch.Tensor) for t in past
+                    ):
                         new_kwargs[key] = tuple(torch.zeros_like(t) for t in past)
             probes.append((name, new_args, new_kwargs))
     elif mask.shape[-1] == mask.shape[-2] and mask.shape[-1] > 1:
@@ -373,6 +424,7 @@ class ExportRecorder:
         def capture_convert(module, args, *positional, **options):
             import numpy as np
             import torch
+
             from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode
             from tico.utils.signature import ModelInputSpec
 
@@ -383,14 +435,27 @@ class ExportRecorder:
             expected = []
             with torch.no_grad():
                 for name, probe_args, probe_kwargs in probes:
-                    tensors = list(_tree_arrays(module(*_clone_inputs(probe_args), **_clone_inputs(probe_kwargs))).values())
+                    tensors = list(
+                        _tree_arrays(
+                            module(
+                                *_clone_inputs(probe_args),
+                                **_clone_inputs(probe_kwargs),
+                            )
+                        ).values()
+                    )
                     expected.append(tensors)
                 self.fx = None
                 converted = self.old_convert(module, args, **options)
             if self.fx is None:
-                raise RuntimeError("No Torch Export graph was captured; conversion path changed.")
+                raise RuntimeError(
+                    "No Torch Export graph was captured; conversion path changed."
+                )
             runtime = CircleReferenceRuntime(converted.circle_binary)
-            mode = ExecutionMode.FAKE_QUANTIZE if runtime.has_quantized_activations() else ExecutionMode.NATIVE
+            mode = (
+                ExecutionMode.FAKE_QUANTIZE
+                if runtime.has_quantized_activations()
+                else ExecutionMode.NATIVE
+            )
             specification = ModelInputSpec(converted.circle_binary)
             arrays, numerical = {}, []
             for probe_index, (name, probe_args, probe_kwargs) in enumerate(probes):
@@ -408,9 +473,18 @@ class ExportRecorder:
                 else:
                     for index, (before, after) in enumerate(zip(golden, actual)):
                         arrays[f"p{probe_index}_torch_{index}"] = before
-                        comparisons.append(compare_arrays(before, after, atol=self.atol, rtol=self.rtol))
+                        comparisons.append(
+                            compare_arrays(
+                                before, after, atol=self.atol, rtol=self.rtol
+                            )
+                        )
                 numerical.append({"probe": name, "torch_parity": comparisons})
-            converted._export_regression = {"fx": self.fx, "arrays": arrays, "probes": numerical, "mode": mode.value}
+            converted._export_regression = {
+                "fx": self.fx,
+                "arrays": arrays,
+                "probes": numerical,
+                "mode": mode.value,
+            }
             self.pending += 1
             return converted
 
@@ -421,16 +495,25 @@ class ExportRecorder:
             payload = getattr(converted, "_export_regression", None)
             if payload is None:
                 raise RuntimeError(f"Saved Circle was not captured: {path}")
-            relative = Path(path).resolve().relative_to((self.root / "artifacts").resolve()).as_posix()
+            relative = (
+                Path(path)
+                .resolve()
+                .relative_to((self.root / "artifacts").resolve())
+                .as_posix()
+            )
             if relative in self.stages:
                 raise RuntimeError(f"Duplicate exported stage: {relative}")
             import numpy as np
+
             snapshot_name = relative.replace("/", "__")
             np.savez(self.records / (snapshot_name + ".npz"), **payload.pop("arrays"))
             with CircleDocument.load_mapped(path) as document:
                 document.verify(raise_on_error=True)
                 contract = circle_contract(document)
-            _write_json(self.records / (snapshot_name + ".json"), {"contract": contract, **payload})
+            _write_json(
+                self.records / (snapshot_name + ".json"),
+                {"contract": contract, **payload},
+            )
             self.stages[relative] = snapshot_name
             delattr(converted, "_export_regression")
             self.pending -= 1
@@ -464,9 +547,13 @@ def _host_contract(root: Path) -> dict:
         name = path.relative_to(root).as_posix()
         if path.suffix == ".npz":
             with np.load(path, allow_pickle=False) as values:
-                result[name] = {key: _array_record(values[key]) for key in sorted(values.files)}
+                result[name] = {
+                    key: _array_record(values[key]) for key in sorted(values.files)
+                }
         elif path.suffix == ".npy":
-            result[name] = _array_record(np.load(path, allow_pickle=False, mmap_mode="r"))
+            result[name] = _array_record(
+                np.load(path, allow_pickle=False, mmap_mode="r")
+            )
         elif path.suffix in (".pt", ".pth"):
             values = torch.load(path, map_location="cpu", weights_only=True)
             result[name] = _json_value(values)
@@ -485,11 +572,14 @@ def _export_full_text_probe(ctx, path: Path, options: argparse.Namespace) -> Non
     catching mask/RoPE generation accidentally reintroduced inside the trace.
     """
     from contextlib import nullcontext
+
     import torch
+
     import tico
 
     owners = [
-        module for module in ctx.model.modules()
+        module
+        for module in ctx.model.modules()
         if type(module).__name__ in ("QuantQwen3VLTextModel", "QuantGemma4TextModel")
     ]
     if len(owners) != 1:
@@ -517,6 +607,7 @@ def _export_full_text_probe(ctx, path: Path, options: argparse.Namespace) -> Non
     context: AbstractContextManager[None]
     if callable(builder):
         from tico.quantization.wrapq.utils.static_export import prepared_static_export
+
         context = prepared_static_export(adapter, options.seq_len)
     else:
         context = nullcontext()
@@ -530,7 +621,9 @@ def _export_full_text_probe(ctx, path: Path, options: argparse.Namespace) -> Non
         owner.force_export = previous_force_export
 
 
-def _export_phase(ctx, phase: Path, options: argparse.Namespace, initial_state: dict) -> dict:
+def _export_phase(
+    ctx, phase: Path, options: argparse.Namespace, initial_state: dict
+) -> dict:
     """Export one phase and check that it preserved the frozen quantization state."""
     phase.mkdir(parents=True, exist_ok=False)
     (phase / "artifacts").mkdir()
@@ -560,6 +653,36 @@ def _export_phase(ctx, phase: Path, options: argparse.Namespace, initial_state: 
     return result
 
 
+def _ordinary_text_token_ids(config):
+    """Exclude configured special tokens from synthetic text-only stress inputs."""
+    import torch
+
+    text_config = getattr(config, "text_config", config)
+    vocabulary = int(text_config.vocab_size)
+    if vocabulary < 1:
+        raise ValueError("Eager stress requires a positive text vocabulary size.")
+    allowed = torch.ones(vocabulary, dtype=torch.bool)
+    for owner in (config, text_config):
+        fields = (
+            owner.to_dict()
+            if callable(getattr(owner, "to_dict", None))
+            else vars(owner)
+        )
+        for name, value in fields.items():
+            if not name.endswith(("_token_id", "_token_ids", "_token_index")):
+                continue
+            configured_ids = value if isinstance(value, (list, tuple)) else (value,)
+            for identifier in configured_ids:
+                if type(identifier) is int and 0 <= identifier < vocabulary:
+                    allowed[identifier] = False
+    identifiers = torch.arange(vocabulary, dtype=torch.long)[allowed]
+    if identifiers.numel() == 0:
+        raise ValueError(
+            "No ordinary text token IDs remain after excluding configured special tokens."
+        )
+    return identifiers
+
+
 def _exercise_eager(ctx, options: argparse.Namespace) -> dict:
     """Run teacher-forced eager calls without changing the model's config."""
     import torch
@@ -570,11 +693,17 @@ def _exercise_eager(ctx, options: argparse.Namespace) -> dict:
         loaded = torch.load(options.eager_inputs, map_location="cpu", weights_only=True)
         calls = loaded if isinstance(loaded, list) else [loaded]
         if not calls or not all(isinstance(item, dict) for item in calls):
-            raise ValueError("--eager-inputs must contain a dict or a list of kwargs dicts.")
+            raise ValueError(
+                "--eager-inputs must contain a dict or a list of kwargs dicts."
+            )
         with torch.no_grad():
             for call in calls:
                 ctx.model(**_clone_inputs(call))
-        return {"kind": "user_kwargs", "calls": len(calls), "file_sha256": _file_sha256(Path(options.eager_inputs))}
+        return {
+            "kind": "user_kwargs",
+            "calls": len(calls),
+            "file_sha256": _file_sha256(Path(options.eager_inputs)),
+        }
     config = getattr(ctx.model, "config", None)
     if config is None and hasattr(ctx.model, "wrapped"):
         config = ctx.model.wrapped.config
@@ -589,17 +718,56 @@ def _exercise_eager(ctx, options: argparse.Namespace) -> dict:
             f"checkpoint records capacity={capacity}. Do not silently enlarge its "
             "RoPE config; select a valid stress length or a native-context checkpoint."
         )
-    inputs = torch.randint(0, int(text_config.vocab_size), (1, length))
+    ordinary_ids = _ordinary_text_token_ids(config)
+    inputs = ordinary_ids[torch.randint(0, ordinary_ids.numel(), (1, length))]
+    decode_inputs = []
     with torch.no_grad():
-        output = ctx.model(input_ids=inputs, use_cache=True, logits_to_keep=1, return_dict=True)
+        output = ctx.model(
+            input_ids=inputs, use_cache=True, logits_to_keep=1, return_dict=True
+        )
         cache = output.past_key_values
         if cache is None and options.decode_steps:
             raise RuntimeError("Eager prefill did not produce a KV cache.")
         for _ in range(options.decode_steps):
-            token = torch.randint(0, int(text_config.vocab_size), (1, 1))
-            output = ctx.model(input_ids=token, past_key_values=cache, use_cache=True, logits_to_keep=1, return_dict=True)
+            token = ordinary_ids[torch.randint(0, ordinary_ids.numel(), (1, 1))]
+            decode_inputs.append(token.tolist())
+            output = ctx.model(
+                input_ids=token,
+                past_key_values=cache,
+                use_cache=True,
+                logits_to_keep=1,
+                return_dict=True,
+            )
             cache = output.past_key_values
-    return {"kind": "text_only", "prefill_tokens": length, "decode_steps": options.decode_steps, "capacity": capacity}
+    return {
+        "kind": "text_only",
+        "prefill_tokens": length,
+        "decode_steps": options.decode_steps,
+        "capacity": capacity,
+        "token_sampling": "uniform over ordinary root/text-config token IDs",
+        "ordinary_token_count": ordinary_ids.numel(),
+        "prefill_input_ids": inputs.tolist(),
+        "decode_input_ids": decode_inputs,
+    }
+
+
+def _worker_overrides(options: argparse.Namespace) -> list[str]:
+    """Preserve calibration length unless an old exporter bridge is requested."""
+    overrides = list(options.set)
+    overrides += [
+        "runtime.device=cpu",
+        "runtime.dtype=float32",
+        "evaluation.enabled=false",
+        "export.enabled=true",
+        "export.prefill_decode=true",
+        "export.artifacts=[" + options.artifacts + "]",
+        f"export.max_seq_len={options.seq_len}",
+    ]
+    if options.legacy_calibration_length:
+        # Historical exporters read this field to select the export profile.
+        # This explicit bridge changes no frozen checkpoint or qparams.
+        overrides.append(f"calibration.seq_len={options.seq_len}")
+    return overrides
 
 
 def _worker(options: argparse.Namespace) -> None:
@@ -607,6 +775,7 @@ def _worker(options: argparse.Namespace) -> None:
     repo = Path(options.repo).resolve()
     sys.path.insert(0, str(repo))
     import torch
+
     import tico
     from tico.quantization.recipes.adapters import resolve_adapter
     from tico.quantization.recipes.config import load_recipe_config
@@ -618,17 +787,7 @@ def _worker(options: argparse.Namespace) -> None:
     torch.set_num_threads(options.threads)
     root = Path(options.output)
     root.mkdir(parents=True, exist_ok=False)
-    overrides = list(options.set)
-    overrides += [
-        "runtime.device=cpu", "runtime.dtype=float32", "evaluation.enabled=false",
-        "export.enabled=true", "export.prefill_decode=true",
-        "export.artifacts=[" + options.artifacts + "]",
-        f"export.max_seq_len={options.seq_len}",
-        # The pre-PR adapter takes its export length from calibration.seq_len.
-        # No calibration runs: both fields merely select the same artifact shape.
-        f"calibration.seq_len={options.seq_len}",
-    ]
-    cfg = load_recipe_config(options.config, overrides=overrides)
+    cfg = load_recipe_config(options.config, overrides=_worker_overrides(options))
     if options.artifacts == "auto":
         family = str(cfg.get("model", {}).get("family", ""))
         cfg["export"]["artifacts"] = [
@@ -644,7 +803,8 @@ def _worker(options: argparse.Namespace) -> None:
     if not isinstance(model, torch.nn.Module):
         raise TypeError("The checkpoint must be a frozen TICO model, not a state_dict.")
     non_fp32 = [
-        name for name, value in model.named_parameters()
+        name
+        for name, value in model.named_parameters()
         if value.is_floating_point() and value.dtype != torch.float32
     ]
     if non_fp32:
@@ -654,7 +814,13 @@ def _worker(options: argparse.Namespace) -> None:
             + ", ".join(non_fp32[:5])
         )
     model.eval()
-    ctx = RecipeContext(cfg=cfg, adapter=adapter, model=model, device=torch.device("cpu"), dtype=torch.float32)
+    ctx = RecipeContext(
+        cfg=cfg,
+        adapter=adapter,
+        model=model,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
     initial = _state_contract(model)
     rope_migration = None
     if options.migrate_llama_rope:
@@ -663,6 +829,7 @@ def _worker(options: argparse.Namespace) -> None:
         from tico.quantization.wrapq.wrappers.llama.static_inputs import (
             migrate_llama_rope_state,
         )
+
         rope_migration = migrate_llama_rope_state(model)
         if _state_contract(model) != initial:
             raise RuntimeError("RoPE migration changed frozen quantization state.")
@@ -670,15 +837,32 @@ def _worker(options: argparse.Namespace) -> None:
     versions = {}
     for package in ("torch", "transformers", "circle-schema", "numpy"):
         versions[package] = importlib.metadata.version(package)
-    git = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True)
-    dirty = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
-    _write_json(root / "environment.json", {
-        "repo": str(repo), "commit": git.stdout.strip() if git.returncode == 0 else None,
-        "working_tree": dirty.stdout if dirty.returncode == 0 else None,
-        "versions": versions, "checkpoint_sha256": _file_sha256(Path(options.checkpoint)),
-        "effective_config": cfg,
-        "llama_rope_migration": rope_migration,
-    })
+    git = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True
+    )
+    dirty = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    _write_json(
+        root / "environment.json",
+        {
+            "repo": str(repo),
+            "commit": git.stdout.strip() if git.returncode == 0 else None,
+            "working_tree": dirty.stdout if dirty.returncode == 0 else None,
+            "versions": versions,
+            "checkpoint_sha256": _file_sha256(Path(options.checkpoint)),
+            "effective_config": cfg,
+            "calibration_length_policy": (
+                "legacy_export_bridge"
+                if options.legacy_calibration_length
+                else "preserve_configured"
+            ),
+            "effective_calibration_seq_len": cfg.get("calibration", {}).get("seq_len"),
+            "llama_rope_migration": rope_migration,
+        },
+    )
     _export_phase(ctx, root / "before", options, initial)
     if options.stress:
         exercise = _exercise_eager(ctx, options)
@@ -687,6 +871,57 @@ def _worker(options: argparse.Namespace) -> None:
         exercise["state_differences"] = _first_differences(initial, after_eager)
         _write_json(root / "eager.json", exercise)
         _export_phase(ctx, root / "after_eager", options, initial)
+
+
+def _boundary_dtype(tensor: dict[str, Any], mode: str):
+    """Resolve a saved boundary's effective dtype using the runtime contract."""
+    import numpy as np
+
+    from tico.circle.value import default_tensor_type_registry
+
+    tensor_type = tensor["type"]
+    if type(tensor_type) is not int:
+        raise ValueError("Graph boundary tensor type must be an integer enum.")
+    dtype = default_tensor_type_registry().by_value(tensor_type).logical_dtype
+    quantization = tensor.get("quantization")
+    scale = None if quantization is None else quantization["fields"].get("scale")
+    if isinstance(scale, dict):
+        scale = scale["values"]
+    if scale is not None and not isinstance(scale, list):
+        raise ValueError("Graph boundary quantization scales must be a list.")
+    if mode == "fake_quantize" and dtype.kind in "iu" and scale:
+        return np.dtype(np.float32)
+    return dtype
+
+
+def _boundary_shape_contract(tensor: dict[str, Any]):
+    """Validate normalized Circle placeholders and their explicit dynamic axes."""
+    from tico.circle.analysis import TensorContract
+
+    shape = tensor["shape"]
+    signature = tensor.get("shapeSignature")
+    if isinstance(shape, dict):
+        shape = shape["values"]
+    if isinstance(signature, dict):
+        signature = signature["values"]
+        if not isinstance(signature, list):
+            raise ValueError(
+                "Normalized shape signature must contain a dimension list."
+            )
+    if not isinstance(shape, list) or any(type(dim) is not int for dim in shape):
+        raise ValueError("Graph boundary shape must contain integer dimensions.")
+    if signature is not None and (
+        not isinstance(signature, list)
+        or any(type(dim) is not int for dim in signature)
+    ):
+        raise ValueError(
+            "Graph boundary shape signature must contain integer dimensions."
+        )
+    return TensorContract(
+        tensor_type=tensor["type"],
+        shape=tuple(shape),
+        shape_signature=tuple(signature) if signature else None,
+    )
 
 
 def _numerical_evidence(
@@ -701,9 +936,14 @@ def _numerical_evidence(
     """
     import numpy as np
 
+    from tico.circle.errors import CircleValueError
+
     failures: list[str] = []
     parity: list[dict[str, Any]] = []
     try:
+        mode = metadata["mode"]
+        if mode not in ("native", "fake_quantize"):
+            raise ValueError("Unsupported numerical execution mode.")
         graphs = metadata["contract"]["subgraphs"]
         if not isinstance(graphs, list) or not graphs:
             raise ValueError("Missing primary graph contract.")
@@ -717,6 +957,13 @@ def _numerical_evidence(
         for index in inputs + outputs:
             if type(index) is not int or not 0 <= index < len(tensors):
                 raise ValueError("Invalid graph boundary tensor index.")
+        dtypes = {
+            index: _boundary_dtype(tensors[index], mode) for index in inputs + outputs
+        }
+        shapes = {
+            index: _boundary_shape_contract(tensors[index])
+            for index in inputs + outputs
+        }
         probes = metadata["probes"]
         if not isinstance(probes, list) or not probes:
             raise ValueError("Missing numerical probes.")
@@ -725,13 +972,17 @@ def _numerical_evidence(
             raise ValueError("Probe names must be nonempty strings.")
         if len(set(names)) != len(names):
             raise ValueError("Duplicate numerical probes.")
-    except (KeyError, TypeError, ValueError, IndexError) as error:
+    except (KeyError, TypeError, ValueError, IndexError, CircleValueError) as error:
         return {"ok": False, "failures": [str(error)], "parity": []}
 
     expected = {
         f"p{probe_index}_{kind}_{index}"
         for probe_index in range(len(probes))
-        for kind, boundary in (("input", inputs), ("circle", outputs), ("torch", outputs))
+        for kind, boundary in (
+            ("input", inputs),
+            ("circle", outputs),
+            ("torch", outputs),
+        )
         for index in range(len(boundary))
     }
     actual = set(values.files)
@@ -748,47 +999,79 @@ def _numerical_evidence(
         reports_complete = (
             isinstance(reported, list)
             and len(reported) == len(outputs)
-            and all(isinstance(item, dict) and type(item.get("ok")) is bool for item in reported)
+            and all(
+                isinstance(item, dict) and type(item.get("ok")) is bool
+                for item in reported
+            )
         )
         if not reports_complete:
-            failures.append(f"Probe {probe_index}: missing per-output Torch parity records.")
-        for kind, boundary in (("input", inputs), ("circle", outputs), ("torch", outputs)):
+            failures.append(
+                f"Probe {probe_index}: missing per-output Torch parity records."
+            )
+        for kind, boundary in (
+            ("input", inputs),
+            ("circle", outputs),
+            ("torch", outputs),
+        ):
             for index, tensor_index in enumerate(boundary):
                 key = f"p{probe_index}_{kind}_{index}"
                 if key not in actual:
                     continue
                 array = values[key]
-                shape = tensors[tensor_index].get("shape")
-                # _json_value normalizes generated NumPy shape vectors this way.
-                if isinstance(shape, dict):
-                    shape = shape.get("values")
-                if (
-                    not isinstance(shape, list)
-                    or any(type(dim) is not int or dim < 0 for dim in shape)
-                    or tuple(shape) != array.shape
+                contract = shapes[tensor_index]
+                signature = contract.shape_signature
+                if array.ndim != len(contract.shape) or any(
+                    actual != expected
+                    and not (signature is not None and signature[axis] == -1)
+                    for axis, (actual, expected) in enumerate(
+                        zip(array.shape, contract.shape)
+                    )
                 ):
-                    failures.append(f"{key}: array shape disagrees with graph boundary.")
+                    failures.append(
+                        f"{key}: array shape disagrees with graph boundary."
+                    )
                 if array.dtype.kind not in "biufc" or not np.isfinite(array).all():
-                    failures.append(f"{key}: nonnumeric or nonfinite numerical evidence.")
+                    failures.append(
+                        f"{key}: nonnumeric or nonfinite numerical evidence."
+                    )
+                if array.dtype != dtypes[tensor_index]:
+                    failures.append(
+                        f"{key}: dtype {array.dtype} disagrees with {mode} graph boundary "
+                        f"dtype {dtypes[tensor_index]}."
+                    )
         comparisons = []
         for index in range(len(outputs)):
-            golden, result = f"p{probe_index}_torch_{index}", f"p{probe_index}_circle_{index}"
+            golden, result = (
+                f"p{probe_index}_torch_{index}",
+                f"p{probe_index}_circle_{index}",
+            )
             if golden in actual and result in actual:
-                comparisons.append(compare_arrays(values[golden], values[result], atol=atol, rtol=rtol))
-        parity.append({
-            "probe": names[probe_index],
-            "outputs": comparisons,
-            "ok": (
-                reports_complete
-                and all(item["ok"] for item in reported)
-                and len(comparisons) == len(outputs)
-                and all(item["ok"] for item in comparisons)
-            ),
-        })
+                comparisons.append(
+                    compare_arrays(values[golden], values[result], atol=atol, rtol=rtol)
+                )
+        parity.append(
+            {
+                "probe": names[probe_index],
+                "outputs": comparisons,
+                "ok": (
+                    reports_complete
+                    and all(item["ok"] for item in reported)
+                    and len(comparisons) == len(outputs)
+                    and all(item["ok"] for item in comparisons)
+                ),
+            }
+        )
     return {"ok": not failures, "failures": failures, "parity": parity}
 
 
-def compare_snapshots(left_root: Path, right_root: Path, *, atol: float, rtol: float, require_torch_parity: bool = False) -> dict:
+def compare_snapshots(
+    left_root: Path,
+    right_root: Path,
+    *,
+    atol: float,
+    rtol: float,
+    require_torch_parity: bool = False,
+) -> dict:
     """Compare structure, actual inputs/outputs, host data, and state invariants."""
     import numpy as np
 
@@ -803,42 +1086,68 @@ def compare_snapshots(left_root: Path, right_root: Path, *, atol: float, rtol: f
     if left["stages"].keys() != right["stages"].keys():
         failures.append("Exported stage sets differ")
     if left["host"] != right["host"]:
-        failures.extend("Host " + item for item in _first_differences(left["host"], right["host"]))
+        failures.extend(
+            "Host " + item for item in _first_differences(left["host"], right["host"])
+        )
     for name in sorted(left["stages"].keys() & right["stages"].keys()):
         a_path = left_root / "records" / left["stages"][name]
         b_path = right_root / "records" / right["stages"][name]
-        a, b = json.loads(Path(str(a_path) + ".json").read_text()), json.loads(Path(str(b_path) + ".json").read_text())
+        a, b = json.loads(Path(str(a_path) + ".json").read_text()), json.loads(
+            Path(str(b_path) + ".json").read_text()
+        )
         record: dict[str, Any] = {
             "circle_structure_equal": a["contract"] == b["contract"],
-            "circle_structure_differences": _first_differences(a["contract"], b["contract"]),
+            "circle_structure_differences": _first_differences(
+                a["contract"], b["contract"]
+            ),
             "torch_export_ops_equal": a["fx"] == b["fx"],
-            "probe_names_equal": [p["probe"] for p in a["probes"]] == [p["probe"] for p in b["probes"]],
+            "probe_names_equal": [p["probe"] for p in a["probes"]]
+            == [p["probe"] for p in b["probes"]],
             "execution_mode_equal": a["mode"] == b["mode"],
-            "torch_parity_left": a["probes"], "torch_parity_right": b["probes"],
+            "torch_parity_left": a["probes"],
+            "torch_parity_right": b["probes"],
             "arrays": {},
         }
-        with np.load(str(a_path) + ".npz", allow_pickle=False) as av, np.load(str(b_path) + ".npz", allow_pickle=False) as bv:
+        with np.load(str(a_path) + ".npz", allow_pickle=False) as av, np.load(
+            str(b_path) + ".npz", allow_pickle=False
+        ) as bv:
             record["array_keys_equal"] = set(av.files) == set(bv.files)
             left_evidence = _numerical_evidence(a, av, atol=atol, rtol=rtol)
             right_evidence = _numerical_evidence(b, bv, atol=atol, rtol=rtol)
             record["numerical_evidence_left"] = left_evidence
             record["numerical_evidence_right"] = right_evidence
-            record["numerical_coverage_complete"] = left_evidence["ok"] and right_evidence["ok"]
+            record["numerical_coverage_complete"] = (
+                left_evidence["ok"] and right_evidence["ok"]
+            )
             for key in sorted(set(av.files) & set(bv.files)):
                 # Inputs must match exactly; output tolerances are explicit.
                 tol = (0.0, 0.0) if "_input_" in key else (atol, rtol)
-                record["arrays"][key] = compare_arrays(av[key], bv[key], atol=tol[0], rtol=tol[1])
-        stage_ok = all(record[key] for key in ("circle_structure_equal", "probe_names_equal", "execution_mode_equal", "array_keys_equal", "numerical_coverage_complete"))
+                record["arrays"][key] = compare_arrays(
+                    av[key], bv[key], atol=tol[0], rtol=tol[1]
+                )
+        stage_ok = all(
+            record[key]
+            for key in (
+                "circle_structure_equal",
+                "probe_names_equal",
+                "execution_mode_equal",
+                "array_keys_equal",
+                "numerical_coverage_complete",
+            )
+        )
         stage_ok &= all(value["ok"] for value in record["arrays"].values())
         if require_torch_parity:
             stage_ok &= all(
-                evidence["ok"] and bool(evidence["parity"])
+                evidence["ok"]
+                and bool(evidence["parity"])
                 and all(probe["ok"] for probe in evidence["parity"])
                 for evidence in (left_evidence, right_evidence)
             )
         record["ok"] = bool(stage_ok)
         if not stage_ok:
-            failures.append(name + ": structural, input, output, or requested Torch parity mismatch")
+            failures.append(
+                name + ": structural, input, output, or requested Torch parity mismatch"
+            )
         stages[name] = record
     if not stages:
         failures.append("No common exported stages were compared")
@@ -851,24 +1160,49 @@ def _run(options: argparse.Namespace) -> int:
     output.mkdir(parents=True, exist_ok=False)
     script = str(Path(__file__).resolve())
     common = [
-        "--config", str(Path(options.config).resolve()),
-        "--checkpoint", str(Path(options.checkpoint).resolve()),
-        "--seq-len", str(options.seq_len), "--eager-seq-len", str(options.eager_seq_len),
-        "--decode-steps", str(options.decode_steps), "--artifacts", options.artifacts,
-        "--seed", str(options.seed), "--threads", str(options.threads),
-        "--atol", str(options.atol), "--rtol", str(options.rtol),
+        "--config",
+        str(Path(options.config).resolve()),
+        "--checkpoint",
+        str(Path(options.checkpoint).resolve()),
+        "--seq-len",
+        str(options.seq_len),
+        "--eager-seq-len",
+        str(options.eager_seq_len),
+        "--decode-steps",
+        str(options.decode_steps),
+        "--artifacts",
+        options.artifacts,
+        "--seed",
+        str(options.seed),
+        "--threads",
+        str(options.threads),
+        "--atol",
+        str(options.atol),
+        "--rtol",
+        str(options.rtol),
     ]
     if options.eager_inputs:
         common += ["--eager-inputs", str(Path(options.eager_inputs).resolve())]
     if options.include_full_text:
         common.append("--include-full-text")
+    if options.legacy_calibration_length:
+        common.append("--legacy-calibration-length")
     for override in options.set:
         common += ["--set", override]
     workers = [("candidate", options.candidate_repo, True)]
     if options.command == "run":
         workers.insert(0, ("baseline", options.baseline_repo, False))
     for role, repo, stress in workers:
-        command = [sys.executable, script, "_worker", "--repo", str(Path(repo).resolve()), "--output", str(output / role), *common]
+        command = [
+            sys.executable,
+            script,
+            "_worker",
+            "--repo",
+            str(Path(repo).resolve()),
+            "--output",
+            str(output / role),
+            *common,
+        ]
         if stress:
             command.append("--stress")
         if role == "candidate" and options.migrate_llama_rope:
@@ -878,36 +1212,83 @@ def _run(options: argparse.Namespace) -> int:
         env["HF_HUB_OFFLINE"] = "1"
         env["TRANSFORMERS_OFFLINE"] = "1"
         with (output / (role + ".log")).open("w") as log:
-            result = subprocess.run(command, cwd=Path(repo).resolve(), env=env, stdout=log, stderr=subprocess.STDOUT)
+            result = subprocess.run(
+                command,
+                cwd=Path(repo).resolve(),
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         if result.returncode:
-            _write_json(output / "summary.json", {"status": "ERROR", "worker": role, "returncode": result.returncode, "log": role + ".log", "comparisons_complete": False})
+            _write_json(
+                output / "summary.json",
+                {
+                    "status": "ERROR",
+                    "worker": role,
+                    "returncode": result.returncode,
+                    "log": role + ".log",
+                    "comparisons_complete": False,
+                },
+            )
             print(f"ERROR: {role} worker failed; inspect {output / (role + '.log')}")
             return 2
     identities_match, initial_match = True, True
-    old_new = {"status": "NOT_RUN", "reason": "Isolation-only run; no baseline checkout."}
+    old_new = {
+        "status": "NOT_RUN",
+        "reason": "Isolation-only run; no baseline checkout.",
+    }
     if options.command == "run":
         baseline = json.loads((output / "baseline/environment.json").read_text())
         candidate = json.loads((output / "candidate/environment.json").read_text())
-        identities_match = baseline["versions"] == candidate["versions"] and baseline["checkpoint_sha256"] == candidate["checkpoint_sha256"]
-        initial_match = json.loads((output / "baseline/quantization_state.json").read_text()) == json.loads((output / "candidate/quantization_state.json").read_text())
-        old_new = compare_snapshots(output / "baseline/before", output / "candidate/before", atol=options.atol, rtol=options.rtol, require_torch_parity=options.require_torch_parity)
-    before_after = compare_snapshots(output / "candidate/before", output / "candidate/after_eager", atol=options.atol, rtol=options.rtol, require_torch_parity=options.require_torch_parity)
+        identities_match = (
+            baseline["versions"] == candidate["versions"]
+            and baseline["checkpoint_sha256"] == candidate["checkpoint_sha256"]
+        )
+        initial_match = json.loads(
+            (output / "baseline/quantization_state.json").read_text()
+        ) == json.loads((output / "candidate/quantization_state.json").read_text())
+        old_new = compare_snapshots(
+            output / "baseline/before",
+            output / "candidate/before",
+            atol=options.atol,
+            rtol=options.rtol,
+            require_torch_parity=options.require_torch_parity,
+        )
+    before_after = compare_snapshots(
+        output / "candidate/before",
+        output / "candidate/after_eager",
+        atol=options.atol,
+        rtol=options.rtol,
+        require_torch_parity=options.require_torch_parity,
+    )
     eager = json.loads((output / "candidate/eager.json").read_text())
-    ok = identities_match and initial_match and old_new.get("ok", options.command == "isolation") and before_after["ok"] and eager["state_preserved"]
+    ok = (
+        identities_match
+        and initial_match
+        and old_new.get("ok", options.command == "isolation")
+        and before_after["ok"]
+        and eager["state_preserved"]
+    )
     summary = {
-        "status": "PASS" if ok else "FAIL", "comparisons_complete": True,
+        "status": "PASS" if ok else "FAIL",
+        "comparisons_complete": True,
         "requested_scope": options.command,
         "baseline_comparison_performed": options.command == "run",
         "same_checkpoint_and_dependencies": identities_match,
         "same_initial_quantization_state": initial_match,
-        "baseline_vs_candidate": old_new, "candidate_before_vs_after_eager": before_after,
-        "eager": eager, "atol": options.atol, "rtol": options.rtol,
+        "baseline_vs_candidate": old_new,
+        "candidate_before_vs_after_eager": before_after,
+        "eager": eager,
+        "atol": options.atol,
+        "rtol": options.rtol,
         "torch_parity_required": options.require_torch_parity,
         "llama_rope_migration_requested": options.migrate_llama_rope,
+        "legacy_calibration_length_requested": options.legacy_calibration_length,
         "intentional_change_note": (
             "The candidate uses unified LLaMA RoPE. Differences from an old "
             "unscaled decoder are reported as FAIL, never waived automatically."
-            if options.migrate_llama_rope else None
+            if options.migrate_llama_rope
+            else None
         ),
         "scope": "Conservative Circle structure and stage-level reference numerics; not NPU or end-to-end generation validation.",
     }
@@ -920,45 +1301,85 @@ def main(argv=None) -> int:
     """Provide isolated collection, complete orchestration, and offline comparison."""
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="Export both revisions and candidate after eager use.")
+    run = sub.add_parser(
+        "run", help="Export both revisions and candidate after eager use."
+    )
     run.add_argument("--baseline-repo", required=True)
     run.add_argument("--candidate-repo", default=".")
-    isolation = sub.add_parser("isolation", help="Compare only candidate export before/after eager use.")
+    isolation = sub.add_parser(
+        "isolation", help="Compare only candidate export before/after eager use."
+    )
     isolation.add_argument("--candidate-repo", default=".")
     worker = sub.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--repo", required=True)
     worker.add_argument("--stress", action="store_true")
     for command in (run, isolation, worker):
         command.add_argument("--config", required=True)
-        command.add_argument("--checkpoint", required=True, help="Trusted frozen model checkpoint; torch.load uses weights_only=False.")
-        command.add_argument("--output", required=True, help="A new output directory; existing results are never overwritten.")
+        command.add_argument(
+            "--checkpoint",
+            required=True,
+            help="Trusted frozen model checkpoint; torch.load uses weights_only=False.",
+        )
+        command.add_argument(
+            "--output",
+            required=True,
+            help="A new output directory; existing results are never overwritten.",
+        )
         command.add_argument("--seq-len", type=int, required=True)
         command.add_argument("--eager-seq-len", type=int, required=True)
-        command.add_argument("--eager-inputs", help="Optional torch-saved kwargs dict/list for real multimodal eager stress.")
-        command.add_argument("--include-full-text", action="store_true", help="Also compare a text-only full-model probe for Qwen3-VL/Gemma4.")
         command.add_argument(
-            "--migrate-llama-rope", action="store_true",
+            "--eager-inputs",
+            help="Optional torch-saved kwargs dict/list for real multimodal eager stress.",
+        )
+        command.add_argument(
+            "--include-full-text",
+            action="store_true",
+            help="Also compare a text-only full-model probe for Qwen3-VL/Gemma4.",
+        )
+        command.add_argument(
+            "--migrate-llama-rope",
+            action="store_true",
             help="Explicitly rebuild candidate LLaMA RoPE from its unified snapshot or recorded config. The baseline and frozen qparams are unchanged.",
         )
+        command.add_argument(
+            "--legacy-calibration-length",
+            action="store_true",
+            help="Explicit historical-exporter bridge: set calibration.seq_len to --seq-len in both workers. The default preserves the configured calibration length; no recalibration is performed.",
+        )
         command.add_argument("--decode-steps", type=int, default=2)
-        command.add_argument("--artifacts", default="auto", help="Comma-separated Circle artifacts; auto selects LLaMA bundle or VLM per-layer export.")
+        command.add_argument(
+            "--artifacts",
+            default="auto",
+            help="Comma-separated Circle artifacts; auto selects LLaMA bundle or VLM per-layer export.",
+        )
         command.add_argument("--seed", type=int, default=42)
         command.add_argument("--threads", type=int, default=1)
         command.add_argument("--set", action="append", default=[])
-    compare = sub.add_parser("compare", help="Compare previously collected phase directories.")
+    compare = sub.add_parser(
+        "compare", help="Compare previously collected phase directories."
+    )
     compare.add_argument("left")
     compare.add_argument("right")
     compare.add_argument("--report", required=True)
     for command in (run, isolation, worker, compare):
         command.add_argument("--atol", type=float, default=1e-5)
         command.add_argument("--rtol", type=float, default=1e-4)
-        command.add_argument("--require-torch-parity", action="store_true", help="Also require PyTorch-vs-Circle parity, not just before-vs-after parity.")
+        command.add_argument(
+            "--require-torch-parity",
+            action="store_true",
+            help="Also require PyTorch-vs-Circle parity, not just before-vs-after parity.",
+        )
     args = parser.parse_args(argv)
     if not all(math.isfinite(value) and value >= 0 for value in (args.atol, args.rtol)):
         parser.error("Tolerances must be finite and nonnegative.")
     if args.command != "compare":
-        if min(args.seq_len, args.eager_seq_len, args.threads) < 1 or args.decode_steps < 0:
-            parser.error("Lengths/threads must be positive and decode steps nonnegative.")
+        if (
+            min(args.seq_len, args.eager_seq_len, args.threads) < 1
+            or args.decode_steps < 0
+        ):
+            parser.error(
+                "Lengths/threads must be positive and decode steps nonnegative."
+            )
         if not Path(args.checkpoint).is_file() or not Path(args.config).is_file():
             parser.error("Checkpoint and config must be existing files.")
         if Path(args.output).exists():
@@ -969,7 +1390,13 @@ def main(argv=None) -> int:
             return 0
         if args.command in ("run", "isolation"):
             return _run(args)
-        result = compare_snapshots(Path(args.left), Path(args.right), atol=args.atol, rtol=args.rtol, require_torch_parity=args.require_torch_parity)
+        result = compare_snapshots(
+            Path(args.left),
+            Path(args.right),
+            atol=args.atol,
+            rtol=args.rtol,
+            require_torch_parity=args.require_torch_parity,
+        )
         _write_json(Path(args.report), result)
         print("PASS" if result["ok"] else "FAIL")
         return 0 if result["ok"] else 1
@@ -977,10 +1404,15 @@ def main(argv=None) -> int:
         traceback.print_exc()
         output = getattr(args, "output", None)
         if output and Path(output).is_dir():
-            _write_json(Path(output) / "error.json", {
-                "status": "ERROR", "error_type": type(exc).__name__,
-                "message": str(exc), "comparisons_complete": False,
-            })
+            _write_json(
+                Path(output) / "error.json",
+                {
+                    "status": "ERROR",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "comparisons_complete": False,
+                },
+            )
         return 2
 
 

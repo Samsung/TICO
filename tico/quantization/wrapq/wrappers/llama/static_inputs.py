@@ -43,7 +43,9 @@ def capture_rope_state(owner: nn.Module, config: Any, source=None) -> None:
     # Old table/snapshot names must not override the canonical source after an
     # explicit migration. Quantized parameters and observer state are untouched.
     for name in (
-        "rope_cos_template", "rope_sin_template", "_export_rope_inv_freq",
+        "rope_cos_template",
+        "rope_sin_template",
+        "_export_rope_inv_freq",
         "_export_rope_attention_scaling",
     ):
         if hasattr(owner, name):
@@ -66,10 +68,9 @@ def _owner_config(owner: nn.Module) -> Any:
 def _canonical_snapshot(owner: nn.Module) -> nn.Module:
     """Require the unified contract rather than reusing legacy unscaled tables."""
     snapshot = getattr(owner, "_export_rotary_emb", None)
-    if (
-        getattr(owner, "_export_rope_contract_version", None) != ROPE_CONTRACT_VERSION
-        or not isinstance(snapshot, nn.Module)
-    ):
+    if getattr(
+        owner, "_export_rope_contract_version", None
+    ) != ROPE_CONTRACT_VERSION or not isinstance(snapshot, nn.Module):
         raise ValueError(
             "This LLaMA checkpoint predates the unified RoPE contract. Regenerate "
             "it, or explicitly call migrate_llama_rope_state(model) before eager "
@@ -126,7 +127,10 @@ def migrate_llama_rope_state(model: nn.Module, *, rotary_emb=None) -> dict[str, 
         config = _owner_config(owner)
         if rotary_emb is not None:
             source, origin = rotary_emb, "explicit_model_rotary"
-        elif getattr(owner, "_export_rope_contract_version", None) == ROPE_CONTRACT_VERSION:
+        elif (
+            getattr(owner, "_export_rope_contract_version", None)
+            == ROPE_CONTRACT_VERSION
+        ):
             source, origin = _canonical_snapshot(owner), "unified_snapshot"
         else:
             source, origin = None, "recorded_config"
@@ -136,7 +140,9 @@ def migrate_llama_rope_state(model: nn.Module, *, rotary_emb=None) -> dict[str, 
             for layer in owner.layers:
                 child = layer.wrapped
                 if not isinstance(child, QuantLlamaDecoderLayer):
-                    raise TypeError("Expected quantized LLaMA decoder layers for migration.")
+                    raise TypeError(
+                        "Expected quantized LLaMA decoder layers for migration."
+                    )
                 children.append(child)
         plans.append((owner, config, source, origin, children))
 
@@ -164,14 +170,19 @@ class LlamaStaticInputs(nn.Module):
         super().__init__()
         if cos.ndim != 3 or cos.shape != sin.shape or cos.shape[0] != 1:
             raise ValueError("Static LLaMA RoPE tables must have shape [1, S, D].")
-        if not math.isfinite(fill_value) or abs(fill_value) > torch.finfo(torch.float32).max:
+        if (
+            not math.isfinite(fill_value)
+            or abs(fill_value) > torch.finfo(torch.float32).max
+        ):
             raise ValueError("Static attention mask fill value must be finite float32.")
         self.max_seq_len = int(cos.shape[1])
         self.register_buffer("cos", cos.detach().clone(), persistent=False)
         self.register_buffer("sin", sin.detach().clone(), persistent=False)
         mask = torch.full(
             (1, 1, self.max_seq_len, self.max_seq_len),
-            fill_value, dtype=torch.float32, device=cos.device,
+            fill_value,
+            dtype=torch.float32,
+            device=cos.device,
         ).triu_(1)
         self.register_buffer("attention_mask", mask, persistent=False)
 
@@ -188,16 +199,22 @@ class LlamaStaticInputs(nn.Module):
     def mask(self, query_length: int, key_length: int, start: int, *, device):
         """Slice the legacy [1, Q, K] additive mask."""
         if (
-            start < 0 or query_length < 1 or key_length < 1
+            start < 0
+            or query_length < 1
+            or key_length < 1
             or start + query_length > self.max_seq_len
             or key_length > self.max_seq_len
         ):
             raise ValueError("Requested mask exceeds the static export profile.")
-        return self.attention_mask[:, 0, start : start + query_length, :key_length].to(device)
+        return self.attention_mask[:, 0, start : start + query_length, :key_length].to(
+            device
+        )
 
 
 @torch.no_grad()
-def prepare_llama_static_inputs(owner: nn.Module, max_seq_len: int) -> LlamaStaticInputs:
+def prepare_llama_static_inputs(
+    owner: nn.Module, max_seq_len: int
+) -> LlamaStaticInputs:
     """Prepare canonical static tables before tracing, never from live eager state.
 
     The snapshot includes the complete RoPE implementation, not only theta.
@@ -211,8 +228,11 @@ def prepare_llama_static_inputs(owner: nn.Module, max_seq_len: int) -> LlamaStat
     parameter = next(owner.parameters(), None)
     buffer = next(snapshot.buffers(), None)
     device = (
-        parameter.device if parameter is not None else
-        buffer.device if buffer is not None else torch.device("cpu")
+        parameter.device
+        if parameter is not None
+        else buffer.device
+        if buffer is not None
+        else torch.device("cpu")
     )
     rotary = copy.deepcopy(snapshot).to(device=device, dtype=torch.float32)
     positions = torch.arange(max_seq_len, device=device).unsqueeze(0)

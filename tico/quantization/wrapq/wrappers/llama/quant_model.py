@@ -497,8 +497,10 @@ class QuantLlamaModel(QuantModuleBase):
         prepared = getattr(self, "_static_export_inputs", None)
         if prepared is not None:
             cos, sin = prepared.rope(
-                start, hidden_states.size(1),
-                device=hidden_states.device, dtype=hidden_states.dtype,
+                start,
+                hidden_states.size(1),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
             )
             return self._fq(cos, self.obs_cos), self._fq(sin, self.obs_sin)
         if torch.compiler.is_compiling():

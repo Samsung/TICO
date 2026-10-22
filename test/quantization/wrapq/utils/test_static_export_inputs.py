@@ -20,7 +20,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-from torch import nn
 
 from tico.quantization.wrapq.utils.static_export import (
     prepared_static_export,
@@ -36,6 +35,7 @@ from tico.quantization.wrapq.wrappers.qwen_vl.static_inputs import (
     prepare_qwen3_vl_static_text_inputs,
     Qwen3VLStaticTextInputs,
 )
+from torch import nn
 
 
 class _LlamaRotary(nn.Module):
@@ -46,6 +46,7 @@ class _LlamaRotary(nn.Module):
     def __init__(self):
         super().__init__()
         self.register_buffer("inv_freq", torch.tensor([1.0, 0.01]), persistent=False)
+        self.inv_freq = self.get_buffer("inv_freq")
         self.attention_scaling = 1.0
         self.calls = 0
 
@@ -72,12 +73,17 @@ class _LlamaOwner(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(1))
         self.config = SimpleNamespace(
-            hidden_size=8, num_attention_heads=2, head_dim=4,
-            max_position_embeddings=capacity, rope_theta=10000.0,
+            hidden_size=8,
+            num_attention_heads=2,
+            head_dim=4,
+            max_position_embeddings=capacity,
+            rope_theta=10000.0,
         )
         self.qcfg = SimpleNamespace(attention_mask_fill_value=-120.0)
         self.attn_options = SimpleNamespace(rope=rope)
-        capture_rope_state(self, self.config, source if source is not None else _LlamaRotary())
+        capture_rope_state(
+            self, self.config, source if source is not None else _LlamaRotary()
+        )
 
     def _build_static_export_inputs(self, length):
         return prepare_llama_static_inputs(self, length)
@@ -152,7 +158,9 @@ class TestStaticInputContext(unittest.TestCase):
         with prepared_static_export(owner, 8):
             assert owner._static_export_inputs is not None
             self.assertEqual(owner._static_export_inputs.cos.shape, (1, 8, 4))
-            self.assertEqual(owner._static_export_inputs.attention_mask.shape, (1, 1, 8, 8))
+            self.assertEqual(
+                owner._static_export_inputs.attention_mask.shape, (1, 1, 8, 8)
+            )
             self.assertIs(owner.weight, weight)
             self.assertEqual(tuple(owner.state_dict()), original_keys)
         self.assertFalse(hasattr(owner, "_static_export_inputs"))
@@ -208,7 +216,11 @@ class TestStaticInputContext(unittest.TestCase):
         require_static_decoder_inputs(mask, positions)
         # Existing boolean-mask support remains the responsibility of each wrapper.
         require_static_decoder_inputs(mask.bool(), positions)
-        for bad_mask, bad_rope in ((None, positions), (mask, None), (mask, (positions[0],))):
+        for bad_mask, bad_rope in (
+            (None, positions),
+            (mask, None),
+            (mask, (positions[0],)),
+        ):
             with self.assertRaises(ValueError):
                 require_static_decoder_inputs(bad_mask, bad_rope)
 
@@ -218,15 +230,23 @@ class TestLlamaStaticInputs(unittest.TestCase):
         for convention in ("hf", "pre_negated_sin"):
             owner = _LlamaOwner(rope=convention)
             actual = prepare_llama_static_inputs(owner, 6)
-            frequencies = torch.outer(torch.arange(6).float(), torch.tensor([1.0, 0.01]))
+            frequencies = torch.outer(
+                torch.arange(6).float(), torch.tensor([1.0, 0.01])
+            )
             phases = torch.cat((frequencies, frequencies), dim=-1)
             expected_sin = phases.sin()
             if convention == "pre_negated_sin":
                 expected_sin[:, :2] *= -1
-            torch.testing.assert_close(actual.cos, phases.cos().unsqueeze(0), atol=0, rtol=0)
-            torch.testing.assert_close(actual.sin, expected_sin.unsqueeze(0), atol=0, rtol=0)
+            torch.testing.assert_close(
+                actual.cos, phases.cos().unsqueeze(0), atol=0, rtol=0
+            )
+            torch.testing.assert_close(
+                actual.sin, expected_sin.unsqueeze(0), atol=0, rtol=0
+            )
             expected_mask = torch.full((6, 6), -120.0).triu(1)
-            torch.testing.assert_close(actual.attention_mask[0, 0], expected_mask, atol=0, rtol=0)
+            torch.testing.assert_close(
+                actual.attention_mask[0, 0], expected_mask, atol=0, rtol=0
+            )
 
     def test_source_frequency_and_scaling_are_snapshotted(self):
         source = _LlamaRotary()
@@ -300,8 +320,12 @@ class TestLlamaStaticInputs(unittest.TestCase):
         owner.register_buffer("_export_rope_inv_freq", torch.ones(2))
         owner._export_rope_attention_scaling = 1.0
         capture_rope_state(owner, owner.config, _LlamaRotary())
-        for name in ("rope_cos_template", "rope_sin_template", "_export_rope_inv_freq",
-                     "_export_rope_attention_scaling"):
+        for name in (
+            "rope_cos_template",
+            "rope_sin_template",
+            "_export_rope_inv_freq",
+            "_export_rope_attention_scaling",
+        ):
             self.assertFalse(hasattr(owner, name), name)
 
     def test_no_native_context_allocation(self):
@@ -321,6 +345,32 @@ class TestLlamaStaticInputs(unittest.TestCase):
         with self.assertRaises(ValueError):
             inputs.mask(1, 9, 0, device="cpu")
 
+    def test_prefill_and_decode_capacity_boundaries_at_two_profiles(self):
+        for capacity in (16, 32):
+            inputs = prepare_llama_static_inputs(
+                _LlamaOwner(capacity=capacity), capacity
+            )
+            for valid in (1, capacity // 2, capacity - 1, capacity):
+                with self.subTest(capacity=capacity, valid=valid):
+                    cos, sin = inputs.rope(0, valid, device="cpu", dtype=torch.float32)
+                    self.assertEqual(cos.shape, (1, valid, 4))
+                    self.assertEqual(sin.shape, cos.shape)
+                    mask = inputs.mask(valid, valid, 0, device="cpu")
+                    expected = torch.full((valid, valid), -120.0).triu(1)
+                    torch.testing.assert_close(mask[0], expected, atol=0, rtol=0)
+            for past in (0, capacity // 2, capacity - 1):
+                with self.subTest(capacity=capacity, past=past):
+                    cos, _ = inputs.rope(past, 1, device="cpu", dtype=torch.float32)
+                    self.assertEqual(cos.shape, (1, 1, 4))
+                    mask = inputs.mask(1, past + 1, past, device="cpu")
+                    torch.testing.assert_close(
+                        mask, torch.zeros_like(mask), atol=0, rtol=0
+                    )
+            with self.assertRaisesRegex(ValueError, "exceeds"):
+                inputs.rope(capacity, 1, device="cpu", dtype=torch.float32)
+            with self.assertRaisesRegex(ValueError, "exceeds"):
+                inputs.mask(capacity + 1, capacity + 1, 0, device="cpu")
+
     def test_torch_export_graph_contains_no_table_generation(self):
         class Consumer(nn.Module):
             inputs: LlamaStaticInputs
@@ -330,16 +380,30 @@ class TestLlamaStaticInputs(unittest.TestCase):
                 self.inputs = inputs
 
             def forward(self, hidden):
-                cos, sin = self.inputs.rope(0, 4, device=hidden.device, dtype=hidden.dtype)
+                cos, sin = self.inputs.rope(
+                    0, 4, device=hidden.device, dtype=hidden.dtype
+                )
                 mask = self.inputs.mask(4, 4, 0, device=hidden.device)
                 return hidden * cos + sin + mask
 
         consumer = Consumer(prepare_llama_static_inputs(_LlamaOwner(), 4))
         hidden = torch.randn(1, 4, 4)
         exported = torch.export.export(consumer, (hidden,), strict=False)
-        torch.testing.assert_close(exported.module()(hidden), consumer(hidden), atol=0, rtol=0)
-        targets = [str(node.target) for node in exported.graph.nodes if node.op == "call_function"]
-        for forbidden in ("aten.sin.", "aten.cos.", "aten.arange.", "aten.triu.", "aten.outer."):
+        torch.testing.assert_close(
+            exported.module()(hidden), consumer(hidden), atol=0, rtol=0
+        )
+        targets = [
+            str(node.target)
+            for node in exported.graph.nodes
+            if node.op == "call_function"
+        ]
+        for forbidden in (
+            "aten.sin.",
+            "aten.cos.",
+            "aten.arange.",
+            "aten.triu.",
+            "aten.outer.",
+        ):
             self.assertFalse(any(forbidden in target for target in targets), targets)
 
 
@@ -379,16 +443,15 @@ class TestQwenStaticInputs(unittest.TestCase):
         self.assertFalse(hasattr(owner, "_static_export_inputs"))
 
 
-
 class TestDecoderExportBoundaries(unittest.TestCase):
     def test_llama_and_qwen_adapters_do_not_change_eager_return_policy(self):
         from tico.quantization.wrapq.wrappers.llama.export_adapters import (
-            LlamaDecoderLayerPrefillExportAdapter,
             LlamaDecoderLayerDecodeExportAdapter,
+            LlamaDecoderLayerPrefillExportAdapter,
         )
         from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
-            Qwen3VLTextDecoderLayerPrefillExportAdapter,
             Qwen3VLTextDecoderLayerDecodeExportAdapter,
+            Qwen3VLTextDecoderLayerPrefillExportAdapter,
         )
 
         class Layer(nn.Module):
@@ -396,7 +459,9 @@ class TestDecoderExportBoundaries(unittest.TestCase):
                 super().__init__()
                 self.return_type = "tensor"
 
-            def forward(self, hidden_states, *, return_type=None, use_cache=False, **kwargs):
+            def forward(
+                self, hidden_states, *, return_type=None, use_cache=False, **kwargs
+            ):
                 hidden = hidden_states + 1
                 key = hidden.unsqueeze(1)
                 return (hidden, (key, key)) if return_type == "tuple" else hidden
@@ -405,21 +470,31 @@ class TestDecoderExportBoundaries(unittest.TestCase):
         mask = torch.zeros(1, 1, 4)
         positions = (torch.ones(1, 1, 4), torch.zeros(1, 1, 4))
         past = (torch.zeros(1, 1, 3, 4), torch.zeros(1, 1, 3, 4))
-        for cls in (LlamaDecoderLayerPrefillExportAdapter, LlamaDecoderLayerDecodeExportAdapter,
-                    Qwen3VLTextDecoderLayerPrefillExportAdapter, Qwen3VLTextDecoderLayerDecodeExportAdapter):
+        for cls in (
+            LlamaDecoderLayerPrefillExportAdapter,
+            LlamaDecoderLayerDecodeExportAdapter,
+            Qwen3VLTextDecoderLayerPrefillExportAdapter,
+            Qwen3VLTextDecoderLayerDecodeExportAdapter,
+        ):
             with self.subTest(adapter=cls.__name__):
                 layer = Layer()
                 adapter = cls(layer, return_kv=True)
                 self.assertEqual(layer.return_type, "tensor")
                 kwargs = {"attention_mask": mask, "position_embeddings": positions}
                 if "DecodeExportAdapter" in cls.__name__:
-                    key = "past_key_values" if cls.__name__.startswith("Qwen") else "past_key_value"
+                    key = (
+                        "past_key_values"
+                        if cls.__name__.startswith("Qwen")
+                        else "past_key_value"
+                    )
                     kwargs[key] = past
                 output = adapter(hidden, **kwargs)
                 self.assertEqual(len(output), 3)
                 self.assertEqual(layer.return_type, "tensor")
                 self.assertIsInstance(layer(hidden), torch.Tensor)
-                program = torch.export.export(adapter, (hidden,), kwargs=kwargs, strict=False)
+                program = torch.export.export(
+                    adapter, (hidden,), kwargs=kwargs, strict=False
+                )
                 for actual, expected in zip(program.module()(hidden, **kwargs), output):
                     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
                 with self.assertRaisesRegex(ValueError, "explicit attention_mask"):
@@ -431,7 +506,9 @@ class TestDecoderExportBoundaries(unittest.TestCase):
         )
 
         class Consumer(nn.Module):
-            def forward(self, hidden_states, *, shared_key_value, static_export, **kwargs):
+            def forward(
+                self, hidden_states, *, shared_key_value, static_export, **kwargs
+            ):
                 if not static_export:
                     raise AssertionError("Static path was not selected")
                 return hidden_states + shared_key_value[0][:, 0, -1:]
@@ -449,7 +526,9 @@ class TestDecoderExportBoundaries(unittest.TestCase):
         self.assertEqual(output.shape, hidden.shape)
         self.assertEqual(shared[0].shape[-2], 8)
         program = torch.export.export(adapter, (hidden,), kwargs=kwargs, strict=False)
-        torch.testing.assert_close(program.module()(hidden, **kwargs), output, atol=0, rtol=0)
+        torch.testing.assert_close(
+            program.module()(hidden, **kwargs), output, atol=0, rtol=0
+        )
 
     def test_full_model_owner_suppresses_duplicate_layer_tables(self):
         owner = _LlamaOwner()

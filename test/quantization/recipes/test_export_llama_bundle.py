@@ -117,7 +117,9 @@ class TestLlamaBundleContext(unittest.TestCase):
             for key in ("rope_cos", "rope_sin"):
                 np.testing.assert_array_equal(
                     context[f"{key}_{index}"],
-                    getattr(layer.wrapped._export_rotary_emb, key.replace("rope_", ""))[:, :4].numpy(),
+                    getattr(layer.wrapped._export_rotary_emb, key.replace("rope_", ""))[
+                        :, :4
+                    ].numpy(),
                 )
                 self.assertEqual(context[f"{key}_{index}"].dtype, np.float32)
         np.testing.assert_array_equal(context["mask_fill_values"], [-100.0, -101.0])
@@ -143,7 +145,9 @@ class TestLlamaBundleContext(unittest.TestCase):
     def test_context_rejects_incomplete_rope_and_nonfinite_mask(self):
         for mutation, message in (
             (
-                lambda layer: setattr(layer._export_rotary_emb, "sin", torch.zeros(1, 2, 4)),
+                lambda layer: setattr(
+                    layer._export_rotary_emb, "sin", torch.zeros(1, 2, 4)
+                ),
                 "head_dim",
             ),
             (
@@ -215,7 +219,9 @@ class TestLlamaBundleContext(unittest.TestCase):
 
     def test_preflight_failure_preserves_existing_bundle_manifest(self):
         qmodel = _bundle_model()
-        qmodel.model.wrapped.layers[0].wrapped._export_rotary_emb.cos = torch.zeros(1, 2, 4)
+        qmodel.model.wrapped.layers[0].wrapped._export_rotary_emb.cos = torch.zeros(
+            1, 2, 4
+        )
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "llama_manifest.json"
             manifest.write_text("old manifest")
