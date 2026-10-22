@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import torch
 from tico.quantization.wrapq.mode import Mode
+from tico.quantization.wrapq.utils.static_export import prepared_static_export
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
     QuantQwen3VLTextAttention,
@@ -46,19 +47,14 @@ class TestQwen3VLEagerContext(unittest.TestCase):
         )
         from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
 
-        config = Qwen3VLTextConfig(
-            vocab_size=32,
-            hidden_size=16,
-            intermediate_size=32,
-            num_hidden_layers=2,
-            num_attention_heads=2,
-            num_key_value_heads=1,
-            head_dim=8,
-            max_position_embeddings=max_position_embeddings,
-            rope_scaling={"rope_type": "default", "mrope_section": [1, 1, 2]},
-            attention_dropout=0.0,
-            use_cache=True,
-        )
+        config = Qwen3VLTextConfig.from_dict({
+            "vocab_size": 32, "hidden_size": 16, "intermediate_size": 32,
+            "num_hidden_layers": 2, "num_attention_heads": 2,
+            "num_key_value_heads": 1, "head_dim": 8,
+            "max_position_embeddings": max_position_embeddings,
+            "rope_scaling": {"rope_type": "default", "mrope_section": [1, 1, 2]},
+            "attention_dropout": 0.0, "use_cache": True,
+        })
         config._attn_implementation = "eager"
         return Qwen3VLTextModel(config).eval()
 
@@ -222,7 +218,8 @@ class TestQwen3VLEagerContext(unittest.TestCase):
         kwargs = {"input_ids": ids, "use_cache": False, "return_dict": False}
         with torch.no_grad():
             expected = wrapped(position_ids=positions, **kwargs)[0]
-            exported = torch.export.export(wrapped, (), kwargs=kwargs, strict=False)
+            with prepared_static_export(wrapped, ids.shape[1]):
+                exported = torch.export.export(wrapped, (), kwargs=kwargs, strict=False)
             actual = exported.module()(**kwargs)[0]
         torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-5)
 

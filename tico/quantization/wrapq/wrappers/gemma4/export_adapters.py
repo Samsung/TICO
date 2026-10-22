@@ -24,11 +24,12 @@ from typing import Any, cast, Iterable, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
-
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.observers.base import ObserverBase
+from tico.quantization.wrapq.utils.static_export import (
+    require_static_decoder_inputs,
+)
 from tico.quantization.wrapq.wrappers.gemma4.utils import (
     fixed_slot_fuse,
     lookup_gemma4_per_layer_token_inputs,

@@ -226,6 +226,16 @@ input-file checksum. It does not automatically construct a cross-call KV cache.
    when final Circle structure and values match. Add `--require-torch-parity` to
    make local Torch-vs-Circle parity an additional hard requirement.
 
+Every probe must contain the exact indexed input, Circle-output, and Torch-output
+array sets required by the primary graph, together with one parity record per
+output. Missing or extra arrays, invalid indices, duplicate probe names, incorrect
+shapes, and nonfinite data are rejected even when both snapshots are damaged in
+the same way. Constant graphs may have no inputs but must have output evidence.
+With `--require-torch-parity`, parity is recomputed from the saved numerical arrays;
+a stale positive summary or an empty parity list cannot establish a pass.
+The detailed `numerical_evidence_left` and `numerical_evidence_right` records
+identify coverage failures independently of numerical mismatches.
+
 The runner intercepts real conversion/save functions only to record evidence; it
 does not substitute a mock compiler, fake graph, or synthetic runtime result.
 Every saved Circle must be captured and every compared stage must have numerical

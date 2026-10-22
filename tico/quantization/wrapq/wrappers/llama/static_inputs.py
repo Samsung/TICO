@@ -39,7 +39,7 @@ def capture_rope_state(owner: nn.Module, config: Any, source=None) -> None:
     """
     snapshot = make_rotary_embedding(config, source).eval()
     owner.add_module("_export_rotary_emb", snapshot)
-    owner._export_rope_contract_version = ROPE_CONTRACT_VERSION
+    setattr(owner, "_export_rope_contract_version", ROPE_CONTRACT_VERSION)
     # Old table/snapshot names must not override the canonical source after an
     # explicit migration. Quantized parameters and observer state are untouched.
     for name in (
@@ -53,7 +53,14 @@ def capture_rope_state(owner: nn.Module, config: Any, source=None) -> None:
 def _owner_config(owner: nn.Module) -> Any:
     """Resolve configuration on a model or a standalone wrapped decoder."""
     config = getattr(owner, "config", None)
-    return config if config is not None else owner.self_attn.wrapped.config
+    if config is not None:
+        return config
+    attention = getattr(owner, "self_attn", None)
+    wrapped = getattr(attention, "wrapped", None)
+    config = getattr(wrapped, "config", None)
+    if config is None:
+        raise ValueError("A static RoPE owner must provide its original model config.")
+    return config
 
 
 def _canonical_snapshot(owner: nn.Module) -> nn.Module:
@@ -102,10 +109,12 @@ def migrate_llama_rope_state(model: nn.Module, *, rotary_emb=None) -> dict[str, 
             raise ValueError("Cannot migrate RoPE while static export is prepared.")
     full_models = [m for m in modules if isinstance(m, QuantLlamaModel)]
     covered = {id(child) for m in full_models for child in m.modules()}
-    roots = full_models + [
-        m for m in modules
-        if isinstance(m, QuantLlamaDecoderLayer) and id(m) not in covered
-    ]
+    roots: list[nn.Module] = list(full_models)
+    roots.extend(
+        module
+        for module in modules
+        if isinstance(module, QuantLlamaDecoderLayer) and id(module) not in covered
+    )
     if not roots:
         raise ValueError("No QuantLlamaModel or QuantLlamaDecoderLayer was found.")
     if rotary_emb is not None and len(roots) != 1:
@@ -122,12 +131,13 @@ def migrate_llama_rope_state(model: nn.Module, *, rotary_emb=None) -> dict[str, 
         else:
             source, origin = None, "recorded_config"
         source = make_rotary_embedding(config, source)
-        children = (
-            [layer.wrapped for layer in owner.layers]
-            if isinstance(owner, QuantLlamaModel) else []
-        )
-        if any(not isinstance(child, QuantLlamaDecoderLayer) for child in children):
-            raise TypeError("Expected quantized LLaMA decoder layers for migration.")
+        children: list[QuantLlamaDecoderLayer] = []
+        if isinstance(owner, QuantLlamaModel):
+            for layer in owner.layers:
+                child = layer.wrapped
+                if not isinstance(child, QuantLlamaDecoderLayer):
+                    raise TypeError("Expected quantized LLaMA decoder layers for migration.")
+                children.append(child)
         plans.append((owner, config, source, origin, children))
 
     result = []
@@ -145,6 +155,10 @@ def migrate_llama_rope_state(model: nn.Module, *, rotary_emb=None) -> dict[str, 
 
 class LlamaStaticInputs(nn.Module):
     """Own bounded raw masks and RoPE tables outside the quantized wrapper."""
+
+    cos: torch.Tensor
+    sin: torch.Tensor
+    attention_mask: torch.Tensor
 
     def __init__(self, cos: torch.Tensor, sin: torch.Tensor, fill_value: float):
         super().__init__()
@@ -211,7 +225,9 @@ def prepare_llama_static_inputs(owner: nn.Module, max_seq_len: int) -> LlamaStat
         raise ValueError("Canonical LLaMA rotary must return [1, S, head_dim] tables.")
     if not torch.isfinite(cos).all() or not torch.isfinite(sin).all():
         raise ValueError("Canonical LLaMA rotary produced non-finite values.")
-    if owner.attn_options.rope == "pre_negated_sin":
+    if getattr(owner, "attn_options").rope == "pre_negated_sin":
         half = sin.shape[-1] // 2
         sin = torch.cat((-sin[..., :half], sin[..., half:]), dim=-1)
-    return LlamaStaticInputs(cos, sin, float(owner.qcfg.attention_mask_fill_value))
+    return LlamaStaticInputs(
+        cos, sin, float(getattr(owner, "qcfg").attention_mask_fill_value)
+    )

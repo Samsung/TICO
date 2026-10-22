@@ -20,13 +20,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from tico.quantization.wrapq.wrappers.llama.static_inputs import prepare_llama_static_inputs
-
 import numpy as np
 import torch
 
 from tico.circle import CircleDocument
 from tico.circle._schema import decode_text
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 
 
 _INPUT_ROLES = {

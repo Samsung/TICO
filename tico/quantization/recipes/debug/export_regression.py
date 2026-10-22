@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import traceback
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
@@ -262,7 +263,7 @@ def _state_contract(model) -> dict:
                 raise ValueError(f"Calibration is enabled at {name}; provide a frozen checkpoint.")
             modes[name] = module._mode.name
         if isinstance(module, ObserverBase):
-            fields = {
+            fields: dict[str, Any] = {
                 key: repr(getattr(module, key, None))
                 for key in ("enabled", "fake_quant_enabled", "dtype", "qscheme", "channel_axis", "_qparams_locked")
             }
@@ -347,7 +348,7 @@ class ExportRecorder:
         self.records = root / "records"
         self.records.mkdir(parents=True)
         self.atol, self.rtol = atol, rtol
-        self.stages = {}
+        self.stages: dict[str, str] = {}
         self.pending = 0
 
     def __enter__(self):
@@ -357,7 +358,7 @@ class ExportRecorder:
         self.convert_module = importlib.import_module("tico.utils.convert")
         self.old_convert = tico.convert
         self.old_save = CircleModel.save
-        self.old_export = self.convert_module.export
+        self.old_export = getattr(self.convert_module, "export")
         self.fx = None
 
         def capture_export(*args, **kwargs):
@@ -434,18 +435,19 @@ class ExportRecorder:
             delattr(converted, "_export_regression")
             self.pending -= 1
 
-        tico.convert = capture_convert
-        CircleModel.save = capture_save
-        self.convert_module.export = capture_export
+        # Instrumentation preserves the real compiler/runtime and is restored on exit.
+        setattr(tico, "convert", capture_convert)
+        setattr(CircleModel, "save", capture_save)
+        setattr(self.convert_module, "export", capture_export)
         return self
 
     def __exit__(self, exc_type, exc_value, trace):
         import tico
         from tico.utils.model import CircleModel
 
-        tico.convert = self.old_convert
-        CircleModel.save = self.old_save
-        self.convert_module.export = self.old_export
+        setattr(tico, "convert", self.old_convert)
+        setattr(CircleModel, "save", self.old_save)
+        setattr(self.convert_module, "export", self.old_export)
         if exc_type is None and self.pending:
             raise RuntimeError("Some converted stages were not saved and verified.")
 
@@ -455,7 +457,7 @@ def _host_contract(root: Path) -> dict:
     import numpy as np
     import torch
 
-    result = {}
+    result: dict[str, Any] = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix == ".circle":
             continue
@@ -512,6 +514,7 @@ def _export_full_text_probe(ctx, path: Path, options: argparse.Namespace) -> Non
     adapter = TextProbe(owner).eval()
     inputs = torch.randint(0, int(owner.config.vocab_size), (1, options.seq_len))
     builder = getattr(owner, "_build_static_export_inputs", None)
+    context: AbstractContextManager[None]
     if callable(builder):
         from tico.quantization.wrapq.utils.static_export import prepared_static_export
         context = prepared_static_export(adapter, options.seq_len)
@@ -530,6 +533,7 @@ def _export_full_text_probe(ctx, path: Path, options: argparse.Namespace) -> Non
 def _export_phase(ctx, phase: Path, options: argparse.Namespace, initial_state: dict) -> dict:
     """Export one phase and check that it preserved the frozen quantization state."""
     phase.mkdir(parents=True, exist_ok=False)
+    (phase / "artifacts").mkdir()
     ctx.cfg["export"]["output_dir"] = str(phase / "artifacts")
     _seed(options.seed)
     with ExportRecorder(phase, atol=options.atol, rtol=options.rtol) as recorder:
@@ -575,6 +579,8 @@ def _exercise_eager(ctx, options: argparse.Namespace) -> dict:
     if config is None and hasattr(ctx.model, "wrapped"):
         config = ctx.model.wrapped.config
     text_config = getattr(config, "text_config", config)
+    if text_config is None:
+        raise ValueError("Eager stress requires the checkpoint's text configuration.")
     capacity = int(text_config.max_position_embeddings)
     length = options.eager_seq_len
     if length + options.decode_steps > capacity:
@@ -683,6 +689,105 @@ def _worker(options: argparse.Namespace) -> None:
         _export_phase(ctx, root / "after_eager", options, initial)
 
 
+def _numerical_evidence(
+    metadata: dict[str, Any], values: Any, *, atol: float, rtol: float
+) -> dict[str, Any]:
+    """Validate every graph boundary and probe before considering equal results.
+
+    Both sides may be damaged identically. Equal key sets or one surviving
+    Circle output therefore do not establish coverage. Validate indexed arrays
+    against the primary graph, check every shape/value, and independently
+    recompute Torch/Circle parity instead of trusting an empty or stale summary.
+    """
+    import numpy as np
+
+    failures: list[str] = []
+    parity: list[dict[str, Any]] = []
+    try:
+        graphs = metadata["contract"]["subgraphs"]
+        if not isinstance(graphs, list) or not graphs:
+            raise ValueError("Missing primary graph contract.")
+        graph = graphs[0]
+        tensors = graph["tensors"]
+        inputs, outputs = graph["inputs"], graph["outputs"]
+        if not isinstance(tensors, list):
+            raise ValueError("Missing tensor contracts.")
+        if not isinstance(inputs, list) or not isinstance(outputs, list) or not outputs:
+            raise ValueError("Graph boundaries must be lists with at least one output.")
+        for index in inputs + outputs:
+            if type(index) is not int or not 0 <= index < len(tensors):
+                raise ValueError("Invalid graph boundary tensor index.")
+        probes = metadata["probes"]
+        if not isinstance(probes, list) or not probes:
+            raise ValueError("Missing numerical probes.")
+        names = [probe["probe"] for probe in probes]
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("Probe names must be nonempty strings.")
+        if len(set(names)) != len(names):
+            raise ValueError("Duplicate numerical probes.")
+    except (KeyError, TypeError, ValueError, IndexError) as error:
+        return {"ok": False, "failures": [str(error)], "parity": []}
+
+    expected = {
+        f"p{probe_index}_{kind}_{index}"
+        for probe_index in range(len(probes))
+        for kind, boundary in (("input", inputs), ("circle", outputs), ("torch", outputs))
+        for index in range(len(boundary))
+    }
+    actual = set(values.files)
+    if len(actual) != len(values.files):
+        failures.append("Duplicate array keys in numerical archive.")
+    if actual != expected:
+        failures.append(
+            f"Numerical array coverage differs: missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+
+    for probe_index, probe in enumerate(probes):
+        reported = probe.get("torch_parity")
+        reports_complete = (
+            isinstance(reported, list)
+            and len(reported) == len(outputs)
+            and all(isinstance(item, dict) and type(item.get("ok")) is bool for item in reported)
+        )
+        if not reports_complete:
+            failures.append(f"Probe {probe_index}: missing per-output Torch parity records.")
+        for kind, boundary in (("input", inputs), ("circle", outputs), ("torch", outputs)):
+            for index, tensor_index in enumerate(boundary):
+                key = f"p{probe_index}_{kind}_{index}"
+                if key not in actual:
+                    continue
+                array = values[key]
+                shape = tensors[tensor_index].get("shape")
+                # _json_value normalizes generated NumPy shape vectors this way.
+                if isinstance(shape, dict):
+                    shape = shape.get("values")
+                if (
+                    not isinstance(shape, list)
+                    or any(type(dim) is not int or dim < 0 for dim in shape)
+                    or tuple(shape) != array.shape
+                ):
+                    failures.append(f"{key}: array shape disagrees with graph boundary.")
+                if array.dtype.kind not in "biufc" or not np.isfinite(array).all():
+                    failures.append(f"{key}: nonnumeric or nonfinite numerical evidence.")
+        comparisons = []
+        for index in range(len(outputs)):
+            golden, result = f"p{probe_index}_torch_{index}", f"p{probe_index}_circle_{index}"
+            if golden in actual and result in actual:
+                comparisons.append(compare_arrays(values[golden], values[result], atol=atol, rtol=rtol))
+        parity.append({
+            "probe": names[probe_index],
+            "outputs": comparisons,
+            "ok": (
+                reports_complete
+                and all(item["ok"] for item in reported)
+                and len(comparisons) == len(outputs)
+                and all(item["ok"] for item in comparisons)
+            ),
+        })
+    return {"ok": not failures, "failures": failures, "parity": parity}
+
+
 def compare_snapshots(left_root: Path, right_root: Path, *, atol: float, rtol: float, require_torch_parity: bool = False) -> dict:
     """Compare structure, actual inputs/outputs, host data, and state invariants."""
     import numpy as np
@@ -703,7 +808,7 @@ def compare_snapshots(left_root: Path, right_root: Path, *, atol: float, rtol: f
         a_path = left_root / "records" / left["stages"][name]
         b_path = right_root / "records" / right["stages"][name]
         a, b = json.loads(Path(str(a_path) + ".json").read_text()), json.loads(Path(str(b_path) + ".json").read_text())
-        record = {
+        record: dict[str, Any] = {
             "circle_structure_equal": a["contract"] == b["contract"],
             "circle_structure_differences": _first_differences(a["contract"], b["contract"]),
             "torch_export_ops_equal": a["fx"] == b["fx"],
@@ -714,14 +819,11 @@ def compare_snapshots(left_root: Path, right_root: Path, *, atol: float, rtol: f
         }
         with np.load(str(a_path) + ".npz", allow_pickle=False) as av, np.load(str(b_path) + ".npz", allow_pickle=False) as bv:
             record["array_keys_equal"] = set(av.files) == set(bv.files)
-            record["numerical_coverage_complete"] = all(
-                bool(metadata["probes"])
-                and all(
-                    any(key.startswith(f"p{index}_circle_") for key in values.files)
-                    for index in range(len(metadata["probes"]))
-                )
-                for metadata, values in ((a, av), (b, bv))
-            )
+            left_evidence = _numerical_evidence(a, av, atol=atol, rtol=rtol)
+            right_evidence = _numerical_evidence(b, bv, atol=atol, rtol=rtol)
+            record["numerical_evidence_left"] = left_evidence
+            record["numerical_evidence_right"] = right_evidence
+            record["numerical_coverage_complete"] = left_evidence["ok"] and right_evidence["ok"]
             for key in sorted(set(av.files) & set(bv.files)):
                 # Inputs must match exactly; output tolerances are explicit.
                 tol = (0.0, 0.0) if "_input_" in key else (atol, rtol)
@@ -729,7 +831,11 @@ def compare_snapshots(left_root: Path, right_root: Path, *, atol: float, rtol: f
         stage_ok = all(record[key] for key in ("circle_structure_equal", "probe_names_equal", "execution_mode_equal", "array_keys_equal", "numerical_coverage_complete"))
         stage_ok &= all(value["ok"] for value in record["arrays"].values())
         if require_torch_parity:
-            stage_ok &= all(item["ok"] for p in a["probes"] + b["probes"] for item in p["torch_parity"])
+            stage_ok &= all(
+                evidence["ok"] and bool(evidence["parity"])
+                and all(probe["ok"] for probe in evidence["parity"])
+                for evidence in (left_evidence, right_evidence)
+            )
         record["ok"] = bool(stage_ok)
         if not stage_ok:
             failures.append(name + ": structural, input, output, or requested Torch parity mismatch")

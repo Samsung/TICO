@@ -14,14 +14,14 @@
 
 """Explicit, temporary input preparation for static model export."""
 
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager, ExitStack
 from typing import Iterator
 
 import torch
 from torch import nn
 
 
-def validate_static_length(length: int, capacity: int) -> int:
+def validate_static_length(length: object, capacity: int) -> int:
     """Validate an explicit profile without consulting calibration settings."""
     if isinstance(length, bool) or not isinstance(length, int):
         raise TypeError("Static export max_seq_len must be an integer.")
@@ -60,7 +60,7 @@ def prepared_static_export(model: nn.Module, max_seq_len: int) -> Iterator[None]
         if getattr(getattr(owner, "_mode", None), "name", None) == "CALIB":
             raise ValueError("Static export cannot run while calibration is enabled.")
     with ExitStack() as stack:
-        covered = set()
+        covered: set[int] = set()
         for owner in owners:
             if id(owner) in covered:
                 continue
@@ -80,7 +80,9 @@ def prepared_static_export(model: nn.Module, max_seq_len: int) -> Iterator[None]
             was_registered = "_static_export_inputs" in owner._modules
 
             def restore(
-                owner=owner, existed=existed, previous=previous,
+                owner=owner,
+                existed=existed,
+                previous=previous,
                 was_registered=was_registered,
             ):
                 if hasattr(owner, "_static_export_inputs"):

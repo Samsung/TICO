@@ -14,6 +14,7 @@
 
 """Positive and negative tests for the export-regression report comparator."""
 
+import argparse
 import contextlib
 import copy
 import io
@@ -158,6 +159,90 @@ class TestSnapshotComparison(unittest.TestCase):
     def test_identical_complete_snapshots_pass(self):
         self.assertTrue(self.compare()["ok"])
 
+    def rewrite_both_arrays(self, transform):
+        """Damage both archives identically to catch false equality positives."""
+        for root in (self.left, self.right):
+            path = root / "records/decoder.npz"
+            with np.load(path, allow_pickle=False) as values:
+                arrays = {key: values[key] for key in values.files}
+            transform(arrays)
+            np.savez(path, **arrays)
+
+    def rewrite_both_records(self, transform):
+        """Apply a malformed-evidence fixture to each independent snapshot."""
+        for root in (self.left, self.right):
+            path = root / "records/decoder.json"
+            data = json.loads(path.read_text())
+            transform(data)
+            _write_json(path, data)
+
+    def test_missing_inputs_on_both_sides_fail(self):
+        self.rewrite_both_arrays(lambda arrays: arrays.pop("p0_input_0"))
+        result = self.compare()
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["stages"]["decoder.q.circle"]["numerical_coverage_complete"])
+
+    def test_missing_torch_outputs_and_empty_parity_fail(self):
+        self.rewrite_both_arrays(lambda arrays: arrays.pop("p0_torch_0"))
+        self.rewrite_both_records(lambda record: record["probes"][0].update(torch_parity=[]))
+        self.assertFalse(self.compare()["ok"])
+        self.assertFalse(self.compare(require_torch_parity=True)["ok"])
+
+    def test_partial_multi_output_evidence_fails(self):
+        def add_output(record):
+            record["contract"]["subgraphs"][0]["outputs"].append(2)
+            record["probes"][0]["torch_parity"].append({"ok": True, "max_abs_error": 0.0})
+
+        self.rewrite_both_records(add_output)
+        self.rewrite_both_arrays(lambda arrays: arrays.update(
+            p0_circle_1=arrays["p0_circle_0"].copy(),
+            p0_torch_1=arrays["p0_torch_0"].copy(),
+        ))
+        self.assertTrue(self.compare(require_torch_parity=True)["ok"])
+        self.rewrite_both_arrays(lambda arrays: arrays.pop("p0_circle_1"))
+        self.assertFalse(self.compare()["ok"])
+
+    def test_shifted_output_index_does_not_count_as_coverage(self):
+        self.rewrite_both_arrays(lambda arrays: arrays.update(p0_circle_9=arrays.pop("p0_circle_0")))
+        self.assertFalse(self.compare()["ok"])
+
+    def test_extra_unindexed_arrays_fail(self):
+        self.rewrite_both_arrays(lambda arrays: arrays.update(unused=np.ones(1, np.float32)))
+        self.assertFalse(self.compare()["ok"])
+
+    def test_parity_record_count_must_match_graph_outputs(self):
+        self.rewrite_both_records(lambda record: record["probes"][0]["torch_parity"].append({"ok": True}))
+        self.assertFalse(self.compare()["ok"])
+
+    def test_identical_shape_corruption_fails_against_graph_contract(self):
+        self.rewrite_both_arrays(lambda arrays: arrays.update(p0_input_0=arrays["p0_input_0"].reshape(1, 1)))
+        self.assertFalse(self.compare()["ok"])
+
+    def test_stale_positive_parity_is_recomputed_from_actual_arrays(self):
+        self.rewrite_both_arrays(lambda arrays: arrays.update(p0_torch_0=np.array([100.0], np.float32)))
+        self.assertTrue(self.compare()["ok"])
+        self.assertFalse(self.compare(require_torch_parity=True)["ok"])
+
+    def test_matching_nonfinite_evidence_never_passes(self):
+        for key in ("p0_input_0", "p0_circle_0", "p0_torch_0"):
+            with self.subTest(key=key):
+                self.rewrite_both_arrays(lambda arrays: arrays.update({key: np.array([np.inf], np.float32)}))
+                self.assertFalse(self.compare()["ok"])
+                self.rewrite_both_arrays(lambda arrays: arrays.update({key: np.array([1.0 if "input" in key else 2.0], np.float32)}))
+
+    def test_constant_graph_with_no_inputs_is_valid(self):
+        self.rewrite_both_records(lambda record: record["contract"]["subgraphs"][0].update(inputs=[]))
+        self.rewrite_both_arrays(lambda arrays: arrays.pop("p0_input_0"))
+        self.assertTrue(self.compare(require_torch_parity=True)["ok"])
+
+    def test_no_graph_outputs_is_incomplete_not_vacuous_success(self):
+        self.rewrite_both_records(lambda record: record["contract"]["subgraphs"][0].update(outputs=[]))
+        self.assertFalse(self.compare()["ok"])
+
+    def test_invalid_graph_boundary_index_fails(self):
+        self.rewrite_both_records(lambda record: record["contract"]["subgraphs"][0].update(outputs=[999]))
+        self.assertFalse(self.compare()["ok"])
+
     def test_state_mutation_fails(self):
         self.mutate_snapshot("state_preserved", False)
         self.assertFalse(self.compare()["ok"])
@@ -253,8 +338,8 @@ class TestProbeAndHostContracts(unittest.TestCase):
 
 class TestFrozenStateFingerprint(unittest.TestCase):
     def make_model(self):
-        from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
         from tico.quantization.wrapq.observers.minmax import MinMaxObserver
+        from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
         class Model(QuantModuleBase):
             def __init__(self):
@@ -306,7 +391,7 @@ class TestRopeMigrationRouting(unittest.TestCase):
         from tico.quantization.recipes.debug.export_regression import _run
 
         root = Path(directory)
-        options = SimpleNamespace(
+        options = argparse.Namespace(
             command="run", output=str(root / "results"), config=str(root / "config.yaml"),
             checkpoint=str(root / "model.pt"), seq_len=16, eager_seq_len=8,
             decode_steps=2, artifacts="auto", seed=42, threads=1, atol=1e-5,

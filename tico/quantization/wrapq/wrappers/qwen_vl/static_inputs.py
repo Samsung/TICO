@@ -25,6 +25,11 @@ from tico.quantization.wrapq.utils.static_export import validate_static_length
 class Qwen3VLStaticTextInputs(nn.Module):
     """Own raw static buffers without owning quantized weights or observers."""
 
+    position_ids: torch.Tensor
+    cos: torch.Tensor
+    sin: torch.Tensor
+    attention_mask: torch.Tensor
+
     def __init__(self, positions, cos, sin, fill_value):
         super().__init__()
         self.max_seq_len = int(positions.shape[-1])
@@ -53,11 +58,14 @@ def prepare_qwen3_vl_static_text_inputs(owner, max_seq_len):
     validate_static_length(max_seq_len, int(owner.config.max_position_embeddings))
     parameter = next(owner.parameters())
     device = parameter.device
-    legacy = [getattr(owner, name, None) for name in (
-        "position_ids_template", "cos_template", "sin_template"
-    )]
-    if all(isinstance(value, torch.Tensor) for value in legacy):
-        positions, cos, sin = legacy
+    positions = getattr(owner, "position_ids_template", None)
+    cos = getattr(owner, "cos_template", None)
+    sin = getattr(owner, "sin_template", None)
+    if (
+        isinstance(positions, torch.Tensor)
+        and isinstance(cos, torch.Tensor)
+        and isinstance(sin, torch.Tensor)
+    ):
         if positions.shape[-1] < max_seq_len or cos.shape[1] < max_seq_len:
             raise ValueError("Legacy Qwen3-VL tables do not cover the export profile.")
         positions = positions[..., :max_seq_len]

@@ -23,12 +23,12 @@ if TYPE_CHECKING:
 
 
 from tico.quantization.config.ptq import PTQConfig
-from tico.quantization.wrapq.wrappers.qwen_vl.static_inputs import (
-    prepare_qwen3_vl_static_text_inputs,
-)
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.qwen_vl.static_inputs import (
+    prepare_qwen3_vl_static_text_inputs,
+)
 from tico.quantization.wrapq.wrappers.registry import try_register
 from transformers.cache_utils import Cache
 
