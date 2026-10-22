@@ -107,10 +107,14 @@ python tico/quantization/recipes/debug/export_regression.py run \
   --config tico/quantization/examples/configs/llama_export.yaml \
   --checkpoint /absolute/path/to/pre_pr_frozen.pt \
   --migrate-llama-rope \
+  --legacy-calibration-length \
   --seq-len 2048 --eager-seq-len 1536 --decode-steps 4 \
   --output /absolute/path/to/new-results/llama-old-new
 ```
 
+The explicit length bridge is required for this historical exporter; current
+exporters preserve the configured calibration length by default. It does not
+recalibrate the checkpoint or verify calibration/export length independence.
 The baseline remains unchanged. The candidate migration preserves frozen
 weights/qparams, but corrected RoPE may change host arrays, conversion probe
 inputs, and outputs. Those differences still produce `FAIL` (exit 1); there is

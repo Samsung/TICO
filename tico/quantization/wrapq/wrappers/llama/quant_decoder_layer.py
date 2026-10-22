@@ -145,7 +145,11 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         assert hasattr(cfg, "max_position_embeddings")
         assert isinstance(cfg.max_position_embeddings, int)
         self.max_seq = cfg.max_position_embeddings
-        source = rotary_emb if rotary_emb is not None else getattr(fp_layer, "rotary_emb", None)
+        source = (
+            rotary_emb
+            if rotary_emb is not None
+            else getattr(fp_layer, "rotary_emb", None)
+        )
         self.rotary_emb = make_rotary_embedding(cfg, source)
         capture_rope_state(self, cfg, self.rotary_emb)
 
@@ -234,10 +238,14 @@ class QuantLlamaDecoderLayer(QuantModuleBase):
         prepared = getattr(self, "_static_export_inputs", None)
         if position_embeddings is None and prepared is not None:
             if position_ids is not None:
-                raise ValueError("Provide explicit RoPE tensors for custom static positions.")
+                raise ValueError(
+                    "Provide explicit RoPE tensors for custom static positions."
+                )
             cos, sin = prepared.rope(
-                self._get_past_len(past_key_value), hidden_states.size(1),
-                device=hidden_states.device, dtype=hidden_states.dtype,
+                self._get_past_len(past_key_value),
+                hidden_states.size(1),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
             )
         elif position_embeddings is None:
             if torch.compiler.is_compiling():

@@ -794,9 +794,7 @@ def save_layers_to(
 
         static_inputs = prepare_llama_static_inputs(qlayer.wrapped, max_seq_len)
         attention_mask = static_inputs.mask(S, S, 0, device=torch.device("cpu"))
-        pos_embeds = static_inputs.rope(
-            0, S, device="cpu", dtype=example_hidden.dtype
-        )
+        pos_embeds = static_inputs.rope(0, S, device="cpu", dtype=example_hidden.dtype)
 
         print(f"Saving {layer_name} to {save_path.resolve()}")
         with torch.no_grad():

@@ -493,13 +493,24 @@ class TestQuantLlamaAttention(unittest.TestCase):
         hidden = torch.randn(1, 1, self.hidden_size)
         positions = self._rand_rope_for(attention, 1, 1)
         mask = self._rand_additive_mask(1, 1, 1)
-        for cls in (LlamaAttentionPrefillExportAdapter, LlamaAttentionDecodeExportAdapter):
+        for cls in (
+            LlamaAttentionPrefillExportAdapter,
+            LlamaAttentionDecodeExportAdapter,
+        ):
             adapter = cls(attention, return_kv=False)
             with self.subTest(adapter=cls.__name__):
                 with self.assertRaisesRegex(ValueError, "attention_mask"):
-                    adapter(hidden_states=hidden, position_embeddings=positions, attention_mask=None)
+                    adapter(
+                        hidden_states=hidden,
+                        position_embeddings=positions,
+                        attention_mask=None,
+                    )
                 with self.assertRaisesRegex(ValueError, "cos, sin"):
-                    adapter(hidden_states=hidden, position_embeddings=None, attention_mask=mask)
+                    adapter(
+                        hidden_states=hidden,
+                        position_embeddings=None,
+                        attention_mask=mask,
+                    )
 
     def test_decode_export_adapter_returns_delta_kv(self):
         qattn = self._make_qattn()

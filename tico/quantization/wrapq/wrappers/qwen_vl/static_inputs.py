@@ -17,9 +17,9 @@
 import copy
 
 import torch
-from torch import nn
 
 from tico.quantization.wrapq.utils.static_export import validate_static_length
+from torch import nn
 
 
 class Qwen3VLStaticTextInputs(nn.Module):
@@ -37,12 +37,16 @@ class Qwen3VLStaticTextInputs(nn.Module):
             raise ValueError("Qwen3-VL static positions must have shape [3, 1, S].")
         if cos.shape[:2] != (1, self.max_seq_len) or cos.shape != sin.shape:
             raise ValueError("Qwen3-VL static RoPE tables must have shape [1, S, D].")
-        self.register_buffer("position_ids", positions.detach().clone(), persistent=False)
+        self.register_buffer(
+            "position_ids", positions.detach().clone(), persistent=False
+        )
         self.register_buffer("cos", cos.detach().clone(), persistent=False)
         self.register_buffer("sin", sin.detach().clone(), persistent=False)
         mask = torch.full(
-            (1, 1, self.max_seq_len, self.max_seq_len), fill_value,
-            device=cos.device, dtype=torch.float32,
+            (1, 1, self.max_seq_len, self.max_seq_len),
+            fill_value,
+            device=cos.device,
+            dtype=torch.float32,
         ).triu_(1)
         self.register_buffer("attention_mask", mask, persistent=False)
 

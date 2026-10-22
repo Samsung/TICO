@@ -94,7 +94,8 @@ def export_full_circle(
         raise ValueError("Full text export requires an explicit max_seq_len profile.")
     preparation = (
         prepared_static_export(export_model, max_seq_len)
-        if max_seq_len is not None else nullcontext()
+        if max_seq_len is not None
+        else nullcontext()
     )
     with preparation, torch.no_grad(), SuppressWarning(UserWarning, ".*"):
         cm = tico.convert(export_model, args, kwargs=kwargs, strict=strict)

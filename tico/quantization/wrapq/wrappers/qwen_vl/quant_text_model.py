@@ -604,8 +604,16 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         # rotary_emb returns (cos, sin) which are float tensors and need quantization
 
         if prepared is not None:
-            cos = prepared.cos[:, past_seen_tokens:end].to(hidden_states).expand(batch_size, -1, -1)
-            sin = prepared.sin[:, past_seen_tokens:end].to(hidden_states).expand(batch_size, -1, -1)
+            cos = (
+                prepared.cos[:, past_seen_tokens:end]
+                .to(hidden_states)
+                .expand(batch_size, -1, -1)
+            )
+            sin = (
+                prepared.sin[:, past_seen_tokens:end]
+                .to(hidden_states)
+                .expand(batch_size, -1, -1)
+            )
         else:
             cos, sin = self.rotary_emb(hidden_states, position_ids)
         position_embeddings = (cos, sin)
