@@ -15,6 +15,8 @@
 """Unit tests for the Gemma4 text-model PTQ wrapper."""
 
 import unittest
+from typing import cast
+from unittest import mock
 
 import torch
 
@@ -161,6 +163,86 @@ class TestQuantGemma4TextModel(unittest.TestCase):
             )
 
         _assert_close(self, quant_out.last_hidden_state, fp_out.last_hidden_state)
+
+    def test_sliding_cached_decode_aligns_masks_with_cropped_keys(self):
+        """Keep cropped sliding K/V aligned with padding and shared consumers."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+            QuantGemma4TextAttention,
+        )
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+        from transformers.cache_utils import DynamicCache
+
+        cfg = _make_text_config(
+            layer_types=[
+                "sliding_attention",
+                "full_attention",
+                "sliding_attention",
+                "full_attention",
+            ],
+            sliding_window=4,
+            max_position_embeddings=16,
+            num_kv_shared_layers=2,
+        )
+        qmodel = QuantGemma4TextModel(_make_text_model(cfg)).eval()
+        cropped_cache = DynamicCache(config=cfg)
+        full_cache = DynamicCache()
+        input_ids = torch.arange(1, 9).unsqueeze(0)
+        mask = torch.tensor([[1, 1, 1, 1, 1, 1, 0, 0]])
+        owner = cast(
+            QuantGemma4TextAttention,
+            qmodel.get_submodule("layers.0.wrapped.self_attn.wrapped"),
+        )
+        shared = cast(
+            QuantGemma4TextAttention,
+            qmodel.get_submodule("layers.2.wrapped.self_attn.wrapped"),
+        )
+        fill = qmodel.qcfg.attention_mask_fill_value
+
+        with torch.no_grad():
+            for step in range(3):
+                with (
+                    mock.patch.object(
+                        owner, "_forward_unrolled", wraps=owner._forward_unrolled
+                    ) as owner_forward,
+                    mock.patch.object(
+                        shared, "_forward_unrolled", wraps=shared._forward_unrolled
+                    ) as shared_forward,
+                ):
+                    actual = qmodel(
+                        input_ids=input_ids,
+                        attention_mask=mask,
+                        past_key_values=cropped_cache,
+                        use_cache=True,
+                        return_dict=True,
+                    )
+                expected = qmodel(
+                    input_ids=input_ids,
+                    attention_mask=mask,
+                    past_key_values=full_cache,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                if step:
+                    # The sliding cache holds the previous three physical slots
+                    # plus the new token; padding keeps its corresponding slot.
+                    expected_mask = torch.tensor(
+                        [0.0, fill, fill, 0.0] if step == 1 else [fill, fill, 0.0, 0.0]
+                    ).reshape(1, 1, 1, 4)
+                    for forward in (owner_forward, shared_forward):
+                        self.assertTrue(
+                            torch.equal(
+                                forward.call_args.kwargs["attention_mask"],
+                                expected_mask,
+                            )
+                        )
+                _assert_close(
+                    self, actual.last_hidden_state, expected.last_hidden_state
+                )
+                self.assertEqual(cropped_cache.get_seq_length(), 8 + step)
+                input_ids = torch.tensor([[9 + step]])
+                mask = torch.cat((mask, torch.ones((1, 1), dtype=mask.dtype)), dim=-1)
 
     def test_static_attention_mask_mapping_matches_hf_text_model(self):
         """Check the static CPU-provided mask mapping path."""

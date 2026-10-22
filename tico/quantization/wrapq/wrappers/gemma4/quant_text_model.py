@@ -860,6 +860,16 @@ class QuantGemma4TextModel(QuantModuleBase):
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,
         )
+        get_mask_sizes = getattr(past_key_values, "get_mask_sizes", None)
+        if callable(get_mask_sizes):
+            # Sliding caches discard old slots. Use the owning layer's cache
+            # span before updates, also for shared-KV consumers of that type.
+            layer_types = cast(list[str], self.config.layer_types)
+            for layer_type, mask in mask_mapping.items():
+                kv_length, kv_offset = get_mask_sizes(
+                    inputs_embeds.shape[1], layer_types.index(layer_type)
+                )
+                mask_mapping[layer_type] = mask[..., kv_offset : kv_offset + kv_length]
         mask_mapping = self._observe_attention_mask_mapping(mask_mapping)
 
         hidden_states = inputs_embeds
