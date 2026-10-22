@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import types
+import copy
 from typing import cast, Iterable, Optional, TYPE_CHECKING
 
 import torch
@@ -26,6 +26,9 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.utils.utils import get_model_arg, join_name
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
+from tico.quantization.wrapq.wrappers.qwen_vl.static_inputs import (
+    prepare_qwen3_vl_static_text_inputs,
+)
 from tico.quantization.wrapq.wrappers.registry import try_register
 from transformers.cache_utils import Cache
 
@@ -44,11 +47,6 @@ class QuantQwen3VLTextModel(QuantModuleBase):
     - Final normalization layer (norm)
     - Rotary position embedding (rotary_emb) - NOT wrapped
     """
-
-    causal_mask_template: torch.Tensor
-    position_ids_template: torch.Tensor
-    cos_template: torch.Tensor
-    sin_template: torch.Tensor
 
     # This boolean flag enforces model behavior that is only activated during model graph tracing (torch.export.export).
     # This flag is used in unit tests only in order to check the behavior without actually exporting the model.
@@ -116,40 +114,11 @@ class QuantQwen3VLTextModel(QuantModuleBase):
 
         # rotary_emb
         self.rotary_emb = fp_model.rotary_emb
+        self._export_rotary_emb = copy.deepcopy(fp_model.rotary_emb)
 
-        device = next(fp_model.parameters()).device
-
-        # ----- static buffers: causal mask template ---------------------------
-        assert isinstance(self.config.max_position_embeddings, int)
-        max_seq = self.config.max_position_embeddings
-        mask = torch.full(
-            (1, 1, max_seq, max_seq), float(self.qcfg.attention_mask_fill_value)
-        )
-        mask.triu_(1)
-        self.register_buffer("causal_mask_template", mask, persistent=False)
-
-        # ----- static buffers: position_ids -----------------------------------
-        visual_start_idx = self._get_visual_start_idx(qcfg)
-        grid_thw = self._get_vision_grid_thw(qcfg)
-        spatial_merge_size = self._get_spatial_merge_size(qcfg)
-        position_ids = self._compute_3d_position_ids(
-            device=device,
-            visual_start_idx=visual_start_idx,
-            seq_len=max_seq,
-            thw=grid_thw,
-            spatial_merge_size=spatial_merge_size,  # type: ignore[arg-type]
-        )
-        self.register_buffer("position_ids_template", position_ids, persistent=False)
-
-        # ----- static buffers: position_embeddings -----------------------------------
-        # Dummy tensor: rotary_emb uses `x` only for device/dtype (shape is unused)
-        _ = torch.empty(0, device=device)
-        # tuple of 2 tensors with shape (batch_size, seq_len, head_dim // 2)
-        cos, sin = self.rotary_emb(_, position_ids)
-        assert cos.shape[:-1] == (1, max_seq)
-        assert sin.shape[:-1] == (1, max_seq)
-        self.register_buffer("cos_template", cos, persistent=False)
-        self.register_buffer("sin_template", sin, persistent=False)
+        # Eager execution builds masks and mRoPE from each request. Do not size
+        # runtime buffers from the native context limit or a calibration sample.
+        # Fixed-grid vision arguments are consumed only by static export paths.
 
         # --- Observers for floating-point tensors -----------------------------
         mk = self._make_obs
@@ -165,6 +134,10 @@ class QuantQwen3VLTextModel(QuantModuleBase):
             obs = mk(obs_name)
             self.obs_deepstack_visual_embeds.append(obs)
             self.add_module(obs_name, obs)
+
+    def _build_static_export_inputs(self, max_seq_len: int):
+        """Prepare fixed-grid full-text inputs before entering the trace."""
+        return prepare_qwen3_vl_static_text_inputs(self, max_seq_len)
 
     def _get_past_seen_tokens(self, past_key_values: Cache | None) -> int:
         """
@@ -190,7 +163,7 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """
-        Slice the static causal mask template for the current query/key sizes.
+        Build the additive causal mask for the current query/key sizes.
 
         The row offset is shifted by `past_seen_tokens` so that decode steps
         produce the correct `q_len x kv_len` causal region.
@@ -205,14 +178,20 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         Returns:
             A 4D additive causal mask with shape `(1, 1, q_len, kv_len)`.
         """
-        assert isinstance(self.causal_mask_template, torch.Tensor)
-
-        row_start = past_seen_tokens
-        row_end = past_seen_tokens + q_len
-
-        return self.causal_mask_template[..., row_start:row_end, :kv_len].to(
-            device=device, dtype=dtype
-        )
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            end = past_seen_tokens + q_len
+            if end > prepared.max_seq_len or kv_len > prepared.max_seq_len:
+                raise ValueError("Qwen3-VL mask exceeds the static export profile.")
+            return prepared.attention_mask[..., past_seen_tokens:end, :kv_len].to(
+                device=device, dtype=dtype
+            )
+        return torch.full(
+            (1, 1, q_len, kv_len),
+            float(self.qcfg.attention_mask_fill_value),
+            device=device,
+            dtype=dtype,
+        ).triu_(diagonal=past_seen_tokens + 1)
 
     def _normalize_attention_mask(
         self,
@@ -537,6 +516,17 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                 "You must specify exactly one of input_ids or inputs_embeds"
             )
 
+        prepared = getattr(self, "_static_export_inputs", None)
+        if prepared is not None:
+            if use_cache or past_key_values is not None:
+                raise ValueError(
+                    "Full Qwen3-VL static text export is cache-free prefill. "
+                    "Use per-layer adapters for external KV-cache export."
+                )
+            use_cache = False
+        elif use_cache is None:
+            use_cache = self.config.use_cache
+
         # torch.jit.trace() doesn't support cache objects in the output
         if use_cache and past_key_values is None and not torch.jit.is_tracing():
             from transformers.cache_utils import DynamicCache
@@ -566,14 +556,26 @@ class QuantQwen3VLTextModel(QuantModuleBase):
                 device=inputs_embeds.device,
             )
 
+        prepared = getattr(self, "_static_export_inputs", None)
+        static_requested = bool(
+            prepared is not None or torch.compiler.is_compiling() or self.force_export
+        )
+        if static_requested and prepared is None:
+            raise ValueError(
+                "Prepare fixed Qwen3-VL text inputs with prepared_static_export(model, "
+                "max_seq_len) before full-model export. Per-layer export instead "
+                "requires explicit host mask and RoPE tensors."
+            )
+        export_position_ids = None
+        if prepared is not None:
+            end = past_seen_tokens + seq_len
+            if end > prepared.max_seq_len:
+                raise ValueError("Qwen3-VL position span exceeds the export profile.")
+            export_position_ids = prepared.position_ids[..., past_seen_tokens:end]
+
         if position_ids is None:
-            if torch.compiler.is_compiling() or self.force_export:
-                # Use precomputed position IDs at export time only
-                # Get position_ids from precomputed position_ids_template buffer.
-                # Take first seq_len positions. We obtain a tensor of shape (3, 1, seq_len).
-                position_ids = self.position_ids_template[
-                    ..., past_seen_tokens : past_seen_tokens + seq_len
-                ]
+            if export_position_ids is not None:
+                position_ids = export_position_ids
             else:
                 position_ids = cache_position.view(1, 1, -1)
             # Replicate position_ids across batch dimension
@@ -601,16 +603,17 @@ class QuantQwen3VLTextModel(QuantModuleBase):
         # create position embeddings to be shared across the decoder layers
         # rotary_emb returns (cos, sin) which are float tensors and need quantization
 
-        if torch.compiler.is_compiling() or self.force_export:
-            # Use precomputed position embeddings at export time only
-            # Get position embeddings from precomputed position_embeddings_template.
-            # Take seq_len positions starting from past_seen_tokens.
-            # We obtain a tensor of shape (1, seq_len, head_dim // 2)
-            cos = self.cos_template[:, past_seen_tokens : past_seen_tokens + seq_len, :]
-            sin = self.sin_template[:, past_seen_tokens : past_seen_tokens + seq_len, :]
-            # Replicate position_embeddings across batch dimension
-            cos = cos.expand(batch_size, -1, -1)
-            sin = sin.expand(batch_size, -1, -1)
+        if prepared is not None:
+            cos = (
+                prepared.cos[:, past_seen_tokens:end]
+                .to(hidden_states)
+                .expand(batch_size, -1, -1)
+            )
+            sin = (
+                prepared.sin[:, past_seen_tokens:end]
+                .to(hidden_states)
+                .expand(batch_size, -1, -1)
+            )
         else:
             cos, sin = self.rotary_emb(hidden_states, position_ids)
         position_embeddings = (cos, sin)

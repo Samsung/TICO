@@ -115,7 +115,9 @@ example_pos = rotary(example, torch.arange(S)[None, :])
 
 with SuppressWarning(UserWarning, ".*"):
     cm = tico.convert(
-        attn_q.wrapped.as_export_module("prefill").eval(), (example, example_pos)
+        attn_q.wrapped.as_export_module("prefill").eval(),
+        (example, example_pos),
+        kwargs={"attention_mask": torch.full((B, S, S), -120.0).triu(1)},
     )
 cm.save(save_path)
 

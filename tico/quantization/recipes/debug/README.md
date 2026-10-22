@@ -255,3 +255,107 @@ Before merging a new debug utility:
 - It respects config-provided device, dtype, and calibration settings.
 - It does not import from another example script.
 - It has at least a small smoke test or documented manual command.
+
+## Download-free CPU recipe follow-up
+
+The CPU runner creates deterministic random HF models, uses the real adapters and
+PTQ stage, and executes saved Circle files with the reference runtime. No model
+weights or datasets are downloaded. Run it from the installed development tree:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+python -m tico.quantization.recipes.debug.cpu_followup \
+  --output ./out/cpu-followup-NEW
+```
+
+The default runs static/comparator regressions, real generation, cache coverage,
+small in-memory evaluation, and actual Circle conversion/execution sequentially.
+Use `--stage regression`, `generate`, `coverage`, `evaluation`, or `circle` to rerun
+one stage in a new directory. Unit-stage reports include the actual test count;
+zero tests or any skip cannot establish a pass. `--baseline-repo /path/to/start`
+compares the same frozen checkpoint with that checkout's exporter. It does not
+recalibrate the baseline. `--fixtures /path/to/prior/fixtures` reuses trusted local
+checkpoints only when their checkpoint and effective-config hashes match their
+recorded calibration provenance.
+
+The bounded Llama and Qwen fixtures use two decoder layers, GQA with two query
+heads and one KV head, native context 128, calibration samples of eight tokens,
+export capacities 16/32 and eager prefill 48 plus four connected decode steps.
+W4A16 means actual frozen four-bit linear weights and sixteen-bit activations;
+embedding/LM-head weights use the standard explicitly recorded unsigned eight-bit policy.
+Qwen includes a local RGB image, a real vision block, mRoPE and fixed external
+mask/RoPE/KV stage inputs. Extra focused tests exercise head dimension 128 and a
+non-square image grid. Gemma's small evaluation smoke explicitly disables PLE
+and shared KV and does not establish those features' coverage.
+
+The Circle stage includes Llama bundle/full-model export, Qwen static capacities
+16 and 32, export/eager isolation, and an image-conditioned Qwen chain. That chain
+writes actual Circle prefill delta-K/V into separate per-layer host buffers and
+passes them into four one-token decodes. The final decode uses S-1 valid past
+positions, masks padded slots and uses positions from the actual HF mRoPE host
+calculation. Every saved stage's local Torch/Circle outputs, including delta-K/V,
+are compared with `atol=1e-5`, `rtol=1e-4`. Strict numerical failures retain their
+nonzero exit code; the runner never treats a matching old/new failure as strict
+parity success. Detailed classification requires the recorded baseline evidence.
+
+Each invocation preserves command lines, working directory, dependency versions,
+resource limits, source digest, seed, effective configs, checkpoint hashes,
+stdout/stderr and original child exit codes. Checkpoints, Circle files and tensor
+archives remain under the caller's output directory and must not be committed.
+An existing directory is refused. Missing dependencies, failed stages and skipped
+checks remain visible in `summary.json`.
+
+These checks cover software contracts and small numerical boundaries. Random-model
+PPL and generated IDs are execution evidence, not pretrained quality. Large
+pretrained accuracy, full 2048-token model capacity and NPU integer behavior or
+performance remain outside this runner's scope.
+
+For a separate calibration-change diagnostic, create the negative checkpoint with
+an absolute script invocation from the starting checkout. This imports that
+checkout normally and verifies the actual TICO import path. The saved FP source,
+calibration tensors and effective config are shared; the resulting frozen
+checkpoint remains separate from the correctly calibrated candidate:
+
+```bash
+cd /path/to/starting-checkout
+PYTHONPATH=/path/to/starting-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+python /path/to/candidate/tico/quantization/recipes/debug/cpu_followup.py \
+  --stage _baseline_calibration --repo /path/to/starting-checkout \
+  --fixtures /path/to/cpu-followup-NEW/fixtures \
+  --output /path/to/calibration-before-NEW
+
+cd /path/to/candidate
+python -m tico.quantization.recipes.debug.cpu_followup \
+  --stage _legacy_rejection \
+  --checkpoint /path/to/calibration-before-NEW/qwen3_vl.missing-cache-coverage.pt \
+  --output /path/to/legacy-rejection-NEW
+```
+
+The first diagnostic passes when it reproduces missing past-cache coverage in
+that starting revision; its checkpoint is explicitly invalid for static decode.
+The second passes when the candidate rejects each layer's decode export preflight
+with calibration guidance and preserves all frozen weights/observers/qparams.
+This is a calibration-change negative test, not numerical exporter equivalence
+for an invalid old checkpoint. Neither diagnostic repairs or overwrites it.
+
+A connected-chain strict failure can be diagnosed with the exact saved host calls,
+using the same valid checkpoint and the starting checkout's saved Circle stages:
+
+```bash
+cd /path/to/starting-checkout
+PYTHONPATH=/path/to/starting-checkout OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+OPENBLAS_NUM_THREADS=1 \
+python /path/to/candidate/tico/quantization/recipes/debug/cpu_followup.py \
+  --stage _baseline_connected --repo /path/to/starting-checkout \
+  --checkpoint /path/to/cpu-followup-NEW/fixtures/qwen3_vl.pt \
+  --evidence /path/to/cpu-followup-NEW/qwen3_vl-16-connected \
+  --artifacts /path/to/cpu-followup-NEW/qwen3_vl-16/baseline/before/artifacts \
+  --output /path/to/connected-baseline-replay-NEW
+```
+
+Replay checks the checkpoint hash, executes the real baseline adapters and runtime,
+and saves every output. A successful reproduction means all saved host inputs and
+both Torch/Circle output arrays match the original run exactly. The separate
+`strict_torch_circle_status` retains the numerical parity verdict; an identical
+baseline failure does not become strict parity success. Repeat with capacity 32's
+evidence and artifacts when that profile needs diagnosis.

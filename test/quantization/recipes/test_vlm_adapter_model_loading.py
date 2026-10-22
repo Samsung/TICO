@@ -285,7 +285,7 @@ class _ModelLoadingContractMixin(_MixinBase):
                 )
                 self.assertFalse(model.config.use_cache)
                 self.assertFalse(model.config.text_config.use_cache)
-                expected_positions = 4096 if seq_len is None else seq_len
+                expected_positions = 4096
                 self.assertEqual(
                     model.config.text_config.max_position_embeddings,
                     expected_positions,
@@ -531,7 +531,7 @@ class TestGemma4AdapterModelLoading(_ModelLoadingContractMixin, unittest.TestCas
                 self.assertIs(captured["canonicalize_input"], original_model_args)
                 self.assertEqual(
                     captured["profile_args"],
-                    (normalized_model_args, model.config.vision_config, 128),
+                    (normalized_model_args, model.config.vision_config, 2048),
                 )
                 self.assertIs(captured["validated_processor"], ctx.processor)
                 self.assertIs(ctx.cfg["model_args"], normalized_model_args)

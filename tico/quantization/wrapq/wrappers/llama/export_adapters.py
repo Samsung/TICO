@@ -17,7 +17,7 @@ from typing import cast, List, Optional, Tuple, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from transformers.cache_utils import Cache
+from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
 
 
 if TYPE_CHECKING:
@@ -252,6 +252,7 @@ class LlamaAttentionPrefillExportAdapter(nn.Module):
         When `return_kv=True`, the wrapped attention module is asked to return
         only the newly produced K/V tensors instead of the full present cache.
         """
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -313,6 +314,7 @@ class LlamaAttentionDecodeExportAdapter(nn.Module):
         attention computation, but only the newly produced K/V tensors are
         returned to the caller.
         """
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states=hidden_states,
             position_embeddings=position_embeddings,
@@ -343,8 +345,6 @@ class LlamaDecoderLayerPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
-        # TODO: Replace this shared-state mutation with a per-call return-type override.
-        self.wrapped.return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -358,6 +358,7 @@ class LlamaDecoderLayerPrefillExportAdapter(nn.Module):
         Run the decoder layer prefill path and return delta-only K/V tensors
         when caching is enabled.
         """
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states,
             attention_mask=attention_mask,
@@ -365,6 +366,7 @@ class LlamaDecoderLayerPrefillExportAdapter(nn.Module):
             past_key_value=None,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            return_type="tuple",
             **kwargs,
         )
 
@@ -407,7 +409,6 @@ class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
     def __init__(self, wrapped, *, return_kv: bool = True):
         super().__init__()
         self.wrapped = wrapped
-        self.wrapped.return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -422,6 +423,7 @@ class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
         Run a cache-aware decoder-layer block and return delta-only K/V tensors
         when caching is enabled.
         """
+        require_static_decoder_inputs(attention_mask, position_embeddings)
         outputs = self.wrapped(
             hidden_states,
             attention_mask=attention_mask,
@@ -429,6 +431,7 @@ class LlamaDecoderLayerDecodeExportAdapter(nn.Module):
             past_key_value=past_key_value,
             use_cache=self.return_kv,
             cache_output_mode="delta",
+            return_type="tuple",
             **kwargs,
         )
 
@@ -464,7 +467,6 @@ class QuantLlamaForCausalLMPrefillExportAdapter(nn.Module):
     def __init__(self, wrapped, *, return_kv: bool = False):
         super().__init__()
         self.wrapped = wrapped
-        self.wrapped.return_type = "tuple"
         self.return_kv = return_kv
 
     def forward(
@@ -475,6 +477,11 @@ class QuantLlamaForCausalLMPrefillExportAdapter(nn.Module):
         past_key_values: List[Tuple[torch.Tensor, torch.Tensor]] | None = (
             None if self.return_kv is False else []
         )
+        text_model = self.wrapped.model.wrapped
+        if getattr(text_model, "_static_export_inputs", None) is None:
+            raise ValueError(
+                "Full LLaMA export requires prepared_static_export(adapter, max_seq_len)."
+            )
         outputs = self.wrapped(
             input_ids=input_ids,
             past_key_values=past_key_values,
@@ -520,6 +527,11 @@ class QuantLlamaForCausalLMDecodeExportAdapter(nn.Module):
         past_key_values: List[Tuple[torch.Tensor, torch.Tensor]],
         **kwargs,
     ):
+        text_model = self.wrapped.model.wrapped
+        if getattr(text_model, "_static_export_inputs", None) is None:
+            raise ValueError(
+                "Full LLaMA export requires prepared_static_export(adapter, max_seq_len)."
+            )
         outputs = self.wrapped(
             input_ids=input_ids,
             past_key_values=past_key_values,

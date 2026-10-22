@@ -155,6 +155,7 @@ calibration:
   dataset: vqav2
   n_samples: 128
   seq_len: 2048
+  decode_steps: 8
 ```
 
 Rules:
@@ -164,6 +165,27 @@ Rules:
 - `seq_len` should match the intended export/evaluation path when static shapes
   matter.
 - Dataset-specific logic belongs in `recipes/data/`, not in config parsing.
+
+For Llama and Qwen3-VL PTQ, `decode_steps` reserves the final dataset token IDs
+for teacher-forced cached decode inside each sample's existing `seq_len` budget.
+The PTQ stage's `decode_calibration_steps` overrides this value. Values must be
+non-negative; short samples clamp to leave one prefill token. A one-token sample
+cannot collect a nonempty past cache. Zero selects prompt-only calibration.
+The defaults are zero for Llama and one for Qwen3-VL. Qwen image/video placeholders
+must remain wholly in prefill, with the reserved suffix containing text tokens.
+Pixels run only during prefill, and temporary mRoPE request offsets are restored
+after calibration, including errors.
+
+Qwen static decode and frozen cached inference reject active cache observers
+without observed affine ranges and valid qparams. A frozen flag or finite scale
+alone is insufficient. Existing checkpoints with valid persisted ranges remain
+usable; checkpoints with missing/sentinel ranges require explicit recalibration.
+Prefill-only, `NO_QUANT`, identity and explicitly bypassed cache observers retain
+their valid uses. HF cache execution supports append-only dynamic caches; fixed
+or sliding buffers must use the static tuple/delta interface with external masks.
+HF cache storage and the static host buffer retain new-K/V delta values; past
+and present grids are applied to read-only attention values rather than written
+back into the cache.
 
 ## `model_args`
 
@@ -417,6 +439,42 @@ missing or if no PTQ weight observer accepts the attached qparams. Successful
 reuse reports the number of matched PTQ weight observers.
 
 ## `evaluation`
+
+LLaMA, Qwen3-VL, and Gemma4 use **FP eager vs Quant eager** for standard
+quantization quality measurements. See the
+[evaluation protocol](../../recipes/evaluation/README.md#standard-quality-protocol-fp-eager-vs-quant-eager)
+for paired commands, metadata, PPL windows, and legacy checkpoint migration.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `max_seq_len` | `null` | Native model context when null; otherwise a positive integer no larger than the loaded model capacity |
+| `use_cache` | `true` | Inference KV-cache default for both FP and Quant |
+| `output_dir` | `null` | Optional directory for `evaluation_protocol.json` |
+
+`calibration.seq_len` never limits evaluation or modifies pretrained positional
+configuration. `export.max_seq_len` never supplies an evaluation default.
+An explicit task-level PPL window (`perplexity.max_seq_len` for LLaMA,
+`ppl.max_seq_len` for VLMs) may be smaller than the evaluation context. Record
+the PPL window and stride when comparing scores.
+
+```yaml
+calibration:
+  seq_len: 2048
+evaluation:
+  enabled: true
+  max_seq_len: null
+  use_cache: true
+  output_dir: ./out/evaluation/fp
+export:
+  enabled: false
+  max_seq_len: 2048
+```
+
+The calibration and export lengths remain 2048 in this example; the eager
+evaluation uses the native model context. The `*_eval_suite.yaml` presets use
+this policy. Other presets with an explicit evaluation limit keep that limit.
+The static export default is independently `min(2048, model context)`;
+set `export.max_seq_len` explicitly to reproduce another deployment profile.
 
 LLM example:
 

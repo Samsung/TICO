@@ -36,6 +36,9 @@ from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
 from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (
     QuantLlamaForCausalLM,
 )
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
 
@@ -334,17 +337,12 @@ def _export_prepared_llama_per_layer(
 
         batch, seq, hidden_size = 1, max_seq_len, config.hidden_size
         example_hidden = torch.randn(batch, seq, hidden_size, device="cpu")
-        attention_mask = (
-            cast(QuantLlamaDecoderLayer, qlayer.wrapped)
-            .causal_mask_template[..., :seq, :seq]
-            .squeeze(0)
-            .to("cpu")
+        prepared_inputs = prepare_llama_static_inputs(
+            cast(QuantLlamaDecoderLayer, qlayer.wrapped), max_seq_len
         )
-        position_embeddings = cast(QuantLlamaDecoderLayer, qlayer.wrapped)._slice_rope(
-            start=0,
-            seq_len=seq,
-            device=torch.device("cpu"),
-            dtype=example_hidden.dtype,
+        attention_mask = prepared_inputs.mask(seq, seq, 0, device=torch.device("cpu"))
+        position_embeddings = prepared_inputs.rope(
+            0, seq, device=torch.device("cpu"), dtype=example_hidden.dtype
         )
 
         _convert_and_save(

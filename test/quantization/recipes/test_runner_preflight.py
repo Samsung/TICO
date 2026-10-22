@@ -86,7 +86,9 @@ class TestRunnerPreflight(unittest.TestCase):
             [{"name": "unknown_preflight"}], adapter_requires_inputs=True
         )
         with self.assertRaisesRegex(KeyError, "Unknown quantization stage"):
-            _requires_calibration_inputs(cfg, get_adapter("llama"))
+            _requires_calibration_inputs(
+                cfg, SimpleNamespace(requires_calibration_inputs=lambda _: True)
+            )
 
     def test_requirements_accumulate_without_resolving_disabled_stages(self):
         for pipeline, adapter_requires_inputs, expected in (
@@ -104,7 +106,13 @@ class TestRunnerPreflight(unittest.TestCase):
                     pipeline, adapter_requires_inputs=adapter_requires_inputs
                 )
                 self.assertIs(
-                    _requires_calibration_inputs(cfg, get_adapter("llama")), expected
+                    _requires_calibration_inputs(
+                        cfg,
+                        SimpleNamespace(
+                            requires_calibration_inputs=lambda _: adapter_requires_inputs
+                        ),
+                    ),
+                    expected,
                 )
 
     def test_legacy_stage_without_metadata_still_requires_calibration(self):
@@ -136,7 +144,12 @@ class TestRunnerPreflight(unittest.TestCase):
                         pipeline, adapter_requires_inputs=adapter_requires_inputs
                     )
                     self.assertTrue(
-                        _requires_calibration_inputs(cfg, get_adapter("llama"))
+                        _requires_calibration_inputs(
+                            cfg,
+                            SimpleNamespace(
+                                requires_calibration_inputs=lambda _: adapter_requires_inputs
+                            ),
+                        )
                     )
 
     def test_adapter_requirement_is_called_once(self):

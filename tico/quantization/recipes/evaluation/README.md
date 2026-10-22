@@ -7,6 +7,135 @@ debug workflows.
 Evaluation helpers are kept outside examples so that metrics can be shared
 across FP models, fake-quant models, checkpoint evaluation, and regression tests.
 
+## Standard quality protocol: FP eager vs Quant eager
+
+LLaMA, Qwen3-VL, and Gemma4 use the same eager evaluation policy through
+`eager.py`. The standard score measures the quality change after quantization.
+Static graph parity, target NPU latency, memory, and throughput are separate
+measurements with their own deployment profiles.
+
+The three sequence settings have independent owners:
+
+| Setting | Meaning | Default when omitted or null |
+|---|---|---|
+| `calibration.seq_len` | Calibration input budget | The calibration data builder's existing default |
+| `evaluation.max_seq_len` | Common eager evaluation context budget | The source model's recorded native context |
+| `export.max_seq_len` | Static prefill/decode capacity | `min(2048, model context)` |
+
+Calibration never rewrites `config.max_position_embeddings`, the VLM text
+configuration, or RoPE scaling. Eager quantized wrappers construct masks and
+position embeddings for the actual request. LLaMA and Qwen3-VL do not allocate
+native-context square masks at construction. Gemma4 retains bounded export
+templates but builds full/sliding-window eager masks independently, including
+the offsets of sliding KV caches.
+
+Standard quality evaluation always uses eager execution; no execution selector
+is required. An `npu_export` quantization profile can still run eagerly, and
+evaluation does not change its fused weights, arithmetic, observer placement,
+or qparams. Static/NPU measurements use separate deployment workflows.
+
+`evaluation.use_cache` defaults to `true` for all three adapters and controls
+the inference default on both the model and generation configuration. A
+task implementation can still explicitly disable unused cache for a scoring
+forward. `evaluation.videomme.use_cache` remains an optional **results-cache
+directory**, not the KV-cache setting.
+
+Benchmark data must never update quantization statistics. Evaluation rejects
+wrappers still in calibration mode or forced into the static export path.
+Convert and save the calibrated model before using it as the Quant baseline.
+
+### Compare the same protocol
+
+Use one evaluation config for the FP and Quant runs, with the same model and
+processor, task selection, dataset/split, sample selection, chat template,
+few-shot count, image/video preprocessing, generation budget, stopping rules,
+seed, and dtype. Change only the checkpoint and output directory:
+
+```bash
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks mmmu,ppl \
+  --output-dir ./out/comparison/fp
+
+python -m tico.quantization.examples.evaluate \
+  --config tico/quantization/examples/configs/qwen3_vl_eval_suite.yaml \
+  --tasks mmmu,ppl \
+  --checkpoint ./out/qwen3_vl_quantized/quantized_model.pt \
+  --output-dir ./out/comparison/quant
+```
+
+The same command pattern applies to `llama_eval_suite.yaml` (for example,
+`--tasks lm_eval`) and `gemma4_eval_suite.yaml`. `evaluate.py` never runs the
+quantization pipeline in the config. The saved checkpoint must correspond to
+the configured model/tokenizer/processor.
+
+`--output-dir` controls the protocol record. Existing task-specific output and
+results-cache paths remain explicit task settings. When evaluating LLaVA-Bench,
+use separate candidate-answer/review/summary paths for FP and Quant, or enable
+its `regenerate` option (enabled in the standard VLM evaluation presets). Do
+not reuse FP candidate answers or an lmms results
+cache as a Quant measurement.
+
+Use an explicit common context cap when the native context is too expensive,
+for example `--set evaluation.max_seq_len=8192` in **both** commands. Changing
+this cap defines a different evaluation protocol; it does not change
+calibration length or static artifact shapes. Report the cap with the score.
+For VLM generation the budget includes visual/prompt tokens and the reserved
+generation tokens. Video preprocessing uses this evaluation budget for FP and
+Quant alike, never a quantized wrapper's static template capacity.
+
+PPL windows can be configured separately with
+`evaluation.perplexity.max_seq_len` for LLaMA or `evaluation.ppl.max_seq_len`
+for VLMs. They default to the common evaluation context and must not exceed
+it. The VLM evaluation-suite presets explicitly keep a 2048-token PPL window
+with stride 512 while leaving generation tasks at native context. LLaMA
+supports `evaluation.perplexity.stride`; omission retains its existing
+non-overlapping window behavior. VLM `ppl.stride`, Gemma4's `chat-prefix` PPL,
+and the existing task-specific prompt/scoring protocols are preserved. Scores
+with different PPL windows, strides, or prompt modes are not the same protocol.
+
+Raw-text PPL preserves a tokenizer's padding mask. Padding, targets without a
+valid preceding token, and targets already scored in an overlapping window do
+not contribute to NLL. A corpus with no valid next-token targets is rejected
+explicitly. The offline CPU regression uses a local tokenizer and in-memory
+text with actual HF and frozen WrapQ models; its random-model PPL values verify
+the scoring loop and do not measure pretrained quality:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest \
+  test.quantization.recipes.test_cpu_evaluation
+```
+
+### Protocol record and checkpoint migration
+
+Set `evaluation.output_dir`, or use `evaluate.py --output-dir`, to save
+`evaluation_protocol.json`. The adapters also expose the same dictionary as
+`ctx.artifacts["evaluation_protocol"]`. It records the execution purpose,
+resolved context and independent calibration/export settings, cache policy,
+configured/parameter dtypes, checkpoint path, tokenizer/processor identity and
+chat-template digest, evaluation settings, and installed evaluator versions.
+It is a record of the protocol prepared for execution, not a metrics file or
+proof that a benchmark completed. Use separate directories for FP and Quant.
+
+Older checkpoints may have a calibration-clamped positional configuration.
+The evaluator retains the source model's native context before replacing it
+with a checkpoint and rejects a requested/default context beyond the
+checkpoint's recorded capacity. Regenerate such a checkpoint with this version,
+or apply the same explicit smaller evaluation cap to FP and Quant. Editing a
+checkpoint's capacity field is not a migration: it cannot establish that its
+original positional semantics were preserved.
+
+### Deployment validation
+
+Keep small synthetic prefill/decode, RoPE/mask, padding, and KV-cache parity
+tests alongside the eager quality evaluation. Choose static text capacity,
+vision shape/frame profile, batch size, and cache policy when a deployment use
+case is selected, then use the existing staged export/runtime workflows.
+Export validation and fake-quant reference parity do not establish target NPU
+latency or bit-exact integer execution. Benchmark those on the selected target
+runtime separately; no external benchmark package changes are needed for the
+eager protocol.
+
 ## Responsibilities
 
 Evaluation helpers should:
@@ -59,6 +188,7 @@ or legacy spellings.
 ```text
 recipes/evaluation/
 ├── README.md
+├── eager.py             # common eager policy and protocol metadata
 ├── selection.py         # top-level target parsing and allow-list helpers
 ├── llm.py               # perplexity and text-only LM benchmark helpers
 ├── vlm.py               # VQA / COCO-style VLM benchmark helpers

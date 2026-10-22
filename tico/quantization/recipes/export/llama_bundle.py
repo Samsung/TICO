@@ -25,6 +25,9 @@ import torch
 
 from tico.circle import CircleDocument
 from tico.circle._schema import decode_text
+from tico.quantization.wrapq.wrappers.llama.static_inputs import (
+    prepare_llama_static_inputs,
+)
 
 
 _INPUT_ROLES = {
@@ -76,8 +79,11 @@ def build_llama_bundle_context(
     mask_fill_values = []
     for index, layer in enumerate(layers):
         wrapped = layer.wrapped
-        for key in ("rope_cos", "rope_sin"):
-            template = getattr(wrapped, f"{key}_template", None)
+        prepared_inputs = prepare_llama_static_inputs(wrapped, max_seq_len)
+        position_embeddings = prepared_inputs.rope(
+            0, max_seq_len, device=torch.device("cpu"), dtype=torch.float32
+        )
+        for key, template in zip(("rope_cos", "rope_sin"), position_embeddings):
             if (
                 not isinstance(template, torch.Tensor)
                 or template.ndim != 3
@@ -86,7 +92,7 @@ def build_llama_bundle_context(
                 or template.shape[2] != dimensions["head_dim"]
             ):
                 raise ValueError(
-                    f"LLaMA Circle bundle layer {index} {key}_template must "
+                    f"LLaMA Circle bundle layer {index} {key} must "
                     f"cover shape (1, {max_seq_len}, {dimensions['head_dim']})."
                 )
             value = template[:, :max_seq_len, :].detach().cpu().float().numpy().copy()

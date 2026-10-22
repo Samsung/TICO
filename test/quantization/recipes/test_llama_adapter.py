@@ -63,6 +63,27 @@ class TiedEmbeddingLlamaModel(torch.nn.Module):
 
 
 class TestLlamaAdapter(unittest.TestCase):
+    def test_full_export_uses_export_shape_without_calibration_samples(self):
+        """A static full-model graph uses the independently configured capacity."""
+        ctx = _fake_llama_context(
+            {
+                "calibration": {"seq_len": 4},
+                "evaluation": {"max_seq_len": 12},
+                "export": {
+                    "enabled": True,
+                    "max_seq_len": 8,
+                    "artifacts": ["circle_full"],
+                },
+            }
+        )
+        self.assertFalse(ctx.adapter.requires_calibration_inputs(ctx.cfg))
+        with patch.object(llama_mod, "export_full_circle") as export:
+            ctx.adapter.export(ctx)
+        example = export.call_args.kwargs["example_input"]
+        self.assertEqual(tuple(example.shape), (1, 8))
+        self.assertEqual(example.dtype, torch.long)
+        self.assertEqual(ctx.calibration_inputs, [])
+
     def test_export_routes_circle_bundle_without_repeating_per_layer_export(self):
         """Bundle export supplies its own paired stages and records the manifest."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -167,10 +188,8 @@ class TestLlamaAdapter(unittest.TestCase):
                 },
             )
 
-    def test_build_calibration_inputs_rejects_non_positive_effective_sequence_length(
-        self,
-    ):
-        """LlamaAdapter should validate seq_len after decode calibration steps are subtracted."""
+    def test_build_calibration_inputs_preserves_total_teacher_forcing_budget(self):
+        """UNIT_MOCK: dataset loading retains tokens reserved for decode."""
         cfg = {
             "calibration": {"seq_len": 4, "decode_steps": 4},
             "runtime": {"seed": 1},
@@ -178,9 +197,18 @@ class TestLlamaAdapter(unittest.TestCase):
         }
         ctx = _fake_llama_context(cfg)
         ctx.tokenizer = object()
-
-        with self.assertRaises(ValueError):
+        with patch.object(
+            llama_mod, "build_wikitext_calibration_inputs", return_value=[]
+        ) as loader:
             LlamaAdapter().build_calibration_inputs(ctx)
+        self.assertEqual(loader.call_args.kwargs["seq_len"], 4)
+
+    def test_build_calibration_inputs_rejects_non_positive_sequence_length(self):
+        """Invalid sample budgets fail before invoking a dataset loader."""
+        for length in (0, -1):
+            ctx = _fake_llama_context({"calibration": {"seq_len": length}})
+            with self.assertRaisesRegex(ValueError, "positive"):
+                LlamaAdapter().build_calibration_inputs(ctx)
 
     def test_export_rejects_circle_export_for_reference_eval_profile(self):
         """Circle export should be blocked for reference_eval LLaMA profiles."""

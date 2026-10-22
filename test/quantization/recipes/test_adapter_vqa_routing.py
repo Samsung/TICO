@@ -83,7 +83,9 @@ class TestAdapterVqaRouting(unittest.TestCase):
         ctx.model = SimpleNamespace(
             config=SimpleNamespace(
                 use_cache=False,
-                text_config=SimpleNamespace(use_cache=False),
+                text_config=SimpleNamespace(
+                    use_cache=False, max_position_embeddings=8192
+                ),
             )
         )
         ctx.device = torch.device("cpu")
@@ -188,10 +190,10 @@ class TestAdapterVqaRouting(unittest.TestCase):
                 self._assert_vqa_ran_once(mocks)
                 kwargs = mocks["evaluate_vqa_tasks"].call_args.kwargs
                 self.assertEqual(kwargs["n_samples"], 50)
-                self.assertIsNone(kwargs["max_seq_len"])
+                self.assertEqual(kwargs["max_seq_len"], 8192)
                 self.assertIs(kwargs["verbose"], False)
                 self.assertIs(kwargs["show_progress"], True)
-                # max_seq_len=None must not be replaced by calibration.seq_len.
+                # Omitted context resolves to native capacity, not calibration.seq_len.
                 self.assertEqual(ctx.cfg["calibration"]["seq_len"], 256)
 
     def test_results_reach_the_real_printer_with_title_and_scores(self):
@@ -537,9 +539,9 @@ class TestAdapterVqaRouting(unittest.TestCase):
 
                 self.assertEqual(order, ["vqa", "vqa_print", "coco", "llava_judge"])
 
-    def test_gemma4_enables_cache_and_qwen_does_not(self):
-        """Gemma4 keeps enabling KV cache before VQA; Qwen3-VL does not mutate it."""
-        expected = {"gemma4": True, "qwen3_vl": False}
+    def test_vlm_adapters_share_the_default_cache_policy(self):
+        """Both VLM adapters enable the common eager KV-cache policy before VQA."""
+        expected = {"gemma4": True, "qwen3_vl": True}
         for family, _module, adapter_cls, owner in self.ADAPTERS:
             with self.subTest(family=family):
                 ctx = self._make_context(

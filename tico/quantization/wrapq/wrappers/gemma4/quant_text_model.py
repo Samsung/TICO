@@ -49,16 +49,18 @@ if TYPE_CHECKING:
 class QuantGemma4TextModel(QuantModuleBase):
     """Quantization wrapper for the dense Gemma4 E2B text model.
 
-    Full and sliding causal masks are built from bounded static templates owned
-    by this wrapper. The forward path does not call Hugging Face mask factories.
+    Eager full and sliding causal masks cover only the active query and cache
+    spans. The forward path does not call Hugging Face mask factories.
     Masked entries use ``PTQConfig.attention_mask_fill_value`` instead of the
     minimum finite value of the activation dtype, which keeps affine observer
     ranges usable around unmasked attention logits.
 
-    The static template capacity can be selected with
+    The separate export template capacity can be selected with
     ``PTQConfig.model_args["text"]["max_seq"]``. When it is omitted, the
     wrapper uses the smaller of the model context limit and 2048 tokens to avoid
-    allocating an unexpectedly large quadratic mask.
+    allocating an unexpectedly large quadratic mask. This capacity does not
+    limit eager calibration or evaluation, which retain the model's native
+    context length.
 
     The E2B scope intentionally rejects MoE. Cache allocation and writes,
     sampling, and CPU/NPU orchestration remain runtime responsibilities.
@@ -394,6 +396,13 @@ class QuantGemma4TextModel(QuantModuleBase):
 
         start = self._past_seen_tokens(past_key_values)
         end = start + seq_len
+        if not self._requires_static_inputs():
+            self._validate_eager_context(end)
+            return (
+                torch.arange(start, end, device=inputs_embeds.device)
+                .unsqueeze(0)
+                .expand(batch_size, -1)
+            )
         if end > self.static_max_seq:
             raise ValueError(
                 "Gemma4 position range exceeds static_max_seq: "
@@ -403,6 +412,59 @@ class QuantGemma4TextModel(QuantModuleBase):
             self.position_ids_template[:, start:end]
             .to(device=inputs_embeds.device)
             .expand(batch_size, -1)
+        )
+
+    def _validate_eager_context(self, context_length: int) -> None:
+        """Validate an eager token span against the native model capacity."""
+        model_capacity = int(self.config.max_position_embeddings)
+        if context_length > model_capacity:
+            raise ValueError(
+                "Gemma4 eager context exceeds max_position_embeddings: "
+                f"context_length={context_length}, model_capacity={model_capacity}."
+            )
+
+    def _eager_cache_span(
+        self,
+        layer_type: str,
+        *,
+        q_len: int,
+        past_seen_tokens: int,
+        past_key_values: Any,
+    ) -> tuple[int, int]:
+        """Return the physical KV length and logical offset before a cache update."""
+        get_mask_sizes = getattr(past_key_values, "get_mask_sizes", None)
+        if callable(get_mask_sizes):
+            # All layers of one type share the same cache geometry. The first
+            # layer of that type owns K/V even when later layers share them.
+            layer_idx = cast(list[str], self.config.layer_types).index(layer_type)
+            kv_len, kv_offset = get_mask_sizes(q_len, layer_idx)
+            return int(kv_len), int(kv_offset)
+        return past_seen_tokens + q_len, 0
+
+    def _build_eager_causal_mask(
+        self,
+        layer_type: str,
+        *,
+        q_len: int,
+        kv_len: int,
+        past_seen_tokens: int,
+        kv_offset: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Build an active Q-by-K mask without allocating a native-context square."""
+        query = torch.arange(
+            past_seen_tokens, past_seen_tokens + q_len, device=device
+        ).view(-1, 1)
+        key = torch.arange(kv_offset, kv_offset + kv_len, device=device).view(1, -1)
+        keep = key <= query
+        if layer_type == "sliding_attention":
+            keep = keep & (key > query - int(self.config.sliding_window))
+        mask = torch.zeros((q_len, kv_len), device=device, dtype=dtype)
+        return (
+            mask.masked_fill(~keep, float(self.qcfg.attention_mask_fill_value))
+            .unsqueeze(0)
+            .unsqueeze(0)
         )
 
     def _slice_mask_template(
@@ -435,6 +497,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         batch_size: int,
         q_len: int,
         kv_len: int,
+        kv_offset: int = 0,
     ) -> torch.Tensor:
         """Normalize an explicit mask to shape ``(B, 1, Q, K)``."""
         if mask.dim() == 3:
@@ -460,7 +523,12 @@ class QuantGemma4TextModel(QuantModuleBase):
                 f"mask_k={mask.size(-1)}, kv_len={kv_len}."
             )
         if mask.size(-1) > kv_len:
-            mask = mask[..., :kv_len]
+            if mask.size(-1) < kv_offset + kv_len:
+                raise ValueError(
+                    "Explicit mask does not cover the cache's logical key range: "
+                    f"mask_k={mask.size(-1)}, kv_offset={kv_offset}, kv_len={kv_len}."
+                )
+            mask = mask[..., kv_offset : kv_offset + kv_len]
         if mask.size(-2) < q_len:
             raise ValueError(
                 "Explicit mask has fewer query rows than required: "
@@ -490,21 +558,39 @@ class QuantGemma4TextModel(QuantModuleBase):
         inputs_embeds: torch.Tensor,
         past_key_values: Any,
     ) -> torch.Tensor:
-        """Build one bounded additive mask directly from static templates."""
+        """Build one additive mask for the current eager or export cache span."""
         batch_size, q_len = inputs_embeds.shape[:2]
         past_seen_tokens = self._past_seen_tokens(past_key_values)
-        kv_len = past_seen_tokens + q_len
+        logical_kv_len = past_seen_tokens + q_len
         device = inputs_embeds.device
         dtype = inputs_embeds.dtype
-
-        causal_mask = self._slice_mask_template(
-            layer_type,
-            q_len=q_len,
-            kv_len=kv_len,
-            past_seen_tokens=past_seen_tokens,
-            device=device,
-            dtype=dtype,
-        )
+        if self._requires_static_inputs():
+            kv_len, kv_offset = logical_kv_len, 0
+            causal_mask = self._slice_mask_template(
+                layer_type,
+                q_len=q_len,
+                kv_len=kv_len,
+                past_seen_tokens=past_seen_tokens,
+                device=device,
+                dtype=dtype,
+            )
+        else:
+            self._validate_eager_context(logical_kv_len)
+            kv_len, kv_offset = self._eager_cache_span(
+                layer_type,
+                q_len=q_len,
+                past_seen_tokens=past_seen_tokens,
+                past_key_values=past_key_values,
+            )
+            causal_mask = self._build_eager_causal_mask(
+                layer_type,
+                q_len=q_len,
+                kv_len=kv_len,
+                past_seen_tokens=past_seen_tokens,
+                kv_offset=kv_offset,
+                device=device,
+                dtype=dtype,
+            )
         if attention_mask is None:
             return causal_mask
 
@@ -522,13 +608,23 @@ class QuantGemma4TextModel(QuantModuleBase):
                     dtype=attention_mask.dtype,
                 )
                 attention_mask = torch.cat((prefix, attention_mask), dim=-1)
-            if attention_mask.size(1) != kv_len:
+            if attention_mask.size(1) == logical_kv_len:
+                keep = attention_mask.to(device=device) != 0
+                if kv_offset + kv_len > logical_kv_len:
+                    # A fixed-capacity HF cache may contain unfilled tail slots.
+                    padding = keep.new_zeros(
+                        batch_size, kv_offset + kv_len - logical_kv_len
+                    )
+                    keep = torch.cat((keep, padding), dim=-1)
+                keep = keep[:, kv_offset : kv_offset + kv_len]
+            elif attention_mask.size(1) == kv_len:
+                keep = attention_mask.to(device=device) != 0
+            else:
                 raise ValueError(
                     "2D attention-mask length does not match KV length: "
-                    f"mask_len={attention_mask.size(1)}, kv_len={kv_len}."
+                    f"mask_len={attention_mask.size(1)}, kv_len={kv_len}, "
+                    f"logical_kv_len={logical_kv_len}."
                 )
-
-            keep = attention_mask.to(device=device) != 0
             padding_mask = torch.zeros(
                 batch_size, 1, 1, kv_len, device=device, dtype=dtype
             ).masked_fill(
@@ -546,6 +642,7 @@ class QuantGemma4TextModel(QuantModuleBase):
             batch_size=batch_size,
             q_len=q_len,
             kv_len=kv_len,
+            kv_offset=kv_offset,
         )
         if torch.is_floating_point(explicit):
             return self._bounded_additive_mask(explicit, device=device, dtype=dtype)
@@ -562,7 +659,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         inputs_embeds: torch.Tensor,
         past_key_values: Any,
     ) -> dict[str, torch.Tensor]:
-        """Create bounded masks for every layer type without HF mask factories."""
+        """Create active masks for every layer type without HF mask factories."""
         if isinstance(attention_mask, Mapping):
             missing = [
                 layer_type
@@ -794,7 +891,7 @@ class QuantGemma4TextModel(QuantModuleBase):
         output_attentions: Optional[bool] = None,
         **kwargs,
     ):
-        """Run Gemma4 text inference with direct bounded mask construction."""
+        """Run Gemma4 text inference with independent eager and export capacities."""
         if (input_ids is None) == (inputs_embeds is None):
             raise ValueError(
                 "You must specify exactly one of input_ids or inputs_embeds."
@@ -850,6 +947,11 @@ class QuantGemma4TextModel(QuantModuleBase):
                 inputs_embeds, per_layer_inputs
             )
 
+        if position_ids_were_provided and self._requires_static_inputs():
+            raise ValueError(
+                "Full Gemma4 text export uses its fixed position profile. "
+                "Use per-layer export with explicit RoPE for custom positions."
+            )
         position_ids = self._make_position_ids(
             inputs_embeds=inputs_embeds,
             past_key_values=past_key_values,

@@ -590,6 +590,25 @@ class TestQuantGemma4TextAttention(unittest.TestCase):
         self.assertEqual(out[0, 0, 2, 1].item(), 0.0)
         self.assertEqual(out[0, 0, 2, 2].item(), 0.0)
 
+    def test_export_adapter_keeps_capacity_after_long_eager_call(self):
+        """Long eager attention must not enlarge the fixed export-mask capacity."""
+        qattn = QuantGemma4TextAttention(
+            self._make_attention(),
+            qcfg=PTQConfig(model_args={"text": {"max_seq": 3}}),
+        ).eval()
+        hidden = torch.randn(1, 6, qattn.config.hidden_size)
+        rope = _rope_for_attention(qattn, self._rope(1, 6, qattn.head_dim))
+        mask = self._zero_mask(1, 6, 6)
+        with torch.no_grad():
+            actual, _ = qattn(hidden, rope, attention_mask=mask)
+        self.assertEqual(tuple(actual.shape), tuple(hidden.shape))
+        self.assertEqual(tuple(qattn.causal_mask_template.shape), (1, 1, 3, 3))
+        adapter = qattn.as_export_module("prefill")
+        with self.assertRaisesRegex(
+            RuntimeError, "Key length exceeds causal mask capacity"
+        ):
+            adapter(hidden, mask, rope)
+
 
 if __name__ == "__main__":
     unittest.main()

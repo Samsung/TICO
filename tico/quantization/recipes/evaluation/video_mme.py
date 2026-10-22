@@ -42,6 +42,8 @@ def evaluate_and_print_video_mme(
     n_samples: int | None = None,
     use_cache: str | None = None,
     verbose: bool = True,
+    max_seq_len: int | None = None,
+    kv_cache: bool | None = None,
 ) -> dict[str, Any]:
     """Evaluate a VLM on the Video-MME benchmark and print results.
 
@@ -67,6 +69,8 @@ def evaluate_and_print_video_mme(
             ``None`` (download and evaluate all samples).
         use_cache: Optional path to an ``lmms-eval`` results cache directory.
         verbose: Whether to print detailed evaluation logs.
+        max_seq_len: Common FP/Quant eager context budget, independent of export.
+        kv_cache: Inference KV-cache policy, distinct from the results-cache path.
 
     Returns:
         A dictionary of evaluation results as returned by
@@ -87,6 +91,8 @@ def evaluate_and_print_video_mme(
         limit=n_samples,
         use_cache=use_cache,
         verbose=verbose,
+        max_seq_len=max_seq_len,
+        kv_cache=kv_cache,
     )
 
     print(f"\n=== Video-MME Evaluation (limit={n_samples}) ===")
