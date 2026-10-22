@@ -544,7 +544,6 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
                 self.assertIsNotNone(circle_embedding)
                 self.assertIsNotNone(circle_projection)
 
-
     def test_projection_circle_quantizes_add_and_both_scale_constants(self):
         """Prefill/decode ADD and scalar MUL operands carry the activation domain."""
         import tico
@@ -653,6 +652,7 @@ class TestGemma4PLEExportAdapters(unittest.TestCase):
                         output.quantization.zeroPoint,
                         zero_point.detach().cpu().reshape(-1),
                     )
+
 
 if __name__ == "__main__":
     unittest.main()
