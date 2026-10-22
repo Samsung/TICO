@@ -32,6 +32,7 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_assistant_builders import (
     build_gemma4_assistant_ptq_config,
 )
+from tico.quantization.wrapq.observers.identity import IdentityObserver
 
 
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
@@ -197,6 +198,10 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
     def test_ptq_flow_produces_qparams_and_draft_token(self):
         """prepare → calibrate → convert must leave no missing qparams."""
         prepared = self._prepare()
+        shared_before = {
+            layer_type: tuple(tensor.clone() for tensor in tensors)
+            for layer_type, tensors in self.sample["shared_kv_states"].items()
+        }
         with torch.no_grad():
             prepared(**self.sample)
             prepared(**_make_sample(self.fp_ref, kv_len=6))
@@ -211,6 +216,16 @@ class TestQuantGemma4AssistantForCausalLM(unittest.TestCase):
 
         with torch.no_grad():
             out = converted(**self.sample)
+        for layer in converted.wrapped.model.layers:
+            attention = layer.wrapped.self_attn.wrapped
+            storage_key, storage_value = attention.cache_storage_observers()
+            self.assertIsInstance(storage_key, IdentityObserver)
+            self.assertIsInstance(storage_value, IdentityObserver)
+            self.assertIsNot(storage_key, attention.obs_new_k)
+            self.assertIsNot(storage_key, attention.obs_past_key)
+        for layer_type, tensors in self.sample["shared_kv_states"].items():
+            for tensor, before in zip(tensors, shared_before[layer_type]):
+                self.assertTrue(torch.equal(tensor, before))
         self.assertTrue(torch.isfinite(out.logits).all())
         self.assertTrue(torch.isfinite(out.last_hidden_state).all())
         draft_token = int(out.logits.argmax(-1).item())

@@ -18,7 +18,7 @@ import copy
 import unittest
 from types import SimpleNamespace
 from typing import Any, cast, Dict, Tuple
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -125,7 +125,11 @@ class TestGemma4RoPEOptions(unittest.TestCase):
     @staticmethod
     def _decoder_shell(options) -> QuantGemma4TextDecoderLayer:
         shell = SimpleNamespace(
-            self_attn=SimpleNamespace(wrapped=SimpleNamespace(attn_options=options)),
+            self_attn=SimpleNamespace(
+                wrapped=SimpleNamespace(
+                    attn_options=options, validate_export_cache=Mock()
+                )
+            ),
             _mode=None,
         )
         # Only the attributes read by ``as_export_module`` are needed here.
@@ -171,6 +175,9 @@ class TestGemma4RoPEOptions(unittest.TestCase):
                             per_layer_input_observer=observer,
                         )
                     self.assertIs(result, factory.return_value)
+                    cast(
+                        Any, shell.self_attn.wrapped
+                    ).validate_export_cache.assert_called_once_with(mode)
                     factory.assert_called_once_with(
                         shell,
                         return_kv=False,

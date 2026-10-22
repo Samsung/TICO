@@ -202,9 +202,19 @@ tokens and must also fit the model and wrapper capacities. Image structure is
 preserved; samples that cannot fit fail with an error. Externally supplied
 calibration inputs are checked before execution as well.
 
-These calls collect statistics in `Mode.CALIB`. They do not validate accuracy
-with a quantized cache or establish coverage for separate Gemma4 `past_*`
-observers.
+These calls collect statistics in `Mode.CALIB`, including Gemma4 `past_key` and
+`past_value` on actual cached decode inputs. An empty-cache prefill observes
+`new_*` and `present_*` only; a shared-KV consumer observes the producer's real
+KV input even during prefill. These calls do not validate accuracy with a
+quantized cache.
+
+Use positive decode calibration for cached inference and decode export when
+the read observers need statistics. With `decode_steps: 0`, ordinary prefill
+remains usable, but an unobserved affine `past_*` cannot serve cached inference
+or export: recalibrate with a positive count. Valid loaded frozen qparams and
+observers that need no statistics do not require extra decode calls. See the
+[Gemma4 cache boundary contract](../../recipes/export/gemma4_artifacts.md#kv-cache-boundaries)
+for storage/read policies and checkpoint compatibility.
 
 ## `model_args`
 

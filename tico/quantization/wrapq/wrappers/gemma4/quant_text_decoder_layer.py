@@ -35,6 +35,10 @@ from tico.quantization.wrapq.wrappers.registry import try_register
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextDecoderLayer
 
+    from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
+        QuantGemma4TextAttention,
+    )
+
 
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
@@ -320,6 +324,7 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
         return_kv: bool = True,
         require_npu_profile: bool = True,
         per_layer_input_observer: Optional[ObserverBase] = None,
+        cache_source: Optional[nn.Module] = None,
     ) -> nn.Module:
         """Return a static export adapter for the requested execution mode.
 
@@ -337,6 +342,10 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
             Producer-side observer for the packed PLE tensor. Split Circle export
             reapplies this frozen observer at the external ``per_layer_input``
             boundary so the input placeholder inherits the original PLE qparam.
+        cache_source : QuantGemma4TextAttention, optional
+            K/V-owning attention wrapper whose ``new_k`` and ``new_v`` observers
+            own the input storage format of a standalone shared-KV consumer.
+            Full text-model preparation binds this source automatically.
         """
         if require_npu_profile:
             attn_options = getattr(self.self_attn.wrapped, "attn_options", None)
@@ -355,6 +364,11 @@ class QuantGemma4TextDecoderLayer(QuantModuleBase):
                     "require_npu_profile=False for a reference-only export "
                     "experiment."
                 )
+
+        attention = cast("QuantGemma4TextAttention", self.self_attn.wrapped)
+        if cache_source is not None:
+            attention.bind_cache_source(cast("QuantGemma4TextAttention", cache_source))
+        attention.validate_export_cache(mode)
 
         if mode == "prefill":
             return Gemma4TextDecoderLayerPrefillExportAdapter(

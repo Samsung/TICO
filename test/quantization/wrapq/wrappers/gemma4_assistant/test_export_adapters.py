@@ -30,6 +30,9 @@ from tico.quantization import convert, prepare
 from tico.quantization.config.gemma4_assistant_builders import (
     build_gemma4_assistant_ptq_config,
 )
+from tico.quantization.config.specs import affine
+from tico.quantization.wrapq.dtypes import DType
+from tico.quantization.wrapq.qscheme import QScheme
 
 
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
@@ -123,6 +126,22 @@ class TestGemma4AssistantCoreExportAdapter(unittest.TestCase):
         with torch.no_grad():
             prepared(**self.inputs)
         return convert(prepared)
+
+    def test_unsupported_shared_read_policy_is_rejected_before_tracing(self):
+        """A direct core adapter must validate its reused attention boundaries."""
+        qcfg = build_gemma4_assistant_ptq_config(num_hidden_layers=2)
+        qcfg.set_override(
+            "model.layers.0.self_attn.past_key",
+            affine(DType.int(16), qscheme=QScheme.PER_CHANNEL_SYMM, channel_axis=1),
+        )
+        prepared = prepare(copy.deepcopy(self.fp_model), qcfg)
+        with torch.no_grad():
+            prepared(**self.inputs)
+        # The direct wrapper freeze path also supports creating export adapters;
+        # it must receive the same pre-tracing policy validation as convert().
+        prepared.freeze_qparams()
+        with self.assertRaisesRegex(ValueError, "per-tensor affine"):
+            Gemma4AssistantCoreExportAdapter(prepared)
 
     def test_unconverted_model_is_rejected(self):
         """The core export requires a converted (QUANT-mode) assistant."""

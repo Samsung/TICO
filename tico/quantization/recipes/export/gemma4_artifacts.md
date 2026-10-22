@@ -59,6 +59,74 @@ older `quantized_model.pt` alone cannot supply the missing sum statistics and is
 rejected with a recalibration message. Adding the intermediate fake-quant boundary
 can change quantized outputs, so rerun accuracy validation after recalibration.
 
+## KV cache boundaries
+
+Gemma4 text attention has three independent observer roles:
+
+| Role | Tensor and qparam owner |
+|---|---|
+| `new_k`, `new_v` | Current projected KV and the delta written to persistent storage. These producer observers own the cache input/output dtype, scale, zero-point, and granularity. |
+| `past_key`, `past_value` | Actual existing KV read by this attention layer; a shared consumer reads its producer's supplied KV. Read overrides do not change storage. |
+| `present_key`, `present_value` | Combined KV used by attention. The compute branch explicitly converts concat operands to this grid. |
+
+An ordinary empty-cache prefill applies `new_*`, returns the storage delta, and
+applies `present_*` for attention. It never executes `past_*`, including in
+calibration. Cached decode applies the producer storage boundary and then
+`past_*` to the existing tokens before combining them with current `new_*` KV
+on the compute branch. The current token is never collected as past.
+
+The static host copies/slices prefill and decode deltas without requantizing
+them. Decode cache inputs and shared consumer inputs therefore use the producer's
+frozen `new_*` qparams. Independent read and compute policies remain internal
+conversions, including when only scale or zero-point differs. Supported Circle
+cache conversions use per-tensor UINT8/INT16 affine policies, or a consistently
+unquantized cache path. An explicitly declared external float source can also
+feed affine read/compute boundaries. MX, per-channel cache grids, and unsupported
+affine-to-identity paths are rejected rather than serialized with mismatched
+concat qparams. Disabling fake quantization on an affine cache boundary is also
+rejected; use an explicit supported identity policy for a float path.
+
+The full prepared text model binds each shared consumer to the corresponding
+KV-owning layer of the same layer type. For standalone shared attention or
+decoder use, call `bind_cache_source(producer_attention)` on the attention
+wrapper before calibration. Export also accepts
+`as_export_module(cache_source=producer_attention)` to supply or check the
+binding, but first binding a calibrated consumer is rejected: reprepare and
+bind before calibration so the default read policy is resolved correctly.
+The source is a reference, not an owned child module, so consumer calibration
+does not reset producer observers or traverse its weights.
+
+Gemma4 Assistant receives KV from the FP target used by its existing assisted
+generation adapter. Its backbone explicitly declares this external float cache
+contract with `bind_external_float_cache()`; it does not guess a quantized
+producer grid. The independent default past observers preserve that float
+storage policy, and `present_*` keeps the assistant's attention conversion.
+
+`cache_output_mode="delta"` keeps returning current storage KV.
+`"present"`/`"full"` returns the updated HF cache object or the full **storage**
+tuple. The tuple previously contained attention-quantized `present_*` values;
+it now preserves the producer grid so it can safely be reused as cache input.
+The shared-KV dictionary likewise carries storage tensors. Read-quantized
+tensors are never written back into an HF cache.
+
+The HF runtime path supports non-offloaded `DynamicCache` and `StaticCache`
+full/sliding layers using their cache-layer APIs. Offloaded, quantized, and other
+cache layer implementations are rejected explicitly.
+
+For generation, calibrate through real cached decode with the existing
+`calibration.decode_steps` setting (the quantize preset uses `8`; an active
+PTQ stage's `decode_calibration_steps` takes precedence). `decode_steps: 0`
+supports prefill-only use without inventing past statistics. Cached inference
+or decode export with an unobserved affine read observer fails with guidance to
+recalibrate using positive decode steps. Valid loaded frozen qparams and
+observers that need no statistics remain usable without new decode calibration.
+
+Save/load preserves read statistics and frozen qparams. Recreate the same
+prepared model/configuration before loading a state dict so shared source
+bindings are rebuilt. Checkpoints from before `past_*` was added require
+re-prepare and PTQ recalibration; export cannot infer the missing read statistics.
+No automatic checkpoint migration is provided.
+
 ## `circle_layers/`: vision pipeline
 
 `granularity: both` writes the monolithic graph and the split pipeline.
