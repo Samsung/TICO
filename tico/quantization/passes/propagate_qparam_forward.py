@@ -23,8 +23,11 @@ import torch
 from torch.export import ExportedProgram
 
 from tico.quantization.passes.concat_qparam import is_width_direction_concat
+from tico.quantization.passes.mx_qparam import remap_mx_qparam
 from tico.serialize.quant_param import QPARAM_KEY
 from tico.utils import logging
+from tico.utils.errors import NotYetSupportedError
+from tico.utils.mx.dtypes import is_mx_dtype, normalize_mx_axis
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.validate_args_kwargs import (
@@ -76,13 +79,35 @@ class PropagateQParamForward(PassBase):
             if QPARAM_KEY not in src.meta:
                 return
 
+            src_qparam = src.meta[QPARAM_KEY]
+            if is_mx_dtype(src_qparam.dtype):
+                mapped = remap_mx_qparam(src_qparam, dst)
+                assert mapped is not None
+                existing = dst.meta.get(QPARAM_KEY)
+                if existing is not None:
+                    if not is_mx_dtype(existing.dtype):
+                        return
+                    canonical = copy.deepcopy(existing)
+                    canonical.quantized_dimension = normalize_mx_axis(
+                        canonical.quantized_dimension, len(dst.meta["val"].shape)
+                    )
+                    if canonical != mapped:
+                        raise NotYetSupportedError(
+                            f"Conflicting MX output domain on {dst.name}: a layout "
+                            "operation cannot requantize its input. Keep an explicit "
+                            "Quantize operation for the destination domain."
+                        )
+                dst.meta[QPARAM_KEY] = mapped
+                logger.debug(f"{src.name}'s MX quantparam is remapped to {dst.name}.")
+                return
+
             if (
                 QPARAM_KEY in dst.meta
-                and src.meta[QPARAM_KEY].dtype != dst.meta[QPARAM_KEY].dtype
+                and src_qparam.dtype != dst.meta[QPARAM_KEY].dtype
             ):
                 return
 
-            dst.meta[QPARAM_KEY] = copy.deepcopy(src.meta[QPARAM_KEY])
+            dst.meta[QPARAM_KEY] = copy.deepcopy(src_qparam)
 
             logger.debug(f"{src.name}'s quantparam is propagated to {dst.name}.")
 
@@ -115,7 +140,9 @@ class PropagateQParamForward(PassBase):
                 # uses one per-tensor qparam. Per-channel propagation requires
                 # axis-aware qparam slicing and is intentionally not handled here.
                 input_qparam = input_.meta[QPARAM_KEY]
-                if input_qparam.quantized_dimension is not None:
+                if input_qparam.quantized_dimension is not None and not is_mx_dtype(
+                    input_qparam.dtype
+                ):
                     continue
 
                 for user in node.users:
@@ -145,11 +172,24 @@ class PropagateQParamForward(PassBase):
                 concat_args = CatArgs(*node.args, **node.kwargs)
                 concat_inputs = concat_args.tensors
 
+                if not concat_inputs:
+                    continue
+                mx_source = next(
+                    (
+                        source
+                        for source in concat_inputs
+                        if QPARAM_KEY in source.meta
+                        and is_mx_dtype(source.meta[QPARAM_KEY].dtype)
+                    ),
+                    None,
+                )
+                if mx_source is not None:
+                    _propagate_qparam_if_possible(mx_source, node)
+                    continue
+
                 if is_width_direction_concat(node, concat_args):
                     continue
 
-                if not concat_inputs:
-                    continue
                 if any(
                     QPARAM_KEY not in concat_input.meta
                     for concat_input in concat_inputs

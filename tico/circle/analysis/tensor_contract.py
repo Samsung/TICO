@@ -26,6 +26,7 @@ from tico.circle._object import (
     vector_as_tuple,
 )
 from tico.circle.errors import CircleValueError
+from tico.circle.value.dtype import is_mx_tensor_type
 from tico.circle.value.tensor import TensorQuantization, TensorValue
 
 
@@ -252,6 +253,14 @@ class TensorContract:
                     raise CircleValueError(
                         "Static shape signature dimensions must match shape values."
                     )
+        if (
+            self.quantization is not None
+            and is_mx_tensor_type(self.tensor_type)
+            and self.quantization.quantized_dimension >= self.rank
+        ):
+            raise CircleValueError(
+                "MX quantized_dimension must be within the tensor rank."
+            )
         if self.quantization is not None and self.quantization.scale:
             if self.rank == 0 and len(self.quantization.scale) > 1:
                 raise CircleValueError(

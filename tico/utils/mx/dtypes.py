@@ -58,6 +58,15 @@ def is_mx_dtype(dtype: str) -> bool:
     return dtype in SUPPORTED_MX_DTYPES
 
 
+def normalize_mx_axis(axis: int, rank: int) -> int:
+    """Validate an MX block axis and return its non-negative tensor dimension."""
+    if isinstance(axis, bool) or not isinstance(axis, int):
+        raise ValueError(f"MX axis must be an integer, got {axis!r}.")
+    if rank <= 0 or not -rank <= axis < rank:
+        raise ValueError(f"MX axis {axis} is out of range for rank {rank}.")
+    return axis % rank
+
+
 def normalize_mx_elem_format(elem_format: str) -> str:
     """Return the canonical MX element format spelling used by Circle metadata."""
     if elem_format == "fp4_e2m1":

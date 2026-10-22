@@ -64,6 +64,16 @@ class MXFakeQuantize(torch.nn.Module):
         return (torch.randn(2, 32),), {}
 
 
+class MXRequantize(torch.nn.Module):
+    def __init__(self, output_format="int8"):
+        super().__init__()
+        self.output_format = output_format
+
+    def forward(self, inp):
+        inp = torch.ops.circle_custom.mx_fake_quantize(inp, "int8", -1)
+        return torch.ops.circle_custom.mx_fake_quantize(inp, self.output_format, 1)
+
+
 class FoldQuantOpsTest(unittest.TestCase):
     def test_pass(self):
         m = torch.nn.SiLU().eval()
@@ -192,6 +202,34 @@ class FoldQuantOpsTest(unittest.TestCase):
         for node in ep.graph.nodes:
             if node.op == "placeholder" and QPARAM_KEY in node.meta:
                 self.assertEqual(node.meta[QPARAM_KEY].dtype, "mxint8")
-                self.assertEqual(node.meta[QPARAM_KEY].quantized_dimension, -1)
+                self.assertEqual(node.meta[QPARAM_KEY].quantized_dimension, 1)
                 found_input_qparam = True
         self.assertTrue(found_input_qparam)
+
+    def test_equivalent_positive_and_negative_mx_axes_are_one_domain(self):
+        ep = torch.export.export(MXRequantize().eval(), (torch.ones(2, 32),))
+        DecomposeFakeQuantize().call(ep)
+        FoldQuantOps().call(ep)
+
+        self.assertEqual(
+            num_of_ops(ep, [torch.ops.circle_custom.quantize_mx.default]), 0
+        )
+        inp = next(node for node in ep.graph.nodes if node.op == "placeholder")
+        self.assertEqual(inp.meta[QPARAM_KEY].quantized_dimension, 1)
+
+    def test_different_mx_formats_preserve_requantization(self):
+        ep = torch.export.export(
+            MXRequantize(output_format="fp4").eval(), (torch.ones(2, 32),)
+        )
+        DecomposeFakeQuantize().call(ep)
+        FoldQuantOps().call(ep)
+
+        quantizes = [
+            node
+            for node in ep.graph.nodes
+            if node.target == torch.ops.circle_custom.quantize_mx.default
+        ]
+        self.assertEqual(len(quantizes), 1)
+        self.assertEqual(quantizes[0].args[0].meta[QPARAM_KEY].dtype, "mxint8")
+        self.assertEqual(quantizes[0].meta[QPARAM_KEY].dtype, "mxfp4")
+        self.assertEqual(quantizes[0].meta[QPARAM_KEY].quantized_dimension, 1)

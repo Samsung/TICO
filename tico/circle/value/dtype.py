@@ -151,6 +151,16 @@ def circle_tensor_type_value(name: str) -> int:
     return int(getattr(enum_type, name))
 
 
+@lru_cache(maxsize=None)
+def is_mx_tensor_type(tensor_type: int) -> bool:
+    """Return whether a Circle tensor uses axis-sensitive MX block encoding."""
+
+    return int(tensor_type) in (
+        circle_tensor_type_value("MXINT8"),
+        circle_tensor_type_value("MXFP4"),
+    )
+
+
 @lru_cache(maxsize=1)
 def default_tensor_type_registry() -> TensorTypeRegistry:
     """Return codecs for the dense and four-bit tensor types used by TICO."""

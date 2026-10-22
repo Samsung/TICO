@@ -14,11 +14,13 @@
 
 from __future__ import annotations
 
+import copy
 import struct
 import unittest
 from dataclasses import dataclass
 
 from tico.circle.document import CircleDocument
+from tico.circle.export import optimize_document_for_export
 from tico.circle.passes import (
     CirclePassContext,
     CirclePassManager,
@@ -34,6 +36,8 @@ from tico.circle.passes.optimization.simplify.transpose_region import (
     _ADD_BUILTIN_CODE,
     _PAD_BUILTIN_CODE,
 )
+from tico.circle.value.dtype import circle_tensor_type_value
+from tico.circle.value.tensor import TensorQuantization
 
 from test.unit_test.circle.fixture import (
     FakeBuffer,
@@ -636,6 +640,61 @@ class EliminateTransposeBoundedLayoutRegionPassTest(unittest.TestCase):
 
         self.assertFalse(result.modified)
         self.assertEqual(document.subgraph().outputs, [7])
+
+    def test_preserves_mx_region_and_internal_block_axes(self) -> None:
+        """Keep MX regions whose scale-free qparams still encode a block axis."""
+
+        for name in ("MXINT8", "MXFP4"):
+            with self.subTest(dtype=name):
+                document = _make_downsample_document()
+                for tensor in document.subgraph().tensors:
+                    if tensor.type != _FLOAT32_TENSOR_TYPE:
+                        continue
+                    tensor.type = circle_tensor_type_value(name)
+                    axis = 1 if "nchw" in tensor.name else 3
+                    tensor.quantization = FakeQuantization([], [], axis)
+                original = copy.deepcopy(document.model)
+
+                result = EliminateTransposeBoundedLayoutRegionPass().run(
+                    document,
+                    CirclePassContext(),
+                )
+
+                self.assertFalse(result.modified)
+                self.assertEqual(document.model, original)
+                padded = document.subgraph().tensors[6]
+                self.assertEqual(padded.shape, [1, 6, 4, 5])
+                self.assertEqual(padded.quantization.quantizedDimension, 1)
+
+    def test_default_o1_preserves_mx_region_block_axes(self) -> None:
+        """Keep positive MX axes and internal layouts through export's O1 pipeline."""
+
+        for name in ("MXINT8", "MXFP4"):
+            with self.subTest(dtype=name):
+                document = _make_downsample_document()
+                for tensor in document.subgraph().tensors:
+                    if tensor.type != _FLOAT32_TENSOR_TYPE:
+                        continue
+                    tensor.type = circle_tensor_type_value(name)
+                    axis = 1 if "nchw" in tensor.name else 3
+                    tensor.quantization = TensorQuantization(
+                        quantized_dimension=axis
+                    ).to_object()
+
+                optimize_document_for_export(document)
+
+                tensors = {
+                    tensor.name: tensor for tensor in document.subgraph().tensors
+                }
+                self.assertEqual(len(document.subgraph().operators), 5)
+                self.assertEqual(tensors["padded_nchw"].shape, [1, 6, 4, 5])
+                self.assertEqual(
+                    tensors["padded_nchw"].quantization.quantizedDimension, 1
+                )
+                self.assertEqual(tensors["output_nhwc"].shape, [1, 4, 5, 6])
+                self.assertEqual(
+                    tensors["output_nhwc"].quantization.quantizedDimension, 3
+                )
 
     def test_rejects_mismatched_boundary_shape_signature(self) -> None:
         """Reject a Transpose boundary with inconsistent shape signatures."""
