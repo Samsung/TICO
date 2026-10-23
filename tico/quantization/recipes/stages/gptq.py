@@ -269,9 +269,12 @@ class GPTQStage(Stage):
         # declare it (e.g. Qwen3VLGPTQConfig): derived as
         # sum(datasets n_samples) * calibration.seq_len so the per-layer
         # damping policy is normalized to the actual calibration volume.
-        # filter_dataclass_kwargs drops the key for config classes without
-        # the field; an explicit payload value always wins.
-        if "auto_percdamp_ref_observations" not in payload:
+        # ``0`` (or an omitted key) means "auto"; a positive payload value
+        # pins the reference explicitly. filter_dataclass_kwargs drops the
+        # key for config classes without the field; when the reference
+        # cannot be derived (no calibration spec), the key stays 0/absent
+        # and the quantizer falls back to 128 * 2048.
+        if not payload.get("auto_percdamp_ref_observations"):
             calibration_cfg = ctx.cfg.get("calibration", {})
             if isinstance(calibration_cfg, Mapping) and calibration_cfg:
                 ref_observations = self._auto_percdamp_ref_observations(calibration_cfg)
