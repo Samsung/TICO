@@ -1791,13 +1791,7 @@ class Qwen3VLGPTQQuantizer(BaseQuantizer):
 
         hessian_factor = self._auto_percdamp_hessian_factor(gptq_obj)
 
-        value = (
-            base
-            * stage_factor
-            * batch_factor
-            * observation_factor
-            * hessian_factor
-        )
+        value = base * stage_factor * batch_factor * observation_factor * hessian_factor
         return self._clamp_float(
             value,
             float(gptq_conf.auto_percdamp_min),
