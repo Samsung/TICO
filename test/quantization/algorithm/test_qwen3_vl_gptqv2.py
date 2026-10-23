@@ -149,6 +149,77 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
                 )
 
     @torch.no_grad()
+    def test_retry_ceiling_attempted_before_giving_up(self):
+        """The configured retry ceiling is always attempted before giving up.
+
+        Regression test: with percdamp=0.002, retry_factor=2.5 and a ceiling
+        of 0.5, five escalating attempts only reach 0.078125. The attempt
+        budget must not stop the loop there — one final attempt at the
+        ceiling itself is made, and the error must say so.
+        """
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        dampings = []
+
+        def failing_cholesky(m, *args, **kwargs):
+            # H is the identity, so the diagonal shift equals the damping.
+            dampings.append(float(m[0, 0]) - 1.0)
+            raise RuntimeError("simulated factorization failure")
+
+        with unittest.mock.patch("torch.linalg.cholesky", failing_cholesky):
+            with self.assertRaises(RuntimeError) as cm:
+                gptq.fasterquant(
+                    blocksize=3,
+                    percdamp=0.002,
+                    percdamp_max=0.5,
+                    groupsize=-1,
+                )
+
+        # 5 escalating attempts (0.002 .. 0.078125) + the ceiling attempt.
+        self.assertEqual(len(dampings), 6)
+        self.assertAlmostEqual(dampings[0], 0.002, places=6)
+        self.assertAlmostEqual(dampings[-1], 0.5, places=6)
+        self.assertIn(
+            "The final attempt used the configured retry ceiling",
+            str(cm.exception),
+        )
+
+    @torch.no_grad()
+    def test_retry_succeeds_at_ceiling_after_attempt_budget(self):
+        """A layer that needs the ceiling damping is rescued by the final attempt."""
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        real_cholesky = torch.linalg.cholesky
+        dampings = []
+
+        def ceiling_only_cholesky(m, *args, **kwargs):
+            damping = float(m[0, 0]) - 1.0
+            if damping >= 0.0:
+                # Only the per-attempt damped Hessian has a positive shift;
+                # the final cholesky(hinv) input is left alone below.
+                dampings.append(damping)
+                if damping < 0.5 - 1e-12:
+                    raise RuntimeError("simulated factorization failure")
+            return real_cholesky(m, *args, **kwargs)
+
+        with unittest.mock.patch("torch.linalg.cholesky", ceiling_only_cholesky):
+            gptq.fasterquant(
+                blocksize=3,
+                percdamp=0.002,
+                percdamp_max=0.5,
+                groupsize=-1,
+            )
+
+        self.assertEqual(gptq.percdamp_used, 0.5)
+        self.assertEqual(len(dampings), 6)
+
+    @torch.no_grad()
     def test_static_factorization_consumes_hessian_in_place(self):
         """Static mode must damp H in place: no full-size clone is made."""
         layer = torch.nn.Linear(2, 2, bias=False)

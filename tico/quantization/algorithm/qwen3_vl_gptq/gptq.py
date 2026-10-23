@@ -569,8 +569,12 @@ class GPTQ:
 
         This is the auto-mode path: ``percdamp_max`` acts as a retry ceiling,
         independent of any clamp the caller applied to ``percdamp``. The
-        undamped ``h`` is retained for retries while per-attempt temporaries
-        are released as early as possible, so at most three N x N tensors are
+        ceiling is always attempted before giving up: if the attempt budget
+        (``max_retries``) is exhausted first, one final attempt is made at
+        the ceiling itself (at most ``max_retries + 1`` attempts in total).
+        The undamped ``h`` is retained for retries while per-attempt
+        temporaries are released as early as possible, so at most three N x N
+        tensors are
         live at once. The static single-attempt path is inlined in
         ``fasterquant`` to preserve its legacy two-tensor memory profile.
         """
@@ -587,6 +591,7 @@ class GPTQ:
         diag, diag_mean = self._damping_precheck(h, percdamp)
 
         cur_percdamp = float(percdamp)
+        ceiling = float(percdamp_max)
         attempts = 0
         last_error: Optional[Exception] = None
 
@@ -617,16 +622,22 @@ class GPTQ:
             except RuntimeError as exc:
                 last_error = exc
 
-            if attempts >= max_retries or cur_percdamp >= float(percdamp_max):
+            if cur_percdamp >= ceiling:
                 break
-
-            cur_percdamp = min(float(percdamp_max), cur_percdamp * retry_factor)
+            if attempts >= max_retries:
+                # Attempt budget exhausted before natural escalation reached
+                # the configured ceiling: spend one final attempt at the
+                # ceiling itself so the retry policy always honors it.
+                cur_percdamp = ceiling
+            else:
+                cur_percdamp = min(ceiling, cur_percdamp * retry_factor)
 
         raise RuntimeError(
             "GPTQ Hessian factorization failed or became numerically unstable "
             f"after {attempts} attempt(s). "
             f"start_percdamp={percdamp}, last_percdamp={cur_percdamp}, "
             f"retry_ceiling={percdamp_max}. "
+            "The final attempt used the configured retry ceiling. "
             "Increase percdamp or raise the retry ceiling "
             "(auto_percdamp_retry_max)."
         ) from last_error
