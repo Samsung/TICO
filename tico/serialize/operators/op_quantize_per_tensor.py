@@ -56,8 +56,8 @@ def _require_matching_qparam(
         f"tensor_scale={tensor_scale!r}, "
         f"op_zero_point={zero_point}, "
         f"tensor_zero_point={tensor_zero_point}. "
-        "A qparam propagation pass must not overwrite a Quantize output "
-        "domain, including inputs of width-direction Concat."
+        "A pass retargeting a Quantize domain must update its arguments "
+        "and output qparam metadata atomically."
     )
 
 

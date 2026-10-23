@@ -17,18 +17,103 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch.fx
 import copy
+import math
 
 import torch
 from torch.export import ExportedProgram
 
 from tico.quantization.passes.concat_qparam import is_width_direction_concat
 from tico.quantization.passes.mx_qparam import remap_mx_qparam
-from tico.serialize.quant_param import QPARAM_KEY
+from tico.quantization.passes.remove_weight_dequant_op import infer_dtype
+from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils import logging
 from tico.utils.mx.dtypes import is_mx_dtype
 from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
-from tico.utils.validate_args_kwargs import CatArgs, PermuteArgs, ReshapeArgs
+from tico.utils.utils import ArgTypeError
+from tico.utils.validate_args_kwargs import (
+    CatArgs,
+    PermuteArgs,
+    QuantizePerTensorArgs,
+    ReshapeArgs,
+)
+
+
+def _retarget_affine_per_tensor_quantize(
+    src: torch.fx.Node, dst: torch.fx.Node
+) -> None:
+    """Retarget a private Quantize boundary without changing its source domain."""
+    if len(dst.users) != 1 or src not in dst.users:
+        return
+
+    qparam = src.meta.get(QPARAM_KEY)
+    if not isinstance(qparam, QuantParam):
+        return
+    qparams = [qparam]
+    if QPARAM_KEY in dst.meta:
+        existing = dst.meta[QPARAM_KEY]
+        if not isinstance(existing, QuantParam):
+            return
+        qparams.append(existing)
+
+    # Resolve schema keyword names (input/zero_point) before using the existing
+    # validator, whose corresponding fields are named tensor/zero_p.
+    schema = getattr(dst.target, "_schema")
+    values = [
+        dst.args[index] if index < len(dst.args) else dst.kwargs.get(argument.name)
+        for index, argument in enumerate(schema.arguments)
+    ]
+    try:
+        args = QuantizePerTensorArgs(*values)  # type: ignore[arg-type]
+        dtype = infer_dtype(args.quant_min, args.quant_max, args.dtype)
+    except (ArgTypeError, TypeError, ValueError, RuntimeError):
+        return
+    if (
+        not math.isfinite(args.scale)
+        or args.scale <= 0
+        or not args.quant_min <= args.zero_p <= args.quant_max
+    ):
+        return
+
+    for candidate in qparams:
+        if (
+            is_mx_dtype(candidate.dtype)
+            or candidate.dtype != dtype
+            or candidate.quantized_dimension is not None
+            or not isinstance(candidate.scale, list)
+            or len(candidate.scale) != 1
+            or not isinstance(candidate.zero_point, list)
+            or len(candidate.zero_point) != 1
+            or not isinstance(candidate.scale[0], (float, int))
+            or not math.isfinite(candidate.scale[0])
+            or candidate.scale[0] <= 0
+            or not isinstance(candidate.zero_point[0], int)
+            or not args.quant_min <= candidate.zero_point[0] <= args.quant_max
+        ):
+            return
+
+    # Stage every replacement before mutating the node. Preserve argument
+    # placement, storage dtype, range, and all unrelated kwargs and metadata.
+    assert qparam.scale is not None and qparam.zero_point is not None
+    scale, zero_point = float(qparam.scale[0]), qparam.zero_point[0]
+    new_qparam = copy.deepcopy(qparam)
+    new_args = list(dst.args)
+    new_kwargs = dict(dst.kwargs)
+    for index, name, value in (
+        (1, "scale", scale),
+        (2, "zero_point", zero_point),
+    ):
+        if index < len(new_args):
+            new_args[index] = value
+        else:
+            new_kwargs[name] = value
+    dst.args = tuple(new_args)
+    dst.kwargs = new_kwargs
+    dst.meta[QPARAM_KEY] = new_qparam
+    logging.getLogger(__name__).debug(
+        f"{dst.name} is retargeted to {src.name}'s affine quantparam: "
+        f"scale={scale}, zero_point={zero_point}."
+    )
 
 
 @trace_graph_diff_on_pass
@@ -58,19 +143,26 @@ class PropagateQParamBackward(PassBase):
             if QPARAM_KEY not in src.meta:
                 return
 
+            # Explicit quantizers are domain boundaries, including unsupported
+            # overloads. Only a private affine per-tensor Quantize can retarget.
+            schema = getattr(dst.target, "_schema", None)
+            if getattr(schema, "name", None) in {
+                "circle_custom::quantize_mx",
+                "quantized_decomposed::quantize_per_tensor",
+                "quantized_decomposed::quantize_per_channel",
+            }:
+                if dst.target == (
+                    torch.ops.quantized_decomposed.quantize_per_tensor.default
+                ):
+                    _retarget_affine_per_tensor_quantize(src, dst)
+                return
+
             src_qparam = src.meta[QPARAM_KEY]
             if is_mx_dtype(src_qparam.dtype):
                 # A producer's established domain belongs to all its users. In
                 # particular, never rewrite an explicit Quantize destination
                 # using the domain of a later view or requantization boundary.
                 if QPARAM_KEY in dst.meta or len(dst.users) != 1:
-                    return
-                schema = getattr(dst.target, "_schema", None)
-                if getattr(schema, "name", None) in {
-                    "circle_custom::quantize_mx",
-                    "quantized_decomposed::quantize_per_tensor",
-                    "quantized_decomposed::quantize_per_channel",
-                }:
                     return
                 mapped = remap_mx_qparam(src_qparam, src, backward=True)
                 assert mapped is not None
