@@ -332,6 +332,14 @@ see the [Circle pass contracts](../tico/circle/README.md).
 This phase legalizes and completes a graph that has already been prepared as quantized.
 It is not a replacement for model calibration or the public quantization workflow.
 
+Affine backward propagation may retarget an explicit per-tensor Quantize to a
+non-width Concat's domain, including through reshape/permute nodes, when the
+quantized dtype matches and the Quantize's sole user is the propagating node.
+Retargeting updates its scale/zero-point arguments and output qparam metadata
+atomically and stops at its input boundary. Shared Quantize outputs, unsupported
+overloads, and non-affine or non-scalar domains remain unchanged. Serialization
+rejects Quantize arguments and output metadata that disagree.
+
 The third graph snapshot is emitted after this phase when enabled.
 
 ### 5.7 Final checks and serialization
