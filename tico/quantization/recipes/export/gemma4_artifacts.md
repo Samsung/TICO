@@ -88,13 +88,16 @@ affine cache boundary is also rejected; use an explicit supported identity
 policy for a float path.
 
 With affine storage and affine reads, `present_value` can use MXINT8 on the
-sequence axis (`axis: -2`). For cached decode, the compute branch first converts
-current V to the independent `past_value` affine grid, concatenates it with the
-already converted existing V, then applies MX to the full sequence. It does not
-concatenate separately quantized partial MX blocks. Empty-cache prefill applies
-MX directly to current V without executing `past_value`; a shared consumer
-converts the actual supplied full storage tensor through its read and compute
-boundaries. The affine `present_*` path retains its existing conversions.
+sequence axis (`axis: -2`). For cached decode, the compute branch concatenates
+existing V after its independent `past_value` conversion with current V from
+the producer's `new_v` grid, then applies MX to the full sequence. Only existing
+tokens pass through `past_value`. For differing affine source grids, the
+exported graph preserves each grid and explicitly dequantizes the inputs before
+concatenation. It does not concatenate separately quantized partial MX blocks.
+Empty-cache prefill applies MX directly to current V without executing
+`past_value`; a shared consumer converts the actual supplied full storage tensor
+through its read and compute boundaries. The affine `present_*` path retains
+its existing conversions.
 Together with MXINT8 probabilities on the key axis (`axis: -1`), this supports
 MXINT8 × MXINT8 attention with an INT16 result and INT16 persistent cache. See
 the [policy example](../../examples/configs/PTQ_OVERRIDE_POLICIES.md#gemma4-int16-cache-with-mx-attention)

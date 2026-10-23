@@ -274,7 +274,23 @@ class TestGemma4MXAttentionIntegration(unittest.TestCase):
                 model = self._calibrate(layout)
                 owner, consumer = self._attentions(model)
                 self.assertIs(consumer.cache_storage_observers()[1], owner.obs_new_v)
-                with torch.no_grad():
+                self.assertIsNot(consumer.obs_past_value, owner.obs_past_value)
+                read_lengths: dict[str, list[int]] = {"owner": [], "consumer": []}
+
+                def read_spy(observer, name):
+                    original = observer.fake_quant
+
+                    def fake_quant(value):
+                        read_lengths[name].append(value.shape[-2])
+                        return original(value)
+
+                    return mock.patch.object(
+                        observer, "fake_quant", side_effect=fake_quant
+                    )
+
+                with ExitStack() as stack, torch.no_grad():
+                    stack.enter_context(read_spy(owner.obs_past_value, "owner"))
+                    stack.enter_context(read_spy(consumer.obs_past_value, "consumer"))
                     result = model(
                         input_ids=torch.tensor([[1, 3, 5, 7]]),
                         use_cache=True,
@@ -298,6 +314,8 @@ class TestGemma4MXAttentionIntegration(unittest.TestCase):
                             rtol=0,
                         )
                         self.assertTrue(bool(torch.isfinite(result.logits).all()))
+                self.assertEqual(read_lengths["owner"], [4, 5])
+                self.assertEqual(read_lengths["consumer"], [4, 5, 6])
                 caches.append(result.past_key_values.layers[0].values)
                 state = copy.deepcopy(model.state_dict())
                 _, restored = self._prepared(layout)
@@ -409,13 +427,47 @@ class TestGemma4MXAttentionIntegration(unittest.TestCase):
                 torch.tensor(0.5), torch.tensor(127, dtype=torch.int32)
             )
         past = torch.full((1, 1, 31, 32), 0.375)
-        current = torch.full((1, 1, 1, 32), 64.0)
+        # The old read grid would clip 100 and 64.375 to 64, and round .375
+        # to .5. None of those transformations belongs on the current delta.
+        current = torch.tensor([100.0] * 8 + [64.375] * 8 + [0.375] * 16).reshape(
+            1, 1, 1, 32
+        )
         args = (current, current, past, past)
+        originals = tuple(value.clone() for value in args)
         module = _StorageAndCompute(attention).eval()
+        read_calls = []
+        compute_inputs = []
+        read_quantize = attention.obs_past_value.fake_quant
+        compute_quantize = attention.obs_present_value.fake_quant
+
+        def record_read(value):
+            read_calls.append(value.detach().clone())
+            return read_quantize(value)
+
+        def record_compute(value):
+            compute_inputs.append(value.detach().clone())
+            return compute_quantize(value)
+
+        with mock.patch.object(
+            attention.obs_past_value, "fake_quant", side_effect=record_read
+        ), mock.patch.object(
+            attention.obs_present_value, "fake_quant", side_effect=record_compute
+        ), torch.no_grad():
+            eager = module(*args)
+        self.assertEqual(len(read_calls), 1)
+        torch.testing.assert_close(read_calls[0], past, atol=0, rtol=0)
+        self.assertEqual(len(compute_inputs), 1)
+        self.assertEqual(tuple(compute_inputs[0].shape), (1, 1, 32, 32))
+        torch.testing.assert_close(
+            compute_inputs[0][..., -1:, :], current, atol=0, rtol=0
+        )
         circle_model, outputs = self._export(module, args)
         compute, delta, storage = outputs
+        for actual, expected_output in zip(outputs, eager, strict=True):
+            torch.testing.assert_close(actual, expected_output, atol=0, rtol=0)
         read_past = torch.full_like(past, 0.5)
         read_full = torch.cat((read_past, current), dim=-2)
+        torch.testing.assert_close(compute_inputs[0], read_full, atol=0, rtol=0)
         expected = quantize_mx(read_full, elem_format="int8", axis=-2)
         incorrect = torch.cat(
             (
@@ -436,12 +488,32 @@ class TestGemma4MXAttentionIntegration(unittest.TestCase):
             torch.equal(expected, bypass_read),
             "the independent affine read must affect the MX result",
         )
+        current_on_read_grid = (
+            torch.round(current / 0.5 + 127).clamp(0, 255) - 127
+        ) * 0.5
+        wrong_current = quantize_mx(
+            torch.cat((read_past, current_on_read_grid), dim=-2),
+            elem_format="int8",
+            axis=-2,
+        )
+        self.assertFalse(
+            torch.equal(expected, wrong_current),
+            "current values must keep their producer storage grid before full MX",
+        )
+        torch.testing.assert_close(
+            compute[..., -1:, :8], current[..., :8], atol=0, rtol=0
+        )
         torch.testing.assert_close(delta, current, atol=0, rtol=0)
         torch.testing.assert_close(
             storage, torch.cat((past, current), dim=-2), atol=0, rtol=0
         )
         self.assertFalse(torch.equal(compute[..., :31, :], past))
-        torch.testing.assert_close(args[2], past, atol=0, rtol=0)
+        for actual, original in zip(args, originals, strict=True):
+            torch.testing.assert_close(actual, original, atol=0, rtol=0)
+        scale, zero_point = attention.obs_past_value.compute_qparams()
+        self.assertEqual(float(scale), 0.5)
+        self.assertEqual(int(zero_point), 127)
+        self.assertIsNot(attention.obs_past_value, attention.obs_new_v)
         graph = circle_model.subgraphs[0]
         conversions = [
             (graph.tensors[operator.inputs[0]], graph.tensors[operator.outputs[0]])
@@ -458,6 +530,14 @@ class TestGemma4MXAttentionIntegration(unittest.TestCase):
                 and tuple(after.quantization.zeroPoint) == (127,)
                 for before, after in conversions
             )
+        )
+        self.assertFalse(
+            any(
+                after.type == circle.TensorType.TensorType.UINT8
+                and int(after.shape[-2]) == 1
+                for _, after in conversions
+            ),
+            "the current delta must never be requantized to the past-read grid",
         )
         mx_quantizes = [
             operator
@@ -483,9 +563,29 @@ class TestGemma4MXAttentionIntegration(unittest.TestCase):
         )
         for index in (*concat.inputs, *concat.outputs):
             tensor = graph.tensors[index]
-            self.assertEqual(tensor.type, circle.TensorType.TensorType.UINT8)
-            self.assertEqual(tuple(tensor.quantization.scale), (0.5,))
-            self.assertEqual(tuple(tensor.quantization.zeroPoint), (127,))
+            self.assertEqual(tensor.type, circle.TensorType.TensorType.FLOAT32)
+            self.assertIsNone(tensor.quantization)
+        producers = {
+            int(index): operator
+            for operator in graph.operators
+            for index in operator.outputs
+        }
+        for index, dtype, scale, zero_point in zip(
+            concat.inputs,
+            (circle.TensorType.TensorType.UINT8, circle.TensorType.TensorType.INT16),
+            (0.5, 0.125),
+            (127, 0),
+            strict=True,
+        ):
+            dequantize = producers[int(index)]
+            self.assertEqual(
+                self._builtin(circle_model, dequantize),
+                circle.BuiltinOperator.BuiltinOperator.DEQUANTIZE,
+            )
+            source = graph.tensors[dequantize.inputs[0]]
+            self.assertEqual(source.type, dtype)
+            self.assertEqual(tuple(source.quantization.scale), (scale,))
+            self.assertEqual(tuple(source.quantization.zeroPoint), (zero_point,))
         output = graph.tensors[mx_quantize.outputs[0]]
         self.assertEqual(list(output.shape), [1, 1, 32, 32])
         self.assertEqual(output.quantization.quantizedDimension, 2)

@@ -20,7 +20,7 @@ from unittest import mock
 
 import torch
 
-from tico.quantization.config.specs import mx, no_quant
+from tico.quantization.config.specs import affine, mx, no_quant
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.mx import MXObserver
 from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
@@ -87,59 +87,130 @@ class TestGemma4PastKVMX(unittest.TestCase):
 
     def test_full_v_mx_blocks_follow_affine_read_conversion_and_concat(self):
         for layout in ("unrolled", "batched"):
+            for read_dtype in (DType.int(16), DType.uint(8)):
+                with self.subTest(layout=layout, read_dtype=read_dtype):
+                    attention = self._make_attention(
+                        layout=layout, overrides={"past_value": affine(read_dtype)}
+                    )
+                    self._calibrate(attention)
+                    # Different scale/zero point even with the same INT16 dtype.
+                    # UINT8 additionally puts current outside the past-read range.
+                    # These cases test conversion separately from calibration.
+                    attention.obs_new_v.load_qparams(
+                        torch.tensor(0.0625), torch.tensor(-3)
+                    )
+                    attention.obs_past_value.load_qparams(
+                        torch.tensor(0.125), torch.tensor(7)
+                    )
+                    past_v = torch.full((1, 1, 31, 32), 0.4375)
+                    new_v = torch.full((1, 1, 1, 32), 100.0625)
+                    torch.testing.assert_close(
+                        attention.obs_new_v.fake_quant(new_v), new_v, atol=0, rtol=0
+                    )
+                    if read_dtype == DType.uint(8):
+                        self.assertGreater(float(new_v.min()), (255 - 7) * 0.125)
+                    past_k = torch.zeros_like(past_v)
+                    new_k = torch.zeros_like(new_v)
+                    original_past = past_v.clone()
+                    original_new = new_v.clone()
+                    with mock.patch.object(
+                        attention.obs_past_value,
+                        "fake_quant",
+                        wraps=attention.obs_past_value.fake_quant,
+                    ) as read, mock.patch.object(
+                        attention.obs_present_value,
+                        "fake_quant",
+                        wraps=attention.obs_present_value.fake_quant,
+                    ) as present:
+                        compute, storage, cache = attention._build_present_key_value(
+                            new_key_value=(new_k, new_v),
+                            past_key_value=(past_k, past_v),
+                        )
+                    self.assertEqual(
+                        [call.args[0].shape[-2] for call in read.call_args_list], [31]
+                    )
+                    present.assert_called_once()
+                    torch.testing.assert_close(
+                        present.call_args.args[0][..., -1:, :], new_v, atol=0, rtol=0
+                    )
+                    read_v = attention.obs_past_value.fake_quant(
+                        attention.obs_new_v.fake_quant(past_v)
+                    )
+                    self.assertFalse(torch.equal(read_v, past_v))
+                    incorrectly_read_current = attention.obs_past_value.fake_quant(
+                        new_v
+                    )
+                    self.assertFalse(torch.equal(incorrectly_read_current, new_v))
+                    expected = attention.obs_present_value.fake_quant(
+                        torch.cat((read_v, new_v), dim=-2)
+                    )
+                    with_current_read_conversion = (
+                        attention.obs_present_value.fake_quant(
+                            torch.cat((read_v, incorrectly_read_current), dim=-2)
+                        )
+                    )
+                    if read_dtype == DType.uint(8):
+                        self.assertFalse(
+                            torch.equal(expected, with_current_read_conversion)
+                        )
+                    per_part = torch.cat(
+                        (
+                            attention.obs_present_value.fake_quant(read_v),
+                            attention.obs_present_value.fake_quant(new_v),
+                        ),
+                        dim=-2,
+                    )
+                    without_read_conversion = attention.obs_present_value.fake_quant(
+                        torch.cat((past_v, new_v), dim=-2)
+                    )
+                    self.assertFalse(torch.equal(expected, without_read_conversion))
+                    self.assertFalse(torch.equal(expected, per_part))
+                    torch.testing.assert_close(compute[1], expected, atol=0, rtol=0)
+                    torch.testing.assert_close(
+                        storage[1], torch.cat((past_v, new_v), dim=-2), atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(past_v, original_past, atol=0, rtol=0)
+                    torch.testing.assert_close(new_v, original_new, atol=0, rtol=0)
+                    self.assertIsNone(cache)
+
+    def test_prefill_and_decode_full_v_agree_without_requantizing_current_as_past(self):
+        for layout in ("unrolled", "batched"):
             with self.subTest(layout=layout):
-                attention = self._make_attention(layout=layout)
+                attention = self._make_attention(
+                    layout=layout, overrides={"past_value": affine(DType.uint(8))}
+                )
                 self._calibrate(attention)
-                # Deliberately different scale AND zero point. This case tests
-                # conversion semantics separately from real cached calibration.
                 attention.obs_new_v.load_qparams(torch.tensor(0.0625), torch.tensor(-3))
                 attention.obs_past_value.load_qparams(
                     torch.tensor(0.125), torch.tensor(7)
                 )
-                past_v = torch.full((1, 1, 31, 32), 0.4375)
-                new_v = torch.full((1, 1, 1, 32), 100.0)
-                past_k = torch.zeros_like(past_v)
-                new_k = torch.zeros_like(new_v)
-                original_past = past_v.clone()
-                original_new = new_v.clone()
+                # Existing tokens already fit both grids, so the same complete
+                # storage values must yield identical full-V MX computation.
+                # The current token lies outside the past-read range and is not
+                # on its grid; it remains a producer delta until full-V MX.
+                past_v = torch.full((1, 1, 31, 32), 0.5)
+                current_v = torch.full((1, 1, 1, 32), 100.0625)
+                full_v = torch.cat((past_v, current_v), dim=-2)
+                full_k = torch.zeros_like(full_v)
                 with mock.patch.object(
                     attention.obs_past_value,
                     "fake_quant",
                     wraps=attention.obs_past_value.fake_quant,
                 ) as read:
-                    compute, storage, cache = attention._build_present_key_value(
-                        new_key_value=(new_k, new_v), past_key_value=(past_k, past_v)
+                    prefill, prefill_storage, _ = attention._build_present_key_value(
+                        new_key_value=(full_k, full_v), past_key_value=None
+                    )
+                    read.assert_not_called()
+                    decode, decode_storage, _ = attention._build_present_key_value(
+                        new_key_value=(full_k[..., -1:, :], current_v),
+                        past_key_value=(full_k[..., :31, :], past_v),
                     )
                 self.assertEqual(
-                    [call.args[0].shape[-2] for call in read.call_args_list], [31, 1]
+                    [call.args[0].shape[-2] for call in read.call_args_list], [31]
                 )
-                read_v = attention.obs_past_value.fake_quant(
-                    attention.obs_new_v.fake_quant(past_v)
-                )
-                self.assertFalse(torch.equal(read_v, past_v))
-                current_v = attention.obs_past_value.fake_quant(new_v)
-                expected = attention.obs_present_value.fake_quant(
-                    torch.cat((read_v, current_v), dim=-2)
-                )
-                per_part = torch.cat(
-                    (
-                        attention.obs_present_value.fake_quant(read_v),
-                        attention.obs_present_value.fake_quant(current_v),
-                    ),
-                    dim=-2,
-                )
-                without_read_conversion = attention.obs_present_value.fake_quant(
-                    torch.cat((past_v, new_v), dim=-2)
-                )
-                self.assertFalse(torch.equal(expected, without_read_conversion))
-                self.assertFalse(torch.equal(expected, per_part))
-                torch.testing.assert_close(compute[1], expected, atol=0, rtol=0)
-                torch.testing.assert_close(
-                    storage[1], torch.cat((past_v, new_v), dim=-2), atol=0, rtol=0
-                )
-                torch.testing.assert_close(past_v, original_past, atol=0, rtol=0)
-                torch.testing.assert_close(new_v, original_new, atol=0, rtol=0)
-                self.assertIsNone(cache)
+                torch.testing.assert_close(prefill[1], decode[1], atol=0, rtol=0)
+                for storage in (prefill_storage, decode_storage):
+                    torch.testing.assert_close(storage[1], full_v, atol=0, rtol=0)
 
     def test_prefill_unused_read_and_decode_only_existing_tokens(self):
         for layout in ("unrolled", "batched"):

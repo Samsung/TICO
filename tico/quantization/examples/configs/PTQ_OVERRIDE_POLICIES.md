@@ -136,9 +136,11 @@ attention V boundary; no additional `attn_value` observer is needed.
 
 `past_value` remains an independent per-tensor affine read observer. During
 cached decode, only existing tokens pass through that observer. The compute
-branch converts current V to the read grid, concatenates it with read V, and
-applies MX once to the complete sequence. Quantizing partial past/current MX
-blocks before concatenation would change their shared exponents. Producer
+branch concatenates read V with current V from the `new_v` grid, then applies
+MX once to the complete sequence. Current V does not pass through `past_value`.
+When the affine source grids differ, export preserves their qparams with
+explicit dequantization before concatenation. Quantizing partial past/current
+MX blocks before concatenation would change their shared exponents. Producer
 storage, returned deltas, full cache returns, and shared-KV storage keep the
 frozen `new_*` grid.
 

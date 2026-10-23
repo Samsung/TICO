@@ -985,19 +985,14 @@ class QuantGemma4TextAttention(QuantModuleBase):
             )
         else:
             read_k, read_v = self._read_cache_key_value(past)
-            # Both concat inputs must share the actual compute grid. These are
-            # value conversions; the original new_* delta branch stays intact.
+            # Affine compute aligns concat inputs to its grid. MX instead
+            # quantizes full V after concat, preserving the independent past
+            # read and current storage values at their respective boundaries.
             current_k, current_v = new_k, new_v
             if self._mode is Mode.QUANT:
                 read_k = self._fq(read_k, self.obs_present_key)
                 current_k = self._fq(current_k, self.obs_present_key)
-                if isinstance(self.obs_present_value, MXObserver):
-                    # Sequence blocks can straddle past/current. Assemble on
-                    # the independent affine read grid before applying MX once
-                    # to full V; quantizing partial blocks before concat would
-                    # change their shared exponents. Storage is never modified.
-                    current_v = self._fq(current_v, self.obs_past_value)
-                else:
+                if not isinstance(self.obs_present_value, MXObserver):
                     read_v = self._fq(read_v, self.obs_present_value)
                     current_v = self._fq(current_v, self.obs_present_value)
             compute = (

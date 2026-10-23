@@ -104,7 +104,9 @@ def _restore_float_inputs(graph: torch.fx.Graph) -> None:
             node.replace_input_with(source, dequantize)
 
 
-def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
+def _inherit_qparam_from_view_chain(
+    node: torch.fx.Node, *, preserve_float_concat: bool = False
+) -> bool:
     """Seed a view chain with its source's affine or remapped MX domain.
 
     ``FoldQuantOps`` runs before ``PropagateQParamForward``.  A
@@ -114,8 +116,10 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
     the target Q-DQ pair can be folded into RESHAPE and the required Quantize
     operation disappears.
 
-    MX views must preserve the shared-exponent blocks. Affine per-channel
-    propagation is not handled here.
+    MX views must preserve the shared-exponent blocks. Before a full-tensor MX
+    conversion, keep incompatible concat input domains as dequantized values
+    rather than replacing their independently established grids. Affine
+    per-channel propagation is not handled here.
     """
     if QPARAM_KEY in node.meta:
         return False
@@ -135,10 +139,14 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
                     return False
                 sources.append(source)
             for source in sources:
-                _inherit_qparam_from_view_chain(source)
+                _inherit_qparam_from_view_chain(
+                    source, preserve_float_concat=preserve_float_concat
+                )
             qparams = [source.meta.get(QPARAM_KEY) for source in sources]
             first_qparam = qparams[0]
             if first_qparam is None or any(qparam is None for qparam in qparams):
+                if preserve_float_concat:
+                    current.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True
                 return False
             if is_mx_dtype(first_qparam.dtype):
                 current.meta[QPARAM_KEY] = remap_mx_qparam(first_qparam, current)
@@ -146,6 +154,8 @@ def _inherit_qparam_from_view_chain(node: torch.fx.Node) -> bool:
                 if first_qparam.quantized_dimension is not None or any(
                     qparam != first_qparam for qparam in qparams[1:]
                 ):
+                    if preserve_float_concat:
+                        current.meta[_PRESERVE_FLOAT_INPUTS_KEY] = True
                     return False
                 current.meta[QPARAM_KEY] = copy.deepcopy(first_qparam)
             break
@@ -248,7 +258,7 @@ def _fold_mx_qdq(dq: torch.fx.Node) -> None:
     if _mx_op_params(q) != _mx_op_params(dq):
         return
 
-    _inherit_qparam_from_view_chain(op)
+    _inherit_qparam_from_view_chain(op, preserve_float_concat=True)
     qparam = _mx_qparam_from_quant_node(q)
     existing = op.meta.get(QPARAM_KEY)
     if existing is None:
