@@ -321,7 +321,7 @@ class GPTQ:
         )
         self.nsamples = 0
         self.observation_count = 0
-        self.effective_observation_count = 0.0        
+        self.effective_observation_count = 0.0
         self.percdamp_used: Optional[float] = None
         self.quantizer: Quantizer = Quantizer()
 
@@ -541,6 +541,21 @@ class GPTQ:
                 f"percdamp={percdamp}."
             )
 
+    def _damping_precheck(
+        self, h: torch.Tensor, percdamp: float
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Validate damping inputs; return the diagonal index and its mean."""
+        if percdamp <= 0:
+            raise ValueError(f"percdamp must be positive. got {percdamp}")
+        diag = torch.arange(self.columns, device=self.dev)
+        diag_mean = torch.mean(torch.diag(h))
+        if not torch.isfinite(diag_mean) or diag_mean <= 0:
+            raise RuntimeError(
+                "GPTQ Hessian has a non-positive or non-finite diagonal mean "
+                f"before damping: {diag_mean.item()}."
+            )
+        return diag, diag_mean
+
     def _factorize_hessian_inverse(
         self,
         h: torch.Tensor,
@@ -550,27 +565,26 @@ class GPTQ:
         max_retries: int = 5,
     ) -> torch.Tensor:
         """
-        Build the Cholesky factor of the damped inverse Hessian.
+        Build the Cholesky factor of the damped inverse Hessian with retries.
 
-        Static GPTQ uses one attempt. When ``percdamp_max`` is provided it
-        acts as a retry ceiling, independent of any clamp the caller applied
-        to ``percdamp``: this layer retries with geometrically larger damping
-        when factorization or post-factorization sanity checks fail.
+        This is the auto-mode path: ``percdamp_max`` acts as a retry ceiling,
+        independent of any clamp the caller applied to ``percdamp``. The
+        undamped ``h`` is retained for retries while per-attempt temporaries
+        are released as early as possible, so at most three N x N tensors are
+        live at once. The static single-attempt path is inlined in
+        ``fasterquant`` to preserve its legacy two-tensor memory profile.
         """
-        if percdamp <= 0:
-            raise ValueError(f"percdamp must be positive. got {percdamp}")
-        if percdamp_max is not None and percdamp_max < percdamp:
+        if percdamp_max is None:
+            raise ValueError(
+                "percdamp_max is required for the retry path; the static "
+                "single-attempt path is inlined in fasterquant."
+            )
+        if percdamp_max < percdamp:
             raise ValueError(
                 "percdamp_max must be >= percdamp. " f"got {percdamp_max} < {percdamp}"
             )
 
-        diag = torch.arange(self.columns, device=self.dev)
-        diag_mean = torch.mean(torch.diag(h))
-        if not torch.isfinite(diag_mean) or diag_mean <= 0:
-            raise RuntimeError(
-                "GPTQ Hessian has a non-positive or non-finite diagonal mean "
-                f"before damping: {diag_mean.item()}."
-            )
+        diag, diag_mean = self._damping_precheck(h, percdamp)
 
         cur_percdamp = float(percdamp)
         attempts = 0
@@ -582,7 +596,9 @@ class GPTQ:
                 h_try = h.clone()
                 h_try[diag, diag] += cur_percdamp * diag_mean
                 chol = torch.linalg.cholesky(h_try)
+                del h_try  # damped copy no longer needed once chol exists
                 hinv = torch.cholesky_inverse(chol)
+                del chol  # lower factor no longer needed once the inverse exists
                 hinv = torch.linalg.cholesky(hinv, upper=True)
                 self._validate_hinv(hinv, cur_percdamp)
                 self.percdamp_used = cur_percdamp
@@ -595,31 +611,18 @@ class GPTQ:
             except RuntimeError as exc:
                 last_error = exc
 
-            if (
-                percdamp_max is None
-                or attempts >= max_retries
-                or cur_percdamp >= float(percdamp_max)
-            ):
+            if attempts >= max_retries or cur_percdamp >= float(percdamp_max):
                 break
 
             cur_percdamp = min(float(percdamp_max), cur_percdamp * retry_factor)
 
-        if percdamp_max is not None:
-            hint = (
-                "Increase percdamp or raise the retry ceiling "
-                "(auto_percdamp_retry_max)."
-            )
-        else:
-            hint = (
-                "No retry ceiling was provided (static percdamp_mode). "
-                "Increase percdamp or enable percdamp_mode='auto' with "
-                "auto_percdamp_retry_max."
-            )
         raise RuntimeError(
             "GPTQ Hessian factorization failed or became numerically unstable "
             f"after {attempts} attempt(s). "
             f"start_percdamp={percdamp}, last_percdamp={cur_percdamp}, "
-            f"retry_ceiling={percdamp_max}. " + hint
+            f"retry_ceiling={percdamp_max}. "
+            "Increase percdamp or raise the retry ceiling "
+            "(auto_percdamp_retry_max)."
         ) from last_error
 
     @torch.no_grad()
@@ -713,11 +716,36 @@ class GPTQ:
         losses = torch.zeros_like(w)
         q_all = torch.zeros_like(w)
 
-        hinv = self._factorize_hessian_inverse(
-            h,
-            percdamp=percdamp,
-            percdamp_max=percdamp_max,
-        )
+        if percdamp_max is None:
+            # Static single attempt: in-place factorization.
+            diag, diag_mean = self._damping_precheck(h, percdamp)
+            try:
+                h[diag, diag] += percdamp * diag_mean
+                chol = torch.linalg.cholesky(h)
+                del h  # release the damped Hessian before building the inverse
+                hinv = torch.cholesky_inverse(chol)
+                del chol  # release the lower factor before the final Cholesky
+                hinv = torch.linalg.cholesky(hinv, upper=True)
+                self._validate_hinv(hinv, percdamp)
+                self.percdamp_used = float(percdamp)
+            except torch.OutOfMemoryError:
+                raise
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "GPTQ Hessian factorization failed or became numerically "
+                    f"unstable after 1 attempt(s). start_percdamp={percdamp}, "
+                    f"last_percdamp={percdamp}, retry_ceiling=None. "
+                    "No retry ceiling was provided (static percdamp_mode). "
+                    "Increase percdamp or enable percdamp_mode='auto' with "
+                    "auto_percdamp_retry_max."
+                ) from exc
+        else:
+            hinv = self._factorize_hessian_inverse(
+                h,
+                percdamp=percdamp,
+                percdamp_max=percdamp_max,
+            )
+            del h  # the undamped original is no longer needed after retries
 
         # GPTQv2: Compute P correction matrix from dXXT
         P = None

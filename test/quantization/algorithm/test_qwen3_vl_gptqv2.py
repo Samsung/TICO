@@ -148,6 +148,113 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
                     groupsize=-1,
                 )
 
+    @torch.no_grad()
+    def test_static_factorization_consumes_hessian_in_place(self):
+        """Static mode must damp H in place: no full-size clone is made."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(2, dtype=gptq.hessian_dtype, device=gptq.dev)
+        h_ptr = gptq.H.data_ptr()
+
+        seen = []
+        real_cholesky = torch.linalg.cholesky
+
+        def cholesky_spy(m, *args, **kwargs):
+            seen.append(m.data_ptr())
+            return real_cholesky(m, *args, **kwargs)
+
+        with unittest.mock.patch("torch.linalg.cholesky", cholesky_spy):
+            gptq.fasterquant(blocksize=2, percdamp=0.01, groupsize=-1)
+
+        # The first Cholesky consumes the damped Hessian itself, proving the
+        # static path keeps the legacy in-place, low-memory factorization.
+        self.assertGreater(len(seen), 0)
+        self.assertEqual(seen[0], h_ptr)
+        self.assertEqual(gptq.percdamp_used, 0.01)
+
+    @torch.no_grad()
+    def test_auto_factorization_retains_original_hessian(self):
+        """Auto mode must keep the undamped Hessian for retries."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        h = torch.eye(2, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        hinv = gptq._factorize_hessian_inverse(h, percdamp=0.01, percdamp_max=0.5)
+
+        # The original stays pristine so later attempts re-damp a fresh copy.
+        self.assertTrue(
+            torch.allclose(torch.diag(h), torch.ones(2, dtype=h.dtype, device=h.device))
+        )
+        self.assertEqual(hinv.shape, h.shape)
+        self.assertEqual(gptq.percdamp_used, 0.01)
+
+    @torch.no_grad()
+    def test_factorization_peak_live_tensors(self):
+        """Regression guard for the Hessian factorization memory profile."""
+        import contextlib
+        import weakref
+
+        @contextlib.contextmanager
+        def track_live_nxn(h_shape):
+            """Track simultaneously live N x N tensors via weak refs."""
+            live: weakref.WeakSet = weakref.WeakSet()
+            stats = {"peak": 0}
+            real_cholesky = torch.linalg.cholesky
+            real_inverse = torch.cholesky_inverse
+            real_clone = torch.Tensor.clone
+
+            def track(t):
+                live.add(t)
+                stats["peak"] = max(stats["peak"], len(live))
+                return t
+
+            def cholesky_spy(m, *args, **kwargs):
+                return track(real_cholesky(m, *args, **kwargs))
+
+            def inverse_spy(m, *args, **kwargs):
+                return track(real_inverse(m, *args, **kwargs))
+
+            def clone_spy(t, *args, **kwargs):
+                out = real_clone(t, *args, **kwargs)
+                if out.shape == h_shape:
+                    track(out)
+                return out
+
+            with (
+                unittest.mock.patch("torch.linalg.cholesky", cholesky_spy),
+                unittest.mock.patch("torch.cholesky_inverse", inverse_spy),
+                unittest.mock.patch("torch.Tensor.clone", clone_spy),
+            ):
+                yield live, stats
+
+        # Rectangular layer: weight clones (4, 3) never collide with the
+        # Hessian shape (3, 3) in the profiler below.
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+
+        # Static path: legacy profile — at most two live N x N tensors.
+        # NOTE: fasterquant is called directly (no wrapper): passing H as an
+        # argument to a helper frame would keep it alive longer, distorting
+        # the measurement. Production takes the same direct path.
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+        with track_live_nxn(gptq.H.shape) as (live, stats):
+            live.add(gptq.H)  # weak ref only; no strong ref is kept by the test
+            stats["peak"] = 1
+            gptq.fasterquant(blocksize=3, percdamp=0.01, groupsize=-1)
+        self.assertLessEqual(stats["peak"], 2)
+
+        # Auto path: the original is retained for retries while temporaries
+        # are released early — at most three live N x N tensors.
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+        h = gptq.H
+        with track_live_nxn(h.shape) as (live, stats):
+            live.add(h)
+            stats["peak"] = 1
+            gptq._factorize_hessian_inverse(h, percdamp=0.01, percdamp_max=0.5)
+        self.assertLessEqual(stats["peak"], 3)
+
 
 class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
     """Test Qwen3VLGPTQQuantizer helper methods."""
