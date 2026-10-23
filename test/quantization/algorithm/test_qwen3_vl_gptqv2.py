@@ -255,6 +255,63 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
             gptq._factorize_hessian_inverse(h, percdamp=0.01, percdamp_max=0.5)
         self.assertLessEqual(stats["peak"], 3)
 
+    @torch.no_grad()
+    def test_failed_retry_attempt_tensors_released_without_gc(self):
+        """A successful retry must not keep failed-attempt tensors alive.
+
+        Regression guard: a retained exception traceback referenced the
+        factorization frame (and the Hessian tensors in its locals), forming
+        a reference cycle that survived until cyclic garbage collection.
+        """
+        import gc
+        import weakref
+
+        gc.disable()  # refcount-only cleanup; restored in finally below
+        try:
+            layer = torch.nn.Linear(3, 4, bias=False)
+            gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+            gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+            gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+            h_shape = gptq.H.shape
+            h_ref = weakref.ref(gptq.H)
+
+            clone_refs = []
+            real_clone = torch.Tensor.clone
+
+            def clone_spy(t, *args, **kwargs):
+                out = real_clone(t, *args, **kwargs)
+                if out.shape == h_shape:
+                    clone_refs.append(weakref.ref(out))
+                return out
+
+            real_cholesky = torch.linalg.cholesky
+            calls = {"n": 0}
+
+            def flaky_cholesky(m, *args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("simulated factorization failure")
+                return real_cholesky(m, *args, **kwargs)
+
+            with (
+                unittest.mock.patch("torch.linalg.cholesky", flaky_cholesky),
+                unittest.mock.patch("torch.Tensor.clone", clone_spy),
+            ):
+                gptq.fasterquant(
+                    blocksize=3, percdamp=0.01, groupsize=-1, percdamp_max=0.1
+                )
+
+            # The first attempt failed inside cholesky, so a retry happened.
+            self.assertGreaterEqual(calls["n"], 2)
+            # Without any gc.collect(), the original Hessian and every
+            # per-attempt clone must already be released by refcounting.
+            self.assertIsNone(h_ref())
+            self.assertTrue(clone_refs)
+            for ref in clone_refs:
+                self.assertIsNone(ref())
+        finally:
+            gc.enable()
+
 
 class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
     """Test Qwen3VLGPTQQuantizer helper methods."""

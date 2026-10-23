@@ -602,6 +602,12 @@ class GPTQ:
                 hinv = torch.linalg.cholesky(hinv, upper=True)
                 self._validate_hinv(hinv, cur_percdamp)
                 self.percdamp_used = cur_percdamp
+                # Drop a retained failed-attempt exception before returning:
+                # its traceback references this frame (and thus the Hessian
+                # tensors in its locals), forming a reference cycle that
+                # would otherwise keep those tensors alive until cyclic
+                # garbage collection.
+                last_error = None
                 return hinv
             except torch.OutOfMemoryError:
                 # Retrying with larger damping cannot fix an OOM (each attempt
