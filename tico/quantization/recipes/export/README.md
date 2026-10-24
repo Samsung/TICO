@@ -144,6 +144,9 @@ quality and target-device performance need their own evaluation.
 
 A file-by-file description of a complete Gemma4 E2B quantized export is kept in
 [`gemma4_artifacts.md`](gemma4_artifacts.md).
+Its [KV cache contract](gemma4_artifacts.md#kv-cache-boundaries) distinguishes
+producer storage, independent past reads, and full attention computation,
+including INT16 storage with sequence-axis MXINT8 V.
 
 ### Gemma4 Per-Layer Embedding (PLE) artifacts
 

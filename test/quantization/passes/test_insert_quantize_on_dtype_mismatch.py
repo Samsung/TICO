@@ -21,6 +21,7 @@ from tico.quantization.passes.insert_quantize_on_dtype_mismatch import (
 )
 from tico.serialize.quant_param import QPARAM_KEY, QuantParam
 from tico.utils.errors import NotYetSupportedError
+from tico.utils.mx.dtypes import is_mx_dtype
 
 from test.modules.op.add import SimpleAdd
 from test.modules.op.bmm import SimpleBatchMatMul
@@ -30,6 +31,19 @@ from test.modules.op.mul import SimpleMulWithTensor
 from test.modules.op.permute import SimplePermute
 from test.modules.op.relu import SimpleRelu
 from test.modules.op.reshape import ReshapeTorchAPI
+from test.support.helper import num_of_ops
+
+
+def _make_qparam(dtype: str, scale: float = 1.0, zp: int = 0) -> QuantParam:
+    """Return a per-tensor affine qparam, or an MX qparam grouped on the last axis."""
+    qparam = QuantParam()
+    qparam.dtype = dtype
+    if is_mx_dtype(dtype):
+        qparam.quantized_dimension = -1
+    else:
+        qparam.scale = [scale]
+        qparam.zero_point = [zp]
+    return qparam
 
 
 class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
@@ -59,7 +73,14 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
         zp=0,
         input_dtype="uint8",
         desired_dtype="uint8",
+        node_dtype=None,
     ):
+        """Build the graph and set mismatching qparams on inputs and the target node.
+
+        ``node_dtype`` defaults to the historical uint8/int16 counterpart of
+        ``input_dtype``. Pass it explicitly (or use ``input_dtype="mxint8"``)
+        for MX cases; MX qparams carry a dtype and a quantized dimension only.
+        """
         assert hasattr(mod, "get_example_inputs")
         self.args, self.kwargs = mod.get_example_inputs()  # type: ignore[operator]
         self.scale = scale
@@ -96,26 +117,18 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
         assert len(user_inputs) > 0
 
         for user_input in user_inputs:
-            qparam = QuantParam()
-            qparam.scale = [self.scale]
-            qparam.zero_point = [self.zp]
-            qparam.dtype = self.input_dtype
+            user_input.meta[QPARAM_KEY] = _make_qparam(
+                self.input_dtype, scale=self.scale, zp=self.zp
+            )
 
-            user_input.meta[QPARAM_KEY] = qparam
-
-        node_qparam = QuantParam()
-        if self.input_dtype == "int16":
-            node_qparam.scale = [1.0]
-            node_qparam.zero_point = [0]
-            node_qparam.dtype = "uint8"
-        elif self.input_dtype == "uint8":
-            node_qparam.scale = [1.0]
-            node_qparam.zero_point = [0]
-            node_qparam.dtype = "int16"
-        else:
-            raise RuntimeError("Unsupported dtype")
-
-        self.target.meta[QPARAM_KEY] = node_qparam
+        if node_dtype is None:
+            if self.input_dtype == "int16":
+                node_dtype = "uint8"
+            elif self.input_dtype == "uint8":
+                node_dtype = "int16"
+            else:
+                raise RuntimeError("Unsupported dtype")
+        self.target.meta[QPARAM_KEY] = _make_qparam(node_dtype)
 
         self.initialized = True
 
@@ -137,6 +150,40 @@ class InsertQuantizeOnDtypeMismatchTest(unittest.TestCase):
             self.target.meta[QPARAM_KEY].dtype,
             self.target.args[0].meta[QPARAM_KEY].dtype,
         )
+
+    def assert_mx_quantize_after_target(self, *, elem_format: str, axis: int):
+        """The target's only user must be a logical MX quantize carrying the MX qparam."""
+        axis %= self.target.meta["val"].ndim
+        users = list(self.target.users)
+        self.assertEqual(len(users), 1)
+        quantize = users[0]
+        self.assertEqual(quantize.target, torch.ops.circle_custom.quantize_mx.default)
+        self.assertIs(quantize.args[0], self.target)
+        self.assertEqual(quantize.args[1], elem_format)
+        self.assertEqual(quantize.args[2], axis)
+        qparam = quantize.meta[QPARAM_KEY]
+        self.assertEqual(qparam.dtype, "mxint8")
+        self.assertEqual(qparam.quantized_dimension, axis)
+        self.assertIsNone(qparam.scale)
+        # The affine qparam of the input must have moved onto the view op unchanged.
+        inp = self.target.args[0]
+        self.assertEqual(self.target.meta[QPARAM_KEY].scale, inp.meta[QPARAM_KEY].scale)
+        self.assertEqual(
+            self.target.meta[QPARAM_KEY].zero_point, inp.meta[QPARAM_KEY].zero_point
+        )
+
+    def assert_affine_quantize_before_target(self, *, dtype: str):
+        """The target's input must be an affine quantize fed by the MX placeholder."""
+        quantize = self.target.args[0]
+        self.assertEqual(
+            quantize.target,
+            torch.ops.quantized_decomposed.quantize_per_tensor.default,
+        )
+        self.assertEqual(quantize.meta[QPARAM_KEY].dtype, dtype)
+        self.assertEqual(quantize.args[5], getattr(torch, dtype))
+        source = quantize.args[0]
+        self.assertEqual(source.op, "placeholder")
+        self.assertEqual(source.meta[QPARAM_KEY].dtype, "mxint8")
 
 
 class PermuteTest(InsertQuantizeOnDtypeMismatchTest):
@@ -161,6 +208,30 @@ class PermuteTest(InsertQuantizeOnDtypeMismatchTest):
         )
         self.run_test()
 
+    # Input (s16) -> Permute (s16) -> QuantizeMX (mxint8)
+    def test_i16omx(self):
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="int16",
+            desired_dtype="int16",
+            node_dtype="mxint8",
+        )
+        self.run_test()
+        self.assert_mx_quantize_after_target(elem_format="int8", axis=-1)
+
+    # Input (mxint8) -> Quantize (s16) -> Permute (s16)
+    def test_imxo16(self):
+        self.setup(
+            SimplePermute(),
+            torch.ops.aten.permute.default,
+            input_dtype="mxint8",
+            desired_dtype="int16",
+            node_dtype="int16",
+        )
+        self.run_test()
+        self.assert_affine_quantize_before_target(dtype="int16")
+
 
 class LinearTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i8o16(self):
@@ -171,6 +242,19 @@ class LinearTest(InsertQuantizeOnDtypeMismatchTest):
             desired_dtype="uint8",
         )
         self.run_test()
+
+    # MX handling exists only for value-preserving view ops; a Linear whose
+    # input and output disagree on MX-ness must still be rejected explicitly.
+    def test_imx_o16_is_rejected(self):
+        self.setup(
+            SimpleLinear(),
+            torch.ops.aten.linear.default,
+            input_dtype="mxint8",
+            desired_dtype="int16",
+            node_dtype="int16",
+        )
+        with self.assertRaisesRegex(NotYetSupportedError, "From mxint8 to int16"):
+            InsertQuantizeOnDtypeMismatch().call(self.ep)
 
 
 class MulTest(InsertQuantizeOnDtypeMismatchTest):
@@ -204,6 +288,107 @@ class BMMTest(InsertQuantizeOnDtypeMismatchTest):
         self.run_test()
 
 
+class BMMMXTest(InsertQuantizeOnDtypeMismatchTest):
+    def test_mx_inputs_preserve_output_domain(self):
+        for output_dtype in ("int16", "mxint8"):
+            with self.subTest(output_dtype=output_dtype):
+                self.setup(
+                    SimpleBatchMatMul(),
+                    torch.ops.aten.bmm.default,
+                    input_dtype="mxint8",
+                    desired_dtype=output_dtype,
+                    node_dtype=output_dtype,
+                )
+                self.target.args[1].meta[QPARAM_KEY].quantized_dimension = -2
+                InsertQuantizeOnDtypeMismatch().call(self.ep)
+                self.assertEqual(self.target.meta[QPARAM_KEY].dtype, output_dtype)
+                x, y = self.target.args[:2]
+                self.assertEqual(x.meta[QPARAM_KEY].dtype, "mxint8")
+                self.assertEqual(y.meta[QPARAM_KEY].dtype, "mxint8")
+                self.assertEqual(
+                    num_of_ops(
+                        self.ep,
+                        [
+                            torch.ops.quantized_decomposed.quantize_per_tensor.default,
+                            torch.ops.circle_custom.quantize_mx.default,
+                        ],
+                    ),
+                    0,
+                )
+
+    def test_mixed_mx_affine_operands_are_rejected(self):
+        # Validate both operands even when the left input matches the output.
+        for left_dtype, right_dtype in (("mxint8", "int16"), ("int16", "mxint8")):
+            for output_dtype in ("int16", "mxint8"):
+                with self.subTest(
+                    left_dtype=left_dtype,
+                    right_dtype=right_dtype,
+                    output_dtype=output_dtype,
+                ):
+                    self.setup(
+                        SimpleBatchMatMul(),
+                        torch.ops.aten.bmm.default,
+                        input_dtype=left_dtype,
+                        desired_dtype=output_dtype,
+                        node_dtype=output_dtype,
+                    )
+                    _, y = self.target.args[:2]
+                    y.meta[QPARAM_KEY] = _make_qparam(right_dtype)
+                    with self.assertRaisesRegex(
+                        NotYetSupportedError,
+                        f"{left_dtype} x {right_dtype} -> {output_dtype}",
+                    ):
+                        InsertQuantizeOnDtypeMismatch().call(self.ep)
+
+    def test_same_format_mxfp4_bmm_is_preserved(self):
+        self.setup(
+            SimpleBatchMatMul(),
+            torch.ops.aten.bmm.default,
+            input_dtype="mxfp4",
+            node_dtype="mxfp4",
+        )
+        self.target.args[1].meta[QPARAM_KEY].quantized_dimension = -2
+        InsertQuantizeOnDtypeMismatch().call(self.ep)
+        self.assertEqual(self.target.meta[QPARAM_KEY].dtype, "mxfp4")
+
+    def test_unsupported_mx_formats_and_outputs_are_rejected(self):
+        for left, right, output in (
+            ("mxint8", "mxfp4", "mxint8"),
+            ("mxfp4", "mxint8", "mxfp4"),
+            ("mxfp4", "mxfp4", "int16"),
+            ("mxint8", "mxint8", "uint8"),
+            ("mxfp6_e3m2", "mxfp6_e3m2", "mxfp6_e3m2"),
+        ):
+            with self.subTest(left=left, right=right, output=output):
+                self.setup(
+                    SimpleBatchMatMul(),
+                    torch.ops.aten.bmm.default,
+                    input_dtype=left,
+                    node_dtype=output,
+                )
+                self.target.args[1].meta[QPARAM_KEY] = _make_qparam(right)
+                with self.assertRaisesRegex(
+                    NotYetSupportedError, "MX matmul combination"
+                ):
+                    InsertQuantizeOnDtypeMismatch().call(self.ep)
+
+    def test_mx_bmm_requires_reduction_axis_blocks(self):
+        for left_axis, right_axis in ((-2, -2), (-1, -1)):
+            with self.subTest(left_axis=left_axis, right_axis=right_axis):
+                self.setup(
+                    SimpleBatchMatMul(),
+                    torch.ops.aten.bmm.default,
+                    input_dtype="mxint8",
+                    node_dtype="int16",
+                )
+                self.target.args[0].meta[QPARAM_KEY].quantized_dimension = left_axis
+                self.target.args[1].meta[QPARAM_KEY].quantized_dimension = right_axis
+                with self.assertRaisesRegex(
+                    NotYetSupportedError, "reduction dimension"
+                ):
+                    InsertQuantizeOnDtypeMismatch().call(self.ep)
+
+
 class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
     def test_i8o16(self):
         self.setup(
@@ -225,6 +410,30 @@ class ReshapeTest(InsertQuantizeOnDtypeMismatchTest):
             desired_dtype="uint8",
         )
         self.run_test()
+
+    # Input (s16) -> Reshape (s16) -> QuantizeMX (mxint8)
+    def test_i16omx(self):
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="int16",
+            desired_dtype="int16",
+            node_dtype="mxint8",
+        )
+        self.run_test()
+        self.assert_mx_quantize_after_target(elem_format="int8", axis=-1)
+
+    # Input (mxint8) -> Quantize (s16) -> Reshape (s16)
+    def test_imxo16(self):
+        self.setup(
+            ReshapeTorchAPI(),
+            torch.ops.aten.reshape.default,
+            input_dtype="mxint8",
+            desired_dtype="int16",
+            node_dtype="int16",
+        )
+        self.run_test()
+        self.assert_affine_quantize_before_target(dtype="int16")
 
 
 class ReluTest(InsertQuantizeOnDtypeMismatchTest):
@@ -642,3 +851,244 @@ class ReluDtypeMismatchTest(InsertQuantizeOnDtypeMismatchTest):
         target_pass = InsertQuantizeOnDtypeMismatch()
         with self.assertRaises(NotYetSupportedError):
             target_pass.call(self.ep)
+
+
+class _Int16ViewToMX(torch.nn.Module):
+    """int16 fake-quant -> permute -> reshape -> MX fake-quant (linear act_in pattern)."""
+
+    def forward(self, x):
+        x = torch.fake_quantize_per_tensor_affine(x, 0.01, 0, -32768, 32767)
+        x = torch.permute(x, (0, 2, 1, 3))
+        x = torch.reshape(x, (2, 4, 64))
+        return torch.ops.circle_custom.mx_fake_quantize(x, "int8", -1)
+
+    def get_example_inputs(self):
+        torch.manual_seed(0)
+        return (torch.randn(2, 2, 4, 32),), {}
+
+
+class _MXViewToInt16(torch.nn.Module):
+    """MX fake-quant -> reshape -> permute -> int16 fake-quant (linear act_out pattern)."""
+
+    def forward(self, x):
+        x = torch.ops.circle_custom.mx_fake_quantize(x, "int8", -1)
+        x = torch.reshape(x, (2, 4, 2, 32))
+        x = torch.permute(x, (0, 2, 1, 3))
+        return torch.fake_quantize_per_tensor_affine(x, 0.01, 0, -32768, 32767)
+
+    def get_example_inputs(self):
+        torch.manual_seed(0)
+        return (torch.randn(2, 4, 64),), {}
+
+
+class _MXCircleExportTestCase(unittest.TestCase):
+    """End-to-end: an int16/MX boundary across view ops becomes a Circle QUANTIZE."""
+
+    @staticmethod
+    def _ops(model):
+        from circle_schema import circle
+
+        graph = model.subgraphs[0]
+        result = []
+        for operator in graph.operators:
+            code = model.operatorCodes[operator.opcodeIndex]
+            builtin = (
+                code.builtinCode
+                if code.builtinCode != 0 or code.deprecatedBuiltinCode == 0
+                else code.deprecatedBuiltinCode
+            )
+            ins = [graph.tensors[i].type for i in operator.inputs if i >= 0]
+            outs = [graph.tensors[i].type for i in operator.outputs]
+            result.append((builtin, ins, outs))
+        return result, graph
+
+    @staticmethod
+    def _builtin(model, operator):
+        code = model.operatorCodes[operator.opcodeIndex]
+        return (
+            code.builtinCode
+            if code.builtinCode != 0 or code.deprecatedBuiltinCode == 0
+            else code.deprecatedBuiltinCode
+        )
+
+    def _export(self, module):
+        import tico
+        from tico.circle.io import model_from_bytes
+
+        args, kwargs = module.get_example_inputs()
+        with torch.no_grad():
+            module.eval()
+            ep = torch.export.export(module, args, kwargs)
+            torch.testing.assert_close(
+                ep.module()(*args, **kwargs), module(*args, **kwargs), rtol=0, atol=0
+            )
+            circle_model = tico.convert(module, args, kwargs)
+        return model_from_bytes(circle_model.circle_binary)
+
+
+class MXViewCircleExportTest(_MXCircleExportTestCase):
+    def test_int16_views_then_mx(self):
+        from circle_schema import circle
+
+        T = circle.TensorType.TensorType
+        B = circle.BuiltinOperator.BuiltinOperator
+        model = self._export(_Int16ViewToMX())
+        ops, graph = self._ops(model)
+        kinds = [op[0] for op in ops]
+        # Views stay INT16 and a single INT16 -> MXINT8 QUANTIZE closes the chain.
+        self.assertEqual(kinds.count(B.QUANTIZE), 1)
+        for builtin, ins, outs in ops:
+            if builtin == B.QUANTIZE:
+                self.assertEqual(ins, [T.INT16])
+                self.assertEqual(outs, [T.MXINT8])
+            else:
+                self.assertEqual(outs, [T.INT16], builtin)
+        self.assertEqual(ops[-1][0], B.QUANTIZE)
+        storage_input = graph.tensors[graph.inputs[0]]
+        self.assertEqual(storage_input.type, T.INT16)
+        self.assertAlmostEqual(float(storage_input.quantization.scale[0]), 0.01)
+        self.assertEqual(list(storage_input.quantization.zeroPoint), [0])
+        output = graph.tensors[graph.outputs[0]]
+        self.assertEqual(output.type, T.MXINT8)
+        # The MX block axis (-1 in the fake-quant op) is stored as the last
+        # axis of the rank-3 output tensor.
+        self.assertEqual(output.quantization.quantizedDimension, 2)
+        self.assertIsNone(output.quantization.scale)
+        self.assertIsNone(output.quantization.zeroPoint)
+
+    def test_mx_then_int16_views(self):
+        from circle_schema import circle
+
+        T = circle.TensorType.TensorType
+        B = circle.BuiltinOperator.BuiltinOperator
+        model = self._export(_MXViewToInt16())
+        ops, graph = self._ops(model)
+        kinds = [op[0] for op in ops]
+        # FoldQuantOps remaps the MX block axis through the views (reshape:
+        # last axis 64 -> 32 keeps whole blocks; transpose moves axis 3 to 3),
+        # so the views run in the MX domain and a single MXINT8 -> INT16
+        # QUANTIZE closes the chain at the int16 fake-quant.
+        self.assertEqual(kinds.count(B.QUANTIZE), 1)
+        self.assertEqual(kinds[-1], B.QUANTIZE)
+        self.assertEqual(ops[-1][1], [T.MXINT8])
+        self.assertEqual(ops[-1][2], [T.INT16])
+        for builtin, ins, outs in ops[:-1]:
+            self.assertEqual(ins[:1], [T.MXINT8], builtin)
+            self.assertEqual(outs, [T.MXINT8], builtin)
+        quantize_input = graph.tensors[graph.operators[-1].inputs[0]]
+        self.assertEqual(list(quantize_input.shape), [2, 2, 4, 32])
+        self.assertEqual(quantize_input.quantization.quantizedDimension, 3)
+        self.assertEqual(graph.tensors[graph.inputs[0]].type, T.MXINT8)
+        self.assertEqual(
+            graph.tensors[graph.inputs[0]].quantization.quantizedDimension, 2
+        )
+        affine_output = graph.tensors[graph.outputs[0]]
+        self.assertEqual(affine_output.type, T.INT16)
+        self.assertAlmostEqual(float(affine_output.quantization.scale[0]), 0.01)
+        self.assertEqual(list(affine_output.quantization.zeroPoint), [0])
+
+
+class _MXAttentionMatmul(torch.nn.Module):
+    """softmax(INT16) -> MX(axis -1); V(INT16) -> MX(axis -2); bmm -> INT16.
+
+    The attention-probability blocks run along the key axis and the V blocks
+    along its key (reduction) axis, so both matmul operands share the
+    reduction dimension of their MX blocks. The KV-cache side stays INT16.
+    """
+
+    def forward(self, probs, value):
+        probs = torch.fake_quantize_per_tensor_affine(
+            probs, 1.0 / 32767, 0, -32768, 32767
+        )
+        probs = torch.ops.circle_custom.mx_fake_quantize(probs, "int8", -1)
+        value = torch.fake_quantize_per_tensor_affine(value, 0.01, 0, -32768, 32767)
+        value = torch.ops.circle_custom.mx_fake_quantize(value, "int8", -2)
+        out = torch.bmm(probs, value)
+        return torch.fake_quantize_per_tensor_affine(out, 0.02, 0, -32768, 32767)
+
+    def get_example_inputs(self):
+        torch.manual_seed(0)
+        probs = torch.softmax(torch.randn(2, 8, 64), dim=-1)
+        return (probs, torch.randn(2, 64, 32)), {}
+
+
+class MXAttentionMatmulCircleExportTest(_MXCircleExportTestCase):
+    def test_mx_probabilities_times_mx_value_to_int16(self):
+        from circle_schema import circle
+
+        T = circle.TensorType.TensorType
+        B = circle.BuiltinOperator.BuiltinOperator
+        model = self._export(_MXAttentionMatmul())
+        ops, graph = self._ops(model)
+        kinds = [op[0] for op in ops]
+        self.assertEqual(kinds.count(B.QUANTIZE), 2)
+        self.assertEqual(kinds.count(B.BATCH_MATMUL), 1)
+        for builtin, ins, outs in ops:
+            if builtin == B.QUANTIZE:
+                self.assertEqual(ins, [T.INT16])
+                self.assertEqual(outs, [T.MXINT8])
+            elif builtin == B.BATCH_MATMUL:
+                self.assertEqual(ins[:2], [T.MXINT8, T.MXINT8])
+                self.assertEqual(outs, [T.INT16])
+        bmm = next(
+            op for op in graph.operators if self._builtin(model, op) == B.BATCH_MATMUL
+        )
+        probs_t, value_t = (graph.tensors[i] for i in bmm.inputs[:2])
+        self.assertEqual(
+            probs_t.quantization.quantizedDimension, 2
+        )  # key axis of [2, 8, 64]
+        self.assertEqual(
+            value_t.quantization.quantizedDimension, 1
+        )  # key axis of [2, 64, 32]
+        for index in graph.inputs:
+            self.assertEqual(graph.tensors[index].type, T.INT16)
+        self.assertEqual(graph.tensors[graph.outputs[0]].type, T.INT16)
+
+
+class MXViewDomainTest(unittest.TestCase):
+    def _program(self, shape, output_shape=None):
+        class View(torch.nn.Module):
+            def forward(self, value):
+                if output_shape is not None:
+                    return value.reshape(output_shape)
+                return value.permute(1, 0)
+
+        ep = torch.export.export(View(), (torch.zeros(shape),))
+        ConvertLayoutOpToReshape().call(ep)
+        source = next(node for node in ep.graph.nodes if node.op == "placeholder")
+        view = next(node for node in ep.graph.nodes if node.op == "call_function")
+        source.meta[QPARAM_KEY] = QuantParam(dtype="mxint8", quantized_dimension=1)
+        return ep, source, view
+
+    def test_same_format_view_remaps_axis_without_requantize(self):
+        ep, source, view = self._program((2, 64))
+        view.meta[QPARAM_KEY] = QuantParam(dtype="mxint8", quantized_dimension=0)
+        InsertQuantizeOnDtypeMismatch().call(ep)
+        self.assertEqual(view.meta[QPARAM_KEY].quantized_dimension, 0)
+        self.assertEqual(source.meta[QPARAM_KEY].quantized_dimension, 1)
+        self.assertEqual(list(view.users)[0].op, "output")
+
+    def test_format_or_axis_change_keeps_requantize_after_view(self):
+        for dtype, axis, elem_format in (("mxfp4", 0, "fp4"), ("mxint8", 1, "int8")):
+            with self.subTest(dtype=dtype, axis=axis):
+                ep, source, view = self._program((2, 64))
+                view.meta[QPARAM_KEY] = QuantParam(
+                    dtype=dtype, quantized_dimension=axis
+                )
+                InsertQuantizeOnDtypeMismatch().call(ep)
+                self.assertEqual(view.meta[QPARAM_KEY].dtype, "mxint8")
+                self.assertEqual(view.meta[QPARAM_KEY].quantized_dimension, 0)
+                quantize = next(iter(view.users))
+                self.assertEqual(
+                    quantize.target, torch.ops.circle_custom.quantize_mx.default
+                )
+                self.assertEqual(quantize.args, (view, elem_format, axis))
+                self.assertEqual(quantize.meta[QPARAM_KEY].dtype, dtype)
+                self.assertEqual(quantize.meta[QPARAM_KEY].quantized_dimension, axis)
+                self.assertEqual(source.meta[QPARAM_KEY].quantized_dimension, 1)
+
+    def test_same_dtype_reshape_cannot_regroup_blocks(self):
+        ep, _, view = self._program((4, 8), (2, 16))
+        view.meta[QPARAM_KEY] = QuantParam(dtype="mxint8", quantized_dimension=1)
+        with self.assertRaisesRegex(NotYetSupportedError, "changes the groups"):
+            InsertQuantizeOnDtypeMismatch().call(ep)

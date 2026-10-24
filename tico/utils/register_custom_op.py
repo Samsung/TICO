@@ -982,7 +982,7 @@ def CircleInstanceNorm():
 
 
 def CircleMXFakeQuantize():
-    """Register the eager MX fake-quantization custom operator."""
+    """Register MX fake quantization with a fresh, contiguous output."""
 
     @custom_op("circle_custom::mx_fake_quantize", mutates_args=())
     def mx_fake_quantize(
@@ -997,14 +997,22 @@ def CircleMXFakeQuantize():
                 f"Unsupported elem_format in mx_fake_quantize: {elem_format}"
             )
         normalize_mx_axis(axis, input_.ndim)
-        return _quantize_mx(
-            input_,
-            scale_bits=8,
-            elem_format=normalize_mx_elem_format(elem_format),
-            axes=[axis],
-            block_size=32,
-            shared_exp_method=shared_exp_method,
-            round=round,
+        # Removing block padding can leave a sliced, noncontiguous result.
+        # Flatten before restoring shape so singleton and empty dimensions
+        # also have the canonical strides used by the fake kernel.
+        return (
+            _quantize_mx(
+                input_,
+                scale_bits=8,
+                elem_format=normalize_mx_elem_format(elem_format),
+                axes=[axis],
+                block_size=32,
+                shared_exp_method=shared_exp_method,
+                round=round,
+            )
+            .contiguous()
+            .view(-1)
+            .view(input_.shape)
         )
 
     @register_fake("circle_custom::mx_fake_quantize")
@@ -1016,7 +1024,9 @@ def CircleMXFakeQuantize():
         round: str = "nearest",
     ) -> torch.Tensor:
         normalize_mx_axis(axis, input_.ndim)
-        return input_
+        # Match eager output strides and keep it distinct from the input so
+        # export preserves both stride-sensitive operations and residual users.
+        return torch.empty_like(input_, memory_format=torch.contiguous_format)
 
 
 def CircleQuantizeMX():
@@ -1044,7 +1054,10 @@ def CircleQuantizeMX():
         shared_exp_method: str = "max",
         round: str = "nearest",
     ) -> torch.Tensor:
-        return input_
+        # Return a fresh fake tensor: aliasing the input would let torch.export
+        # treat the fake-quantized output as the input itself and rewire other
+        # consumers of the input (e.g. a residual branch) onto this op.
+        return torch.empty_like(input_, memory_format=torch.contiguous_format)
 
 
 def CircleDequantizeMX():
@@ -1071,7 +1084,10 @@ def CircleDequantizeMX():
         shared_exp_method: str = "max",
         round: str = "nearest",
     ) -> torch.Tensor:
-        return input_
+        # Return a fresh fake tensor: aliasing the input would let torch.export
+        # treat the fake-quantized output as the input itself and rewire other
+        # consumers of the input (e.g. a residual branch) onto this op.
+        return torch.empty_like(input_, memory_format=torch.contiguous_format)
 
 
 def CircleRMSNorm():
