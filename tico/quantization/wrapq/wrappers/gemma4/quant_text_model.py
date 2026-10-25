@@ -999,9 +999,9 @@ class QuantGemma4TextModel(QuantModuleBase):
             past_key_values=past_key_values,
         )
         get_mask_sizes = getattr(past_key_values, "get_mask_sizes", None)
-        if callable(get_mask_sizes):
-            # Sliding caches discard old slots. Use the owning layer's cache
-            # span before updates, also for shared-KV consumers of that type.
+        if self._requires_static_inputs() and callable(get_mask_sizes):
+            # Eager masks already cover the physical cache span. Only static
+            # templates still need cropping from logical to physical keys.
             layer_types = cast(list[str], self.config.layer_types)
             for layer_type, mask in mask_mapping.items():
                 kv_length, kv_offset = get_mask_sizes(

@@ -167,6 +167,7 @@ Rules:
 - Dataset-specific logic belongs in `recipes/data/`, not in config parsing.
 
 ### Gemma4 cached PTQ calibration
+
 Gemma4 PTQ can collect observer statistics through prefill and cached decode:
 
 ```yaml
@@ -200,9 +201,11 @@ shared-KV state, `inputs_embeds`, or explicit `per_layer_inputs` are rejected.
 Input preparation reserves `D` positions from the context budget using the same
 effective setting as execution: `seq_len: 2048` with `decode_steps: 8` permits at
 most 2040 processed prompt tokens. The processed length includes expanded image
-tokens and must also fit the model and wrapper capacities. Image structure is
-preserved; samples that cannot fit fail with an error. Externally supplied
-calibration inputs are checked before execution as well.
+tokens and must also fit the native model context. Supported eager calibration
+is independent of the static export capacity; explicitly static execution still
+obeys its wrapper profile. Image structure is preserved; samples that cannot fit
+fail with an error. Externally supplied calibration inputs are checked before
+execution as well.
 
 These calls collect statistics in `Mode.CALIB`, including Gemma4 `past_key` and
 `past_value` on actual cached decode inputs. An empty-cache prefill observes

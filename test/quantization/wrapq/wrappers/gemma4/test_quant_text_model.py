@@ -245,6 +245,65 @@ class TestQuantGemma4TextModel(unittest.TestCase):
                 input_ids = torch.tensor([[9 + step]])
                 mask = torch.cat((mask, torch.ones((1, 1), dtype=mask.dtype)), dim=-1)
 
+    def test_sliding_decode_applies_cache_offset_once(self):
+        """Keep logical padding aligned when the eager mask already has a KV offset."""
+        from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
+            QuantGemma4TextModel,
+        )
+
+        cfg = _make_text_config(
+            layer_types=["sliding_attention", "full_attention"],
+            sliding_window=4,
+            max_position_embeddings=32,
+        )
+        fp_model = _make_text_model(cfg)
+        reference = copy.deepcopy(fp_model)
+        qmodel = QuantGemma4TextModel(fp_model).eval()
+        prefix = torch.arange(1, 7).unsqueeze(0)
+        prefix_mask = torch.tensor([[1, 1, 1, 1, 1, 0]])
+        decode_ids = torch.tensor([[7, 8]])
+        decode_mask = torch.cat((prefix_mask, torch.ones_like(decode_ids)), dim=-1)
+        with torch.no_grad():
+            prepared = qmodel(
+                input_ids=prefix, attention_mask=prefix_mask, use_cache=True
+            )
+            expected_prefix = reference(
+                input_ids=prefix, attention_mask=prefix_mask, use_cache=True
+            )
+        self.assertEqual(prepared.past_key_values.get_mask_sizes(2, 0), (5, 3))
+        captured: list[torch.Tensor] = []
+
+        def capture_mask(_module, _args, kwargs):
+            captured.append(kwargs["attention_mask"].detach().clone())
+
+        handle = qmodel.layers[0].register_forward_pre_hook(
+            capture_mask, with_kwargs=True
+        )
+        try:
+            with torch.no_grad():
+                actual = qmodel(
+                    input_ids=decode_ids,
+                    attention_mask=decode_mask,
+                    past_key_values=prepared.past_key_values,
+                    use_cache=True,
+                )
+                expected = reference(
+                    input_ids=decode_ids,
+                    attention_mask=decode_mask,
+                    past_key_values=expected_prefix.past_key_values,
+                    use_cache=True,
+                )
+        finally:
+            handle.remove()
+        fill = qmodel.qcfg.attention_mask_fill_value
+        # Queries 6 and 7 attend to physical slots representing logical keys 3..7.
+        expected_mask = torch.tensor(
+            [[0.0, 0.0, fill, 0.0, fill], [fill, 0.0, fill, 0.0, 0.0]]
+        ).reshape(1, 1, 2, 5)
+        self.assertEqual(len(captured), 1)
+        torch.testing.assert_close(captured[0], expected_mask, atol=0, rtol=0)
+        _assert_close(self, actual.last_hidden_state, expected.last_hidden_state)
+
     def test_static_attention_mask_mapping_matches_hf_text_model(self):
         """Check the static CPU-provided mask mapping path."""
         from tico.quantization.wrapq.wrappers.gemma4.quant_text_model import (
@@ -407,7 +466,15 @@ class TestQuantGemma4TextModel(unittest.TestCase):
         for model in models:
             model.enable_calibration()
             with torch.no_grad():
-                model(input_ids=calibration_ids)
+                calibration_prefill = model(
+                    input_ids=calibration_ids[:, :2], use_cache=True
+                )
+                model(
+                    input_ids=calibration_ids[:, 2:],
+                    attention_mask=torch.ones_like(calibration_ids),
+                    past_key_values=calibration_prefill.past_key_values,
+                    use_cache=True,
+                )
             model.freeze_qparams()
             self.assertIs(model._mode, Mode.QUANT)
 

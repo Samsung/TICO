@@ -376,7 +376,9 @@ class Gemma4Adapter(ModelAdapter):
 
     @staticmethod
     def _decode_calibration_capacity(ctx: RecipeContext, model: Any = None) -> int:
-        """Use the recipe, model, and existing wrapper mask/RoPE limits."""
+        """Resolve the eager budget while retaining real static execution limits."""
+        from transformers.models.gemma4.modeling_gemma4 import Gemma4TextModel
+
         from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
             QuantGemma4TextAttention,
         )
@@ -395,24 +397,35 @@ class Gemma4Adapter(ModelAdapter):
             ctx.cfg.get("calibration", {}).get("seq_len"),
             getattr(text_config, "max_position_embeddings", None),
         ]
-        model_args = ctx.cfg.get("model_args", {})
-        configured = model_args.get("text", {}).get("max_seq")
-        if configured is None:
-            configured = model_args.get("max_seq")
-        # Match the owning wrapper's default; do not invent a calibration cap.
-        limits.append(
-            configured
-            if configured is not None
-            else QuantGemma4TextModel._DEFAULT_STATIC_MAX_SEQ
+        modules = list(model.modules()) if isinstance(model, torch.nn.Module) else []
+        text_wrappers = [
+            module for module in modules if isinstance(module, QuantGemma4TextModel)
+        ]
+        dynamic_eager = (
+            all(not module._requires_static_inputs() for module in text_wrappers)
+            if text_wrappers
+            else any(isinstance(module, Gemma4TextModel) for module in modules)
         )
-        if isinstance(model, torch.nn.Module):
-            for module in model.modules():
+        # Static profiles do not constrain native eager calibration. Keep the
+        # conservative profile limits for explicit static and unknown/legacy
+        # execution, whose dynamic mask/RoPE contract is not established here.
+        if not dynamic_eager:
+            model_args = ctx.cfg.get("model_args", {})
+            configured = model_args.get("text", {}).get("max_seq")
+            if configured is None:
+                configured = model_args.get("max_seq")
+            limits.append(
+                configured
+                if configured is not None
+                else QuantGemma4TextModel._DEFAULT_STATIC_MAX_SEQ
+            )
+            for module in modules:
                 if isinstance(module, QuantGemma4TextModel):
                     limits.append(module.static_max_seq)
                 elif isinstance(module, QuantGemma4TextAttention):
                     limits.append(module.max_seq)
         capacities = [int(value) for value in limits if value is not None]
-        if min(capacities) <= 0:
+        if not capacities or min(capacities) <= 0:
             raise ValueError("Gemma4 calibration context capacity must be positive.")
         return min(capacities)
 
