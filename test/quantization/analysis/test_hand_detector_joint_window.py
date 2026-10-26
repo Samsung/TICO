@@ -254,12 +254,16 @@ class HandDetectorJointWindowTest(unittest.TestCase):
                 role=SiteRole.ACTIVATION_OUTPUT,
             ),
         )
-        with patch(
-            "examples.hand_detector._support.reconstruction._find_detector",
-            return_value=detector,
-        ), patch(
-            "examples.hand_detector._support.reconstruction." "iter_quantization_sites",
-            return_value=sites,
+        with (
+            patch(
+                "examples.hand_detector._support.reconstruction._find_detector",
+                return_value=detector,
+            ),
+            patch(
+                "examples.hand_detector._support.reconstruction."
+                "iter_quantization_sites",
+                return_value=sites,
+            ),
         ):
             groups = build_window_observer_groups(nn.Identity(), window)
 
@@ -279,13 +283,16 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             _group("feature_block_01", 2),
         )
         boundaries = QuantizationBoundaries(outputs=SiteSelector.none())
-        with patch(
-            "examples.hand_detector._support.reconstruction."
-            "build_activation_sensitivity_groups",
-            return_value=groups,
-        ), patch(
-            "examples.hand_detector._support.reconstruction._find_detector",
-            return_value=_detector(),
+        with (
+            patch(
+                "examples.hand_detector._support.reconstruction."
+                "build_activation_sensitivity_groups",
+                return_value=groups,
+            ),
+            patch(
+                "examples.hand_detector._support.reconstruction._find_detector",
+                return_value=_detector(),
+            ),
         ):
             windows = build_reconstruction_windows(
                 nn.Identity(),
@@ -305,13 +312,16 @@ class HandDetectorJointWindowTest(unittest.TestCase):
             _group("feature_block_01", 2),
         )
         boundaries = QuantizationBoundaries(outputs=SiteSelector.none())
-        with patch(
-            "examples.hand_detector._support.reconstruction."
-            "build_activation_sensitivity_groups",
-            return_value=groups,
-        ), patch(
-            "examples.hand_detector._support.reconstruction._find_detector",
-            return_value=_detector(),
+        with (
+            patch(
+                "examples.hand_detector._support.reconstruction."
+                "build_activation_sensitivity_groups",
+                return_value=groups,
+            ),
+            patch(
+                "examples.hand_detector._support.reconstruction._find_detector",
+                return_value=_detector(),
+            ),
         ):
             with self.assertRaisesRegex(ValueError, "consecutive groups"):
                 build_reconstruction_windows(

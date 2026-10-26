@@ -274,9 +274,10 @@ class TestAdapterVqaRouting(unittest.TestCase):
                             },
                         },
                     )
-                    with patch.object(
-                        mmmu_mod, "evaluate_and_print_mmmu"
-                    ) as mmmu, self._patched_vqa_evaluator(owner) as (mocks, _):
+                    with (
+                        patch.object(mmmu_mod, "evaluate_and_print_mmmu") as mmmu,
+                        self._patched_vqa_evaluator(owner) as (mocks, _),
+                    ):
                         ctx.adapter.evaluate(ctx)
                     self._assert_vqa_not_run(mocks)
                     self.assertEqual(mmmu.call_count, 1 if selected else 0)
@@ -321,9 +322,10 @@ class TestAdapterVqaRouting(unittest.TestCase):
                             },
                         },
                     )
-                    with patch.object(
-                        mmmu_mod, "evaluate_and_print_mmmu"
-                    ), self._patched_vqa_evaluator(owner) as (mocks, _):
+                    with (
+                        patch.object(mmmu_mod, "evaluate_and_print_mmmu"),
+                        self._patched_vqa_evaluator(owner) as (mocks, _),
+                    ):
                         ctx.adapter.evaluate(ctx)
                     self._assert_vqa_not_run(mocks)
 
@@ -417,17 +419,16 @@ class TestAdapterVqaRouting(unittest.TestCase):
                         },
                     },
                 )
-                with patch.multiple(
-                    module, evaluate_coco=DEFAULT
-                ) as later, patch.object(
-                    mmmu_mod, "evaluate_and_print_mmmu"
-                ) as mmmu, patch.object(
-                    llava_bench_mod, "evaluate_and_print_llava_bench_judge"
-                ) as llava, self._patched_vqa_evaluator(
-                    owner
-                ) as (
-                    mocks,
-                    _stdout,
+                with (
+                    patch.multiple(module, evaluate_coco=DEFAULT) as later,
+                    patch.object(mmmu_mod, "evaluate_and_print_mmmu") as mmmu,
+                    patch.object(
+                        llava_bench_mod, "evaluate_and_print_llava_bench_judge"
+                    ) as llava,
+                    self._patched_vqa_evaluator(owner) as (
+                        mocks,
+                        _stdout,
+                    ),
                 ):
                     mocks["evaluate_vqa_tasks"].side_effect = RuntimeError("vqa boom")
                     with self.assertRaisesRegex(RuntimeError, "vqa boom"):
@@ -517,15 +518,17 @@ class TestAdapterVqaRouting(unittest.TestCase):
                         "llava_bench": {"enabled": True, "mode": "judge"},
                     },
                 )
-                with patch.multiple(
-                    module, evaluate_coco=DEFAULT, print_coco_score_results=DEFAULT
-                ) as coco_mocks, patch.object(
-                    llava_bench_mod, "evaluate_and_print_llava_bench_judge"
-                ) as llava, self._patched_vqa_evaluator(
-                    owner
-                ) as (
-                    mocks,
-                    _stdout,
+                with (
+                    patch.multiple(
+                        module, evaluate_coco=DEFAULT, print_coco_score_results=DEFAULT
+                    ) as coco_mocks,
+                    patch.object(
+                        llava_bench_mod, "evaluate_and_print_llava_bench_judge"
+                    ) as llava,
+                    self._patched_vqa_evaluator(owner) as (
+                        mocks,
+                        _stdout,
+                    ),
                 ):
                     mocks["evaluate_vqa_tasks"].side_effect = record(
                         "vqa", {"vqav2": (1, 2)}
@@ -599,13 +602,13 @@ class TestAdapterVqaRouting(unittest.TestCase):
                     )
                     return (len(accuracy_calls), 4)
 
-                with patch.object(
-                    vlm_mod, "get_dataset", fake_get_dataset
-                ), patch.object(
-                    vlm_mod, "get_accuracy_on_dataset", fake_get_accuracy_on_dataset
-                ), contextlib.redirect_stdout(
-                    io.StringIO()
-                ) as stdout:
+                with (
+                    patch.object(vlm_mod, "get_dataset", fake_get_dataset),
+                    patch.object(
+                        vlm_mod, "get_accuracy_on_dataset", fake_get_accuracy_on_dataset
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()) as stdout,
+                ):
                     ctx.adapter.evaluate(ctx)
 
                 self.assertEqual(

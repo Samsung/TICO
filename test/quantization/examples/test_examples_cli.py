@@ -82,10 +82,10 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "pipeline.0.enabled=false",
         ]
 
-        with patch.object(
-            quantize_cli, "load_recipe_config", fake_load_recipe_config
-        ), patch.object(quantize_cli, "QuantizationRunner", FakeRunner), patch.object(
-            sys, "argv", argv
+        with (
+            patch.object(quantize_cli, "load_recipe_config", fake_load_recipe_config),
+            patch.object(quantize_cli, "QuantizationRunner", FakeRunner),
+            patch.object(sys, "argv", argv),
         ):
             quantize_cli.main()
 
@@ -144,30 +144,36 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "lm_eval,ppl",
         ]
 
-        with patch.object(
-            evaluate_cli,
-            "load_recipe_config",
-            lambda path, overrides: {
-                "model": {"family": "llama", "name_or_path": "model"},
-                "runtime": {},
-                "evaluation": {"enabled": True, "lm_eval_tasks": "mmlu"},
-            },
-        ), patch.object(
-            evaluate_cli,
-            "set_seed",
-            lambda seed: calls.setdefault("seed", seed),
-        ), patch.object(
-            evaluate_cli,
-            "resolve_adapter",
-            lambda cfg: FakeAdapter(),
-        ), patch.object(
-            evaluate_cli.torch,
-            "load",
-            lambda path, **kwargs: FakeCheckpoint(),
-        ), patch.object(
-            sys,
-            "argv",
-            argv,
+        with (
+            patch.object(
+                evaluate_cli,
+                "load_recipe_config",
+                lambda path, overrides: {
+                    "model": {"family": "llama", "name_or_path": "model"},
+                    "runtime": {},
+                    "evaluation": {"enabled": True, "lm_eval_tasks": "mmlu"},
+                },
+            ),
+            patch.object(
+                evaluate_cli,
+                "set_seed",
+                lambda seed: calls.setdefault("seed", seed),
+            ),
+            patch.object(
+                evaluate_cli,
+                "resolve_adapter",
+                lambda cfg: FakeAdapter(),
+            ),
+            patch.object(
+                evaluate_cli.torch,
+                "load",
+                lambda path, **kwargs: FakeCheckpoint(),
+            ),
+            patch.object(
+                sys,
+                "argv",
+                argv,
+            ),
         ):
             evaluate_cli.main()
 
@@ -209,22 +215,26 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "lm_eval_tasks",
         ]
 
-        with patch.object(
-            evaluate_cli,
-            "load_recipe_config",
-            lambda path, overrides: {
-                "model": {"family": "llama", "name_or_path": "model"},
-                "runtime": {},
-                "evaluation": {"enabled": True, "lm_eval_tasks": "mmlu"},
-            },
-        ), patch.object(
-            evaluate_cli,
-            "resolve_adapter",
-            lambda cfg: FakeAdapter(),
-        ), patch.object(
-            sys,
-            "argv",
-            argv,
+        with (
+            patch.object(
+                evaluate_cli,
+                "load_recipe_config",
+                lambda path, overrides: {
+                    "model": {"family": "llama", "name_or_path": "model"},
+                    "runtime": {},
+                    "evaluation": {"enabled": True, "lm_eval_tasks": "mmlu"},
+                },
+            ),
+            patch.object(
+                evaluate_cli,
+                "resolve_adapter",
+                lambda cfg: FakeAdapter(),
+            ),
+            patch.object(
+                sys,
+                "argv",
+                argv,
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -262,16 +272,19 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "cuda",
         ]
 
-        with patch.object(
-            inspect_cli,
-            "load_recipe_config",
-            fake_load_recipe_config,
-        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
-            inspect_cli,
-            "run_static_llama_runtime",
-            lambda cfg: calls.setdefault("cfg", cfg),
-        ), patch.object(
-            sys, "argv", argv
+        with (
+            patch.object(
+                inspect_cli,
+                "load_recipe_config",
+                fake_load_recipe_config,
+            ),
+            patch.object(inspect_cli, "set_seed", lambda seed: None),
+            patch.object(
+                inspect_cli,
+                "run_static_llama_runtime",
+                lambda cfg: calls.setdefault("cfg", cfg),
+            ),
+            patch.object(sys, "argv", argv),
         ):
             inspect_cli.main()
 
@@ -316,16 +329,19 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "cuda",
         ]
 
-        with patch.object(
-            inspect_cli,
-            "load_recipe_config",
-            fake_load_recipe_config,
-        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
-            inspect_cli,
-            "run_static_gemma4_runtime",
-            lambda cfg: calls.setdefault("cfg", cfg),
-        ), patch.object(
-            sys, "argv", argv
+        with (
+            patch.object(
+                inspect_cli,
+                "load_recipe_config",
+                fake_load_recipe_config,
+            ),
+            patch.object(inspect_cli, "set_seed", lambda seed: None),
+            patch.object(
+                inspect_cli,
+                "run_static_gemma4_runtime",
+                lambda cfg: calls.setdefault("cfg", cfg),
+            ),
+            patch.object(sys, "argv", argv),
         ):
             inspect_cli.main()
 
@@ -354,19 +370,22 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "tied-embedding-smoke",
         ]
 
-        with patch.object(
-            inspect_cli,
-            "load_recipe_config",
-            lambda path, overrides: {
-                "runtime": {},
-                "debug": {"tied_embedding": {"vocab_size": 7}},
-            },
-        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
-            inspect_cli,
-            "run_tied_embedding_smoke",
-            lambda cfg: calls.setdefault("cfg", cfg),
-        ), patch.object(
-            sys, "argv", argv
+        with (
+            patch.object(
+                inspect_cli,
+                "load_recipe_config",
+                lambda path, overrides: {
+                    "runtime": {},
+                    "debug": {"tied_embedding": {"vocab_size": 7}},
+                },
+            ),
+            patch.object(inspect_cli, "set_seed", lambda seed: None),
+            patch.object(
+                inspect_cli,
+                "run_tied_embedding_smoke",
+                lambda cfg: calls.setdefault("cfg", cfg),
+            ),
+            patch.object(sys, "argv", argv),
         ):
             inspect_cli.main()
 
@@ -399,20 +418,22 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
             "model.layers.0",
         ]
 
-        with patch.object(
-            inspect_cli,
-            "load_recipe_config",
-            lambda path, overrides: {"runtime": {}, "model": {"family": "llama"}},
-        ), patch.object(inspect_cli, "set_seed", lambda seed: None), patch.object(
-            inspect_cli, "resolve_adapter", lambda cfg: FakeAdapter()
-        ), patch.object(
-            inspect_cli,
-            "trace_ptq_parity",
-            lambda ctx, enable_quantization, interesting_modules: calls.setdefault(
-                "trace", (ctx, enable_quantization, interesting_modules)
+        with (
+            patch.object(
+                inspect_cli,
+                "load_recipe_config",
+                lambda path, overrides: {"runtime": {}, "model": {"family": "llama"}},
             ),
-        ), patch.object(
-            sys, "argv", argv
+            patch.object(inspect_cli, "set_seed", lambda seed: None),
+            patch.object(inspect_cli, "resolve_adapter", lambda cfg: FakeAdapter()),
+            patch.object(
+                inspect_cli,
+                "trace_ptq_parity",
+                lambda ctx, enable_quantization, interesting_modules: calls.setdefault(
+                    "trace", (ctx, enable_quantization, interesting_modules)
+                ),
+            ),
+            patch.object(sys, "argv", argv),
         ):
             inspect_cli.main()
 
@@ -480,24 +501,21 @@ class TestQuantizationExamplesCLI(unittest.TestCase):
         ]
 
         stdout = io.StringIO()
-        with patch.object(
-            side_by_side_cli, "load_recipe_config", fake_load_recipe_config
-        ), patch.object(
-            side_by_side_cli,
-            "load_recipe_extensions",
-            lambda cfg: events.append("load_extensions"),
-        ), patch.object(
-            side_by_side_cli, "QuantizationRunner", FakeRunner
-        ), patch.object(
-            side_by_side_cli, "resolve_adapter", fake_resolve_adapter
-        ), patch.object(
-            side_by_side_cli, "print_gpu_memory", fake_print_gpu_memory
-        ), patch.object(
-            trace_mod, "print_gpu_memory", fake_print_gpu_memory
-        ), patch.object(
-            sys, "argv", argv
-        ), contextlib.redirect_stdout(
-            stdout
+        with (
+            patch.object(
+                side_by_side_cli, "load_recipe_config", fake_load_recipe_config
+            ),
+            patch.object(
+                side_by_side_cli,
+                "load_recipe_extensions",
+                lambda cfg: events.append("load_extensions"),
+            ),
+            patch.object(side_by_side_cli, "QuantizationRunner", FakeRunner),
+            patch.object(side_by_side_cli, "resolve_adapter", fake_resolve_adapter),
+            patch.object(side_by_side_cli, "print_gpu_memory", fake_print_gpu_memory),
+            patch.object(trace_mod, "print_gpu_memory", fake_print_gpu_memory),
+            patch.object(sys, "argv", argv),
+            contextlib.redirect_stdout(stdout),
         ):
             side_by_side_cli.main()
 

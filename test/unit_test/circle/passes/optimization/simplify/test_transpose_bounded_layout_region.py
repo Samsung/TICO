@@ -50,7 +50,6 @@ from test.unit_test.circle.fixture import (
     FakeTensorMap,
 )
 
-
 _RELU_BUILTIN_CODE = 19
 _FLOAT32_TENSOR_TYPE = 0
 _INT32_TENSOR_TYPE = 2

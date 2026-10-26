@@ -330,9 +330,10 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                             },
                         },
                     )
-                    with patch.object(
-                        mmmu_mod, "evaluate_and_print_mmmu"
-                    ) as mmmu, self._patched_llava_evaluators() as (mocks, _):
+                    with (
+                        patch.object(mmmu_mod, "evaluate_and_print_mmmu") as mmmu,
+                        self._patched_llava_evaluators() as (mocks, _),
+                    ):
                         ctx.adapter.evaluate(ctx)
                     self._assert_none_called(mocks)
                     self.assertEqual(mmmu.call_count, 1 if selected else 0)
@@ -467,20 +468,21 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                         "ppl": {"enabled": True},
                     },
                 )
-                with patch.multiple(
-                    module,
-                    evaluate_coco=DEFAULT,
-                    evaluate_and_print_video_mme=DEFAULT,
-                    evaluate_and_print_mmlu=DEFAULT,
-                    evaluate_and_print_hellaswag=DEFAULT,
-                    evaluate_vlm_text_ppl=DEFAULT,
-                ) as mocks, patch.object(
-                    mmmu_mod, "evaluate_and_print_mmmu"
-                ) as evaluate_mmmu, patch.object(
-                    vlm_mod, "evaluate_vqa_tasks"
-                ) as evaluate_vqa_tasks, self._patched_llava_evaluators() as (
-                    llava_mocks,
-                    _,
+                with (
+                    patch.multiple(
+                        module,
+                        evaluate_coco=DEFAULT,
+                        evaluate_and_print_video_mme=DEFAULT,
+                        evaluate_and_print_mmlu=DEFAULT,
+                        evaluate_and_print_hellaswag=DEFAULT,
+                        evaluate_vlm_text_ppl=DEFAULT,
+                    ) as mocks,
+                    patch.object(mmmu_mod, "evaluate_and_print_mmmu") as evaluate_mmmu,
+                    patch.object(vlm_mod, "evaluate_vqa_tasks") as evaluate_vqa_tasks,
+                    self._patched_llava_evaluators() as (
+                        llava_mocks,
+                        _,
+                    ),
                 ):
                     mocks["evaluate_coco"].side_effect = record("coco")
                     mocks["evaluate_and_print_video_mme"].side_effect = record(
@@ -488,9 +490,9 @@ class TestAdapterLlavaBenchRouting(unittest.TestCase):
                     )
                     evaluate_mmmu.side_effect = record("mmmu")
                     mocks["evaluate_vlm_text_ppl"].side_effect = record("ppl")
-                    llava_mocks[
-                        "evaluate_and_print_llava_bench_judge"
-                    ].side_effect = record("llava_judge")
+                    llava_mocks["evaluate_and_print_llava_bench_judge"].side_effect = (
+                        record("llava_judge")
+                    )
                     ctx.adapter.evaluate(ctx)
 
                 self.assertEqual(

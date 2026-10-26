@@ -34,7 +34,6 @@ from tico.quantization.config.gemma4_assistant_builders import (
 )
 from tico.quantization.wrapq.observers.identity import IdentityObserver
 
-
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
 
 

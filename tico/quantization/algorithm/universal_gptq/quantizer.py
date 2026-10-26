@@ -342,12 +342,12 @@ class UniversalGPTQQuantizer(BaseQuantizer):
         """
         config.validate()
         super().__init__(config)
-        self._cache_args: list[
-            tuple[Any]
-        ] = []  # cache_args[i] -> i-th batch of positional arguments
-        self._cache_kwargs: list[
-            dict[str, Any]
-        ] = []  # cache_kwargs[i] -> i-th batch of keyword arguments
+        self._cache_args: list[tuple[Any]] = (
+            []
+        )  # cache_args[i] -> i-th batch of positional arguments
+        self._cache_kwargs: list[dict[str, Any]] = (
+            []
+        )  # cache_kwargs[i] -> i-th batch of keyword arguments
         self._orig_model_forward: _ForwardState | None = None
 
     @torch.no_grad()
@@ -1502,9 +1502,9 @@ def gptq_quantize(
         ignored_module_patterns=(
             [re.compile("lm_head.*")] if not gptq_config.quantize_lm_head else []
         ),
-        ignored_modules=multicall_modules
-        if gptq_config.ignore_multi_call_modules
-        else set(),
+        ignored_modules=(
+            multicall_modules if gptq_config.ignore_multi_call_modules else set()
+        ),
         enforce_quantizable_modules_caching=gptq_config.collect_native_inputs,
     )
 

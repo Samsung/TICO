@@ -389,11 +389,15 @@ def _replay_connected(options: argparse.Namespace) -> int:
             "capacity": source["capacity"],
             "same_saved_host_inputs_torch_circle": same,
             "frozen_state_preserved": preserved,
-            "strict_torch_circle_status": "PASS"
-            if all(
-                output["ok"] for record in records for output in record["torch_circle"]
-            )
-            else "FAIL",
+            "strict_torch_circle_status": (
+                "PASS"
+                if all(
+                    output["ok"]
+                    for record in records
+                    for output in record["torch_circle"]
+                )
+                else "FAIL"
+            ),
             "source_evidence": str(evidence),
             "stages": records,
         },
@@ -444,11 +448,11 @@ def _command(root: Path, name: str, command: list[str], *, cwd: Path) -> dict[st
         {
             "returncode": result.returncode,
             "seconds": time.monotonic() - started,
-            "status": "PASS"
-            if result.returncode == 0
-            else "ERROR"
-            if result.returncode == 2
-            else "FAIL",
+            "status": (
+                "PASS"
+                if result.returncode == 0
+                else "ERROR" if result.returncode == 2 else "FAIL"
+            ),
         }
     )
     _write(root / f"{name}.command.json", record)
@@ -753,11 +757,15 @@ def main(argv=None) -> int:
             _write(
                 root / "summary.json",
                 {
-                    "status": "PASS"
-                    if complete
-                    else "INCOMPLETE"
-                    if result.skipped or not result.testsRun
-                    else "FAIL",
+                    "status": (
+                        "PASS"
+                        if complete
+                        else (
+                            "INCOMPLETE"
+                            if result.skipped or not result.testsRun
+                            else "FAIL"
+                        )
+                    ),
                     "tests_run": result.testsRun,
                     "skips": [
                         {"test": test.id(), "reason": reason}

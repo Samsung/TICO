@@ -21,7 +21,6 @@ from pathlib import Path
 
 from examples.hand_detector._support.tflite_flatbuffer import FlatBufferReader
 
-
 RESIZE_BILINEAR_BUILTIN_CODE = 23
 
 

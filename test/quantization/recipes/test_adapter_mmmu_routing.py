@@ -81,9 +81,12 @@ class TestAdapterMmmuRouting(unittest.TestCase):
 
     def _run(self, adapter: Any, evaluation: dict[str, Any]):
         ctx = self._context(adapter, evaluation)
-        with patch.object(
-            mmmu_mod, "evaluate_mmmu", return_value={"vision": (1, 2, 0)}
-        ) as evaluate, contextlib.redirect_stdout(io.StringIO()) as stdout:
+        with (
+            patch.object(
+                mmmu_mod, "evaluate_mmmu", return_value={"vision": (1, 2, 0)}
+            ) as evaluate,
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+        ):
             adapter.evaluate(ctx)
         return evaluate, stdout.getvalue(), ctx
 
@@ -282,12 +285,12 @@ class TestAdapterMmmuRouting(unittest.TestCase):
                     events.append("ppl")
                     return 1.0
 
-                with patch.object(
-                    mmmu_mod, "evaluate_mmmu", side_effect=evaluate_mmmu
-                ), patch.object(
-                    module, "evaluate_vlm_text_ppl", side_effect=evaluate_ppl
-                ), contextlib.redirect_stdout(
-                    io.StringIO()
+                with (
+                    patch.object(mmmu_mod, "evaluate_mmmu", side_effect=evaluate_mmmu),
+                    patch.object(
+                        module, "evaluate_vlm_text_ppl", side_effect=evaluate_ppl
+                    ),
+                    contextlib.redirect_stdout(io.StringIO()),
                 ):
                     ctx.adapter.evaluate(ctx)
                 self.assertEqual(events, ["mmmu", "ppl"])

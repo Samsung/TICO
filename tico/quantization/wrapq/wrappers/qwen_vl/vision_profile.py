@@ -19,7 +19,6 @@ from typing import TypeAlias
 
 import torch
 
-
 Qwen3VLVisionGridInput: TypeAlias = torch.Tensor | Sequence[int]
 
 

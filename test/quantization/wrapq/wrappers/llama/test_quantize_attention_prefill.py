@@ -25,7 +25,6 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.utils.version import has_transformers_for
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-
 skip_msg = (
     "required transformers not installed — skipping Llama attention example tests"
 )

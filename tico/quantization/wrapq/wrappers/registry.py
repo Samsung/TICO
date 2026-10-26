@@ -19,7 +19,6 @@ import torch.nn as nn
 
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
-
 _WRAPPERS: Dict[
     Type[nn.Module],
     Type[QuantModuleBase],

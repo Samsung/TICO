@@ -194,11 +194,14 @@ class TestRunnerPreflight(unittest.TestCase):
                 cfg = self._config(
                     pipeline, adapter_requires_inputs=adapter_requires_inputs
                 )
-                with patch.object(
-                    adapter,
-                    "load_model",
-                    side_effect=AssertionError("Model loading reached"),
-                ) as load_model, contextlib.redirect_stdout(io.StringIO()):
+                with (
+                    patch.object(
+                        adapter,
+                        "load_model",
+                        side_effect=AssertionError("Model loading reached"),
+                    ) as load_model,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
                     with self.assertRaisesRegex(error, message):
                         QuantizationRunner().run(cfg)
                 load_model.assert_not_called()
@@ -219,16 +222,17 @@ class TestRunnerPreflight(unittest.TestCase):
                 {"name": "first_preflight"},
             ]
         )
-        with patch.dict(
-            stages_mod._STAGE_REGISTRY,
-            {
-                name: _RecordingStage(name, events)
-                for name in ("first_preflight", "second_preflight")
-            },
-        ), patch.object(adapter, "load_model", side_effect=load_model), patch.object(
-            adapter, "build_calibration_inputs"
-        ) as build_inputs, contextlib.redirect_stdout(
-            io.StringIO()
+        with (
+            patch.dict(
+                stages_mod._STAGE_REGISTRY,
+                {
+                    name: _RecordingStage(name, events)
+                    for name in ("first_preflight", "second_preflight")
+                },
+            ),
+            patch.object(adapter, "load_model", side_effect=load_model),
+            patch.object(adapter, "build_calibration_inputs") as build_inputs,
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             QuantizationRunner().run(cfg)
         self.assertEqual(
@@ -254,14 +258,15 @@ class TestRunnerPreflight(unittest.TestCase):
         setattr(extension, "activate", activate)
         cfg = self._config([{"name": "cle"}, {"name": "extension_preflight"}])
         cfg["extensions"] = [f"{module_name}:activate"]
-        with patch.dict(sys.modules, {module_name: extension}), patch.dict(
-            stages_mod._STAGE_REGISTRY
-        ), patch.object(
-            get_adapter("llama"),
-            "load_model",
-            side_effect=load_model,
-        ), contextlib.redirect_stdout(
-            io.StringIO()
+        with (
+            patch.dict(sys.modules, {module_name: extension}),
+            patch.dict(stages_mod._STAGE_REGISTRY),
+            patch.object(
+                get_adapter("llama"),
+                "load_model",
+                side_effect=load_model,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             QuantizationRunner().run(cfg)
         self.assertEqual(events, ["activate", "load", "run"])

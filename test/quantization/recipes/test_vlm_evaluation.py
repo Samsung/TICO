@@ -71,8 +71,11 @@ class TestVlmEvaluation(unittest.TestCase):
             captured["scores"] = kwargs
             return {"CIDEr": 1.5, "total_count": 1, "skipped_count": 0}
 
-        with patch.object(vlm, "get_dataset", fake_get_dataset), patch.object(
-            vlm, "get_coco_scores_on_dataset", fake_get_coco_scores_on_dataset
+        with (
+            patch.object(vlm, "get_dataset", fake_get_dataset),
+            patch.object(
+                vlm, "get_coco_scores_on_dataset", fake_get_coco_scores_on_dataset
+            ),
         ):
             result = vlm.evaluate_llava_bench(
                 model=object(),

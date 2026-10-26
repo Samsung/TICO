@@ -37,7 +37,6 @@ from tico.quantization.recipes.debug.wrapper_smoke.utils import (
     smoke_section,
 )
 
-
 _QWEN3_VL_SIZE_PROFILE_TINY = "tiny"
 _QWEN3_VL_SIZE_PROFILE_4B_DIMS = "qwen3_vl_4b_dims"
 _QWEN3_VL_SIZE_PROFILE_4B_STATIC_RUNTIME = "qwen3_vl_4b_static_runtime"
@@ -561,9 +560,9 @@ def _create_image_input(
     input_ids = torch.randint(
         0, cfg.text_config.vocab_size - 2, (1, seq_len), dtype=torch.long
     )
-    input_ids[
-        0, visual_start_idx : visual_start_idx + num_visual_tokens
-    ] = cfg.image_token_id
+    input_ids[0, visual_start_idx : visual_start_idx + num_visual_tokens] = (
+        cfg.image_token_id
+    )
     pixel_values = _create_patchified_pixel_values(cfg.vision_config, thw)
     image_grid_thw = torch.tensor([thw])
     position_ids = _compute_3d_position_ids(

@@ -134,12 +134,11 @@ def _run_gptq_stage(adapter, stage_cfg, *, cfg=None):
     def fake_forward_calibration(self, ctx_arg, model_arg, calibration_inputs, *, desc):
         calls.append(("calibrate", ctx_arg, model_arg, calibration_inputs, desc))
 
-    with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-        gptq_mod, "convert", fake_convert
-    ), patch.object(
-        type(adapter), "forward_calibration", fake_forward_calibration
-    ), contextlib.redirect_stdout(
-        io.StringIO()
+    with (
+        patch.object(gptq_mod, "prepare", fake_prepare),
+        patch.object(gptq_mod, "convert", fake_convert),
+        patch.object(type(adapter), "forward_calibration", fake_forward_calibration),
+        contextlib.redirect_stdout(io.StringIO()),
     ):
         result = GPTQStage().run(ctx, stage_cfg)
 

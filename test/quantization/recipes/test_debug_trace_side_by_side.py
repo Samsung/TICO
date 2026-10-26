@@ -48,7 +48,6 @@ from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.debug.trace import merge_diff_stats, trace_parity
 from tico.quantization.wrapq.utils.introspection import DifferenceStatistics
 
-
 _SUMMARY_RE = re.compile(
     r"^(?P<name>.*): mean\|diff\|=(?P<mean>[^,]+), max\|diff\|=(?P<max>[^,]+), "
     r"peir=(?P<peir>.+)%$"

@@ -45,7 +45,6 @@ from torch import nn
 
 from examples.hand_detector._support.sensitivity import ActivationSensitivityGroup
 
-
 _ACTIVATION_ROLES = frozenset(
     {
         SiteRole.ACTIVATION_INPUT,

@@ -86,7 +86,10 @@ class QuantizationSensitivityTest(unittest.TestCase):
             QuantizationGroup("coarse", SiteSelector.paths("block.act_in")),
             QuantizationGroup("fine", SiteSelector.paths("block.act_out")),
         )
-        _, results = QuantizationSensitivity(IdentityReference(), Candidate(),).run(
+        _, results = QuantizationSensitivity(
+            IdentityReference(),
+            Candidate(),
+        ).run(
             [torch.tensor([0.13, 0.57, 0.91])],
             groups,
             mode=SensitivityMode.ENABLE_ONE,
@@ -121,7 +124,10 @@ class QuantizationSensitivityTest(unittest.TestCase):
     def test_custom_baseline_rejects_an_immutable_group(self) -> None:
         groups = (QuantizationGroup("fine", SiteSelector.paths("block.act_out")),)
         with self.assertRaisesRegex(ValueError, "matched no quantization sites"):
-            QuantizationSensitivity(IdentityReference(), Candidate(),).run(
+            QuantizationSensitivity(
+                IdentityReference(),
+                Candidate(),
+            ).run(
                 [torch.tensor([0.13, 0.57, 0.91])],
                 groups,
                 mode=SensitivityMode.LEAVE_ONE_FLOAT,
@@ -132,7 +138,10 @@ class QuantizationSensitivityTest(unittest.TestCase):
     def test_rejects_a_group_that_matches_no_site(self) -> None:
         groups = (QuantizationGroup("missing", SiteSelector.paths("block.missing")),)
         with self.assertRaisesRegex(ValueError, "matched no quantization sites"):
-            QuantizationSensitivity(IdentityReference(), Candidate(),).run(
+            QuantizationSensitivity(
+                IdentityReference(),
+                Candidate(),
+            ).run(
                 [torch.tensor([0.13, 0.57, 0.91])],
                 groups,
                 mode=SensitivityMode.ENABLE_ONE,

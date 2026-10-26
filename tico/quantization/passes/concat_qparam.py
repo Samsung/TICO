@@ -22,7 +22,6 @@ import torch
 
 from tico.utils.validate_args_kwargs import CatArgs
 
-
 _MIN_WIDTH_CONCAT_RANK = 3
 _TICO_CONCAT_TYPE_SUFFIXES = (
     "tico.ops.concat.Concat",

@@ -64,7 +64,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     validate_gemma4_assistant_architecture,
 )
 
-
 if TYPE_CHECKING:
     from transformers.models.gemma4_assistant.modeling_gemma4_assistant import (
         Gemma4AssistantForCausalLM,

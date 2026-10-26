@@ -25,7 +25,6 @@ from tico.quantization.wrapq.qscheme import QScheme
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import register
 
-
 Padding3D = Tuple[int, int, int, int, int, int]
 SpatialPadding2D = Tuple[int, int, int, int]
 

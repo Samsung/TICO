@@ -25,7 +25,6 @@ from astroid.builder import parse
 from astroid.exceptions import InferenceError
 from pylint.lint import PyLinter
 
-
 _CONFIG_BASE = "transformers.configuration_utils.PreTrainedConfig"
 _REGISTERED = False
 

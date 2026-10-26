@@ -24,7 +24,6 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 
-
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 _OWNERSHIP_FORBIDDEN_PREFIXES = ("embed_tokens.", "layers.", "lm_head", "norm.")

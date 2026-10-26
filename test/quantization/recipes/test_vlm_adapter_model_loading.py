@@ -216,9 +216,12 @@ class _ModelLoadingContractMixin(_MixinBase):
                     legacy = self._legacy_recorder(events) if install_legacy else None
                     ctx = RecipeContext(cfg=_recipe_cfg(), adapter=self.adapter_cls())
 
-                    with self._loading_boundaries(
-                        events, primary=primary, legacy=legacy
-                    ), self._assert_raises_same(error):
+                    with (
+                        self._loading_boundaries(
+                            events, primary=primary, legacy=legacy
+                        ),
+                        self._assert_raises_same(error),
+                    ):
                         self.adapter_cls().load_model(ctx)
 
                     self.assertEqual(len(primary.calls), 1)
@@ -324,9 +327,10 @@ class _ModelLoadingContractMixin(_MixinBase):
                     cfg=_recipe_cfg(**runtime), adapter=self.adapter_cls()
                 )
 
-                with self._loading_boundaries(
-                    events, primary=primary, legacy=None
-                ), patch.object(torch.cuda, "is_available", lambda: cuda_available):
+                with (
+                    self._loading_boundaries(events, primary=primary, legacy=None),
+                    patch.object(torch.cuda, "is_available", lambda: cuda_available),
+                ):
                     self.adapter_cls().load_model(ctx)
 
                 expected_device = torch.device(
@@ -349,9 +353,12 @@ class _ModelLoadingContractMixin(_MixinBase):
         legacy = self._legacy_recorder(events)
         ctx = RecipeContext(cfg=_recipe_cfg(), adapter=self.adapter_cls())
 
-        with self._loading_boundaries(
-            events, primary=primary, legacy=legacy, processor_error=error
-        ), self._assert_raises_same(error):
+        with (
+            self._loading_boundaries(
+                events, primary=primary, legacy=legacy, processor_error=error
+            ),
+            self._assert_raises_same(error),
+        ):
             self.adapter_cls().load_model(ctx)
 
         self.assertEqual(primary.calls, [])
@@ -368,9 +375,10 @@ class _ModelLoadingContractMixin(_MixinBase):
         legacy = self._legacy_recorder(events)
         ctx = RecipeContext(cfg=_recipe_cfg(), adapter=self.adapter_cls())
 
-        with self._loading_boundaries(
-            events, primary=primary, legacy=legacy
-        ), self._assert_raises_same(error):
+        with (
+            self._loading_boundaries(events, primary=primary, legacy=legacy),
+            self._assert_raises_same(error),
+        ):
             self.adapter_cls().load_model(ctx)
 
         self.assertEqual(len(primary.calls), 1)
@@ -450,12 +458,10 @@ class TestGemma4AdapterModelLoading(_ModelLoadingContractMixin, unittest.TestCas
             events.append("no_moe")
             raise error
 
-        with self._loading_boundaries(
-            events, primary=primary, legacy=legacy
-        ), patch.object(
-            gemma4_mod, "assert_gemma4_e2b_no_moe", failing_assert_no_moe
-        ), self._assert_raises_same(
-            error
+        with (
+            self._loading_boundaries(events, primary=primary, legacy=legacy),
+            patch.object(gemma4_mod, "assert_gemma4_e2b_no_moe", failing_assert_no_moe),
+            self._assert_raises_same(error),
         ):
             Gemma4Adapter().load_model(ctx)
 
@@ -497,16 +503,18 @@ class TestGemma4AdapterModelLoading(_ModelLoadingContractMixin, unittest.TestCas
                     return profile
 
                 ctx = RecipeContext(cfg=cfg, adapter=Gemma4Adapter())
-                with self._loading_boundaries(
-                    events, primary=primary, legacy=None
-                ), patch.object(
-                    gemma4_mod,
-                    "canonicalize_gemma4_static_vision_model_args",
-                    fake_canonicalize,
-                ), patch.object(
-                    gemma4_mod,
-                    "build_gemma4_static_vision_profile",
-                    fake_build_profile,
+                with (
+                    self._loading_boundaries(events, primary=primary, legacy=None),
+                    patch.object(
+                        gemma4_mod,
+                        "canonicalize_gemma4_static_vision_model_args",
+                        fake_canonicalize,
+                    ),
+                    patch.object(
+                        gemma4_mod,
+                        "build_gemma4_static_vision_profile",
+                        fake_build_profile,
+                    ),
                 ):
                     Gemma4Adapter().load_model(ctx)
 

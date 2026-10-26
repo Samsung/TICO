@@ -36,7 +36,6 @@ from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
-
 skip_msg = "required transformers not installed — skipping LlamaDecoderLayer tests"
 
 

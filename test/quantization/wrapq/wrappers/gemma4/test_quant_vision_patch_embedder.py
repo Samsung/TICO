@@ -27,7 +27,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_vision_patch_embedder import 
     QuantGemma4VisionPatchEmbedder,
 )
 
-
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 

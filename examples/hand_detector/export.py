@@ -47,7 +47,6 @@ from examples.hand_detector.hand_detector import (
     NHWCInputAdapter,
 )
 
-
 DIRECTORY = Path(__file__).resolve().parent
 
 

@@ -413,8 +413,9 @@ def _extract_command(args: argparse.Namespace) -> int:
 def _parse_passes(
     value: str,
     *,
-    constant_folding_profile: ConstantFoldingProfile
-    | str = (ConstantFoldingProfile.BASIC),
+    constant_folding_profile: ConstantFoldingProfile | str = (
+        ConstantFoldingProfile.BASIC
+    ),
 ) -> list[CirclePass]:
     """Create Circle pass instances from canonical comma-separated names."""
 

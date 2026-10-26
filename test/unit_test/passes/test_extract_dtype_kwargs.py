@@ -22,7 +22,6 @@ from tico.serialize.circle_graph import CircleModel, CircleSubgraph
 from tico.serialize.operators.op_full_like import FullLikeVisitor
 from tico.utils.validate_args_kwargs import FullLikeArgs
 
-
 _CASES: tuple[
     tuple[torch.dtype, int | float, dict[str, torch.dtype | None], torch.dtype], ...
 ] = (

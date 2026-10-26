@@ -277,9 +277,11 @@ def _run_ptq_stage(ctx: RecipeContext, *, prepare=None) -> tuple[dict[str, Any],
         return model
 
     stdout = io.StringIO()
-    with patch.object(ptq_mod, "prepare", prepare or recording_prepare), patch.object(
-        ptq_mod, "convert", lambda model: model
-    ), patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)):
+    with (
+        patch.object(ptq_mod, "prepare", prepare or recording_prepare),
+        patch.object(ptq_mod, "convert", lambda model: model),
+        patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)),
+    ):
         with contextlib.redirect_stdout(stdout):
             PTQStage().run(ctx, ctx.cfg["pipeline"][0])
     return calls, stdout.getvalue()
@@ -292,8 +294,9 @@ def _run_trace(ctx: RecipeContext, *, prepare=None) -> dict[str, Any]:
         calls["prepare"] = (model, config)
         return model
 
-    with patch.object(trace_mod, "prepare", prepare or recording_prepare), patch.object(
-        trace_mod, "convert", lambda model: model
+    with (
+        patch.object(trace_mod, "prepare", prepare or recording_prepare),
+        patch.object(trace_mod, "convert", lambda model: model),
     ):
         with contextlib.redirect_stdout(io.StringIO()):
             trace_ptq_parity(ctx)

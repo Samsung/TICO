@@ -30,7 +30,6 @@ from tico.utils.trace_decorators import (
 from tico.utils.utils import is_target_node, set_new_meta_val
 from tico.utils.validate_args_kwargs import WhereSelfArgs
 
-
 dtype_ranking = {
     torch.int32: 0,
     torch.int64: 1,

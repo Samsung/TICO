@@ -366,9 +366,10 @@ class TestMmmuGenerationIntegration(unittest.TestCase):
             "options": ["one", "two", "three", "four"],
             "answer": "C",
         }
-        with patch.object(mmmu, "load_data", return_value=[sample]), patch.object(
-            mmmu, "generate_answer", return_value="C"
-        ) as generate:
+        with (
+            patch.object(mmmu, "load_data", return_value=[sample]),
+            patch.object(mmmu, "generate_answer", return_value="C") as generate,
+        ):
             result = mmmu.evaluate_mmmu(
                 object(),
                 object(),

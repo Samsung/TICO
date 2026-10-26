@@ -35,7 +35,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_block import (
     QuantQwen3VLVisionBlock,
 )
 
-
 skip_msg = "transformers not installed — skipping Qwen3VLVisionBlock tests"
 
 

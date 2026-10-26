@@ -98,9 +98,12 @@ class TestLlamaAdapter(unittest.TestCase):
             }
             ctx = _fake_llama_context(cfg)
             ctx.tokenizer = object()
-            with patch.object(
-                llama_mod, "export_llama_bundle", return_value="llama_manifest.json"
-            ) as bundle, patch.object(llama_mod, "export_llama_per_layer") as per_layer:
+            with (
+                patch.object(
+                    llama_mod, "export_llama_bundle", return_value="llama_manifest.json"
+                ) as bundle,
+                patch.object(llama_mod, "export_llama_per_layer") as per_layer,
+            ):
                 LlamaAdapter().export(ctx)
             bundle.assert_called_once()
             self.assertIs(bundle.call_args.kwargs["q_model"], ctx.model)
@@ -234,8 +237,9 @@ class TestLlamaAdapter(unittest.TestCase):
         def fake_save_checkpoint(model, output_dir):
             calls["checkpoint"] = (model, output_dir)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            llama_mod, "save_checkpoint", fake_save_checkpoint
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(llama_mod, "save_checkpoint", fake_save_checkpoint),
         ):
             cfg = {
                 "export": {

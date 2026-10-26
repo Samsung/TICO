@@ -32,7 +32,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
     QuantQwen3VLVisionModel,
 )
 
-
 _AVAILABILITY = _has_qwen3_vl()
 
 

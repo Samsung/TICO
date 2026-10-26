@@ -36,7 +36,6 @@ from examples.hand_detector.hand_detector import (
     ResizeBilinearTConv,
 )
 
-
 DIRECTORY = Path(__file__).resolve().parent
 
 

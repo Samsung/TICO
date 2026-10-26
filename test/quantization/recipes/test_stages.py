@@ -131,9 +131,11 @@ class TestRecipeStages(unittest.TestCase):
             return SimpleNamespace(name="prepared")
 
         stdout = io.StringIO()
-        with patch.object(ptq_mod, "prepare", prepare or default_prepare), patch.object(
-            ptq_mod, "convert", lambda model: model
-        ), patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)):
+        with (
+            patch.object(ptq_mod, "prepare", prepare or default_prepare),
+            patch.object(ptq_mod, "convert", lambda model: model),
+            patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)),
+        ):
             with contextlib.redirect_stdout(stdout):
                 result = PTQStage().run(ctx, stage_cfg)
         return result, stdout.getvalue(), calls
@@ -159,16 +161,20 @@ class TestRecipeStages(unittest.TestCase):
             calls["inject"] = (owner, quantizers, verbose)
             return {"matched": 1, "missed": 0, "unused": 0}
 
-        with patch.object(ptq_mod, "prepare", fake_prepare), patch.object(
-            ptq_mod, "convert", fake_convert
-        ), patch.object(
-            ptq_mod, "find_gptq_quantizers", lambda model: (model, {"linear": object()})
-        ), patch.object(
-            ptq_mod, "inject_gptq_qparams", fake_inject
-        ), patch.object(
-            ptq_mod,
-            "clear_gptq_quantizers",
-            lambda model: calls.setdefault("clear", model),
+        with (
+            patch.object(ptq_mod, "prepare", fake_prepare),
+            patch.object(ptq_mod, "convert", fake_convert),
+            patch.object(
+                ptq_mod,
+                "find_gptq_quantizers",
+                lambda model: (model, {"linear": object()}),
+            ),
+            patch.object(ptq_mod, "inject_gptq_qparams", fake_inject),
+            patch.object(
+                ptq_mod,
+                "clear_gptq_quantizers",
+                lambda model: calls.setdefault("clear", model),
+            ),
         ):
             with contextlib.redirect_stdout(stdout):
                 result = PTQStage().run(ctx, {"name": "ptq", "verbose": True})
@@ -252,9 +258,11 @@ class TestRecipeStages(unittest.TestCase):
         }
 
         stdout = io.StringIO()
-        with patch.object(ptq_mod, "prepare", fake_prepare), patch.object(
-            ptq_mod, "convert", fake_convert
-        ), patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)):
+        with (
+            patch.object(ptq_mod, "prepare", fake_prepare),
+            patch.object(ptq_mod, "convert", fake_convert),
+            patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)),
+        ):
             with contextlib.redirect_stdout(stdout):
                 result = PTQStage().run(ctx, stage_cfg)
 
@@ -450,10 +458,10 @@ class TestRecipeStages(unittest.TestCase):
         ctx = RecipeContext(cfg={}, adapter=adapter, model=object())
         prepared_model = SimpleNamespace(name="prepared")
 
-        with patch.object(
-            ptq_mod, "prepare", lambda model, config: prepared_model
-        ), patch.object(ptq_mod, "convert", lambda model: model), patch.object(
-            ptq_mod, "find_gptq_quantizers", lambda model: (None, None)
+        with (
+            patch.object(ptq_mod, "prepare", lambda model, config: prepared_model),
+            patch.object(ptq_mod, "convert", lambda model: model),
+            patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 PTQStage().run(ctx, {"name": "ptq"})
@@ -477,14 +485,16 @@ class TestRecipeStages(unittest.TestCase):
             calls["verbose"] = verbose
             return {"matched": 1, "missed": 0, "unused": 0}
 
-        with patch.object(
-            ptq_mod, "prepare", lambda model, config: prepared_model
-        ), patch.object(ptq_mod, "convert", lambda model: model), patch.object(
-            ptq_mod, "find_gptq_quantizers", lambda model: (model, {"linear": object()})
-        ), patch.object(
-            ptq_mod, "inject_gptq_qparams", fake_inject
-        ), patch.object(
-            ptq_mod, "clear_gptq_quantizers", lambda model: None
+        with (
+            patch.object(ptq_mod, "prepare", lambda model, config: prepared_model),
+            patch.object(ptq_mod, "convert", lambda model: model),
+            patch.object(
+                ptq_mod,
+                "find_gptq_quantizers",
+                lambda model: (model, {"linear": object()}),
+            ),
+            patch.object(ptq_mod, "inject_gptq_qparams", fake_inject),
+            patch.object(ptq_mod, "clear_gptq_quantizers", lambda model: None),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 PTQStage().run(ctx, {"name": "ptq"})
@@ -520,8 +530,9 @@ class TestRecipeStages(unittest.TestCase):
             "unknown_key": "ignored",
         }
 
-        with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-            gptq_mod, "convert", fake_convert
+        with (
+            patch.object(gptq_mod, "prepare", fake_prepare),
+            patch.object(gptq_mod, "convert", fake_convert),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = GPTQStage().run(ctx, stage_cfg)
@@ -560,8 +571,11 @@ class TestRecipeStages(unittest.TestCase):
             "weight_bits": 4,
         }
 
-        with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-            gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+        with (
+            patch.object(gptq_mod, "prepare", fake_prepare),
+            patch.object(
+                gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 GPTQStage().run(ctx, stage_cfg)
@@ -587,8 +601,11 @@ class TestRecipeStages(unittest.TestCase):
             calls["prepare"] = (model_arg, config, inplace)
             return model_arg
 
-        with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-            gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+        with (
+            patch.object(gptq_mod, "prepare", fake_prepare),
+            patch.object(
+                gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 GPTQStage().run(ctx, {"name": "gptq", "weight_bits": 4})
@@ -633,8 +650,9 @@ class TestRecipeStages(unittest.TestCase):
             sensitivity = {"linear": torch.tensor([1.0])}
             torch.save(sensitivity, sensitivity_path)
 
-            with patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-                gptq_mod, "convert", lambda model, inplace=False: model
+            with (
+                patch.object(gptq_mod, "prepare", fake_prepare),
+                patch.object(gptq_mod, "convert", lambda model, inplace=False: model),
             ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     GPTQStage().run(
@@ -683,10 +701,12 @@ class TestRecipeStages(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "gptq_sensitivity.pt"
 
-            with patch.object(
-                gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
-            ), patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-                gptq_mod, "convert", lambda model, inplace=False: model
+            with (
+                patch.object(
+                    gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
+                ),
+                patch.object(gptq_mod, "prepare", fake_prepare),
+                patch.object(gptq_mod, "convert", lambda model, inplace=False: model),
             ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = GPTQStage().run(
@@ -740,10 +760,12 @@ class TestRecipeStages(unittest.TestCase):
                 calibration_inputs=[torch.randn(1, 2)],
             )
 
-            with patch.object(
-                gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
-            ), patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-                gptq_mod, "convert", lambda model, inplace=False: model
+            with (
+                patch.object(
+                    gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
+                ),
+                patch.object(gptq_mod, "prepare", fake_prepare),
+                patch.object(gptq_mod, "convert", lambda model, inplace=False: model),
             ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = GPTQStage().run(
@@ -793,10 +815,12 @@ class TestRecipeStages(unittest.TestCase):
                 calibration_inputs=[torch.randn(1, 2)],
             )
 
-            with patch.object(
-                gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
-            ), patch.object(gptq_mod, "prepare", fake_prepare), patch.object(
-                gptq_mod, "convert", lambda model, inplace=False: model
+            with (
+                patch.object(
+                    gptq_mod, "SensitivityCalibrator", FakeSensitivityCalibrator
+                ),
+                patch.object(gptq_mod, "prepare", fake_prepare),
+                patch.object(gptq_mod, "convert", lambda model, inplace=False: model),
             ):
                 with contextlib.redirect_stdout(io.StringIO()):
                     GPTQStage().run(

@@ -57,8 +57,12 @@ class SchemaEnumValuesTest(unittest.TestCase):
         )
         with patch.object(_schema, "import_module", return_value=package):
             for module in self.MODULES:
-                with self.subTest(module=module), self.assertRaisesRegex(
-                    RuntimeError, r"^Circle schema does not provide Padding\.VALID\.$"
+                with (
+                    self.subTest(module=module),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        r"^Circle schema does not provide Padding\.VALID\.$",
+                    ),
                 ):
                     module._schema_enum_value("Padding", "VALID")
 

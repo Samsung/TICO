@@ -199,9 +199,7 @@ class QuantModuleBase(nn.Module, ABC):
             return (
                 user_val
                 if user_val is not _UNSPEC
-                else wrap_val
-                if wrap_val is not _UNSPEC
-                else role_val
+                else wrap_val if wrap_val is not _UNSPEC else role_val
             )
 
         user_observer = user_cfg.pop("observer", _UNSPEC)

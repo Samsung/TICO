@@ -74,13 +74,16 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
             }
         )
 
-        with patch.object(
-            llama_mod,
-            "evaluate_perplexity",
-        ) as evaluate_perplexity, patch.object(
-            llama_mod,
-            "evaluate_lm_tasks",
-        ) as evaluate_lm_tasks:
+        with (
+            patch.object(
+                llama_mod,
+                "evaluate_perplexity",
+            ) as evaluate_perplexity,
+            patch.object(
+                llama_mod,
+                "evaluate_lm_tasks",
+            ) as evaluate_lm_tasks,
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 ctx.adapter.evaluate(ctx)
 
@@ -103,14 +106,17 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
             }
         )
 
-        with patch.object(
-            llama_mod,
-            "evaluate_perplexity",
-            return_value=1.25,
-        ) as evaluate_perplexity, patch.object(
-            llama_mod,
-            "evaluate_lm_tasks",
-        ) as evaluate_lm_tasks:
+        with (
+            patch.object(
+                llama_mod,
+                "evaluate_perplexity",
+                return_value=1.25,
+            ) as evaluate_perplexity,
+            patch.object(
+                llama_mod,
+                "evaluate_lm_tasks",
+            ) as evaluate_lm_tasks,
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 ctx.adapter.evaluate(ctx)
 
@@ -178,14 +184,17 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
         ctx.cfg["evaluation"]["selected_tasks"] = ["ppl"]
         ctx.cfg["evaluation"]["ppl"]["mode"] = "chat-prefix"
 
-        with patch.object(
-            gemma4_mod,
-            "evaluate_vlm_text_ppl",
-        ) as evaluate_raw_ppl, patch.object(
-            gemma4_mod,
-            "evaluate_vlm_text_ppl_chat_prefix",
-            return_value=2.5,
-        ) as evaluate_chat_prefix_ppl:
+        with (
+            patch.object(
+                gemma4_mod,
+                "evaluate_vlm_text_ppl",
+            ) as evaluate_raw_ppl,
+            patch.object(
+                gemma4_mod,
+                "evaluate_vlm_text_ppl_chat_prefix",
+                return_value=2.5,
+            ) as evaluate_chat_prefix_ppl,
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.evaluate(ctx)
 
@@ -212,24 +221,29 @@ class TestEvaluationTargetAdapters(unittest.TestCase):
                 ctx = self._make_vlm_context(adapter)
                 # VQA routing lives in the shared vlm module, so its evaluator
                 # is patched there rather than on the adapter module.
-                with patch.multiple(
-                    module,
-                    evaluate_coco=DEFAULT,
-                    evaluate_and_print_video_mme=DEFAULT,
-                    evaluate_and_print_mmlu=DEFAULT,
-                    evaluate_and_print_hellaswag=DEFAULT,
-                    evaluate_vlm_text_ppl=DEFAULT,
-                ) as mocks, patch.multiple(
-                    mmmu_mod,
-                    evaluate_and_print_mmmu=DEFAULT,
-                ) as mmmu_mocks, patch.multiple(
-                    vlm_mod,
-                    evaluate_vqa_tasks=DEFAULT,
-                ) as vqa_mocks, patch.multiple(
-                    llava_bench_mod,
-                    evaluate_and_print_llava_bench_judge=DEFAULT,
-                    evaluate_llava_bench=DEFAULT,
-                ) as llava_mocks:
+                with (
+                    patch.multiple(
+                        module,
+                        evaluate_coco=DEFAULT,
+                        evaluate_and_print_video_mme=DEFAULT,
+                        evaluate_and_print_mmlu=DEFAULT,
+                        evaluate_and_print_hellaswag=DEFAULT,
+                        evaluate_vlm_text_ppl=DEFAULT,
+                    ) as mocks,
+                    patch.multiple(
+                        mmmu_mod,
+                        evaluate_and_print_mmmu=DEFAULT,
+                    ) as mmmu_mocks,
+                    patch.multiple(
+                        vlm_mod,
+                        evaluate_vqa_tasks=DEFAULT,
+                    ) as vqa_mocks,
+                    patch.multiple(
+                        llava_bench_mod,
+                        evaluate_and_print_llava_bench_judge=DEFAULT,
+                        evaluate_llava_bench=DEFAULT,
+                    ) as llava_mocks,
+                ):
                     mocks.update(vqa_mocks)
                     mocks.update(llava_mocks)
                     mocks.update(mmmu_mocks)

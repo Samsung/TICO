@@ -37,7 +37,7 @@ class QuantSiLU(QuantModuleBase):
         fp: nn.SiLU,
         *,
         qcfg: Optional[PTQConfig] = None,
-        fp_name: Optional[str] = None
+        fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.obs_act_in = self._make_obs("act_in")

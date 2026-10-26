@@ -31,7 +31,6 @@ from tico.quantization.config.utils import auto_qscheme_for, dtype_is_unsigned
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
-
 ExportMode = Literal["prefill", "decode", "append_prefill"]
 OverridePath = Union[str, Iterable[str]]
 OverrideValue = Union[QuantSpec, Mapping[str, Any]]

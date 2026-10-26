@@ -250,12 +250,14 @@ class TestCPUGeneration(unittest.TestCase):
                     self.assertEqual(leaf_input_lengths, [1] * 4)
                     self.assertEqual(
                         visits,
-                        [sample["input_ids"].shape[-1], 1, 1, 1]
-                        if use_cache
-                        else list(
-                            range(
-                                sample["input_ids"].shape[-1],
-                                sample["input_ids"].shape[-1] + 4,
+                        (
+                            [sample["input_ids"].shape[-1], 1, 1, 1]
+                            if use_cache
+                            else list(
+                                range(
+                                    sample["input_ids"].shape[-1],
+                                    sample["input_ids"].shape[-1] + 4,
+                                )
                             )
                         ),
                     )
@@ -288,9 +290,11 @@ class TestCPUGeneration(unittest.TestCase):
                                 "event": "actual_generation",
                                 "family": family,
                                 "image": image,
-                                "head_dim": reference.config.text_config.head_dim
-                                if qwen
-                                else reference.config.head_dim,
+                                "head_dim": (
+                                    reference.config.text_config.head_dim
+                                    if qwen
+                                    else reference.config.head_dim
+                                ),
                                 "parameter_count": sum(
                                     parameter.numel()
                                     for parameter in reference.parameters()

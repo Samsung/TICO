@@ -48,7 +48,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     validate_gemma4_assistant_architecture,
 )
 
-
 TARGET_MODEL_ENV_VAR = "GEMMA4_TARGET_PATH"
 ASSISTANT_MODEL_ENV_VAR = "GEMMA4_ASSISTANT_PATH"
 
@@ -65,8 +64,7 @@ class _GreedyTokenGenerator(Protocol):
         do_sample: bool,
         pad_token_id: int | None,
         assistant_model: Gemma4AssistantGenerationAdapter | None = None,
-    ) -> torch.Tensor:
-        ...
+    ) -> torch.Tensor: ...
 
 
 def _load_causal_lm(name: str, **kwargs: Any) -> torch.nn.Module:

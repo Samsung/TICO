@@ -23,7 +23,6 @@ from typing import Any, Iterable
 
 from examples.hand_detector._support.tflite_flatbuffer import FlatBufferReader
 
-
 ADD = 0
 CONCATENATION = 2
 CONV_2D = 3

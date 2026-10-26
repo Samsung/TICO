@@ -50,7 +50,6 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
-
 LegacyCache = Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
 
 
@@ -128,9 +127,9 @@ class QuantLlamaModel(QuantModuleBase):
 
             # Generation/cache path needs tuple outputs from decoder layers.
             if hasattr(wrapped_layer.wrapped, "return_type"):
-                cast(
-                    "QuantLlamaDecoderLayer", wrapped_layer.wrapped
-                ).return_type = "tuple"
+                cast("QuantLlamaDecoderLayer", wrapped_layer.wrapped).return_type = (
+                    "tuple"
+                )
 
             # Pass layer index down so QuantLlamaAttention can update the
             # correct slot in Cache / DynamicCache.

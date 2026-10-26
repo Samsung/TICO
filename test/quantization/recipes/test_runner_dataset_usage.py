@@ -100,10 +100,13 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         adapter = _FakeAdapter()
         cfg = self._base_config()
 
-        with patch(
-            "tico.quantization.recipes.runner.resolve_adapter",
-            return_value=adapter,
-        ), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            patch(
+                "tico.quantization.recipes.runner.resolve_adapter",
+                return_value=adapter,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             result = QuantizationRunner().run(cfg)
 
         self.assertIsInstance(result, RecipeContext)
@@ -119,14 +122,16 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         cfg["pipeline"] = [{"name": "fake", "enabled": False}]
         stage = _FakeStage(requires_calibration_inputs=True)
 
-        with patch(
-            "tico.quantization.recipes.runner.resolve_adapter",
-            return_value=adapter,
-        ), patch(
-            "tico.quantization.recipes.runner.get_stage",
-            return_value=stage,
-        ) as get_stage_mock, contextlib.redirect_stdout(
-            io.StringIO()
+        with (
+            patch(
+                "tico.quantization.recipes.runner.resolve_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "tico.quantization.recipes.runner.get_stage",
+                return_value=stage,
+            ) as get_stage_mock,
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             result = QuantizationRunner().run(cfg)
 
@@ -141,14 +146,16 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         cfg["pipeline"] = [{"name": "fake", "enabled": True}]
         stage = _FakeStage(requires_calibration_inputs=True)
 
-        with patch(
-            "tico.quantization.recipes.runner.resolve_adapter",
-            return_value=adapter,
-        ), patch(
-            "tico.quantization.recipes.runner.get_stage",
-            return_value=stage,
-        ), contextlib.redirect_stdout(
-            io.StringIO()
+        with (
+            patch(
+                "tico.quantization.recipes.runner.resolve_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "tico.quantization.recipes.runner.get_stage",
+                return_value=stage,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             with self.assertRaises(DatasetUsageError):
                 QuantizationRunner().run(cfg)
@@ -163,14 +170,16 @@ class TestRunnerDatasetUsage(unittest.TestCase):
         cfg["pipeline"] = [{"name": "fake", "enabled": True}]
         stage = _FakeStage(requires_calibration_inputs=True)
 
-        with patch(
-            "tico.quantization.recipes.runner.resolve_adapter",
-            return_value=adapter,
-        ), patch(
-            "tico.quantization.recipes.runner.get_stage",
-            return_value=stage,
-        ), contextlib.redirect_stdout(
-            io.StringIO()
+        with (
+            patch(
+                "tico.quantization.recipes.runner.resolve_adapter",
+                return_value=adapter,
+            ),
+            patch(
+                "tico.quantization.recipes.runner.get_stage",
+                return_value=stage,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
             result = QuantizationRunner().run(cfg)
 

@@ -74,7 +74,6 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
 )
 from tico.quantization.wrapq.wrappers.gemma4.utils import assert_gemma4_e2b_no_moe
 
-
 _TEXT_LINEAR_MODULES = COMMON_LINEAR_MODULES + (
     "per_layer_input_gate",
     "per_layer_projection",
@@ -171,9 +170,9 @@ class Gemma4Adapter(ModelAdapter):
         # Load-time preprocessing: this must precede every algorithm stage,
         # including weight-only GPTQ and activation calibration.
         if fuse_ple_scale:
-            ctx.artifacts[
-                "gemma4_ple_scale_fused_modules"
-            ] = fuse_gemma4_ple_embedding_scale(ctx.model)
+            ctx.artifacts["gemma4_ple_scale_fused_modules"] = (
+                fuse_gemma4_ple_embedding_scale(ctx.model)
+            )
 
         ctx.artifacts["pretrained_context_length"] = model_context_length(ctx.model)
 

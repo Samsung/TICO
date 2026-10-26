@@ -55,7 +55,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
 )
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
-
 GEMMA4_ASSISTANT_MANIFEST_SCHEMA_VERSION = 1
 # Version 1 consumers assume HF sine tables. Opt-in graphs must fail closed
 # in hosts that do not understand the changed sine-input semantics.

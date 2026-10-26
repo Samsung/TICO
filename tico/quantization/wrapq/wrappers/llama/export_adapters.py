@@ -19,7 +19,6 @@ import torch.nn as nn
 
 from tico.quantization.wrapq.utils.static_export import require_static_decoder_inputs
 
-
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.llama.quant_model import QuantLlamaModel
     from tico.quantization.wrapq.wrappers.llama.quant_model_for_causal_lm import (

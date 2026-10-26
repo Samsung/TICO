@@ -40,7 +40,6 @@ from tico.utils.validate_args_kwargs import (
     SplitWithSizesArgs,
 )
 
-
 _QPARAM_PRESERVING_UNARY_TARGETS = frozenset({torch.ops.aten.constant_pad_nd.default})
 _QPARAM_FALLBACK_UNARY_SCHEMA_NAMES = frozenset({"circle_custom::maxpool2d"})
 

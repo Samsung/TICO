@@ -30,7 +30,6 @@ from tico.circle.graph import as_indices
 from tico.circle.runtime import CircleReferenceRuntime
 from tico.quantization.recipes.export import gemma4, llama, qwen3_vl
 
-
 _EXPORTERS = (llama, qwen3_vl, gemma4)
 _CONVERSION_WARNING = "stage export warning"
 
@@ -117,9 +116,10 @@ class TestExportCircleStage(unittest.TestCase):
                         x = torch.tensor([[1.0, -2.0], [3.0, 4.0]])
                         original = x.clone()
                         log = io.StringIO()
-                        with torch.set_grad_enabled(
-                            grad_enabled
-                        ), warnings.catch_warnings(record=True) as caught:
+                        with (
+                            torch.set_grad_enabled(grad_enabled),
+                            warnings.catch_warnings(record=True) as caught,
+                        ):
                             warnings.simplefilter("always")
                             filters = list(warnings.filters)
                             with contextlib.redirect_stdout(log):
@@ -194,9 +194,10 @@ class TestExportCircleStage(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as directory:
                     path = Path(directory) / "failed.circle"
                     model = _FailingStage()
-                    with torch.enable_grad(), warnings.catch_warnings(
-                        record=True
-                    ) as caught:
+                    with (
+                        torch.enable_grad(),
+                        warnings.catch_warnings(record=True) as caught,
+                    ):
                         warnings.simplefilter("always")
                         filters = list(warnings.filters)
                         with self.assertRaisesRegex(

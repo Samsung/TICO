@@ -182,14 +182,17 @@ class TestLlamaBundleContext(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "llama_manifest.json"
             manifest.write_text("old manifest")
-            with patch.object(
-                llama,
-                "_prepare_llama_export_model",
-                return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
-            ), patch.object(
-                llama,
-                "export_token_embedding",
-                side_effect=RuntimeError("conversion failed"),
+            with (
+                patch.object(
+                    llama,
+                    "_prepare_llama_export_model",
+                    return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
+                ),
+                patch.object(
+                    llama,
+                    "export_token_embedding",
+                    side_effect=RuntimeError("conversion failed"),
+                ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "conversion failed"):
                     llama.export_llama_bundle(
@@ -202,14 +205,17 @@ class TestLlamaBundleContext(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "llama_manifest.json"
             manifest.write_text("old manifest")
-            with patch.object(
-                llama,
-                "_prepare_llama_export_model",
-                return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
-            ), patch.object(
-                llama,
-                "export_token_embedding",
-                side_effect=RuntimeError("conversion failed"),
+            with (
+                patch.object(
+                    llama,
+                    "_prepare_llama_export_model",
+                    return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
+                ),
+                patch.object(
+                    llama,
+                    "export_token_embedding",
+                    side_effect=RuntimeError("conversion failed"),
+                ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "conversion failed"):
                     llama.export_llama_per_layer(
@@ -225,11 +231,14 @@ class TestLlamaBundleContext(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "llama_manifest.json"
             manifest.write_text("old manifest")
-            with patch.object(
-                llama,
-                "_prepare_llama_export_model",
-                return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
-            ), patch.object(llama, "_export_prepared_llama_per_layer") as export:
+            with (
+                patch.object(
+                    llama,
+                    "_prepare_llama_export_model",
+                    return_value=(SimpleNamespace(wrapped=qmodel), "f32", False),
+                ),
+                patch.object(llama, "_export_prepared_llama_per_layer") as export,
+            ):
                 with self.assertRaisesRegex(ValueError, "head_dim"):
                     llama.export_llama_bundle(
                         q_model=torch.nn.Identity(), max_seq_len=4, output_dir=directory

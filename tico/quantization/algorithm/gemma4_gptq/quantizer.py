@@ -40,7 +40,6 @@ from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import register_quantizer
 
-
 ModelT = TypeVar("ModelT", bound=nn.Module)
 
 

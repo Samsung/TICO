@@ -56,8 +56,7 @@ class Interpreter:
             ) from error
 
         self.ffi = FFI()
-        self.ffi.cdef(
-            """
+        self.ffi.cdef("""
           typedef struct InterpreterWrapper InterpreterWrapper;
 
           const char *get_last_error(void);
@@ -67,8 +66,7 @@ class Interpreter:
           void Interpreter_interpret(InterpreterWrapper *intp);
           void Interpreter_writeInputTensor(InterpreterWrapper *intp, const int input_idx, const void *data, size_t input_size);
           void Interpreter_readOutputTensor(InterpreterWrapper *intp, const int output_idx, void *output, size_t output_size);
-        """
-        )
+        """)
         self.C = self.ffi.dlopen(str(self.LIB_PATH))
 
         # Initialize interpreter

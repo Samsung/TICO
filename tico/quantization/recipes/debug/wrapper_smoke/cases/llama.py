@@ -33,7 +33,6 @@ from tico.quantization.recipes.debug.wrapper_smoke.utils import (
     smoke_section,
 )
 
-
 _LLAMA_SIZE_PROFILE_TINY = "tiny"
 _LLAMA_SIZE_PROFILE_LLAMA3_2_3B_DIMS = "llama3_2_3b_dims"
 _LLAMA_SIZE_PROFILE_LLAMA3_2_3B_STATIC_RUNTIME = "llama3_2_3b_static_runtime"

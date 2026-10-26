@@ -136,8 +136,9 @@ class MappedPayloadSaveTest(unittest.TestCase):
 
     def _check_refused(self, scenario, alias):
         # Run in a child process: the original bug can truncate a live mmap.
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "tico.circle.io._STREAMING_INLINE_BUDGET", 0
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch("tico.circle.io._STREAMING_INLINE_BUDGET", 0),
         ):
             path = self._write_source(directory)
             original = path.read_bytes()
@@ -230,10 +231,10 @@ class MappedPayloadSaveTest(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "Windows cannot replace an open mapped file.")
     def test_atomic_and_other_file_saves_preserve_values(self):
         for scenario in ("direct", "borrowed", "released"):
-            with self.subTest(
-                scenario=scenario
-            ), tempfile.TemporaryDirectory() as directory, patch(
-                "tico.circle.io._STREAMING_INLINE_BUDGET", 0
+            with (
+                self.subTest(scenario=scenario),
+                tempfile.TemporaryDirectory() as directory,
+                patch("tico.circle.io._STREAMING_INLINE_BUDGET", 0),
             ):
                 path = self._write_source(directory)
                 with CircleDocument.load_mapped(path) as document:
@@ -250,10 +251,10 @@ class MappedPayloadSaveTest(unittest.TestCase):
 
     def test_detached_copies_can_save_to_the_original_path(self):
         for kind in ("clone", "deepcopy", "extract"):
-            with self.subTest(
-                kind=kind
-            ), tempfile.TemporaryDirectory() as directory, patch(
-                "tico.circle.io._STREAMING_INLINE_BUDGET", 0
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory() as directory,
+                patch("tico.circle.io._STREAMING_INLINE_BUDGET", 0),
             ):
                 path = self._write_source(directory)
                 with CircleDocument.load_mapped(path) as document:

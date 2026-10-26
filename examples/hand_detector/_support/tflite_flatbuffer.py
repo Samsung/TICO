@@ -23,7 +23,6 @@ from typing import Any
 
 import numpy as np
 
-
 TENSOR_DTYPES: dict[int, np.dtype[Any]] = {
     0: np.dtype(np.float32),
     1: np.dtype(np.float16),

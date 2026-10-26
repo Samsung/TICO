@@ -24,7 +24,6 @@ from typing import cast, Iterable
 
 from examples.hand_detector._support.tflite_flatbuffer import FlatBufferReader
 
-
 ADD = 0
 TRANSPOSE = 39
 EXPECTED_INPUT_SHAPE = (1, 192, 192, 3)

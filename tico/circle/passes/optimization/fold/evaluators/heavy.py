@@ -755,10 +755,13 @@ def _input_buffer_payload(
 def _parse_sparsity(
     sparsity: Any,
     dense_shape: Sequence[int],
-) -> tuple[
-    tuple[int, ...],
-    tuple[tuple[str, int, tuple[int, ...], tuple[int, ...]], ...],
-] | None:
+) -> (
+    tuple[
+        tuple[int, ...],
+        tuple[tuple[str, int, tuple[int, ...], tuple[int, ...]], ...],
+    ]
+    | None
+):
     """Parse an unblocked Circle sparsity record into traversal-level metadata."""
 
     rank = len(dense_shape)

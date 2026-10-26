@@ -29,7 +29,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_vision_pooler import (
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
-
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 

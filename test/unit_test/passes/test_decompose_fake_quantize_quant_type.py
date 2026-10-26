@@ -27,7 +27,6 @@ from tico.passes.decompose_fake_quantize_tensor_qparams import (
     get_quant_type as tensor_quant_type,
 )
 
-
 _SUPPORTED_RANGES = (
     (0, 15, torch.uint8),
     (0, 255, torch.uint8),

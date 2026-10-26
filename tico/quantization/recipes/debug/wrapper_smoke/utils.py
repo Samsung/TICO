@@ -23,7 +23,6 @@ from typing import Any, Iterator
 
 import torch
 
-
 DEFAULT_PROMPTS = [
     "The quick brown fox jumps over the lazy dog.",
     "In 2025, AI systems accelerated hardware-software co-design at scale.",

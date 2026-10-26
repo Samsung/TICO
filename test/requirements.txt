@@ -2,4 +2,4 @@
 # DO NOT REMOVE THIS FILE
 transformers==5.18.0
 # Real Dataset API for calibration/filter tests; no remote data is needed.
-datasets==4.8.4
+datasets==5.0.1

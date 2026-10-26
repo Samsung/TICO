@@ -92,7 +92,6 @@ from tico.utils.trace_decorators import (
 )
 from tico.utils.utils import has_quantization_ops, SuppressWarning
 
-
 # Bound the final inline pack for explicit file conversion. The bytes APIs and
 # ordinary Circle document saves retain their existing layout budgets.
 _FILE_OUTPUT_INLINE_BUDGET = 64 << 20
@@ -241,9 +240,12 @@ def _prepare_exported_program(
 
     # This pass should be run before 'RestoreLinear' and after 'decompose_quantize_op'.
     # TODO run pass regardless of the orders.
-    with SuppressWarning(UserWarning, ".*quantize_per_tensor"), SuppressWarning(
-        UserWarning,
-        ".*TF32 acceleration on top of oneDNN is available for Intel GPUs.*",
+    with (
+        SuppressWarning(UserWarning, ".*quantize_per_tensor"),
+        SuppressWarning(
+            UserWarning,
+            ".*TF32 acceleration on top of oneDNN is available for Intel GPUs.*",
+        ),
     ):
         # Warning details:
         #   ...site-packages/torch/_subclasses/functional_tensor.py:364

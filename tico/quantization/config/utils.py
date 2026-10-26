@@ -19,7 +19,6 @@ import torch
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
-
 TORCH_DTYPE_MAP = {
     "float32": torch.float32,
     "fp32": torch.float32,

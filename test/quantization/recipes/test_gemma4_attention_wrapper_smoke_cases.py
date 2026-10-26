@@ -25,7 +25,6 @@ from tico.quantization.recipes.debug.wrapper_smoke.cases.gemma4 import (
     Gemma4TextSlidingAttentionPrefillCase,
 )
 
-
 _EXPECTED_CASES = {
     "gemma4_text_attention_prefill",
     "gemma4_text_attention_decode",

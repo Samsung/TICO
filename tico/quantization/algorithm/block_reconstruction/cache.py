@@ -22,7 +22,6 @@ from typing import Any, TypeAlias
 
 import torch
 
-
 TensorTree: TypeAlias = (
     torch.Tensor
     | tuple["TensorTree", ...]

@@ -34,7 +34,6 @@ from tico.quantization.config.specs import affine
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.qscheme import QScheme
 
-
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
 
 

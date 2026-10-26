@@ -37,8 +37,8 @@ from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 from tico.utils.utils import SuppressWarning
 
-
 torch.manual_seed(123)
+
 
 # -------------------------------------------------------------------------
 # 0. Define a toy model (1 Linear layer only)

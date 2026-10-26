@@ -26,6 +26,7 @@ from tico.quantization.wrapq.wrappers.fairseq.decoder_export_single_step import 
     make_example_inputs,
 )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Dummies for testing (no fairseq needed)
 # ─────────────────────────────────────────────────────────────────────────────

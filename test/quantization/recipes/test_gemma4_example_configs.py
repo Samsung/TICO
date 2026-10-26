@@ -17,7 +17,6 @@ from pathlib import Path
 
 from tico.quantization.recipes.config import load_recipe_config
 
-
 _CONFIG_DIR = (
     Path(__file__).resolve().parents[3]
     / "tico"

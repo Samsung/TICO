@@ -18,7 +18,6 @@ import unittest
 
 from tico.quantization.config.ptq import PTQConfig
 
-
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 

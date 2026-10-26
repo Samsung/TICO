@@ -41,7 +41,6 @@ from typing import Any, cast, Iterable
 import torch
 from datasets import load_dataset
 
-
 LLAVA_BENCH_DATASET = "lmms-lab/llava-bench-in-the-wild"
 DEFAULT_JUDGE_MODEL_ID = "meta-llama/Llama-3.2-3B-Instruct"
 
@@ -879,9 +878,7 @@ def judge_pair(
         winner = (
             "candidate"
             if winner_ab == "A"
-            else "baseline"
-            if winner_ab == "B"
-            else "tie"
+            else "baseline" if winner_ab == "B" else "tie"
         )
     else:
         score_baseline = score_a
@@ -889,9 +886,7 @@ def judge_pair(
         winner = (
             "baseline"
             if winner_ab == "A"
-            else "candidate"
-            if winner_ab == "B"
-            else "tie"
+            else "candidate" if winner_ab == "B" else "tie"
         )
 
     return JudgeResult(

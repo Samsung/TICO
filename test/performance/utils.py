@@ -13,7 +13,6 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 
-
 if TYPE_CHECKING:
     from transformers.cache_utils import CacheLayerMixin
 

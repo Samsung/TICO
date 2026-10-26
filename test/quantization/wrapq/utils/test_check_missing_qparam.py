@@ -85,10 +85,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 2")
@@ -121,10 +124,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 1")
@@ -157,10 +163,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             with self.assertRaisesRegex(
                 RuntimeError,
                 r"\[QuantCheck\] 1 nodes without qparam detected\.",
@@ -203,10 +212,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(
                 exported_program,
                 strict=False,
@@ -233,10 +245,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 0")
@@ -258,10 +273,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 0")
@@ -292,10 +310,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 0")
@@ -325,10 +346,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 1")
@@ -362,10 +386,13 @@ class CheckMissingQParamTest(unittest.TestCase):
 
         mock_logger = MagicMock()
 
-        with patch(
-            "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
-            return_value=mock_logger,
-        ), patch("builtins.print") as mock_print:
+        with (
+            patch(
+                "tico.quantization.wrapq.utils.check_missing_qparam.logging.getLogger",
+                return_value=mock_logger,
+            ),
+            patch("builtins.print") as mock_print,
+        ):
             check_missing_qparam(exported_program, strict=False)
 
         mock_logger.debug.assert_any_call("[QuantCheck] quantized nodes : 1")

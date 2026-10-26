@@ -30,7 +30,6 @@ from tico.quantization.analysis import (
 
 from torch import nn
 
-
 OBSERVER_SWEEP_PROFILES = (
     QuantizationProfile.ACTIVATION_ONLY,
     QuantizationProfile.FULL,

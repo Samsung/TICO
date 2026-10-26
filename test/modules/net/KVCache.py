@@ -17,7 +17,6 @@ import torch
 
 from test.modules.base import TestModuleBase
 
-
 bs = bsz = 4
 seq_len = slen = 16
 n_kv_heads = 8

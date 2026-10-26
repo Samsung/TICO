@@ -97,9 +97,10 @@ class FakePackableModel:
 
 class CircleIOTest(unittest.TestCase):
     def test_deserialize_uses_generated_object_api(self):
-        with patch(
-            "tico.circle.io.accessor_api_type", return_value=FakeAccessor
-        ), patch("tico.circle.io.object_api_type", return_value=FakeObjectType):
+        with (
+            patch("tico.circle.io.accessor_api_type", return_value=FakeAccessor),
+            patch("tico.circle.io.object_api_type", return_value=FakeObjectType),
+        ):
             model = model_from_bytes(b"\x08\x00\x00\x00CIR0model")
 
         self.assertEqual(model, {"root": (b"\x08\x00\x00\x00CIR0model", 0)})
@@ -252,9 +253,10 @@ class CircleBytesWriteTest(unittest.TestCase):
             stream.close()
             with self.assertRaisesRegex(ValueError, "closed"):
                 write_circle_bytes(b"", stream)
-        with self.subTest(
-            stream="read-only"
-        ), tempfile.TemporaryDirectory() as temporary:
+        with (
+            self.subTest(stream="read-only"),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             path = Path(temporary) / "model.circle"
             path.write_bytes(b"previous")
             with path.open("rb", buffering=0) as read_only:
@@ -278,18 +280,20 @@ class CircleStreamingSaveTest(unittest.TestCase):
     def test_stream_destination_receives_layout_without_joining(self):
         layout = _fake_layout()
         stream = io.BytesIO()
-        with patch("tico.circle.io.plan_circle_layout", return_value=layout), patch(
-            "tico.serialize.circle_binary._join_payloads"
-        ) as join:
+        with (
+            patch("tico.circle.io.plan_circle_layout", return_value=layout),
+            patch("tico.serialize.circle_binary._join_payloads") as join,
+        ):
             save_model(SimpleNamespace(Pack=lambda builder: 0), stream)
         join.assert_not_called()
         self.assertEqual(stream.getvalue(), layout.to_bytes())
 
     def test_file_save_uses_the_streaming_inline_budget(self):
         layout = _fake_layout()
-        with patch(
-            "tico.circle.io.plan_circle_layout", return_value=layout
-        ) as plan, tempfile.TemporaryDirectory() as temporary:
+        with (
+            patch("tico.circle.io.plan_circle_layout", return_value=layout) as plan,
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             path = Path(temporary) / "nested" / "model.circle"
             save_model(SimpleNamespace(Pack=lambda builder: 0), path)
             self.assertEqual(path.read_bytes(), layout.to_bytes())
@@ -301,8 +305,9 @@ class CircleStreamingSaveTest(unittest.TestCase):
     def test_stdout_destination_writes_binary_to_the_buffer(self):
         layout = _fake_layout()
         buffer = io.BytesIO()
-        with patch("tico.circle.io.plan_circle_layout", return_value=layout), patch(
-            "tico.circle.io.sys.stdout", SimpleNamespace(buffer=buffer)
+        with (
+            patch("tico.circle.io.plan_circle_layout", return_value=layout),
+            patch("tico.circle.io.sys.stdout", SimpleNamespace(buffer=buffer)),
         ):
             save_model(SimpleNamespace(Pack=lambda builder: 0), "-")
         self.assertEqual(buffer.getvalue(), layout.to_bytes())
@@ -321,9 +326,10 @@ class CircleStreamingSaveTest(unittest.TestCase):
             raise OSError("disk full")
 
         failing.write_to = write_to
-        with patch(
-            "tico.circle.io.plan_circle_layout", return_value=failing
-        ), tempfile.TemporaryDirectory() as temporary:
+        with (
+            patch("tico.circle.io.plan_circle_layout", return_value=failing),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             path = Path(temporary) / "model.circle"
             path.write_bytes(b"previous")
             with self.assertRaisesRegex(CircleIOError, "Failed to write"):
@@ -336,19 +342,23 @@ class CircleStreamingSaveTest(unittest.TestCase):
             raise RuntimeError("unexpected")
 
         failing = SimpleNamespace(write_to=write_to)
-        with patch(
-            "tico.circle.io.plan_circle_layout", return_value=failing
-        ), tempfile.TemporaryDirectory() as temporary:
+        with (
+            patch("tico.circle.io.plan_circle_layout", return_value=failing),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             path = Path(temporary) / "model.circle"
             with self.assertRaises(RuntimeError):
                 save_model(SimpleNamespace(Pack=lambda builder: 0), path)
             self.assertEqual(os.listdir(temporary), [])
 
     def test_serialization_errors_become_io_errors_before_writing(self):
-        with patch(
-            "tico.circle.io.plan_circle_layout",
-            side_effect=binary.CircleSerializationError("bad"),
-        ), tempfile.TemporaryDirectory() as temporary:
+        with (
+            patch(
+                "tico.circle.io.plan_circle_layout",
+                side_effect=binary.CircleSerializationError("bad"),
+            ),
+            tempfile.TemporaryDirectory() as temporary,
+        ):
             path = Path(temporary) / "model.circle"
             with self.assertRaisesRegex(CircleIOError, "Failed to serialize"):
                 save_model(SimpleNamespace(Pack=lambda builder: 0), path)
@@ -421,9 +431,11 @@ class CirclePayloadMappingTest(unittest.TestCase):
         )
         accessor = SimpleNamespace(GetRootAsModel=get_root)
         object_type = SimpleNamespace(InitFromObj=lambda value: restored)
-        with tempfile.TemporaryDirectory() as temporary, patch(
-            "tico.circle.io.accessor_api_type", return_value=accessor
-        ), patch("tico.circle.io.object_api_type", return_value=object_type):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("tico.circle.io.accessor_api_type", return_value=accessor),
+            patch("tico.circle.io.object_api_type", return_value=object_type),
+        ):
             path = self._write(temporary, source)
             model, mapping = load_model_mapped(path)
             self.assertIs(calls[0], mapping.buffer())

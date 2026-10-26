@@ -29,7 +29,6 @@ from tico.quantization.algorithm.qwen3_vl_gptq.utils import (
     get_quantizable_layers as get_qwen3_vl_layers,
 )
 
-
 _FINDERS = {
     "gptq": find_gptq_layers,
     "qwen3_vl": find_qwen3_vl_layers,

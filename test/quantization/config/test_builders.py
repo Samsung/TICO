@@ -189,11 +189,7 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
         self.assertEqual(
             cfg.overrides["model"]["language_model"]["layers"]["2"]["self_attn"][  # type: ignore[index]
                 "q_proj"
-            ][
-                "weight"
-            ][
-                "dtype"
-            ],
+            ]["weight"]["dtype"],
             DType.uint(4),
         )
         self.assertEqual(
@@ -252,9 +248,7 @@ class TestBuildQwen3VlPtqConfig(unittest.TestCase):
             "self_attn"
         ][
             "q_proj"
-        ][
-            "weight"
-        ]
+        ]["weight"]
         self.assertEqual(q_proj["dtype"], DType.uint(4))
 
     def test_build_qwen3_vl_ptq_config_vision_linear_weight_defaults_to_shared(self):

@@ -25,6 +25,7 @@ class TestDiffGraph(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
+
         # Create first test model and graph
         class TestModule1(nn.Module):
             def __init__(self):

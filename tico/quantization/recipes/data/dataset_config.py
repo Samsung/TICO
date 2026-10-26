@@ -27,7 +27,6 @@ here, so that configuration handling stays importable in minimal environments
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-
 DatasetConfig = dict[str, dict[str, Any]]
 
 # Single source of calibration defaults.

@@ -279,12 +279,15 @@ class TestNativeModelLoading(unittest.TestCase):
         ctx = _context()
         model = ctx.model
         tokenizer = SimpleNamespace(pad_token_id=0)
-        with patch(
-            "tico.quantization.recipes.adapters.llama.AutoTokenizer.from_pretrained",
-            return_value=tokenizer,
-        ), patch(
-            "tico.quantization.recipes.adapters.llama.AutoModelForCausalLM.from_pretrained",
-            return_value=model,
+        with (
+            patch(
+                "tico.quantization.recipes.adapters.llama.AutoTokenizer.from_pretrained",
+                return_value=tokenizer,
+            ),
+            patch(
+                "tico.quantization.recipes.adapters.llama.AutoModelForCausalLM.from_pretrained",
+                return_value=model,
+            ),
         ):
             ctx.adapter.load_model(ctx)
         self.assertEqual(model.config.max_position_embeddings, 8192)
@@ -296,17 +299,22 @@ class TestNativeModelLoading(unittest.TestCase):
             with self.subTest(family=adapter.family):
                 ctx = _context(adapter)
                 model = ctx.model
-                with patch(
-                    "transformers.AutoProcessor.from_pretrained",
-                    return_value=ctx.processor,
-                ), patch(
-                    "transformers.AutoModelForImageTextToText.from_pretrained",
-                    return_value=model,
-                ), patch(
-                    "tico.quantization.recipes.adapters.gemma4.assert_gemma4_e2b_no_moe"
-                ), patch(
-                    "tico.quantization.recipes.adapters.gemma4.fuse_gemma4_ple_embedding_scale",
-                    return_value=0,
+                with (
+                    patch(
+                        "transformers.AutoProcessor.from_pretrained",
+                        return_value=ctx.processor,
+                    ),
+                    patch(
+                        "transformers.AutoModelForImageTextToText.from_pretrained",
+                        return_value=model,
+                    ),
+                    patch(
+                        "tico.quantization.recipes.adapters.gemma4.assert_gemma4_e2b_no_moe"
+                    ),
+                    patch(
+                        "tico.quantization.recipes.adapters.gemma4.fuse_gemma4_ple_embedding_scale",
+                        return_value=0,
+                    ),
                 ):
                     adapter.load_model(ctx)
                 self.assertEqual(model.config.text_config.max_position_embeddings, 8192)
@@ -327,9 +335,11 @@ class TestNativeModelLoading(unittest.TestCase):
                     },
                 )
                 module_path = f"tico.quantization.recipes.adapters.{family}"
-                with patch(f"{module_path}.evaluate_and_print_mmlu") as mmlu, patch(
-                    f"{module_path}.evaluate_and_print_video_mme"
-                ) as video, contextlib.redirect_stdout(io.StringIO()):
+                with (
+                    patch(f"{module_path}.evaluate_and_print_mmlu") as mmlu,
+                    patch(f"{module_path}.evaluate_and_print_video_mme") as video,
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
                     adapter.evaluate(ctx)
                 self.assertEqual(mmlu.call_args.kwargs["max_seq_len"], 8192)
                 self.assertEqual(video.call_args.kwargs["max_seq_len"], 8192)

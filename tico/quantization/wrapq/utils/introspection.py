@@ -40,7 +40,6 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.utils.version import package_version_is_at_least
 
-
 # Type aliases (for more descriptive type hints)
 ArgName = str
 ModuleOutput = Any
@@ -343,7 +342,7 @@ def build_fqn_map(root: torch.nn.Module) -> dict[torch.nn.Module, str]:
 def module_hook(
     hook: Callable[
         [torch.nn.Module, tuple[torch.Tensor, ...], dict[str, Any], Any], Any
-    ]
+    ],
 ):
     """
     Context manager for registering a global forward hook on all modules.
@@ -515,9 +514,9 @@ def trace_model_input_output(
             inputs=inputs,
             kwargs=kwargs,
             output=detach_tensors(output),
-            quantization=module._all_observers()
-            if isinstance(module, QuantModuleBase)
-            else None,
+            quantization=(
+                module._all_observers() if isinstance(module, QuantModuleBase) else None
+            ),
         )
         hook(data)
 
@@ -526,8 +525,7 @@ def trace_model_input_output(
             _ = model(**model_inputs)
 
 
-class DataMismatchError(Exception):
-    ...
+class DataMismatchError(Exception): ...
 
 
 def outputs_close(
@@ -749,9 +747,14 @@ def compare_side_by_side(
             continue
         output_a = model_outputs_a[module_name]
         output_b = model_outputs_b[module_name]
-        diff: Number | torch.Tensor | DifferenceStatistics | dict[
-            str, Any
-        ] | Exception | None
+        diff: (
+            Number
+            | torch.Tensor
+            | DifferenceStatistics
+            | dict[str, Any]
+            | Exception
+            | None
+        )
         this_module_is_interesting = module_name in interesting_modules
         try:
             diff = compare_outputs(
@@ -903,9 +906,9 @@ def compare_layer_outputs(
     metrics = metrics or ["diff"]
     calc = MetricCalculator(custom_metrics)
     handles: List[torch.utils.hooks.RemovableHandle] = []
-    results: Dict[
-        str, Dict[str, float]
-    ] = {}  # Dict[layer_name, Dict[metric_name, value]]
+    results: Dict[str, Dict[str, float]] = (
+        {}
+    )  # Dict[layer_name, Dict[metric_name, value]]
 
     def _cmp(name: str):
         ref = cache.get(name)

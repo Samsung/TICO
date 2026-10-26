@@ -31,7 +31,6 @@ from tico.quantization.algorithm.block_reconstruction.cache import (
     TensorTree,
 )
 
-
 _ACTIVE_QDROP: ContextVar[QDropController | None] = ContextVar(
     "block_reconstruction_qdrop",
     default=None,

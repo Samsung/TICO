@@ -134,9 +134,10 @@ class TestPTQQParamHandoff(unittest.TestCase):
         ctx = RecipeContext(cfg={}, adapter=adapter, model=source_model)
         stdout = io.StringIO()
 
-        with patch.object(
-            ptq_mod, "prepare", lambda model, config: prepared_model
-        ), patch.object(ptq_mod, "convert", lambda model: model):
+        with (
+            patch.object(ptq_mod, "prepare", lambda model, config: prepared_model),
+            patch.object(ptq_mod, "convert", lambda model: model),
+        ):
             with contextlib.redirect_stdout(stdout):
                 result = PTQStage().run(ctx, {"name": "ptq"})
 
@@ -162,11 +163,11 @@ class TestPTQQParamHandoff(unittest.TestCase):
         ctx = RecipeContext(cfg={}, adapter=adapter, model=source_model)
         stdout = io.StringIO()
 
-        with patch.object(
-            ptq_mod, "prepare", lambda model, config: prepared_model
-        ), patch.object(ptq_mod, "convert", lambda model: model), patch.object(
-            ptq_mod, "inject_gptq_qparams"
-        ) as inject_mock:
+        with (
+            patch.object(ptq_mod, "prepare", lambda model, config: prepared_model),
+            patch.object(ptq_mod, "convert", lambda model: model),
+            patch.object(ptq_mod, "inject_gptq_qparams") as inject_mock,
+        ):
             with contextlib.redirect_stdout(stdout):
                 result = PTQStage().run(
                     ctx,
@@ -191,9 +192,10 @@ class TestPTQQParamHandoff(unittest.TestCase):
         adapter = DummyAdapter()
         ctx = RecipeContext(cfg={}, adapter=adapter, model=source_model)
 
-        with patch.object(
-            ptq_mod, "prepare", lambda model, config: prepared_model
-        ), patch.object(ptq_mod, "convert", lambda model: model):
+        with (
+            patch.object(ptq_mod, "prepare", lambda model, config: prepared_model),
+            patch.object(ptq_mod, "convert", lambda model: model),
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -220,9 +222,10 @@ class TestPTQQParamHandoff(unittest.TestCase):
             model=source_model,
         )
 
-        with patch.object(
-            ptq_mod, "prepare", lambda model, config: prepared_model
-        ), patch.object(ptq_mod, "convert", lambda model: model):
+        with (
+            patch.object(ptq_mod, "prepare", lambda model, config: prepared_model),
+            patch.object(ptq_mod, "convert", lambda model: model),
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(
                     RuntimeError,
@@ -239,8 +242,9 @@ class TestPTQQParamHandoff(unittest.TestCase):
         adapter = DummyAdapter()
         ctx = RecipeContext(cfg={}, adapter=adapter, model=source_model)
 
-        with patch.object(ptq_mod, "prepare") as prepare_mock, patch.object(
-            ptq_mod, "convert", lambda model: model
+        with (
+            patch.object(ptq_mod, "prepare") as prepare_mock,
+            patch.object(ptq_mod, "convert", lambda model: model),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaisesRegex(
@@ -262,9 +266,12 @@ class TestPTQQParamHandoff(unittest.TestCase):
                 model, _ = self._quantized_model(source_bits)
                 adapter = DummyAdapter(target_bits, torch.tensor([[0.5, 1.0]]))
                 ctx = RecipeContext(cfg={}, adapter=adapter, model=model)
-                with patch.object(
-                    ptq_mod, "prepare", side_effect=self._prepare_linear_model
-                ), patch.object(ptq_mod, "convert") as convert_mock:
+                with (
+                    patch.object(
+                        ptq_mod, "prepare", side_effect=self._prepare_linear_model
+                    ),
+                    patch.object(ptq_mod, "convert") as convert_mock,
+                ):
                     with contextlib.redirect_stdout(io.StringIO()):
                         with self.assertRaisesRegex(ValueError, "GPTQ"):
                             PTQStage().run(ctx, {"name": "ptq"})
@@ -281,9 +288,10 @@ class TestPTQQParamHandoff(unittest.TestCase):
         adapter = DummyAdapter(4, torch.tensor([[0.5, 1.0]]))
         ctx = RecipeContext(cfg={}, adapter=adapter, model=model)
 
-        with patch.object(
-            ptq_mod, "prepare", side_effect=self._prepare_linear_model
-        ), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            patch.object(ptq_mod, "prepare", side_effect=self._prepare_linear_model),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             result = PTQStage().run(ctx, {"name": "ptq"})
 
         observer = result.model[0].get_observer("weight")
@@ -301,9 +309,10 @@ class TestPTQQParamHandoff(unittest.TestCase):
         adapter = DummyAdapter(8, torch.tensor([[0.5, 1.0]]))
         ctx = RecipeContext(cfg={}, adapter=adapter, model=model)
 
-        with patch.object(
-            ptq_mod, "prepare", side_effect=self._prepare_linear_model
-        ), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            patch.object(ptq_mod, "prepare", side_effect=self._prepare_linear_model),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             result = PTQStage().run(ctx, {"name": "ptq", "reuse_gptq_qparams": False})
 
         observer = result.model[0].get_observer("weight")
@@ -326,9 +335,10 @@ class TestPTQQParamHandoff(unittest.TestCase):
             model=model,
         )
 
-        with patch.object(
-            ptq_mod, "prepare", side_effect=self._prepare_linear_model
-        ), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            patch.object(ptq_mod, "prepare", side_effect=self._prepare_linear_model),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             result = PTQStage().run(ctx, {"name": "ptq"})
 
         observer = result.model[0].get_observer("weight")

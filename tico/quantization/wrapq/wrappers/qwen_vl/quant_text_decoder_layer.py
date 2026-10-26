@@ -34,7 +34,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.export_adapters import (
 )
 from tico.quantization.wrapq.wrappers.registry import try_register
 
-
 ReturnType = Literal["tensor", "tuple"]
 
 

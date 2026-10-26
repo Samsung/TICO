@@ -199,7 +199,10 @@ class QuantizationSensitivity:
         score_output: str,
         score_metric: str = "mae",
         baseline_selector: SiteSelector | None = None,
-    ) -> tuple[dict[str, dict[str, float | int | None]], list[SensitivityPathResult],]:
+    ) -> tuple[
+        dict[str, dict[str, float | int | None]],
+        list[SensitivityPathResult],
+    ]:
         """Apply groups cumulatively in the supplied order.
 
         Each step starts from the selected baseline and applies every group up
@@ -287,7 +290,10 @@ class QuantizationSensitivity:
         baseline_selector: SiteSelector | None = None,
         max_steps: int | None = None,
         minimum_improvement: float = 0.0,
-    ) -> tuple[dict[str, dict[str, float | int | None]], list[SensitivityPathResult],]:
+    ) -> tuple[
+        dict[str, dict[str, float | int | None]],
+        list[SensitivityPathResult],
+    ]:
         """Greedily select the best next group after every accumulated step.
 
         Remaining groups are re-evaluated after each selection. Search stops at
@@ -322,14 +328,17 @@ class QuantizationSensitivity:
             results: list[SensitivityPathResult] = []
 
             for step in range(1, step_limit + 1):
-                best: tuple[
-                    QuantizationGroup,
-                    SiteSelector,
-                    tuple[str, ...],
-                    dict[str, dict[str, float | int | None]],
-                    float,
-                    float,
-                ] | None = None
+                best: (
+                    tuple[
+                        QuantizationGroup,
+                        SiteSelector,
+                        tuple[str, ...],
+                        dict[str, dict[str, float | int | None]],
+                        float,
+                        float,
+                    ]
+                    | None
+                ) = None
                 best_improvement = float("-inf")
                 for group in remaining:
                     new_selector = (

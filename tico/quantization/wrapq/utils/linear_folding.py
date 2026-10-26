@@ -17,7 +17,6 @@ from typing import Union
 import torch
 import torch.nn as nn
 
-
 AffineValue = Union[float, int, torch.Tensor]
 _REUSED_WEIGHT_QPARAM_SCALE_MULTIPLIER_ATTR = (
     "_tico_reused_weight_qparam_scale_multiplier"

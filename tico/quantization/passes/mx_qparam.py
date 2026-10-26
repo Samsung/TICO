@@ -33,7 +33,6 @@ from tico.utils.validate_args_kwargs import (
     SplitWithSizesArgs,
 )
 
-
 _MX_BLOCK_SIZE = 32
 
 

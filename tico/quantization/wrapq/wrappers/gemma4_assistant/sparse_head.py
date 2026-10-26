@@ -27,7 +27,6 @@ from typing import Any, Mapping
 import torch
 import torch.nn as nn
 
-
 SPARSE_HEAD_ARTIFACT_SCHEMA_VERSION = 1
 
 

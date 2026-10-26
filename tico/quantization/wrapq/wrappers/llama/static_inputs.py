@@ -24,7 +24,6 @@ from torch import nn
 from tico.quantization.wrapq.utils.static_export import validate_static_length
 from tico.quantization.wrapq.wrappers.llama.position import make_rotary_embedding
 
-
 ROPE_CONTRACT_VERSION = 2
 
 
@@ -230,9 +229,7 @@ def prepare_llama_static_inputs(
     device = (
         parameter.device
         if parameter is not None
-        else buffer.device
-        if buffer is not None
-        else torch.device("cpu")
+        else buffer.device if buffer is not None else torch.device("cpu")
     )
     rotary = copy.deepcopy(snapshot).to(device=device, dtype=torch.float32)
     positions = torch.arange(max_seq_len, device=device).unsqueeze(0)

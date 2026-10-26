@@ -47,7 +47,6 @@ from tico.quantization.wrapq.control import (
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 
-
 MetricsEvaluator = Callable[[], OutputMetrics]
 ProgressCallback = Callable[["GlobalWeightRefinementCheckpoint"], None]
 
@@ -1086,7 +1085,7 @@ class GlobalWeightRefinementCheckpoint:
     train_checkpoint_anchor_loss: float | None = None
     checkpoint_anchor_weight: float | None = None
     alpha_absolute_histogram: GlobalRefinementTensorHistogram | None = None
-    alpha_gradient_absolute_histogram: (GlobalRefinementTensorHistogram | None) = None
+    alpha_gradient_absolute_histogram: GlobalRefinementTensorHistogram | None = None
     flip_budget_statistics: GlobalRefinementFlipBudgetStatistics | None = None
 
     def to_dict(self) -> dict[str, object]:

@@ -30,7 +30,6 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
     gemma4_layer_type_head_dim,
 )
 
-
 HF_GEMMA4_ASSISTANT_CLASS_PATH = (
     "transformers.models.gemma4_assistant.modeling_gemma4_assistant"
     ".Gemma4AssistantForCausalLM"

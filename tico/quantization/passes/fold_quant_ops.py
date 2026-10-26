@@ -42,7 +42,6 @@ from tico.utils.validate_args_kwargs import (
     QuantizePerTensorArgs,
 )
 
-
 _QPARAM_PRESERVING_VIEW_TARGETS = frozenset(
     {
         torch.ops.aten.permute.default,
@@ -82,9 +81,11 @@ def _restore_float_inputs(graph: torch.fx.Graph) -> None:
             storage_dtype = (
                 torch.uint8
                 if qparam.dtype == "uint4"
-                else torch.int8
-                if qparam.dtype == "int4"
-                else getattr(torch, qparam.dtype)
+                else (
+                    torch.int8
+                    if qparam.dtype == "int4"
+                    else getattr(torch, qparam.dtype)
+                )
             )
             with graph.inserting_before(node):
                 dequantize = graph.call_function(

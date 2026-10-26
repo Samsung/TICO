@@ -161,9 +161,10 @@ class TestCollectForwardOutputsHookLifetime(unittest.TestCase):
 
         buffer = io.StringIO()
         with patch.object(trace_mod, "_summarize", broken_summarize):
-            with self.assertRaisesRegex(
-                ValueError, "summarize boom"
-            ), contextlib.redirect_stdout(buffer):
+            with (
+                self.assertRaisesRegex(ValueError, "summarize boom"),
+                contextlib.redirect_stdout(buffer),
+            ):
                 collect_forward_outputs(self.model, self.x, print_trace=True)
 
         self.assertEqual(self.model.forward_calls, 1)

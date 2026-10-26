@@ -35,7 +35,6 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
-
 SCHEMA_VERSION = 1
 
 
@@ -309,16 +308,20 @@ def _state_contract(model) -> dict:
                 elif key == "_qparams" and value is not None:
                     if isinstance(value, (tuple, list)):
                         fields[key] = [
-                            tensor_record(item)
-                            if isinstance(item, torch.Tensor)
-                            else _json_value(item)
+                            (
+                                tensor_record(item)
+                                if isinstance(item, torch.Tensor)
+                                else _json_value(item)
+                            )
                             for item in value
                         ]
                     elif isinstance(value, dict):
                         fields[key] = {
-                            str(k): tensor_record(v)
-                            if isinstance(v, torch.Tensor)
-                            else _json_value(v)
+                            str(k): (
+                                tensor_record(v)
+                                if isinstance(v, torch.Tensor)
+                                else _json_value(v)
+                            )
                             for k, v in value.items()
                         }
                     else:
@@ -1108,9 +1111,10 @@ def compare_snapshots(
             "torch_parity_right": b["probes"],
             "arrays": {},
         }
-        with np.load(str(a_path) + ".npz", allow_pickle=False) as av, np.load(
-            str(b_path) + ".npz", allow_pickle=False
-        ) as bv:
+        with (
+            np.load(str(a_path) + ".npz", allow_pickle=False) as av,
+            np.load(str(b_path) + ".npz", allow_pickle=False) as bv,
+        ):
             record["array_keys_equal"] = set(av.files) == set(bv.files)
             left_evidence = _numerical_evidence(a, av, atol=atol, rtol=rtol)
             right_evidence = _numerical_evidence(b, bv, atol=atol, rtol=rtol)

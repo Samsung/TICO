@@ -22,6 +22,7 @@ is quantized.  Attaching an `IdentityObserver` satisfies the wrapper API
 (`_update_stats()`, `compute_qparams()`, `fake_quant()`) without actually
 performing any statistics gathering or fake-quantization.
 """
+
 import torch
 
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase

@@ -246,9 +246,12 @@ class CircleBinaryInlineBudgetTest(unittest.TestCase):
 
     def test_budget_below_payload_total_skips_inline_pack(self):
         document = model(b"a" * 300, b"b" * 300)
-        with patch.object(
-            binary, "_pack_flatbuffer", return_value=bytearray(100)
-        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with (
+            patch.object(
+                binary, "_pack_flatbuffer", return_value=bytearray(100)
+            ) as pack,
+            patch.dict(sys.modules, {"circle_schema": self._schema_stub()}),
+        ):
             layout = binary.plan_circle_layout(document, inline_budget=500)
         self.assertEqual(pack.call_count, 1)
         self.assertIsNone(pack.call_args.args[0].buffers[1].data)
@@ -268,9 +271,13 @@ class CircleBinaryInlineBudgetTest(unittest.TestCase):
 
     def test_budget_cannot_exceed_the_flatbuffer_threshold(self):
         document = model(b"a" * 700, b"b" * 700)
-        with patch.object(binary, "_FLATBUFFER_LIMIT", 1024), patch.object(
-            binary, "_pack_flatbuffer", return_value=bytearray(64)
-        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with (
+            patch.object(binary, "_FLATBUFFER_LIMIT", 1024),
+            patch.object(
+                binary, "_pack_flatbuffer", return_value=bytearray(64)
+            ) as pack,
+            patch.dict(sys.modules, {"circle_schema": self._schema_stub()}),
+        ):
             layout = binary.plan_circle_layout(document, inline_budget=10**9)
         self.assertEqual(pack.call_count, 1)
         self.assertFalse(layout.inline)
@@ -389,9 +396,11 @@ class CircleBinaryPolicyTest(unittest.TestCase):
         # Both constants fit separately; only their aggregate exceeds the budget.
         document = model(b"a" * 700, b"b" * 700)
         header = bytearray(100)
-        with patch.object(binary, "_FLATBUFFER_LIMIT", 1024), patch.object(
-            binary, "_pack_flatbuffer", return_value=header
-        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with (
+            patch.object(binary, "_FLATBUFFER_LIMIT", 1024),
+            patch.object(binary, "_pack_flatbuffer", return_value=header) as pack,
+            patch.dict(sys.modules, {"circle_schema": self._schema_stub()}),
+        ):
             result = binary.serialize_circle_model(document)
         projected = pack.call_args.args[0]
         self.assertIsNot(projected, document)
@@ -411,14 +420,17 @@ class CircleBinaryPolicyTest(unittest.TestCase):
 
     def test_actual_pack_overflow_uses_external_layout(self):
         document = model(b"abcd")
-        with patch.object(
-            binary,
-            "_pack_flatbuffer",
-            side_effect=[
-                binary._FlatbufferTooLarge("metadata overhead"),
-                bytearray(64),
-            ],
-        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with (
+            patch.object(
+                binary,
+                "_pack_flatbuffer",
+                side_effect=[
+                    binary._FlatbufferTooLarge("metadata overhead"),
+                    bytearray(64),
+                ],
+            ) as pack,
+            patch.dict(sys.modules, {"circle_schema": self._schema_stub()}),
+        ):
             result = binary.serialize_circle_model(document)
         self.assertEqual(pack.call_count, 2)
         self.assertTrue(result.endswith(b"abcd"))
@@ -453,11 +465,14 @@ class CircleBinaryPolicyTest(unittest.TestCase):
 
     def test_one_byte_and_empty_buffers_remain_inline(self):
         document = model(b"z", b"", b"abc")
-        with patch.object(
-            binary,
-            "_pack_flatbuffer",
-            side_effect=[binary._FlatbufferTooLarge(), bytearray(96)],
-        ) as pack, patch.dict(sys.modules, {"circle_schema": self._schema_stub()}):
+        with (
+            patch.object(
+                binary,
+                "_pack_flatbuffer",
+                side_effect=[binary._FlatbufferTooLarge(), bytearray(96)],
+            ) as pack,
+            patch.dict(sys.modules, {"circle_schema": self._schema_stub()}),
+        ):
             binary.serialize_circle_model(document)
         projected = pack.call_args.args[0]
         self.assertEqual(projected.buffers[1].data, b"z")

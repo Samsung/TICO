@@ -17,7 +17,6 @@ from os.path import basename, dirname, isfile, join
 
 from tico.utils.register_custom_op import RegisterOps
 
-
 # Register custom ops to torch namespace
 RegisterOps()
 

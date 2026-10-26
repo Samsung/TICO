@@ -121,9 +121,11 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
             self.deepstack_merger_list.append(
                 PTQWrapper(
                     merger,
-                    qcfg=deepstack_merger_cfg.child(str(i))
-                    if deepstack_merger_cfg
-                    else None,
+                    qcfg=(
+                        deepstack_merger_cfg.child(str(i))
+                        if deepstack_merger_cfg
+                        else None
+                    ),
                     fp_name=join_name(fp_name, f"deepstack_merger_list.{i}"),
                 )
             )
@@ -480,7 +482,7 @@ class QuantQwen3VLVisionModel(QuantModuleBase):
         self,
         mode: ExportMode = "prefill",
         *,
-        grid_thw: (Qwen3VLVisionProfile | Qwen3VLVisionGridInput | None) = None,
+        grid_thw: Qwen3VLVisionProfile | Qwen3VLVisionGridInput | None = None,
     ) -> "Qwen3VLVisionPrefillExportAdapter":
         """Return a static vision adapter for one explicit THW profile.
 

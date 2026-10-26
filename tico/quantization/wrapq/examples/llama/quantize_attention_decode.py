@@ -52,6 +52,7 @@ layer0.self_attn = prepare(orig_attn, PTQConfig())
 attn_q = layer0.self_attn
 assert isinstance(attn_q.wrapped, QuantLlamaAttention), type(attn_q.wrapped)
 
+
 # -----------------------------------------------------------------------------
 # Random input generator
 # -----------------------------------------------------------------------------

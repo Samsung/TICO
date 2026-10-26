@@ -21,7 +21,6 @@ from typing import Any, Callable, TypeAlias
 
 import torch
 
-
 NormalizedOutputs: TypeAlias = dict[str, torch.Tensor]
 OutputAdapter: TypeAlias = Callable[[Any], Mapping[str, torch.Tensor]]
 

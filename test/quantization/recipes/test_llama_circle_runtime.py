@@ -266,8 +266,7 @@ class TestLlamaCircleRuntime(unittest.TestCase):
 
     def test_bundle_runs_in_clean_process_without_transformers(self):
         """Only saved Circle/NumPy artifacts cross the process boundary."""
-        script = textwrap.dedent(
-            """\
+        script = textwrap.dedent("""\
             import importlib.abc
             import json
             import sys
@@ -285,8 +284,7 @@ class TestLlamaCircleRuntime(unittest.TestCase):
             tokens = np.array(json.loads(sys.argv[2]), dtype=np.int64)
             result = runtime.generate(tokens, max_new_tokens=3)
             print('RESULT=' + json.dumps(result.tolist()))
-            """
-        )
+            """)
         with tempfile.TemporaryDirectory() as tmp:
             bundle = Path(tmp) / "bundle"
             shutil.copytree(self.bundle_dir, bundle)

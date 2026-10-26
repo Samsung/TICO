@@ -89,18 +89,21 @@ class TestLlamaExport(unittest.TestCase):
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
             calls.append(save_path.name)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            llama_export,
-            "export_token_embedding",
-            lambda qmodel, max_seq_len, output_dir, **kwargs: calls.append(
-                "token_embedding.q.circle"
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                llama_export,
+                "export_token_embedding",
+                lambda qmodel, max_seq_len, output_dir, **kwargs: calls.append(
+                    "token_embedding.q.circle"
+                ),
             ),
-        ), patch.object(
-            llama_export,
-            "export_lm_head",
-            lambda qmodel, output_dir, **kwargs: calls.append("lm_head.q.circle"),
-        ), patch.object(
-            llama_export, "_convert_and_save", fake_convert_and_save
+            patch.object(
+                llama_export,
+                "export_lm_head",
+                lambda qmodel, output_dir, **kwargs: calls.append("lm_head.q.circle"),
+            ),
+            patch.object(llama_export, "_convert_and_save", fake_convert_and_save),
         ):
             llama_export.export_llama_per_layer(
                 q_model=wrapped_model,
@@ -127,22 +130,26 @@ class TestLlamaExport(unittest.TestCase):
         def fake_convert_and_save(module, example_inputs, save_path, **kwargs):
             calls.append(save_path.name)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            llama_export,
-            "_prepare_llama_export_model",
-            return_value=(wrapped_model, "f32", False),
-        ), patch.object(
-            llama_export,
-            "export_token_embedding",
-            lambda qmodel, max_seq_len, output_dir, **kwargs: calls.append(
-                "token_embedding.f32.circle"
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                llama_export,
+                "_prepare_llama_export_model",
+                return_value=(wrapped_model, "f32", False),
             ),
-        ), patch.object(
-            llama_export,
-            "export_lm_head",
-            lambda qmodel, output_dir, **kwargs: calls.append("lm_head.f32.circle"),
-        ), patch.object(
-            llama_export, "_convert_and_save", fake_convert_and_save
+            patch.object(
+                llama_export,
+                "export_token_embedding",
+                lambda qmodel, max_seq_len, output_dir, **kwargs: calls.append(
+                    "token_embedding.f32.circle"
+                ),
+            ),
+            patch.object(
+                llama_export,
+                "export_lm_head",
+                lambda qmodel, output_dir, **kwargs: calls.append("lm_head.f32.circle"),
+            ),
+            patch.object(llama_export, "_convert_and_save", fake_convert_and_save),
         ):
             llama_export.export_llama_per_layer(
                 q_model=torch.nn.Identity(),
@@ -262,17 +269,13 @@ class TestExportMain(unittest.TestCase):
         loaded_ctx = Mock()
         adapter.load_model.return_value = loaded_ctx
 
-        with patch.object(
-            export_example, "parse_args", return_value=self._args()
-        ), patch.object(
-            export_example, "load_recipe_config", return_value=cfg
-        ), patch.object(
-            export_example, "resolve_adapter", return_value=adapter
-        ), patch.object(
-            export_example, "set_seed"
-        ), patch.object(
-            export_example.torch, "load"
-        ) as torch_load:
+        with (
+            patch.object(export_example, "parse_args", return_value=self._args()),
+            patch.object(export_example, "load_recipe_config", return_value=cfg),
+            patch.object(export_example, "resolve_adapter", return_value=adapter),
+            patch.object(export_example, "set_seed"),
+            patch.object(export_example.torch, "load") as torch_load,
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 export_example.main()
 
@@ -292,19 +295,19 @@ class TestExportMain(unittest.TestCase):
         checkpoint.to.return_value = checkpoint
         checkpoint.eval.return_value = checkpoint
 
-        with patch.object(
-            export_example,
-            "parse_args",
-            return_value=self._args(source="checkpoint", checkpoint="model.pt"),
-        ), patch.object(
-            export_example, "load_recipe_config", return_value=cfg
-        ), patch.object(
-            export_example, "resolve_adapter", return_value=adapter
-        ), patch.object(
-            export_example, "set_seed"
-        ), patch.object(
-            export_example.torch, "load", return_value=checkpoint
-        ) as torch_load:
+        with (
+            patch.object(
+                export_example,
+                "parse_args",
+                return_value=self._args(source="checkpoint", checkpoint="model.pt"),
+            ),
+            patch.object(export_example, "load_recipe_config", return_value=cfg),
+            patch.object(export_example, "resolve_adapter", return_value=adapter),
+            patch.object(export_example, "set_seed"),
+            patch.object(
+                export_example.torch, "load", return_value=checkpoint
+            ) as torch_load,
+        ):
             with contextlib.redirect_stdout(io.StringIO()):
                 export_example.main()
 

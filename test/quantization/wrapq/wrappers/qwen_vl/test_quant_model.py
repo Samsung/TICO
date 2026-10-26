@@ -32,7 +32,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_model import (
     QuantQwen3VLTextModel,
 )
 
-
 skip_msg = "transformers not installed — skipping Qwen3VLModel tests"
 
 
@@ -485,9 +484,9 @@ class TestQuantQwen3VLModel(unittest.TestCase):
 
         # Add video tokens later in the sequence (with some text in between)
         video_start = num_visual_tokens + 10
-        input_ids[
-            0, video_start : video_start + num_visual_tokens
-        ] = self.video_token_id
+        input_ids[0, video_start : video_start + num_visual_tokens] = (
+            self.video_token_id
+        )
 
         # Create pixel values for images
         pixel_values = self._create_patchified_pixel_values(thw, batch_size=batch_size)

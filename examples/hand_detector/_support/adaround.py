@@ -46,7 +46,6 @@ from examples.hand_detector._support.reconstruction import (
     ReconstructionWindow,
 )
 
-
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 

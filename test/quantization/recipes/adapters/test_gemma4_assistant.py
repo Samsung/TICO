@@ -50,7 +50,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     assistant_layer_type_head_dim,
 )
 
-
 if TYPE_CHECKING:
     from transformers.models.gemma4_assistant.configuration_gemma4_assistant import (
         Gemma4AssistantConfig,
@@ -128,8 +127,9 @@ class TestGemma4AssistantCausalLMLoader(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 causal = _RecordingAutoClass(error=error)
                 image_text = _RecordingAutoClass(result=object())
-                with patch("transformers.AutoModelForCausalLM", causal), patch(
-                    "transformers.AutoModelForImageTextToText", image_text
+                with (
+                    patch("transformers.AutoModelForCausalLM", causal),
+                    patch("transformers.AutoModelForImageTextToText", image_text),
                 ):
                     with self.assertRaises(type(error)) as raised:
                         _load_causal_lm("org/fake-target", dtype=torch.float32)
@@ -143,8 +143,9 @@ class TestGemma4AssistantCausalLMLoader(unittest.TestCase):
         model = object()
         causal = _RecordingAutoClass(result=model)
         image_text = _RecordingAutoClass(result=object())
-        with patch("transformers.AutoModelForCausalLM", causal), patch(
-            "transformers.AutoModelForImageTextToText", image_text
+        with (
+            patch("transformers.AutoModelForCausalLM", causal),
+            patch("transformers.AutoModelForImageTextToText", image_text),
         ):
             result = _load_causal_lm(
                 "org/fake-target",

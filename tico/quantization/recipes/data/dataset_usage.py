@@ -26,7 +26,6 @@ from tico.quantization.recipes.evaluation.selection import (
     get_selected_evaluation_targets,
 )
 
-
 CALIBRATION_ROLE = "calibration"
 EVALUATION_ROLE = "evaluation"
 FEW_SHOT_ROLE = "few_shot"

@@ -15,7 +15,6 @@
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-
 SELECTED_TASKS_KEY = "selected_tasks"
 
 

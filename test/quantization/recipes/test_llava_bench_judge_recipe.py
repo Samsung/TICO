@@ -127,11 +127,14 @@ class TestLlavaBenchJudgeRecipe(unittest.TestCase):
             captured.update(kwargs)
             return summary
 
-        with patch.object(
-            judge_recipe,
-            "evaluate_llava_bench_with_judge",
-            fake_evaluate_llava_bench_with_judge,
-        ), patch.object(judge_recipe, "print_llava_bench_judge_summary") as printer:
+        with (
+            patch.object(
+                judge_recipe,
+                "evaluate_llava_bench_with_judge",
+                fake_evaluate_llava_bench_with_judge,
+            ),
+            patch.object(judge_recipe, "print_llava_bench_judge_summary") as printer,
+        ):
             result = judge_recipe.evaluate_and_print_llava_bench_judge(
                 model="target-model",
                 processor="target-processor",

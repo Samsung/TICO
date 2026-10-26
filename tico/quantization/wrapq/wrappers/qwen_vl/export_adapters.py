@@ -24,7 +24,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import (
     Qwen3VLVisionProfile,
 )
 
-
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.qwen_vl.quant_for_conditional_generation import (
         QuantQwen3VLForConditionalGeneration,

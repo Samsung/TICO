@@ -46,7 +46,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_decoder_layer import (
 )
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
-
 DEFAULT_IMAGE_MAX_PIXELS = 1280 * 28 * 28
 DEFAULT_IMAGE_MIN_PIXELS = None
 
@@ -795,7 +794,11 @@ class StaticQwen3VLTextLayerRuntime:
         image_grid_thw: Optional[torch.Tensor],
         mm_token_type_ids: Optional[torch.Tensor],
         valid: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[list[torch.Tensor]],]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        Optional[list[torch.Tensor]],
+    ]:
         """Prepare fused embeddings, position IDs, and optional DeepStack deltas."""
         input_ids = input_ids.to(self.device)
         inputs_embeds = self.embed_tokens(input_ids)

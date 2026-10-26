@@ -28,7 +28,6 @@ from typing import Callable, cast, TYPE_CHECKING
 
 import torch
 
-
 if TYPE_CHECKING:
     from tico.quantization.recipes.adapters.gemma4_assistant import (
         _GreedyTokenGenerator,

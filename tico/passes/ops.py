@@ -14,7 +14,6 @@
 
 import torch
 
-
 """
 This module contains Op lists used for finding the target Ops in passes.
 The module is introduced to reduce duplicate codes.

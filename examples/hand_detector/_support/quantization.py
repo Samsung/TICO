@@ -49,7 +49,6 @@ from torch import nn
 from examples.hand_detector._support.circle import save_layout_optimized_circle
 from examples.hand_detector.hand_detector import SpatialMeanNode
 
-
 ObserverOverride = QuantSpec | Mapping[str, object]
 
 

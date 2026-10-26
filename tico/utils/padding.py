@@ -19,7 +19,6 @@ import torch
 
 from tico.utils.errors import InvalidArgumentError
 
-
 PaddingValue = Union[str, Sequence[int]]  # "same" | "valid" | [pad_h, pad_w]
 
 

@@ -51,9 +51,10 @@ class TestTraceSmoke(unittest.TestCase):
         )
         ctx.device = torch.device("cpu")
 
-        with patch.object(
-            trace_mod, "prepare", lambda model, qcfg: model
-        ), patch.object(trace_mod, "convert", lambda model: model):
+        with (
+            patch.object(trace_mod, "prepare", lambda model, qcfg: model),
+            patch.object(trace_mod, "convert", lambda model: model),
+        ):
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
                 trace_ptq_parity(

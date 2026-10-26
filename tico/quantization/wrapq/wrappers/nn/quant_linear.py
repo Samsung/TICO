@@ -34,7 +34,7 @@ class QuantLinear(QuantModuleBase):
         fp: nn.Linear,
         *,
         qcfg: Optional[PTQConfig] = None,
-        fp_name: Optional[str] = None
+        fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.obs_weight = self._make_obs(

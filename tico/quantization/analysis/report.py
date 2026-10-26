@@ -23,7 +23,6 @@ from typing import Any, Mapping
 
 from tico.quantization.analysis.profile import QuantizationProfile
 
-
 MetricSummary = Mapping[str, float | int | None]
 
 

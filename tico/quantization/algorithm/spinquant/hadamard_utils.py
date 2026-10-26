@@ -59,8 +59,7 @@ except ImportError:
 #   '+' for +1
 #   '-' for -1
 #
-SPECIAL_HADAMARD_TEXT: Dict[int, str] = {
-    12: """
+SPECIAL_HADAMARD_TEXT: Dict[int, str] = {12: """
     +-----------
     ++-+---+++-+
     +++-+---+++-
@@ -73,8 +72,7 @@ SPECIAL_HADAMARD_TEXT: Dict[int, str] = {
     +---+++-++-+
     ++---+++-++-
     +-+---+++-++
-    """
-}
+    """}
 
 
 def is_pow2(n: int) -> bool:

@@ -34,7 +34,7 @@ class QuantEmbedding(QuantModuleBase):
         fp: nn.Embedding,
         *,
         qcfg: Optional[PTQConfig] = None,
-        fp_name: Optional[str] = None
+        fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.weight_obs = self._make_obs(

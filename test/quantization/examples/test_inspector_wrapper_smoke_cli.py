@@ -62,18 +62,21 @@ class TestInspectWrapperSmokeCLI(unittest.TestCase):
             calls["load"] = (path, overrides)
             return {"runtime": {}}
 
-        with patch.object(
-            inspect_cli,
-            "load_recipe_config",
-            fake_load_recipe_config,
-        ), patch.object(
-            inspect_cli, "set_seed", lambda seed: calls.setdefault("seed", seed)
-        ), patch.object(
-            inspect_cli,
-            "run_wrapper_smoke",
-            lambda *args, **kwargs: calls.setdefault("run", (args, kwargs)),
-        ), patch.object(
-            sys, "argv", argv
+        with (
+            patch.object(
+                inspect_cli,
+                "load_recipe_config",
+                fake_load_recipe_config,
+            ),
+            patch.object(
+                inspect_cli, "set_seed", lambda seed: calls.setdefault("seed", seed)
+            ),
+            patch.object(
+                inspect_cli,
+                "run_wrapper_smoke",
+                lambda *args, **kwargs: calls.setdefault("run", (args, kwargs)),
+            ),
+            patch.object(sys, "argv", argv),
         ):
             inspect_cli.main()
 
@@ -89,11 +92,14 @@ class TestInspectWrapperSmokeCLI(unittest.TestCase):
         calls: dict[str, bool] = {}
         argv = ["inspector.py", "--mode", "wrapper-smoke", "--list-cases"]
 
-        with patch.object(
-            inspect_cli,
-            "_print_wrapper_smoke_cases",
-            lambda: calls.setdefault("listed", True),
-        ), patch.object(sys, "argv", argv):
+        with (
+            patch.object(
+                inspect_cli,
+                "_print_wrapper_smoke_cases",
+                lambda: calls.setdefault("listed", True),
+            ),
+            patch.object(sys, "argv", argv),
+        ):
             inspect_cli.main()
 
         self.assertTrue(calls["listed"])
@@ -111,9 +117,10 @@ class TestInspectWrapperSmokeCLI(unittest.TestCase):
         ]
 
         stdout = io.StringIO()
-        with patch.object(
-            inspect_cli, "list_cases", lambda: fake_cases
-        ), redirect_stdout(stdout):
+        with (
+            patch.object(inspect_cli, "list_cases", lambda: fake_cases),
+            redirect_stdout(stdout),
+        ):
             inspect_cli._print_wrapper_smoke_cases()
 
         self.assertEqual(

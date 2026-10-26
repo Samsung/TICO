@@ -25,7 +25,6 @@ from tico.quantization.recipes.qparams import (
 )
 from tico.quantization.recipes.stages.base import Stage
 
-
 _INTERNAL_OVERRIDE_FIELDS = frozenset({"__quant_spec_replace_role__"})
 _OVERRIDE_FIELD_ORDER = (
     "observer",

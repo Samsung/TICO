@@ -1237,9 +1237,11 @@ def verify_step_vision_prefill(
     # the static adapter.
     wrapped_top = cast(
         QuantGemma4ForConditionalGeneration,
-        runtime.qmodel.wrapped
-        if hasattr(runtime.qmodel, "wrapped")
-        else runtime.qmodel,
+        (
+            runtime.qmodel.wrapped
+            if hasattr(runtime.qmodel, "wrapped")
+            else runtime.qmodel
+        ),
     )
     ref_visual_embeds = cast(
         QuantGemma4Model, wrapped_top.model.wrapped

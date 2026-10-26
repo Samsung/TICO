@@ -155,11 +155,12 @@ class TestGemma4PastKVObservers(unittest.TestCase):
                     elif cache_kind == "static":
                         cache = StaticCache(attention.config, max_cache_len=32)
                     attention.enable_calibration()
-                    with mock.patch.object(
-                        attention.obs_past_key, "collect"
-                    ) as past_k, mock.patch.object(
-                        attention.obs_past_value, "collect"
-                    ) as past_v:
+                    with (
+                        mock.patch.object(attention.obs_past_key, "collect") as past_k,
+                        mock.patch.object(
+                            attention.obs_past_value, "collect"
+                        ) as past_v,
+                    ):
                         self._forward(attention, 3, past=cache)
                     past_k.assert_not_called()
                     past_v.assert_not_called()
@@ -184,14 +185,17 @@ class TestGemma4PastKVObservers(unittest.TestCase):
             DynamicCache(config=attention.config),
             StaticCache(attention.config, max_cache_len=32),
         ):
-            with mock.patch.object(
-                attention.obs_past_key,
-                "fake_quant",
-                side_effect=AssertionError("past K in prefill"),
-            ), mock.patch.object(
-                attention.obs_past_value,
-                "fake_quant",
-                side_effect=AssertionError("past V in prefill"),
+            with (
+                mock.patch.object(
+                    attention.obs_past_key,
+                    "fake_quant",
+                    side_effect=AssertionError("past K in prefill"),
+                ),
+                mock.patch.object(
+                    attention.obs_past_value,
+                    "fake_quant",
+                    side_effect=AssertionError("past V in prefill"),
+                ),
             ):
                 self._forward(attention, 3, past=cache)
 
@@ -204,15 +208,18 @@ class TestGemma4PastKVObservers(unittest.TestCase):
             with self.subTest(layout=layout):
                 attention = self._make_attention(layout=layout)
                 attention.enable_calibration()
-                with mock.patch.object(
-                    attention.obs_past_key,
-                    "collect",
-                    wraps=attention.obs_past_key.collect,
-                ) as key, mock.patch.object(
-                    attention.obs_past_value,
-                    "collect",
-                    wraps=attention.obs_past_value.collect,
-                ) as value:
+                with (
+                    mock.patch.object(
+                        attention.obs_past_key,
+                        "collect",
+                        wraps=attention.obs_past_key.collect,
+                    ) as key,
+                    mock.patch.object(
+                        attention.obs_past_value,
+                        "collect",
+                        wraps=attention.obs_past_value.collect,
+                    ) as value,
+                ):
                     attention(*self._inputs(1), past_key_value=past, use_cache=False)
                 self.assertEqual(key.call_count, 1)
                 self.assertEqual(value.call_count, 1)

@@ -34,7 +34,6 @@ from tico.quantization.wrapq.wrappers.nn.quant_linear import QuantLinear
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
-
 skip_msg = "required transformers not installed — skipping LlamaAttention tests"
 
 

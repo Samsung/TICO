@@ -47,6 +47,7 @@ attn_q = model.model.layers[0].self_attn  # quant wrapper
 assert isinstance(attn_q.wrapped, QuantLlamaAttention)
 rotary = model.model.rotary_emb
 
+
 # -------------------------------------------------------------------------
 # Helpers: tokenize + embed
 # -------------------------------------------------------------------------
