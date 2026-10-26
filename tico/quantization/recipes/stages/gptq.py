@@ -213,6 +213,29 @@ class GPTQStage(Stage):
             provenance["split"] = calibration_cfg.get("split")
         return json.dumps(provenance, sort_keys=True, default=str)
 
+    @classmethod
+    def _auto_percdamp_ref_observations(
+        cls, calibration_cfg: Mapping[str, Any]
+    ) -> int | None:
+        """
+        Derive the auto-damping observation reference from calibration config:
+        ``sum(datasets n_samples) * seq_len``.
+
+        Returns ``None`` when ``seq_len`` is unknown, so the config default
+        (auto -> 128 * 2048 fallback) applies instead.
+        """
+        seq_len = calibration_cfg.get("seq_len")
+        if seq_len is None or int(seq_len) <= 0:
+            return None
+
+        default_n = calibration_cfg.get("n_samples", DEFAULT_CALIBRATION_N_SAMPLES)
+        datasets = calibration_cfg.get("datasets")
+        if datasets is None:
+            datasets = calibration_cfg.get("dataset") or DEFAULT_CALIBRATION_DATASET
+        normalized = normalize_mixed_dataset_config(datasets, default_n)  # type: ignore[arg-type]
+        total_samples = sum(int(entry["n_samples"]) for entry in normalized.values())
+        return total_samples * int(seq_len)
+
     def run(self, ctx: RecipeContext, stage_cfg: Mapping[str, Any]) -> RecipeContext:
         payload = stage_payload(stage_cfg)
 
@@ -241,6 +264,22 @@ class GPTQStage(Stage):
                     calibration_cfg,
                     runtime_cfg if isinstance(runtime_cfg, Mapping) else None,
                 )
+
+        # Stamp the auto-damping observation reference for configs that
+        # declare it (e.g. Qwen3VLGPTQConfig): derived as
+        # sum(datasets n_samples) * calibration.seq_len so the per-layer
+        # damping policy is normalized to the actual calibration volume.
+        # ``0`` (or an omitted key) means "auto"; a positive payload value
+        # pins the reference explicitly. filter_dataclass_kwargs drops the
+        # key for config classes without the field; when the reference
+        # cannot be derived (no calibration spec), the key stays 0/absent
+        # and the quantizer falls back to 128 * 2048.
+        if not payload.get("auto_percdamp_ref_observations"):
+            calibration_cfg = ctx.cfg.get("calibration", {})
+            if isinstance(calibration_cfg, Mapping) and calibration_cfg:
+                ref_observations = self._auto_percdamp_ref_observations(calibration_cfg)
+                if ref_observations is not None:
+                    payload["auto_percdamp_ref_observations"] = ref_observations
 
         # Select the GPTQ config class. The default variant asks the adapter
         # layer for a model-family-specific class (adapters own that choice;

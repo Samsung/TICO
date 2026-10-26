@@ -38,6 +38,7 @@ import torch
 
 from tico.quantization.config.gptq import GPTQConfig, UniversalGPTQConfig
 from tico.quantization.config.ptq import PTQConfig
+from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 from tico.quantization.config.specs import affine
 from tico.quantization.recipes.context import RecipeContext
 from tico.quantization.recipes.stages.gptq import GPTQStage
@@ -78,6 +79,13 @@ class RealPTQConfigAdapter(DummyAdapter):
             affine(DType.uint(4)),
         )
         return config
+
+
+class Qwen3VLGPTQAdapter(DummyAdapter):
+    """Adapter fake selecting the Qwen3-VL GPTQ config class."""
+
+    def get_gptq_config_class(self):
+        return Qwen3VLGPTQConfig
 
 
 def _two_layer_llama_model() -> SimpleNamespace:
@@ -629,6 +637,71 @@ class TestRecipeStages(unittest.TestCase):
             GPTQStage().run(ctx, {"name": "gptq", "variant": "unknown"})
 
         self.assertIn("Unsupported GPTQ variant", str(cm.exception))
+
+    def test_gptq_stage_auto_percdamp_ref_observations_zero_is_auto(self):
+        """Explicit 0 must behave like an omitted auto_percdamp_ref_observations.
+
+        The config documents 0 as "auto": the stage derives the reference as
+        sum(datasets n_samples) * calibration.seq_len. A positive payload
+        value pins the reference explicitly; without a calibration spec the
+        key stays 0 so the quantizer falls back to 128 * 2048.
+        """
+        calibration_cfg = {
+            "datasets": "vqav2:128,wikitext:128",
+            "seq_len": 2048,
+        }
+        expected_auto = 2 * 128 * 2048
+
+        def run_stage(stage_cfg, cfg):
+            ctx = RecipeContext(
+                cfg=cfg,
+                adapter=Qwen3VLGPTQAdapter(),
+                model=torch.nn.Linear(2, 2),
+                calibration_inputs=[torch.randn(1, 2)],
+            )
+            calls: dict[str, Any] = {}
+
+            def fake_prepare(model_arg, config, inplace=False):
+                calls["config"] = config
+                return model_arg
+
+            with (
+                patch.object(gptq_mod, "prepare", fake_prepare),
+                patch.object(
+                    gptq_mod, "convert", lambda model_arg, inplace=False: model_arg
+                ),
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    GPTQStage().run(ctx, stage_cfg)
+            return calls["config"]
+
+        base_stage = {"name": "gptq", "weight_bits": 4}
+
+        with self.subTest(case="omitted"):
+            config = run_stage(dict(base_stage), {"calibration": calibration_cfg})
+            self.assertIsInstance(config, Qwen3VLGPTQConfig)
+            self.assertEqual(config.auto_percdamp_ref_observations, expected_auto)
+
+        with self.subTest(case="explicit zero"):
+            config = run_stage(
+                {**base_stage, "auto_percdamp_ref_observations": 0},
+                {"calibration": calibration_cfg},
+            )
+            self.assertEqual(config.auto_percdamp_ref_observations, expected_auto)
+
+        with self.subTest(case="explicit positive pins"):
+            config = run_stage(
+                {**base_stage, "auto_percdamp_ref_observations": 777},
+                {"calibration": calibration_cfg},
+            )
+            self.assertEqual(config.auto_percdamp_ref_observations, 777)
+
+        with self.subTest(case="zero without calibration keeps fallback"):
+            config = run_stage(
+                {**base_stage, "auto_percdamp_ref_observations": 0},
+                {},
+            )
+            self.assertEqual(config.auto_percdamp_ref_observations, 0)
 
     def test_gptq_stage_loads_sensitivity_from_nested_path(self):
         """GPTQStage should load sensitivity tensors with mode=load."""

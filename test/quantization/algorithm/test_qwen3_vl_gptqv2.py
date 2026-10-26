@@ -23,6 +23,7 @@ These tests verify that:
 
 import copy
 import json
+import math
 import os
 import unittest
 from typing import cast
@@ -69,6 +70,380 @@ class TestQwen3VLGPTQv2Core(unittest.TestCase):
         assert dXXT is not None
         self.assertEqual(dXXT.shape, gptq.H.shape)  # type: ignore[union-attr]
         self.assertGreater(dXXT.abs().sum().item(), 0.0)
+
+    @torch.no_grad()
+    def test_fasterquant_retries_damping_for_unstable_hessian(self):
+        """Auto retry should raise per-layer damping instead of using pinv."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.tensor(
+            [[1.0, 1.1], [1.1, 1.0]],
+            dtype=gptq.hessian_dtype,
+            device=gptq.dev,
+        )
+
+        gptq.fasterquant(
+            blocksize=2,
+            percdamp=0.01,
+            percdamp_max=0.2,
+            groupsize=-1,
+            actorder=False,
+            verbose=False,
+        )
+
+        assert gptq.percdamp_used is not None
+        self.assertGreater(gptq.percdamp_used, 0.01)
+        self.assertLessEqual(gptq.percdamp_used, 0.2)
+
+    @torch.no_grad()
+    def test_fasterquant_retries_above_heuristic_clamp(self):
+        """The retry ceiling may exceed a caller-clamped starting damping.
+
+        Regression test: when the resolved percdamp is already clamped to the
+        heuristic maximum (e.g. auto_percdamp_max=0.08), a separate higher
+        retry ceiling must still rescue a layer that needs more damping
+        instead of aborting after a single attempt.
+        """
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        # Indefinite Hessian: factorization needs percdamp > 0.09.
+        gptq.H = torch.tensor(
+            [[1.0, 1.09], [1.09, 1.0]],
+            dtype=gptq.hessian_dtype,
+            device=gptq.dev,
+        )
+
+        gptq.fasterquant(
+            blocksize=2,
+            percdamp=0.08,  # e.g. clamped to auto_percdamp_max by the caller
+            percdamp_max=0.5,  # separate, higher retry ceiling
+            groupsize=-1,
+            actorder=False,
+            verbose=False,
+        )
+
+        assert gptq.percdamp_used is not None
+        self.assertGreater(gptq.percdamp_used, 0.08)
+        self.assertLessEqual(gptq.percdamp_used, 0.5)
+
+    @torch.no_grad()
+    def test_fasterquant_oom_propagates_without_retries(self):
+        """OOM during factorization must not be retried or rewrapped."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(2, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        with unittest.mock.patch(
+            "torch.linalg.cholesky",
+            side_effect=torch.OutOfMemoryError("simulated OOM"),
+        ):
+            with self.assertRaises(torch.OutOfMemoryError):
+                gptq.fasterquant(
+                    blocksize=2,
+                    percdamp=0.01,
+                    percdamp_max=0.5,
+                    groupsize=-1,
+                )
+
+    @torch.no_grad()
+    def test_retry_ceiling_attempted_before_giving_up(self):
+        """The configured retry ceiling is always attempted before giving up.
+
+        Regression test: with percdamp=0.002, retry_factor=2.5 and a ceiling
+        of 0.5, five escalating attempts only reach 0.078125. The attempt
+        budget must not stop the loop there — one final attempt at the
+        ceiling itself is made, and the error must say so.
+        """
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        dampings = []
+
+        def failing_cholesky(m, *args, **kwargs):
+            # H is the identity, so the diagonal shift equals the damping.
+            dampings.append(float(m[0, 0]) - 1.0)
+            raise RuntimeError("simulated factorization failure")
+
+        with unittest.mock.patch("torch.linalg.cholesky", failing_cholesky):
+            with self.assertRaises(RuntimeError) as cm:
+                gptq.fasterquant(
+                    blocksize=3,
+                    percdamp=0.002,
+                    percdamp_max=0.5,
+                    groupsize=-1,
+                )
+
+        # 5 escalating attempts (0.002 .. 0.078125) + the ceiling attempt.
+        self.assertEqual(len(dampings), 6)
+        self.assertAlmostEqual(dampings[0], 0.002, places=6)
+        self.assertAlmostEqual(dampings[-1], 0.5, places=6)
+        self.assertIn(
+            "The final attempt used the configured retry ceiling",
+            str(cm.exception),
+        )
+
+    @torch.no_grad()
+    def test_retry_succeeds_at_ceiling_after_attempt_budget(self):
+        """A layer that needs the ceiling damping is rescued by the final attempt."""
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        real_cholesky = torch.linalg.cholesky
+        dampings = []
+
+        def ceiling_only_cholesky(m, *args, **kwargs):
+            damping = float(m[0, 0]) - 1.0
+            if damping >= 0.0:
+                # Only the per-attempt damped Hessian has a positive shift;
+                # the final cholesky(hinv) input is left alone below.
+                dampings.append(damping)
+                if damping < 0.5 - 1e-12:
+                    raise RuntimeError("simulated factorization failure")
+            return real_cholesky(m, *args, **kwargs)
+
+        with unittest.mock.patch("torch.linalg.cholesky", ceiling_only_cholesky):
+            gptq.fasterquant(
+                blocksize=3,
+                percdamp=0.002,
+                percdamp_max=0.5,
+                groupsize=-1,
+            )
+
+        self.assertEqual(gptq.percdamp_used, 0.5)
+        self.assertEqual(len(dampings), 6)
+
+    @torch.no_grad()
+    def test_static_factorization_consumes_hessian_in_place(self):
+        """Static mode must damp H in place: no full-size clone is made."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+        gptq.H = torch.eye(2, dtype=gptq.hessian_dtype, device=gptq.dev)
+        h_ptr = gptq.H.data_ptr()
+
+        seen = []
+        real_cholesky = torch.linalg.cholesky
+
+        def cholesky_spy(m, *args, **kwargs):
+            seen.append(m.data_ptr())
+            return real_cholesky(m, *args, **kwargs)
+
+        with unittest.mock.patch("torch.linalg.cholesky", cholesky_spy):
+            gptq.fasterquant(blocksize=2, percdamp=0.01, groupsize=-1)
+
+        # The first Cholesky consumes the damped Hessian itself, proving the
+        # static path keeps the legacy in-place, low-memory factorization.
+        self.assertGreater(len(seen), 0)
+        self.assertEqual(seen[0], h_ptr)
+        self.assertEqual(gptq.percdamp_used, 0.01)
+
+    @torch.no_grad()
+    def test_auto_factorization_retains_original_hessian(self):
+        """Auto mode must keep the undamped Hessian for retries."""
+        layer = torch.nn.Linear(2, 2, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        h = torch.eye(2, dtype=gptq.hessian_dtype, device=gptq.dev)
+
+        hinv = gptq._factorize_hessian_inverse(h, percdamp=0.01, percdamp_max=0.5)
+
+        # The original stays pristine so later attempts re-damp a fresh copy.
+        self.assertTrue(
+            torch.allclose(torch.diag(h), torch.ones(2, dtype=h.dtype, device=h.device))
+        )
+        self.assertEqual(hinv.shape, h.shape)
+        self.assertEqual(gptq.percdamp_used, 0.01)
+
+    @torch.no_grad()
+    def test_factorization_peak_live_tensors(self):
+        """Regression guard for the Hessian factorization memory profile."""
+        import contextlib
+        import weakref
+
+        @contextlib.contextmanager
+        def track_live_nxn(h_shape):
+            """Track simultaneously live N x N tensors via weak refs."""
+            live: weakref.WeakSet = weakref.WeakSet()
+            stats = {"peak": 0}
+            real_cholesky = torch.linalg.cholesky
+            real_inverse = torch.cholesky_inverse
+            real_clone = torch.Tensor.clone
+
+            def track(t):
+                live.add(t)
+                stats["peak"] = max(stats["peak"], len(live))
+                return t
+
+            def cholesky_spy(m, *args, **kwargs):
+                return track(real_cholesky(m, *args, **kwargs))
+
+            def inverse_spy(m, *args, **kwargs):
+                return track(real_inverse(m, *args, **kwargs))
+
+            def clone_spy(t, *args, **kwargs):
+                out = real_clone(t, *args, **kwargs)
+                if out.shape == h_shape:
+                    track(out)
+                return out
+
+            with (
+                unittest.mock.patch("torch.linalg.cholesky", cholesky_spy),
+                unittest.mock.patch("torch.cholesky_inverse", inverse_spy),
+                unittest.mock.patch("torch.Tensor.clone", clone_spy),
+            ):
+                yield live, stats
+
+        # Rectangular layer: weight clones (4, 3) never collide with the
+        # Hessian shape (3, 3) in the profiler below.
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+
+        # Static path: legacy profile — at most two live N x N tensors.
+        # NOTE: fasterquant is called directly (no wrapper): passing H as an
+        # argument to a helper frame would keep it alive longer, distorting
+        # the measurement. Production takes the same direct path.
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+        with track_live_nxn(gptq.H.shape) as (live, stats):
+            live.add(gptq.H)  # weak ref only; no strong ref is kept by the test
+            stats["peak"] = 1
+            gptq.fasterquant(blocksize=3, percdamp=0.01, groupsize=-1)
+        self.assertLessEqual(stats["peak"], 2)
+
+        # Auto path: the original is retained for retries while temporaries
+        # are released early — at most three live N x N tensors.
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+        h = gptq.H
+        with track_live_nxn(h.shape) as (live, stats):
+            live.add(h)
+            stats["peak"] = 1
+            gptq._factorize_hessian_inverse(h, percdamp=0.01, percdamp_max=0.5)
+        self.assertLessEqual(stats["peak"], 3)
+
+    @torch.no_grad()
+    def test_retry_does_not_retain_failed_attempt_tensors(self):
+        """A failed attempt's temporaries must not inflate the next attempt.
+
+        Regression guard: when the final cholesky of an attempt fails, the
+        retry loop must not carry the stale inverse (or the failed frame via
+        a retained exception) into the next attempt — at most three N x N
+        tensors may be live at any time during the retry path.
+        """
+        import weakref
+
+        layer = torch.nn.Linear(3, 4, bias=False)
+        gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+        gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+
+        live: weakref.WeakSet = weakref.WeakSet()
+        stats = {"peak": 0}
+        real_cholesky = torch.linalg.cholesky
+        real_inverse = torch.cholesky_inverse
+        real_clone = torch.Tensor.clone
+
+        def track(t):
+            live.add(t)
+            stats["peak"] = max(stats["peak"], len(live))
+            return t
+
+        upper_calls = {"n": 0}
+
+        def cholesky_spy(m, *args, **kwargs):
+            if kwargs.get("upper"):
+                upper_calls["n"] += 1
+                if upper_calls["n"] == 1:
+                    # Fail the first attempt at its last step, when the
+                    # inverse has already been built (worst case for stale
+                    # retention).
+                    raise RuntimeError("simulated numerical failure")
+            return track(real_cholesky(m, *args, **kwargs))
+
+        def inverse_spy(m, *args, **kwargs):
+            return track(real_inverse(m, *args, **kwargs))
+
+        gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+        h_shape = gptq.H.shape
+
+        def clone_spy(t, *args, **kwargs):
+            out = real_clone(t, *args, **kwargs)
+            if out.shape == h_shape:
+                track(out)
+            return out
+
+        live.add(gptq.H)
+        stats["peak"] = 1
+        with (
+            unittest.mock.patch("torch.linalg.cholesky", cholesky_spy),
+            unittest.mock.patch("torch.cholesky_inverse", inverse_spy),
+            unittest.mock.patch("torch.Tensor.clone", clone_spy),
+        ):
+            gptq.fasterquant(blocksize=3, percdamp=0.01, percdamp_max=0.5, groupsize=-1)
+
+        self.assertGreaterEqual(upper_calls["n"], 2)  # a retry really happened
+        self.assertLessEqual(stats["peak"], 3)
+
+    @torch.no_grad()
+    def test_failed_retry_attempt_tensors_released_without_gc(self):
+        """A successful retry must not keep failed-attempt tensors alive.
+
+        Regression guard: a retained exception traceback referenced the
+        factorization frame (and the Hessian tensors in its locals), forming
+        a reference cycle that survived until cyclic garbage collection.
+        """
+        import gc
+        import weakref
+
+        gc.disable()  # refcount-only cleanup; restored in finally below
+        try:
+            layer = torch.nn.Linear(3, 4, bias=False)
+            gptq = GPTQ(layer, normalize_H=False, gptq_v2_alpha=0.0)
+            gptq.quantizer.configure(bits=8, perchannel=True, sym=False, mse=None)
+            gptq.H = torch.eye(3, dtype=gptq.hessian_dtype, device=gptq.dev)
+            h_shape = gptq.H.shape
+            h_ref = weakref.ref(gptq.H)
+
+            clone_refs = []
+            real_clone = torch.Tensor.clone
+
+            def clone_spy(t, *args, **kwargs):
+                out = real_clone(t, *args, **kwargs)
+                if out.shape == h_shape:
+                    clone_refs.append(weakref.ref(out))
+                return out
+
+            real_cholesky = torch.linalg.cholesky
+            calls = {"n": 0}
+
+            def flaky_cholesky(m, *args, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise RuntimeError("simulated factorization failure")
+                return real_cholesky(m, *args, **kwargs)
+
+            with (
+                unittest.mock.patch("torch.linalg.cholesky", flaky_cholesky),
+                unittest.mock.patch("torch.Tensor.clone", clone_spy),
+            ):
+                gptq.fasterquant(
+                    blocksize=3, percdamp=0.01, groupsize=-1, percdamp_max=0.1
+                )
+
+            # The first attempt failed inside cholesky, so a retry happened.
+            self.assertGreaterEqual(calls["n"], 2)
+            # Without any gc.collect(), the original Hessian and every
+            # per-attempt clone must already be released by refcounting.
+            self.assertIsNone(h_ref())
+            self.assertTrue(clone_refs)
+            for ref in clone_refs:
+                self.assertIsNone(ref())
+        finally:
+            gc.enable()
 
 
 class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
@@ -165,6 +540,165 @@ class TestQwen3VLGPTQv2QuantizerHelpers(unittest.TestCase):
             local_module_name="self_attn.q_proj",
         )
         self.assertEqual(bits, 8)
+
+    def test_auto_percdamp_stage_factor_prefers_vision_patch_embed(self):
+        """Auto damping should distinguish vision patch embedding from text."""
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 128
+        quantizer._num_vision_batches = 0
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(cfg.auto_percdamp_ref_observations)
+
+        text = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.language_model.layers.0",
+            num_batches=128,
+        )
+        vision = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.visual.patch_embed.proj",
+            num_batches=128,
+        )
+
+        self.assertAlmostEqual(text, 0.01)
+        self.assertGreater(vision, text)
+
+    def test_auto_percdamp_ref_batches_auto_uses_run_batch_count(self):
+        """Zero ref_batches -> actual run total; under-covered stages get more."""
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 384
+        quantizer._num_vision_batches = 192
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(128 * 2048)
+
+        # Text stage replays all 384 batches: batch factor is neutral.
+        text = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.language_model.layers.0",
+            num_batches=384,
+        )
+        # Vision stage replays only its 192 vision batches: sqrt(384/192) = sqrt(2).
+        vision = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.visual.blocks.0",
+            num_batches=192,
+        )
+
+        self.assertAlmostEqual(text, 0.01 * 1.125, places=6)
+        self.assertAlmostEqual(vision, 0.01 * 1.25 * math.sqrt(2.0), places=6)
+        self.assertGreater(vision, text)
+
+    def test_auto_percdamp_ref_batches_explicit_pins_reference(self):
+        """An explicit ref_batches wins over the run batch count."""
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_ref_batches=128,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 384
+        quantizer._num_vision_batches = 192
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(128 * 2048)
+
+        # sqrt(128/384) clamped to 0.75 even though the run replayed 384 batches.
+        text = quantizer._resolve_percdamp(
+            gptq,
+            stage_desc="model.language_model.layers.0",
+            num_batches=384,
+        )
+        self.assertAlmostEqual(text, 0.01 * 1.125 * 0.75, places=6)
+
+    def test_finalize_stage_quantization_passes_retry_ceiling(self):
+        """Auto mode must pass auto_percdamp_retry_max as the retry ceiling.
+
+        The heuristic clamp (auto_percdamp_max) and the retry ceiling are
+        separate knobs: fasterquant must receive the retry ceiling so layers
+        clamped to auto_percdamp_max can still be rescued by retries.
+        """
+        cfg = Qwen3VLGPTQConfig(
+            percdamp_mode="auto",
+            percdamp=0.01,
+            auto_percdamp_min=0.001,
+            auto_percdamp_max=0.08,
+            auto_percdamp_retry_max=0.5,
+            auto_percdamp_ref_observations=128 * 2048,
+        )
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 8
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+        gptq.effective_observation_count = float(128 * 2048)
+
+        captured = {}
+
+        def fake_fasterquant(self, **kwargs):
+            captured.update(kwargs)
+
+        with unittest.mock.patch.object(GPTQ, "fasterquant", fake_fasterquant):
+            quantizer._finalize_stage_quantization(
+                gptq_objs={"linear": gptq},
+                subset={"linear": layer},
+                module_name={layer: "linear"},
+                stage_desc="model.language_model.layers.0",
+                num_batches=8,
+            )
+
+        self.assertEqual(captured["percdamp_max"], 0.5)
+
+    def test_finalize_stage_quantization_static_mode_disables_retry(self):
+        """Static mode must keep the no-retry behavior (percdamp_max=None)."""
+        cfg = Qwen3VLGPTQConfig(percdamp_mode="static")
+        quantizer = Qwen3VLGPTQQuantizer(cfg)
+        quantizer.num_batches = 8
+
+        layer = torch.nn.Linear(4, 3)
+        gptq = GPTQ(layer)
+        gptq.H = torch.eye(4)
+
+        captured = {}
+
+        def fake_fasterquant(self, **kwargs):
+            captured.update(kwargs)
+
+        with unittest.mock.patch.object(GPTQ, "fasterquant", fake_fasterquant):
+            quantizer._finalize_stage_quantization(
+                gptq_objs={"linear": gptq},
+                subset={"linear": layer},
+                module_name={layer: "linear"},
+                stage_desc="model.language_model.layers.0",
+                num_batches=8,
+            )
+
+        self.assertIsNone(captured["percdamp_max"])
 
     def test_module_device(self):
         """_module_device should return the device of the module's parameters."""
