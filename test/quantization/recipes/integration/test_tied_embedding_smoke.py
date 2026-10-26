@@ -49,12 +49,14 @@ class TestTiedEmbeddingSmoke(unittest.TestCase):
 
         fake_circle = FakeCircleModel()
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            tied_mod.tico, "convert", lambda model, args: fake_circle
-        ), patch.object(
-            tied_mod,
-            "_circle_data_tensors_with_shape",
-            lambda circle_binary, shape: [(0, "shared_weight", 1, 32, 0)],
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(tied_mod.tico, "convert", lambda model, args: fake_circle),
+            patch.object(
+                tied_mod,
+                "_circle_data_tensors_with_shape",
+                lambda circle_binary, shape: [(0, "shared_weight", 1, 32, 0)],
+            ),
         ):
             from pathlib import Path
 

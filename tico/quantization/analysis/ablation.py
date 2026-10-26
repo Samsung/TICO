@@ -32,7 +32,6 @@ from tico.quantization.analysis.report import (
 from tico.quantization.analysis.selector import QuantizationBoundaries
 from tico.quantization.wrapq.control import FakeQuantState, iter_quantization_sites
 
-
 _DEFAULT_PROFILES = (
     QuantizationProfile.OUTPUT_ONLY,
     QuantizationProfile.WEIGHT_ONLY,

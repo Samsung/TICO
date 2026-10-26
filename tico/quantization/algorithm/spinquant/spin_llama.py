@@ -35,7 +35,6 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 
-
 _CREATE_CAUSAL_MASK_PARAMS = inspect.signature(create_causal_mask).parameters
 
 

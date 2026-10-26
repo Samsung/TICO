@@ -67,7 +67,6 @@ from tico.quantization.recipes.utils import (
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-
 _VISION_LINEAR_MODULES = (
     "attn.qkv",
     "attn.proj",

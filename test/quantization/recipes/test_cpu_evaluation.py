@@ -209,8 +209,9 @@ class TestCPUPerplexity(unittest.TestCase):
             encoding = self.tokenizer(
                 text, return_tensors="pt", padding="max_length", max_length=length
             )
-            with self.subTest(text=text), self.assertRaisesRegex(
-                ValueError, "No target tokens"
+            with (
+                self.subTest(text=text),
+                self.assertRaisesRegex(ValueError, "No target tokens"),
             ):
                 perplexity(
                     self.models["fp"],
@@ -329,10 +330,13 @@ class TestAdapterPPLPlumbing(unittest.TestCase):
                         if adapter.family == "llama"
                         else "evaluate_vlm_text_ppl"
                     )
-                    with patch(
-                        f"tico.quantization.recipes.adapters.{adapter.family}.{target}",
-                        return_value=1.0,
-                    ) as helper, contextlib.redirect_stdout(io.StringIO()):
+                    with (
+                        patch(
+                            f"tico.quantization.recipes.adapters.{adapter.family}.{target}",
+                            return_value=1.0,
+                        ) as helper,
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
                         adapter.evaluate(ctx)
                     self.assertEqual(helper.call_args.kwargs["max_seq_len"], 8)
                     self.assertEqual(helper.call_args.kwargs["stride"], 3)

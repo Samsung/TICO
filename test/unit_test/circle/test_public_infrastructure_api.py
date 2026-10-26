@@ -31,7 +31,6 @@ from tico.circle import (
     TensorValueCodec,
 )
 
-
 _EXPECTED_PASS_API = {
     "CanonicalizeEquivalentOpsPass",
     "CircleOptimizationPreset",

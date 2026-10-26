@@ -150,8 +150,9 @@ class MXLayoutMetadataTest(unittest.TestCase):
     def test_invalid_axis_is_rejected(self):
         _, node = _layout_node((2, 64), torch.ops.aten.permute.default, ([1, 0],))
         for axis in (-3, 2):
-            with self.subTest(axis=axis), self.assertRaisesRegex(
-                ValueError, "out of range"
+            with (
+                self.subTest(axis=axis),
+                self.assertRaisesRegex(ValueError, "out of range"),
             ):
                 remap_mx_qparam(_mx(axis), node)
 

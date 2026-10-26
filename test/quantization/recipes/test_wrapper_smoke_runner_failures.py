@@ -69,9 +69,10 @@ class TestWrapperSmokeRunnerFailureKinds(unittest.TestCase):
     def test_invalid_config_is_tagged_config(self):
         """A config validation error should fail with the CONFIG kind."""
         stdout = io.StringIO()
-        with patch.object(
-            runner, "get_case", lambda name: _InvalidConfigCase()
-        ), redirect_stdout(stdout):
+        with (
+            patch.object(runner, "get_case", lambda name: _InvalidConfigCase()),
+            redirect_stdout(stdout),
+        ):
             result = runner.run_wrapper_smoke("fake_invalid_config")
         self.assertFalse(result.passed)
         self.assertEqual(result.failures, ["CONFIG"])

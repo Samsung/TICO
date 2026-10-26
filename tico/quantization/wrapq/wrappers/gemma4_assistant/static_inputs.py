@@ -40,7 +40,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
     extract_assistant_text_config,
 )
 
-
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
 GEMMA4_ASSISTANT_CORE_INPUT_NAMES: tuple[str, ...] = (

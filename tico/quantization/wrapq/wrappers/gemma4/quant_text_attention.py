@@ -37,7 +37,6 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
-
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
@@ -1335,9 +1334,9 @@ class QuantGemma4TextAttention(QuantModuleBase):
                 self._cache_output(
                     mode=cache_output_mode_normalized,
                     new_key_value=new_key_value,
-                    present_key_value=storage_key_value
-                    if new_key_value is not None
-                    else None,
+                    present_key_value=(
+                        storage_key_value if new_key_value is not None else None
+                    ),
                     cache_object_out=cache_object_out,
                 ),
             )

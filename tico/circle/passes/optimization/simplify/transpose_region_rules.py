@@ -25,7 +25,6 @@ from tico.circle.passes.optimization.simplify._layout_utils import (
     _get_const_data,
 )
 
-
 _ADD_BUILTIN_CODE = _builtin_operator_value("ADD")
 _ADD_N_BUILTIN_CODE = _builtin_operator_value("ADD_N")
 _CONCATENATION_BUILTIN_CODE = _builtin_operator_value("CONCATENATION")

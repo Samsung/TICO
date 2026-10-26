@@ -56,7 +56,6 @@ from tico.quantization.wrapq.control import (
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 
-
 MetricsEvaluator = Callable[[], OutputMetrics]
 ProgressCallback = Callable[["DiscreteCodeRoundResult"], None]
 

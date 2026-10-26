@@ -31,7 +31,6 @@ import numpy as np
 from tico.circle.document import CircleDocument
 from tico.circle.runtime import CircleReferenceRuntime, ExecutionMode, RuntimeTensor
 
-
 _INPUT_ROLES = {
     "input_ids": "input_ids",
     "hidden_states": "hidden_states",

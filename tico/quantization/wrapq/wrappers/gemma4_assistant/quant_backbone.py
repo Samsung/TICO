@@ -40,7 +40,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.utils import (
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
-
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
 
 

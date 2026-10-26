@@ -353,9 +353,9 @@ class QuantQwen3VLModel(QuantModuleBase):
     def _fuse_text_n_image(inputs_embeds, visual_embeds, visual_start_idx):
         num_visual_tokens = visual_embeds.shape[0]
         flat_inputs = inputs_embeds.view(-1, inputs_embeds.shape[-1])
-        flat_inputs[
-            visual_start_idx : visual_start_idx + num_visual_tokens
-        ] = visual_embeds
+        flat_inputs[visual_start_idx : visual_start_idx + num_visual_tokens] = (
+            visual_embeds
+        )
         inputs_embeds = flat_inputs.view_as(inputs_embeds)
         return inputs_embeds
 

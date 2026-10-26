@@ -39,7 +39,6 @@ from tico.quantization.wrapq.wrappers.gemma4.static_vision_profile import (
     get_gemma4_static_vision_profile,
 )
 
-
 _GEMMA4_FULL_ROPE_PARAMETERS: dict[str, Any] = {
     "rope_type": "proportional",
     "partial_rotary_factor": 0.25,
@@ -205,7 +204,7 @@ def _set_eager_attention(cfg: Any) -> Any:
 
 
 def _rope_parameters_for_layer_types(
-    layer_types: tuple[str, ...]
+    layer_types: tuple[str, ...],
 ) -> dict[str, dict[str, Any]]:
     """Return RoPE parameters whose keys exactly match the requested layer types.
 

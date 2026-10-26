@@ -19,7 +19,6 @@ import torch
 from tico.passes.decompose_slice_scatter import DecomposeSliceScatter
 from tico.passes.fill_meta_val import FillMetaVal
 
-
 # start, end, source width, and the expected first output row.
 _CASES = (
     (None, None, 5, [10, 11, 12, 13, 14]),

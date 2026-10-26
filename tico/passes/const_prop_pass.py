@@ -48,7 +48,6 @@ from tico.utils.trace_decorators import (
 )
 from tico.utils.utils import get_fake_mode
 
-
 _MISSING = object()
 
 TensorStorageIdentityKey = tuple[
@@ -590,12 +589,12 @@ class ConstPropPass(PassBase):
         graph: torch.fx.Graph = graph_module.graph
 
         # [1], [2]
-        const_node_to_tensor: OrderedDict[
-            torch.fx.Node, torch.Tensor
-        ] = propagate_constants(
-            exported_program,
-            fold_filter=self._fold_filter,
-            folded_node_callback=self._folded_node_callback,
+        const_node_to_tensor: OrderedDict[torch.fx.Node, torch.Tensor] = (
+            propagate_constants(
+                exported_program,
+                fold_filter=self._fold_filter,
+                folded_node_callback=self._folded_node_callback,
+            )
         )
         # [3]
         placeholders = create_constant_placeholder(

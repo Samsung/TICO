@@ -281,8 +281,9 @@ class TestGemma4PLEScaleFusionConfig(unittest.TestCase):
                 )
         invalid_configs: list[Any] = [None, [], {"text": None}, {"text": "true"}]
         for config in invalid_configs:
-            with self.subTest(config=config), self.assertRaisesRegex(
-                TypeError, "mapping"
+            with (
+                self.subTest(config=config),
+                self.assertRaisesRegex(TypeError, "mapping"),
             ):
                 gemma4_ple_scale_fusion_enabled(config)
 

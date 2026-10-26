@@ -294,7 +294,10 @@ class CircleRewriteRuleTest(unittest.TestCase):
 
         document = self._make_document(operator_count=2)
         with self.assertRaisesRegex(RuntimeError, "exceeded 1 applications"):
-            CircleRulePass([MarkOpcodeRule()], maximum_rewrites=1,).run(
+            CircleRulePass(
+                [MarkOpcodeRule()],
+                maximum_rewrites=1,
+            ).run(
                 document,
                 CirclePassContext(verify_after_each_pass=False),
             )

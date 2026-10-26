@@ -25,7 +25,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_multimodal_embedder import (
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 

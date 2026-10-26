@@ -332,9 +332,10 @@ class TestGemma4RoPEIntegration(unittest.TestCase):
                 cfg = self._config(shared=2, k_eq_v=k_eq_v)
                 rotary = Gemma4TextRotaryEmbedding(cfg)
                 for layer_idx in range(4):
-                    with self.subTest(
-                        layout=layout, k_eq_v=k_eq_v, layer=layer_idx
-                    ), torch.no_grad():
+                    with (
+                        self.subTest(layout=layout, k_eq_v=k_eq_v, layer=layer_idx),
+                        torch.no_grad(),
+                    ):
                         fp = Gemma4TextAttention(cfg, layer_idx=layer_idx).eval()
                         hf = QuantGemma4TextAttention(
                             copy.deepcopy(fp), qcfg=self._qcfg(layout, "hf")

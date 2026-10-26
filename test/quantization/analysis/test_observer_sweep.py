@@ -37,7 +37,6 @@ from tico.quantization.analysis import (
     QuantizationReport,
 )
 
-
 _SITE_COUNTS = {
     QuantizationProfile.ACTIVATION_ONLY: 197,
     QuantizationProfile.FULL: 293,

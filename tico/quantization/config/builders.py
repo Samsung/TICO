@@ -24,7 +24,6 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.config.specs import affine, QuantSpec
 from tico.quantization.wrapq.dtypes import DType
 
-
 _RMSNORM_ACTIVATION_OBSERVERS = ("act_in", "act_out")
 _LAYERNORM_ACTIVATION_OBSERVERS = (
     "act_in",
@@ -387,12 +386,12 @@ def _build_qwen3_vl_overrides(
 
     vision_overrides["blocks"] = {}
     for block_idx in range(num_vision_blocks):
-        vision_overrides["blocks"][
-            str(block_idx)
-        ] = _build_qwen3_vl_vision_block_overrides(
-            linear_weight=eff_vision_weight,
-            norm=norm,
-            norm_weight=norm_weight,
+        vision_overrides["blocks"][str(block_idx)] = (
+            _build_qwen3_vl_vision_block_overrides(
+                linear_weight=eff_vision_weight,
+                norm=norm,
+                norm_weight=norm_weight,
+            )
         )
 
     merger_override = _build_qwen3_vl_vision_merger_overrides(

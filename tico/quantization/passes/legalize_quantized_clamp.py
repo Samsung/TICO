@@ -40,7 +40,6 @@ from tico.utils.trace_decorators import (
 from tico.utils.utils import quant_min_max, set_new_meta_val
 from tico.utils.validate_args_kwargs import ClampArgs
 
-
 _SUPPORTED_DTYPES: dict[str, torch.dtype] = {
     "uint8": torch.uint8,
     "int16": torch.int16,

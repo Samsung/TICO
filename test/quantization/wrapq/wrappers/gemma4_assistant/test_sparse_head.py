@@ -26,7 +26,6 @@ from tico.quantization.wrapq.wrappers.gemma4_assistant.sparse_head import (
     sparse_top1_token,
 )
 
-
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
 
 

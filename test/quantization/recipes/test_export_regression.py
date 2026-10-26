@@ -570,8 +570,9 @@ class TestSnapshotComparison(unittest.TestCase):
 
     def test_invalid_tolerance_is_rejected(self):
         for value in ("nan", "inf", "-1"):
-            with self.assertRaises(SystemExit), contextlib.redirect_stderr(
-                io.StringIO()
+            with (
+                self.assertRaises(SystemExit),
+                contextlib.redirect_stderr(io.StringIO()),
             ):
                 main(["compare", "a", "b", "--report", "unused", "--atol", value])
 
@@ -832,18 +833,24 @@ class TestRopeMigrationRouting(unittest.TestCase):
             return SimpleNamespace(returncode=0)
 
         owner = "tico.quantization.recipes.debug.export_regression"
-        with patch(owner + ".subprocess.run", side_effect=worker), patch(
-            owner + ".compare_snapshots", side_effect=[{"ok": old_new_ok}, {"ok": True}]
-        ), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            patch(owner + ".subprocess.run", side_effect=worker),
+            patch(
+                owner + ".compare_snapshots",
+                side_effect=[{"ok": old_new_ok}, {"ok": True}],
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             code = _run(options)
         summary = json.loads((root / "results/summary.json").read_text())
         return code, commands, summary
 
     def test_only_candidate_receives_explicit_migration_flag(self):
         for enabled in (False, True):
-            with self.subTest(
-                enabled=enabled
-            ), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(enabled=enabled),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 code, commands, summary = self._run_fixture(
                     directory, migration=enabled, old_new_ok=True
                 )
@@ -864,9 +871,10 @@ class TestRopeMigrationRouting(unittest.TestCase):
 
     def test_legacy_length_flag_is_explicit_and_sent_to_both_workers(self):
         for enabled in (False, True):
-            with self.subTest(
-                enabled=enabled
-            ), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(enabled=enabled),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 code, commands, summary = self._run_fixture(
                     directory, migration=False, old_new_ok=True, legacy_length=enabled
                 )

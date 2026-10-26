@@ -67,11 +67,13 @@ def convert_nnmodule_to_pt2(
     dynamic_shapes: dict | None = None,
 ):
     # Create .pt2 model
-    with torch.no_grad(), SuppressWarning(
-        UserWarning, ".*quantize_per_tensor"
-    ), SuppressWarning(
-        UserWarning,
-        ".*TF32 acceleration on top of oneDNN is available for Intel GPUs.*",
+    with (
+        torch.no_grad(),
+        SuppressWarning(UserWarning, ".*quantize_per_tensor"),
+        SuppressWarning(
+            UserWarning,
+            ".*TF32 acceleration on top of oneDNN is available for Intel GPUs.*",
+        ),
     ):
         # Warning details:
         #   ...site-packages/torch/_subclasses/functional_tensor.py:364

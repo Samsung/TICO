@@ -27,7 +27,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder import (
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
-
 _SKIP_MSG = "required transformers Gemma4 vision modules are not installed"
 
 
@@ -261,15 +260,18 @@ class TestQuantGemma4VisionEncoder(unittest.TestCase):
         q_encoder.enable_calibration()
 
         inputs = self._sample_inputs()
-        with mock.patch.object(
-            q_encoder.obs_position_cos,
-            "collect",
-            wraps=q_encoder.obs_position_cos.collect,
-        ) as mock_cos_collect, mock.patch.object(
-            q_encoder.obs_position_sin,
-            "collect",
-            wraps=q_encoder.obs_position_sin.collect,
-        ) as mock_sin_collect:
+        with (
+            mock.patch.object(
+                q_encoder.obs_position_cos,
+                "collect",
+                wraps=q_encoder.obs_position_cos.collect,
+            ) as mock_cos_collect,
+            mock.patch.object(
+                q_encoder.obs_position_sin,
+                "collect",
+                wraps=q_encoder.obs_position_sin.collect,
+            ) as mock_sin_collect,
+        ):
             with torch.no_grad():
                 _ = q_encoder(**inputs)
             mock_cos_collect.assert_called()
@@ -306,15 +308,18 @@ class TestQuantGemma4VisionEncoder(unittest.TestCase):
             _ = q_encoder(**inputs)
         q_encoder.freeze_qparams()
 
-        with mock.patch.object(
-            q_encoder.obs_position_cos,
-            "fake_quant",
-            wraps=q_encoder.obs_position_cos.fake_quant,
-        ) as mock_cos_fq, mock.patch.object(
-            q_encoder.obs_position_sin,
-            "fake_quant",
-            wraps=q_encoder.obs_position_sin.fake_quant,
-        ) as mock_sin_fq:
+        with (
+            mock.patch.object(
+                q_encoder.obs_position_cos,
+                "fake_quant",
+                wraps=q_encoder.obs_position_cos.fake_quant,
+            ) as mock_cos_fq,
+            mock.patch.object(
+                q_encoder.obs_position_sin,
+                "fake_quant",
+                wraps=q_encoder.obs_position_sin.fake_quant,
+            ) as mock_sin_fq,
+        ):
             with torch.no_grad():
                 _ = q_encoder(**inputs)
             mock_cos_fq.assert_called()

@@ -19,7 +19,6 @@ from tico.utils.passes import PassBase, PassResult
 from tico.utils.trace_decorators import trace_graph_diff_on_pass
 from tico.utils.utils import is_target_node
 
-
 assert_node_targets = [
     torch.ops.aten._assert_scalar.default,
     torch.ops.aten._assert_tensor_metadata.default,

@@ -31,7 +31,6 @@ from examples.hand_detector._support.verify_quantized_circle import (
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 
-
 DIRECTORY = Path(__file__).resolve().parent
 RESIZE_TARGET = "circle_custom.resize_bilinear.default"
 

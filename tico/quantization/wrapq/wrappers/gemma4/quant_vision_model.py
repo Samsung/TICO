@@ -27,7 +27,6 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
-
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionModel
 
@@ -87,16 +86,20 @@ class QuantGemma4VisionModel(QuantModuleBase):
         if self.config.standardize:
             self.register_buffer(
                 "std_bias",
-                fp_model.std_bias.clone()
-                if hasattr(fp_model, "std_bias")
-                else torch.empty(self.config.hidden_size),
+                (
+                    fp_model.std_bias.clone()
+                    if hasattr(fp_model, "std_bias")
+                    else torch.empty(self.config.hidden_size)
+                ),
                 persistent=False,
             )
             self.register_buffer(
                 "std_scale",
-                fp_model.std_scale.clone()
-                if hasattr(fp_model, "std_scale")
-                else torch.empty(self.config.hidden_size),
+                (
+                    fp_model.std_scale.clone()
+                    if hasattr(fp_model, "std_scale")
+                    else torch.empty(self.config.hidden_size)
+                ),
                 persistent=False,
             )
 

@@ -33,7 +33,6 @@ parameter.
 import os
 from typing import Any
 
-
 _GEMMA4_DEFAULT_VIDEO_SOFT_TOKENS = 70
 
 

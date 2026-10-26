@@ -27,7 +27,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_vision_attention import (
     QuantGemma4VisionAttention,
 )
 
-
 _SKIP_MSG = "required transformers Gemma4 vision modules are not installed"
 
 

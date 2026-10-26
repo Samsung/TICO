@@ -24,7 +24,6 @@ from typing import Any, cast
 import torch
 import torch.nn as nn
 
-
 # Bound validation temporaries, not the table itself. One unusually wide row is
 # the minimum chunk; ordinary E2B rows are far smaller than this bound.
 _MAX_CHUNK_ELEMENTS = 1 << 20

@@ -303,12 +303,12 @@ class PrefillDecodeGreedyDecoder:
 
                 # insert new key-value at seq_len as if decoded token was present at original prompt
                 for idx in range(len(new_key_values)):
-                    past_key_values[idx][0][
-                        :, :, cur_seq_len - 1 : cur_seq_len, :
-                    ] = new_key_values[idx][0][:, :, -1:, :]
-                    past_key_values[idx][1][
-                        :, :, cur_seq_len - 1 : cur_seq_len, :
-                    ] = new_key_values[idx][1][:, :, -1:, :]
+                    past_key_values[idx][0][:, :, cur_seq_len - 1 : cur_seq_len, :] = (
+                        new_key_values[idx][0][:, :, -1:, :]
+                    )
+                    past_key_values[idx][1][:, :, cur_seq_len - 1 : cur_seq_len, :] = (
+                        new_key_values[idx][1][:, :, -1:, :]
+                    )
                 # update mask accordingly as if decoded token was present at original prompt
                 pad_mask[..., cur_seq_len - 1] = True
 

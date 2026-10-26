@@ -33,7 +33,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_text_attention import (
 
 from test.quantization.quant_spec_helpers import make_affine_ptq_config
 
-
 skip_msg = "required transformers not installed — skipping Qwen3VLTextAttention tests"
 
 

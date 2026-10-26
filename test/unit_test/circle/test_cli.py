@@ -226,13 +226,15 @@ class CircleCLITest(unittest.TestCase):
             preserve_compatible_signatures=False,
             no_verify=False,
         )
-        with mock.patch.object(
-            cli_main, "_open_extraction_source", return_value=document
-        ), mock.patch.object(
-            cli_main, "extract_by_operator_indices", return_value=result
-        ) as extract, mock.patch.object(
-            sys, "stderr", new_callable=io.StringIO
-        ) as stderr:
+        with (
+            mock.patch.object(
+                cli_main, "_open_extraction_source", return_value=document
+            ),
+            mock.patch.object(
+                cli_main, "extract_by_operator_indices", return_value=result
+            ) as extract,
+            mock.patch.object(sys, "stderr", new_callable=io.StringIO) as stderr,
+        ):
             self.assertEqual(_extract_command(args), 0)
 
         self.assertIs(
@@ -248,9 +250,10 @@ class CircleCLITest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "model.circle"
             path.write_bytes(b"\x08\x00\x00\x00CIR0!")
-            with mock.patch.object(
-                CircleDocument, "load_mapped"
-            ) as mapped, mock.patch.object(CircleDocument, "load") as eager:
+            with (
+                mock.patch.object(CircleDocument, "load_mapped") as mapped,
+                mock.patch.object(CircleDocument, "load") as eager,
+            ):
                 _open_extraction_source(str(path), "-")
                 mapped.assert_called_once_with(str(path))
                 eager.assert_not_called()

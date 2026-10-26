@@ -29,7 +29,6 @@ from examples.hand_detector._support.conversion import (
 from examples.hand_detector._support.tflite_flatbuffer import TFLiteModel
 from examples.hand_detector.hand_detector import HandDetector
 
-
 DIRECTORY = Path(__file__).resolve().parent
 
 

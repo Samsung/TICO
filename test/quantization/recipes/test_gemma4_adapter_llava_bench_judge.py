@@ -117,12 +117,15 @@ class TestGemma4AdapterLlavaBenchJudge(unittest.TestCase):
         def fake_print_coco_score_results(title, results):
             calls.append(("print", {"title": title, "results": results}))
 
-        with patch.object(
-            llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
-        ), patch.object(
-            llava_bench_mod,
-            "print_coco_score_results",
-            fake_print_coco_score_results,
+        with (
+            patch.object(
+                llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            ),
+            patch.object(
+                llava_bench_mod,
+                "print_coco_score_results",
+                fake_print_coco_score_results,
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()) as buffer:
                 adapter.evaluate(ctx)
@@ -162,12 +165,15 @@ class TestGemma4AdapterLlavaBenchJudge(unittest.TestCase):
             calls.append(("legacy", kwargs))
             return {"CIDEr": 0.5, "total_count": 4, "skipped_count": 0}
 
-        with patch.object(
-            llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
-        ), patch.object(
-            llava_bench_mod,
-            "print_coco_score_results",
-            lambda *args, **kwargs: None,
+        with (
+            patch.object(
+                llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            ),
+            patch.object(
+                llava_bench_mod,
+                "print_coco_score_results",
+                lambda *args, **kwargs: None,
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.evaluate(ctx)

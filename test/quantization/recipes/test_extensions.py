@@ -188,9 +188,13 @@ class TestLoadRecipeExtensions(unittest.TestCase):
             "runtime": {"seed": 1, "print_config": False},
             "pipeline": [],
         }
-        with patch.object(runner_mod, "set_seed", lambda seed: None), patch.object(
-            runner_mod, "validate_recipe_dataset_usage", lambda cfg, **kw: None
-        ), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            patch.object(runner_mod, "set_seed", lambda seed: None),
+            patch.object(
+                runner_mod, "validate_recipe_dataset_usage", lambda cfg, **kw: None
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             ctx = QuantizationRunner().run(cfg)
         self.assertEqual(self.events, ["activate", "load", "evaluate", "export"])
         self.assertIs(ctx.adapter, sys.modules[_MODULE_NAME].adapter)
@@ -202,10 +206,10 @@ class TestLoadRecipeExtensions(unittest.TestCase):
             "runtime": {"print_config": False},
             "pipeline": [],
         }
-        with patch.object(
-            runner_mod, "set_seed", lambda seed: None
-        ), contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(
-            KeyError, "Unknown model family"
+        with (
+            patch.object(runner_mod, "set_seed", lambda seed: None),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(KeyError, "Unknown model family"),
         ):
             QuantizationRunner().run(cfg)
 

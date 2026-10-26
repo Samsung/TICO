@@ -27,7 +27,6 @@ from tico.quantization.wrapq.wrappers.gemma4.embedding_scale_fusion import (
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import register, try_register
 
-
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextScaledWordEmbedding
 

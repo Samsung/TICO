@@ -64,6 +64,7 @@ model.eval()
 qlayer = model.model.layers[0]  # alias for brevity
 assert isinstance(qlayer.wrapped, QuantLlamaDecoderLayer)
 
+
 # -------------------------------------------------------------------------
 # Helpers: fixed-length tokenize + embed
 # -------------------------------------------------------------------------

@@ -37,7 +37,6 @@ from tico.quantization.recipes.override_policies import (
 from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.mx import MXObserver
 
-
 _LAYER0_DOWN_OUT = ("model", "layers", "0", "mlp", "down_proj", "act_out")
 _LAYER1_DOWN_OUT = ("model", "layers", "1", "mlp", "down_proj", "act_out")
 _LAYER0_Q_WEIGHT = ("model", "layers", "0", "self_attn", "q_proj", "weight")
@@ -723,14 +722,10 @@ class TestPtqOverridePolicies(unittest.TestCase):
 
         text_act = qcfg.overrides["model"]["language_model"]["layers"]["1"]["mlp"][  # type: ignore[index]
             "down_proj"
-        ][
-            "act_in"
-        ]
+        ]["act_in"]
         vision_act = qcfg.overrides["model"]["visual"]["blocks"]["0"]["attn"][  # type: ignore[index]
             "qkv"
-        ][
-            "act_in"
-        ]
+        ]["act_in"]
         self.assertEqual(text_act["dtype"], DType.int(16))
         self.assertEqual(vision_act["dtype"], DType.int(16))
 

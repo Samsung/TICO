@@ -48,7 +48,7 @@ class QuantLayerNorm(QuantModuleBase):
         fp: nn.LayerNorm,
         *,
         qcfg: Optional[PTQConfig] = None,
-        fp_name: Optional[str] = None
+        fp_name: Optional[str] = None,
     ):
         super().__init__(qcfg, fp_name=fp_name)
         self.module = fp

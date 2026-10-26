@@ -54,7 +54,6 @@ from examples.hand_detector._support.reconstruction import (
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 
-
 DIRECTORY = Path(__file__).resolve().parent
 OUTPUT_ADAPTER = make_output_adapter(OUTPUT_NAMES)
 

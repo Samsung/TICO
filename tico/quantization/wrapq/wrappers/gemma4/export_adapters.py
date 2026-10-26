@@ -36,7 +36,6 @@ from tico.quantization.wrapq.wrappers.gemma4.utils import (
 )
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 
-
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.gemma4.quant_for_conditional_generation import (
         QuantGemma4ForConditionalGeneration,

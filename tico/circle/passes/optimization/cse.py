@@ -152,9 +152,11 @@ class CommonSubexpressionEliminationPass(CirclePass):
                         continue
                     outputs = tuple(as_indices(getattr(operator, "outputs", None)))
                     canonical_inputs = tuple(
-                        _representative(representatives, tensor_index)
-                        if tensor_index != OPTIONAL_TENSOR_INDEX
-                        else tensor_index
+                        (
+                            _representative(representatives, tensor_index)
+                            if tensor_index != OPTIONAL_TENSOR_INDEX
+                            else tensor_index
+                        )
                         for tensor_index in as_indices(
                             getattr(operator, "inputs", None)
                         )

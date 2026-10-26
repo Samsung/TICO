@@ -34,7 +34,6 @@ from examples.hand_detector._support.verify_quantized_circle import (
     verify_quantized_circle,
 )
 
-
 OutputMetrics = Mapping[str, Mapping[str, float | int | None]]
 
 

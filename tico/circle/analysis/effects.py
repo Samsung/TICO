@@ -23,7 +23,6 @@ from tico.circle._schema import circle_schema, object_api_type
 from tico.circle.errors import CircleRewriteError
 from tico.circle.graph import as_indices, as_list, CircleGraph, OPTIONAL_TENSOR_INDEX
 
-
 DEFAULT_EFFECTFUL_BUILTIN_NAMES = (
     "ASSIGN_VARIABLE",
     "BIDIRECTIONAL_SEQUENCE_LSTM",

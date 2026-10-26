@@ -119,10 +119,9 @@ def gather_single_batch_from_list(data_list, idx):
 
 
 def get_numerical_padding(
-    layer: torch.nn.Conv1d
-    | torch.nn.Conv2d
-    | torch.nn.Conv3d
-    | torch.nn.ConvTranspose2d,
+    layer: (
+        torch.nn.Conv1d | torch.nn.Conv2d | torch.nn.Conv3d | torch.nn.ConvTranspose2d
+    ),
 ) -> int | tuple[int, ...]:
     padding: str | int | tuple[int, ...] = layer.padding
     if isinstance(padding, str):

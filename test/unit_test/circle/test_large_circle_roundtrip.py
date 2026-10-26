@@ -185,8 +185,9 @@ class CircleExternalIOUnitTest(unittest.TestCase):
         )
         accessor = SimpleNamespace(GetRootAsModel=get_root)
         object_type = SimpleNamespace(InitFromObj=lambda value: restored)
-        with patch("tico.circle.io.accessor_api_type", return_value=accessor), patch(
-            "tico.circle.io.object_api_type", return_value=object_type
+        with (
+            patch("tico.circle.io.accessor_api_type", return_value=accessor),
+            patch("tico.circle.io.object_api_type", return_value=object_type),
         ):
             actual = model_from_bytes(source)
         self.assertIs(calls[0], source)
@@ -416,9 +417,11 @@ class LargeCircleExtractionRoundTripTest(unittest.TestCase):
         from tico.circle.cli.main import main
 
         output = self.directory / "cli.circle"
-        with _RecordingMappings() as recorded, patch.object(
-            _buffer, "owned_payload_copy"
-        ) as copy_payload, patch.object(binary, "_join_payloads") as join:
+        with (
+            _RecordingMappings() as recorded,
+            patch.object(_buffer, "owned_payload_copy") as copy_payload,
+            patch.object(binary, "_join_payloads") as join,
+        ):
             self.assertEqual(
                 main(["extract", str(self.source), "--ops", "1", "-o", str(output)]), 0
             )
@@ -488,8 +491,9 @@ class LargeCircleExtractionRoundTripTest(unittest.TestCase):
 
         buffer = io.BytesIO()
         errors = io.StringIO()
-        with patch.object(sys, "stdout", SimpleNamespace(buffer=buffer)), patch.object(
-            sys, "stderr", errors
+        with (
+            patch.object(sys, "stdout", SimpleNamespace(buffer=buffer)),
+            patch.object(sys, "stderr", errors),
         ):
             self.assertEqual(
                 main(["extract", str(self.source), "--ops", "0", "-o", "-"]), 0
@@ -507,8 +511,13 @@ class LargeCircleExtractionRoundTripTest(unittest.TestCase):
         from tico.circle.cli.main import main
 
         output = self.directory / "stdin.circle"
-        with _RecordingMappings() as recorded, patch.object(
-            sys, "stdin", SimpleNamespace(buffer=io.BytesIO(self.source.read_bytes()))
+        with (
+            _RecordingMappings() as recorded,
+            patch.object(
+                sys,
+                "stdin",
+                SimpleNamespace(buffer=io.BytesIO(self.source.read_bytes())),
+            ),
         ):
             self.assertEqual(main(["extract", "-", "--ops", "1", "-o", str(output)]), 0)
         self.assertEqual(recorded.mappings, [])
@@ -654,9 +663,13 @@ class LargeCircleConversionTest(unittest.TestCase):
             with self.subTest(entry=entry), tempfile.TemporaryDirectory() as temporary:
                 module, args = self._module_and_inputs()
                 expected = module.weight.detach().numpy().tobytes()
-                with patch.object(binary, "_FLATBUFFER_LIMIT", 4096), patch(
-                    "tico.circle.export.optimize_for_export", wraps=optimize_for_export
-                ) as optimize:
+                with (
+                    patch.object(binary, "_FLATBUFFER_LIMIT", 4096),
+                    patch(
+                        "tico.circle.export.optimize_for_export",
+                        wraps=optimize_for_export,
+                    ) as optimize,
+                ):
                     if entry == "module":
                         result = tico.convert(module, args)
                     else:

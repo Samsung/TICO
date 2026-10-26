@@ -176,19 +176,23 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
             if save_path.name.startswith("vision_prefill_"):
                 vision_inputs.append((module, example_inputs))
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            qwen_export,
-            "_prepare_qwen3_vl_export_model",
-            return_value=(export_model, "q"),
-        ), patch.object(
-            qwen_export,
-            "make_token_embedding_dynamic_shapes",
-            return_value=dynamic_shapes,
-        ), patch.object(
-            qwen_export,
-            "register_fake_quant_meta_kernels_for_dynamic_export",
-        ) as register_meta, patch.object(
-            qwen_export, "_convert_and_save", fake_convert_and_save
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                qwen_export,
+                "_prepare_qwen3_vl_export_model",
+                return_value=(export_model, "q"),
+            ),
+            patch.object(
+                qwen_export,
+                "make_token_embedding_dynamic_shapes",
+                return_value=dynamic_shapes,
+            ),
+            patch.object(
+                qwen_export,
+                "register_fake_quant_meta_kernels_for_dynamic_export",
+            ) as register_meta,
+            patch.object(qwen_export, "_convert_and_save", fake_convert_and_save),
         ):
             qwen_export.export_qwen3_vl_per_layer(
                 q_model=torch.nn.Identity(),
@@ -233,11 +237,15 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
             del module, example_inputs, kwargs
             names.append(save_path.name)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            qwen_export,
-            "_prepare_qwen3_vl_export_model",
-            return_value=(export_model, "f32"),
-        ), patch.object(qwen_export, "_convert_and_save", fake_convert_and_save):
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                qwen_export,
+                "_prepare_qwen3_vl_export_model",
+                return_value=(export_model, "f32"),
+            ),
+            patch.object(qwen_export, "_convert_and_save", fake_convert_and_save),
+        ):
             qwen_export.export_qwen3_vl_per_layer(
                 q_model=torch.nn.Identity(),
                 max_seq_len=4,
@@ -273,10 +281,13 @@ class TestQwen3VLPerLayerExport(unittest.TestCase):
         args["vision"]["visual_start_idx"] = 1
         export_model.wrapped.model.wrapped.visual_start_idx = 1
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            qwen_export,
-            "_prepare_qwen3_vl_export_model",
-            return_value=(export_model, "q"),
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                qwen_export,
+                "_prepare_qwen3_vl_export_model",
+                return_value=(export_model, "q"),
+            ),
         ):
             with self.assertRaisesRegex(ValueError, "visual-token span"):
                 qwen_export.export_qwen3_vl_per_layer(

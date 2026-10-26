@@ -72,6 +72,7 @@ model.eval()
 attn_q = model.model.language_model.layers[0].self_attn
 assert isinstance(attn_q.wrapped, QuantQwen3VLTextAttention)
 
+
 # -------------------------------------------------------------------------
 # Helpers: fixed-length tokenize + embed
 # -------------------------------------------------------------------------

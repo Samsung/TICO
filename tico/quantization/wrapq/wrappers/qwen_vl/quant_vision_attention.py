@@ -67,9 +67,7 @@ class QuantQwen3VLVisionAttention(QuantModuleBase):
         )
 
         # Let's fold constant scale (1/√d) to k_proj
-        scale_t = torch.tensor(
-            float(getattr(attn_fp, "scaling", self.head_dim**-0.5))
-        )
+        scale_t = torch.tensor(float(getattr(attn_fp, "scaling", self.head_dim**-0.5)))
         with torch.no_grad():
             lin = cast(nn.Linear, self.qkv.wrapped.module)
             k_offset = lin.weight.shape[0] // 3

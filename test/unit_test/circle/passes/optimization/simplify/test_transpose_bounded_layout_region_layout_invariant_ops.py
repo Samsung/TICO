@@ -44,7 +44,6 @@ from test.unit_test.circle.fixture import (
     FakeTensorMap,
 )
 
-
 _FLOAT32_TENSOR_TYPE = 0
 _INT32_TENSOR_TYPE = 2
 _BOOL_TENSOR_TYPE = 6

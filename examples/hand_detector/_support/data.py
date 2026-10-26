@@ -22,7 +22,6 @@ from pathlib import Path
 import numpy as np
 import torch
 
-
 _NUMERIC_SUFFIX = re.compile(r"(\d+)$")
 
 

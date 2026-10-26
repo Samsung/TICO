@@ -113,7 +113,10 @@ class CumulativeSensitivityTest(unittest.TestCase):
 
     def test_greedy_recomputes_and_selects_the_best_next_group(self) -> None:
         candidate = _Candidate()
-        _, steps = QuantizationSensitivity(_IdentityReference(), candidate,).run_greedy(
+        _, steps = QuantizationSensitivity(
+            _IdentityReference(),
+            candidate,
+        ).run_greedy(
             self.samples,
             self.groups,
             mode=SensitivityMode.LEAVE_ONE_FLOAT,
@@ -167,7 +170,10 @@ class CumulativeSensitivityTest(unittest.TestCase):
             QuantizationGroup("coarse_again", SiteSelector.paths("block.act_in")),
         )
         with self.assertRaisesRegex(ValueError, "adds no new quantization sites"):
-            QuantizationSensitivity(_IdentityReference(), _Candidate(),).run_cumulative(
+            QuantizationSensitivity(
+                _IdentityReference(),
+                _Candidate(),
+            ).run_cumulative(
                 self.samples,
                 groups,
                 mode=SensitivityMode.LEAVE_ONE_FLOAT,

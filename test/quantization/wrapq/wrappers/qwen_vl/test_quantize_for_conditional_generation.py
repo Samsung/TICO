@@ -177,14 +177,14 @@ def _create_image_input(
         size=(1, seq_len),
         dtype=torch.long,
     )
-    input_ids[
-        0, visual_start_idx : visual_start_idx + num_visual_tokens
-    ] = cfg.image_token_id
+    input_ids[0, visual_start_idx : visual_start_idx + num_visual_tokens] = (
+        cfg.image_token_id
+    )
 
     mm_token_type_ids = torch.zeros_like(input_ids)
-    mm_token_type_ids[
-        0, visual_start_idx : visual_start_idx + num_visual_tokens
-    ] = 1  # text=0, image=1, video=2
+    mm_token_type_ids[0, visual_start_idx : visual_start_idx + num_visual_tokens] = (
+        1  # text=0, image=1, video=2
+    )
 
     num_patches = thw[0] * thw[1] * thw[2]
     assert isinstance(cfg.vision_config.patch_size, int)

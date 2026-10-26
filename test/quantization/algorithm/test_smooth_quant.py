@@ -457,13 +457,13 @@ def _install_faux_qwen3vl():
 
     # Store original classes if they exist (for restoration)
     if hasattr(modeling_mod, "Qwen3VLVisionBlock"):
-        _ORIGINAL_QWEN3VL_CLASSES[
-            "Qwen3VLVisionBlock"
-        ] = modeling_mod.Qwen3VLVisionBlock
+        _ORIGINAL_QWEN3VL_CLASSES["Qwen3VLVisionBlock"] = (
+            modeling_mod.Qwen3VLVisionBlock
+        )
     if hasattr(modeling_mod, "Qwen3VLVisionPatchMerger"):
-        _ORIGINAL_QWEN3VL_CLASSES[
-            "Qwen3VLVisionPatchMerger"
-        ] = modeling_mod.Qwen3VLVisionPatchMerger
+        _ORIGINAL_QWEN3VL_CLASSES["Qwen3VLVisionPatchMerger"] = (
+            modeling_mod.Qwen3VLVisionPatchMerger
+        )
 
     # Override with faux classes
     modeling_mod.Qwen3VLVisionBlock = FauxQwen3VLVisionBlock  # type: ignore[attr-defined]

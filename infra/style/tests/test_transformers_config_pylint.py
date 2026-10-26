@@ -43,8 +43,7 @@ class TransformersConfigPylintTest(unittest.TestCase):
     ) -> None:
         """Retain field defaults and exclusions without replacing authored methods."""
         module = parse(
-            textwrap.dedent(
-                """\
+            textwrap.dedent("""\
                 from dataclasses import dataclass, field
                 from typing import ClassVar
 
@@ -60,8 +59,7 @@ class TransformersConfigPylintTest(unittest.TestCase):
                 class ExplicitConfig(PreTrainedConfig):
                     def __init__(self, width):
                         self.width = width
-                """
-            ),
+                """),
             module_name="transformers.configuration_utils",
         )
         generated = module["GeneratedConfig"]
@@ -89,8 +87,7 @@ class TransformersConfigPylintTest(unittest.TestCase):
         )
         self.assertEqual(config.hidden_size, 32)
 
-        source = textwrap.dedent(
-            """\
+        source = textwrap.dedent("""\
             from transformers import LlamaConfig
 
             valid = LlamaConfig(
@@ -113,8 +110,7 @@ class TransformersConfigPylintTest(unittest.TestCase):
             PlainConfig(width=16)
             ExplicitConfig(invalid_keyword=True)
             PlainConfig(invalid_keyword=True)
-            """
-        )
+            """)
         project_root = Path(__file__).resolve().parents[3]
         with tempfile.TemporaryDirectory() as directory:
             fixture = Path(directory) / "constructor_calls.py"

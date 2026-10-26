@@ -374,13 +374,17 @@ class TestMixedModeClassFiltering(unittest.TestCase):
 
             processor = MagicMock()
 
-            with patch(
-                "tico.quantization.evaluation.vlm_eval_utils.get_calib_inputs"
-            ) as mock_calib, patch(
-                "tico.quantization.evaluation.vlm_eval_utils.get_dataset"
-            ) as mock_get_dataset, patch(
-                "tico.quantization.evaluation.vlm_eval_utils.build_vlm_inputs"
-            ) as mock_build:
+            with (
+                patch(
+                    "tico.quantization.evaluation.vlm_eval_utils.get_calib_inputs"
+                ) as mock_calib,
+                patch(
+                    "tico.quantization.evaluation.vlm_eval_utils.get_dataset"
+                ) as mock_get_dataset,
+                patch(
+                    "tico.quantization.evaluation.vlm_eval_utils.build_vlm_inputs"
+                ) as mock_build,
+            ):
                 ds = MagicMock()
                 adapter = MagicMock(
                     return_value={"image": MagicMock(), "question": "q", "golds": []}
@@ -415,13 +419,17 @@ class TestMixedModeClassFiltering(unittest.TestCase):
 
         processor = MagicMock()
 
-        with patch(
-            "tico.quantization.evaluation.vlm_eval_utils.get_calib_inputs"
-        ) as mock_calib, patch(
-            "tico.quantization.evaluation.vlm_eval_utils.get_dataset"
-        ) as mock_get_dataset, patch(
-            "tico.quantization.evaluation.vlm_eval_utils._build_text_calib_inputs"
-        ) as mock_text:
+        with (
+            patch(
+                "tico.quantization.evaluation.vlm_eval_utils.get_calib_inputs"
+            ) as mock_calib,
+            patch(
+                "tico.quantization.evaluation.vlm_eval_utils.get_dataset"
+            ) as mock_get_dataset,
+            patch(
+                "tico.quantization.evaluation.vlm_eval_utils._build_text_calib_inputs"
+            ) as mock_text,
+        ):
             # textvqa class-filtering returns dummy inputs
             mock_calib.return_value = [{"input_ids": "textvqa_filtered"}]
 
@@ -470,13 +478,17 @@ class TestMixedModeClassFiltering(unittest.TestCase):
 
         processor = MagicMock()
 
-        with patch(
-            "tico.quantization.evaluation.vlm_eval_utils.get_calib_inputs"
-        ) as mock_calib, patch(
-            "tico.quantization.evaluation.vlm_eval_utils.get_dataset"
-        ) as mock_get_dataset, patch(
-            "tico.quantization.evaluation.vlm_eval_utils.build_vlm_inputs"
-        ) as mock_build:
+        with (
+            patch(
+                "tico.quantization.evaluation.vlm_eval_utils.get_calib_inputs"
+            ) as mock_calib,
+            patch(
+                "tico.quantization.evaluation.vlm_eval_utils.get_dataset"
+            ) as mock_get_dataset,
+            patch(
+                "tico.quantization.evaluation.vlm_eval_utils.build_vlm_inputs"
+            ) as mock_build,
+        ):
             ds = MagicMock()
             adapter = MagicMock(
                 return_value={"image": MagicMock(), "question": "q", "golds": []}
@@ -632,13 +644,18 @@ class TestGetCalibInputsLazyFilter(unittest.TestCase):
         vlm.DATASETS["toy"] = {"adapter": lambda ex: ex, "is_text_only": False}
         built_images: list = []
         try:
-            with patch.object(
-                vlm, "get_dataset", return_value=(hf_ds, vlm.DATASETS["toy"]["adapter"])
-            ), patch.object(
-                vlm,
-                "build_vlm_inputs",
-                side_effect=lambda **kw: built_images.append(kw["image"])  # type: ignore[func-returns-value]
-                or {"mock": kw["image"]},
+            with (
+                patch.object(
+                    vlm,
+                    "get_dataset",
+                    return_value=(hf_ds, vlm.DATASETS["toy"]["adapter"]),
+                ),
+                patch.object(
+                    vlm,
+                    "build_vlm_inputs",
+                    side_effect=lambda **kw: built_images.append(kw["image"])  # type: ignore[func-returns-value]
+                    or {"mock": kw["image"]},
+                ),
             ):
                 out = vlm.get_calib_inputs(
                     "toy",

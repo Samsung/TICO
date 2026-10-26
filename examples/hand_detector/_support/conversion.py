@@ -28,7 +28,6 @@ from examples.hand_detector._support.tflite_flatbuffer import OperatorInfo, TFLi
 
 from examples.hand_detector.hand_detector import ConvNode, HandDetector
 
-
 PADDING_SAME = 0
 FUSED_ACTIVATION_NONE = 0
 FUSED_ACTIVATION_RELU6 = 3

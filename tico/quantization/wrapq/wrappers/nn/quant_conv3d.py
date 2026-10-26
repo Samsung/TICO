@@ -39,7 +39,7 @@ class QuantConv3d(QuantModuleBase):
         fp: nn.Conv3d,
         *,
         qcfg: Optional[PTQConfig] = None,
-        fp_name: Optional[str] = None
+        fp_name: Optional[str] = None,
     ):
         """
         Initialize a QuantConv3d wrapper around a floating-point Conv3d module.

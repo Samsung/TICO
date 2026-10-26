@@ -29,7 +29,6 @@ from tico.utils import logging
 from tico.utils.errors import NotYetSupportedError
 from tico.utils.serialize import finalise_tensor_names, validate_tensor_shapes
 
-
 multiple_output_ops = [
     torch.ops.aten.split_with_sizes.default,
     torch.ops.aten.max.dim,

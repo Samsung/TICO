@@ -28,7 +28,6 @@ from tico.quantization.evaluation.vlm_generation_utils import (
     resolve_generation_input_budget,
 )
 
-
 MMMU_DATASETS = ["MMMU/MMMU", "MMMU/MMMU_Pro"]
 
 MMMU_SUBJECTS: dict[str, list[str]] = {

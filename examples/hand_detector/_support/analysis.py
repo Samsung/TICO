@@ -25,7 +25,6 @@ from torch import nn
 
 from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
-
 OUTPUT_NAMES = ("regressors", "classifiers")
 
 

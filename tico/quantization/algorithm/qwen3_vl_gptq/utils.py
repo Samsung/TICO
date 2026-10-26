@@ -21,7 +21,6 @@ import torch.nn as nn
 from tico.quantization.algorithm.gptq.utils import find_layers as _find_layers
 from tico.quantization.config.qwen3_vl_gptq import Qwen3VLGPTQConfig
 
-
 _QUANTIZABLE_LAYER_TYPES: tuple[type[nn.Module], ...] = (
     nn.Linear,
     nn.Conv1d,

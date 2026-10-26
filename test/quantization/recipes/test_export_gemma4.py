@@ -258,21 +258,28 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             ]
             calls.append((save_path.name, kwargs.get("dynamic_shapes")))
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            gemma_export,
-            "_prepare_gemma4_export_model",
-            return_value=(export_model, "q"),
-        ), patch.object(
-            gemma_export,
-            "make_token_embedding_dynamic_shapes",
-            return_value=dynamic_shapes,
-        ), patch.object(
-            gemma_export,
-            "register_fake_quant_meta_kernels_for_dynamic_export",
-        ) as register_fake_kernels, _patch_small_ple_table(), patch.object(
-            gemma_export,
-            "_convert_and_save",
-            fake_convert_and_save,
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(export_model, "q"),
+            ),
+            patch.object(
+                gemma_export,
+                "make_token_embedding_dynamic_shapes",
+                return_value=dynamic_shapes,
+            ),
+            patch.object(
+                gemma_export,
+                "register_fake_quant_meta_kernels_for_dynamic_export",
+            ) as register_fake_kernels,
+            _patch_small_ple_table(),
+            patch.object(
+                gemma_export,
+                "_convert_and_save",
+                fake_convert_and_save,
+            ),
         ):
             gemma_export.export_gemma4_per_layer(
                 q_model=torch.nn.Identity(),
@@ -391,14 +398,18 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             del module, example_inputs, kwargs
             names.append(save_path.name)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            gemma_export,
-            "_prepare_gemma4_export_model",
-            return_value=(export_model, "q"),
-        ), patch.object(
-            gemma_export,
-            "_convert_and_save",
-            fake_convert_and_save,
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(export_model, "q"),
+            ),
+            patch.object(
+                gemma_export,
+                "_convert_and_save",
+                fake_convert_and_save,
+            ),
         ):
             gemma_export.export_gemma4_per_layer(
                 q_model=torch.nn.Identity(),
@@ -434,14 +445,19 @@ class TestGemma4PerLayerExport(unittest.TestCase):
             del module, example_inputs, kwargs
             names.append(save_path.name)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            gemma_export,
-            "_prepare_gemma4_export_model",
-            return_value=(export_model, "f32"),
-        ), _patch_small_ple_table(), patch.object(
-            gemma_export,
-            "_convert_and_save",
-            fake_convert_and_save,
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(export_model, "f32"),
+            ),
+            _patch_small_ple_table(),
+            patch.object(
+                gemma_export,
+                "_convert_and_save",
+                fake_convert_and_save,
+            ),
         ):
             gemma_export.export_gemma4_per_layer(
                 q_model=torch.nn.Identity(),
@@ -484,16 +500,18 @@ class TestGemma4PerLayerExport(unittest.TestCase):
         if estimated_bytes is None:
             estimated_bytes = 1024
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            gemma_export,
-            "_prepare_gemma4_export_model",
-            return_value=(export_model, artifact_tag),
-        ), patch.object(
-            gemma_export, "_convert_and_save", fake_convert_and_save
-        ), patch.object(
-            gemma_export, "save_gemma4_ple_embedding_artifact", fake_save_pt
-        ), _patch_small_ple_table(
-            estimated_bytes
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(export_model, artifact_tag),
+            ),
+            patch.object(gemma_export, "_convert_and_save", fake_convert_and_save),
+            patch.object(
+                gemma_export, "save_gemma4_ple_embedding_artifact", fake_save_pt
+            ),
+            _patch_small_ple_table(estimated_bytes),
         ):
             gemma_export.export_gemma4_per_layer(
                 q_model=torch.nn.Identity(),

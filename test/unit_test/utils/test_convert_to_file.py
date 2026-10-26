@@ -248,15 +248,17 @@ class ConvertToFileTest(unittest.TestCase):
             pt2 = Path(temporary) / "model.pt2"
             output = Path(temporary) / "model.circle"
             torch.export.save(torch.export.export(module, args), pt2)
-            with patch(
-                "tico.pt2_to_circle.convert_from_pt2_to_file",
-                wraps=tico.convert_from_pt2_to_file,
-            ) as convert_file, patch.object(
-                conversion,
-                "build_circle_bytes",
-                side_effect=AssertionError("CLI must use file conversion"),
-            ), patch.object(
-                conversion, "_FILE_OUTPUT_INLINE_BUDGET", 0
+            with (
+                patch(
+                    "tico.pt2_to_circle.convert_from_pt2_to_file",
+                    wraps=tico.convert_from_pt2_to_file,
+                ) as convert_file,
+                patch.object(
+                    conversion,
+                    "build_circle_bytes",
+                    side_effect=AssertionError("CLI must use file conversion"),
+                ),
+                patch.object(conversion, "_FILE_OUTPUT_INLINE_BUDGET", 0),
             ):
                 tico.pt2_to_circle.convert(str(pt2), str(output), config=config)
                 convert_file.assert_called_once_with(
@@ -303,9 +305,10 @@ class ConvertToFileTest(unittest.TestCase):
             ),
         )
         for injected, error, message in failures:
-            with self.subTest(
-                message=message
-            ), tempfile.TemporaryDirectory() as temporary:
+            with (
+                self.subTest(message=message),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
                 path = Path(temporary) / "model.circle"
                 path.write_bytes(b"existing destination")
                 module, args = self._inputs()

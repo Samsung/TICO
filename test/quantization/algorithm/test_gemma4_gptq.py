@@ -37,7 +37,6 @@ from tico.quantization.algorithm.gemma4_gptq.utils import (
 from tico.quantization.algorithm.gptq.quant import Quantizer
 from tico.quantization.config.gemma4_gptq import Gemma4GPTQConfig
 
-
 # ---------------------------------------------------------------------------
 # Mock model helpers
 # ---------------------------------------------------------------------------

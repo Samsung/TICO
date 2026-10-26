@@ -114,9 +114,9 @@ def create_visual_input(
     # Replace first tokens with video placeholder tokens
     # This marks where the video features should be inserted
     for i in range(batch_size):
-        input_ids[
-            i, visual_start_idx : visual_start_idx + num_video_tokens
-        ] = image_token_id
+        input_ids[i, visual_start_idx : visual_start_idx + num_video_tokens] = (
+            image_token_id
+        )
 
     # The Qwen3-VL processor outputs one flattened feature vector per patch.
     num_patches = thw[0] * thw[1] * thw[2]

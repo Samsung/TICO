@@ -46,7 +46,6 @@ from tico.quantization.wrapq.dtypes import DType
 from tico.quantization.wrapq.observers.minmax import MinMaxObserver
 from tico.quantization.wrapq.observers.mx import MXObserver
 
-
 _LAYER0_DOWN_OUT = ("model", "layers", "0", "mlp", "down_proj", "act_out")
 _LAYER1_DOWN_OUT = ("model", "layers", "1", "mlp", "down_proj", "act_out")
 _LAYER0_Q_WEIGHT = ("model", "layers", "0", "self_attn", "q_proj", "weight")
@@ -191,8 +190,9 @@ def _run_trace(
         return model
 
     stdout = io.StringIO()
-    with patch.object(trace_mod, "prepare", prepare or recording_prepare), patch.object(
-        trace_mod, "convert", recording_convert
+    with (
+        patch.object(trace_mod, "prepare", prepare or recording_prepare),
+        patch.object(trace_mod, "convert", recording_convert),
     ):
         with contextlib.redirect_stdout(stdout):
             trace_ptq_parity(ctx, enable_quantization=enable_quantization)
@@ -207,9 +207,11 @@ def _run_ptq_stage(ctx: RecipeContext, stage_cfg: dict) -> PTQConfig:
         calls["prepare"] = (model, config)
         return model
 
-    with patch.object(ptq_mod, "prepare", recording_prepare), patch.object(
-        ptq_mod, "convert", lambda model: model
-    ), patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)):
+    with (
+        patch.object(ptq_mod, "prepare", recording_prepare),
+        patch.object(ptq_mod, "convert", lambda model: model),
+        patch.object(ptq_mod, "find_gptq_quantizers", lambda model: (None, None)),
+    ):
         with contextlib.redirect_stdout(io.StringIO()):
             PTQStage().run(ctx, stage_cfg)
     return calls["prepare"][1]
@@ -454,10 +456,13 @@ class TestTracePtqParityOverrides(unittest.TestCase):
                     events.append("collect")
                     return real_collect(*args, **kwargs)
 
-                with patch.object(
-                    trace_mod, "apply_ptq_override_policies", recording_apply
-                ), patch.object(
-                    trace_mod, "collect_forward_outputs", recording_collect
+                with (
+                    patch.object(
+                        trace_mod, "apply_ptq_override_policies", recording_apply
+                    ),
+                    patch.object(
+                        trace_mod, "collect_forward_outputs", recording_collect
+                    ),
                 ):
                     calls, output = _run_trace(
                         ctx,
@@ -540,10 +545,11 @@ class TestTracePtqParityOverrides(unittest.TestCase):
                 weights = _state_snapshot(model)
 
                 stdout = io.StringIO()
-                with self.assertRaises(exc_type) as cm, contextlib.redirect_stdout(
-                    stdout
-                ), patch.object(trace_mod, "prepare", failing_prepare), patch.object(
-                    trace_mod, "convert", failing_convert
+                with (
+                    self.assertRaises(exc_type) as cm,
+                    contextlib.redirect_stdout(stdout),
+                    patch.object(trace_mod, "prepare", failing_prepare),
+                    patch.object(trace_mod, "convert", failing_convert),
                 ):
                     trace_ptq_parity(ctx)
 

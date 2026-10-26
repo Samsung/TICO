@@ -225,8 +225,7 @@ def _gemma4_resolver(default_bits, overrides, full_module_name, local_module_nam
 class _ResolvesWeightBits(Protocol):
     def _resolve_weight_bits(
         self, gptq_conf: Any, *, full_module_name: str, local_module_name: str
-    ) -> int:
-        ...
+    ) -> int: ...
 
 
 class _BuildsGPTQObjects(Protocol):
@@ -234,8 +233,7 @@ class _BuildsGPTQObjects(Protocol):
         self,
         subset: Dict[str, torch.nn.Module],
         module_name: Dict[torch.nn.Module, str],
-    ) -> Mapping[str, Any]:
-        ...
+    ) -> Mapping[str, Any]: ...
 
 
 RESOLVERS: Dict[str, Resolver] = {

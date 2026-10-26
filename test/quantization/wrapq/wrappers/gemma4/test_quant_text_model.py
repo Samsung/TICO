@@ -24,7 +24,6 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 
-
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 
 _GEMMA4_FULL_ROPE_PARAMETERS = {

@@ -32,7 +32,6 @@ from tico.quantization.wrapq.control import (
 from tico.quantization.wrapq.observers.affine_base import AffineObserverBase
 from tico.quantization.wrapq.observers.base import ObserverBase
 
-
 _SUPPORTED_FAMILIES = frozenset({"regular_conv", "depthwise_conv"})
 
 

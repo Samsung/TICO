@@ -79,16 +79,22 @@ class TestRecipePipelineSmoke(unittest.TestCase):
         """A synthetic recipe should execute through the same public runner path as examples."""
         events = []
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            runner_mod, "set_seed", lambda seed: events.append(("seed", seed))
-        ), patch.object(
-            runner_mod, "resolve_adapter", lambda cfg: SmokeAdapter(events)
-        ), patch.object(
-            runner_mod, "get_stage", lambda name: SmokeStage(name, events)
-        ), patch.object(
-            runner_mod,
-            "save_effective_config",
-            lambda path, cfg: events.append(("save", path.name)),
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                runner_mod, "set_seed", lambda seed: events.append(("seed", seed))
+            ),
+            patch.object(
+                runner_mod, "resolve_adapter", lambda cfg: SmokeAdapter(events)
+            ),
+            patch.object(
+                runner_mod, "get_stage", lambda name: SmokeStage(name, events)
+            ),
+            patch.object(
+                runner_mod,
+                "save_effective_config",
+                lambda path, cfg: events.append(("save", path.name)),
+            ),
         ):
             cfg = {
                 "model": {"family": "smoke", "name_or_path": "synthetic"},

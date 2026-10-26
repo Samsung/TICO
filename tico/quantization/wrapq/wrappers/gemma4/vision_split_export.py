@@ -28,7 +28,6 @@ from tico.quantization.wrapq.wrappers.gemma4.export_adapters import (
     build_gemma4_vision_prefill_export_module,
 )
 
-
 if TYPE_CHECKING:
     from tico.quantization.wrapq.wrappers.gemma4.quant_vision_encoder import (
         QuantGemma4VisionEncoder,

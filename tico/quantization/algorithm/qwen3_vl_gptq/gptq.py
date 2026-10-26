@@ -444,9 +444,11 @@ class GPTQ:
                     dilation=(1, self.layer.dilation[0]),
                     padding=(
                         0,
-                        0
-                        if self.layer.padding == "valid"
-                        else int(self.layer.padding[0]),
+                        (
+                            0
+                            if self.layer.padding == "valid"
+                            else int(self.layer.padding[0])
+                        ),
                     ),
                     stride=(1, self.layer.stride[0]),
                 )

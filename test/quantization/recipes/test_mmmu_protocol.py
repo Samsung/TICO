@@ -100,8 +100,9 @@ class TestMmmuBudgetDefaults(unittest.TestCase):
     def test_invalid_explicit_budgets_are_rejected_not_converted(self):
         for mode in mmmu.MMMU_PRO_VISION_PROMPT_MODES:
             for value in (0, -1, True, False, 2.5, "256", 16.0):
-                with self.subTest(mode=mode, value=value), self.assertRaises(
-                    ValueError
+                with (
+                    self.subTest(mode=mode, value=value),
+                    self.assertRaises(ValueError),
                 ):
                     mmmu.resolve_mmmu_max_new_tokens(
                         value, prompt_mode=mode, **VISION  # type: ignore[arg-type]
@@ -110,8 +111,9 @@ class TestMmmuBudgetDefaults(unittest.TestCase):
     def test_invalid_prompt_mode_is_rejected_even_with_explicit_budget(self):
         invalid_modes: tuple[object, ...] = ("strict", "direct", "", None, [])
         for mode in invalid_modes:
-            with self.subTest(mode=mode), self.assertRaisesRegex(
-                ValueError, "prompt_mode"
+            with (
+                self.subTest(mode=mode),
+                self.assertRaisesRegex(ValueError, "prompt_mode"),
             ):
                 mmmu.resolve_mmmu_max_new_tokens(
                     16, prompt_mode=mode, **VISION  # type: ignore[arg-type]
@@ -191,8 +193,9 @@ class TestChoiceLabels(unittest.TestCase):
 
     def test_unsupported_counts_raise_instead_of_clamping(self):
         for count in (0, -1, 27, 100, True, False, 2.5, "10", None):
-            with self.subTest(count=count), self.assertRaisesRegex(
-                ValueError, "num_choices"
+            with (
+                self.subTest(count=count),
+                self.assertRaisesRegex(ValueError, "num_choices"),
             ):
                 mmmu.mmmu_choice_labels(count)  # type: ignore[arg-type]
 
@@ -380,8 +383,9 @@ class TestMmmuParser(unittest.TestCase):
 
     def test_invalid_choice_counts_raise(self):
         for count in (0, 27, True, -3, 1.5):
-            with self.subTest(count=count), self.assertRaisesRegex(
-                ValueError, "num_choices"
+            with (
+                self.subTest(count=count),
+                self.assertRaisesRegex(ValueError, "num_choices"),
             ):
                 mmmu.extract_answer("C", num_choices=count)  # type: ignore[arg-type]
 
@@ -423,8 +427,11 @@ class TestSampleValidation(unittest.TestCase):
             "gold_not_a_letter": (["a", "b"], "42", "gold answer"),
         }
         for name, (choices, gold, fragment) in cases.items():
-            with self.subTest(case=name), self.assertRaisesRegex(
-                ValueError, f"(?s)Sample 'test_X_1'.*{fragment}"
+            with (
+                self.subTest(case=name),
+                self.assertRaisesRegex(
+                    ValueError, f"(?s)Sample 'test_X_1'.*{fragment}"
+                ),
             ):
                 mmmu.validate_sample_choices("test_X_1", choices, gold)
 
@@ -432,12 +439,14 @@ class TestSampleValidation(unittest.TestCase):
         # ``in "ABCD"`` is a substring test; these all passed it before.
         invalid: tuple[Any, ...] = ("", " ", "AB", "A,B", "ab", None, 1, True, 0.5)
         for gold in invalid:
-            with self.subTest(gold=gold), self.assertRaisesRegex(
-                ValueError, "Sample 'test_X_1'.*gold answer"
+            with (
+                self.subTest(gold=gold),
+                self.assertRaisesRegex(ValueError, "Sample 'test_X_1'.*gold answer"),
             ):
                 mmmu.validate_sample_choices("test_X_1", ["a"] * 4, gold)
-            with self.subTest(gold=gold, helper="normalize"), self.assertRaisesRegex(
-                ValueError, "Sample 'test_X_1'.*gold answer"
+            with (
+                self.subTest(gold=gold, helper="normalize"),
+                self.assertRaisesRegex(ValueError, "Sample 'test_X_1'.*gold answer"),
             ):
                 mmmu.normalize_mmmu_gold_label("test_X_1", gold, "ABCD")
 
@@ -458,8 +467,9 @@ class TestQuestionTypes(unittest.TestCase):
 
     def test_open_and_unknown_types_are_rejected_with_the_sample_id(self):
         for value in ("open", "fill-in", "", True):
-            with self.subTest(value=value), self.assertRaisesRegex(
-                ValueError, "Sample 'sample'"
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(ValueError, "Sample 'sample'"),
             ):
                 mmmu.validate_mmmu_question_type("sample", value)
 
@@ -501,11 +511,12 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         return [json.loads(line) for line in Path(path).read_text().splitlines()]
 
     def test_default_prompt_budget_and_legacy_result_shape(self):
-        with patch.object(
-            mmmu, "load_data", return_value=[self.sample()]
-        ), patch.object(
-            mmmu, "generate_image_only_answer", return_value="C"
-        ) as generate:
+        with (
+            patch.object(mmmu, "load_data", return_value=[self.sample()]),
+            patch.object(
+                mmmu, "generate_image_only_answer", return_value="C"
+            ) as generate,
+        ):
             result = mmmu.evaluate_mmmu(**self.kwargs())
         self.assertEqual(result, {"vision": (1, 1, 0)})
         self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 16)
@@ -518,22 +529,32 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         self.assertNotIn("input_max_seq_len", generate.call_args.kwargs)
 
     def test_ten_choice_default_prompt_is_the_legacy_prompt(self):
-        with patch.object(
-            mmmu, "load_data", return_value=[self.sample(num_choices=10, answer="J")]
-        ), patch.object(
-            mmmu, "generate_image_only_answer", return_value="J"
-        ) as generate:
+        with (
+            patch.object(
+                mmmu,
+                "load_data",
+                return_value=[self.sample(num_choices=10, answer="J")],
+            ),
+            patch.object(
+                mmmu, "generate_image_only_answer", return_value="J"
+            ) as generate,
+        ):
             result = mmmu.evaluate_mmmu(**self.kwargs())
         self.assertEqual(result, {"vision": (1, 1, 0)})
         self.assertEqual(generate.call_args.kwargs["question"], LEGACY_STRICT_PROMPT)
         self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 16)
 
     def test_official_direct_is_an_explicit_option_with_256_default(self):
-        with patch.object(
-            mmmu, "load_data", return_value=[self.sample(num_choices=12, answer="L")]
-        ), patch.object(
-            mmmu, "generate_image_only_answer", return_value="Answer: L"
-        ) as generate:
+        with (
+            patch.object(
+                mmmu,
+                "load_data",
+                return_value=[self.sample(num_choices=12, answer="L")],
+            ),
+            patch.object(
+                mmmu, "generate_image_only_answer", return_value="Answer: L"
+            ) as generate,
+        ):
             result = mmmu.evaluate_mmmu(**self.kwargs(prompt_mode="official_direct"))
         self.assertEqual(result, {"vision": (1, 1, 0)})
         self.assertEqual(generate.call_args.kwargs["max_new_tokens"], 256)
@@ -544,19 +565,22 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
 
     def test_explicit_budget_overrides_mode_default(self):
         for mode, budget in (("strict_single_letter", 64), ("official_direct", 16)):
-            with self.subTest(mode=mode), patch.object(
-                mmmu, "load_data", return_value=[self.sample()]
-            ), patch.object(
-                mmmu, "generate_image_only_answer", return_value="C"
-            ) as generate:
+            with (
+                self.subTest(mode=mode),
+                patch.object(mmmu, "load_data", return_value=[self.sample()]),
+                patch.object(
+                    mmmu, "generate_image_only_answer", return_value="C"
+                ) as generate,
+            ):
                 mmmu.evaluate_mmmu(
                     **self.kwargs(prompt_mode=mode, max_new_tokens=budget)
                 )
             self.assertEqual(generate.call_args.kwargs["max_new_tokens"], budget)
 
     def test_cot_without_budget_fails_before_dataset_loading(self):
-        with patch.object(mmmu, "load_data") as load, self.assertRaisesRegex(
-            ValueError, "explicit max_new_tokens"
+        with (
+            patch.object(mmmu, "load_data") as load,
+            self.assertRaisesRegex(ValueError, "explicit max_new_tokens"),
         ):
             mmmu.evaluate_mmmu(**self.kwargs(prompt_mode="official_cot"))
         load.assert_not_called()
@@ -577,8 +601,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run.jsonl"
-            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
-                mmmu, "generate_image_only_answer", side_effect=generate
+            with (
+                patch.object(mmmu, "load_data", return_value=samples),
+                patch.object(mmmu, "generate_image_only_answer", side_effect=generate),
             ):
                 result = mmmu.evaluate_mmmu(
                     **self.kwargs(n_samples=3, output_jsonl=path)
@@ -631,11 +656,14 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         for name, sample in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "run.jsonl"
-                with patch.object(
-                    mmmu, "load_data", return_value=[self.sample("ok"), sample]
-                ), patch.object(
-                    mmmu, "generate_image_only_answer", return_value="C"
-                ) as generate:
+                with (
+                    patch.object(
+                        mmmu, "load_data", return_value=[self.sample("ok"), sample]
+                    ),
+                    patch.object(
+                        mmmu, "generate_image_only_answer", return_value="C"
+                    ) as generate,
+                ):
                     with self.assertRaisesRegex(ValueError, f"Sample '{name}'"):
                         mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
                 # Only the valid sample before it was generated; nothing was skipped.
@@ -655,8 +683,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run.jsonl"
-            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
-                mmmu, "generate_image_only_answer", return_value="C"
+            with (
+                patch.object(mmmu, "load_data", return_value=samples),
+                patch.object(mmmu, "generate_image_only_answer", return_value="C"),
             ):
                 result = mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
             records = self.read(path)
@@ -674,11 +703,12 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
             with self.subTest(gold=gold), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "run.jsonl"
                 samples = [self.sample("ok"), self.sample("bad_gold", answer=gold)]
-                with patch.object(
-                    mmmu, "load_data", return_value=samples
-                ), patch.object(
-                    mmmu, "generate_image_only_answer", return_value="C"
-                ) as generate:
+                with (
+                    patch.object(mmmu, "load_data", return_value=samples),
+                    patch.object(
+                        mmmu, "generate_image_only_answer", return_value="C"
+                    ) as generate,
+                ):
                     with self.assertRaisesRegex(
                         ValueError, "Sample 'bad_gold'.*gold answer"
                     ):
@@ -707,8 +737,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "out" / "fp.jsonl"
-            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
-                mmmu, "generate_image_only_answer", side_effect=generate
+            with (
+                patch.object(mmmu, "load_data", return_value=samples),
+                patch.object(mmmu, "generate_image_only_answer", side_effect=generate),
             ):
                 result = mmmu.evaluate_mmmu(
                     **self.kwargs(output_jsonl=path, input_max_seq_len=1536)
@@ -734,8 +765,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "existing.jsonl"
             path.write_text("preserve me")
-            with patch.object(mmmu, "load_data") as load, self.assertRaises(
-                FileExistsError
+            with (
+                patch.object(mmmu, "load_data") as load,
+                self.assertRaises(FileExistsError),
             ):
                 mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
             load.assert_not_called()
@@ -744,8 +776,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
     def test_invalid_budgets_fail_before_dataset_and_log_creation(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run.jsonl"
-            with patch.object(mmmu, "load_data") as load, self.assertRaisesRegex(
-                ValueError, "must not exceed"
+            with (
+                patch.object(mmmu, "load_data") as load,
+                self.assertRaisesRegex(ValueError, "must not exceed"),
             ):
                 mmmu.evaluate_mmmu(
                     **self.kwargs(
@@ -762,8 +795,9 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
                 mmmu.evaluate_mmmu(**self.kwargs(input_max_seq_len=2032)),
                 {"vision": (0, 0, 0)},
             )
-        with patch.object(mmmu, "load_data") as load, self.assertRaisesRegex(
-            ValueError, "must not exceed"
+        with (
+            patch.object(mmmu, "load_data") as load,
+            self.assertRaisesRegex(ValueError, "must not exceed"),
         ):
             mmmu.evaluate_mmmu(
                 **self.kwargs(input_max_seq_len=2032, prompt_mode="official_direct")
@@ -774,10 +808,13 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         samples = [self.sample(image_2=object()), self.sample("two")]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run.jsonl"
-            with patch.object(mmmu, "load_data", return_value=samples), patch.object(
-                mmmu,
-                "generate_image_only_answer",
-                side_effect=RuntimeError("fake runtime failure"),
+            with (
+                patch.object(mmmu, "load_data", return_value=samples),
+                patch.object(
+                    mmmu,
+                    "generate_image_only_answer",
+                    side_effect=RuntimeError("fake runtime failure"),
+                ),
             ):
                 result = mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
             records = self.read(path)
@@ -793,12 +830,13 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
     def test_unexpected_value_error_is_not_swallowed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run.jsonl"
-            with patch.object(
-                mmmu, "load_data", return_value=[self.sample()]
-            ), patch.object(
-                mmmu,
-                "generate_image_only_answer",
-                side_effect=ValueError("unexpected shape"),
+            with (
+                patch.object(mmmu, "load_data", return_value=[self.sample()]),
+                patch.object(
+                    mmmu,
+                    "generate_image_only_answer",
+                    side_effect=ValueError("unexpected shape"),
+                ),
             ):
                 with self.assertRaisesRegex(ValueError, "unexpected shape"):
                     mmmu.evaluate_mmmu(**self.kwargs(output_jsonl=path))
@@ -813,9 +851,11 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
 
     def test_non_vision_keeps_existing_prompt_path_and_budget(self):
         sample = self.sample(question="Which is correct?")
-        with patch.object(mmmu, "load_data", return_value=[sample]), patch.object(
-            mmmu, "generate_answer", return_value="C"
-        ) as generate, patch.object(mmmu, "generate_image_only_answer") as image_only:
+        with (
+            patch.object(mmmu, "load_data", return_value=[sample]),
+            patch.object(mmmu, "generate_answer", return_value="C") as generate,
+            patch.object(mmmu, "generate_image_only_answer") as image_only,
+        ):
             result = mmmu.evaluate_mmmu(
                 **self.kwargs(
                     dataset="MMMU/MMMU_Pro", subjects=["standard (4 options)"]
@@ -833,10 +873,12 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         for subjects in (None, [], ["Accounting"]):
             with self.subTest(subjects=subjects), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp) / "run.jsonl"
-                with patch.object(mmmu, "load_data") as load, patch.object(
-                    mmmu, "generate_answer"
-                ) as generate, self.assertRaisesRegex(
-                    ValueError, "Open-ended MMMU scoring is not supported"
+                with (
+                    patch.object(mmmu, "load_data") as load,
+                    patch.object(mmmu, "generate_answer") as generate,
+                    self.assertRaisesRegex(
+                        ValueError, "Open-ended MMMU scoring is not supported"
+                    ),
                 ):
                     mmmu.evaluate_mmmu(
                         **self.kwargs(
@@ -848,8 +890,11 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
                 self.assertFalse(path.exists())
 
     def test_direct_subject_api_rejects_mixed_dataset_before_loading(self):
-        with patch.object(mmmu, "load_data") as load, self.assertRaisesRegex(
-            ValueError, "Open-ended MMMU scoring is not supported"
+        with (
+            patch.object(mmmu, "load_data") as load,
+            self.assertRaisesRegex(
+                ValueError, "Open-ended MMMU scoring is not supported"
+            ),
         ):
             mmmu.evaluate_subject(
                 model=object(),
@@ -879,13 +924,11 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
                     )
                     with tempfile.TemporaryDirectory() as tmp:
                         path = Path(tmp) / "run.jsonl"
-                        with patch.object(
-                            mmmu, "load_data", return_value=[sample]
-                        ), patch.object(
-                            mmmu, "generate_answer"
-                        ) as generate, patch.object(
-                            mmmu, "generate_image_only_answer"
-                        ) as vision:
+                        with (
+                            patch.object(mmmu, "load_data", return_value=[sample]),
+                            patch.object(mmmu, "generate_answer") as generate,
+                            patch.object(mmmu, "generate_image_only_answer") as vision,
+                        ):
                             with self.assertRaisesRegex(
                                 ValueError, "Sample 'open_row'.*open-ended"
                             ):
@@ -905,10 +948,10 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         sample = self.sample(
             "open_shot", num_choices=0, answer="42", question_type="open"
         )
-        with patch.object(mmmu, "load_data", return_value=[sample]), patch.object(
-            mmmu, "generate_answer"
-        ) as generate, self.assertRaisesRegex(
-            ValueError, "Sample 'open_shot'.*open-ended"
+        with (
+            patch.object(mmmu, "load_data", return_value=[sample]),
+            patch.object(mmmu, "generate_answer") as generate,
+            self.assertRaisesRegex(ValueError, "Sample 'open_shot'.*open-ended"),
         ):
             mmmu.evaluate_mmmu(
                 **self.kwargs(subjects=["standard (4 options)"], n_shots=1)
@@ -922,9 +965,10 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
         def load_data(**kwargs):
             return shots if kwargs["start"] == 0 else [target]
 
-        with patch.object(
-            mmmu, "load_data", side_effect=load_data
-        ) as load, patch.object(mmmu, "generate_answer", return_value="C") as generate:
+        with (
+            patch.object(mmmu, "load_data", side_effect=load_data) as load,
+            patch.object(mmmu, "generate_answer", return_value="C") as generate,
+        ):
             result = mmmu.evaluate_mmmu(
                 **self.kwargs(subjects=["standard (4 options)"], n_shots=1)
             )
@@ -936,10 +980,11 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
 
     def test_all_pro_configs_remain_supported(self):
         for subject in mmmu.MMMU_SUBJECTS["MMMU/MMMU_Pro"]:
-            with self.subTest(subject=subject), patch.object(
-                mmmu, "load_data", return_value=[self.sample()]
-            ), patch.object(mmmu, "generate_answer", return_value="C"), patch.object(
-                mmmu, "generate_image_only_answer", return_value="C"
+            with (
+                self.subTest(subject=subject),
+                patch.object(mmmu, "load_data", return_value=[self.sample()]),
+                patch.object(mmmu, "generate_answer", return_value="C"),
+                patch.object(mmmu, "generate_image_only_answer", return_value="C"),
             ):
                 self.assertEqual(
                     mmmu.evaluate_mmmu(**self.kwargs(subjects=[subject])),
@@ -951,9 +996,11 @@ class TestMmmuEvaluationLogging(unittest.TestCase):
             (None, "strict_single_letter"),
             ("official_direct", "official_direct"),
         ):
-            with self.subTest(prompt_mode=prompt_mode), patch.object(
-                recipe, "evaluate_mmmu", return_value={}
-            ) as evaluate, patch.object(recipe, "print_mmmu_results"):
+            with (
+                self.subTest(prompt_mode=prompt_mode),
+                patch.object(recipe, "evaluate_mmmu", return_value={}) as evaluate,
+                patch.object(recipe, "print_mmmu_results"),
+            ):
                 recipe.evaluate_and_print_mmmu(
                     model=object(),
                     processor=object(),
@@ -1075,8 +1122,11 @@ class TestMmmuRecipePreflight(unittest.TestCase):
                     "mmmu": {"enabled": True, "dataset": "MMMU/MMMU"},
                 }
             }
-            with self.subTest(selected=selected), self.assertRaisesRegex(
-                ValueError, "Open-ended MMMU scoring is not supported"
+            with (
+                self.subTest(selected=selected),
+                self.assertRaisesRegex(
+                    ValueError, "Open-ended MMMU scoring is not supported"
+                ),
             ):
                 recipe.validate_mmmu_recipe_config(cfg)
 
@@ -1163,8 +1213,9 @@ class TestMmmuRecipePreflight(unittest.TestCase):
                 "validate_mmmu_recipe_config": validate,
             }
             exec(compile(module, "<adapter-preflight>", "exec"), namespace)
-            with self.subTest(family=family), self.assertRaisesRegex(
-                ValueError, "MMMU/MMMU mixes"
+            with (
+                self.subTest(family=family),
+                self.assertRaisesRegex(ValueError, "MMMU/MMMU mixes"),
             ):
                 namespace["Adapter"]().validate_evaluation_config(
                     {"evaluation": {"enabled": True, "selected_tasks": ["mmmu"]}}

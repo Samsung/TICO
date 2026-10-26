@@ -21,7 +21,6 @@ from tqdm import tqdm
 
 from tico.quantization.config.cle import CLEConfig
 
-
 SupportedLayer: TypeAlias = nn.Conv2d | nn.Linear
 
 

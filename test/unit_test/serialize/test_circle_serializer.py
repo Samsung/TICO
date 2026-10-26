@@ -25,7 +25,6 @@ from tico.serialize.circle_serializer import (
 )
 from tico.utils.errors import NotYetSupportedError
 
-
 _TIED_WEIGHT_NAMES = {"embed.weight", "lm_head.weight"}
 
 

@@ -228,16 +228,23 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
             )
         )
         try:
-            with ExitStack() as observer_spies, mock.patch.object(
-                model, "forward", side_effect=AssertionError("unwrapped top forward")
-            ), mock.patch.object(
-                model.model,
-                "forward",
-                side_effect=AssertionError("unwrapped model forward"),
-            ), mock.patch.object(
-                model.model.language_model,
-                "forward",
-                side_effect=AssertionError("unwrapped text forward"),
+            with (
+                ExitStack() as observer_spies,
+                mock.patch.object(
+                    model,
+                    "forward",
+                    side_effect=AssertionError("unwrapped top forward"),
+                ),
+                mock.patch.object(
+                    model.model,
+                    "forward",
+                    side_effect=AssertionError("unwrapped model forward"),
+                ),
+                mock.patch.object(
+                    model.model.language_model,
+                    "forward",
+                    side_effect=AssertionError("unwrapped text forward"),
+                ),
             ):
                 for name in ("new_k", "new_v", "past_key", "past_value"):
                     observer_spies.enter_context(
@@ -365,9 +372,10 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
         )
         text = prepared.wrapped.model.wrapped.language_model.wrapped
         owner = text.layers[0].wrapped.self_attn.wrapped
-        with mock.patch.object(owner.obs_past_key, "collect") as key_collect, (
-            mock.patch.object(owner.obs_past_value, "collect")
-        ) as value_collect:
+        with (
+            mock.patch.object(owner.obs_past_key, "collect") as key_collect,
+            mock.patch.object(owner.obs_past_value, "collect") as value_collect,
+        ):
             adapter.calibrate_prepared_model(ctx, prepared, {"name": "ptq"})
         key_collect.assert_not_called()
         value_collect.assert_not_called()
@@ -376,19 +384,26 @@ class TestGemma4DecodeCalibrationIntegration(unittest.TestCase):
         self.assertFalse(owner.obs_past_value.has_qparams)
         self.assertTrue(owner.obs_new_k.has_qparams)
         self.assertTrue(owner.obs_present_key.has_qparams)
-        with torch.no_grad(), mock.patch.object(
-            owner.obs_past_key,
-            "fake_quant",
-            side_effect=AssertionError("Prefill invoked past fake quantization"),
-        ), mock.patch.object(
-            owner.obs_past_value,
-            "fake_quant",
-            side_effect=AssertionError("Prefill invoked past fake quantization"),
+        with (
+            torch.no_grad(),
+            mock.patch.object(
+                owner.obs_past_key,
+                "fake_quant",
+                side_effect=AssertionError("Prefill invoked past fake quantization"),
+            ),
+            mock.patch.object(
+                owner.obs_past_value,
+                "fake_quant",
+                side_effect=AssertionError("Prefill invoked past fake quantization"),
+            ),
         ):
             output = quantized(input_ids=input_ids, use_cache=True, return_dict=True)
         self.assertEqual(output.past_key_values.get_seq_length(), 4)
-        with torch.no_grad(), self.assertRaisesRegex(
-            RuntimeError, "(?i)(decode.*calibrat|calibrat.*decode)"
+        with (
+            torch.no_grad(),
+            self.assertRaisesRegex(
+                RuntimeError, "(?i)(decode.*calibrat|calibrat.*decode)"
+            ),
         ):
             quantized(
                 input_ids=torch.tensor([[5]]),

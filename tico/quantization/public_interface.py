@@ -22,7 +22,6 @@ from tico.quantization.config.base import BaseConfig
 from tico.quantization.quantizer import BaseQuantizer
 from tico.quantization.quantizer_registry import get_quantizer
 
-
 QUANTIZER_ATTRIBUTE_NAME = "tico_quantizer"
 
 

@@ -25,7 +25,6 @@ from tico.quantization.wrapq.observers.base import ObserverBase
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
-
 if TYPE_CHECKING:
     from transformers.models.gemma4.modeling_gemma4 import Gemma4VisionPooler
 

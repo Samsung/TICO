@@ -22,7 +22,6 @@ import torch
 from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 
-
 _SKIP_MSG = "required transformers Gemma4 vision modules are not installed"
 
 

@@ -112,6 +112,7 @@ class GPTQQuantizer(BaseQuantizer):
         Returns:
             torch.nn.Module: The model with the catcher attached
         """
+
         # Define the catcher to store inputs/kwargs and stop the execution
         def forward(layer, *args, **kwargs):
             """

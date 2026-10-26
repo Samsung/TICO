@@ -26,7 +26,6 @@ from typing import Any, Mapping
 
 import torch
 
-
 DEFAULT_GEMMA4_STATIC_VISION_PROFILE = "e2b_66x36_264"
 
 

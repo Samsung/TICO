@@ -72,7 +72,6 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-
 _VISION_EXPORT_GRANULARITIES = frozenset({"monolithic", "layer", "both"})
 _PLE_EMBEDDING_FORMATS = frozenset({"auto", "circle", "pt"})
 

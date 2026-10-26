@@ -87,8 +87,9 @@ class TestReplayArrays(unittest.TestCase):
                 (self.values, missing),
                 (missing, missing),
             ):
-                with self.subTest(missing=key), self.assertRaisesRegex(
-                    ValueError, "array keys"
+                with (
+                    self.subTest(missing=key),
+                    self.assertRaisesRegex(ValueError, "array keys"),
                 ):
                     self.compare(saved=saved, current=current)
         extra = dict(self.values, unexpected=np.ones(1, np.float32))
@@ -97,15 +98,17 @@ class TestReplayArrays(unittest.TestCase):
             (self.values, extra),
             (extra, extra),
         ):
-            with self.subTest(extra=True), self.assertRaisesRegex(
-                ValueError, "array keys"
+            with (
+                self.subTest(extra=True),
+                self.assertRaisesRegex(ValueError, "array keys"),
             ):
                 self.compare(saved=saved, current=current)
 
     def test_empty_or_invalid_output_counts_cannot_pass(self):
         for count in (0, -1, True, 1.5, "1", None):
-            with self.subTest(count=count), self.assertRaisesRegex(
-                ValueError, "output_count"
+            with (
+                self.subTest(count=count),
+                self.assertRaisesRegex(ValueError, "output_count"),
             ):
                 self.compare(record={"input_count": 1, "output_count": count})
         with self.assertRaisesRegex(ValueError, "input_count"):
@@ -151,9 +154,10 @@ class TestReplaySummary(unittest.TestCase):
 class TestReplayCLI(unittest.TestCase):
     def test_replay_arguments_are_visible_in_help(self):
         output = io.StringIO()
-        with contextlib.redirect_stdout(output), self.assertRaises(
-            SystemExit
-        ) as result:
+        with (
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as result,
+        ):
             main(["--help"])
         self.assertEqual(result.exception.code, 0)
         for argument in (
@@ -169,9 +173,10 @@ class TestReplayCLI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "new"
             error = io.StringIO()
-            with contextlib.redirect_stderr(error), self.assertRaises(
-                SystemExit
-            ) as result:
+            with (
+                contextlib.redirect_stderr(error),
+                self.assertRaises(SystemExit) as result,
+            ):
                 main(["--stage", "replay", "--output", str(output)])
             self.assertEqual(result.exception.code, 2)
             for argument in ("--repo", "--checkpoint", "--evidence", "--artifacts"):

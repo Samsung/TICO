@@ -32,7 +32,6 @@ from tico.quantization.wrapq.wrappers.llama.quant_decoder_layer import (
     QuantLlamaDecoderLayer,
 )
 
-
 PaddingSide = Literal["left", "right"]
 PromptInput = Union[str, Sequence[str]]
 
@@ -871,12 +870,12 @@ class StaticLlamaLayerRuntime:
                     as_tuple=False,
                 ).flatten()
                 valid_len = int(valid_lengths[batch_idx].item())
-                self.layer_caches[layer_idx].past_k[
-                    batch_idx, :, :valid_len, :
-                ] = new_k[batch_idx, :, token_indices, :]
-                self.layer_caches[layer_idx].past_v[
-                    batch_idx, :, :valid_len, :
-                ] = new_v[batch_idx, :, token_indices, :]
+                self.layer_caches[layer_idx].past_k[batch_idx, :, :valid_len, :] = (
+                    new_k[batch_idx, :, token_indices, :]
+                )
+                self.layer_caches[layer_idx].past_v[batch_idx, :, :valid_len, :] = (
+                    new_v[batch_idx, :, token_indices, :]
+                )
 
         self.past_lengths = valid_lengths.clone()
         self.past_len = int(valid_lengths.max().item())

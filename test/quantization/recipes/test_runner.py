@@ -83,16 +83,22 @@ class TestQuantizationRunner(unittest.TestCase):
         """QuantizationRunner should load, calibrate, run enabled stages, evaluate, and export."""
         events = []
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            runner_mod, "set_seed", lambda seed: events.append(f"seed:{seed}")
-        ), patch.object(
-            runner_mod, "resolve_adapter", lambda cfg: DummyAdapter(events)
-        ), patch.object(
-            runner_mod, "get_stage", lambda name: DummyStage(name, events)
-        ), patch.object(
-            runner_mod,
-            "save_effective_config",
-            lambda path, cfg: events.append(f"save:{path.name}"),
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                runner_mod, "set_seed", lambda seed: events.append(f"seed:{seed}")
+            ),
+            patch.object(
+                runner_mod, "resolve_adapter", lambda cfg: DummyAdapter(events)
+            ),
+            patch.object(
+                runner_mod, "get_stage", lambda name: DummyStage(name, events)
+            ),
+            patch.object(
+                runner_mod,
+                "save_effective_config",
+                lambda path, cfg: events.append(f"save:{path.name}"),
+            ),
         ):
             cfg = {
                 "model": {"family": "dummy", "name_or_path": "model"},

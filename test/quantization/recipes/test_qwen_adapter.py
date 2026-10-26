@@ -317,10 +317,10 @@ class TestQwen3VLAdapter(unittest.TestCase):
             "show_progress": False,
         }
 
-        with patch.object(
-            qwen_mod, "Qwen3VLSpinQuantConfig", FakeSpinQuantConfig
-        ), patch.object(qwen_mod, "prepare", fake_prepare), patch.object(
-            qwen_mod, "convert", fake_convert
+        with (
+            patch.object(qwen_mod, "Qwen3VLSpinQuantConfig", FakeSpinQuantConfig),
+            patch.object(qwen_mod, "prepare", fake_prepare),
+            patch.object(qwen_mod, "convert", fake_convert),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 result = adapter.apply_spinquant(ctx, stage_cfg)
@@ -445,11 +445,12 @@ class TestQwen3VLAdapter(unittest.TestCase):
             captured["exclude_appliers"] = exclude_appliers
             captured["custom_alpha_map"] = custom_alpha_map
 
-        with patch.object(
-            adapter, "forward_calibration", lambda *args, **kwargs: None
-        ), patch(
-            "tico.quantization.algorithm.smoothquant.smooth_quant.apply_smoothing",
-            fake_apply_smoothing,
+        with (
+            patch.object(adapter, "forward_calibration", lambda *args, **kwargs: None),
+            patch(
+                "tico.quantization.algorithm.smoothquant.smooth_quant.apply_smoothing",
+                fake_apply_smoothing,
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.apply_smoothquant(ctx, {"alpha": 0.25, "components": "vision"})
@@ -492,14 +493,19 @@ class TestQwen3VLAdapter(unittest.TestCase):
 
         # COCO prints from the adapter module; LLaVA routing prints from the
         # shared llava_bench module, so both print symbols are patched.
-        with patch.object(qwen_mod, "evaluate_coco", fake_evaluate_coco), patch.object(
-            llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
-        ), patch.object(
-            qwen_mod, "print_coco_score_results", fake_print_coco_score_results
-        ), patch.object(
-            llava_bench_mod,
-            "print_coco_score_results",
-            fake_print_coco_score_results,
+        with (
+            patch.object(qwen_mod, "evaluate_coco", fake_evaluate_coco),
+            patch.object(
+                llava_bench_mod, "evaluate_llava_bench", fake_evaluate_llava_bench
+            ),
+            patch.object(
+                qwen_mod, "print_coco_score_results", fake_print_coco_score_results
+            ),
+            patch.object(
+                llava_bench_mod,
+                "print_coco_score_results",
+                fake_print_coco_score_results,
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.evaluate(ctx)
@@ -550,14 +556,17 @@ class TestQwen3VLAdapter(unittest.TestCase):
             calls.append(("ppl", kwargs))
             return 12.5
 
-        with patch.object(
-            mmmu_mod,
-            "evaluate_and_print_mmmu",
-            lambda **kwargs: calls.append(("mmmu", kwargs)),
-        ), patch.object(
-            qwen_mod,
-            "evaluate_vlm_text_ppl",
-            fake_evaluate_vlm_text_ppl,
+        with (
+            patch.object(
+                mmmu_mod,
+                "evaluate_and_print_mmmu",
+                lambda **kwargs: calls.append(("mmmu", kwargs)),
+            ),
+            patch.object(
+                qwen_mod,
+                "evaluate_vlm_text_ppl",
+                fake_evaluate_vlm_text_ppl,
+            ),
         ):
             with contextlib.redirect_stdout(io.StringIO()):
                 adapter.evaluate(ctx)

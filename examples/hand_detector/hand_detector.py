@@ -425,9 +425,7 @@ class HandDetector(nn.Module):
             runtime_inputs = (
                 inputs
                 if name == "CONCATENATION"
-                else inputs[:2]
-                if name == "ADD"
-                else inputs[:1]
+                else inputs[:2] if name == "ADD" else inputs[:1]
             )
             missing = tuple(
                 int(tensor_id)

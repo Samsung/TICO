@@ -25,7 +25,6 @@ from tico.quantization.config.ptq import PTQConfig
 from tico.quantization.wrapq.mode import Mode
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-
 IS_INTERNAL_TEST = os.environ.get("RUN_INTERNAL_TESTS", "0") == "1"
 _SKIP_MSG = "required transformers Gemma4 modules are not installed"
 

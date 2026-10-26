@@ -29,7 +29,6 @@ from tico.quantization.wrapq.wrappers.llama.static_inputs import (
     prepare_llama_static_inputs,
 )
 
-
 _INPUT_ROLES = {
     "input_ids": "input_ids",
     "hidden_states": "hidden_states",

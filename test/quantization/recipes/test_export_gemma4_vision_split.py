@@ -545,14 +545,18 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
             del module, example_inputs, kwargs
             calls.append(save_path.name)
 
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            gemma_export,
-            "_prepare_gemma4_export_model",
-            return_value=(export_model, "q"),
-        ), patch.object(
-            gemma_export,
-            "_convert_and_save",
-            fake_convert_and_save,
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+                return_value=(export_model, "q"),
+            ),
+            patch.object(
+                gemma_export,
+                "_convert_and_save",
+                fake_convert_and_save,
+            ),
         ):
             gemma_export.export_gemma4_per_layer(
                 q_model=torch.nn.Identity(),
@@ -610,10 +614,13 @@ class TestGemma4VisionSplitRecipe(unittest.TestCase):
 
     def test_invalid_vision_options_fail_before_model_preparation(self) -> None:
         """Invalid split options should fail before loading or wrapping a model."""
-        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
-            gemma_export,
-            "_prepare_gemma4_export_model",
-        ) as prepare_model:
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.object(
+                gemma_export,
+                "_prepare_gemma4_export_model",
+            ) as prepare_model,
+        ):
             with self.assertRaisesRegex(ValueError, "granularity"):
                 gemma_export.export_gemma4_per_layer(
                     q_model=torch.nn.Identity(),

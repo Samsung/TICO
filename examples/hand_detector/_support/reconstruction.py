@@ -51,7 +51,6 @@ from examples.hand_detector._support.sensitivity import (
 )
 from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
-
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 _ACTIVATION_ROLES = frozenset(
     {

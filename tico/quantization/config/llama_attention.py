@@ -17,7 +17,6 @@ from typing import Any, cast, Literal, Mapping, Optional
 
 from tico.quantization.config.ptq import PTQConfig
 
-
 ExecutionProfile = Literal["reference_eval", "npu_export"]
 ScaleFusion = Literal["none", "q_proj", "k_proj"]
 RopeConvention = Literal["hf", "pre_negated_sin"]

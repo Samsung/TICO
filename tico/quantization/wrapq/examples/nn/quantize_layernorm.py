@@ -25,7 +25,6 @@ import tico.quantization.config.ptq
 from tico.quantization.evaluation.metric import compute_peir
 from tico.quantization.evaluation.utils import plot_two_outputs
 
-
 torch.manual_seed(123)
 
 

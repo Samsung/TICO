@@ -35,7 +35,6 @@ from tico.quantization.wrapq.wrappers.qwen_vl.quant_vision_model import (
 )
 from tico.quantization.wrapq.wrappers.qwen_vl.vision_profile import Qwen3VLVisionProfile
 
-
 skip_msg = "transformers not installed — skipping Qwen3VLVisionModel tests"
 
 

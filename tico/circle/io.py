@@ -204,9 +204,9 @@ def write_circle_bytes(
         raise TypeError(f"Expected bytes, received {type(data).__name__}.")
     _write_destination(
         destination,
-        lambda stream: _write_all(stream, memoryview(data))
-        if data
-        else stream.write(data),
+        lambda stream: (
+            _write_all(stream, memoryview(data)) if data else stream.write(data)
+        ),
         atomic=atomic,
     )
 

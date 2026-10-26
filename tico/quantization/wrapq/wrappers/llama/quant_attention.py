@@ -45,7 +45,6 @@ from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 from tico.quantization.wrapq.wrappers.quant_module_base import QuantModuleBase
 from tico.quantization.wrapq.wrappers.registry import try_register
 
-
 CacheOutputMode = Literal["present", "delta"]
 LayerKV = Tuple[torch.Tensor, torch.Tensor]
 

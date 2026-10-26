@@ -31,7 +31,6 @@ from tico.quantization.config.gemma4_assistant_builders import (
     build_gemma4_assistant_ptq_config,
 )
 
-
 _SKIP_MSG = "required transformers Gemma4 assistant modules are not installed"
 
 

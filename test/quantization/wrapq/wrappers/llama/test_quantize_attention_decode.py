@@ -31,7 +31,6 @@ from tico.quantization.wrapq.wrappers.llama.export_adapters import (
 )
 from tico.quantization.wrapq.wrappers.ptq_wrapper import PTQWrapper
 
-
 skip_msg = "required transformers not installed — skipping Llama attention decode example tests"
 
 
@@ -132,8 +131,7 @@ class TestLlamaAttentionDecodeExample(unittest.TestCase):
 
     def _prepare_percentile(self, model_args):
         """Parse a YAML activation policy and calibrate every active cache site."""
-        config = yaml.safe_load(
-            """
+        config = yaml.safe_load("""
 activation:
   kind: affine
   dtype: int16
@@ -141,8 +139,7 @@ activation:
   percentile: 99.9
   max_samples: 256
   samples_per_batch: 256
-"""
-        )
+""")
         activation = quant_spec_from_config(config["activation"])
         assert activation is not None
         prepared = prepare(

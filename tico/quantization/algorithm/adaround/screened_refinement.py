@@ -51,7 +51,6 @@ from tico.quantization.algorithm.block_reconstruction.selection import (
 from tico.quantization.analysis import OutputAdapter
 from tico.quantization.wrapq.control import FakeQuantState
 
-
 MetricsEvaluator = Callable[[], OutputMetrics]
 ProgressCallback = Callable[["ScreenedCodeRoundResult"], None]
 

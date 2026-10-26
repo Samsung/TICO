@@ -17,7 +17,6 @@ import torch
 
 from test.modules.base import TestModuleBase
 
-
 B = 4
 SEQ_LEN = 8
 DIM = 16

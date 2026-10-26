@@ -41,7 +41,6 @@ from torch import nn
 from examples.hand_detector._support.analysis import OUTPUT_NAMES
 from examples.hand_detector.hand_detector import HandDetector, NHWCInputAdapter
 
-
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 _PASSTHROUGH_HEAD_OPS = frozenset({"RESHAPE"})
 

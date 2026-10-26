@@ -823,9 +823,9 @@ def build_qwen3_vl_gptq_config(
     weight_bits_overrides: dict[str, int] = {}
 
     if args.gptq_vision:
-        weight_bits_overrides[
-            "model.visual.patch_embed.proj"
-        ] = args.vision_patch_embed_weight_bits
+        weight_bits_overrides["model.visual.patch_embed.proj"] = (
+            args.vision_patch_embed_weight_bits
+        )
 
     if args.gptq_lm_head:
         weight_bits_overrides["lm_head"] = args.lm_head_weight_bits

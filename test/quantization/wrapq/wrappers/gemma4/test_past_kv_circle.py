@@ -31,7 +31,6 @@ from tico.quantization.wrapq.wrappers.gemma4.quant_text_attention import (
     QuantGemma4TextAttention,
 )
 
-
 try:
     from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention

@@ -84,7 +84,6 @@ from examples.hand_detector._support.sensitivity import (
 )
 from examples.hand_detector.hand_detector import load_nhwc_hand_detector
 
-
 DIRECTORY = Path(__file__).resolve().parent
 DEFAULT_PERCENTILES = (99.0, 99.5, 99.9, 99.95, 99.99, 99.995, 99.999)
 DEFAULT_GROUP_PERCENTILES = (99.9, 99.95, 99.99, 99.995, 99.999)

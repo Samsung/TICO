@@ -19,6 +19,7 @@ from test.modules.base import TestModuleBase
 
 from test.support import tag
 
+
 # With square kernels and equal stride
 class SimpleConv(TestModuleBase):
     def __init__(self):
